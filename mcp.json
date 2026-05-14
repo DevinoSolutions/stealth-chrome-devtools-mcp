@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "stealth-chrome-devtools-mcp": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+ssh://git@github.com/DevinoSolutions/stealth-chrome-devtools-mcp.git",
+        "stealth-chrome-devtools-mcp"
+      ]
+    }
+  }
+}

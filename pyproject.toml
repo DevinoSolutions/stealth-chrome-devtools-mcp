@@ -1,24 +1,36 @@
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
 name = "stealth-chrome-devtools-mcp"
 version = "0.1.0"
-description = "A profile-aware stealth Chrome DevTools MCP proxy with master/copy browser sessions."
+description = "A self-contained stealth Chrome DevTools MCP server with master/copy browser sessions."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
-authors = [
-  { name = "Devino Solutions" }
-]
 dependencies = [
-  "fastmcp>=2.11.2",
-  "psutil>=5.9",
+    "fastmcp==2.11.2",
+    "nodriver==0.47.0",
+    "pydantic==2.11.7",
+    "python-dotenv==1.1.1",
+    "py2js @ git+https://github.com/am230/py2js.git@31a83c7c25a51ab0cc3255f484a2279d26278ec3",
+    "jsbeautifier==1.15.4",
+    "strinpy==0.0.4",
+    "strbuilder==1.1.3",
+    "psutil==7.0.0",
+    "pillow==11.3.0",
+    "requests>=2.32.0",
+    "uvicorn[standard]==0.35.0",
 ]
 
 [project.scripts]
 stealth-chrome-devtools-mcp = "stealth_chrome_devtools_mcp.server:main"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/stealth_chrome_devtools_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/stealth_chrome_devtools_mcp/embedded/js" = "stealth_chrome_devtools_mcp/embedded/js"

@@ -1,103 +1,80 @@
 # Stealth Chrome DevTools MCP
 
-Profile-aware MCP wrapper for `stealth-browser-mcp`.
+Self-contained stealth Chrome DevTools MCP server with a master/copy browser profile strategy.
 
-It keeps the upstream browser automation server update-friendly while adding the shared browser-session behavior we want across Claude Code, Codex, and other MCP clients.
+This repo vendors the runtime source from `stealth-browser-mcp` so installs do not depend on a separate local clone. Local tweaks live here, and the original upstream repo can still be pulled cleanly.
 
-## Behavior
+## Browser profile behavior
 
-- Uses the exact master profile when it is free.
-- Uses a deterministic per-project copy when the master profile is already in use.
-- Refreshes session copies from master after 7 days by default.
-- Respects explicit `user_data_dir` values passed by a tool caller.
-- Proxies all upstream `stealth-browser-mcp` tools unchanged except for injecting `user_data_dir` into `spawn_browser`.
+No environment variables are required.
 
-Default paths:
+By default, the server uses:
 
 ```text
-Master profile:   C:\browser-sessions\master
-Session copies:   C:\browser-sessions\sessions
-Upstream server:  C:\Users\amind\stealth-browser-mcp
+C:\stealth-mcp-browser-sessions\master
+C:\stealth-mcp-browser-sessions\sessions
 ```
 
-## Initialize The Master Profile
+Behavior:
 
-Run `spawn_browser` once with:
+1. `spawn_browser` uses the exact master profile when it is not already in use.
+2. If the master profile is busy, the server creates or reuses a deterministic copy under `sessions`.
+3. Copies are keyed by the MCP client roots when available, then workspace/cwd fallback.
+4. Browser idle timeout defaults to `0`, so the MCP server does not close browsers because of idle cleanup.
 
-```text
-user_data_dir=C:\browser-sessions\master
-```
+## Install from GitHub
 
-Log in to the services you need, then close the browser. Future sessions inherit those logins from the master profile.
-
-## Install From Git
-
-Typical MCP config after the repo is pushed:
+Use the package like a normal MCP server:
 
 ```json
 {
   "mcpServers": {
-    "stealth-chrome-devtools": {
+    "stealth-chrome-devtools-mcp": {
       "command": "uvx",
       "args": [
         "--from",
         "git+ssh://git@github.com/DevinoSolutions/stealth-chrome-devtools-mcp.git",
         "stealth-chrome-devtools-mcp"
-      ],
-      "env": {
-        "STEALTH_BROWSER_MCP_ROOT": "C:\\Users\\amind\\stealth-browser-mcp",
-        "BROWSER_IDLE_TIMEOUT": "0",
-        "BROWSER_MASTER_USER_DATA_DIR": "C:\\browser-sessions\\master",
-        "BROWSER_PROFILE_CLONE_ROOT": "C:\\browser-sessions\\sessions",
-        "BROWSER_PROFILE_REFRESH_DAYS": "7"
-      }
+      ]
     }
   }
 }
 ```
 
-Local development config:
+## Local development install
+
+For local development from this checkout:
 
 ```json
 {
   "mcpServers": {
-    "stealth-chrome-devtools": {
-      "command": "C:\\Users\\amind\\stealth-browser-mcp\\venv\\Scripts\\python.exe",
+    "stealth-chrome-devtools-mcp": {
+      "command": "uv",
       "args": [
-        "C:\\Users\\amind\\OneDrive\\Desktop\\Projects\\CUSTOM MCPs\\stealth-chrome-devtools-mcp\\src\\stealth_chrome_devtools_mcp\\server.py"
-      ],
-      "env": {
-        "STEALTH_BROWSER_MCP_ROOT": "C:\\Users\\amind\\stealth-browser-mcp",
-        "BROWSER_IDLE_TIMEOUT": "0"
-      }
+        "--directory",
+        "C:\\Users\\amind\\OneDrive\\Desktop\\Projects\\CUSTOM MCPs\\stealth-chrome-devtools-mcp",
+        "run",
+        "stealth-chrome-devtools-mcp"
+      ]
     }
   }
 }
 ```
 
-## Configuration
+## Optional environment overrides
 
-Environment variables:
+These are optional. Defaults are chosen for normal use.
 
-```text
-BROWSER_MASTER_USER_DATA_DIR      Master Chrome profile path
-BROWSER_PROFILE_CLONE_ROOT        Directory for per-project profile copies
-BROWSER_PROFILE_REFRESH_DAYS      Copy refresh age in days
-BROWSER_IDLE_TIMEOUT              Passed through to upstream stealth-browser-mcp
-STEALTH_BROWSER_MCP_ROOT          Upstream stealth-browser-mcp checkout
-STEALTH_BROWSER_MCP_PYTHON        Optional explicit Python executable for upstream
-STEALTH_BROWSER_MCP_SERVER        Optional explicit upstream server.py path
-```
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `STEALTH_MCP_BROWSER_SESSION_ROOT` | `C:\stealth-mcp-browser-sessions` on Windows, `~/.stealth-mcp-browser-sessions` elsewhere | Base folder for master and clone profiles. |
+| `BROWSER_MASTER_USER_DATA_DIR` | `<root>\master` | Exact master Chrome profile. |
+| `BROWSER_PROFILE_CLONE_ROOT` | `<root>\sessions` | Folder for profile copies when master is busy. |
+| `BROWSER_PROFILE_REFRESH_DAYS` | `7` | Refresh old copies from master after this many days. Use `0` to disable refresh. |
+| `BROWSER_IDLE_TIMEOUT` | `0` | Browser idle cleanup timeout. `0` disables idle cleanup. |
+| `STEALTH_CHROME_PROFILE_KEY` | unset | Force a stable clone key when client roots/cwd are not enough. |
+| `STEALTH_BROWSER_DEBUG` | `false` | Enable debug logging. |
 
-Equivalent CLI flags are available:
+## Preparing the master profile
 
-```powershell
-stealth-chrome-devtools-mcp `
-  --upstream-root C:\Users\amind\stealth-browser-mcp `
-  --master-profile C:\browser-sessions\master `
-  --sessions-dir C:\browser-sessions\sessions
-```
-
-## Why This Exists
-
-Chrome profiles cannot be shared by multiple live Chrome processes. Claude Code previously solved this with a `PreToolUse` hook. This MCP server moves that policy into a normal MCP entry point so every client can use the same behavior without client-specific hooks.
+Start the MCP server and call `spawn_browser` without `user_data_dir`. The first browser uses the master profile at `C:\stealth-mcp-browser-sessions\master`. Sign in and configure the browser there, then close it. Future sessions use that exact master when available, or a copied profile when another client already has master open.
