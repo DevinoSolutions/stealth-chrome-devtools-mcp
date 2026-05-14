@@ -19,8 +19,9 @@ Behavior:
 
 1. `spawn_browser` uses the exact master profile when it is not already in use.
 2. If the master profile is busy, the server creates or reuses a deterministic copy under `sessions`.
-3. Copies are keyed by the MCP client roots when available, then workspace/cwd fallback.
-4. Browser idle timeout defaults to `0`, so the MCP server does not close browsers because of idle cleanup.
+3. If that deterministic copy is also busy, the server uses a PID-suffixed copy such as `<session>-<hash>-<pid>`.
+4. Copies are keyed by the MCP client roots when available, then workspace/cwd fallback.
+5. Browser idle timeout defaults to `0`, so the MCP server does not close browsers because of idle cleanup.
 
 ## Install from GitHub
 

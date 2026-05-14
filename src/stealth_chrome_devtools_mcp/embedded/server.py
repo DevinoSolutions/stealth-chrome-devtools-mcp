@@ -278,6 +278,26 @@ async def _clone_profile_dir_for_session(clone_root: Path) -> Path:
     return clone_root / f"{label[:48] or 'session'}-{digest}"
 
 
+def _pid_suffixed_clone_dir(base_clone: Path) -> Path:
+    return base_clone.with_name(f"{base_clone.name}-{os.getpid()}")
+
+
+def _available_clone_dir(base_clone: Path) -> Path:
+    if not _profile_has_running_browser(base_clone):
+        return base_clone
+
+    pid_clone = _pid_suffixed_clone_dir(base_clone)
+    if not _profile_has_running_browser(pid_clone):
+        return pid_clone
+
+    for index in range(2, 100):
+        candidate = base_clone.with_name(f"{base_clone.name}-{os.getpid()}-{index}")
+        if not _profile_has_running_browser(candidate):
+            return candidate
+
+    return base_clone.with_name(f"{base_clone.name}-{os.getpid()}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}")
+
+
 async def _resolve_profile_user_data_dir(user_data_dir: Optional[str]) -> str:
     master = _master_profile_dir()
     clone_root = _clone_root_dir()
@@ -293,7 +313,7 @@ async def _resolve_profile_user_data_dir(user_data_dir: Optional[str]) -> str:
     if not _profile_has_running_browser(master):
         return str(master)
 
-    clone = await _clone_profile_dir_for_session(clone_root)
+    clone = _available_clone_dir(await _clone_profile_dir_for_session(clone_root))
     clone_root.mkdir(parents=True, exist_ok=True)
     if _clone_needs_refresh(clone) and not _profile_has_running_browser(clone):
         _copy_profile_tree(master, clone, clone_root)
