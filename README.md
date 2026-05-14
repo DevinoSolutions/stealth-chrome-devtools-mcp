@@ -64,7 +64,7 @@ Local development config:
     "stealth-chrome-devtools": {
       "command": "C:\\Users\\amind\\stealth-browser-mcp\\venv\\Scripts\\python.exe",
       "args": [
-        "C:\\Users\\amind\\stealth-chrome-devtools-mcp\\src\\stealth_chrome_devtools_mcp\\server.py"
+        "C:\\Users\\amind\\OneDrive\\Desktop\\Projects\\CUSTOM MCPs\\stealth-chrome-devtools-mcp\\src\\stealth_chrome_devtools_mcp\\server.py"
       ],
       "env": {
         "STEALTH_BROWSER_MCP_ROOT": "C:\\Users\\amind\\stealth-browser-mcp",
