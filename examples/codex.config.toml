@@ -1,0 +1,15 @@
+[mcp_servers.stealth-chrome-devtools-mcp]
+command = "uvx"
+args = [
+  "--from",
+  "git+ssh://git@github.com/DevinoSolutions/stealth-chrome-devtools-mcp.git",
+  "stealth-chrome-devtools-mcp",
+]
+startup_timeout_sec = 30.0
+
+[mcp_servers.stealth-chrome-devtools-mcp.env]
+BROWSER_IDLE_TIMEOUT = "0"
+BROWSER_MASTER_USER_DATA_DIR = 'C:\browser-sessions\master'
+BROWSER_PROFILE_CLONE_ROOT = 'C:\browser-sessions\sessions'
+BROWSER_PROFILE_REFRESH_DAYS = "7"
+STEALTH_BROWSER_MCP_ROOT = 'C:\Users\amind\stealth-browser-mcp'

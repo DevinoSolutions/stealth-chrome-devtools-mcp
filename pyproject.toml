@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stealth-chrome-devtools-mcp"
+version = "0.1.0"
+description = "A profile-aware stealth Chrome DevTools MCP proxy with master/copy browser sessions."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Devino Solutions" }
+]
+dependencies = [
+  "fastmcp>=2.11.2",
+  "psutil>=5.9",
+]
+
+[project.scripts]
+stealth-chrome-devtools-mcp = "stealth_chrome_devtools_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stealth_chrome_devtools_mcp"]
