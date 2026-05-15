@@ -38,6 +38,7 @@ Use the package like a normal MCP server:
     "stealth-chrome-devtools-mcp": {
       "command": "uvx",
       "args": [
+        "--refresh",
         "--from",
         "git+ssh://git@github.com/DevinoSolutions/stealth-chrome-devtools-mcp.git",
         "stealth-chrome-devtools-mcp"
