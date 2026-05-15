@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional, List
 from datetime import datetime, timedelta
 
 import nodriver as uc
+import psutil
 from nodriver import Browser, Tab
 
 from debug_logger import debug_logger
@@ -135,6 +136,52 @@ class BrowserManager:
         stop_result = browser.stop()
         if asyncio.iscoroutine(stop_result):
             await stop_result
+
+    @staticmethod
+    def _browser_process_is_alive(browser: Browser) -> bool:
+        process = getattr(browser, "_process", None)
+        if process is not None:
+            poll = getattr(process, "poll", None)
+            if callable(poll):
+                try:
+                    return poll() is None
+                except Exception:
+                    pass
+            return getattr(process, "returncode", None) is None
+
+        pid = getattr(browser, "_process_pid", None)
+        if pid:
+            try:
+                proc = psutil.Process(int(pid))
+                return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+            except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+                return False
+
+        return True
+
+    def _discard_instance_unlocked(self, instance_id: str, data: dict, reason: str) -> None:
+        instance = data.get("instance")
+        if instance is not None:
+            instance.state = BrowserState.CLOSED
+        self._instances.pop(instance_id, None)
+        self._spawn_diagnostics.pop(instance_id, None)
+        proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
+        if proxy_forwarder is not None:
+            asyncio.create_task(proxy_forwarder.close())
+        try:
+            process_cleanup.finalize_browser_process(instance_id)
+            process_cleanup.cleanup_deferred_profiles()
+        except Exception:
+            pass
+        try:
+            persistent_storage.remove_instance(instance_id)
+        except Exception:
+            pass
+        debug_logger.log_info(
+            "browser_manager",
+            "discard_instance",
+            f"Removed stale browser instance {instance_id}: {reason}",
+        )
 
     async def _close_proxy_forwarder(self, instance_id: str) -> None:
         """Close and forget any authenticated proxy forwarder for an instance."""
@@ -375,6 +422,10 @@ class BrowserManager:
 
             await self._setup_dynamic_hooks(tab, instance_id)
 
+            await asyncio.sleep(0.2)
+            if not self._browser_process_is_alive(browser):
+                raise Exception("Browser process exited immediately after launch")
+
             spawn_diagnostics = self._build_spawn_diagnostics(
                 launch_args=launch_args,
                 proxy_server=proxy_config.server if proxy_config else None,
@@ -411,6 +462,29 @@ class BrowserManager:
                 'title': 'Browser Instance'
             })
 
+        except asyncio.CancelledError:
+            if browser is not None:
+                try:
+                    await self._stop_browser(browser)
+                except Exception:
+                    pass
+            if proxy_forwarder is not None:
+                try:
+                    await proxy_forwarder.close()
+                except Exception:
+                    pass
+            try:
+                process_cleanup.kill_browser_process(instance_id)
+                process_cleanup.finalize_browser_process(instance_id)
+                process_cleanup.cleanup_deferred_profiles()
+            except Exception:
+                pass
+            async with self._lock:
+                self._instances.pop(instance_id, None)
+                self._spawn_diagnostics.pop(instance_id, None)
+                self._proxy_forwarders.pop(instance_id, None)
+            instance.state = BrowserState.CLOSED
+            raise
         except Exception as e:
             if browser is not None:
                 try:
@@ -465,7 +539,11 @@ class BrowserManager:
             Optional[dict]: The browser instance data if found, else None.
         """
         async with self._lock:
-            return self._instances.get(instance_id)
+            data = self._instances.get(instance_id)
+            if data and not self._browser_process_is_alive(data["browser"]):
+                self._discard_instance_unlocked(instance_id, data, "browser process is not running")
+                return None
+            return data
 
     async def list_instances(self) -> List[BrowserInstance]:
         """
@@ -475,6 +553,13 @@ class BrowserManager:
             List[BrowserInstance]: List of all browser instances.
         """
         async with self._lock:
+            for instance_id, data in list(self._instances.items()):
+                if not self._browser_process_is_alive(data["browser"]):
+                    self._discard_instance_unlocked(
+                        instance_id,
+                        data,
+                        "browser process is not running",
+                    )
             return [data['instance'] for data in self._instances.values()]
 
     async def close_instance(self, instance_id: str) -> bool:
