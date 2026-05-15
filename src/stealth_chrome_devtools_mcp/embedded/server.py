@@ -11,6 +11,7 @@ import signal
 import shutil
 import sys
 import tempfile
+import time
 import urllib.parse
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -56,6 +57,16 @@ def parse_bool_env(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
+def parse_float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 def _install_asyncio_close_noise_filter() -> None:
     try:
         loop = asyncio.get_running_loop()
@@ -87,6 +98,28 @@ def _install_asyncio_close_noise_filter() -> None:
     setattr(loop, marker, True)
 
 
+def _install_nodriver_cookie_compat() -> None:
+    try:
+        import nodriver.cdp.network as cdp_network
+    except Exception:
+        return
+
+    marker = "_stealth_chrome_devtools_cookie_compat"
+    if getattr(cdp_network.Cookie, marker, False):
+        return
+
+    original_from_json = cdp_network.Cookie.from_json
+
+    def from_json(json_obj: Dict[str, Any]):
+        if isinstance(json_obj, dict) and "sameParty" not in json_obj:
+            json_obj = dict(json_obj)
+            json_obj["sameParty"] = False
+        return original_from_json(json_obj)
+
+    cdp_network.Cookie.from_json = staticmethod(from_json)
+    setattr(cdp_network.Cookie, marker, True)
+
+
 DEBUG_LOGGING_ENABLED = (
     parse_bool_env("STEALTH_BROWSER_DEBUG", default=False)
     or parse_bool_env("DEBUG", default=False)
@@ -116,6 +149,13 @@ def _clone_root_dir() -> Path:
     if configured:
         return Path(configured).expanduser()
     return _default_session_root() / "sessions"
+
+
+def _last_known_good_profile_dir() -> Path:
+    configured = os.getenv("BROWSER_LAST_KNOWN_GOOD_PROFILE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return _clone_root_dir() / "_last-known-good"
 
 
 def _profile_refresh_days() -> int:
@@ -185,16 +225,49 @@ def _profile_ignore_names(directory: str, names: List[str]) -> set:
 
 
 def _copy_profile_file(source: str, target: str) -> str:
-    try:
-        shutil.copy2(source, target)
-    except (PermissionError, OSError) as exc:
+    last_error = None
+    for attempt in range(3):
+        try:
+            shutil.copy2(source, target)
+            return target
+        except (PermissionError, OSError) as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.05 * (attempt + 1))
+    if last_error is not None:
         log_warning = getattr(debug_logger, "log_warning", None)
         if callable(log_warning):
-            log_warning("profile", "copy_skip", f"Skipping locked profile file {source}: {exc}")
+            log_warning("profile", "copy_skip", f"Skipping locked profile file {source}: {last_error}")
     return target
 
 
-def _copy_profile_tree(source: Path, target: Path, clone_root: Path) -> None:
+def _copy_profile_delta(source: Path, target: Path) -> None:
+    for directory, dirnames, filenames in os.walk(source, onerror=lambda exc: None):
+        ignored_dirs = _profile_ignore_names(directory, dirnames)
+        dirnames[:] = [name for name in dirnames if name not in ignored_dirs]
+
+        source_dir = Path(directory)
+        target_dir = target / source_dir.relative_to(source)
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        ignored_files = _profile_ignore_names(directory, filenames)
+        for filename in filenames:
+            if filename in ignored_files:
+                continue
+            source_file = source_dir / filename
+            target_file = target_dir / filename
+            try:
+                if (
+                    not target_file.exists()
+                    or source_file.stat().st_size != target_file.stat().st_size
+                    or int(source_file.stat().st_mtime) != int(target_file.stat().st_mtime)
+                ):
+                    _copy_profile_file(str(source_file), str(target_file))
+            except (PermissionError, OSError):
+                continue
+
+
+def _copy_profile_tree(source: Path, target: Path, clone_root: Path, source_kind: str = "profile") -> None:
     if not source.exists():
         target.mkdir(parents=True, exist_ok=True)
         return
@@ -204,15 +277,13 @@ def _copy_profile_tree(source: Path, target: Path, clone_root: Path) -> None:
         if _profile_has_running_browser(target):
             return
         shutil.rmtree(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(
-        source,
-        target,
-        ignore=_profile_ignore_names,
-        copy_function=_copy_profile_file,
-    )
+    target.mkdir(parents=True, exist_ok=True)
+    _copy_profile_delta(source, target)
+    time.sleep(0.2)
+    _copy_profile_delta(source, target)
     marker = {
         "source": str(source),
+        "source_kind": source_kind,
         "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
     (target / ".stealth_chrome_devtools_mcp_clone.json").write_text(
@@ -282,6 +353,16 @@ def _pid_suffixed_clone_dir(base_clone: Path) -> Path:
     return base_clone.with_name(f"{base_clone.name}-{os.getpid()}")
 
 
+def _unique_clone_dir(base_clone: Path, suffix: str) -> Path:
+    safe_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "-", suffix).strip(".-") or "retry"
+    candidate = base_clone.with_name(f"{base_clone.name}-{os.getpid()}-{safe_suffix}")
+    if not _profile_has_running_browser(candidate):
+        return candidate
+    return base_clone.with_name(
+        f"{base_clone.name}-{os.getpid()}-{safe_suffix}-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+    )
+
+
 def _available_clone_dir(base_clone: Path) -> Path:
     if not _profile_has_running_browser(base_clone):
         return base_clone
@@ -298,28 +379,132 @@ def _available_clone_dir(base_clone: Path) -> Path:
     return base_clone.with_name(f"{base_clone.name}-{os.getpid()}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}")
 
 
-async def _resolve_profile_user_data_dir(user_data_dir: Optional[str]) -> str:
+def _staging_clone_dir(clone_root: Path, clone_name: str) -> Path:
+    return clone_root / "_staging" / f"{clone_name}-{os.getpid()}-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+
+
+def _copy_clone_from_source(source: Path, clone: Path, clone_root: Path, source_kind: str) -> Dict[str, Any]:
+    selection: Dict[str, Any] = {
+        "user_data_dir": str(clone),
+        "profile_role": "clone",
+        "clone_source": source_kind,
+        "clone_source_path": str(source),
+        "last_known_good_path": str(_last_known_good_profile_dir()),
+    }
+    if source_kind.startswith("live-master"):
+        staging = _staging_clone_dir(clone_root, clone.name)
+        _copy_profile_tree(source, staging, clone_root, source_kind)
+        _copy_profile_tree(staging, clone, clone_root, "staged-live-master")
+        selection["staging_dir"] = str(staging)
+    else:
+        _copy_profile_tree(source, clone, clone_root, source_kind)
+    return selection
+
+
+def _promote_last_known_good_profile(profile_selection: Dict[str, Any]) -> None:
+    staging_dir = profile_selection.get("staging_dir")
+    if not staging_dir:
+        return
+    staging = Path(staging_dir)
+    if not staging.exists():
+        return
+    clone_root = _clone_root_dir()
+    last_known_good = _last_known_good_profile_dir()
+    try:
+        _copy_profile_tree(staging, last_known_good, clone_root, "last-known-good")
+    finally:
+        try:
+            if staging.exists() and not _profile_has_running_browser(staging):
+                shutil.rmtree(staging)
+        except Exception:
+            pass
+
+
+def _public_profile_selection(profile_selection: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in profile_selection.items()
+        if key not in {"staging_dir"}
+    }
+
+
+async def _resolve_profile_selection(
+    user_data_dir: Optional[str],
+    *,
+    force_clone: bool = False,
+    source_override: Optional[Path] = None,
+    source_kind: Optional[str] = None,
+    clone_suffix: Optional[str] = None,
+) -> Dict[str, Any]:
     master = _master_profile_dir()
     clone_root = _clone_root_dir()
 
     if user_data_dir:
         explicit = Path(user_data_dir).expanduser()
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
-            _copy_profile_tree(master, explicit, clone_root)
+            _copy_profile_tree(master, explicit, clone_root, "explicit-live-master")
         explicit.parent.mkdir(parents=True, exist_ok=True)
-        return str(explicit)
+        return {
+            "user_data_dir": str(explicit),
+            "profile_role": "explicit",
+            "clone_source": None,
+        }
 
     master.parent.mkdir(parents=True, exist_ok=True)
-    if not _profile_has_running_browser(master):
-        return str(master)
+    if not force_clone and not _profile_has_running_browser(master):
+        return {
+            "user_data_dir": str(master),
+            "profile_role": "master",
+            "clone_source": None,
+        }
 
-    clone = _available_clone_dir(await _clone_profile_dir_for_session(clone_root))
+    base_clone = await _clone_profile_dir_for_session(clone_root)
+    clone = _unique_clone_dir(base_clone, clone_suffix) if clone_suffix else _available_clone_dir(base_clone)
     clone_root.mkdir(parents=True, exist_ok=True)
-    if _clone_needs_refresh(clone) and not _profile_has_running_browser(clone):
-        _copy_profile_tree(master, clone, clone_root)
-    else:
+    if _profile_has_running_browser(clone):
+        clone = _unique_clone_dir(base_clone, clone_suffix or "busy")
+    if not _clone_needs_refresh(clone):
         clone.mkdir(parents=True, exist_ok=True)
-    return str(clone)
+        return {
+            "user_data_dir": str(clone),
+            "profile_role": "clone",
+            "clone_source": "existing-clone",
+            "clone_source_path": str(clone),
+            "last_known_good_path": str(_last_known_good_profile_dir()),
+        }
+
+    source = source_override or master
+    resolved_source_kind = source_kind or ("live-master" if source == master else "last-known-good")
+    return _copy_clone_from_source(source, clone, clone_root, resolved_source_kind)
+
+
+async def _fallback_profile_selection(
+    previous_selection: Dict[str, Any],
+    attempt: int,
+) -> Optional[Dict[str, Any]]:
+    if previous_selection.get("profile_role") != "clone":
+        return None
+
+    last_known_good = _last_known_good_profile_dir()
+    if attempt == 0:
+        return await _resolve_profile_selection(
+            None,
+            force_clone=True,
+            source_override=_master_profile_dir(),
+            source_kind="live-master-retry",
+            clone_suffix="retry",
+        )
+
+    if last_known_good.exists():
+        return await _resolve_profile_selection(
+            None,
+            force_clone=True,
+            source_override=last_known_good,
+            source_kind="last-known-good",
+            clone_suffix="lkg",
+        )
+
+    return None
 
 
 def is_section_enabled(section: str) -> bool:
@@ -353,6 +538,7 @@ async def app_lifespan(server):
         server (Any): The server instance for which the lifespan is being managed.
     """
     _install_asyncio_close_noise_filter()
+    _install_nodriver_cookie_compat()
     debug_logger.log_info("server", "startup", "Starting Browser Automation MCP Server...")
     try:
         await browser_manager.start_idle_reaper()
@@ -461,23 +647,39 @@ async def spawn_browser(
         elif not isinstance(sandbox, bool):
             sandbox = bool(sandbox)
         
-        user_data_dir = await _resolve_profile_user_data_dir(user_data_dir)
+        profile_selection = await _resolve_profile_selection(user_data_dir)
+        spawn_errors = []
 
-        options = BrowserOptions(
-            headless=headless,
-            user_agent=user_agent,
-            viewport_width=viewport_width,
-            viewport_height=viewport_height,
-            proxy=proxy,
-            browser_args=browser_args or [],
-            timezone_id=timezone_id,
-            idle_timeout_seconds=idle_timeout_seconds,
-            block_resources=block_resources or [],
-            extra_headers=extra_headers or {},
-            user_data_dir=user_data_dir,
-            sandbox=sandbox
-        )
-        instance = await browser_manager.spawn_browser(options)
+        for spawn_attempt in range(3):
+            selected_user_data_dir = profile_selection["user_data_dir"]
+            options = BrowserOptions(
+                headless=headless,
+                user_agent=user_agent,
+                viewport_width=viewport_width,
+                viewport_height=viewport_height,
+                proxy=proxy,
+                browser_args=browser_args or [],
+                timezone_id=timezone_id,
+                idle_timeout_seconds=idle_timeout_seconds,
+                block_resources=block_resources or [],
+                extra_headers=extra_headers or {},
+                user_data_dir=selected_user_data_dir,
+                sandbox=sandbox
+            )
+            try:
+                instance = await browser_manager.spawn_browser(options)
+                _promote_last_known_good_profile(profile_selection)
+                user_data_dir = selected_user_data_dir
+                break
+            except Exception as spawn_error:
+                spawn_errors.append(f"{type(spawn_error).__name__}: {spawn_error}")
+                fallback_selection = await _fallback_profile_selection(profile_selection, spawn_attempt)
+                if fallback_selection is None:
+                    raise
+                profile_selection = fallback_selection
+        else:
+            raise Exception("; ".join(spawn_errors))
+
         tab = await browser_manager.get_tab(instance.instance_id)
         if tab:
             await network_interceptor.setup_interception(
@@ -485,7 +687,9 @@ async def spawn_browser(
             )
         spawn_diagnostics = await browser_manager.get_spawn_diagnostics(instance.instance_id)
         if isinstance(spawn_diagnostics, dict):
-            spawn_diagnostics["profile_selection"] = {"user_data_dir": user_data_dir}
+            spawn_diagnostics["profile_selection"] = _public_profile_selection(profile_selection)
+            if spawn_errors:
+                spawn_diagnostics["profile_selection"]["spawn_retries"] = spawn_errors
         return {
             "instance_id": instance.instance_id,
             "state": instance.state,
@@ -554,9 +758,52 @@ async def get_instance_state(instance_id: str) -> Optional[Dict[str, Any]]:
     Returns:
         Optional[Dict[str, Any]]: Complete state information.
     """
-    state = await browser_manager.get_page_state(instance_id)
+    timeout_seconds = parse_float_env("BROWSER_STATE_TIMEOUT_SECONDS", 10.0)
+    try:
+        state = await asyncio.wait_for(
+            browser_manager.get_page_state(instance_id),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        for instance in await browser_manager.list_instances():
+            if instance.instance_id == instance_id:
+                return {
+                    "instance_id": instance.instance_id,
+                    "state": instance.state,
+                    "current_url": instance.current_url,
+                    "title": instance.title,
+                    "source": "active",
+                    "partial": True,
+                    "detail_error": f"Timed out after {timeout_seconds:g}s while collecting full page state.",
+                }
+        return {
+            "instance_id": instance_id,
+            "state": "unknown",
+            "partial": True,
+            "detail_error": f"Timed out after {timeout_seconds:g}s while collecting full page state.",
+        }
+    except Exception as exc:
+        for instance in await browser_manager.list_instances():
+            if instance.instance_id == instance_id:
+                return {
+                    "instance_id": instance.instance_id,
+                    "state": instance.state,
+                    "current_url": instance.current_url,
+                    "title": instance.title,
+                    "source": "active",
+                    "partial": True,
+                    "detail_error": f"Failed to collect full page state: {type(exc).__name__}: {exc}",
+                }
+        return {
+            "instance_id": instance_id,
+            "state": "unknown",
+            "partial": True,
+            "detail_error": f"Failed to collect full page state: {type(exc).__name__}: {exc}",
+        }
     if state:
-        return state.dict()
+        result = state.dict()
+        result["partial"] = False
+        return result
     return None
 
 @section_tool("browser-management")
