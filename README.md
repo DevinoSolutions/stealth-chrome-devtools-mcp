@@ -12,6 +12,7 @@ By default, the server uses:
 
 ```text
 C:\stealth-mcp-browser-sessions\master
+C:\stealth-mcp-browser-sessions\master-snapshot
 C:\stealth-mcp-browser-sessions\sessions
 C:\stealth-mcp-browser-sessions\sessions\_last-known-good
 ```
@@ -19,11 +20,11 @@ C:\stealth-mcp-browser-sessions\sessions\_last-known-good
 Behavior:
 
 1. `spawn_browser` uses the exact master profile when it is not already in use.
-2. If the master profile is busy, the server creates a fresh deterministic copy under `sessions`.
-3. Copies are created with a hardened best-effort live copy from master: volatile Chrome files are skipped, locked files are retried, and a second delta pass catches files that changed during the first pass.
-4. If launching a live copy fails, the server retries with a fresh PID-suffixed copy.
-5. If retry still fails, the server falls back to the internal `_last-known-good` profile when available.
-6. Successful live-copy launches refresh `_last-known-good` automatically.
+2. Right before opening master, the server refreshes `master-snapshot` while master is still closed.
+3. When a master browser is closed through the MCP, the server refreshes `master-snapshot` again in the background.
+4. If the master profile is busy, the server creates a fresh deterministic copy from `master-snapshot` under `sessions`.
+5. If launching a snapshot copy fails, the server retries with a fresh PID-suffixed copy.
+6. If retry still fails, the server falls back to the internal `_last-known-good` profile when available.
 7. If the deterministic copy is already busy, the server creates a fresh PID-suffixed copy such as `<session>-<hash>-<pid>`.
 8. Copies are keyed by the MCP client roots when available, then workspace/cwd fallback.
 9. Browser idle timeout defaults to `0`, so the MCP server does not close browsers because of idle cleanup.
@@ -76,8 +77,9 @@ These are optional. Defaults are chosen for normal use.
 | --- | --- | --- |
 | `STEALTH_MCP_BROWSER_SESSION_ROOT` | `C:\stealth-mcp-browser-sessions` on Windows, `~/.stealth-mcp-browser-sessions` elsewhere | Base folder for master and clone profiles. |
 | `BROWSER_MASTER_USER_DATA_DIR` | `<root>\master` | Exact master Chrome profile. |
+| `BROWSER_MASTER_SNAPSHOT_DIR` | `<root>\master-snapshot` | Safe clone source refreshed while master is closed, before master opens and after MCP-managed master closes. |
 | `BROWSER_PROFILE_CLONE_ROOT` | `<root>\sessions` | Folder for profile copies when master is busy. |
-| `BROWSER_LAST_KNOWN_GOOD_PROFILE_DIR` | `<root>\sessions\_last-known-good` | Internal fallback profile refreshed after successful live-copy launches. |
+| `BROWSER_LAST_KNOWN_GOOD_PROFILE_DIR` | `<root>\sessions\_last-known-good` | Internal fallback profile used only if snapshot-based clone launch fails. |
 | `BROWSER_PROFILE_REFRESH_DAYS` | `7` | Refresh old copies from master after this many days. Use `0` to disable refresh. |
 | `BROWSER_IDLE_TIMEOUT` | `0` | Browser idle cleanup timeout. `0` disables idle cleanup. |
 | `BROWSER_STATE_TIMEOUT_SECONDS` | `10` | Timeout for full `get_instance_state` collection before returning compact partial state. |

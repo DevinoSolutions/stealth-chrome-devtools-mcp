@@ -151,6 +151,13 @@ def _clone_root_dir() -> Path:
     return _default_session_root() / "sessions"
 
 
+def _master_snapshot_dir() -> Path:
+    configured = os.getenv("BROWSER_MASTER_SNAPSHOT_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return _default_session_root() / "master-snapshot"
+
+
 def _last_known_good_profile_dir() -> Path:
     configured = os.getenv("BROWSER_LAST_KNOWN_GOOD_PROFILE_DIR")
     if configured:
@@ -305,6 +312,27 @@ def _clone_needs_refresh(target: Path) -> bool:
     return datetime.fromtimestamp(marker.stat().st_mtime) < cutoff
 
 
+def _refresh_master_snapshot_if_safe(reason: str) -> Dict[str, Any]:
+    master = _master_profile_dir()
+    snapshot = _master_snapshot_dir()
+    result = {
+        "snapshot_dir": str(snapshot),
+        "snapshot_refreshed": False,
+        "snapshot_reason": reason,
+    }
+
+    if _profile_has_running_browser(master):
+        result["snapshot_error"] = "master-in-use"
+        return result
+
+    try:
+        _copy_profile_tree(master, snapshot, _default_session_root(), f"master-snapshot-{reason}")
+        result["snapshot_refreshed"] = True
+    except Exception as exc:
+        result["snapshot_error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
 def _root_to_path(root: Any) -> Optional[str]:
     value = getattr(root, "uri", None) or root
     value = str(value)
@@ -389,6 +417,7 @@ def _copy_clone_from_source(source: Path, clone: Path, clone_root: Path, source_
         "profile_role": "clone",
         "clone_source": source_kind,
         "clone_source_path": str(source),
+        "master_snapshot_path": str(_master_snapshot_dir()),
         "last_known_good_path": str(_last_known_good_profile_dir()),
     }
     if source_kind.startswith("live-master"):
@@ -447,11 +476,14 @@ async def _resolve_profile_selection(
 ) -> Dict[str, Any]:
     master = _master_profile_dir()
     clone_root = _clone_root_dir()
+    snapshot = _master_snapshot_dir()
 
     if user_data_dir:
         explicit = Path(user_data_dir).expanduser()
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
-            _copy_profile_tree(master, explicit, clone_root, "explicit-live-master")
+            source = snapshot if snapshot.exists() else master
+            source_kind = "explicit-master-snapshot" if source == snapshot else "explicit-master"
+            _copy_profile_tree(source, explicit, clone_root, source_kind)
         explicit.parent.mkdir(parents=True, exist_ok=True)
         return {
             "user_data_dir": str(explicit),
@@ -461,10 +493,12 @@ async def _resolve_profile_selection(
 
     master.parent.mkdir(parents=True, exist_ok=True)
     if not force_clone and not _profile_has_running_browser(master):
+        snapshot_result = _refresh_master_snapshot_if_safe("before-master-open")
         return {
             "user_data_dir": str(master),
             "profile_role": "master",
             "clone_source": None,
+            **snapshot_result,
         }
 
     base_clone = await _clone_profile_dir_for_session(clone_root)
@@ -472,8 +506,21 @@ async def _resolve_profile_selection(
     clone_root.mkdir(parents=True, exist_ok=True)
     if _profile_has_running_browser(clone):
         clone = _unique_clone_dir(base_clone, clone_suffix or "busy")
-    source = source_override or master
-    resolved_source_kind = source_kind or ("live-master" if source == master else "last-known-good")
+
+    if source_override is not None:
+        source = source_override
+    elif snapshot.exists():
+        source = snapshot
+    elif _last_known_good_profile_dir().exists():
+        source = _last_known_good_profile_dir()
+    else:
+        raise RuntimeError(
+            "Master is already in use and no master snapshot exists yet. "
+            "Open master once through this MCP after this update, or close master and spawn again, "
+            f"so the server can create {snapshot}."
+        )
+
+    resolved_source_kind = source_kind or ("master-snapshot" if source == snapshot else "last-known-good")
     return _copy_clone_from_source(source, clone, clone_root, resolved_source_kind)
 
 
@@ -484,15 +531,26 @@ async def _fallback_profile_selection(
     if previous_selection.get("profile_role") != "clone":
         return None
 
+    snapshot = _master_snapshot_dir()
     last_known_good = _last_known_good_profile_dir()
     if attempt == 0:
-        return await _resolve_profile_selection(
-            None,
-            force_clone=True,
-            source_override=_master_profile_dir(),
-            source_kind="live-master-retry",
-            clone_suffix="retry",
-        )
+        if snapshot.exists():
+            return await _resolve_profile_selection(
+                None,
+                force_clone=True,
+                source_override=snapshot,
+                source_kind="master-snapshot-retry",
+                clone_suffix="retry",
+            )
+        if last_known_good.exists():
+            return await _resolve_profile_selection(
+                None,
+                force_clone=True,
+                source_override=last_known_good,
+                source_kind="last-known-good",
+                clone_suffix="lkg",
+            )
+        return None
 
     if last_known_good.exists():
         return await _resolve_profile_selection(
@@ -501,6 +559,15 @@ async def _fallback_profile_selection(
             source_override=last_known_good,
             source_kind="last-known-good",
             clone_suffix="lkg",
+        )
+
+    if snapshot.exists():
+        return await _resolve_profile_selection(
+            None,
+            force_clone=True,
+            source_override=snapshot,
+            source_kind="master-snapshot-final",
+            clone_suffix="snapshot",
         )
 
     return None
@@ -742,9 +809,17 @@ async def close_instance(instance_id: str) -> bool:
     Returns:
         bool: True if closed successfully.
     """
+    spawn_diagnostics = await browser_manager.get_spawn_diagnostics(instance_id)
+    profile_selection = {}
+    if isinstance(spawn_diagnostics, dict):
+        profile_selection = spawn_diagnostics.get("profile_selection") or {}
+    should_refresh_snapshot = profile_selection.get("profile_role") == "master"
+
     success = await browser_manager.close_instance(instance_id)
     if success:
         await network_interceptor.clear_instance_data(instance_id)
+        if should_refresh_snapshot:
+            await asyncio.to_thread(_refresh_master_snapshot_if_safe, "after-master-close")
     return success
 
 @section_tool("browser-management")
