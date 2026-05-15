@@ -463,16 +463,6 @@ async def _resolve_profile_selection(
     clone_root.mkdir(parents=True, exist_ok=True)
     if _profile_has_running_browser(clone):
         clone = _unique_clone_dir(base_clone, clone_suffix or "busy")
-    if not _clone_needs_refresh(clone):
-        clone.mkdir(parents=True, exist_ok=True)
-        return {
-            "user_data_dir": str(clone),
-            "profile_role": "clone",
-            "clone_source": "existing-clone",
-            "clone_source_path": str(clone),
-            "last_known_good_path": str(_last_known_good_profile_dir()),
-        }
-
     source = source_override or master
     resolved_source_kind = source_kind or ("live-master" if source == master else "last-known-good")
     return _copy_clone_from_source(source, clone, clone_root, resolved_source_kind)

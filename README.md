@@ -19,12 +19,12 @@ C:\stealth-mcp-browser-sessions\sessions\_last-known-good
 Behavior:
 
 1. `spawn_browser` uses the exact master profile when it is not already in use.
-2. If the master profile is busy, the server creates or reuses a deterministic copy under `sessions`.
+2. If the master profile is busy, the server creates a fresh deterministic copy under `sessions`.
 3. Copies are created with a hardened best-effort live copy from master: volatile Chrome files are skipped, locked files are retried, and a second delta pass catches files that changed during the first pass.
 4. If launching a live copy fails, the server retries with a fresh PID-suffixed copy.
 5. If retry still fails, the server falls back to the internal `_last-known-good` profile when available.
 6. Successful live-copy launches refresh `_last-known-good` automatically.
-7. If that deterministic copy is already busy, the server uses a PID-suffixed copy such as `<session>-<hash>-<pid>`.
+7. If the deterministic copy is already busy, the server creates a fresh PID-suffixed copy such as `<session>-<hash>-<pid>`.
 8. Copies are keyed by the MCP client roots when available, then workspace/cwd fallback.
 9. Browser idle timeout defaults to `0`, so the MCP server does not close browsers because of idle cleanup.
 
