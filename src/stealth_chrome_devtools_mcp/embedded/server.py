@@ -158,13 +158,6 @@ def _master_snapshot_dir() -> Path:
     return _default_session_root() / "master-snapshot"
 
 
-def _last_known_good_profile_dir() -> Path:
-    configured = os.getenv("BROWSER_LAST_KNOWN_GOOD_PROFILE_DIR")
-    if configured:
-        return Path(configured).expanduser()
-    return _clone_root_dir() / "_last-known-good"
-
-
 def _profile_refresh_days() -> int:
     try:
         return int(os.getenv("BROWSER_PROFILE_REFRESH_DAYS", "7"))
@@ -407,10 +400,6 @@ def _available_clone_dir(base_clone: Path) -> Path:
     return base_clone.with_name(f"{base_clone.name}-{os.getpid()}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}")
 
 
-def _staging_clone_dir(clone_root: Path, clone_name: str) -> Path:
-    return clone_root / "_staging" / f"{clone_name}-{os.getpid()}-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
-
-
 def _copy_clone_from_source(source: Path, clone: Path, clone_root: Path, source_kind: str) -> Dict[str, Any]:
     selection: Dict[str, Any] = {
         "user_data_dir": str(clone),
@@ -418,52 +407,13 @@ def _copy_clone_from_source(source: Path, clone: Path, clone_root: Path, source_
         "clone_source": source_kind,
         "clone_source_path": str(source),
         "master_snapshot_path": str(_master_snapshot_dir()),
-        "last_known_good_path": str(_last_known_good_profile_dir()),
     }
-    if source_kind.startswith("live-master"):
-        staging = _staging_clone_dir(clone_root, clone.name)
-        _copy_profile_tree(source, staging, clone_root, source_kind)
-        _copy_profile_tree(staging, clone, clone_root, "staged-live-master")
-        selection["staging_dir"] = str(staging)
-    else:
-        _copy_profile_tree(source, clone, clone_root, source_kind)
+    _copy_profile_tree(source, clone, clone_root, source_kind)
     return selection
 
 
-def _promote_last_known_good_profile(profile_selection: Dict[str, Any]) -> None:
-    staging_dir = profile_selection.get("staging_dir")
-    if not staging_dir:
-        return
-    staging = Path(staging_dir)
-    if not staging.exists():
-        return
-    clone_root = _clone_root_dir()
-    last_known_good = _last_known_good_profile_dir()
-    try:
-        _copy_profile_tree(staging, last_known_good, clone_root, "last-known-good")
-    finally:
-        try:
-            if staging.exists() and not _profile_has_running_browser(staging):
-                shutil.rmtree(staging)
-        except Exception:
-            pass
-
-
-async def _promote_last_known_good_profile_async(profile_selection: Dict[str, Any]) -> None:
-    try:
-        await asyncio.to_thread(_promote_last_known_good_profile, profile_selection)
-    except Exception as exc:
-        log_warning = getattr(debug_logger, "log_warning", None)
-        if callable(log_warning):
-            log_warning("profile", "last_known_good", f"Failed to promote last-known-good profile: {exc}")
-
-
 def _public_profile_selection(profile_selection: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        key: value
-        for key, value in profile_selection.items()
-        if key not in {"staging_dir"}
-    }
+    return dict(profile_selection)
 
 
 async def _resolve_profile_selection(
@@ -511,8 +461,6 @@ async def _resolve_profile_selection(
         source = source_override
     elif snapshot.exists():
         source = snapshot
-    elif _last_known_good_profile_dir().exists():
-        source = _last_known_good_profile_dir()
     else:
         raise RuntimeError(
             "Master is already in use and no master snapshot exists yet. "
@@ -520,7 +468,7 @@ async def _resolve_profile_selection(
             f"so the server can create {snapshot}."
         )
 
-    resolved_source_kind = source_kind or ("master-snapshot" if source == snapshot else "last-known-good")
+    resolved_source_kind = source_kind or "master-snapshot"
     return _copy_clone_from_source(source, clone, clone_root, resolved_source_kind)
 
 
@@ -532,7 +480,6 @@ async def _fallback_profile_selection(
         return None
 
     snapshot = _master_snapshot_dir()
-    last_known_good = _last_known_good_profile_dir()
     if attempt == 0:
         if snapshot.exists():
             return await _resolve_profile_selection(
@@ -542,24 +489,7 @@ async def _fallback_profile_selection(
                 source_kind="master-snapshot-retry",
                 clone_suffix="retry",
             )
-        if last_known_good.exists():
-            return await _resolve_profile_selection(
-                None,
-                force_clone=True,
-                source_override=last_known_good,
-                source_kind="last-known-good",
-                clone_suffix="lkg",
-            )
         return None
-
-    if last_known_good.exists():
-        return await _resolve_profile_selection(
-            None,
-            force_clone=True,
-            source_override=last_known_good,
-            source_kind="last-known-good",
-            clone_suffix="lkg",
-        )
 
     if snapshot.exists():
         return await _resolve_profile_selection(
@@ -734,8 +664,6 @@ async def spawn_browser(
             )
             try:
                 instance = await browser_manager.spawn_browser(options)
-                if profile_selection.get("staging_dir"):
-                    asyncio.create_task(_promote_last_known_good_profile_async(profile_selection))
                 user_data_dir = selected_user_data_dir
                 break
             except Exception as spawn_error:
