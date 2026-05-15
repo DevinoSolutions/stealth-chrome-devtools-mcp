@@ -420,6 +420,15 @@ def _promote_last_known_good_profile(profile_selection: Dict[str, Any]) -> None:
             pass
 
 
+async def _promote_last_known_good_profile_async(profile_selection: Dict[str, Any]) -> None:
+    try:
+        await asyncio.to_thread(_promote_last_known_good_profile, profile_selection)
+    except Exception as exc:
+        log_warning = getattr(debug_logger, "log_warning", None)
+        if callable(log_warning):
+            log_warning("profile", "last_known_good", f"Failed to promote last-known-good profile: {exc}")
+
+
 def _public_profile_selection(profile_selection: Dict[str, Any]) -> Dict[str, Any]:
     return {
         key: value
@@ -658,7 +667,8 @@ async def spawn_browser(
             )
             try:
                 instance = await browser_manager.spawn_browser(options)
-                _promote_last_known_good_profile(profile_selection)
+                if profile_selection.get("staging_dir"):
+                    asyncio.create_task(_promote_last_known_good_profile_async(profile_selection))
                 user_data_dir = selected_user_data_dir
                 break
             except Exception as spawn_error:
