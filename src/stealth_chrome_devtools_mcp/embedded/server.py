@@ -430,6 +430,8 @@ async def _resolve_profile_selection(
 
     if user_data_dir:
         explicit = Path(user_data_dir).expanduser()
+        if not explicit.is_absolute():
+            explicit = _default_session_root() / explicit
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
             source = snapshot if snapshot.exists() else master
             source_kind = "explicit-master-snapshot" if source == snapshot else "explicit-master"

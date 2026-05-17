@@ -36,6 +36,9 @@ class ProcessCleanup:
             "BROWSER_ORPHAN_PROFILE_MAX_AGE",
             self.DEFAULT_ORPHAN_PROFILE_MAX_AGE_SECONDS,
         )
+        # Record server start time so recovery never kills processes spawned
+        # during the current session (create_time >= _init_time).
+        self._init_time = time.time()
         self._setup_cleanup_handlers()
         self._recover_orphaned_processes()
 
@@ -144,6 +147,7 @@ class ProcessCleanup:
                     continue
                 metadata = {
                     "pid": pid,
+                    "create_time": raw_value.get("create_time"),
                     "user_data_dir": raw_value.get("user_data_dir"),
                     "uses_custom_data_dir": raw_value.get("uses_custom_data_dir"),
                     "timestamp": raw_value.get("timestamp", 0),
@@ -300,6 +304,7 @@ class ProcessCleanup:
         self,
         instance_id: str,
         metadata: Dict[str, Any],
+        recovery: bool = False,
     ) -> bool:
         """
         Kill all browser processes associated with tracked metadata.
@@ -307,14 +312,61 @@ class ProcessCleanup:
         Args:
             instance_id (str): Browser instance id.
             metadata (Dict[str, Any]): Tracked process metadata.
+            recovery (bool): When True (startup orphan recovery), only kill processes
+                that pre-date this server session.  Processes created after
+                ``self._init_time`` belong to the current run and are never killed.
 
         Returns:
             bool: True if all associated browser processes were killed or already absent.
         """
         pids_to_kill = self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
         fallback_pid = metadata.get("pid")
-        if not pids_to_kill and isinstance(fallback_pid, int):
-            pids_to_kill = {fallback_pid}
+        stored_create_time = metadata.get("create_time")
+
+        if recovery:
+            # Safety net: never kill processes that started after this server
+            # session began — they belong to the current run, not a previous one.
+            safe_pids: Set[int] = set()
+            for pid in pids_to_kill:
+                try:
+                    pid_create_time = psutil.Process(pid).create_time()
+                    if pid_create_time < self._init_time:
+                        safe_pids.add(pid)
+                    else:
+                        debug_logger.log_info(
+                            "process_cleanup",
+                            "recovery",
+                            f"Skipping PID {pid} for {instance_id}: started after server init",
+                        )
+                except psutil.NoSuchProcess:
+                    pass  # already gone, no action needed
+            pids_to_kill = safe_pids
+
+            if not pids_to_kill and isinstance(fallback_pid, int):
+                # Use the stored PID only if it predates this session and,
+                # when create_time was recorded, the identity still matches.
+                try:
+                    proc = psutil.Process(fallback_pid)
+                    actual_create_time = proc.create_time()
+                    create_time_ok = (
+                        stored_create_time is None
+                        or abs(actual_create_time - stored_create_time) < 1.0
+                    )
+                    if actual_create_time < self._init_time and create_time_ok:
+                        pids_to_kill = {fallback_pid}
+                    else:
+                        debug_logger.log_info(
+                            "process_cleanup",
+                            "recovery",
+                            f"Skipping fallback PID {fallback_pid} for {instance_id}: "
+                            "create_time mismatch or started after server init",
+                        )
+                except psutil.NoSuchProcess:
+                    pass  # already gone
+        else:
+            if not pids_to_kill and isinstance(fallback_pid, int):
+                pids_to_kill = {fallback_pid}
+
         if not pids_to_kill:
             return True
 
@@ -487,7 +539,7 @@ class ProcessCleanup:
 
         for instance_id, metadata in saved_processes.items():
             try:
-                if self._kill_processes_for_metadata(instance_id, metadata):
+                if self._kill_processes_for_metadata(instance_id, metadata, recovery=True):
                     recovered_count += 1
                 self._cleanup_profile_for_metadata(instance_id, metadata)
             except Exception as error:
@@ -536,8 +588,14 @@ class ProcessCleanup:
                 return False
 
             pid = browser_process.pid
+            create_time = None
+            try:
+                create_time = psutil.Process(pid).create_time()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+                pass
             metadata = {
                 "pid": pid,
+                "create_time": create_time,
                 "user_data_dir": self._normalize_path(user_data_dir),
                 "uses_custom_data_dir": uses_custom_data_dir,
                 "timestamp": time.time(),
