@@ -97,26 +97,105 @@ def get_required_sandbox_args() -> List[str]:
     return unique_args
 
 
-def merge_browser_args(user_args: Optional[List[str]] = None) -> List[str]:
+def _stealth_blocked_args() -> dict:
+    """
+    Returns a dict mapping blocked Chrome flag prefixes to the reason they
+    compromise stealth.  Keys are lowercase and checked with startswith()
+    so ``--disable-gpu-sandbox`` is caught by ``--disable-gpu``.
+    """
+    return {
+        # ── direct automation signals ──
+        "--enable-automation": "sets navigator.webdriver=true",
+        "--test-type": "enables Chrome test mode",
+        "--enable-blink-features=automationcontrolled": "explicit automation marker",
+        "--auto-open-devtools-for-tabs": "DevTools on start is detectable",
+        "--remote-debugging-port": "DevTools port exposure",
+        "--remote-debugging-pipe": "DevTools pipe exposure",
+        # ── fingerprint-altering flags ──
+        "--no-sandbox": "missing sandbox detectable via process topology",
+        "--disable-gpu": "GPU absence detectable via WebGL probes",
+        "--disable-dev-shm-usage": "signals headless container environment",
+        "--disable-software-rasterizer": "alters rendering pipeline (canvas fingerprint)",
+        "--disable-webgl": "WebGL absence is a strong bot signal",
+        "--disable-webgl2": "WebGL2 absence is a strong bot signal",
+        "--disable-extensions": "real users have extensions",
+        "--disable-default-apps": "app list mismatch",
+        "--disable-popup-blocking": "behavior differs from real user",
+        "--disable-notifications": "permission API behaves differently",
+        "--single-process": "detectable process architecture",
+        "--headless": "headless detection via window/navigator properties",
+        "--mute-audio": "audio context fingerprint affected",
+        "--force-device-scale-factor": "DPI/scale mismatch detectable",
+        "--disable-background-networking": "network behavior differs from real browser",
+        # ── Puppeteer / Playwright signature flags ──
+        "--disable-backgrounding-occluded-windows": "Puppeteer default",
+        "--disable-renderer-backgrounding": "Puppeteer/Playwright default",
+        "--disable-ipc-flooding-protection": "Puppeteer default",
+        "--password-store=basic": "Playwright default",
+        "--use-mock-keychain": "Playwright default",
+        "--export-tagged-pdf": "Playwright default",
+        "--disable-hang-monitor": "automation default",
+        "--disable-prompt-on-repost": "automation default",
+        "--disable-client-side-phishing-detection": "automation default",
+        "--disable-domain-reliability": "automation default",
+        "--metrics-recording-only": "automation telemetry flag",
+        "--safebrowsing-disable-auto-update": "automation default",
+        "--disable-sync": "common in automation, absent in real profiles",
+        "--disable-component-extensions-with-background-pages": "component fingerprint mismatch",
+        "--no-first-run": "automation convenience flag",
+        "--no-default-browser-check": "automation convenience flag",
+        "--disable-setuid-sandbox": "sandbox mismatch detectable",
+    }
+
+
+def filter_stealth_args(user_args: List[str]) -> tuple:
+    """
+    Strip browser args that would compromise stealth and return
+    (clean_args, stripped_warnings).
+
+    Each warning is a string like:
+        ``"--no-sandbox stripped: missing sandbox detectable via process topology"``
+    """
+    blocked = _stealth_blocked_args()
+    clean: List[str] = []
+    warnings: List[str] = []
+
+    for arg in user_args:
+        lower = arg.lower().strip()
+        matched = False
+        for prefix, reason in blocked.items():
+            if lower.startswith(prefix):
+                warnings.append(f"{arg} stripped: {reason}")
+                matched = True
+                break
+        if not matched:
+            clean.append(arg)
+
+    return clean, warnings
+
+
+def merge_browser_args(user_args: Optional[List[str]] = None) -> tuple:
     """
     Merge user-provided browser arguments with platform-specific required arguments.
-    
+    Strips any args that would compromise stealth detection.
+
     Args:
         user_args: User-provided browser arguments
-        
+
     Returns:
-        List[str]: Combined list of browser arguments
+        tuple: (combined_args, stealth_warnings) — warnings list may be empty
     """
     user_args = user_args or []
+    clean_args, stealth_warnings = filter_stealth_args(user_args)
     required_args = get_required_sandbox_args()
-    
-    combined_args = list(user_args)
-    
+
+    combined_args = list(clean_args)
+
     for arg in required_args:
         if arg not in combined_args:
             combined_args.append(arg)
-    
-    return combined_args
+
+    return combined_args, stealth_warnings
 
 
 def get_platform_info() -> dict:

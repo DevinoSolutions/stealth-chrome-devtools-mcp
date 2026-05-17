@@ -367,8 +367,14 @@ class BrowserManager:
                 caller_args,
                 launch_proxy_server,
             )
-            launch_args = merge_browser_args(caller_args)
-            
+            launch_args, stealth_warnings = merge_browser_args(caller_args)
+            if stealth_warnings:
+                debug_logger.log_warning(
+                    "browser_manager", "stealth_filter",
+                    f"Stripped {len(stealth_warnings)} detectable arg(s): "
+                    + "; ".join(stealth_warnings),
+                )
+
             config = uc.Config(
                 headless=options.headless,
                 user_data_dir=options.user_data_dir,
@@ -436,6 +442,8 @@ class BrowserManager:
                 headless=options.headless,
                 user_data_dir=actual_user_data_dir,
             )
+            if stealth_warnings:
+                spawn_diagnostics["stealth_args_stripped"] = stealth_warnings
             self._spawn_diagnostics[instance_id] = spawn_diagnostics
             if proxy_forwarder is not None:
                 self._proxy_forwarders[instance_id] = proxy_forwarder
