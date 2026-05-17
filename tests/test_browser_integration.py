@@ -38,9 +38,11 @@ def _unwrap(fn):
 pytestmark = pytest.mark.integration
 
 _can_run = False
+_needs_no_sandbox = False
 try:
-    from platform_utils import check_browser_executable
+    from platform_utils import check_browser_executable, is_running_as_root, is_running_in_container
     _can_run = _server_mod is not None and check_browser_executable() is not None
+    _needs_no_sandbox = is_running_as_root() or is_running_in_container()
 except Exception:
     pass
 
@@ -60,6 +62,11 @@ def _get_fn(name):
     return _unwrap(fn)
 
 
+def _sandbox_kwargs() -> dict:
+    """Return sandbox=False when running as root/container (CI), else empty."""
+    return {"sandbox": False} if _needs_no_sandbox else {}
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -73,7 +80,7 @@ class TestBrowserSpawnAndClose:
         spawn = _get_fn("spawn_browser")
         close = _get_fn("close_instance")
 
-        result = await spawn(headless=True)
+        result = await spawn(headless=True, **_sandbox_kwargs())
         assert result["state"] == "ready"
         assert result["instance_id"]
         iid = result["instance_id"]
@@ -107,6 +114,7 @@ class TestBrowserSpawnAndClose:
         result = await spawn(
             headless=True,
             browser_args=["--enable-automation", "--no-sandbox", "--lang=en-US"],
+            **_sandbox_kwargs(),
         )
         iid = result["instance_id"]
         diag = result["spawn_diagnostics"]
@@ -139,7 +147,7 @@ class TestNavigateAndScreenshot:
         get_content = _get_fn("get_page_content")
         close = _get_fn("close_instance")
 
-        result = await spawn(headless=True)
+        result = await spawn(headless=True, **_sandbox_kwargs())
         iid = result["instance_id"]
 
         try:
@@ -159,7 +167,7 @@ class TestNavigateAndScreenshot:
         execute = _get_fn("execute_script")
         close = _get_fn("close_instance")
 
-        result = await spawn(headless=True)
+        result = await spawn(headless=True, **_sandbox_kwargs())
         iid = result["instance_id"]
 
         try:
@@ -182,8 +190,8 @@ class TestSelectiveClose:
         close = _get_fn("close_instance")
         list_fn = _get_fn("list_instances")
 
-        a = await spawn(headless=True)
-        b = await spawn(headless=True)
+        a = await spawn(headless=True, **_sandbox_kwargs())
+        b = await spawn(headless=True, **_sandbox_kwargs())
 
         # Close A
         await close(instance_id=a["instance_id"])
@@ -207,7 +215,7 @@ class TestIdleTimeout:
         close = _get_fn("close_instance")
         list_fn = _get_fn("list_instances")
 
-        result = await spawn(headless=True)
+        result = await spawn(headless=True, **_sandbox_kwargs())
         iid = result["instance_id"]
         assert result["spawn_diagnostics"]["idle_timeout_seconds"] == 0
 
