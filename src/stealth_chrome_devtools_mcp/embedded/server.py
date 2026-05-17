@@ -471,9 +471,14 @@ async def _resolve_profile_selection(
     if user_data_dir:
         explicit = Path(user_data_dir).expanduser()
         if not explicit.is_absolute():
-            # Resolve relative names inside clone_root (sessions/) so they get
-            # auto-cloned from master on first use, matching user expectations.
-            explicit = clone_root / explicit
+            # Resolve relative names so they land inside clone_root (sessions/).
+            # First anchor against session_root; if the result is already inside
+            # clone_root (e.g. "sessions/github-session"), keep it — otherwise
+            # prepend clone_root so a bare name like "github-session" becomes
+            # sessions/github-session.  This avoids the double-sessions path
+            # sessions/sessions/github-session when the user includes the prefix.
+            anchored = _default_session_root() / explicit
+            explicit = anchored if _is_relative_to(anchored, clone_root) else clone_root / explicit
         # If the requested path (inside clone_root) is already held by a running
         # browser, find the next free numbered variant rather than crashing.
         if _is_relative_to(explicit, clone_root) and _profile_has_running_browser(explicit):
