@@ -326,6 +326,30 @@ def _refresh_master_snapshot_if_safe(reason: str) -> Dict[str, Any]:
     return result
 
 
+def _snapshot_needs_refresh() -> bool:
+    """Return True when master has auth-relevant files newer than the last snapshot.
+
+    Checks a small set of key Chrome profile files whose mtime changes on
+    login/logout.  Fast (stat-only) and safe to call before every clone.
+    """
+    master = _master_profile_dir()
+    snapshot = _master_snapshot_dir()
+    if not snapshot.exists():
+        return False  # no snapshot yet; creation is handled elsewhere
+    marker = snapshot / ".stealth_chrome_devtools_mcp_clone.json"
+    if not marker.exists():
+        return True
+    try:
+        snapshot_time = marker.stat().st_mtime
+        for rel in ("Default/Cookies", "Default/Login Data", "Default/Web Data"):
+            src = master / rel
+            if src.exists() and src.stat().st_mtime > snapshot_time:
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def _root_to_path(root: Any) -> Optional[str]:
     value = getattr(root, "uri", None) or root
     value = str(value)
@@ -431,8 +455,14 @@ async def _resolve_profile_selection(
     if user_data_dir:
         explicit = Path(user_data_dir).expanduser()
         if not explicit.is_absolute():
-            explicit = _default_session_root() / explicit
+            # Resolve relative names inside clone_root (sessions/) so they get
+            # auto-cloned from master on first use, matching user expectations.
+            explicit = clone_root / explicit
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
+            # Refresh stale snapshot before copying so the clone carries the
+            # latest logins (only runs when master is not in use).
+            if _snapshot_needs_refresh():
+                _refresh_master_snapshot_if_safe("pre-clone-stale")
             source = snapshot if snapshot.exists() else master
             source_kind = "explicit-master-snapshot" if source == snapshot else "explicit-master"
             _copy_profile_tree(source, explicit, clone_root, source_kind)
@@ -458,6 +488,10 @@ async def _resolve_profile_selection(
     clone_root.mkdir(parents=True, exist_ok=True)
     if _profile_has_running_browser(clone):
         clone = _unique_clone_dir(base_clone, clone_suffix or "busy")
+
+    # Freshen snapshot before cloning if master has newer auth data and is not in use.
+    if _snapshot_needs_refresh():
+        _refresh_master_snapshot_if_safe("pre-clone-stale")
 
     if source_override is not None:
         source = source_override
