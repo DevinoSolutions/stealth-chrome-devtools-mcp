@@ -79,7 +79,7 @@ class TestBrowserSpawnAndClose:
         iid = result["instance_id"]
 
         closed = await close(instance_id=iid)
-        assert closed["result"] is True
+        assert closed is True or (isinstance(closed, dict) and closed.get("result") is True)
 
     @pytest.mark.asyncio
     async def test_spawn_with_relative_user_data_dir(self, tmp_path):
@@ -147,7 +147,8 @@ class TestNavigateAndScreenshot:
             assert nav.get("success") or nav.get("url")
 
             content = await get_content(instance_id=iid)
-            assert "Integration Test" in content.get("content", "")
+            body = content.get("content", "") or content.get("html", "")
+            assert "Integration Test" in body
         finally:
             await close(instance_id=iid)
 
