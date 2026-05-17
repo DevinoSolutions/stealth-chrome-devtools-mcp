@@ -7,6 +7,7 @@ Skip in CI without Chrome: pytest -m "not integration"
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -42,7 +43,11 @@ _needs_no_sandbox = False
 try:
     from platform_utils import check_browser_executable, is_running_as_root, is_running_in_container
     _can_run = _server_mod is not None and check_browser_executable() is not None
-    _needs_no_sandbox = is_running_as_root() or is_running_in_container()
+    _needs_no_sandbox = (
+        is_running_as_root()
+        or is_running_in_container()
+        or os.environ.get("CI") == "true"  # GitHub Actions, GitLab CI, etc.
+    )
 except Exception:
     pass
 
