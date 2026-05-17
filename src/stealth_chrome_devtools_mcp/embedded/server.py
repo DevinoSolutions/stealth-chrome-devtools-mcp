@@ -461,16 +461,24 @@ async def _resolve_profile_selection(
 
     if source_override is not None:
         source = source_override
+        resolved_source_kind = source_kind or "master-snapshot"
     elif snapshot.exists():
         source = snapshot
+        resolved_source_kind = source_kind or "master-snapshot"
+    elif master.exists():
+        # No snapshot yet (first run, snapshot deleted, or snapshot copy failed).
+        # Fall back to cloning directly from the live master directory.
+        # _copy_profile_delta skips locked files (PermissionError/OSError),
+        # and _copy_profile_tree does a double-pass — cookies and login data
+        # transfer successfully even while Chrome has master open.
+        source = master
+        resolved_source_kind = source_kind or "live-master-fallback"
     else:
         raise RuntimeError(
-            "Master is already in use and no master snapshot exists yet. "
-            "Open master once through this MCP after this update, or close master and spawn again, "
-            f"so the server can create {snapshot}."
+            "No master profile directory found — nothing to clone from. "
+            "Spawn a browser without user_data_dir first to create and populate the master profile."
         )
 
-    resolved_source_kind = source_kind or "master-snapshot"
     return _copy_clone_from_source(source, clone, clone_root, resolved_source_kind)
 
 
