@@ -26,6 +26,19 @@ dependencies = [
 [project.scripts]
 stealth-chrome-devtools-mcp = "stealth_chrome_devtools_mcp.server:main"
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: tests that spawn real browsers (need Chrome installed)",
+]
+
 [tool.hatch.metadata]
 allow-direct-references = true
 
