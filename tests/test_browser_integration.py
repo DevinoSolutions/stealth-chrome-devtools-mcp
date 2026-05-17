@@ -99,7 +99,7 @@ class TestBrowserSpawnAndClose:
         spawn = _get_fn("spawn_browser")
         close = _get_fn("close_instance")
 
-        result = await spawn(headless=True, user_data_dir="integration-test-profile")
+        result = await spawn(headless=True, user_data_dir="integration-test-profile", **_sandbox_kwargs())
         iid = result["instance_id"]
         udd = result["spawn_diagnostics"]["user_data_dir"]
 
