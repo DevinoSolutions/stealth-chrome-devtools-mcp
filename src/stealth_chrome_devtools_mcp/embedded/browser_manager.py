@@ -375,6 +375,12 @@ class BrowserManager:
                     + "; ".join(stealth_warnings),
                 )
 
+            # When sandbox is explicitly disabled, ensure --no-sandbox is present
+            # in launch args (added after stealth filter since this is a deliberate
+            # platform/user choice, not an accidental automation leak).
+            if options.sandbox is False and "--no-sandbox" not in launch_args:
+                launch_args.append("--no-sandbox")
+
             config = uc.Config(
                 headless=options.headless,
                 user_data_dir=options.user_data_dir,
