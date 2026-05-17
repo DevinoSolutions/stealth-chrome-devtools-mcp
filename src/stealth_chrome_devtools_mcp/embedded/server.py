@@ -424,6 +424,22 @@ def _available_clone_dir(base_clone: Path) -> Path:
     return base_clone.with_name(f"{base_clone.name}-{os.getpid()}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}")
 
 
+def _next_available_explicit_dir(requested: Path) -> Path:
+    """Return the next free variant of a user-supplied profile path.
+
+    When ``sessions/github-session`` is busy, tries ``sessions/github-session-2``,
+    ``sessions/github-session-3``, … up to -99, then falls back to a timestamp
+    suffix.  Uses clean numeric suffixes (no PID) because these are user-visible.
+    """
+    for index in range(2, 100):
+        candidate = requested.with_name(f"{requested.name}-{index}")
+        if not _profile_has_running_browser(candidate):
+            return candidate
+    return requested.with_name(
+        f"{requested.name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    )
+
+
 def _copy_clone_from_source(source: Path, clone: Path, clone_root: Path, source_kind: str) -> Dict[str, Any]:
     selection: Dict[str, Any] = {
         "user_data_dir": str(clone),
@@ -458,6 +474,10 @@ async def _resolve_profile_selection(
             # Resolve relative names inside clone_root (sessions/) so they get
             # auto-cloned from master on first use, matching user expectations.
             explicit = clone_root / explicit
+        # If the requested path (inside clone_root) is already held by a running
+        # browser, find the next free numbered variant rather than crashing.
+        if _is_relative_to(explicit, clone_root) and _profile_has_running_browser(explicit):
+            explicit = _next_available_explicit_dir(explicit)
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
             # Refresh stale snapshot before copying so the clone carries the
             # latest logins (only runs when master is not in use).
