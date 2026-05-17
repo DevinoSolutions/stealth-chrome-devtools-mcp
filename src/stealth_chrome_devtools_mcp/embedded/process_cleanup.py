@@ -137,6 +137,7 @@ class ProcessCleanup:
             if isinstance(raw_value, int):
                 metadata = {
                     "pid": raw_value,
+                    "create_time": None,
                     "user_data_dir": None,
                     "uses_custom_data_dir": None,
                     "timestamp": 0,
@@ -338,8 +339,8 @@ class ProcessCleanup:
                             "recovery",
                             f"Skipping PID {pid} for {instance_id}: started after server init",
                         )
-                except psutil.NoSuchProcess:
-                    pass  # already gone, no action needed
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass  # gone or inaccessible — skip conservatively
             pids_to_kill = safe_pids
 
             if not pids_to_kill and isinstance(fallback_pid, int):
@@ -361,8 +362,8 @@ class ProcessCleanup:
                             f"Skipping fallback PID {fallback_pid} for {instance_id}: "
                             "create_time mismatch or started after server init",
                         )
-                except psutil.NoSuchProcess:
-                    pass  # already gone
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass  # gone or inaccessible — skip conservatively
         else:
             if not pids_to_kill and isinstance(fallback_pid, int):
                 pids_to_kill = {fallback_pid}
