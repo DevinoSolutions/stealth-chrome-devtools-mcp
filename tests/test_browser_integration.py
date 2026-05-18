@@ -80,22 +80,16 @@ class TestBrowserSpawnAndClose:
     """Basic spawn → verify → close lifecycle."""
 
     @pytest.mark.asyncio
-    async def test_spawn_no_args(self):
-        """Spawn with defaults, verify ready, close."""
+    async def test_spawn_and_close(self):
+        """Spawn with a named session, verify ready, close."""
         spawn = _get_fn("spawn_browser")
         close = _get_fn("close_instance")
 
-        # Retry once — first Chrome launch on CI can fail while Xvfb settles
-        result = None
-        for attempt in range(2):
-            try:
-                result = await spawn(headless=True, **_sandbox_kwargs())
-                break
-            except Exception:
-                if attempt == 1:
-                    raise
-                await asyncio.sleep(3)
-
+        result = await spawn(
+            headless=True,
+            user_data_dir="ci-basic-test",
+            **_sandbox_kwargs(),
+        )
         assert result["state"] == "ready"
         assert result["instance_id"]
         iid = result["instance_id"]

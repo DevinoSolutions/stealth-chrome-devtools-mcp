@@ -60,7 +60,7 @@ jobs:
         run: uv sync --extra test
 
       - name: Run integration tests
-        run: uv run pytest -m integration -v --tb=short -x --timeout=120
+        run: uv run pytest -m integration -v --tb=short --timeout=120
         env:
           DISPLAY: ":99"
           STEALTH_MCP_BROWSER_SESSION_ROOT: /tmp/stealth-mcp-test
