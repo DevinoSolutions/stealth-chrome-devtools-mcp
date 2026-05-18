@@ -85,7 +85,17 @@ class TestBrowserSpawnAndClose:
         spawn = _get_fn("spawn_browser")
         close = _get_fn("close_instance")
 
-        result = await spawn(headless=True, **_sandbox_kwargs())
+        # Retry once — first Chrome launch on CI can fail while Xvfb settles
+        result = None
+        for attempt in range(2):
+            try:
+                result = await spawn(headless=True, **_sandbox_kwargs())
+                break
+            except Exception:
+                if attempt == 1:
+                    raise
+                await asyncio.sleep(3)
+
         assert result["state"] == "ready"
         assert result["instance_id"]
         iid = result["instance_id"]

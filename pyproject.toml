@@ -30,6 +30,7 @@ stealth-chrome-devtools-mcp = "stealth_chrome_devtools_mcp.server:main"
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.3",
 ]
 
 [tool.pytest.ini_options]

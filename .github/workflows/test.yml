@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -43,25 +43,24 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
 
-      - name: Install Chrome
+      - name: Install Chrome and Xvfb
         run: |
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/google-chrome.gpg
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update -qq
-          sudo apt-get install -y -qq google-chrome-stable
+          sudo apt-get install -y -qq google-chrome-stable xvfb
           google-chrome --version
 
-      - name: Set up virtual display
+      - name: Start virtual display
         run: |
-          sudo apt-get install -y -qq xvfb
-          Xvfb :99 -screen 0 1920x1080x24 &
-          sleep 1
+          Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+          sleep 3
 
       - name: Install dependencies
         run: uv sync --extra test
 
       - name: Run integration tests
-        run: uv run pytest -m integration -v --tb=short
+        run: uv run pytest -m integration -v --tb=short -x --timeout=120
         env:
           DISPLAY: ":99"
           STEALTH_MCP_BROWSER_SESSION_ROOT: /tmp/stealth-mcp-test
