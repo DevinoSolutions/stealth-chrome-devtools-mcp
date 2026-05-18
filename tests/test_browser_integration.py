@@ -73,6 +73,31 @@ def _sandbox_kwargs() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Warmup — first Chrome launch on CI is slow / flaky
+# ---------------------------------------------------------------------------
+
+_warmed_up = False
+
+
+@pytest.fixture(autouse=True)
+async def _warmup_chrome():
+    """Launch and close a throwaway browser before the first real test."""
+    global _warmed_up
+    if _warmed_up or not _can_run:
+        yield
+        return
+    _warmed_up = True
+    spawn = _get_fn("spawn_browser")
+    close = _get_fn("close_instance")
+    try:
+        result = await spawn(headless=True, user_data_dir="ci-warmup", **_sandbox_kwargs())
+        await close(instance_id=result["instance_id"])
+    except Exception:
+        pass  # warmup failure is non-fatal
+    yield
+
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
