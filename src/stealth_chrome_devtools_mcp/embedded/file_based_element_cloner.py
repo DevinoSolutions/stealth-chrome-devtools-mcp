@@ -599,8 +599,8 @@ class FileBasedElementCloner:
                         data = json.load(f)
                         if '_metadata' in data:
                             file_info['metadata'] = data['_metadata']
-                except:
-                    pass
+                except (json.JSONDecodeError, KeyError, OSError):
+                    pass  # metadata may be missing or file partially written
                 files.append(file_info)
             except Exception as e:
                 debug_logger.log_warning("file_element_cloner", "list_files", f"Error reading {file_path}: {e}")

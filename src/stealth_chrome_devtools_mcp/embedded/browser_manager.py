@@ -145,8 +145,8 @@ class BrowserManager:
             if callable(poll):
                 try:
                     return poll() is None
-                except Exception:
-                    pass
+                except OSError:
+                    pass  # process handle invalid or already closed
             return getattr(process, "returncode", None) is None
 
         pid = getattr(browser, "_process_pid", None)
@@ -171,12 +171,19 @@ class BrowserManager:
         try:
             process_cleanup.finalize_browser_process(instance_id)
             process_cleanup.cleanup_deferred_profiles()
-        except Exception:
-            pass
+        except (OSError, psutil.Error, KeyError) as e:
+            debug_logger.log_warning(
+                "browser_manager", "discard_instance",
+                f"Process finalize failed for {instance_id}: {e}",
+            )
         try:
             persistent_storage.remove_instance(instance_id)
-        except Exception:
-            pass
+        except KeyError:
+            pass  # already removed
+        try:
+            dynamic_hook_system.remove_instance(instance_id)
+        except KeyError:
+            pass  # already removed
         debug_logger.log_info(
             "browser_manager",
             "discard_instance",
@@ -480,19 +487,28 @@ class BrowserManager:
             if browser is not None:
                 try:
                     await self._stop_browser(browser)
-                except Exception:
-                    pass
+                except (OSError, RuntimeError, ConnectionError) as stop_err:
+                    debug_logger.log_warning(
+                        "browser_manager", "spawn_browser",
+                        f"browser.stop() failed during cancel cleanup for {instance_id}: {stop_err}",
+                    )
             if proxy_forwarder is not None:
                 try:
                     await proxy_forwarder.close()
-                except Exception:
-                    pass
+                except (OSError, ConnectionError) as proxy_err:
+                    debug_logger.log_warning(
+                        "browser_manager", "spawn_browser",
+                        f"Proxy close failed during cancel cleanup for {instance_id}: {proxy_err}",
+                    )
             try:
                 process_cleanup.kill_browser_process(instance_id)
                 process_cleanup.finalize_browser_process(instance_id)
                 process_cleanup.cleanup_deferred_profiles()
-            except Exception:
-                pass
+            except (OSError, psutil.Error, ProcessLookupError) as proc_err:
+                debug_logger.log_warning(
+                    "browser_manager", "spawn_browser",
+                    f"Process cleanup failed during cancel for {instance_id}: {proc_err}",
+                )
             async with self._lock:
                 self._instances.pop(instance_id, None)
                 self._spawn_diagnostics.pop(instance_id, None)
@@ -503,17 +519,26 @@ class BrowserManager:
             if browser is not None:
                 try:
                     await self._stop_browser(browser)
-                except Exception:
-                    pass
+                except (OSError, RuntimeError, ConnectionError) as stop_err:
+                    debug_logger.log_warning(
+                        "browser_manager", "spawn_browser",
+                        f"browser.stop() failed during error cleanup for {instance_id}: {stop_err}",
+                    )
             if proxy_forwarder is not None:
                 try:
                     await proxy_forwarder.close()
-                except Exception:
-                    pass
+                except (OSError, ConnectionError) as proxy_err:
+                    debug_logger.log_warning(
+                        "browser_manager", "spawn_browser",
+                        f"Proxy close failed during error cleanup for {instance_id}: {proxy_err}",
+                    )
             try:
                 process_cleanup.kill_browser_process(instance_id)
-            except Exception:
-                pass
+            except (OSError, psutil.Error, ProcessLookupError) as proc_err:
+                debug_logger.log_warning(
+                    "browser_manager", "spawn_browser",
+                    f"Process kill failed during error cleanup for {instance_id}: {proc_err}",
+                )
             instance.state = BrowserState.ERROR
             raise Exception(f"Failed to spawn browser: {str(e)}")
 
@@ -602,10 +627,16 @@ class BrowserManager:
                         for tab in browser.tabs[:]:
                             try:
                                 await tab.close()
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                            except Exception as tab_err:
+                                debug_logger.log_warning(
+                                    "browser_manager", "close_instance",
+                                    f"Failed to close tab for {instance_id}: {tab_err}",
+                                )
+                except Exception as tabs_err:
+                    debug_logger.log_warning(
+                        "browser_manager", "close_instance",
+                        f"Failed to close tabs for {instance_id}: {tabs_err}",
+                    )
 
                 try:
                     import asyncio
@@ -629,24 +660,33 @@ class BrowserManager:
                     import nodriver.cdp.browser as cdp_browser
                     if hasattr(browser, 'connection') and browser.connection:
                         await browser.connection.send(cdp_browser.close())
-                except Exception:
-                    pass
+                except Exception as cdp_err:
+                    debug_logger.log_warning(
+                        "browser_manager", "close_instance",
+                        f"CDP browser.close() failed for {instance_id}: {cdp_err}",
+                    )
 
                 try:
                     process_cleanup.kill_browser_process(instance_id)
                 except Exception as e:
-                    debug_logger.log_warning("browser_manager", "close_instance", 
+                    debug_logger.log_warning("browser_manager", "close_instance",
                                            f"Process cleanup failed for {instance_id}: {e}")
 
                 try:
                     await self._stop_browser(browser)
-                except Exception:
-                    pass
+                except Exception as stop_err:
+                    debug_logger.log_warning(
+                        "browser_manager", "close_instance",
+                        f"browser.stop() failed for {instance_id}: {stop_err}",
+                    )
 
                 try:
                     await self._close_proxy_forwarder(instance_id)
-                except Exception:
-                    pass
+                except Exception as proxy_err:
+                    debug_logger.log_warning(
+                        "browser_manager", "close_instance",
+                        f"Proxy forwarder close failed for {instance_id}: {proxy_err}",
+                    )
 
                 if hasattr(browser, '_process') and browser._process and browser._process.returncode is None:
                     import os
@@ -681,8 +721,11 @@ class BrowserManager:
                         browser._process_pid = None
 
                     instance.state = BrowserState.CLOSED
-                except Exception:
-                    pass
+                except Exception as state_err:
+                    debug_logger.log_warning(
+                        "browser_manager", "close_instance",
+                        f"Failed to clear process refs for {instance_id}: {state_err}",
+                    )
 
                 try:
                     process_cleanup.finalize_browser_process(instance_id)
@@ -704,7 +747,7 @@ class BrowserManager:
         try:
             return await asyncio.wait_for(_do_close(), timeout=5.0)
         except asyncio.TimeoutError:
-            debug_logger.log_info("browser_manager", "close_instance", f"Close timeout for {instance_id}, forcing cleanup")
+            debug_logger.log_warning("browser_manager", "close_instance", f"Close timeout for {instance_id}, forcing cleanup")
             try:
                 async with self._lock:
                     if instance_id in self._instances:
@@ -719,8 +762,11 @@ class BrowserManager:
                         if proxy_forwarder is not None:
                             asyncio.create_task(proxy_forwarder.close())
                         persistent_storage.remove_instance(instance_id)
-            except Exception:
-                pass
+            except Exception as force_err:
+                debug_logger.log_error(
+                    "browser_manager", "close_instance",
+                    Exception(f"Forced cleanup failed for {instance_id}, Chrome process may be orphaned: {force_err}"),
+                )
             return True
         except Exception as e:
             debug_logger.log_error("browser_manager", "close_instance", e)
@@ -793,8 +839,11 @@ class BrowserManager:
             if previous_target_id and previous_target_id != new_target_id:
                 try:
                     await previous_tab.close()
-                except Exception:
-                    pass
+                except (ConnectionError, RuntimeError, OSError) as e:
+                    debug_logger.log_warning(
+                        "browser_manager", "_replace_main_tab",
+                        f"Failed to close previous tab for {instance_id}: {e}",
+                    )
 
         async with self._lock:
             if instance_id in self._instances:
@@ -1198,8 +1247,17 @@ class BrowserManager:
                 for key in session_storage_keys:
                     value = await tab.evaluate(f"sessionStorage.getItem('{key}')")
                     session_storage[key] = value
-            except Exception:
-                pass
+            except (RuntimeError, ConnectionError) as e:
+                debug_logger.log_warning(
+                    "browser_manager", "get_page_state",
+                    f"Storage access failed (connection issue) for {instance_id}: {e}",
+                )
+            except Exception as e:
+                # Pages may block storage access (cross-origin, opaque origins, security policies)
+                debug_logger.log_info(
+                    "browser_manager", "get_page_state",
+                    f"Storage access unavailable for {instance_id}: {e}",
+                )
 
             viewport = await tab.evaluate("""
                 ({

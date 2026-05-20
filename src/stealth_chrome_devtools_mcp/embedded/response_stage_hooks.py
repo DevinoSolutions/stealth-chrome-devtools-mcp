@@ -71,9 +71,12 @@ class ResponseStageProcessor:
             # Continue response on error
             try:
                 await tab.send(uc.cdp.fetch.continue_response(request_id=uc.cdp.fetch.RequestId(request.request_id)))
-            except:
-                pass
-    
+            except Exception as fallback_err:
+                debug_logger.log_error(
+                    "response_stage", "execute_response_action",
+                    Exception(f"Failed to continue response after error, response may be stuck: {fallback_err}"),
+                )
+
     async def execute_request_action(self, tab, request: RequestInfo, action: HookAction) -> None:
         """Execute a request-stage hook action."""
         try:
@@ -134,8 +137,11 @@ class ResponseStageProcessor:
             # Continue request on error
             try:
                 await tab.send(uc.cdp.fetch.continue_request(request_id=uc.cdp.fetch.RequestId(request.request_id)))
-            except:
-                pass
+            except Exception as fallback_err:
+                debug_logger.log_error(
+                    "response_stage", "execute_request_action",
+                    Exception(f"Failed to continue request after error, request may be stuck: {fallback_err}"),
+                )
 
 
 # Create global instance

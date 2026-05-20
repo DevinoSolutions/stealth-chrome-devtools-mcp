@@ -15,18 +15,23 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 class DebugLogger:
     """Centralized debug logging system for the MCP server."""
 
+    MAX_ERRORS = 500
+    MAX_WARNINGS = 1000
+    MAX_INFO = 2000
+    MAX_SEEN_ERRORS = 1000
+
     def __init__(self):
         """
         Initializes the DebugLogger.
 
         Variables:
-            self._errors (List[Dict[str, Any]]): Stores error logs.
-            self._warnings (List[Dict[str, Any]]): Stores warning logs.
-            self._info (List[Dict[str, Any]]): Stores info logs.
+            self._errors (List[Dict[str, Any]]): Stores error logs (capped at MAX_ERRORS).
+            self._warnings (List[Dict[str, Any]]): Stores warning logs (capped at MAX_WARNINGS).
+            self._info (List[Dict[str, Any]]): Stores info logs (capped at MAX_INFO).
             self._stats (Dict[str, int]): Stores statistics for errors, warnings, and calls.
             self._lock (threading.Lock): Ensures thread safety for logging.
             self._enabled (bool): Indicates if logging is enabled.
-            self._seen_errors (set): Track error signatures to prevent duplicates.
+            self._seen_errors (set): Track error signatures to prevent duplicates (capped at MAX_SEEN_ERRORS).
         """
         self._errors: List[Dict[str, Any]] = []
         self._warnings: List[Dict[str, Any]] = []
@@ -51,8 +56,8 @@ class DebugLogger:
             return
         try:
             print(message, file=sys.stderr)
-        except Exception:
-            pass
+        except (OSError, ValueError):
+            pass  # stderr closed or broken pipe
 
     def log_error(self, component: str, method: str, error: Exception, context: Optional[Dict[str, Any]] = None):
         """
@@ -74,8 +79,10 @@ class DebugLogger:
                 self._stats[f'{component}.{method}.errors'] += 1
                 return
             
+            if len(self._seen_errors) >= self.MAX_SEEN_ERRORS:
+                self._seen_errors.clear()
             self._seen_errors.add(error_signature)
-            
+
             error_entry = {
                 'timestamp': datetime.now().isoformat(),
                 'component': component,
@@ -86,6 +93,8 @@ class DebugLogger:
                 'context': context or {}
             }
             self._errors.append(error_entry)
+            if len(self._errors) > self.MAX_ERRORS:
+                self._errors = self._errors[-self.MAX_ERRORS:]
             self._stats[f'{component}.{method}.errors'] += 1
             self._emit_stderr(f"[DEBUG ERROR] {component}.{method}: {error}")
 
@@ -111,6 +120,8 @@ class DebugLogger:
                 'context': context or {}
             }
             self._warnings.append(warning_entry)
+            if len(self._warnings) > self.MAX_WARNINGS:
+                self._warnings = self._warnings[-self.MAX_WARNINGS:]
             self._stats[f'{component}.{method}.warnings'] += 1
             self._emit_stderr(f"[DEBUG WARN] {component}.{method}: {message}")
 
@@ -136,6 +147,8 @@ class DebugLogger:
                 'data': data
             }
             self._info.append(info_entry)
+            if len(self._info) > self.MAX_INFO:
+                self._info = self._info[-self.MAX_INFO:]
             self._stats[f'{component}.{method}.calls'] += 1
             self._emit_stderr(f"[DEBUG INFO] {component}.{method}: {message}")
             if data:
@@ -272,7 +285,7 @@ class DebugLogger:
         """
         try:
             self.clear_debug_view()
-        except:
+        except Exception:
             self._errors = []
             self._warnings = []
             self._info = []

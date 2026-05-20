@@ -123,7 +123,11 @@ class DynamicHook:
                     result = eval(condition_code, namespace)
                     if not result:
                         return False
-                except:
+                except Exception as cond_err:
+                    debug_logger.log_warning(
+                        "dynamic_hook", "matches",
+                        f"Custom condition eval failed for hook {self.name}: {cond_err}",
+                    )
                     return False
             
             return True
@@ -256,9 +260,12 @@ class DynamicHookSystem:
             debug_logger.log_error("dynamic_hook_system", "_on_request_paused", f"Error processing {stage if 'stage' in locals() else 'request'}: {e}")
             try:
                 await tab.send(uc.cdp.fetch.continue_request(request_id=event.request_id))
-            except:
-                pass
-    
+            except Exception as fallback_err:
+                debug_logger.log_error(
+                    "dynamic_hook_system", "_on_request_paused",
+                    Exception(f"Failed to continue request after error, request may be stuck: {fallback_err}"),
+                )
+
     async def _process_request_hooks(self, tab, request: RequestInfo, event=None):
         """Process hooks for a request/response in real-time with priority chain processing."""
         try:
@@ -330,9 +337,12 @@ class DynamicHookSystem:
                     await tab.send(uc.cdp.fetch.continue_response(request_id=uc.cdp.fetch.RequestId(request.request_id)))
                 else:
                     await tab.send(uc.cdp.fetch.continue_request(request_id=uc.cdp.fetch.RequestId(request.request_id)))
-            except:
-                pass
-    
+            except Exception as fallback_err:
+                debug_logger.log_error(
+                    "dynamic_hook_system", "_process_request_hooks",
+                    Exception(f"Failed to continue request after hook error, request may be stuck: {fallback_err}"),
+                )
+
     async def create_hook(self, name: str, requirements: Dict[str, Any], function_code: str, 
                          instance_ids: Optional[List[str]] = None, priority: int = 100) -> str:
         """Create a new dynamic hook."""
@@ -417,6 +427,10 @@ class DynamicHookSystem:
         """Add a new browser instance."""
         if instance_id not in self.instance_hooks:
             self.instance_hooks[instance_id] = []
+
+    def remove_instance(self, instance_id: str):
+        """Remove a browser instance and its hook associations."""
+        self.instance_hooks.pop(instance_id, None)
     
     async def _execute_hook_action(self, tab, request: RequestInfo, action: HookAction, event=None):
         """Execute a hook action for either request or response stage."""
@@ -498,8 +512,11 @@ class DynamicHookSystem:
                     await tab.send(uc.cdp.fetch.continue_response(request_id=uc.cdp.fetch.RequestId(request.request_id)))
                 else:
                     await tab.send(uc.cdp.fetch.continue_request(request_id=uc.cdp.fetch.RequestId(request.request_id)))
-            except:
-                pass
+            except Exception as fallback_err:
+                debug_logger.log_error(
+                    "dynamic_hook_system", "_execute_hook_action",
+                    Exception(f"Failed to continue request after action error, request may be stuck: {fallback_err}"),
+                )
 
 
 dynamic_hook_system = DynamicHookSystem()

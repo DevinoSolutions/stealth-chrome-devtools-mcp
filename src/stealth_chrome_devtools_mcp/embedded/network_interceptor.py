@@ -135,8 +135,11 @@ class NetworkInterceptor:
             async with self._lock:
                 self._requests[request_id] = network_request
                 self._instance_requests[instance_id].append(request_id)
-        except Exception:
-            pass
+        except Exception as e:
+            debug_logger.log_warning(
+                "network_interceptor", "_on_request",
+                f"Failed to capture request for {instance_id}: {e}",
+            )
 
     async def _on_response(self, event, instance_id: str, tab: Tab = None):
         """
@@ -160,8 +163,13 @@ class NetworkInterceptor:
                             body = base64.b64decode(body_str)
                         else:
                             body = body_str.encode("utf-8")
+                except (ConnectionError, RuntimeError) as e:
+                    debug_logger.log_warning(
+                        "network_interceptor", "_on_response",
+                        f"Connection lost while capturing response body: {e}",
+                    )
                 except Exception:
-                    pass
+                    pass  # body unavailable for streaming/redirect/preflight responses (expected)
 
             network_response = NetworkResponse(
                 request_id=request_id,
@@ -172,8 +180,11 @@ class NetworkInterceptor:
             )
             async with self._lock:
                 self._responses[request_id] = network_response
-        except Exception:
-            pass
+        except Exception as e:
+            debug_logger.log_warning(
+                "network_interceptor", "_on_response",
+                f"Failed to capture response for {instance_id}: {e}",
+            )
 
 
     async def set_capture_filters(
@@ -257,8 +268,8 @@ class NetworkInterceptor:
                         body_str = response.body.decode('utf-8', errors='ignore')
                         if response_contains.lower() not in body_str.lower():
                             continue
-                    except:
-                        continue
+                    except Exception:
+                        continue  # skip if body can't be decoded for search
 
                 matches.append({
                     "request_id": req_id,
@@ -338,8 +349,13 @@ class NetworkInterceptor:
                     return base64.b64decode(body)
                 else:
                     return body.encode("utf-8")
+        except (ConnectionError, RuntimeError) as e:
+            debug_logger.log_warning(
+                "network_interceptor", "get_response_body",
+                f"Connection lost while fetching body for {request_id}: {e}",
+            )
         except Exception:
-            pass
+            pass  # body unavailable for streaming/redirect/preflight responses (expected)
         return None
 
     async def modify_headers(self, tab: Tab, headers: Dict[str, str]):
@@ -587,3 +603,4 @@ class NetworkInterceptor:
                     self._requests.pop(req_id, None)
                     self._responses.pop(req_id, None)
                 del self._instance_requests[instance_id]
+            self._instance_filters.pop(instance_id, None)

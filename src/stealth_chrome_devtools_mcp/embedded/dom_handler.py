@@ -93,8 +93,11 @@ class DOMHandler:
                             )
                             if not is_visible:
                                 continue
-                        except:
-                            pass
+                        except (AttributeError, RuntimeError, ConnectionError, Exception) as e:
+                            debug_logger.log_info(
+                                "dom_handler", "query_elements",
+                                f"Visibility check skipped for element: {type(e).__name__}",
+                            )
 
                     bbox = None
                     try:
@@ -106,8 +109,11 @@ class DOMHandler:
                                 'width': position.width,
                                 'height': position.height
                             }
-                    except Exception:
-                        pass
+                    except (AttributeError, RuntimeError, ConnectionError, Exception) as e:
+                        debug_logger.log_info(
+                            "dom_handler", "query_elements",
+                            f"Position unavailable for element: {type(e).__name__}",
+                        )
 
                     is_clickable = False
 
@@ -116,8 +122,8 @@ class DOMHandler:
                         if hasattr(elem, 'children'):
                             children = elem.children
                             children_count = len(children) if children else 0
-                    except Exception:
-                        pass
+                    except (AttributeError, TypeError):
+                        pass  # children property not iterable or element detached
 
                     element_info = ElementInfo(
                         selector=selector,
@@ -231,8 +237,8 @@ class DOMHandler:
             if clear_first:
                 try:
                     await element.apply("(elem) => { elem.value = ''; }")
-                except:
-                    await element.send_keys('\ue009' + 'a')
+                except Exception:
+                    await element.send_keys('\ue009' + 'a')  # Ctrl+A fallback
                     await element.send_keys('\ue017')
                 await asyncio.sleep(0.1)
 
@@ -320,8 +326,8 @@ class DOMHandler:
             if clear_first:
                 try:
                     await element.apply("(elem) => { elem.value = ''; }")
-                except:
-                    await tab.send(cdp.input_.dispatch_key_event(
+                except Exception:
+                    await tab.send(cdp.input_.dispatch_key_event(  # Ctrl+A fallback
                         "rawKeyDown", 
                         modifiers=2,  # Ctrl
                         key="a",
@@ -504,8 +510,8 @@ class DOMHandler:
                             if not is_visible:
                                 await asyncio.sleep(0.5)
                                 continue
-                        except:
-                            pass
+                        except (AttributeError, RuntimeError, ConnectionError, Exception):
+                            pass  # visibility check may fail on detached/stale elements during wait
 
                     if text_content:
                         text = element.text_all
@@ -515,8 +521,8 @@ class DOMHandler:
 
                     return True
 
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError, ConnectionError):
+                pass  # element not found or detached during wait loop
 
             await asyncio.sleep(0.5)
 

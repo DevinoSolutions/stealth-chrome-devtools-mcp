@@ -435,5 +435,5 @@ class AuthenticatedProxyForwarder:
         writer.close()
         try:
             await writer.wait_closed()
-        except Exception:
-            pass
+        except (OSError, ConnectionError, BrokenPipeError):
+            pass  # peer already disconnected

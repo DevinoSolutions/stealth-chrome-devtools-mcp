@@ -183,8 +183,11 @@ def _profile_has_running_browser(profile_dir: Path) -> bool:
                         return True
                 except TypeError:
                     continue
-    except Exception:
-        pass
+    except (psutil.Error, OSError, AttributeError) as e:
+        debug_logger.log_warning(
+            "server", "_profile_has_running_browser",
+            f"PID check failed for profile {profile_dir}: {e}",
+        )
     return any(
         (profile_dir / marker).exists()
         for marker in ("SingletonLock", "SingletonSocket", "SingletonCookie")
@@ -815,6 +818,7 @@ async def close_instance(instance_id: str) -> bool:
     success = await browser_manager.close_instance(instance_id)
     if success:
         await network_interceptor.clear_instance_data(instance_id)
+        dynamic_hook_system.remove_instance(instance_id)
         if should_refresh_snapshot:
             await asyncio.to_thread(_refresh_master_snapshot_if_safe, "after-master-close")
     return success

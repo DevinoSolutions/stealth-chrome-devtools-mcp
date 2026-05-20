@@ -592,8 +592,8 @@ class ProcessCleanup:
             create_time = None
             try:
                 create_time = psutil.Process(pid).create_time()
-            except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
-                pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                pass  # process may have exited between spawn and this check
             metadata = {
                 "pid": pid,
                 "create_time": create_time,
