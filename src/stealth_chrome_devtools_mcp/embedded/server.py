@@ -270,6 +270,51 @@ def _copy_profile_delta(source: Path, target: Path) -> None:
                 continue
 
 
+def _rmtree_robust(path: Path, retries: int = 3) -> None:
+    """Remove a directory tree, handling Windows file-lock race conditions.
+
+    Chrome profile dirs may have cache files vanishing mid-traversal
+    (Chrome cleanup) or directories still locked by background processes.
+    Retries with backoff and falls back to best-effort removal so the
+    subsequent profile copy can proceed via overwrite.
+    """
+
+    def _on_rm_error(_func, fpath, exc_info):
+        exc = exc_info[1]
+        if isinstance(exc, FileNotFoundError):
+            return  # file already gone — Chrome or OS cleaned it
+        if isinstance(exc, PermissionError):
+            try:
+                os.chmod(fpath, 0o700)
+                _func(fpath)
+            except (OSError, FileNotFoundError):
+                pass
+            return
+        # OSError (e.g. directory not empty) — let rmtree continue
+        if isinstance(exc, OSError):
+            return
+
+    for attempt in range(retries):
+        try:
+            if not path.exists():
+                return
+            shutil.rmtree(path, onerror=_on_rm_error)
+            return
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(0.5)
+                continue
+            # Final attempt: remove whatever is possible
+            shutil.rmtree(path, ignore_errors=True)
+            if path.exists():
+                debug_logger.log_warning(
+                    "server",
+                    "_rmtree_robust",
+                    f"Could not fully remove {path} after {retries} retries, "
+                    f"proceeding with overwrite",
+                )
+
+
 def _copy_profile_tree(source: Path, target: Path, clone_root: Path, source_kind: str = "profile") -> None:
     if not source.exists():
         target.mkdir(parents=True, exist_ok=True)
@@ -279,7 +324,7 @@ def _copy_profile_tree(source: Path, target: Path, clone_root: Path, source_kind
     if target.exists():
         if _profile_has_running_browser(target):
             return
-        shutil.rmtree(target)
+        _rmtree_robust(target)
     target.mkdir(parents=True, exist_ok=True)
     _copy_profile_delta(source, target)
     time.sleep(0.2)
