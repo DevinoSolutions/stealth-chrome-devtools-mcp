@@ -67,6 +67,29 @@ def parse_float_env(name: str, default: float) -> float:
         return default
 
 
+CDP_OPERATION_TIMEOUT = parse_float_env("CDP_OPERATION_TIMEOUT_SECONDS", 30.0)
+
+
+async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
+    """Wrap a CDP coroutine with asyncio.wait_for to prevent infinite hangs.
+
+    When a Chrome DevTools Protocol connection is stale or dead, awaiting a
+    CDP operation blocks forever.  This wrapper raises a clear error after
+    *timeout* seconds so the caller (and the MCP client) gets a response
+    instead of hanging indefinitely.
+    """
+    t = timeout or CDP_OPERATION_TIMEOUT
+    try:
+        return await asyncio.wait_for(coro, timeout=t)
+    except asyncio.TimeoutError:
+        tag = f" (instance {instance_id})" if instance_id else ""
+        raise Exception(
+            f"CDP operation timed out after {t:.0f}s{tag}. "
+            "The browser may have crashed or the connection dropped. "
+            "Try closing the instance with close_instance and spawning a new one."
+        )
+
+
 def _install_asyncio_close_noise_filter() -> None:
     try:
         loop = asyncio.get_running_loop()
@@ -972,7 +995,7 @@ async def go_back(instance_id: str) -> bool:
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    await tab.back()
+    await _with_cdp_timeout(tab.back(), instance_id=instance_id)
     return True
 
 @section_tool("browser-management")
@@ -989,7 +1012,7 @@ async def go_forward(instance_id: str) -> bool:
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    await tab.forward()
+    await _with_cdp_timeout(tab.forward(), instance_id=instance_id)
     return True
 
 @section_tool("browser-management")
@@ -1007,7 +1030,7 @@ async def reload_page(instance_id: str, ignore_cache: bool = False) -> bool:
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    await tab.reload()
+    await _with_cdp_timeout(tab.reload(), instance_id=instance_id)
     return True
 
 @section_tool("element-interaction")
@@ -1035,9 +1058,9 @@ async def query_elements(
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
     debug_logger.log_info('Server', 'query_elements', f'Received limit parameter: {limit} (type: {type(limit)})')
-    elements = await dom_handler.query_elements(
+    elements = await _with_cdp_timeout(dom_handler.query_elements(
         tab, selector, text_filter, visible_only, limit
-    )
+    ), instance_id=instance_id)
     debug_logger.log_info('Server', 'query_elements', f'DOM handler returned {len(elements)} elements')
     result = []
     for i, elem in enumerate(elements):
@@ -1077,7 +1100,7 @@ async def click_element(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await dom_handler.click_element(tab, selector, text_match, timeout)
+    return await _with_cdp_timeout(dom_handler.click_element(tab, selector, text_match, timeout), instance_id=instance_id)
 
 @section_tool("element-interaction")
 async def type_text(
@@ -1109,7 +1132,7 @@ async def type_text(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await dom_handler.type_text(tab, selector, text, clear_first, delay_ms, parse_newlines, shift_enter)
+    return await _with_cdp_timeout(dom_handler.type_text(tab, selector, text, clear_first, delay_ms, parse_newlines, shift_enter), timeout=60, instance_id=instance_id)
 
 @section_tool("element-interaction")
 async def paste_text(
@@ -1133,7 +1156,7 @@ async def paste_text(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await dom_handler.paste_text(tab, selector, text, clear_first)
+    return await _with_cdp_timeout(dom_handler.paste_text(tab, selector, text, clear_first), instance_id=instance_id)
 
 @section_tool("element-interaction")
 async def select_option(
@@ -1167,7 +1190,7 @@ async def select_option(
         except (ValueError, TypeError):
             raise Exception(f"Invalid index value: {index}. Must be a number.")
     
-    return await dom_handler.select_option(tab, selector, value, text, converted_index)
+    return await _with_cdp_timeout(dom_handler.select_option(tab, selector, value, text, converted_index), instance_id=instance_id)
 
 @section_tool("element-interaction")
 async def get_element_state(
@@ -1187,7 +1210,7 @@ async def get_element_state(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await dom_handler.get_element_state(tab, selector)
+    return await _with_cdp_timeout(dom_handler.get_element_state(tab, selector), instance_id=instance_id)
 
 @section_tool("element-interaction")
 async def wait_for_element(
@@ -1215,7 +1238,7 @@ async def wait_for_element(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await dom_handler.wait_for_element(tab, selector, timeout, visible, text_content)
+    return await _with_cdp_timeout(dom_handler.wait_for_element(tab, selector, timeout, visible, text_content), timeout=max(timeout/1000 + 5, CDP_OPERATION_TIMEOUT), instance_id=instance_id)
 
 @section_tool("element-interaction")
 async def scroll_page(
@@ -1241,7 +1264,7 @@ async def scroll_page(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await dom_handler.scroll_page(tab, direction, amount, smooth)
+    return await _with_cdp_timeout(dom_handler.scroll_page(tab, direction, amount, smooth), instance_id=instance_id)
 
 @section_tool("element-interaction")
 async def execute_script(
@@ -1264,7 +1287,7 @@ async def execute_script(
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
     try:
-        result = await dom_handler.execute_script(tab, script, args)
+        result = await _with_cdp_timeout(dom_handler.execute_script(tab, script, args), instance_id=instance_id)
         return {
             "success": True,
             "result": result,
@@ -1295,7 +1318,7 @@ async def get_page_content(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    content = await dom_handler.get_page_content(tab, include_frames)
+    content = await _with_cdp_timeout(dom_handler.get_page_content(tab, include_frames), instance_id=instance_id)
     
     return response_handler.handle_response(
         content, 
@@ -1332,14 +1355,14 @@ async def take_screenshot(
     if file_path:
         save_path = Path(file_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        await tab.save_screenshot(save_path)
+        await _with_cdp_timeout(tab.save_screenshot(save_path), instance_id=instance_id)
         return f"Screenshot saved. AI agents should use the Read tool to view this image: {str(save_path.absolute())}"
-    
+
     with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
         tmp_path = Path(tmp_file.name)
-    
+
     try:
-        await tab.save_screenshot(tmp_path)
+        await _with_cdp_timeout(tab.save_screenshot(tmp_path), instance_id=instance_id)
         
         with Image.open(tmp_path) as img:
             if img.mode in ('RGBA', 'LA', 'P') and format.lower() == 'jpeg':
@@ -2018,14 +2041,14 @@ async def extract_element_styles(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await element_cloner.extract_element_styles(
+    return await _with_cdp_timeout(element_cloner.extract_element_styles(
         tab,
         selector=selector,
         include_computed=include_computed,
         include_css_rules=include_css_rules,
         include_pseudo=include_pseudo,
         include_inheritance=include_inheritance
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("element-extraction")
@@ -2054,14 +2077,14 @@ async def extract_element_structure(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await element_cloner.extract_element_structure(
+    return await _with_cdp_timeout(element_cloner.extract_element_structure(
         tab,
         selector=selector,
         include_children=include_children,
         include_attributes=include_attributes,
         include_data_attributes=include_data_attributes,
         max_depth=max_depth
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("element-extraction")
@@ -2090,14 +2113,14 @@ async def extract_element_events(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await element_cloner.extract_element_events(
+    return await _with_cdp_timeout(element_cloner.extract_element_events(
         tab,
         selector=selector,
         include_inline=include_inline,
         include_listeners=include_listeners,
         include_framework=include_framework,
         analyze_handlers=analyze_handlers
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("element-extraction")
@@ -2126,14 +2149,14 @@ async def extract_element_animations(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await element_cloner.extract_element_animations(
+    return await _with_cdp_timeout(element_cloner.extract_element_animations(
         tab,
         selector=selector,
         include_css_animations=include_css_animations,
         include_transitions=include_transitions,
         include_transforms=include_transforms,
         analyze_keyframes=analyze_keyframes
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("element-extraction")
@@ -2162,14 +2185,14 @@ async def extract_element_assets(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    result = await element_cloner.extract_element_assets(
+    result = await _with_cdp_timeout(element_cloner.extract_element_assets(
         tab,
         selector=selector,
         include_images=include_images,
         include_backgrounds=include_backgrounds,
         include_fonts=include_fonts,
         fetch_external=fetch_external
-    )
+    ), instance_id=instance_id)
     return await response_handler.handle_response(result, f"element_assets_{instance_id}_{selector.replace(' ', '_')}")
 
 
@@ -2200,14 +2223,14 @@ async def extract_element_styles_cdp(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await element_cloner.extract_element_styles_cdp(
+    return await _with_cdp_timeout(element_cloner.extract_element_styles_cdp(
         tab,
         selector=selector,
         include_computed=include_computed,
         include_css_rules=include_css_rules,
         include_pseudo=include_pseudo,
         include_inheritance=include_inheritance
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("element-extraction")
@@ -2234,13 +2257,13 @@ async def extract_related_files(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    result = await element_cloner.extract_related_files(
+    result = await _with_cdp_timeout(element_cloner.extract_related_files(
         tab,
         analyze_css=analyze_css,
         analyze_js=analyze_js,
         follow_imports=follow_imports,
         max_depth=max_depth
-    )
+    ), instance_id=instance_id)
     return await response_handler.handle_response(result, f"related_files_{instance_id}")
 
 
@@ -2281,11 +2304,11 @@ async def clone_element_complete(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    result = await comprehensive_element_cloner.extract_complete_element(
+    result = await _with_cdp_timeout(comprehensive_element_cloner.extract_complete_element(
         tab,
         selector=selector,
         include_children=parsed_options.get('structure', {}).get('include_children', True) if parsed_options else True
-    )
+    ), instance_id=instance_id)
     
     return response_handler.handle_response(
         result,
@@ -2405,7 +2428,7 @@ async def clone_element_progressive(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await progressive_element_cloner.clone_element_progressive(tab, selector, include_children)
+    return await _with_cdp_timeout(progressive_element_cloner.clone_element_progressive(tab, selector, include_children), instance_id=instance_id)
 
 
 @section_tool("progressive-cloning")
@@ -2599,9 +2622,9 @@ async def clone_element_to_file(
             parsed_options = json.loads(extraction_options)
         except json.JSONDecodeError:
             return {"error": "Invalid extraction_options JSON"}
-    return await file_based_element_cloner.clone_element_complete_to_file(
+    return await _with_cdp_timeout(file_based_element_cloner.clone_element_complete_to_file(
         tab, selector=selector, extraction_options=parsed_options
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("file-extraction")
@@ -2627,9 +2650,9 @@ async def extract_complete_element_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await file_based_element_cloner.extract_complete_element_to_file(
+    return await _with_cdp_timeout(file_based_element_cloner.extract_complete_element_to_file(
         tab, selector, include_children
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("element-extraction")
@@ -2691,14 +2714,14 @@ async def extract_element_styles_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await file_based_element_cloner.extract_element_styles_to_file(
+    return await _with_cdp_timeout(file_based_element_cloner.extract_element_styles_to_file(
         tab,
         selector=selector,
         include_computed=include_computed,
         include_css_rules=include_css_rules,
         include_pseudo=include_pseudo,
         include_inheritance=include_inheritance
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("file-extraction")
@@ -2727,14 +2750,14 @@ async def extract_element_structure_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await file_based_element_cloner.extract_element_structure_to_file(
+    return await _with_cdp_timeout(file_based_element_cloner.extract_element_structure_to_file(
         tab,
         selector=selector,
         include_children=include_children,
         include_attributes=include_attributes,
         include_data_attributes=include_data_attributes,
         max_depth=max_depth
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("file-extraction")
@@ -2763,14 +2786,14 @@ async def extract_element_events_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await file_based_element_cloner.extract_element_events_to_file(
+    return await _with_cdp_timeout(file_based_element_cloner.extract_element_events_to_file(
         tab,
         selector=selector,
         include_inline=include_inline,
         include_listeners=include_listeners,
         include_framework=include_framework,
         analyze_handlers=analyze_handlers
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("file-extraction")
@@ -2799,14 +2822,14 @@ async def extract_element_animations_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await file_based_element_cloner.extract_element_animations_to_file(
+    return await _with_cdp_timeout(file_based_element_cloner.extract_element_animations_to_file(
         tab,
         selector=selector,
         include_css_animations=include_css_animations,
         include_transitions=include_transitions,
         include_transforms=include_transforms,
         analyze_keyframes=analyze_keyframes
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("file-extraction")
@@ -2835,14 +2858,14 @@ async def extract_element_assets_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await file_based_element_cloner.extract_element_assets_to_file(
+    return await _with_cdp_timeout(file_based_element_cloner.extract_element_assets_to_file(
         tab,
         selector=selector,
         include_images=include_images,
         include_backgrounds=include_backgrounds,
         include_fonts=include_fonts,
         fetch_external=fetch_external
-    )
+    ), instance_id=instance_id)
 
 
 @section_tool("file-extraction")
@@ -2913,7 +2936,7 @@ async def execute_cdp_command(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await cdp_function_executor.execute_cdp_command(tab, command, params or {})
+    return await _with_cdp_timeout(cdp_function_executor.execute_cdp_command(tab, command, params or {}), instance_id=instance_id)
 
 
 @section_tool("cdp-functions")
@@ -2932,7 +2955,7 @@ async def get_execution_contexts(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return []
-    contexts = await cdp_function_executor.get_execution_contexts(tab)
+    contexts = await _with_cdp_timeout(cdp_function_executor.get_execution_contexts(tab), instance_id=instance_id)
     return [
         {
             "id": ctx.id,
@@ -2963,7 +2986,7 @@ async def discover_global_functions(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return []
-    functions = await cdp_function_executor.discover_global_functions(tab, context_id)
+    functions = await _with_cdp_timeout(cdp_function_executor.discover_global_functions(tab, context_id), instance_id=instance_id)
     result = [
         {
             "name": func.name,
@@ -3013,7 +3036,7 @@ async def discover_object_methods(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return []
-    methods = await cdp_function_executor.discover_object_methods(tab, object_path)
+    methods = await _with_cdp_timeout(cdp_function_executor.discover_object_methods(tab, object_path), instance_id=instance_id)
     methods_data = [
         {
             "name": method.name,
@@ -3050,7 +3073,7 @@ async def call_javascript_function(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await cdp_function_executor.call_discovered_function(tab, function_path, args or [])
+    return await _with_cdp_timeout(cdp_function_executor.call_discovered_function(tab, function_path, args or []), instance_id=instance_id)
 
 
 @section_tool("cdp-functions")
@@ -3071,7 +3094,7 @@ async def inspect_function_signature(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await cdp_function_executor.inspect_function_signature(tab, function_path)
+    return await _with_cdp_timeout(cdp_function_executor.inspect_function_signature(tab, function_path), instance_id=instance_id)
 
 
 @section_tool("cdp-functions")
@@ -3094,7 +3117,7 @@ async def inject_and_execute_script(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await cdp_function_executor.inject_and_execute_script(tab, script_code, context_id)
+    return await _with_cdp_timeout(cdp_function_executor.inject_and_execute_script(tab, script_code, context_id), instance_id=instance_id)
 
 
 @section_tool("cdp-functions")
@@ -3117,7 +3140,7 @@ async def create_persistent_function(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await cdp_function_executor.create_persistent_function(tab, function_name, function_code, instance_id)
+    return await _with_cdp_timeout(cdp_function_executor.create_persistent_function(tab, function_name, function_code, instance_id), instance_id=instance_id)
 
 
 @section_tool("cdp-functions")
@@ -3146,7 +3169,7 @@ async def execute_function_sequence(
             args=call_data.get('args', []),
             context_id=call_data.get('context_id')
         ))
-    return await cdp_function_executor.execute_function_sequence(tab, calls)
+    return await _with_cdp_timeout(cdp_function_executor.execute_function_sequence(tab, calls), instance_id=instance_id)
 
 
 @section_tool("cdp-functions")
@@ -3179,7 +3202,7 @@ async def create_python_binding(
                 break
         if not python_function:
             return {"success": False, "error": "No function found in Python code"}
-        return await cdp_function_executor.create_python_binding(tab, binding_name, python_function)
+        return await _with_cdp_timeout(cdp_function_executor.create_python_binding(tab, binding_name, python_function), instance_id=instance_id)
     except Exception as e:
         return {"success": False, "error": f"Failed to create Python function: {str(e)}"}
 
@@ -3202,7 +3225,7 @@ async def execute_python_in_browser(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await cdp_function_executor.execute_python_in_browser(tab, python_code)
+    return await _with_cdp_timeout(cdp_function_executor.execute_python_in_browser(tab, python_code), instance_id=instance_id)
 
 
 @section_tool("cdp-functions")
@@ -3218,7 +3241,7 @@ async def get_function_executor_info(
     Returns:
         Dict[str, Any]: Function executor state and capabilities.
     """
-    return await cdp_function_executor.get_function_executor_info(instance_id)
+    return await _with_cdp_timeout(cdp_function_executor.get_function_executor_info(instance_id), instance_id=instance_id)
 
 
 @section_tool("dynamic-hooks")
