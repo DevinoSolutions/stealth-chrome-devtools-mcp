@@ -980,12 +980,17 @@ async def navigate(
         Dict[str, Any]: Navigation result with final URL and title.
     """
     timeout = _clamp_timeout(timeout, default=30_000)
-    return await browser_manager.navigate(
+    outer_timeout = max(timeout / 1000 + 5, CDP_OPERATION_TIMEOUT)
+    return await _with_cdp_timeout(
+        browser_manager.navigate(
+            instance_id=instance_id,
+            url=url,
+            wait_until=wait_until,
+            timeout=timeout,
+            referrer=referrer,
+        ),
+        timeout=outer_timeout,
         instance_id=instance_id,
-        url=url,
-        wait_until=wait_until,
-        timeout=timeout,
-        referrer=referrer,
     )
 
 @section_tool("browser-management")
@@ -1500,7 +1505,7 @@ async def get_response_content(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    body = await network_interceptor.get_response_body(tab, request_id)
+    body = await _with_cdp_timeout(network_interceptor.get_response_body(tab, request_id), instance_id=instance_id)
     if body:
         try:
             return body.decode('utf-8')
@@ -1645,7 +1650,7 @@ async def modify_headers(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await network_interceptor.modify_headers(tab, headers)
+    return await _with_cdp_timeout(network_interceptor.modify_headers(tab, headers), instance_id=instance_id)
 
 
 @section_tool("cookies-storage")
@@ -1666,7 +1671,7 @@ async def get_cookies(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await network_interceptor.get_cookies(tab, urls)
+    return await _with_cdp_timeout(network_interceptor.get_cookies(tab, urls), instance_id=instance_id)
 
 
 @section_tool("cookies-storage")
@@ -1722,7 +1727,7 @@ async def set_cookie(
         cookie["domain"] = domain
     if same_site:
         cookie["same_site"] = same_site
-    return await network_interceptor.set_cookie(tab, cookie)
+    return await _with_cdp_timeout(network_interceptor.set_cookie(tab, cookie), instance_id=instance_id)
 
 
 @section_tool("cookies-storage")
@@ -1743,7 +1748,7 @@ async def clear_cookies(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await network_interceptor.clear_cookies(tab, url)
+    return await _with_cdp_timeout(network_interceptor.clear_cookies(tab, url), instance_id=instance_id)
 
 
 @mcp.resource("browser://{instance_id}/state")
@@ -1927,7 +1932,7 @@ async def list_tabs(instance_id: str) -> List[Dict[str, str]]:
     Returns:
         List[Dict[str, str]]: List of tabs with their details.
     """
-    return await browser_manager.list_tabs(instance_id)
+    return await _with_cdp_timeout(browser_manager.list_tabs(instance_id), instance_id=instance_id)
 
 
 @section_tool("tabs")
@@ -1945,7 +1950,7 @@ async def switch_tab(
     Returns:
         bool: True if switched successfully.
     """
-    return await browser_manager.switch_to_tab(instance_id, tab_id)
+    return await _with_cdp_timeout(browser_manager.switch_to_tab(instance_id, tab_id), instance_id=instance_id)
 
 
 @section_tool("tabs")
@@ -1963,7 +1968,7 @@ async def close_tab(
     Returns:
         bool: True if closed successfully.
     """
-    return await browser_manager.close_tab(instance_id, tab_id)
+    return await _with_cdp_timeout(browser_manager.close_tab(instance_id, tab_id), instance_id=instance_id)
 
 
 @section_tool("tabs")
@@ -1977,10 +1982,10 @@ async def get_active_tab(instance_id: str) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Active tab information.
     """
-    tab = await browser_manager.get_active_tab(instance_id)
+    tab = await _with_cdp_timeout(browser_manager.get_active_tab(instance_id), instance_id=instance_id)
     if not tab:
         return {"error": "No active tab found"}
-    await tab
+    await _with_cdp_timeout(tab, instance_id=instance_id)
     return {
         "tab_id": str(tab.target.target_id),
         "url": getattr(tab, 'url', '') or '',
@@ -2008,8 +2013,8 @@ async def new_tab(
     if not browser:
         raise Exception(f"Instance not found: {instance_id}")
     try:
-        new_tab_obj = await browser.get(url, new_tab=True)
-        await new_tab_obj
+        new_tab_obj = await _with_cdp_timeout(browser.get(url, new_tab=True), instance_id=instance_id)
+        await _with_cdp_timeout(new_tab_obj, instance_id=instance_id)
         return {
             "tab_id": str(new_tab_obj.target.target_id),
             "url": getattr(new_tab_obj, 'url', '') or url,
@@ -2690,7 +2695,7 @@ async def extract_complete_element_cdp(
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
     cdp_cloner = CDPElementCloner()
-    return await cdp_cloner.extract_complete_element_cdp(tab, selector, include_children)
+    return await _with_cdp_timeout(cdp_cloner.extract_complete_element_cdp(tab, selector, include_children), instance_id=instance_id)
 
 
 @section_tool("file-extraction")

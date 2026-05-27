@@ -299,6 +299,99 @@ class TestNavigationOptionsTimeoutValidation:
 
 
 # ---------------------------------------------------------------------------
+# Unit tests: fast timeout returns failure quickly (no browser needed)
+# ---------------------------------------------------------------------------
+
+class TestFastTimeoutFailure:
+    """Force very short timeouts on hanging operations to verify they fail
+    quickly and cleanly instead of hanging.  Uses 1s timeouts to keep tests
+    fast and deterministic (no real browser required)."""
+
+    @pytest.mark.asyncio
+    async def test_1s_timeout_on_hanging_coro_fails_within_3s(self):
+        """A 1s timeout must raise within 3s, not hang."""
+        async def hang():
+            await asyncio.sleep(9999)
+
+        start = time.monotonic()
+        with pytest.raises(Exception, match="timed out"):
+            await _with_cdp_timeout(hang(), timeout=1)
+        elapsed = time.monotonic() - start
+        assert elapsed < 3.0, f"Expected failure in ~1s, took {elapsed:.1f}s"
+
+    @pytest.mark.asyncio
+    async def test_1s_timeout_returns_correct_error_type(self):
+        """Timeout should raise a plain Exception (not asyncio.TimeoutError)."""
+        async def hang():
+            await asyncio.sleep(9999)
+
+        with pytest.raises(Exception) as exc_info:
+            await _with_cdp_timeout(hang(), timeout=1)
+        assert type(exc_info.value) is Exception
+        assert "CDP operation timed out" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_1s_timeout_error_includes_elapsed_time(self):
+        """Error message should report how long it waited."""
+        async def hang():
+            await asyncio.sleep(9999)
+
+        with pytest.raises(Exception, match="timed out after 1s"):
+            await _with_cdp_timeout(hang(), timeout=1)
+
+    @pytest.mark.asyncio
+    async def test_1s_timeout_with_instance_id_in_error(self):
+        """Error should include the instance_id for debugging."""
+        async def hang():
+            await asyncio.sleep(9999)
+
+        with pytest.raises(Exception, match="instance dead-browser-42"):
+            await _with_cdp_timeout(hang(), timeout=1, instance_id="dead-browser-42")
+
+    @pytest.mark.asyncio
+    async def test_rapid_sequential_timeouts_all_fail_independently(self):
+        """Multiple sequential timeouts should each fail on their own schedule."""
+        async def hang():
+            await asyncio.sleep(9999)
+
+        start = time.monotonic()
+        for i in range(3):
+            with pytest.raises(Exception, match="timed out"):
+                await _with_cdp_timeout(hang(), timeout=1, instance_id=f"seq-{i}")
+        elapsed = time.monotonic() - start
+        assert elapsed < 6.0, f"3 sequential 1s timeouts should finish in ~3s, took {elapsed:.1f}s"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_timeouts_all_fail_within_budget(self):
+        """Multiple concurrent timeouts should all resolve within the single timeout window."""
+        async def hang():
+            await asyncio.sleep(9999)
+
+        async def timed_hang(instance_id):
+            with pytest.raises(Exception, match="timed out"):
+                await _with_cdp_timeout(hang(), timeout=1, instance_id=instance_id)
+
+        start = time.monotonic()
+        await asyncio.gather(
+            timed_hang("concurrent-0"),
+            timed_hang("concurrent-1"),
+            timed_hang("concurrent-2"),
+        )
+        elapsed = time.monotonic() - start
+        assert elapsed < 3.0, f"3 concurrent 1s timeouts should finish in ~1s, took {elapsed:.1f}s"
+
+    @pytest.mark.asyncio
+    async def test_clamped_timeout_still_fires(self):
+        """A huge timeout clamped by _clamp_timeout should still result
+        in a bounded wait when fed to _with_cdp_timeout."""
+        clamped = _clamp_timeout(999_999)
+        assert clamped == MAX_TIMEOUT_MS == 60_000
+        # We don't actually wait 60s — just verify the clamp produces
+        # a value that _with_cdp_timeout can use (i.e. not infinity).
+        assert clamped / 1000 <= 60.0
+
+
+# ---------------------------------------------------------------------------
 # Integration test: real browser with killed process
 # ---------------------------------------------------------------------------
 
