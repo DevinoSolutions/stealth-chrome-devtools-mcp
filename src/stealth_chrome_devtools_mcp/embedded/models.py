@@ -101,7 +101,7 @@ class BrowserOptions(BaseModel):
 class NavigationOptions(BaseModel):
     """Options for page navigation."""
     wait_until: str = Field(default="load", description="Wait condition: load, domcontentloaded, networkidle")
-    timeout: int = Field(default=30000, description="Navigation timeout in milliseconds")
+    timeout: int = Field(default=30000, le=60000, description="Navigation timeout in ms (max 60000). Most pages load in under 10s — use the default unless the page is known to be slow.")
     referrer: Optional[str] = Field(default=None, description="Referrer URL")
 
 

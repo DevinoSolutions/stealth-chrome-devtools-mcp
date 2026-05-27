@@ -68,6 +68,14 @@ def parse_float_env(name: str, default: float) -> float:
 
 
 CDP_OPERATION_TIMEOUT = parse_float_env("CDP_OPERATION_TIMEOUT_SECONDS", 30.0)
+MAX_TIMEOUT_MS = 60_000
+
+
+def _clamp_timeout(timeout_ms: int, default: int = 30_000) -> int:
+    """Clamp a user-provided timeout (ms) to [1, MAX_TIMEOUT_MS]."""
+    if isinstance(timeout_ms, str):
+        timeout_ms = int(timeout_ms)
+    return max(1, min(timeout_ms, MAX_TIMEOUT_MS))
 
 
 async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
@@ -965,14 +973,13 @@ async def navigate(
         instance_id (str): Browser instance ID.
         url (str): URL to navigate to.
         wait_until (str): Wait condition - 'load', 'domcontentloaded', or 'networkidle'.
-        timeout (int): Navigation timeout in milliseconds.
+        timeout (int): Navigation timeout in ms (default 30000, max 60000). Most pages load in under 10s — only increase if you have evidence the page is slow. Values above 60000 are capped.
         referrer (Optional[str]): Referrer URL.
 
     Returns:
         Dict[str, Any]: Navigation result with final URL and title.
     """
-    if isinstance(timeout, str):
-        timeout = int(timeout)
+    timeout = _clamp_timeout(timeout, default=30_000)
     return await browser_manager.navigate(
         instance_id=instance_id,
         url=url,
@@ -1090,13 +1097,12 @@ async def click_element(
         instance_id (str): Browser instance ID.
         selector (str): CSS selector or XPath.
         text_match (Optional[str]): Click element with matching text.
-        timeout (int): Timeout in milliseconds.
+        timeout (int): Timeout in ms (default 10000, max 60000). Clicks rarely need more than 5s — only increase for dynamically loaded elements. Values above 60000 are capped.
 
     Returns:
         bool: True if clicked successfully.
     """
-    if isinstance(timeout, str):
-        timeout = int(timeout)
+    timeout = _clamp_timeout(timeout, default=10_000)
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
@@ -1226,15 +1232,14 @@ async def wait_for_element(
     Args:
         instance_id (str): Browser instance ID.
         selector (str): CSS selector or XPath.
-        timeout (int): Timeout in milliseconds.
+        timeout (int): Timeout in ms (default 30000, max 60000). Most elements appear within 5-10s — only increase for very slow async content. Values above 60000 are capped.
         visible (bool): Wait for element to be visible.
         text_content (Optional[str]): Wait for specific text content.
 
     Returns:
         bool: True if element found.
     """
-    if isinstance(timeout, str):
-        timeout = int(timeout)
+    timeout = _clamp_timeout(timeout, default=30_000)
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")

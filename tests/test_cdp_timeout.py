@@ -1,13 +1,10 @@
-"""Stress tests for CDP operation timeout enforcement.
+"""Tests for CDP timeout enforcement and timeout clamping.
 
-Verifies that _with_cdp_timeout prevents infinite hangs when:
-1. A coroutine never resolves (simulated dead CDP connection)
-2. A real Chrome process is killed mid-operation
-3. Normal operations still complete within the timeout
-
-These tests validate the fix for the critical hanging bug where
-tool calls (execute_script, take_screenshot, navigate, etc.) would
-block forever on stale CDP WebSocket connections.
+Verifies that:
+1. _with_cdp_timeout prevents infinite hangs on dead connections
+2. _clamp_timeout caps user-provided timeouts to MAX_TIMEOUT_MS (60s)
+3. NavigationOptions model rejects timeouts above the cap
+4. Real browser operations respect the timeout
 """
 
 import asyncio
@@ -31,7 +28,9 @@ EMBEDDED_DIR = (
 if str(EMBEDDED_DIR) not in sys.path:
     sys.path.insert(0, str(EMBEDDED_DIR))
 
-from server import _with_cdp_timeout, CDP_OPERATION_TIMEOUT
+from models import NavigationOptions
+from pydantic import ValidationError
+from server import _with_cdp_timeout, _clamp_timeout, CDP_OPERATION_TIMEOUT, MAX_TIMEOUT_MS
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +228,74 @@ class TestErrorPathPropagation:
             await _with_cdp_timeout(slow_with_own_timeout(), timeout=2)
         elapsed = time.monotonic() - start
         assert elapsed < 5.0, f"CDP timeout (2s) should fire, not inner (60s). Took {elapsed:.1f}s"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _clamp_timeout and MAX_TIMEOUT_MS
+# ---------------------------------------------------------------------------
+
+class TestClampTimeout:
+    """Verify that user-provided timeouts are capped to MAX_TIMEOUT_MS."""
+
+    def test_max_timeout_is_60s(self):
+        assert MAX_TIMEOUT_MS == 60_000
+
+    def test_value_within_range_unchanged(self):
+        assert _clamp_timeout(30_000) == 30_000
+
+    def test_value_at_max_unchanged(self):
+        assert _clamp_timeout(60_000) == 60_000
+
+    def test_value_above_max_capped(self):
+        assert _clamp_timeout(120_000) == 60_000
+
+    def test_extreme_value_capped(self):
+        assert _clamp_timeout(999_999_999) == 60_000
+
+    def test_negative_value_floored_to_one(self):
+        assert _clamp_timeout(-5) == 1
+
+    def test_zero_floored_to_one(self):
+        assert _clamp_timeout(0) == 1
+
+    def test_one_ms_unchanged(self):
+        assert _clamp_timeout(1) == 1
+
+    def test_string_input_converted_and_clamped(self):
+        assert _clamp_timeout("50000") == 50_000
+
+    def test_string_above_max_converted_and_capped(self):
+        assert _clamp_timeout("300000") == 60_000
+
+    def test_string_negative_converted_and_floored(self):
+        assert _clamp_timeout("-100") == 1
+
+    def test_default_param_unused_when_value_provided(self):
+        assert _clamp_timeout(5_000, default=30_000) == 5_000
+
+
+class TestNavigationOptionsTimeoutValidation:
+    """Verify that the NavigationOptions model rejects timeouts above the cap."""
+
+    def test_default_timeout_is_30s(self):
+        opts = NavigationOptions()
+        assert opts.timeout == 30_000
+
+    def test_valid_timeout_accepted(self):
+        opts = NavigationOptions(timeout=15_000)
+        assert opts.timeout == 15_000
+
+    def test_max_timeout_accepted(self):
+        opts = NavigationOptions(timeout=60_000)
+        assert opts.timeout == 60_000
+
+    def test_timeout_above_max_rejected(self):
+        with pytest.raises(ValidationError):
+            NavigationOptions(timeout=60_001)
+
+    def test_huge_timeout_rejected(self):
+        with pytest.raises(ValidationError):
+            NavigationOptions(timeout=300_000)
 
 
 # ---------------------------------------------------------------------------
