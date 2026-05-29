@@ -395,6 +395,7 @@ class TestFastTimeoutFailure:
 # Integration test: real browser with killed process
 # ---------------------------------------------------------------------------
 
+@pytest.mark.integration
 class TestRealBrowserDeadConnection:
     """Test timeout with a real browser whose process gets killed."""
 
