@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from nodriver import Tab, Element
@@ -200,6 +201,66 @@ class DOMHandler:
 
         except Exception as e:
             raise Exception(f"Failed to click element: {str(e)}")
+
+    @staticmethod
+    async def upload_file(
+        tab: Tab,
+        selector: str,
+        file_paths: List[str],
+        timeout: int = 10000
+    ) -> Dict[str, Any]:
+        """
+        Attach local file(s) to a file input via CDP (DOM.setFileInputFiles).
+
+        This is the correct, non-blocking way to upload files. It sets the
+        files directly on the input element without touching the network or
+        the renderer's main thread, so it never freezes the page (unlike
+        fetch/base64/DataTransfer hacks run through execute_script).
+
+        Args:
+            tab (Tab): The browser tab object.
+            selector (str): CSS selector or XPath for the <input type="file"> element.
+            file_paths (List[str]): Absolute paths of the file(s) to attach.
+            timeout (int): Element lookup timeout in milliseconds.
+
+        Returns:
+            Dict[str, Any]: {"uploaded": [...], "count": int}.
+        """
+        try:
+            if not file_paths:
+                raise Exception("No file paths provided")
+
+            resolved: List[str] = []
+            for raw_path in file_paths:
+                path = Path(str(raw_path)).expanduser()
+                if not path.is_file():
+                    raise Exception(f"File not found: {path}")
+                resolved.append(str(path.resolve()))
+
+            element = await tab.select(selector, timeout=timeout / 1000)
+            if not element:
+                raise Exception(f"File input not found: {selector}")
+
+            tag_name = (getattr(element, "tag_name", "") or "").lower()
+            input_type = ""
+            if hasattr(element, "attrs") and element.attrs:
+                input_type = (element.attrs.get("type") or "").lower()
+            if tag_name and tag_name != "input":
+                raise Exception(
+                    f"Selector '{selector}' resolved to <{tag_name}>, not a file input. "
+                    "Point the selector at an <input type=\"file\"> element."
+                )
+            if input_type and input_type != "file":
+                raise Exception(
+                    f"Selector '{selector}' is an <input type=\"{input_type}\">, not type=\"file\"."
+                )
+
+            await element.send_file(*resolved)
+
+            return {"uploaded": resolved, "count": len(resolved)}
+
+        except Exception as e:
+            raise Exception(f"Failed to upload file: {str(e)}")
 
     @staticmethod
     async def type_text(

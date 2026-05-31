@@ -9,6 +9,7 @@ Skip in CI without Chrome: pytest -m "not integration"
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -260,3 +261,114 @@ class TestIdleTimeout:
         assert iid in active_ids
 
         await close(instance_id=iid)
+
+
+class TestFileUpload:
+    """upload_file attaches local files to a file input via CDP (non-blocking)."""
+
+    UPLOAD_URL = (
+        "data:text/html,<html><body>"
+        "<input id='single' type='file'>"
+        "<input id='multi' type='file' multiple>"
+        "</body></html>"
+    )
+
+    @pytest.mark.asyncio
+    async def test_upload_single_file(self, tmp_path):
+        spawn = _get_fn("spawn_browser")
+        navigate = _get_fn("navigate")
+        upload = _get_fn("upload_file")
+        execute = _get_fn("execute_script")
+        close = _get_fn("close_instance")
+
+        f = tmp_path / "alpha.txt"
+        f.write_text("alpha", encoding="utf-8")
+
+        result = await spawn(headless=True, **_sandbox_kwargs())
+        iid = result["instance_id"]
+        try:
+            await navigate(instance_id=iid, url=self.UPLOAD_URL)
+
+            t0 = time.monotonic()
+            res = await upload(instance_id=iid, selector="#single", file_paths=str(f))
+            elapsed = time.monotonic() - t0
+
+            assert res["count"] == 1
+            # Proves it does not block the renderer (the sync-XHR bug froze ~30s).
+            assert elapsed < 5.0, f"upload should be near-instant, took {elapsed:.1f}s"
+
+            name = await execute(
+                instance_id=iid,
+                script="document.getElementById('single').files[0].name",
+            )
+            assert "alpha.txt" in str(name.get("result", name))
+        finally:
+            await close(instance_id=iid)
+
+    @pytest.mark.asyncio
+    async def test_upload_multiple_files(self, tmp_path):
+        spawn = _get_fn("spawn_browser")
+        navigate = _get_fn("navigate")
+        upload = _get_fn("upload_file")
+        execute = _get_fn("execute_script")
+        close = _get_fn("close_instance")
+
+        a = tmp_path / "a.txt"
+        a.write_text("a", encoding="utf-8")
+        b = tmp_path / "b.txt"
+        b.write_text("b", encoding="utf-8")
+
+        result = await spawn(headless=True, **_sandbox_kwargs())
+        iid = result["instance_id"]
+        try:
+            await navigate(instance_id=iid, url=self.UPLOAD_URL)
+            res = await upload(
+                instance_id=iid, selector="#multi", file_paths=[str(a), str(b)]
+            )
+            assert res["count"] == 2
+            count = await execute(
+                instance_id=iid,
+                script="document.getElementById('multi').files.length",
+            )
+            assert int(count.get("result")) == 2
+        finally:
+            await close(instance_id=iid)
+
+    @pytest.mark.asyncio
+    async def test_upload_missing_file_raises(self, tmp_path):
+        spawn = _get_fn("spawn_browser")
+        navigate = _get_fn("navigate")
+        upload = _get_fn("upload_file")
+        close = _get_fn("close_instance")
+
+        result = await spawn(headless=True, **_sandbox_kwargs())
+        iid = result["instance_id"]
+        try:
+            await navigate(instance_id=iid, url=self.UPLOAD_URL)
+            with pytest.raises(Exception, match="File not found"):
+                await upload(
+                    instance_id=iid,
+                    selector="#single",
+                    file_paths=str(tmp_path / "nope.txt"),
+                )
+        finally:
+            await close(instance_id=iid)
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_non_file_input(self, tmp_path):
+        spawn = _get_fn("spawn_browser")
+        navigate = _get_fn("navigate")
+        upload = _get_fn("upload_file")
+        close = _get_fn("close_instance")
+
+        f = tmp_path / "x.txt"
+        f.write_text("x", encoding="utf-8")
+
+        result = await spawn(headless=True, **_sandbox_kwargs())
+        iid = result["instance_id"]
+        try:
+            await navigate(instance_id=iid, url=self.UPLOAD_URL)
+            with pytest.raises(Exception, match="file input"):
+                await upload(instance_id=iid, selector="body", file_paths=str(f))
+        finally:
+            await close(instance_id=iid)
