@@ -70,6 +70,63 @@ def parse_float_env(name: str, default: float) -> float:
 CDP_OPERATION_TIMEOUT = parse_float_env("CDP_OPERATION_TIMEOUT_SECONDS", 30.0)
 MAX_TIMEOUT_MS = 60_000
 
+# User-supplied JS (execute_script) gets a short, dedicated timeout so a blocking
+# script fails fast instead of freezing the tab for the full CDP_OPERATION_TIMEOUT
+# window and stalling every subsequent call.
+EXECUTE_SCRIPT_TIMEOUT = parse_float_env("EXECUTE_SCRIPT_TIMEOUT_SECONDS", 10.0)
+
+# Reject user scripts larger than this. Huge inline payloads (e.g. base64-encoded
+# files) overflow the transport and are almost always an upload hack — callers
+# should use the upload_file tool instead.
+MAX_USER_SCRIPT_BYTES = int(parse_float_env("MAX_USER_SCRIPT_BYTES", 100_000))
+
+# High-confidence denylist of patterns that block the renderer's main thread or
+# overflow the page. This is NOT a JS sandbox — just a guard against the handful
+# of foot-guns that wedge the browser for every later call.
+_BLOCKING_SCRIPT_PATTERNS = [
+    (
+        re.compile(r"\.open\s*\([^)]*,\s*false\s*\)", re.IGNORECASE),
+        "Synchronous XMLHttpRequest (xhr.open(url, false)) blocks the page's main "
+        "thread and freezes every later call. Use 'await fetch(url)' instead.",
+    ),
+    (
+        re.compile(r"while\s*\(\s*(?:true|1)\s*\)"),
+        "Infinite 'while(true)' loop freezes the renderer. Use a bounded loop or an "
+        "async delay: 'await new Promise(r => setTimeout(r, ms))'.",
+    ),
+    (
+        re.compile(r"for\s*\(\s*;\s*;\s*\)"),
+        "Infinite 'for(;;)' loop freezes the renderer. Use a bounded loop instead.",
+    ),
+    (
+        re.compile(r"\b(?:alert|confirm|prompt)\s*\("),
+        "Modal dialogs (alert/confirm/prompt) block the renderer and cannot be "
+        "dismissed by automation. Remove them.",
+    ),
+]
+
+
+def _script_rejection_reason(script: str) -> Optional[str]:
+    """Return a corrective message if a user script is unsafe to run, else None.
+
+    Guards against the common foot-guns that freeze the tab or overflow the
+    transport (sync XHR, infinite loops, blocking dialogs, oversized payloads).
+    Intentionally small and high-confidence — not a JavaScript sandbox.
+    """
+    if not isinstance(script, str):
+        return None
+    size = len(script.encode("utf-8", errors="ignore"))
+    if size > MAX_USER_SCRIPT_BYTES:
+        return (
+            f"Script too large ({size} bytes > {MAX_USER_SCRIPT_BYTES} limit). "
+            "Inline payloads such as base64-encoded files overflow the transport — "
+            "use the 'upload_file' tool for files, or a file-based approach."
+        )
+    for pattern, message in _BLOCKING_SCRIPT_PATTERNS:
+        if pattern.search(script):
+            return f"Rejected: {message}"
+    return None
+
 
 def _clamp_timeout(timeout_ms: int, default: int = 30_000) -> int:
     """Clamp a user-provided timeout (ms) to [1, MAX_TIMEOUT_MS]."""
@@ -114,9 +171,14 @@ def _install_asyncio_close_noise_filter() -> None:
         exception = context.get("exception")
         if (
             exception is not None
-            and exception.__class__.__name__ == "ConnectionClosedOK"
+            and exception.__class__.__name__
+            in ("ConnectionClosedOK", "ConnectionClosedError", "ConnectionClosed")
             and str(exception.__class__.__module__).startswith("websockets.")
         ):
+            # Swallow both clean (OK) and abnormal (Error) websocket closes. When
+            # Chrome crashes or is killed, nodriver's background listener task
+            # raises ConnectionClosedError; without this it surfaces loudly and
+            # can escalate. The instance is already unusable and will be respawned.
             return
 
         if previous_handler is not None:
@@ -1114,6 +1176,41 @@ async def click_element(
     return await _with_cdp_timeout(dom_handler.click_element(tab, selector, text_match, timeout), instance_id=instance_id)
 
 @section_tool("element-interaction")
+async def upload_file(
+    instance_id: str,
+    selector: str,
+    file_paths: Union[str, List[str]],
+    timeout: int = 10000
+) -> Dict[str, Any]:
+    """
+    Upload local file(s) to a file input. USE THIS for file uploads.
+
+    Sets the files directly on the <input type="file"> via CDP — reliable and
+    non-blocking. Do NOT try to upload by fetching blobs / building base64 /
+    DataTransfer inside execute_script: that hits mixed-content/CORS limits and
+    can freeze the page. This tool is the supported path.
+
+    Args:
+        instance_id (str): Browser instance ID.
+        selector (str): CSS selector or XPath for the <input type="file"> element.
+        file_paths (Union[str, List[str]]): Absolute path, or list of paths, to attach.
+            For multiple files the input must have the `multiple` attribute.
+        timeout (int): Element lookup timeout in ms (default 10000, max 60000).
+
+    Returns:
+        Dict[str, Any]: {"uploaded": [absolute paths], "count": int}.
+    """
+    timeout = _clamp_timeout(timeout, default=10_000)
+    paths = [file_paths] if isinstance(file_paths, str) else list(file_paths)
+    tab = await browser_manager.get_tab(instance_id)
+    if not tab:
+        raise Exception(f"Instance not found: {instance_id}")
+    return await _with_cdp_timeout(
+        dom_handler.upload_file(tab, selector, paths, timeout),
+        instance_id=instance_id,
+    )
+
+@section_tool("element-interaction")
 async def type_text(
     instance_id: str,
     selector: str,
@@ -1280,24 +1377,48 @@ async def scroll_page(
 async def execute_script(
     instance_id: str,
     script: str,
-    args: Optional[List[Any]] = None
+    args: Optional[List[Any]] = None,
+    timeout_ms: Optional[int] = None
 ) -> Dict[str, Any]:
     """
-    Execute JavaScript in page context.
+    Execute JavaScript in the page and return its value.
+
+    ⚠️ Async, non-blocking code only. The script runs on the page's main thread,
+    so anything that blocks it freezes the whole tab and makes every later call
+    time out. Specifically:
+      • NEVER use synchronous XHR — `xhr.open(url, false)`. Use `await fetch(url)`.
+      • NEVER use infinite/blocking loops — `while(true)`, `for(;;)`, busy-waits.
+      • NEVER call `alert()` / `confirm()` / `prompt()` — they block automation.
+      • To UPLOAD FILES, use the `upload_file` tool — do NOT fetch blobs or build
+        base64/DataTransfer here (mixed-content/CORS limits and can freeze the page).
+      • Keep scripts small (< ~100KB); don't inline large payloads.
 
     Args:
         instance_id (str): Browser instance ID.
-        script (str): JavaScript code to execute.
-        args (Optional[List[Any]]): Arguments to pass to the script.
+        script (str): JavaScript to execute. Must be non-blocking.
+        args (Optional[List[Any]]): Arguments passed to the script body.
+        timeout_ms (Optional[int]): Max run time in ms (default 10000, max 60000).
+            A blocking script is killed at this limit instead of hanging the tab.
 
     Returns:
-        Dict[str, Any]: Script execution result.
+        Dict[str, Any]: {"success": bool, "result": Any, "error": Optional[str]}.
     """
+    rejection = _script_rejection_reason(script)
+    if rejection:
+        return {"success": False, "result": None, "error": rejection}
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
+    if timeout_ms is not None:
+        timeout_s = _clamp_timeout(timeout_ms, default=int(EXECUTE_SCRIPT_TIMEOUT * 1000)) / 1000
+    else:
+        timeout_s = EXECUTE_SCRIPT_TIMEOUT
     try:
-        result = await _with_cdp_timeout(dom_handler.execute_script(tab, script, args), instance_id=instance_id)
+        result = await _with_cdp_timeout(
+            dom_handler.execute_script(tab, script, args),
+            timeout=timeout_s,
+            instance_id=instance_id,
+        )
         return {
             "success": True,
             "result": result,
