@@ -278,3 +278,175 @@ class TestPidFilePersistence:
         assert "inst-1" in loaded
         assert loaded["inst-1"]["pid"] == 1234
         assert loaded["inst-1"]["create_time"] == 1700000000.0
+
+
+# ---------------------------------------------------------------------------
+# Auto-clone lifecycle (disposable profiles copied from master)
+# ---------------------------------------------------------------------------
+
+class TestAutoCloneCleanup:
+    """Auto-clones (profile_role == 'clone') must be deleted on close even
+    though they carry a user_data_dir (uses_custom_data_dir is True), while
+    named/master profiles with the same flag must be preserved.
+    """
+
+    def _make_cleanup(self, tmp_path):
+        pc = ProcessCleanup.__new__(ProcessCleanup)
+        pc.pid_file = tmp_path / "pids.json"
+        pc.tracked_pids = set()
+        pc.browser_processes = {}
+        pc.orphan_profile_max_age_seconds = 21600
+        pc._init_time = time.time()
+        return pc
+
+    def test_auto_clone_deleted_despite_custom_dir(self, tmp_path):
+        """auto_clone=True overrides the uses_custom_data_dir skip → dir removed."""
+        pc = self._make_cleanup(tmp_path)
+        clone = tmp_path / "sessions" / "ws-abc123"
+        clone.mkdir(parents=True)
+        (clone / "Cookies").write_bytes(b"stub")
+        metadata = {
+            "pid": 4242,
+            "create_time": None,
+            "user_data_dir": str(clone),
+            "uses_custom_data_dir": True,
+            "auto_clone": True,
+            "timestamp": 0,
+        }
+        result = pc._cleanup_profile_for_metadata("inst", metadata, active_profile_dirs=set())
+        assert result is True
+        assert not clone.exists()
+
+    def test_named_profile_preserved(self, tmp_path):
+        """A user-named profile (auto_clone False, custom dir) is never deleted."""
+        pc = self._make_cleanup(tmp_path)
+        named = tmp_path / "sessions" / "github-session"
+        named.mkdir(parents=True)
+        (named / "Cookies").write_bytes(b"stub")
+        metadata = {
+            "pid": 4243,
+            "create_time": None,
+            "user_data_dir": str(named),
+            "uses_custom_data_dir": True,
+            "auto_clone": False,
+            "timestamp": 0,
+        }
+        result = pc._cleanup_profile_for_metadata("inst", metadata, active_profile_dirs=set())
+        assert result is False
+        assert named.exists()
+
+    def test_master_like_profile_preserved(self, tmp_path):
+        """master role (no auto_clone) must survive close even with custom dir."""
+        pc = self._make_cleanup(tmp_path)
+        master = tmp_path / "master"
+        master.mkdir(parents=True)
+        (master / "Cookies").write_bytes(b"stub")
+        metadata = {
+            "pid": 4245,
+            "create_time": None,
+            "user_data_dir": str(master),
+            "uses_custom_data_dir": True,
+            "auto_clone": False,
+            "timestamp": 0,
+        }
+        result = pc._cleanup_profile_for_metadata("inst", metadata, active_profile_dirs=set())
+        assert result is False
+        assert master.exists()
+
+    def test_live_auto_clone_not_deleted(self, tmp_path):
+        """An auto-clone whose browser is still running must not be deleted."""
+        pc = self._make_cleanup(tmp_path)
+        clone = tmp_path / "sessions" / "ws-live"
+        clone.mkdir(parents=True)
+        normalized = pc._normalize_path(str(clone))
+        metadata = {
+            "pid": 4244,
+            "create_time": None,
+            "user_data_dir": str(clone),
+            "uses_custom_data_dir": True,
+            "auto_clone": True,
+            "timestamp": 0,
+        }
+        # Profile reported active on every probe → deletion must be refused.
+        with patch.object(pc, "_get_active_browser_profile_dirs", return_value={normalized}), \
+             patch("process_cleanup.time.sleep"):
+            result = pc._cleanup_profile_for_metadata(
+                "inst", metadata, active_profile_dirs={normalized}
+            )
+        assert result is False
+        assert clone.exists()
+
+
+class TestShouldUntrackAfterCleanup:
+    """Untrack policy: auto-clones stay tracked until their dir is actually
+    removed (so the deferred retry can finish a Windows-locked delete), while
+    named/master profiles stop tracking immediately (they are never deleted).
+    """
+
+    def test_cleaned_always_untracks(self):
+        meta = {"user_data_dir": "/x", "uses_custom_data_dir": True, "auto_clone": True}
+        assert ProcessCleanup._should_untrack_after_cleanup(meta, cleaned=True) is True
+
+    def test_no_dir_untracks(self):
+        meta = {"user_data_dir": None}
+        assert ProcessCleanup._should_untrack_after_cleanup(meta, cleaned=False) is True
+
+    def test_named_profile_untracks_without_delete(self):
+        meta = {"user_data_dir": "/x", "uses_custom_data_dir": True, "auto_clone": False}
+        assert ProcessCleanup._should_untrack_after_cleanup(meta, cleaned=False) is True
+
+    def test_auto_clone_stays_tracked_until_deleted(self):
+        meta = {"user_data_dir": "/x", "uses_custom_data_dir": True, "auto_clone": True}
+        assert ProcessCleanup._should_untrack_after_cleanup(meta, cleaned=False) is False
+
+    def test_temp_profile_stays_tracked_until_deleted(self):
+        meta = {"user_data_dir": "/x", "uses_custom_data_dir": False, "auto_clone": False}
+        assert ProcessCleanup._should_untrack_after_cleanup(meta, cleaned=False) is False
+
+
+class TestAutoCloneMetadata:
+    """auto_clone must round-trip through tracking and the PID file."""
+
+    def test_track_stores_auto_clone(self, tmp_path):
+        pc = ProcessCleanup.__new__(ProcessCleanup)
+        pc.pid_file = tmp_path / "pids.json"
+        pc.tracked_pids = set()
+        pc.browser_processes = {}
+        pc.orphan_profile_max_age_seconds = 21600
+        pc._init_time = time.time()
+
+        proc = MagicMock()
+        proc.pid = 5555
+        ok = pc.track_browser_process(
+            "inst",
+            proc,
+            user_data_dir=str(tmp_path / "clone"),
+            uses_custom_data_dir=True,
+            auto_clone=True,
+        )
+        assert ok is True
+        assert pc.browser_processes["inst"]["auto_clone"] is True
+
+    def test_track_defaults_auto_clone_false(self, tmp_path):
+        pc = ProcessCleanup.__new__(ProcessCleanup)
+        pc.pid_file = tmp_path / "pids.json"
+        pc.tracked_pids = set()
+        pc.browser_processes = {}
+        pc.orphan_profile_max_age_seconds = 21600
+        pc._init_time = time.time()
+
+        proc = MagicMock()
+        proc.pid = 5556
+        pc.track_browser_process("inst", proc, user_data_dir=str(tmp_path / "m"))
+        assert pc.browser_processes["inst"]["auto_clone"] is False
+
+    def test_normalize_preserves_auto_clone(self):
+        raw = {"i": {"pid": 1, "auto_clone": True, "user_data_dir": "/x"}}
+        out = ProcessCleanup._normalize_process_metadata(raw)
+        assert out["i"]["auto_clone"] is True
+
+    def test_normalize_defaults_auto_clone_false(self):
+        raw = {"modern": {"pid": 1, "user_data_dir": "/x"}, "legacy": 999}
+        out = ProcessCleanup._normalize_process_metadata(raw)
+        assert out["modern"]["auto_clone"] is False
+        assert out["legacy"]["auto_clone"] is False

@@ -96,6 +96,7 @@ class BrowserOptions(BaseModel):
     extra_headers: Dict[str, str] = Field(default_factory=dict, description="Extra HTTP headers")
     user_data_dir: Optional[str] = Field(default=None, description="Path to user data directory")
     sandbox: bool = Field(default=True, description="Enable browser sandbox mode")
+    auto_clone: bool = Field(default=False, description="Internal: profile is a disposable auto-clone of master and is deleted when the browser closes. Set by the server from the resolved profile role, never by callers.")
 
 
 class NavigationOptions(BaseModel):

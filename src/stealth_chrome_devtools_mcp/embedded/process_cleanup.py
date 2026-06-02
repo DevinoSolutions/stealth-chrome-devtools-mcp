@@ -140,6 +140,7 @@ class ProcessCleanup:
                     "create_time": None,
                     "user_data_dir": None,
                     "uses_custom_data_dir": None,
+                    "auto_clone": False,
                     "timestamp": 0,
                 }
             elif isinstance(raw_value, dict):
@@ -151,6 +152,7 @@ class ProcessCleanup:
                     "create_time": raw_value.get("create_time"),
                     "user_data_dir": raw_value.get("user_data_dir"),
                     "uses_custom_data_dir": raw_value.get("uses_custom_data_dir"),
+                    "auto_clone": bool(raw_value.get("auto_clone", False)),
                     "timestamp": raw_value.get("timestamp", 0),
                 }
             else:
@@ -457,7 +459,7 @@ class ProcessCleanup:
         Returns:
             bool: True if cleanup succeeded or nothing needed to be removed.
         """
-        if metadata.get("uses_custom_data_dir") is True:
+        if metadata.get("uses_custom_data_dir") is True and not metadata.get("auto_clone"):
             return False
 
         profile_dir = metadata.get("user_data_dir")
@@ -465,6 +467,30 @@ class ProcessCleanup:
             return False
 
         return self._cleanup_profile_dir(profile_dir, instance_id, active_profile_dirs)
+
+    @staticmethod
+    def _should_untrack_after_cleanup(metadata: Dict[str, Any], cleaned: bool) -> bool:
+        """Decide whether a tracked entry can be dropped after a cleanup attempt.
+
+        Auto-clones stay tracked until their directory is actually removed, so a
+        Windows-locked delete is retried later by ``cleanup_deferred_profiles``
+        and startup recovery.  Named/master profiles (custom dir, not an
+        auto-clone) are never deleted, so they are dropped immediately.
+
+        Args:
+            metadata (Dict[str, Any]): Tracked process metadata.
+            cleaned (bool): Whether the profile directory was just removed.
+
+        Returns:
+            bool: True when the tracked entry should be untracked now.
+        """
+        if cleaned:
+            return True
+        if not metadata.get("user_data_dir"):
+            return True
+        if metadata.get("uses_custom_data_dir") is True and not metadata.get("auto_clone"):
+            return True
+        return False
 
     def _sweep_orphaned_temp_profiles(self) -> int:
         """
@@ -566,6 +592,7 @@ class ProcessCleanup:
         browser_process,
         user_data_dir: Optional[str] = None,
         uses_custom_data_dir: Optional[bool] = None,
+        auto_clone: bool = False,
     ) -> bool:
         """
         Track a browser process and its profile metadata for future cleanup.
@@ -575,6 +602,8 @@ class ProcessCleanup:
             browser_process: Browser process object with `.pid`.
             user_data_dir: Browser profile directory.
             uses_custom_data_dir: Whether the profile directory was explicitly provided by the user.
+            auto_clone: Whether the profile is a disposable auto-clone of master
+                that should be deleted once its browser closes.
 
         Returns:
             bool: True if tracking was successful.
@@ -599,6 +628,7 @@ class ProcessCleanup:
                 "create_time": create_time,
                 "user_data_dir": self._normalize_path(user_data_dir),
                 "uses_custom_data_dir": uses_custom_data_dir,
+                "auto_clone": bool(auto_clone),
                 "timestamp": time.time(),
             }
             self.browser_processes[instance_id] = metadata
@@ -681,11 +711,7 @@ class ProcessCleanup:
                 metadata,
                 active_profile_dirs=active_profile_dirs,
             )
-            if (
-                cleaned
-                or metadata.get("uses_custom_data_dir") is True
-                or not metadata.get("user_data_dir")
-            ):
+            if self._should_untrack_after_cleanup(metadata, cleaned):
                 self.untrack_browser_process(instance_id)
             else:
                 metadata["pid"] = None
@@ -720,11 +746,7 @@ class ProcessCleanup:
             metadata,
             active_profile_dirs=active_profile_dirs,
         )
-        if (
-            cleaned
-            or metadata.get("uses_custom_data_dir") is True
-            or not metadata.get("user_data_dir")
-        ):
+        if self._should_untrack_after_cleanup(metadata, cleaned):
             self.untrack_browser_process(instance_id)
             return True
 
@@ -757,11 +779,7 @@ class ProcessCleanup:
                 metadata,
                 active_profile_dirs=active_profile_dirs,
             )
-            if (
-                cleaned
-                or metadata.get("uses_custom_data_dir") is True
-                or not metadata.get("user_data_dir")
-            ):
+            if self._should_untrack_after_cleanup(metadata, cleaned):
                 if self.untrack_browser_process(instance_id):
                     finalized_count += 1
 
