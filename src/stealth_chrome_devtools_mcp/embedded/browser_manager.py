@@ -412,6 +412,7 @@ class BrowserManager:
                     browser._process,
                     user_data_dir=actual_user_data_dir,
                     uses_custom_data_dir=uses_custom_data_dir,
+                    auto_clone=options.auto_clone,
                 )
             else:
                 debug_logger.log_warning("browser_manager", "spawn_browser", 

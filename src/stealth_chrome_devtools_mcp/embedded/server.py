@@ -835,7 +835,12 @@ async def spawn_browser(
         idle_timeout_seconds (Optional[int]): Idle timeout override in seconds for automatic instance cleanup.
         block_resources (List[str]): List of resource types to block (e.g., ['image', 'font', 'stylesheet']).
         extra_headers (Dict[str, str]): Additional HTTP headers.
-        user_data_dir (Optional[str]): Path to user data directory for persistent sessions.
+        user_data_dir (Optional[str]): Leave UNSET for normal use. When unset, the server
+            automatically clones a disposable session from the master profile and deletes it
+            as soon as the browser closes — you never need to manage or clean up sessions.
+            Only set this when the user has EXPLICITLY asked for a persistent/named profile:
+            a named profile is NOT auto-cleaned and persists on disk indefinitely, so treat
+            creating one as a deliberate, space-consuming action. Do not invent names.
         sandbox (Optional[Any]): Enable browser sandbox. Accepts bool, string ('true'/'false'), int (1/0), or None for auto-detect.
 
     Returns:
@@ -870,7 +875,8 @@ async def spawn_browser(
                 block_resources=block_resources or [],
                 extra_headers=extra_headers or {},
                 user_data_dir=selected_user_data_dir,
-                sandbox=sandbox
+                sandbox=sandbox,
+                auto_clone=(profile_selection.get("profile_role") == "clone"),
             )
             try:
                 instance = await browser_manager.spawn_browser(options)
@@ -895,6 +901,12 @@ async def spawn_browser(
             spawn_diagnostics["profile_selection"] = _public_profile_selection(profile_selection)
             if spawn_errors:
                 spawn_diagnostics["profile_selection"]["spawn_retries"] = spawn_errors
+            if profile_selection.get("profile_role") == "explicit":
+                spawn_diagnostics["profile_selection"]["warning"] = (
+                    "Named profile created — it is NOT auto-cleaned and persists on disk. "
+                    "Only pass user_data_dir when the user explicitly asks for a persistent "
+                    "profile; otherwise omit it so the session is auto-cloned and auto-deleted."
+                )
         return {
             "instance_id": instance.instance_id,
             "state": instance.state,

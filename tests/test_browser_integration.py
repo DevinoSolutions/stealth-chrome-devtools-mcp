@@ -372,3 +372,71 @@ class TestFileUpload:
                 await upload(instance_id=iid, selector="body", file_paths=str(f))
         finally:
             await close(instance_id=iid)
+
+
+class TestAutoCloneDeletion:
+    """End-to-end: disposable auto-clones are deleted on close, while the
+    master profile and explicit named profiles are always preserved.
+    """
+
+    @pytest.mark.asyncio
+    async def test_auto_clone_deleted_master_survives(self, tmp_session_root):
+        from process_cleanup import process_cleanup as _pc
+
+        spawn = _get_fn("spawn_browser")
+        close = _get_fn("close_instance")
+        dirs = tmp_session_root
+
+        # First spawn with no user_data_dir takes the master profile directly.
+        master_inst = await spawn(headless=True, **_sandbox_kwargs())
+        master_iid = master_inst["instance_id"]
+        try:
+            master_sel = master_inst["spawn_diagnostics"]["profile_selection"]
+            assert master_sel["profile_role"] == "master", master_sel
+
+            # Master is busy now → a second spawn must clone from the snapshot.
+            clone_inst = await spawn(headless=True, **_sandbox_kwargs())
+            clone_iid = clone_inst["instance_id"]
+            sel = clone_inst["spawn_diagnostics"]["profile_selection"]
+            assert sel["profile_role"] == "clone", sel
+            clone_dir = Path(sel["user_data_dir"])
+            assert clone_dir.exists()
+            assert str(dirs["sessions"]) in str(clone_dir)
+
+            # Closing the clone must delete its directory. Force deferred
+            # finalization to absorb any brief Windows file-lock after exit.
+            await close(instance_id=clone_iid)
+            for _ in range(40):
+                if not clone_dir.exists():
+                    break
+                _pc.cleanup_deferred_profiles()
+                await asyncio.sleep(0.25)
+            assert not clone_dir.exists(), f"auto-clone not cleaned: {clone_dir}"
+
+            # Master directory is never auto-deleted, even while in use.
+            assert dirs["master"].exists()
+        finally:
+            await close(instance_id=master_iid)
+
+        # Master survives its own close too (only the snapshot is refreshed).
+        assert dirs["master"].exists()
+
+    @pytest.mark.asyncio
+    async def test_named_profile_survives_close(self, tmp_session_root):
+        spawn = _get_fn("spawn_browser")
+        close = _get_fn("close_instance")
+
+        inst = await spawn(
+            headless=True, user_data_dir="keep-me-session", **_sandbox_kwargs()
+        )
+        iid = inst["instance_id"]
+        sel = inst["spawn_diagnostics"]["profile_selection"]
+        named_dir = Path(sel["user_data_dir"])
+        assert sel["profile_role"] == "explicit", sel
+        assert named_dir.exists()
+        # The AI-facing nudge must be surfaced when a named profile is created.
+        assert "warning" in sel
+
+        await close(instance_id=iid)
+        await asyncio.sleep(1.0)
+        assert named_dir.exists(), f"named profile wrongly deleted: {named_dir}"
