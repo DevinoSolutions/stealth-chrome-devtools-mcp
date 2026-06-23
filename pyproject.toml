@@ -5,15 +5,31 @@ build-backend = "hatchling.build"
 [project]
 name = "stealth-chrome-devtools-mcp"
 version = "0.1.0"
-description = "A self-contained stealth Chrome DevTools MCP server with master/copy browser sessions."
+description = "Undetectable browser automation for AI agents via the Model Context Protocol."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "AGPL-3.0-only"
+authors = [
+    { name = "Devino Solutions", email = "amin@devino.ca" },
+]
+keywords = ["mcp", "browser-automation", "stealth", "chrome-devtools", "anti-bot", "cdp", "nodriver"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "fastmcp==2.11.2",
     "nodriver==0.47.0",
     "pydantic==2.11.7",
     "python-dotenv==1.1.1",
-    "py2js @ git+https://github.com/am230/py2js.git@31a83c7c25a51ab0cc3255f484a2279d26278ec3",
+    "py2js>=1.2.1",
     "jsbeautifier==1.15.4",
     "strinpy==0.0.4",
     "strbuilder==1.1.3",
@@ -22,6 +38,11 @@ dependencies = [
     "requests>=2.32.0",
     "uvicorn[standard]==0.35.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp"
+Repository = "https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp"
+Issues = "https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/issues"
 
 [project.scripts]
 stealth-chrome-devtools-mcp = "stealth_chrome_devtools_mcp.server:main"
@@ -39,9 +60,6 @@ asyncio_mode = "auto"
 markers = [
     "integration: tests that spawn real browsers (need Chrome installed)",
 ]
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stealth_chrome_devtools_mcp"]

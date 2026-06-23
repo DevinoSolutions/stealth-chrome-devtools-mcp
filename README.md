@@ -41,22 +41,23 @@ https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
 
 ## Quick Start
 
-### Install from GitHub
+Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, etc.):
 
 ```json
 {
   "mcpServers": {
     "stealth-chrome-devtools-mcp": {
       "command": "uvx",
-      "args": [
-        "--refresh",
-        "--from",
-        "git+ssh://git@github.com/DevinoSolutions/stealth-chrome-devtools-mcp.git",
-        "stealth-chrome-devtools-mcp"
-      ]
+      "args": ["stealth-chrome-devtools-mcp"]
     }
   }
 }
+```
+
+Or install via pip:
+
+```bash
+pip install stealth-chrome-devtools-mcp
 ```
 
 ### Local Development
