@@ -11,6 +11,22 @@ A self-contained **stealth Chrome DevTools MCP server** with smart profile manag
 
 ---
 
+## Demos
+
+### Cloudflare Turnstile Bypass
+
+https://github.com/user-attachments/assets/c4de61ae-6878-4fff-9bfd-65cdd4fadc2f
+
+[Watch on YouTube](https://www.youtube.com/watch?v=dx2ksEI056U)
+
+### Persistent Login Sessions
+
+https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
+
+[Watch on YouTube](https://www.youtube.com/watch?v=8w4ejfhTsLo)
+
+---
+
 ## Key Features
 
 - **Undetectable by anti-bot systems** — Cloudflare, DataDome, PerimeterX, etc.
