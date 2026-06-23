@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stealth-chrome-devtools-mcp"
-version = "0.1.0"
+version = "1.0.0"
 description = "Undetectable browser automation for AI agents via the Model Context Protocol."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["mcp", "browser-automation", "stealth", "chrome-devtools", "anti-bot", "cdp", "nodriver"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: GNU Affero General Public License v3",
     "Programming Language :: Python :: 3",
