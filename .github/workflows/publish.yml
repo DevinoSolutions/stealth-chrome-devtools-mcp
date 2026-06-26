@@ -17,10 +17,10 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5.4.1
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -37,12 +37,12 @@ jobs:
     needs: test
     environment: pypi
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5.4.1
 
       - name: Set up Python
         run: uv python install 3.12
@@ -66,10 +66,9 @@ jobs:
         run: uv build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b54f72e44af3571922400088 # v1.12.4
 
       - name: Generate changelog
-        id: changelog
         run: |
           PREV_TAG=$(git tag --sort=-v:refname | sed -n '2p')
           if [ -z "$PREV_TAG" ]; then
@@ -78,48 +77,41 @@ jobs:
             RANGE="${PREV_TAG}..HEAD"
           fi
 
-          {
-            echo "CHANGELOG<<CHANGELOG_EOF"
+          : > changelog.md
 
-            # PRs merged in this range
-            PR_LINES=$(git log "$RANGE" --oneline --grep="(#" | \
-              grep -oP '\(#\d+\)' | sort -u | tr -d '()' | while read pr; do
-                NUM="${pr#\#}"
-                TITLE=$(gh pr view "$NUM" --json title -q '.title' 2>/dev/null || echo "")
-                if [ -n "$TITLE" ]; then
-                  echo "- ${TITLE} (${pr})"
-                fi
-              done)
+          PR_NUMS=$(git log "$RANGE" --oneline --grep="(#" | \
+            grep -oP '\(#\d+\)' | sort -u | tr -d '()#' || true)
 
-            if [ -n "$PR_LINES" ]; then
-              echo "### Pull Requests"
-              echo "$PR_LINES"
-              echo ""
-            fi
+          if [ -n "$PR_NUMS" ]; then
+            echo "### Pull Requests" >> changelog.md
+            echo "$PR_NUMS" | while read num; do
+              TITLE=$(gh pr view "$num" --json title -q '.title' 2>/dev/null | tr -d '\r\n' || echo "")
+              if [ -n "$TITLE" ]; then
+                echo "- ${TITLE} (#${num})" >> changelog.md
+              fi
+            done
+            echo "" >> changelog.md
+          fi
 
-            # Commits without PR references
-            DIRECT_COMMITS=$(git log "$RANGE" --oneline | grep -v "(#" || true)
-            if [ -n "$DIRECT_COMMITS" ]; then
-              echo "### Commits"
-              echo "$DIRECT_COMMITS" | while read line; do
-                echo "- ${line}"
-              done
-            fi
+          DIRECT_COMMITS=$(git log "$RANGE" --oneline | grep -v "(#" || true)
+          if [ -n "$DIRECT_COMMITS" ]; then
+            echo "### Commits" >> changelog.md
+            echo "$DIRECT_COMMITS" | while read line; do
+              echo "- ${line}" >> changelog.md
+            done
+          fi
 
-            echo "CHANGELOG_EOF"
-          } >> "$GITHUB_ENV"
+          cat changelog.md
         env:
           GH_TOKEN: ${{ github.token }}
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
           name: v${{ env.VERSION }}
+          body_path: changelog.md
+          append_body: true
           body: |
-            ## What's Changed
-
-            ${{ env.CHANGELOG }}
-
             ## Installation
 
             ```bash
