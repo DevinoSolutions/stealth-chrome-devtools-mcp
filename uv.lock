@@ -964,7 +964,8 @@ wheels = [
 [[package]]
 name = "py2js"
 version = "1.2.1"
-source = { git = "https://github.com/am230/py2js.git?rev=31a83c7c25a51ab0cc3255f484a2279d26278ec3#31a83c7c25a51ab0cc3255f484a2279d26278ec3" }
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/43/a649f92edb3954884f8f728ad5189635ab3c3c3431cef6f9966049d15dde/py2js-1.2.1.tar.gz", hash = "sha256:0d99dd5a39c80e8e375d6af09fb3a76884f9403a692302e0ed0b946c29ee5df2", size = 10995, upload-time = "2023-07-12T14:45:42.367Z" }
 
 [[package]]
 name = "pycparser"
@@ -1133,6 +1134,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/90/2c/8af215c0f776415f3590cac4f9086ccefd6fd463befeae41cd4d3f193e5a/pytest_asyncio-1.3.0.tar.gz", hash = "sha256:d7f52f36d231b80ee124cd216ffb19369aa168fc10095013c6b014a34d3ee9e5", size = 50087, upload-time = "2025-11-10T16:07:47.256Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e5/35/f8b19922b6a25bc0880171a2f1a003eaeb93657475193ab516fd87cac9da/pytest_asyncio-1.3.0-py3-none-any.whl", hash = "sha256:611e26147c7f77640e6d0a92a38ed17c3e9848063698d5c93d5aa7aa11cebff5", size = 15075, upload-time = "2025-11-10T16:07:45.537Z" },
+]
+
+[[package]]
+name = "pytest-timeout"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/82/4c9ecabab13363e72d880f2fb504c5f750433b2b6f16e99f4ec21ada284c/pytest_timeout-2.4.0.tar.gz", hash = "sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a", size = 17973, upload-time = "2025-05-05T19:44:34.99Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/b6/3127540ecdf1464a00e5a01ee60a1b09175f6913f0644ac748494d9c4b21/pytest_timeout-2.4.0-py3-none-any.whl", hash = "sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2", size = 14382, upload-time = "2025-05-05T19:44:33.502Z" },
 ]
 
 [[package]]
@@ -1439,7 +1452,7 @@ wheels = [
 
 [[package]]
 name = "stealth-chrome-devtools-mcp"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
@@ -1447,7 +1460,6 @@ dependencies = [
     { name = "nodriver" },
     { name = "pillow" },
     { name = "psutil" },
-    { name = "py2js" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "requests" },
@@ -1460,6 +1472,10 @@ dependencies = [
 test = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-timeout" },
+]
+transpiler = [
+    { name = "py2js" },
 ]
 
 [package.metadata]
@@ -1469,17 +1485,18 @@ requires-dist = [
     { name = "nodriver", specifier = "==0.47.0" },
     { name = "pillow", specifier = "==11.3.0" },
     { name = "psutil", specifier = "==7.0.0" },
-    { name = "py2js", git = "https://github.com/am230/py2js.git?rev=31a83c7c25a51ab0cc3255f484a2279d26278ec3" },
+    { name = "py2js", marker = "extra == 'transpiler'", specifier = ">=1.2.1" },
     { name = "pydantic", specifier = "==2.11.7" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
+    { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.3" },
     { name = "python-dotenv", specifier = "==1.1.1" },
     { name = "requests", specifier = ">=2.32.0" },
     { name = "strbuilder", specifier = "==1.1.3" },
     { name = "strinpy", specifier = "==0.0.4" },
     { name = "uvicorn", extras = ["standard"], specifier = "==0.35.0" },
 ]
-provides-extras = ["test"]
+provides-extras = ["transpiler", "test"]
 
 [[package]]
 name = "strbuilder"
