@@ -193,9 +193,9 @@ class DOMHandler:
             await asyncio.sleep(0.5)
 
             try:
-                await element.click()
-            except Exception:
                 await element.mouse_click()
+            except Exception:
+                await element.click()
 
             return True
 
