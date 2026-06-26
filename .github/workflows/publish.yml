@@ -1,0 +1,134 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  test:
+    name: Run tests before publish
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --extra test
+
+      - name: Run unit tests
+        run: uv run pytest -m "not integration" -v --tb=short
+
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    needs: test
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Verify version matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PKG_VERSION=$(python -c "
+          import re
+          with open('pyproject.toml') as f:
+              m = re.search(r'version\s*=\s*\"([^\"]+)\"', f.read())
+              print(m.group(1))
+          ")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag v${TAG_VERSION} does not match pyproject.toml version ${PKG_VERSION}"
+            exit 1
+          fi
+          echo "VERSION=${TAG_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | sed -n '2p')
+          if [ -z "$PREV_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${PREV_TAG}..HEAD"
+          fi
+
+          {
+            echo "CHANGELOG<<CHANGELOG_EOF"
+
+            # PRs merged in this range
+            PR_LINES=$(git log "$RANGE" --oneline --grep="(#" | \
+              grep -oP '\(#\d+\)' | sort -u | tr -d '()' | while read pr; do
+                NUM="${pr#\#}"
+                TITLE=$(gh pr view "$NUM" --json title -q '.title' 2>/dev/null || echo "")
+                if [ -n "$TITLE" ]; then
+                  echo "- ${TITLE} (${pr})"
+                fi
+              done)
+
+            if [ -n "$PR_LINES" ]; then
+              echo "### Pull Requests"
+              echo "$PR_LINES"
+              echo ""
+            fi
+
+            # Commits without PR references
+            DIRECT_COMMITS=$(git log "$RANGE" --oneline | grep -v "(#" || true)
+            if [ -n "$DIRECT_COMMITS" ]; then
+              echo "### Commits"
+              echo "$DIRECT_COMMITS" | while read line; do
+                echo "- ${line}"
+              done
+            fi
+
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_ENV"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ env.VERSION }}
+          body: |
+            ## What's Changed
+
+            ${{ env.CHANGELOG }}
+
+            ## Installation
+
+            ```bash
+            uv tool install stealth-chrome-devtools-mcp==${{ env.VERSION }}
+            ```
+
+            Or with uvx:
+            ```bash
+            uvx stealth-chrome-devtools-mcp
+            ```
+          draft: false
+          prerelease: false
