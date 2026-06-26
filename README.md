@@ -1,5 +1,6 @@
 # Stealth Chrome DevTools MCP
 
+[![PyPI](https://img.shields.io/pypi/v/stealth-chrome-devtools-mcp?color=blue&label=pypi)](https://pypi.org/project/stealth-chrome-devtools-mcp/)
 [![Tests](https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/actions/workflows/test.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
@@ -8,6 +9,22 @@
 > Undetectable browser automation for AI agents via the Model Context Protocol.
 
 A self-contained **stealth Chrome DevTools MCP server** with smart profile management, anti-detection stealth arg filtering, and robust process lifecycle handling. Built on [nodriver](https://github.com/AminDhouib/nodriver) (CDP-based) for full anti-bot evasion.
+
+---
+
+## Demos
+
+### Cloudflare Turnstile Bypass
+
+https://github.com/user-attachments/assets/c4de61ae-6878-4fff-9bfd-65cdd4fadc2f
+
+[Watch on YouTube](https://www.youtube.com/watch?v=dx2ksEI056U)
+
+### Persistent Login Sessions
+
+https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
+
+[Watch on YouTube](https://www.youtube.com/watch?v=8w4ejfhTsLo)
 
 ---
 
@@ -25,22 +42,23 @@ A self-contained **stealth Chrome DevTools MCP server** with smart profile manag
 
 ## Quick Start
 
-### Install from GitHub
+Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, etc.):
 
 ```json
 {
   "mcpServers": {
     "stealth-chrome-devtools-mcp": {
       "command": "uvx",
-      "args": [
-        "--refresh",
-        "--from",
-        "git+ssh://git@github.com/DevinoSolutions/stealth-chrome-devtools-mcp.git",
-        "stealth-chrome-devtools-mcp"
-      ]
+      "args": ["stealth-chrome-devtools-mcp"]
     }
   }
 }
+```
+
+Or install via pip:
+
+```bash
+pip install stealth-chrome-devtools-mcp
 ```
 
 ### Local Development

@@ -964,7 +964,8 @@ wheels = [
 [[package]]
 name = "py2js"
 version = "1.2.1"
-source = { git = "https://github.com/am230/py2js.git?rev=31a83c7c25a51ab0cc3255f484a2279d26278ec3#31a83c7c25a51ab0cc3255f484a2279d26278ec3" }
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/43/a649f92edb3954884f8f728ad5189635ab3c3c3431cef6f9966049d15dde/py2js-1.2.1.tar.gz", hash = "sha256:0d99dd5a39c80e8e375d6af09fb3a76884f9403a692302e0ed0b946c29ee5df2", size = 10995, upload-time = "2023-07-12T14:45:42.367Z" }
 
 [[package]]
 name = "pycparser"
@@ -1451,7 +1452,7 @@ wheels = [
 
 [[package]]
 name = "stealth-chrome-devtools-mcp"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
@@ -1484,7 +1485,7 @@ requires-dist = [
     { name = "nodriver", specifier = "==0.47.0" },
     { name = "pillow", specifier = "==11.3.0" },
     { name = "psutil", specifier = "==7.0.0" },
-    { name = "py2js", marker = "extra == 'transpiler'", git = "https://github.com/am230/py2js.git?rev=31a83c7c25a51ab0cc3255f484a2279d26278ec3" },
+    { name = "py2js", marker = "extra == 'transpiler'", specifier = ">=1.2.1" },
     { name = "pydantic", specifier = "==2.11.7" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
