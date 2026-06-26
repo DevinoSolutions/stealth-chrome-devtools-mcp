@@ -1,6 +1,7 @@
 """Robust process and temp-profile cleanup for browser instances."""
 
 import atexit
+import contextlib
 import json
 import os
 import shutil
@@ -10,6 +11,11 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 import psutil
 
@@ -199,9 +205,31 @@ class ProcessCleanup:
         self._cleanup_all_tracked()
         sys.exit(0)
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _file_lock(file_handle):
+        """Acquire an exclusive file lock, released on exit."""
+        try:
+            if sys.platform == "win32":
+                msvcrt.locking(file_handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            yield
+        except (OSError, IOError):
+            yield
+        finally:
+            try:
+                if sys.platform == "win32":
+                    file_handle.seek(0)
+                    msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(file_handle, fcntl.LOCK_UN)
+            except (OSError, IOError):
+                pass
+
     def _load_tracked_pids(self) -> Dict[str, Dict[str, Any]]:
         """
-        Load tracked browser metadata from disk.
+        Load tracked browser metadata from disk with file locking.
 
         Returns:
             Dict[str, Dict[str, Any]]: Tracked browser metadata keyed by instance id.
@@ -210,7 +238,8 @@ class ProcessCleanup:
             if not self.pid_file.exists():
                 return {}
             with open(self.pid_file, "r") as file_handle:
-                data = json.load(file_handle)
+                with self._file_lock(file_handle):
+                    data = json.load(file_handle)
             return self._normalize_process_metadata(data.get("browser_processes", {}))
         except Exception as error:
             debug_logger.log_warning(
@@ -222,7 +251,7 @@ class ProcessCleanup:
 
     def _save_tracked_pids(self):
         """
-        Persist tracked browser metadata to disk.
+        Persist tracked browser metadata to disk with file locking.
 
         Returns:
             None
@@ -233,7 +262,8 @@ class ProcessCleanup:
                 "timestamp": time.time(),
             }
             with open(self.pid_file, "w") as file_handle:
-                json.dump(data, file_handle)
+                with self._file_lock(file_handle):
+                    json.dump(data, file_handle)
         except Exception as error:
             debug_logger.log_warning(
                 "process_cleanup",
