@@ -180,7 +180,7 @@ uv run pytest
 uv run pytest -v --tb=short
 ```
 
-**95 tests** covering stealth arg filtering, profile resolution, orphan recovery, and full browser integration.
+**256 tests** covering stealth arg filtering, profile resolution, orphan recovery, storage-cap sweeps, the ops CLI, and full browser integration.
 
 ## Environment Variables
 

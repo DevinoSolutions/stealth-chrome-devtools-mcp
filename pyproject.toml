@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stealth-chrome-devtools-mcp"
-version = "1.1.0"
+version = "1.2.0"
 description = "Undetectable browser automation for AI agents via the Model Context Protocol."
 readme = "README.md"
 requires-python = ">=3.11"
