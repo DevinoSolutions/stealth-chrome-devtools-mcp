@@ -96,6 +96,12 @@ C:\stealth-mcp-browser-sessions\
 4. Clones carry all cookies, logins, and session data
 5. Stale snapshots are auto-refreshed when auth files change
 
+Clones exclude regenerable Chrome caches, so each is a few MB rather than
+multiple GB. Disposable auto-clones are deleted on close, and a storage cap
+(`STEALTH_MCP_CLONE_STORAGE_CAP_GB`, default 10 GB) reclaims the oldest **idle**
+clones if any ever leak — so `sessions/` stays bounded. Named profiles you
+create explicitly (e.g. `github-session`) persist and are never auto-deleted.
+
 ### Stealth Arg Filtering
 
 The server automatically strips Chrome flags that would compromise stealth:
@@ -180,6 +186,7 @@ All optional. Defaults work for normal use.
 | `BROWSER_MASTER_SNAPSHOT_DIR` | `<root>/master-snapshot` | Snapshot clone source |
 | `BROWSER_PROFILE_CLONE_ROOT` | `<root>/sessions` | Folder for profile copies |
 | `BROWSER_PROFILE_REFRESH_DAYS` | `7` | Refresh copies after N days (`0` = disable) |
+| `STEALTH_MCP_CLONE_STORAGE_CAP_GB` | `10` | Cap on total auto-clone storage; oldest **idle** clones are reclaimed when exceeded (`0` = disable). Named profiles and in-use clones are never touched. |
 | `BROWSER_IDLE_TIMEOUT` | `0` | Idle cleanup timeout (`0` = disabled) |
 | `STEALTH_CHROME_PROFILE_KEY` | unset | Force a stable clone key |
 | `STEALTH_BROWSER_DEBUG` | `false` | Enable debug logging |

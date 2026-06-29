@@ -287,6 +287,114 @@ def _profile_has_running_browser(profile_dir: Path) -> bool:
     )
 
 
+def _clone_storage_cap_bytes() -> int:
+    """Cap (in bytes) on total auto-clone storage under the clone root.
+
+    Default 10 GiB; override with ``STEALTH_MCP_CLONE_STORAGE_CAP_GB``. A value
+    <= 0 disables the cap entirely. Only disposable auto-clones count against
+    this — user-named/explicit profiles are never measured or reclaimed.
+    """
+    gb = parse_float_env("STEALTH_MCP_CLONE_STORAGE_CAP_GB", 10.0)
+    if gb <= 0:
+        return 0
+    return int(gb * (1024 ** 3))
+
+
+def _dir_size_bytes(path: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _clone_is_auto(clone_dir: Path) -> bool:
+    """True only for server-created disposable auto-clones.
+
+    Never true for user-named/explicit profiles (they persist by design) or for
+    directories the server did not create (no clone marker). The marker carries
+    an explicit ``auto_clean`` flag; markers written before that flag existed
+    fall back to the source-kind heuristic (explicit profiles use an
+    ``explicit-*`` source kind).
+    """
+    marker = clone_dir / ".stealth_chrome_devtools_mcp_clone.json"
+    if not marker.exists():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if "auto_clean" in data:
+        return bool(data["auto_clean"])
+    return not str(data.get("source_kind", "")).startswith("explicit")
+
+
+def _enforce_clone_storage_cap_in(clone_root: Path, cap_bytes: int, reason: str = "") -> int:
+    """Reclaim the oldest idle auto-clones until total auto-clone storage under
+    ``clone_root`` is within ``cap_bytes``. Returns the number of dirs removed.
+
+    Safety invariants (this is the backstop that turns "grows slower" into
+    "provably bounded"):
+      * Named/explicit profiles and unmarked directories are never touched.
+      * A clone a live browser is currently using is never deleted.
+      * Deletion is oldest-first (by mtime), so the freshest sessions survive.
+    ``cap_bytes <= 0`` disables the sweep.
+    """
+    if cap_bytes <= 0 or not clone_root.exists():
+        return 0
+
+    autos = []  # (mtime, size, path, is_running)
+    total = 0
+    try:
+        entries = list(clone_root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if not entry.is_dir() or not _clone_is_auto(entry):
+                continue
+            size = _dir_size_bytes(entry)
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        total += size
+        autos.append((mtime, size, entry, _profile_has_running_browser(entry)))
+
+    if total <= cap_bytes:
+        return 0
+
+    removed = 0
+    for _mtime, size, entry, is_running in sorted(autos, key=lambda item: item[0]):
+        if total <= cap_bytes:
+            break
+        if is_running:
+            continue  # never evict a live session to satisfy the cap
+        _rmtree_robust(entry)
+        if not entry.exists():
+            total -= size
+            removed += 1
+            debug_logger.log_info(
+                "server",
+                "clone_cap_sweep",
+                f"reclaimed auto-clone {entry.name} ({size} bytes) reason={reason}",
+            )
+    return removed
+
+
+def _enforce_clone_storage_cap(reason: str = "") -> int:
+    """Apply the configured cap to the live clone root (thin runtime wrapper)."""
+    try:
+        return _enforce_clone_storage_cap_in(
+            _clone_root_dir(), _clone_storage_cap_bytes(), reason
+        )
+    except Exception as error:  # never let housekeeping break a spawn/startup
+        debug_logger.log_warning("server", "clone_cap_sweep", f"sweep failed: {error}")
+        return 0
+
+
 def _profile_ignore_names(directory: str, names: List[str]) -> set:
     volatile_names = {
         "BrowserMetrics",
@@ -440,6 +548,9 @@ def _copy_profile_tree(source: Path, target: Path, clone_root: Path, source_kind
         "source": str(source),
         "source_kind": source_kind,
         "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        # Disposable auto-clones may be reclaimed by the storage-cap sweep;
+        # explicit/named profiles (explicit-* source kinds) never are.
+        "auto_clean": not str(source_kind).startswith("explicit"),
     }
     (target / ".stealth_chrome_devtools_mcp_clone.json").write_text(
         json.dumps(marker, indent=2),
@@ -666,6 +777,10 @@ async def _resolve_profile_selection(
     base_clone = await _clone_profile_dir_for_session(clone_root)
     clone = _unique_clone_dir(base_clone, clone_suffix) if clone_suffix else _available_clone_dir(base_clone)
     clone_root.mkdir(parents=True, exist_ok=True)
+    # Backstop against unbounded session bloat: before adding another clone,
+    # reclaim the oldest idle auto-clones if storage is over the cap. The clone
+    # we are about to write has no marker yet, so it is never a sweep target.
+    await asyncio.to_thread(_enforce_clone_storage_cap, "pre-clone")
     if _profile_has_running_browser(clone):
         clone = _unique_clone_dir(base_clone, clone_suffix or "busy")
 
@@ -762,6 +877,13 @@ async def app_lifespan(server):
     debug_logger.log_info("server", "startup", "Starting Browser Automation MCP Server...")
     try:
         await browser_manager.start_idle_reaper()
+        # Reclaim any auto-clones that leaked past the cap on a previous run
+        # (e.g. a delete that lost a Windows file-lock race, or a backend that
+        # was killed before close). Fire-and-forget so a large first sweep never
+        # delays server readiness; the local ref keeps the task from being GC'd.
+        _startup_clone_sweep = asyncio.create_task(
+            asyncio.to_thread(_enforce_clone_storage_cap, "startup")
+        )
         yield
     finally:
         debug_logger.log_info("server", "shutdown", "Shutting down Browser Automation MCP Server...")
