@@ -99,8 +99,15 @@ C:\stealth-mcp-browser-sessions\
 Clones exclude regenerable Chrome caches, so each is a few MB rather than
 multiple GB. Disposable auto-clones are deleted on close, and a storage cap
 (`STEALTH_MCP_CLONE_STORAGE_CAP_GB`, default 10 GB) reclaims the oldest **idle**
-clones if any ever leak — so `sessions/` stays bounded. Named profiles you
-create explicitly (e.g. `github-session`) persist and are never auto-deleted.
+clones if any ever leak — so `sessions/` stays bounded.
+
+Named profiles you create explicitly (e.g. `github-session`) persist and are
+never deleted. But even a "persistent" profile is ~98% regenerable (caches plus
+Chrome's multi-GB on-device AI model). So when `sessions/` exceeds
+`STEALTH_MCP_SESSION_STORAGE_CAP_GB` (default 20 GB), the largest **idle** named
+profiles are trimmed of those regenerable dirs while **every login is
+preserved** — Chrome rebuilds them on next launch. In-use profiles are never
+touched.
 
 ### Stealth Arg Filtering
 
@@ -187,6 +194,7 @@ All optional. Defaults work for normal use.
 | `BROWSER_PROFILE_CLONE_ROOT` | `<root>/sessions` | Folder for profile copies |
 | `BROWSER_PROFILE_REFRESH_DAYS` | `7` | Refresh copies after N days (`0` = disable) |
 | `STEALTH_MCP_CLONE_STORAGE_CAP_GB` | `10` | Cap on total auto-clone storage; oldest **idle** clones are reclaimed when exceeded (`0` = disable). Named profiles and in-use clones are never touched. |
+| `STEALTH_MCP_SESSION_STORAGE_CAP_GB` | `20` | Cap on total `sessions/` storage; when exceeded, the largest **idle** named profiles are trimmed of regenerable cache/model dirs — logins kept (`0` = disable). |
 | `BROWSER_IDLE_TIMEOUT` | `0` | Idle cleanup timeout (`0` = disabled) |
 | `STEALTH_CHROME_PROFILE_KEY` | unset | Force a stable clone key |
 | `STEALTH_BROWSER_DEBUG` | `false` | Enable debug logging |
