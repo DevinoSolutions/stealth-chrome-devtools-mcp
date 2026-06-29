@@ -199,6 +199,27 @@ All optional. Defaults work for normal use.
 | `STEALTH_CHROME_PROFILE_KEY` | unset | Force a stable clone key |
 | `STEALTH_BROWSER_DEBUG` | `false` | Enable debug logging |
 
+## CLI
+
+Installs a `stealth-chrome-devtools` ops command for managing the server and its
+disk usage. (This is for *ops* — to drive a browser, use the MCP server or its
+HTTP backend.)
+
+```bash
+stealth-chrome-devtools status       # backend running? session root + caps
+stealth-chrome-devtools profiles     # list profiles with size / role / in-use
+stealth-chrome-devtools cleanup      # preview reclaimable disk (DRY RUN)
+stealth-chrome-devtools cleanup --apply               # actually reclaim
+stealth-chrome-devtools cleanup --session-cap-gb 12   # preview at a tighter cap
+stealth-chrome-devtools doctor       # check Chrome / environment
+stealth-chrome-devtools serve --http --port 19222     # start the server
+```
+
+`cleanup` deletes idle auto-clones over the clone cap and trims idle named
+profiles down to their session state — **logins kept** — over the session cap. It
+is a **dry run unless you pass `--apply`**, never touches in-use profiles, and
+uses the same selectors as the automatic sweep, so the preview matches `--apply`.
+
 ## Preparing the Master Profile
 
 1. Start the MCP server
