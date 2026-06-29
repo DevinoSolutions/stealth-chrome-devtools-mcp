@@ -279,12 +279,16 @@ class ProcessCleanup:
             Set[str]: Normalized active browser profile directories.
         """
         active_profile_dirs: Set[str] = set()
-        for process in psutil.process_iter(["name", "cmdline"]):
+        # Enumerate only the cheap `name` field for every process; reading
+        # `cmdline` for the whole process table is the dominant cost on Windows
+        # (one PEB read per process). Pull cmdline lazily for the handful of
+        # browser-named processes only.
+        for process in psutil.process_iter(["name"]):
             try:
                 process_name = process.info.get("name") or ""
                 if not self._is_browser_process_name(process_name):
                     continue
-                cmdline = process.info.get("cmdline") or []
+                cmdline = process.cmdline() or []
                 profile_dir = self._extract_profile_dir_from_cmdline(cmdline)
                 if profile_dir:
                     active_profile_dirs.add(profile_dir)
@@ -313,12 +317,14 @@ class ProcessCleanup:
             return set()
 
         matching_pids: Set[int] = set()
-        for process in psutil.process_iter(["pid", "name", "cmdline"]):
+        # See _get_active_browser_profile_dirs: enumerate cheap `name`/`pid`
+        # only and read the expensive `cmdline` lazily for browser processes.
+        for process in psutil.process_iter(["pid", "name"]):
             try:
                 process_name = process.info.get("name") or ""
                 if not self._is_browser_process_name(process_name):
                     continue
-                cmdline = process.info.get("cmdline") or []
+                cmdline = process.cmdline() or []
                 profile_dir = self._extract_profile_dir_from_cmdline(cmdline)
                 if profile_dir == normalized_profile_dir:
                     matching_pids.add(process.info["pid"])

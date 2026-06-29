@@ -287,30 +287,312 @@ def _profile_has_running_browser(profile_dir: Path) -> bool:
     )
 
 
+# Regenerable Chrome profile subdirectories — caches and on-device model stores
+# that Chrome rebuilds on next launch. Single source of truth: these are both
+# excluded when cloning a profile (_profile_ignore_names) and trimmed from idle
+# profiles under storage pressure (_trim_profile_regenerable), so the clone path
+# and the trim path can never drift apart.
+_REGENERABLE_PROFILE_NAMES = frozenset({
+    "BrowserMetrics",
+    "CertificateRevocation",
+    "Crashpad",
+    "Crash Reports",
+    "DawnCache",
+    "GPUCache",
+    "GrShaderCache",
+    "GraphiteDawnCache",
+    "LOCK",
+    "lockfile",
+    "Safe Browsing",
+    "ShaderCache",
+    "SingletonCookie",
+    "SingletonLock",
+    "SingletonSocket",
+    "component_crx_cache",
+    # Heavy, regenerable caches and on-device AI models — typically ~98% of a
+    # Chrome profile by size (the on-device model alone can be ~4 GB). Excluding
+    # or trimming them leaves only real session state: cookies, logins, Web
+    # Data, Local Storage, Preferences. Chrome rebuilds them all on next launch.
+    "Cache",
+    "Code Cache",
+    "Service Worker",
+    "blob_storage",
+    "Download Service",
+    "extensions_crx_cache",
+    "optimization_guide_model_store",
+    "optimization_guide_hint_cache_store",
+    "OptGuideOnDeviceModel",
+    "OptGuideOnDeviceClassifierModel",
+})
+
+
+def _clone_storage_cap_bytes() -> int:
+    """Cap (in bytes) on total auto-clone storage under the clone root.
+
+    Default 10 GiB; override with ``STEALTH_MCP_CLONE_STORAGE_CAP_GB``. A value
+    <= 0 disables the cap entirely. Only disposable auto-clones count against
+    this — user-named/explicit profiles are never measured or reclaimed.
+    """
+    gb = parse_float_env("STEALTH_MCP_CLONE_STORAGE_CAP_GB", 10.0)
+    if gb <= 0:
+        return 0
+    return int(gb * (1024 ** 3))
+
+
+def _dir_size_bytes(path: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _clone_is_auto(clone_dir: Path) -> bool:
+    """True only for server-created disposable auto-clones.
+
+    Never true for user-named/explicit profiles (they persist by design) or for
+    directories the server did not create (no clone marker). The marker carries
+    an explicit ``auto_clean`` flag; markers written before that flag existed
+    fall back to the source-kind heuristic (explicit profiles use an
+    ``explicit-*`` source kind).
+    """
+    marker = clone_dir / ".stealth_chrome_devtools_mcp_clone.json"
+    if not marker.exists():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if "auto_clean" in data:
+        return bool(data["auto_clean"])
+    return not str(data.get("source_kind", "")).startswith("explicit")
+
+
+def _enforce_clone_storage_cap_in(clone_root: Path, cap_bytes: int, reason: str = "") -> int:
+    """Reclaim the oldest idle auto-clones until total auto-clone storage under
+    ``clone_root`` is within ``cap_bytes``. Returns the number of dirs removed.
+
+    Safety invariants (this is the backstop that turns "grows slower" into
+    "provably bounded"):
+      * Named/explicit profiles and unmarked directories are never touched.
+      * A clone a live browser is currently using is never deleted.
+      * Deletion is oldest-first (by mtime), so the freshest sessions survive.
+    ``cap_bytes <= 0`` disables the sweep.
+    """
+    if cap_bytes <= 0 or not clone_root.exists():
+        return 0
+
+    autos = []  # (mtime, size, path, is_running)
+    total = 0
+    try:
+        entries = list(clone_root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if not entry.is_dir() or not _clone_is_auto(entry):
+                continue
+            size = _dir_size_bytes(entry)
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        total += size
+        autos.append((mtime, size, entry, _profile_has_running_browser(entry)))
+
+    if total <= cap_bytes:
+        return 0
+
+    removed = 0
+    for _mtime, size, entry, is_running in sorted(autos, key=lambda item: item[0]):
+        if total <= cap_bytes:
+            break
+        if is_running:
+            continue  # never evict a live session to satisfy the cap
+        _rmtree_robust(entry)
+        if not entry.exists():
+            total -= size
+            removed += 1
+            debug_logger.log_info(
+                "server",
+                "clone_cap_sweep",
+                f"reclaimed auto-clone {entry.name} ({size} bytes) reason={reason}",
+            )
+    return removed
+
+
+def _session_storage_cap_bytes() -> int:
+    """Cap (in bytes) on total clone-root storage before idle *named* profiles
+    are trimmed of regenerable data. Default 20 GiB; override with
+    ``STEALTH_MCP_SESSION_STORAGE_CAP_GB`` (a value <= 0 disables the trim).
+    """
+    gb = parse_float_env("STEALTH_MCP_SESSION_STORAGE_CAP_GB", 20.0)
+    if gb <= 0:
+        return 0
+    return int(gb * (1024 ** 3))
+
+
+def _clone_is_named(clone_dir: Path) -> bool:
+    """True for user-named/explicit profiles (the persistent ones). They are
+    never deleted, but they *can* be trimmed of regenerable data when idle."""
+    marker = clone_dir / ".stealth_chrome_devtools_mcp_clone.json"
+    if not marker.exists():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if "auto_clean" in data:
+        return not bool(data["auto_clean"])
+    return str(data.get("source_kind", "")).startswith("explicit")
+
+
+def _trim_profile_regenerable(profile_dir: Path) -> int:
+    """Delete regenerable cache/model subdirectories from an idle profile while
+    preserving every session-state file (cookies, logins, Web Data, Local
+    Storage, Preferences). Returns the number of bytes freed.
+
+    Removes only directories named in ``_REGENERABLE_PROFILE_NAMES`` — the same
+    set the clone path excludes — at the profile root and one level down
+    (``Default/``, ``Profile N/``), which is where Chrome keeps its caches and
+    on-device model stores. Never recurses deeper, so session-state dirs such as
+    ``Local Storage`` and ``IndexedDB`` are always left intact.
+    """
+    freed = 0
+
+    def _trim_level(directory: Path) -> None:
+        nonlocal freed
+        try:
+            children = list(directory.iterdir())
+        except OSError:
+            return
+        for child in children:
+            try:
+                if child.is_dir() and child.name in _REGENERABLE_PROFILE_NAMES:
+                    size = _dir_size_bytes(child)
+                    _rmtree_robust(child)
+                    if not child.exists():
+                        freed += size
+            except OSError:
+                continue
+
+    _trim_level(profile_dir)
+    try:
+        subdirs = [
+            c for c in profile_dir.iterdir()
+            if c.is_dir() and c.name not in _REGENERABLE_PROFILE_NAMES
+        ]
+    except OSError:
+        subdirs = []
+    for sub in subdirs:
+        _trim_level(sub)
+    return freed
+
+
+def _enforce_named_profile_trim_in(clone_root: Path, cap_bytes: int, reason: str = "") -> int:
+    """Trim regenerable data from the largest idle named profiles under
+    ``clone_root`` until total clone-root storage is within ``cap_bytes``.
+    Returns the number of bytes freed.
+
+    Only user-named/explicit profiles are trimmed — auto-clones are the
+    clone-cap sweep's job and unmarked dirs are left alone. In-use profiles are
+    never touched, and only regenerable dirs are removed, so every login
+    survives. ``cap_bytes <= 0`` disables the trim.
+    """
+    if cap_bytes <= 0 or not clone_root.exists():
+        return 0
+
+    sized = []
+    total = 0
+    try:
+        entries = list(clone_root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+            size = _dir_size_bytes(entry)
+        except OSError:
+            continue
+        total += size
+        sized.append((size, entry))
+
+    if total <= cap_bytes:
+        return 0
+
+    freed_total = 0
+    for size, entry in sorted(sized, key=lambda item: item[0], reverse=True):  # largest first
+        if total <= cap_bytes:
+            break
+        if not _clone_is_named(entry):
+            continue  # auto-clones -> clone-cap sweep; unmarked -> leave alone
+        if _profile_has_running_browser(entry):
+            continue  # never trim a profile a live browser is using
+        freed = _trim_profile_regenerable(entry)
+        if freed:
+            total -= freed
+            freed_total += freed
+            debug_logger.log_info(
+                "server",
+                "profile_trim",
+                f"trimmed {freed} bytes of regenerable data from {entry.name} reason={reason}",
+            )
+    return freed_total
+
+
+def _enforce_session_storage(reason: str = "") -> None:
+    """Bound clone-root storage: delete idle auto-clones over the clone cap,
+    then trim regenerable data from the largest idle named profiles over the
+    session cap. Best-effort; never raises into a spawn or startup."""
+    try:
+        clone_root = _clone_root_dir()
+        _enforce_clone_storage_cap_in(clone_root, _clone_storage_cap_bytes(), reason)
+        _enforce_named_profile_trim_in(clone_root, _session_storage_cap_bytes(), reason)
+    except Exception as error:
+        debug_logger.log_warning("server", "session_storage_sweep", f"sweep failed: {error}")
+
+
+# Strong refs to in-flight housekeeping sweeps so the event loop cannot GC them
+# mid-run; the done-callback drops each when it finishes.
+_BACKGROUND_SWEEPS: set = set()
+
+
+def _spawn_background_sweep(reason: str = "") -> None:
+    """Kick the storage sweep off the event loop without blocking the caller.
+
+    The clone root and caps are resolved now, at trigger time, and captured for
+    the worker — so the sweep always targets the root that was active when it was
+    triggered (this also keeps it hermetic when tests patch the env to a tmp
+    dir). Deduped to one in-flight sweep, since sizing the clone root is the only
+    real cost and running it concurrently with itself buys nothing.
+    """
+    if _BACKGROUND_SWEEPS:
+        return
+    clone_root = _clone_root_dir()
+    clone_cap = _clone_storage_cap_bytes()
+    session_cap = _session_storage_cap_bytes()
+
+    def _run() -> None:
+        try:
+            _enforce_clone_storage_cap_in(clone_root, clone_cap, reason)
+            _enforce_named_profile_trim_in(clone_root, session_cap, reason)
+        except Exception as error:
+            debug_logger.log_warning("server", "session_storage_sweep", f"sweep failed: {error}")
+
+    task = asyncio.create_task(asyncio.to_thread(_run))
+    _BACKGROUND_SWEEPS.add(task)
+    task.add_done_callback(_BACKGROUND_SWEEPS.discard)
+
+
 def _profile_ignore_names(directory: str, names: List[str]) -> set:
-    volatile_names = {
-        "BrowserMetrics",
-        "CertificateRevocation",
-        "Crashpad",
-        "Crash Reports",
-        "DawnCache",
-        "GPUCache",
-        "GrShaderCache",
-        "GraphiteDawnCache",
-        "LOCK",
-        "lockfile",
-        "Safe Browsing",
-        "ShaderCache",
-        "SingletonCookie",
-        "SingletonLock",
-        "SingletonSocket",
-        "component_crx_cache",
-    }
     ignored = set()
     for name in names:
         lower = name.lower()
         if (
-            name in volatile_names
+            name in _REGENERABLE_PROFILE_NAMES
             or name.startswith("Singleton")
             or lower.endswith(".tmp")
             or lower.endswith(".lock")
@@ -426,6 +708,9 @@ def _copy_profile_tree(source: Path, target: Path, clone_root: Path, source_kind
         "source": str(source),
         "source_kind": source_kind,
         "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        # Disposable auto-clones may be reclaimed by the storage-cap sweep;
+        # explicit/named profiles (explicit-* source kinds) never are.
+        "auto_clean": not str(source_kind).startswith("explicit"),
     }
     (target / ".stealth_chrome_devtools_mcp_clone.json").write_text(
         json.dumps(marker, indent=2),
@@ -652,6 +937,12 @@ async def _resolve_profile_selection(
     base_clone = await _clone_profile_dir_for_session(clone_root)
     clone = _unique_clone_dir(base_clone, clone_suffix) if clone_suffix else _available_clone_dir(base_clone)
     clone_root.mkdir(parents=True, exist_ok=True)
+    # Backstop against unbounded session bloat: kick a background sweep (delete
+    # idle auto-clones over the clone cap; trim idle named profiles over the
+    # session cap) before adding another clone. Non-blocking so spawns stay
+    # fast; the clone we are about to write has no marker yet, so it is never a
+    # sweep target.
+    _spawn_background_sweep("pre-clone")
     if _profile_has_running_browser(clone):
         clone = _unique_clone_dir(base_clone, clone_suffix or "busy")
 
@@ -748,6 +1039,10 @@ async def app_lifespan(server):
     debug_logger.log_info("server", "startup", "Starting Browser Automation MCP Server...")
     try:
         await browser_manager.start_idle_reaper()
+        # Reclaim leaked auto-clones and trim oversized idle named profiles left
+        # by a previous run. Fire-and-forget so a large first sweep never delays
+        # server readiness.
+        _spawn_background_sweep("startup")
         yield
     finally:
         debug_logger.log_info("server", "shutdown", "Shutting down Browser Automation MCP Server...")
