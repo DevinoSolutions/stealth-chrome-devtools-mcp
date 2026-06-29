@@ -165,6 +165,40 @@ class TestBrowserSpawnAndClose:
             await close(instance_id=iid)
 
 
+class TestClosePerformance:
+    """close_instance must be fast.
+
+    Regression guard for the teardown-ordering bug where ``close_instance``
+    disconnected the CDP websocket *before* sending the graceful
+    ``Browser.close`` command. nodriver's ``send()`` then silently reconnected
+    and awaited a response that the dying browser never returns — hanging for
+    the full 5s ``wait_for`` budget and pushing every close to 6-8s.
+
+    These are "time-tested" bounds: measured on the fixed path, with margin.
+    """
+
+    DATA_URL = "data:text/html,<h1 id='t'>close-perf</h1>"
+
+    @pytest.mark.asyncio
+    async def test_close_is_fast(self):
+        spawn = _get_fn("spawn_browser")
+        navigate = _get_fn("navigate")
+        close = _get_fn("close_instance")
+
+        result = await spawn(headless=True, **_sandbox_kwargs())
+        iid = result["instance_id"]
+        await navigate(instance_id=iid, url=self.DATA_URL)
+
+        t0 = time.monotonic()
+        await close(instance_id=iid)
+        elapsed = time.monotonic() - t0
+
+        # The old hang made this 6-8s (it blocked the entire 5s wait_for plus
+        # forced cleanup). A correct close sends Browser.close on the live
+        # connection (~1ms) and never reconnects.
+        assert elapsed < 3.0, f"close took {elapsed:.2f}s — teardown hang regressed"
+
+
 class TestNavigateAndScreenshot:
     """Navigate to a data: URL and take a screenshot."""
 

@@ -639,32 +639,43 @@ class BrowserManager:
                         f"Failed to close tabs for {instance_id}: {tabs_err}",
                     )
 
-                try:
-                    import asyncio
-                    if hasattr(browser, 'connection') and browser.connection:
-                        asyncio.get_event_loop().create_task(browser.connection.disconnect())
-                        debug_logger.log_info("browser_manager", "close_connection", "closed connection using get_event_loop().create_task()")
-                except RuntimeError:
-                    try:
-                        import asyncio
-                        if hasattr(browser, 'connection') and browser.connection:
-                            await asyncio.wait_for(browser.connection.disconnect(), timeout=2.0)
-                            debug_logger.log_info("browser_manager", "close_connection", "closed connection with direct await and timeout")
-                    except (asyncio.TimeoutError, Exception) as e:
-                        debug_logger.log_info("browser_manager", "close_connection", f"connection disconnect failed or timed out: {e}")
-                        pass
-                except Exception as e:
-                    debug_logger.log_info("browser_manager", "close_connection", f"connection disconnect failed: {e}")
-                    pass
-
+                # Graceful shutdown FIRST, while the CDP websocket is still
+                # live: Browser.close lets Chrome flush session state (cookies,
+                # Local Storage, logins) to disk before it exits. Bounded so a
+                # missing response can never stall teardown.
+                #
+                # Order matters. Disconnecting first (the old behaviour) closed
+                # the websocket, so nodriver's send() silently reconnected and
+                # then awaited a reply the dying browser never sends — hanging
+                # for the whole 5s wait_for budget and making every close 6-8s.
                 try:
                     import nodriver.cdp.browser as cdp_browser
-                    if hasattr(browser, 'connection') and browser.connection:
-                        await browser.connection.send(cdp_browser.close())
-                except Exception as cdp_err:
-                    debug_logger.log_warning(
+                    if getattr(browser, "connection", None) and not browser.connection.closed:
+                        await asyncio.wait_for(
+                            browser.connection.send(cdp_browser.close()),
+                            timeout=2.0,
+                        )
+                except (asyncio.TimeoutError, Exception) as cdp_err:
+                    debug_logger.log_info(
                         "browser_manager", "close_instance",
-                        f"CDP browser.close() failed for {instance_id}: {cdp_err}",
+                        f"CDP browser.close() skipped for {instance_id}: {cdp_err}",
+                    )
+
+                # Then tear down the websocket connection itself, bounded so a
+                # half-dead socket cannot hang the close either.
+                try:
+                    if getattr(browser, "connection", None):
+                        await asyncio.wait_for(
+                            browser.connection.disconnect(), timeout=2.0
+                        )
+                        debug_logger.log_info(
+                            "browser_manager", "close_connection",
+                            "closed websocket connection",
+                        )
+                except (asyncio.TimeoutError, Exception) as e:
+                    debug_logger.log_info(
+                        "browser_manager", "close_connection",
+                        f"connection disconnect failed or timed out: {e}",
                     )
 
                 try:

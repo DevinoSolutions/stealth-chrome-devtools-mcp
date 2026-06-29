@@ -305,6 +305,20 @@ def _profile_ignore_names(directory: str, names: List[str]) -> set:
         "SingletonLock",
         "SingletonSocket",
         "component_crx_cache",
+        # Heavy, regenerable caches — typically ~98% of a Chrome profile by
+        # size. Excluding them turns a multi-GB profile clone into a few-MB
+        # copy of real session state (cookies, logins, Web Data, Local
+        # Storage, Preferences). Chrome rebuilds all of these on next launch.
+        "Cache",
+        "Code Cache",
+        "Service Worker",
+        "blob_storage",
+        "Download Service",
+        "extensions_crx_cache",
+        "optimization_guide_model_store",
+        "optimization_guide_hint_cache_store",
+        "OptGuideOnDeviceModel",
+        "OptGuideOnDeviceClassifierModel",
     }
     ignored = set()
     for name in names:
