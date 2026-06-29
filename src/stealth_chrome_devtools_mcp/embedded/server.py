@@ -371,26 +371,23 @@ def _clone_is_auto(clone_dir: Path) -> bool:
     return not str(data.get("source_kind", "")).startswith("explicit")
 
 
-def _enforce_clone_storage_cap_in(clone_root: Path, cap_bytes: int, reason: str = "") -> int:
-    """Reclaim the oldest idle auto-clones until total auto-clone storage under
-    ``clone_root`` is within ``cap_bytes``. Returns the number of dirs removed.
+def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> List[Path]:
+    """Oldest-first idle auto-clones whose removal brings total auto-clone
+    storage within ``cap_bytes``. Read-only — selection only, no deletion.
 
-    Safety invariants (this is the backstop that turns "grows slower" into
-    "provably bounded"):
-      * Named/explicit profiles and unmarked directories are never touched.
-      * A clone a live browser is currently using is never deleted.
-      * Deletion is oldest-first (by mtime), so the freshest sessions survive.
-    ``cap_bytes <= 0`` disables the sweep.
+    Named/explicit profiles, unmarked dirs, and clones a live browser is using
+    are never selected. ``cap_bytes <= 0`` selects nothing. Shared by the live
+    sweep and the CLI's dry-run so the two can never disagree.
     """
     if cap_bytes <= 0 or not clone_root.exists():
-        return 0
+        return []
 
-    autos = []  # (mtime, size, path, is_running)
+    autos = []  # (mtime, size, path)
     total = 0
     try:
         entries = list(clone_root.iterdir())
     except OSError:
-        return 0
+        return []
     for entry in entries:
         try:
             if not entry.is_dir() or not _clone_is_auto(entry):
@@ -400,20 +397,32 @@ def _enforce_clone_storage_cap_in(clone_root: Path, cap_bytes: int, reason: str 
         except OSError:
             continue
         total += size
-        autos.append((mtime, size, entry, _profile_has_running_browser(entry)))
+        autos.append((mtime, size, entry))
 
     if total <= cap_bytes:
-        return 0
+        return []
 
-    removed = 0
-    for _mtime, size, entry, is_running in sorted(autos, key=lambda item: item[0]):
+    victims: List[Path] = []
+    for _mtime, size, entry in sorted(autos, key=lambda item: item[0]):
         if total <= cap_bytes:
             break
-        if is_running:
+        if _profile_has_running_browser(entry):
             continue  # never evict a live session to satisfy the cap
+        victims.append(entry)
+        total -= size
+    return victims
+
+
+def _enforce_clone_storage_cap_in(clone_root: Path, cap_bytes: int, reason: str = "") -> int:
+    """Delete the oldest idle auto-clones until total auto-clone storage under
+    ``clone_root`` is within ``cap_bytes``. Returns the number of dirs removed.
+    Selection (and its safety invariants) lives in ``_idle_autoclones_over_cap``.
+    """
+    removed = 0
+    for entry in _idle_autoclones_over_cap(clone_root, cap_bytes):
+        size = _dir_size_bytes(entry)
         _rmtree_robust(entry)
         if not entry.exists():
-            total -= size
             removed += 1
             debug_logger.log_info(
                 "server",
@@ -449,21 +458,15 @@ def _clone_is_named(clone_dir: Path) -> bool:
     return str(data.get("source_kind", "")).startswith("explicit")
 
 
-def _trim_profile_regenerable(profile_dir: Path) -> int:
-    """Delete regenerable cache/model subdirectories from an idle profile while
-    preserving every session-state file (cookies, logins, Web Data, Local
-    Storage, Preferences). Returns the number of bytes freed.
-
-    Removes only directories named in ``_REGENERABLE_PROFILE_NAMES`` — the same
-    set the clone path excludes — at the profile root and one level down
+def _regenerable_dirs_in_profile(profile_dir: Path) -> List[Path]:
+    """Regenerable cache/model directories in a profile — those named in
+    ``_REGENERABLE_PROFILE_NAMES``, at the profile root and one level down
     (``Default/``, ``Profile N/``), which is where Chrome keeps its caches and
     on-device model stores. Never recurses deeper, so session-state dirs such as
-    ``Local Storage`` and ``IndexedDB`` are always left intact.
-    """
-    freed = 0
+    ``Local Storage`` and ``IndexedDB`` are never included."""
+    found: List[Path] = []
 
-    def _trim_level(directory: Path) -> None:
-        nonlocal freed
+    def _scan(directory: Path) -> None:
         try:
             children = list(directory.iterdir())
         except OSError:
@@ -471,14 +474,11 @@ def _trim_profile_regenerable(profile_dir: Path) -> int:
         for child in children:
             try:
                 if child.is_dir() and child.name in _REGENERABLE_PROFILE_NAMES:
-                    size = _dir_size_bytes(child)
-                    _rmtree_robust(child)
-                    if not child.exists():
-                        freed += size
+                    found.append(child)
             except OSError:
                 continue
 
-    _trim_level(profile_dir)
+    _scan(profile_dir)
     try:
         subdirs = [
             c for c in profile_dir.iterdir()
@@ -487,29 +487,46 @@ def _trim_profile_regenerable(profile_dir: Path) -> int:
     except OSError:
         subdirs = []
     for sub in subdirs:
-        _trim_level(sub)
+        _scan(sub)
+    return found
+
+
+def _regenerable_size(profile_dir: Path) -> int:
+    """Bytes a trim of ``profile_dir`` would reclaim (read-only)."""
+    return sum(_dir_size_bytes(d) for d in _regenerable_dirs_in_profile(profile_dir))
+
+
+def _trim_profile_regenerable(profile_dir: Path) -> int:
+    """Delete the regenerable cache/model dirs from a profile (see
+    ``_regenerable_dirs_in_profile``) while preserving every session-state file
+    (cookies, logins, Web Data, Local Storage, Preferences). Returns bytes freed.
+    """
+    freed = 0
+    for directory in _regenerable_dirs_in_profile(profile_dir):
+        size = _dir_size_bytes(directory)
+        _rmtree_robust(directory)
+        if not directory.exists():
+            freed += size
     return freed
 
 
-def _enforce_named_profile_trim_in(clone_root: Path, cap_bytes: int, reason: str = "") -> int:
-    """Trim regenerable data from the largest idle named profiles under
-    ``clone_root`` until total clone-root storage is within ``cap_bytes``.
-    Returns the number of bytes freed.
+def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> List[Path]:
+    """Largest-first idle named profiles whose trim brings total clone-root
+    storage within ``cap_bytes``. Read-only — selection only.
 
-    Only user-named/explicit profiles are trimmed — auto-clones are the
-    clone-cap sweep's job and unmarked dirs are left alone. In-use profiles are
-    never touched, and only regenerable dirs are removed, so every login
-    survives. ``cap_bytes <= 0`` disables the trim.
+    Auto-clones (the clone-cap sweep's job), unmarked dirs, and in-use profiles
+    are never selected. ``cap_bytes <= 0`` selects nothing. Shared by the live
+    sweep and the CLI's dry-run.
     """
     if cap_bytes <= 0 or not clone_root.exists():
-        return 0
+        return []
 
-    sized = []
+    sized = []  # (size, path)
     total = 0
     try:
         entries = list(clone_root.iterdir())
     except OSError:
-        return 0
+        return []
     for entry in entries:
         try:
             if not entry.is_dir():
@@ -521,19 +538,28 @@ def _enforce_named_profile_trim_in(clone_root: Path, cap_bytes: int, reason: str
         sized.append((size, entry))
 
     if total <= cap_bytes:
-        return 0
+        return []
 
-    freed_total = 0
-    for size, entry in sorted(sized, key=lambda item: item[0], reverse=True):  # largest first
+    victims: List[Path] = []
+    for _size, entry in sorted(sized, key=lambda item: item[0], reverse=True):  # largest first
         if total <= cap_bytes:
             break
-        if not _clone_is_named(entry):
-            continue  # auto-clones -> clone-cap sweep; unmarked -> leave alone
-        if _profile_has_running_browser(entry):
-            continue  # never trim a profile a live browser is using
+        if not _clone_is_named(entry) or _profile_has_running_browser(entry):
+            continue  # autos -> clone-cap sweep; unmarked/in-use -> leave alone
+        victims.append(entry)
+        total -= _regenerable_size(entry)  # a trim frees ~the regenerable portion
+    return victims
+
+
+def _enforce_named_profile_trim_in(clone_root: Path, cap_bytes: int, reason: str = "") -> int:
+    """Trim regenerable data from the largest idle named profiles until total
+    clone-root storage is within ``cap_bytes``. Returns bytes freed. Selection
+    (and its safety invariants) lives in ``_named_profiles_over_session_cap``.
+    """
+    freed_total = 0
+    for entry in _named_profiles_over_session_cap(clone_root, cap_bytes):
         freed = _trim_profile_regenerable(entry)
         if freed:
-            total -= freed
             freed_total += freed
             debug_logger.log_info(
                 "server",

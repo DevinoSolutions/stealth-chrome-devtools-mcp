@@ -45,6 +45,12 @@ class ProcessCleanup:
         # Record server start time so recovery never kills processes spawned
         # during the current session (create_time >= _init_time).
         self._init_time = time.time()
+        # Read-only tooling (the `stealth-chrome-devtools` CLI) imports this
+        # package to reuse profile helpers without taking over process
+        # lifecycle. Honor an opt-out so importing never kills the running
+        # server's browsers, deletes their profiles, or wipes PID tracking.
+        if os.getenv("STEALTH_MCP_NO_AUTO_RECOVERY", "").strip().lower() in {"1", "true", "yes", "on"}:
+            return
         self._setup_cleanup_handlers()
         self._recover_orphaned_processes()
 

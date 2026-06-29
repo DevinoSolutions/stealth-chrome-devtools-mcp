@@ -45,6 +45,7 @@ Issues = "https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/issues"
 
 [project.scripts]
 stealth-chrome-devtools-mcp = "stealth_chrome_devtools_mcp.server:main"
+stealth-chrome-devtools = "stealth_chrome_devtools_mcp.cli:main"
 
 [project.optional-dependencies]
 transpiler = [
