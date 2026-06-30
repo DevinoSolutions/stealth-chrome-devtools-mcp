@@ -195,3 +195,75 @@ class TestFastHandshakeEndToEnd:
                 backend.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 backend.kill()
+
+
+@pytest.mark.integration
+class TestProxyExitsOnClientDisconnect:
+    """The stdio proxy MUST exit when the client (Claude Code) disconnects.
+
+    The leak that made the server unusable: when stdin hits EOF, ``pump_client``
+    ends but ``run_backend``'s ``from_backend`` loop keeps reading the still-open
+    backend stream forever, so the proxy process never returns. Over days of
+    Claude Code restarts/reconnects these pile up (we measured 250 leaked stealth
+    python processes on one machine) until handles/memory are exhausted and a
+    fresh spawn wedges for hours. Closing the client stream must tear the proxy
+    down and return promptly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_proxy_returns_when_client_stream_closes(self, tmp_path):
+        import os
+        import subprocess
+        import sys
+
+        port = _free_port()
+        env = dict(os.environ)
+        env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(tmp_path / "sessions")
+        env["STEALTH_BROWSER_DEBUG"] = "false"
+
+        backend = subprocess.Popen(
+            [
+                sys.executable, "-m", "stealth_chrome_devtools_mcp",
+                "--transport", "http", "--port", str(port), "--host", "127.0.0.1",
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            env=env,
+        )
+        try:
+            c2p_tx, c2p_rx = anyio.create_memory_object_stream(50)
+            p2c_tx, p2c_rx = anyio.create_memory_object_stream(50)
+            proxy_returned = anyio.Event()
+
+            async with anyio.create_task_group() as tg:
+
+                async def run_proxy():
+                    await _proxy_streams(c2p_rx, p2c_tx, port)
+                    proxy_returned.set()
+
+                tg.start_soon(run_proxy)
+
+                # A real handshake so the backend stream is genuinely live and
+                # from_backend is parked on it (the exact leak condition).
+                await c2p_tx.send(_initialize_msg(1, "2025-03-26"))
+                await c2p_tx.send(_initialized_notification())
+                await c2p_tx.send(_tools_list_msg(2))
+                with anyio.fail_after(90):
+                    await p2c_rx.receive()  # local initialize answer
+                    await p2c_rx.receive()  # tools/list from the real backend
+
+                # The client (Claude Code) disconnects: stdin closes -> EOF.
+                await c2p_tx.aclose()
+
+                # The proxy must notice the dead client and return. On the old
+                # code it parks on the live backend stream forever and this times
+                # out — that is the leaked process.
+                with anyio.fail_after(10):
+                    await proxy_returned.wait()
+
+                tg.cancel_scope.cancel()
+        finally:
+            backend.terminate()
+            try:
+                backend.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                backend.kill()

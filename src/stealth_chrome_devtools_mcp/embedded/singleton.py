@@ -339,8 +339,14 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                 tg.start_soon(from_backend)
 
     async with anyio.create_task_group() as tg:
-        tg.start_soon(pump_client)
         tg.start_soon(run_backend)
+        # Drive the client pump in the main task. When the client (Claude Code)
+        # disconnects, stdin hits EOF and pump_client returns — at which point we
+        # cancel everything. Otherwise run_backend's from_backend loop stays
+        # parked on the still-open backend stream forever and the proxy process
+        # never exits, leaking one stranded process per disconnect.
+        await pump_client()
+        tg.cancel_scope.cancel()
 
 
 async def _bridge(port: int):
