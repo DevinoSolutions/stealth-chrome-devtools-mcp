@@ -267,3 +267,87 @@ class TestProxyExitsOnClientDisconnect:
                 backend.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 backend.kill()
+
+
+@pytest.mark.integration
+class TestEntrypointExitsOnDisconnect:
+    """The REAL entrypoint process must exit when the client disconnects.
+
+    This is the end-to-end guard the isolated ``_proxy_streams`` test above could
+    not provide. The leak had TWO causes: ``_proxy_streams`` not tearing down the
+    backend side, AND mcp's ``stdio_server`` holding its teardown open until the
+    write stream is closed. The unit test only covered the first and passed while
+    the real entrypoint still hung. This runs ``python -m
+    stealth_chrome_devtools_mcp``, does the handshake, closes stdin, and asserts
+    the process exits — the hang it guards against is not platform-specific.
+    """
+
+    def test_stdio_entrypoint_exits_when_stdin_closes(self, tmp_path):
+        import json
+        import os
+        import queue
+        import subprocess
+        import sys
+        import threading
+
+        import psutil
+
+        port = _free_port()
+        env = dict(os.environ)
+        env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(tmp_path / "sessions")
+        env["STEALTH_MCP_NO_AUTO_RECOVERY"] = "1"
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "stealth_chrome_devtools_mcp",
+             "--singleton-port", str(port)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1, env=env,
+        )
+        spawned = []
+        try:
+            answers = queue.Queue()
+
+            def _reader():
+                try:
+                    for line in proc.stdout:
+                        answers.put(line)
+                finally:
+                    answers.put(None)
+
+            threading.Thread(target=_reader, daemon=True).start()
+
+            init = {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                           "clientInfo": {"name": "entrypoint-test", "version": "1"}},
+            }
+            proc.stdin.write(json.dumps(init) + "\n")
+            proc.stdin.flush()
+
+            # The proxy answers initialize locally and instantly.
+            reply = answers.get(timeout=30)
+            assert reply and "serverInfo" in reply, f"no initialize answer: {reply!r}"
+
+            # Capture the singleton backend it started so we can reap it after.
+            try:
+                spawned = psutil.Process(proc.pid).children(recursive=True)
+            except psutil.Error:
+                spawned = []
+
+            proc.stdin.close()  # client disconnects: stdin hits EOF
+
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                pytest.fail(
+                    "stdio entrypoint did not exit within 15s of client disconnect "
+                    "— the proxy process leak regressed"
+                )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            for child in spawned:
+                try:
+                    child.kill()
+                except psutil.Error:
+                    pass

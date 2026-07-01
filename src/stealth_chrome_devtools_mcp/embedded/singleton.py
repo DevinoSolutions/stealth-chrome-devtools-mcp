@@ -354,7 +354,17 @@ async def _bridge(port: int):
     from mcp.server.stdio import stdio_server
 
     async with stdio_server() as (client_read, client_write):
-        await _proxy_streams(client_read, client_write, port)
+        try:
+            await _proxy_streams(client_read, client_write, port)
+        finally:
+            # The client disconnected. mcp's stdio_server holds its __aexit__
+            # open until its stdout-writer task finishes, and that task only
+            # ends when the write stream is closed. Without this the process
+            # hangs after every disconnect instead of exiting — one stranded
+            # entrypoint per disconnect. Closing both streams lets stdio_server
+            # tear down so the entrypoint returns and the process exits.
+            await client_write.aclose()
+            await client_read.aclose()
 
 
 def run_stdio_proxy(port: int):
