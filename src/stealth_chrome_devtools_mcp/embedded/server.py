@@ -3975,16 +3975,24 @@ if parse_bool_env("XPOOL_SAFE_MODE", default=False):
     apply_disabled_sections()
 
 
-if __name__ == "__main__":
+def build_arg_parser():
+    """Construct the CLI parser for the ``python -m ... server`` entrypoint.
+
+    Extracted to module scope so argument defaults (notably the HTTP bind host)
+    are unit-testable without executing the server.
+    """
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Stealth Browser MCP Server with 90 tools")
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio",
                       help="Transport protocol to use")
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8000)),
                       help="Port for HTTP transport")
-    parser.add_argument("--host", default="0.0.0.0",
-                      help="Host for HTTP transport")
+    parser.add_argument("--host", default="127.0.0.1",
+                      help="Host for HTTP transport. Defaults to loopback because "
+                           "the backend is unauthenticated and drives logged-in "
+                           "browser profiles; pass 0.0.0.0 only to deliberately "
+                           "expose it.")
     
     parser.add_argument("--disable-browser-management", action="store_true",
                       help="Disable browser management tools (spawn, navigate, close, etc.)")
@@ -4026,7 +4034,11 @@ if __name__ == "__main__":
         help="Enable xpool-safe surface (disables cdp-functions tools that trigger Runtime.enable)",
     )
     
-    args = parser.parse_args()
+    return parser
+
+
+if __name__ == "__main__":
+    args = build_arg_parser().parse_args()
 
     if args.debug and not debug_logger._enabled:
         debug_logger.enable()
