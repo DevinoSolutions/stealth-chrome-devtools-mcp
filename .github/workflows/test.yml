@@ -3,8 +3,11 @@ name: Tests
 on:
   push:
     branches: [main, dev]
+  # Run on EVERY pull request, whatever its base — a PR stacked on a release or
+  # feature branch (not just main/dev) must still get full unit + integration CI,
+  # so regressions can never slip in through a branch the filter didn't list.
   pull_request:
-    branches: [main, dev]
+    branches: ['**']
 
 jobs:
   unit-tests:
