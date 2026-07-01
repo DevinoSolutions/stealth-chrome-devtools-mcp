@@ -195,3 +195,159 @@ class TestFastHandshakeEndToEnd:
                 backend.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 backend.kill()
+
+
+@pytest.mark.integration
+class TestProxyExitsOnClientDisconnect:
+    """The stdio proxy MUST exit when the client (Claude Code) disconnects.
+
+    The leak that made the server unusable: when stdin hits EOF, ``pump_client``
+    ends but ``run_backend``'s ``from_backend`` loop keeps reading the still-open
+    backend stream forever, so the proxy process never returns. Over days of
+    Claude Code restarts/reconnects these pile up (we measured 250 leaked stealth
+    python processes on one machine) until handles/memory are exhausted and a
+    fresh spawn wedges for hours. Closing the client stream must tear the proxy
+    down and return promptly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_proxy_returns_when_client_stream_closes(self, tmp_path):
+        import os
+        import subprocess
+        import sys
+
+        port = _free_port()
+        env = dict(os.environ)
+        env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(tmp_path / "sessions")
+        env["STEALTH_BROWSER_DEBUG"] = "false"
+
+        backend = subprocess.Popen(
+            [
+                sys.executable, "-m", "stealth_chrome_devtools_mcp",
+                "--transport", "http", "--port", str(port), "--host", "127.0.0.1",
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            env=env,
+        )
+        try:
+            c2p_tx, c2p_rx = anyio.create_memory_object_stream(50)
+            p2c_tx, p2c_rx = anyio.create_memory_object_stream(50)
+            proxy_returned = anyio.Event()
+
+            async with anyio.create_task_group() as tg:
+
+                async def run_proxy():
+                    await _proxy_streams(c2p_rx, p2c_tx, port)
+                    proxy_returned.set()
+
+                tg.start_soon(run_proxy)
+
+                # A real handshake so the backend stream is genuinely live and
+                # from_backend is parked on it (the exact leak condition).
+                await c2p_tx.send(_initialize_msg(1, "2025-03-26"))
+                await c2p_tx.send(_initialized_notification())
+                await c2p_tx.send(_tools_list_msg(2))
+                with anyio.fail_after(90):
+                    await p2c_rx.receive()  # local initialize answer
+                    await p2c_rx.receive()  # tools/list from the real backend
+
+                # The client (Claude Code) disconnects: stdin closes -> EOF.
+                await c2p_tx.aclose()
+
+                # The proxy must notice the dead client and return. On the old
+                # code it parks on the live backend stream forever and this times
+                # out — that is the leaked process.
+                with anyio.fail_after(10):
+                    await proxy_returned.wait()
+
+                tg.cancel_scope.cancel()
+        finally:
+            backend.terminate()
+            try:
+                backend.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                backend.kill()
+
+
+@pytest.mark.integration
+class TestEntrypointExitsOnDisconnect:
+    """The REAL entrypoint process must exit when the client disconnects.
+
+    This is the end-to-end guard the isolated ``_proxy_streams`` test above could
+    not provide. The leak had TWO causes: ``_proxy_streams`` not tearing down the
+    backend side, AND mcp's ``stdio_server`` holding its teardown open until the
+    write stream is closed. The unit test only covered the first and passed while
+    the real entrypoint still hung. This runs ``python -m
+    stealth_chrome_devtools_mcp``, does the handshake, closes stdin, and asserts
+    the process exits — the hang it guards against is not platform-specific.
+    """
+
+    def test_stdio_entrypoint_exits_when_stdin_closes(self, tmp_path):
+        import json
+        import os
+        import queue
+        import subprocess
+        import sys
+        import threading
+
+        import psutil
+
+        port = _free_port()
+        env = dict(os.environ)
+        env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(tmp_path / "sessions")
+        env["STEALTH_MCP_NO_AUTO_RECOVERY"] = "1"
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "stealth_chrome_devtools_mcp",
+             "--singleton-port", str(port)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1, env=env,
+        )
+        spawned = []
+        try:
+            answers = queue.Queue()
+
+            def _reader():
+                try:
+                    for line in proc.stdout:
+                        answers.put(line)
+                finally:
+                    answers.put(None)
+
+            threading.Thread(target=_reader, daemon=True).start()
+
+            init = {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                           "clientInfo": {"name": "entrypoint-test", "version": "1"}},
+            }
+            proc.stdin.write(json.dumps(init) + "\n")
+            proc.stdin.flush()
+
+            # The proxy answers initialize locally and instantly.
+            reply = answers.get(timeout=30)
+            assert reply and "serverInfo" in reply, f"no initialize answer: {reply!r}"
+
+            # Capture the singleton backend it started so we can reap it after.
+            try:
+                spawned = psutil.Process(proc.pid).children(recursive=True)
+            except psutil.Error:
+                spawned = []
+
+            proc.stdin.close()  # client disconnects: stdin hits EOF
+
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                pytest.fail(
+                    "stdio entrypoint did not exit within 15s of client disconnect "
+                    "— the proxy process leak regressed"
+                )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            for child in spawned:
+                try:
+                    child.kill()
+                except psutil.Error:
+                    pass
