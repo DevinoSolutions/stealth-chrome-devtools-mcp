@@ -538,3 +538,81 @@ class TestAutoCloneDeletion:
         await close(instance_id=iid)
         await asyncio.sleep(1.0)
         assert named_dir.exists(), f"named profile wrongly deleted: {named_dir}"
+
+
+class TestOverCapSweepPreservesLiveAndLegacyProfiles:
+    """End-to-end, NO mocks: the storage-cap sweep runs against a real session
+    root holding a real, live browser's clone and a legacy-marker profile, and
+    must reclaim ONLY the genuinely-idle disposable auto-clone.
+
+    This reproduces the exact regressions that silently deleted live/business
+    sessions in production:
+      * a clone a LIVE browser is using — spared via the real protected-dir
+        registry and the real ``_profile_has_running_browser`` heuristic (the
+        unit test fakes that heuristic; here a real Chrome is holding the dir);
+      * a user profile whose marker predates the ``auto_clean`` flag — spared by
+        the fail-safe classifier, not deleted as a disposable clone.
+    Nothing here is stubbed: real classifier, real liveness, real sweep.
+    """
+
+    MARKER = ".stealth_chrome_devtools_mcp_clone.json"
+
+    def _seed(self, sessions, name, *, auto_clean, mtime, source_kind="master-snapshot"):
+        import json as _json
+
+        d = sessions / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "data.bin").write_bytes(b"x" * 4096)
+        marker = {"source": "master", "source_kind": source_kind,
+                  "created_at": "2026-01-01T00:00:00Z"}
+        if auto_clean is not None:                 # legacy markers omit the flag
+            marker["auto_clean"] = auto_clean
+        (d / self.MARKER).write_text(_json.dumps(marker), encoding="utf-8")
+        os.utime(d, (mtime, mtime))
+        return d
+
+    @pytest.mark.asyncio
+    async def test_sweep_spares_running_clone_and_legacy_profile(self, tmp_session_root):
+        spawn = _get_fn("spawn_browser")
+        close = _get_fn("close_instance")
+        enforce = _get_fn("_enforce_clone_storage_cap_in")
+        sessions = tmp_session_root["sessions"]
+
+        # A user profile written by an OLD build: marker carries no auto_clean.
+        legacy = self._seed(sessions, "acme-payroll", auto_clean=None, mtime=1_000)
+        # A genuinely idle, disposable auto-clone (modern marker) — the only dir
+        # the sweep is allowed to reclaim. Oldest, so first by eviction ordering.
+        idle_auto = self._seed(sessions, "stealth-idle-clone", auto_clean=True, mtime=500)
+
+        master_inst = await spawn(headless=True, **_sandbox_kwargs())
+        master_iid = master_inst["instance_id"]
+        clone_iid = None
+        try:
+            # Master is busy now → this second spawn clones, and that clone is in
+            # active use by a real, running browser.
+            clone_inst = await spawn(headless=True, **_sandbox_kwargs())
+            clone_iid = clone_inst["instance_id"]
+            sel = clone_inst["spawn_diagnostics"]["profile_selection"]
+            assert sel["profile_role"] == "clone", sel
+            running_clone = Path(sel["user_data_dir"])
+            assert running_clone.exists()
+
+            # Punishing cap (1 byte) forces the real sweep to try to evict every
+            # eligible auto-clone. No mocks: real _clone_is_auto, real
+            # _profile_has_running_browser, real protected-dir registry.
+            removed = enforce(sessions, 1)
+
+            assert legacy.exists(), (
+                "legacy-marker profile deleted by the sweep (Bug C regression)"
+            )
+            assert running_clone.exists(), (
+                "a live browser's clone deleted by the sweep (Bug A regression)"
+            )
+            assert not idle_auto.exists(), (
+                "sweep failed to reclaim a genuinely idle auto-clone"
+            )
+            assert removed >= 1
+        finally:
+            if clone_iid:
+                await close(instance_id=clone_iid)
+            await close(instance_id=master_iid)
