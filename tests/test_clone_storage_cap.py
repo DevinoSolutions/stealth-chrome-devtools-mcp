@@ -26,7 +26,11 @@ from server import _clone_is_auto, _enforce_clone_storage_cap_in
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
 
-def _make_clone(root, name, *, size_bytes, source_kind="master-snapshot", auto_clean=None):
+def _make_clone(root, name, *, size_bytes, source_kind="master-snapshot", auto_clean=True):
+    # Defaults to a genuine auto-clone: production always writes an explicit
+    # auto_clean flag, and that flag — not the source_kind — is what marks a clone
+    # disposable. Named/explicit profiles pass auto_clean=False; a legacy no-flag
+    # marker is exercised in test_clone_legacy_marker_classification.py.
     d = root / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "data.bin").write_bytes(b"x" * size_bytes)
@@ -55,7 +59,8 @@ class TestClassification:
         assert _clone_is_auto(d) is True
 
     def test_explicit_named_profile_is_not_auto(self, tmp_path):
-        d = _make_clone(tmp_path, "github", size_bytes=10, source_kind="explicit-master")
+        d = _make_clone(tmp_path, "github", size_bytes=10,
+                        source_kind="explicit-master", auto_clean=False)
         assert _clone_is_auto(d) is False
 
     def test_unmarked_dir_is_not_auto(self, tmp_path):
@@ -100,7 +105,8 @@ class TestCapSweep:
         assert new.exists()
 
     def test_named_profiles_never_deleted_even_when_oldest_and_huge(self, tmp_path):
-        named = _make_clone(tmp_path, "github", size_bytes=20_000, source_kind="explicit-master")
+        named = _make_clone(tmp_path, "github", size_bytes=20_000,
+                            source_kind="explicit-master", auto_clean=False)
         _set_mtime(named, 1)
         removed = _enforce_clone_storage_cap_in(tmp_path, cap_bytes=1000)
         assert removed == 0

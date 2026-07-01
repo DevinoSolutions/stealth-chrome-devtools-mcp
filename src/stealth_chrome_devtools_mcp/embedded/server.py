@@ -11,6 +11,7 @@ import signal
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from collections import defaultdict
@@ -354,10 +355,16 @@ def _clone_is_auto(clone_dir: Path) -> bool:
     """True only for server-created disposable auto-clones.
 
     Never true for user-named/explicit profiles (they persist by design) or for
-    directories the server did not create (no clone marker). The marker carries
-    an explicit ``auto_clean`` flag; markers written before that flag existed
-    fall back to the source-kind heuristic (explicit profiles use an
-    ``explicit-*`` source kind).
+    directories the server did not create (no clone marker). Disposability is
+    carried by an explicit ``auto_clean`` flag written at clone time.
+
+    Fail-safe on legacy markers: a marker that predates the ``auto_clean`` flag
+    is NEVER treated as disposable. The old source-kind fallback
+    (``not source_kind.startswith("explicit")``) misjudged user-named profiles
+    cloned from a plain ``master-snapshot`` as auto and let the storage-cap sweep
+    permanently delete a logged-in business session — a silent, unrecoverable
+    loss. Wrongly keeping a stale auto-clone only costs bounded disk, so the
+    ambiguity resolves to "keep".
     """
     marker = clone_dir / ".stealth_chrome_devtools_mcp_clone.json"
     if not marker.exists():
@@ -366,9 +373,53 @@ def _clone_is_auto(clone_dir: Path) -> bool:
         data = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    if "auto_clean" in data:
-        return bool(data["auto_clean"])
-    return not str(data.get("source_kind", "")).startswith("explicit")
+    return bool(data.get("auto_clean", False))
+
+
+# ── Authoritative in-flight / live clone protection ──────────────────────────
+# The storage-cap sweep picks reclaim targets from on-disk markers, but a clone
+# becomes a valid target the instant its marker is written — which happens BEFORE
+# its browser launches and is tracked. During that window the filesystem liveness
+# heuristic (`_profile_has_running_browser`) reports "not running", so a
+# concurrent or startup sweep could delete a live-but-not-yet-attached clone out
+# from under the spawning browser (a silent, unlogged session loss). We therefore
+# register every clone dir the spawn flow is about to write — before the marker
+# exists — and clear it on close. The sweep skips any protected dir regardless of
+# what the filesystem heuristic reports. Guarded by a lock because the sweep runs
+# on a worker thread (`asyncio.to_thread`) while spawns run on the event loop.
+_PROTECTED_CLONE_DIRS: set = set()
+_PROTECTED_CLONE_DIRS_LOCK = threading.Lock()
+
+
+def _normalize_clone_path(path) -> str:
+    """Case/separator-normalized absolute path for protected-set membership."""
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _protect_clone_dir(path) -> None:
+    """Shield a clone dir from the storage-cap sweep while it is in flight or
+    live. Call BEFORE the clone's marker is written and keep it protected until
+    the owning instance has closed."""
+    with _PROTECTED_CLONE_DIRS_LOCK:
+        _PROTECTED_CLONE_DIRS.add(_normalize_clone_path(path))
+
+
+def _release_clone_dir(path) -> None:
+    """Drop sweep protection for a clone dir once its instance has closed."""
+    with _PROTECTED_CLONE_DIRS_LOCK:
+        _PROTECTED_CLONE_DIRS.discard(_normalize_clone_path(path))
+
+
+def _clone_dir_is_protected(path) -> bool:
+    """True while a clone dir is registered as in-flight or live (sweep-exempt)."""
+    with _PROTECTED_CLONE_DIRS_LOCK:
+        return _normalize_clone_path(path) in _PROTECTED_CLONE_DIRS
+
+
+def _clear_protected_clone_dirs() -> None:
+    """Drop all sweep protection. For test isolation and full-shutdown cleanup."""
+    with _PROTECTED_CLONE_DIRS_LOCK:
+        _PROTECTED_CLONE_DIRS.clear()
 
 
 def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> List[Path]:
@@ -406,8 +457,8 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> List[Path]:
     for _mtime, size, entry in sorted(autos, key=lambda item: item[0]):
         if total <= cap_bytes:
             break
-        if _profile_has_running_browser(entry):
-            continue  # never evict a live session to satisfy the cap
+        if _clone_dir_is_protected(entry) or _profile_has_running_browser(entry):
+            continue  # never evict a live or in-flight session to satisfy the cap
         victims.append(entry)
         total -= size
     return victims
@@ -420,6 +471,10 @@ def _enforce_clone_storage_cap_in(clone_root: Path, cap_bytes: int, reason: str 
     """
     removed = 0
     for entry in _idle_autoclones_over_cap(clone_root, cap_bytes):
+        if _clone_dir_is_protected(entry):
+            # Protection acquired between selection and deletion (a spawn started
+            # mid-sweep) — respect it rather than delete a now-in-flight clone.
+            continue
         size = _dir_size_bytes(entry)
         _rmtree_robust(entry)
         if not entry.exists():
@@ -586,6 +641,29 @@ def _enforce_session_storage(reason: str = "") -> None:
 _BACKGROUND_SWEEPS: set = set()
 
 
+def _run_storage_sweep(
+    clone_root: Path, clone_cap: int, session_cap: int, reason: str = ""
+) -> None:
+    """One reclaim pass over the clone root. Runs on a worker thread; never raises.
+
+    Three steps: delete idle auto-clones over the clone cap, trim regenerable data
+    from oversized idle named profiles, and finalize any *deferred* clone
+    deletions. That last step matters: when a close cannot delete its clone in
+    time (Windows still holding a file), the entry stays tracked until something
+    drives the retry — and nothing else does between spawns. Driving it here keeps
+    leaked clones from accumulating and holding the cap perpetually exceeded.
+
+    ``cleanup_deferred_profiles`` only ever finalizes entries whose browser
+    process is already gone, so it can never disturb a live or in-flight clone.
+    """
+    try:
+        _enforce_clone_storage_cap_in(clone_root, clone_cap, reason)
+        _enforce_named_profile_trim_in(clone_root, session_cap, reason)
+        process_cleanup.cleanup_deferred_profiles()
+    except Exception as error:
+        debug_logger.log_warning("server", "session_storage_sweep", f"sweep failed: {error}")
+
+
 def _spawn_background_sweep(reason: str = "") -> None:
     """Kick the storage sweep off the event loop without blocking the caller.
 
@@ -601,14 +679,9 @@ def _spawn_background_sweep(reason: str = "") -> None:
     clone_cap = _clone_storage_cap_bytes()
     session_cap = _session_storage_cap_bytes()
 
-    def _run() -> None:
-        try:
-            _enforce_clone_storage_cap_in(clone_root, clone_cap, reason)
-            _enforce_named_profile_trim_in(clone_root, session_cap, reason)
-        except Exception as error:
-            debug_logger.log_warning("server", "session_storage_sweep", f"sweep failed: {error}")
-
-    task = asyncio.create_task(asyncio.to_thread(_run))
+    task = asyncio.create_task(
+        asyncio.to_thread(_run_storage_sweep, clone_root, clone_cap, session_cap, reason)
+    )
     _BACKGROUND_SWEEPS.add(task)
     task.add_done_callback(_BACKGROUND_SWEEPS.discard)
 
@@ -996,6 +1069,12 @@ async def _resolve_profile_selection(
             "Spawn a browser without user_data_dir first to create and populate the master profile."
         )
 
+    # Shield this clone from the storage-cap sweep BEFORE its marker is written.
+    # The marker (written inside the copy below) makes the clone a reclaim target,
+    # yet its browser has not launched/attached yet — so without this the sweep
+    # could delete it out from under the spawning browser. Released when the
+    # instance closes (or when this spawn attempt fails).
+    _protect_clone_dir(clone)
     return _copy_clone_from_source(source, clone, clone_root, resolved_source_kind)
 
 
@@ -1205,6 +1284,11 @@ async def spawn_browser(
                 break
             except Exception as spawn_error:
                 spawn_errors.append(f"{type(spawn_error).__name__}: {spawn_error}")
+                # This attempt's clone never became a live instance — drop its
+                # sweep protection so a failed clone can't stay protected (and thus
+                # unreclaimable) for the rest of the process.
+                if profile_selection.get("profile_role") == "clone":
+                    _release_clone_dir(selected_user_data_dir)
                 fallback_selection = await _fallback_profile_selection(profile_selection, spawn_attempt)
                 if fallback_selection is None:
                     raise
@@ -1290,6 +1374,10 @@ async def close_instance(instance_id: str) -> bool:
     if success:
         await network_interceptor.clear_instance_data(instance_id)
         dynamic_hook_system.remove_instance(instance_id)
+        # Instance is gone — lift sweep protection for its disposable clone so the
+        # storage cap can reclaim it later if the on-close delete was deferred.
+        if profile_selection.get("profile_role") == "clone" and profile_selection.get("user_data_dir"):
+            _release_clone_dir(profile_selection["user_data_dir"])
         if should_refresh_snapshot:
             await asyncio.to_thread(_refresh_master_snapshot_if_safe, "after-master-close")
     return success
