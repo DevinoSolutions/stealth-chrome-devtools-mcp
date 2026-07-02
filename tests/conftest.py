@@ -20,6 +20,16 @@ EMBEDDED_DIR = (
 if str(EMBEDDED_DIR) not in sys.path:
     sys.path.insert(0, str(EMBEDDED_DIR))
 
+# Redirect clone / large-response artifacts to a temp dir for the whole test
+# session. The module-global ResponseHandler()/FileBasedElementCloner() create
+# their output dir at import time, and various tools spill files there — none of
+# it should touch the installed package or the real ~/.stealth-mcp. setdefault
+# so an explicit env (e.g. CI) still wins.
+os.environ.setdefault(
+    "STEALTH_MCP_CLONE_OUTPUT_DIR",
+    str(Path(tempfile.gettempdir()) / "stealth-mcp-test-clone-output"),
+)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures

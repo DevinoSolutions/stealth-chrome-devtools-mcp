@@ -11,3 +11,17 @@ build/
 .coverage.*
 htmlcov/
 .env
+
+# Clone / large-response artifacts. The default output dir is now
+# ~/.stealth-mcp/element_clones (outside the repo), but never commit any that
+# land in-tree via an explicit relative path or a stale pre-fix run.
+element_clones/
+
+# Local scratch / ad-hoc dev artifacts (perf probes, smoke scripts, screenshots).
+/perf_*.py
+/probe_*.py
+/preview_*.py
+/smoke_*.py
+/test_server_direct.py
+/pypi_*.png
+/test_screenshot.png

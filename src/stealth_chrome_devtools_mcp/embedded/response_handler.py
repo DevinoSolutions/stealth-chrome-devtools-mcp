@@ -8,6 +8,23 @@ from pathlib import Path
 from typing import Any, Dict, Union
 
 
+def default_clone_output_dir() -> Path:
+    """Per-user directory for clone / large-response artifacts.
+
+    Must never resolve inside the installed package: on a real (non-editable)
+    install that path lives in ``site-packages`` — often read-only (system
+    Python, containers, ``pip install --user``), where the first screenshot or
+    large-response spill would raise ``PermissionError``; and where it *is*
+    writable, artifacts silently accumulate in the install. This mirrors the
+    project's existing state-dir convention (``~/.stealth-mcp``, overridable via
+    a ``STEALTH_MCP_*`` env var). Pure: computes the path, never creates it.
+    """
+    configured = os.getenv("STEALTH_MCP_CLONE_OUTPUT_DIR")
+    if configured and configured.strip():
+        return Path(configured).expanduser()
+    return Path.home() / ".stealth-mcp" / "element_clones"
+
+
 class ResponseHandler:
     """Handle large responses by automatically falling back to file-based storage."""
     
@@ -21,10 +38,10 @@ class ResponseHandler:
         """
         self.max_tokens = max_tokens
         if clone_dir is None:
-            self.clone_dir = Path(__file__).parent.parent / "element_clones"
+            self.clone_dir = default_clone_output_dir()
         else:
             self.clone_dir = Path(clone_dir)
-        self.clone_dir.mkdir(exist_ok=True)
+        self.clone_dir.mkdir(parents=True, exist_ok=True)
     
     def estimate_tokens(self, data: Any) -> int:
         """

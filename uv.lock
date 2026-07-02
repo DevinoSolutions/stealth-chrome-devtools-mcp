@@ -1596,7 +1596,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0" },
     { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.3" },
     { name = "python-dotenv", specifier = "==1.1.1" },
-    { name = "requests", specifier = ">=2.32.0" },
+    { name = "requests", specifier = ">=2.32.0,<4" },
     { name = "strbuilder", specifier = "==1.1.3" },
     { name = "strinpy", specifier = "==0.0.4" },
     { name = "uvicorn", extras = ["standard"], specifier = "==0.35.0" },

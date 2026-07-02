@@ -18,22 +18,33 @@ sys.path.append(str(project_root))
 from comprehensive_element_cloner import ComprehensiveElementCloner
 from element_cloner import element_cloner
 
+try:
+    from .response_handler import default_clone_output_dir
+except ImportError:
+    from response_handler import default_clone_output_dir
+
 class FileBasedElementCloner:
     """Element cloner that saves data to files and returns file paths."""
 
-    def __init__(self, output_dir: str = "element_clones"):
+    def __init__(self, output_dir: Optional[str] = None):
         """
         Initialize with output directory for clone files.
 
         Args:
-            output_dir (str): Directory to save clone files.
+            output_dir (str): Directory to save clone files. When omitted,
+                defaults to a per-user location outside the installed package
+                (see ``default_clone_output_dir``) so a real install never
+                writes into read-only ``site-packages``. An explicit absolute
+                path is honored as-is; an explicit relative path stays
+                package-relative for backward compatibility.
         """
-        self.output_dir = (
-            Path(output_dir)
-            if Path(output_dir).is_absolute()
-            else Path(__file__).resolve().parent.parent / output_dir
-        )
-        self.output_dir.mkdir(exist_ok=True)
+        if output_dir is None:
+            self.output_dir = default_clone_output_dir()
+        elif Path(output_dir).is_absolute():
+            self.output_dir = Path(output_dir)
+        else:
+            self.output_dir = Path(__file__).resolve().parent.parent / output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.comprehensive_cloner = ComprehensiveElementCloner()
     
     def _safe_process_framework_handlers(self, framework_handlers):

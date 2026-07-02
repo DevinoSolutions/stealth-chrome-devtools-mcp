@@ -26,14 +26,26 @@ so they don't get re-proposed).
 - CI runs unit (3.11/3.12/3.13) + real-Chrome integration on **every** PR,
   including a no-mock E2E regression for the over-cap sweep sparing live and
   legacy profiles.
+- Clone / large-response output (screenshots, oversized-response spills,
+  element clones) no longer defaults *inside the installed package*. It writes
+  to a per-user `~/.stealth-mcp/element_clones` (override:
+  `STEALTH_MCP_CLONE_OUTPUT_DIR`), so a read-only `site-packages` (system
+  Python, containers, `pip install --user`) can no longer raise
+  `PermissionError` on the first capture, nor silently pollute the install.
+  This is the correct universal fix for issue #5 — the earlier package-root
+  anchor merely swapped a non-writable CWD for a non-writable install dir.
+  RED→GREEN: `tests/test_clone_output_dir.py` + updated
+  `tests/test_element_cloner_output_dir.py`.
 
 ---
 
 ## Ranked changes
 
 > **Status (this session):** #1 ✅ shipped · #2 ✅ shipped · #3 🟡 in progress
-> (6 subsystems covered, coverage 35 → 40 %, + a real proxy-parse bug fixed) ·
-> #5 ✅ mostly (import migration split out) · #4 ⛔ next, needs go-ahead.
+> (8 subsystems covered, coverage 35 → 41 %, + **two** real bugs fixed:
+> proxy-parse and clone/large-response output defaulting *inside the installed
+> package*) · #5 ✅ mostly (import migration split out) · #4 ⛔ next, needs
+> go-ahead.
 
 ### 1. Trash-then-purge sweep (recoverable deletion) — ✅ DONE
 
