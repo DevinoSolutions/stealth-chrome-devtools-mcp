@@ -45,11 +45,17 @@ def parse_proxy_config(proxy_url: str) -> ProxyConfig:
         raise ProxyConfigError(f"Invalid proxy URL (missing hostname): {raw}")
     if parsed.port is None:
         raise ProxyConfigError(f"Invalid proxy URL (missing port): {raw}")
-    if parsed.username is not None and parsed.password is None:
+    # urlsplit yields "" (not None) for an empty userinfo component, e.g.
+    # ":pass@host" -> username="". Normalize empty -> None so the both-or-neither
+    # credential guard below actually fires on malformed userinfo instead of
+    # silently launching a proxy with an empty username/password.
+    username = parsed.username or None
+    password = parsed.password or None
+    if username is not None and password is None:
         raise ProxyConfigError(
             f"Invalid proxy URL (username requires password): {raw}"
         )
-    if parsed.password is not None and parsed.username is None:
+    if password is not None and username is None:
         raise ProxyConfigError(
             f"Invalid proxy URL (password requires username): {raw}"
         )
@@ -63,8 +69,8 @@ def parse_proxy_config(proxy_url: str) -> ProxyConfig:
 
     return ProxyConfig(
         server=server,
-        username=parsed.username,
-        password=parsed.password,
+        username=username,
+        password=password,
     )
 
 
