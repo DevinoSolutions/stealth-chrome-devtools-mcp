@@ -77,6 +77,11 @@ coverage jumped e.g. `dynamic_hook_system` 19 → 48 %, `proxy_utils` 18 → 91 
 `parse_proxy_config` accepted `:pass@host` (empty username) because `urlsplit`
 yields `""` not `None`, defeating the both-or-neither credential guard.
 
+**Shipped (round 2, so far):** `debug_logger` (buffer caps / error dedup /
+paginated view) and `platform_utils` (stealth arg filtering / sandbox-arg
+merging) — 20 more tests. Coverage 40 → 41 % (Linux CI 39.75 → ~40.3 %); gate
+ratcheted 38 → 39.
+
 **Remaining (round 2):** live-browser smoke/contract tests for the ~66 untested
 MCP tools (integration job), plus pure-logic coverage for `dom_handler`,
 `cdp_function_executor`, the element cloners, and `proxy_forwarder`.

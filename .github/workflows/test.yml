@@ -38,7 +38,7 @@ jobs:
           uv run pytest -m "not integration" -v --tb=short
           --cov=src/stealth_chrome_devtools_mcp
           --cov-report=term-missing
-          --cov-fail-under=38
+          --cov-fail-under=39
 
   integration-tests:
     name: Integration Tests
