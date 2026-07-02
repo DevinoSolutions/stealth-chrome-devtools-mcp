@@ -611,6 +611,13 @@ class TestOverCapSweepPreservesLiveAndLegacyProfiles:
             assert not idle_auto.exists(), (
                 "sweep failed to reclaim a genuinely idle auto-clone"
             )
+            # Recoverable, not destroyed: the reclaimed clone must be retrievable
+            # from .trash within the retention window, so a wrong eviction is
+            # never irreversible data loss (defense-in-depth for Bug A/C).
+            trashed = _get_fn("_clone_trash_dir")(sessions) / "stealth-idle-clone"
+            assert trashed.exists() and (trashed / "data.bin").exists(), (
+                "evicted auto-clone must be recoverable from trash, not deleted"
+            )
             assert removed >= 1
         finally:
             if clone_iid:

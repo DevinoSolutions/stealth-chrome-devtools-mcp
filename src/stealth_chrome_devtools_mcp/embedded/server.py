@@ -16,7 +16,7 @@ import time
 import urllib.parse
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -422,6 +422,91 @@ def _clear_protected_clone_dirs() -> None:
         _PROTECTED_CLONE_DIRS.clear()
 
 
+# Evicted auto-clones are moved here — a rename within the clone root, so it is
+# instant and same-volume — instead of being deleted outright, then purged only
+# after a retention window. This turns a wrong eviction (the worst incident this
+# project has had) into a recoverable event rather than irreversible data loss.
+# The dir is excluded from every clone-root scan below so its contents are never
+# re-selected, re-sized, or re-swept.
+_CLONE_TRASH_DIRNAME = ".trash"
+
+
+def _clone_trash_dir(clone_root: Path) -> Path:
+    return clone_root / _CLONE_TRASH_DIRNAME
+
+
+def _clone_trash_retention_seconds() -> float:
+    """How long an evicted clone stays recoverable in ``.trash`` before purge.
+
+    Default 24h; override with ``STEALTH_MCP_CLONE_TRASH_RETENTION_HOURS``. A
+    value <= 0 purges on the next sweep, restoring the old delete-immediately
+    behavior for anyone who wants it.
+    """
+    hours = parse_float_env("STEALTH_MCP_CLONE_TRASH_RETENTION_HOURS", 24.0)
+    return max(0.0, hours) * 3600.0
+
+
+def _trash_clone(entry: Path, clone_root: Path):
+    """Move an evicted auto-clone into ``.trash`` so it stays recoverable.
+
+    Returns the new path on success, or ``None`` if the move was refused or the
+    entry had to be deleted instead. A running profile is never moved (selection
+    already excludes live sessions; this is belt-and-suspenders). If the rename
+    fails (e.g. a Windows lock) the storage cap must still be honored, so we fall
+    back to a best-effort delete — strictly no worse than the old behavior.
+    """
+    if _profile_has_running_browser(entry):
+        return None
+    trash = _clone_trash_dir(clone_root)
+    try:
+        trash.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    target = trash / entry.name
+    counter = 1
+    while target.exists():
+        target = trash / f"{entry.name}-{counter}"
+        counter += 1
+    try:
+        os.replace(str(entry), str(target))
+    except OSError:
+        _rmtree_robust(entry)
+        return None
+    try:
+        # Stamp the trash time so retention is measured from eviction, not from
+        # the clone's original creation (rename preserves the old mtime).
+        os.utime(target, None)
+    except OSError:
+        pass
+    return target
+
+
+def _purge_expired_trash(clone_root: Path, max_age_seconds: float) -> int:
+    """Delete trashed clones whose time-in-trash exceeds ``max_age_seconds``.
+
+    Returns the count purged. Never raises; missing or non-dir trash is a no-op.
+    """
+    trash = _clone_trash_dir(clone_root)
+    if not trash.exists():
+        return 0
+    try:
+        entries = list(trash.iterdir())
+    except OSError:
+        return 0
+    cutoff = time.time() - max_age_seconds
+    purged = 0
+    for entry in entries:
+        try:
+            if not entry.is_dir() or entry.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        _rmtree_robust(entry)
+        if not entry.exists():
+            purged += 1
+    return purged
+
+
 def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> List[Path]:
     """Oldest-first idle auto-clones whose removal brings total auto-clone
     storage within ``cap_bytes``. Read-only — selection only, no deletion.
@@ -440,6 +525,8 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> List[Path]:
     except OSError:
         return []
     for entry in entries:
+        if entry.name == _CLONE_TRASH_DIRNAME:
+            continue  # recoverable-eviction holding area — never a clone itself
         try:
             if not entry.is_dir() or not _clone_is_auto(entry):
                 continue
@@ -465,24 +552,30 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> List[Path]:
 
 
 def _enforce_clone_storage_cap_in(clone_root: Path, cap_bytes: int, reason: str = "") -> int:
-    """Delete the oldest idle auto-clones until total auto-clone storage under
-    ``clone_root`` is within ``cap_bytes``. Returns the number of dirs removed.
+    """Evict the oldest idle auto-clones until total auto-clone storage under
+    ``clone_root`` is within ``cap_bytes``. Returns the number of dirs evicted.
     Selection (and its safety invariants) lives in ``_idle_autoclones_over_cap``.
+
+    Eviction is *recoverable*: victims are moved into ``.trash`` (see
+    ``_trash_clone``) rather than deleted, and trash older than the retention
+    window is purged first — so disk is reclaimed from expired trash before any
+    live clone is touched.
     """
+    _purge_expired_trash(clone_root, _clone_trash_retention_seconds())
     removed = 0
     for entry in _idle_autoclones_over_cap(clone_root, cap_bytes):
         if _clone_dir_is_protected(entry):
-            # Protection acquired between selection and deletion (a spawn started
-            # mid-sweep) — respect it rather than delete a now-in-flight clone.
+            # Protection acquired between selection and eviction (a spawn started
+            # mid-sweep) — respect it rather than evict a now-in-flight clone.
             continue
         size = _dir_size_bytes(entry)
-        _rmtree_robust(entry)
+        _trash_clone(entry, clone_root)
         if not entry.exists():
             removed += 1
             debug_logger.log_info(
                 "server",
                 "clone_cap_sweep",
-                f"reclaimed auto-clone {entry.name} ({size} bytes) reason={reason}",
+                f"evicted auto-clone {entry.name} ({size} bytes) to trash reason={reason}",
             )
     return removed
 
@@ -583,6 +676,9 @@ def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> List[P
     except OSError:
         return []
     for entry in entries:
+        if entry.name == _CLONE_TRASH_DIRNAME:
+            continue  # trashed clones are not named profiles and must not
+            # inflate the session-cap total, or real profiles get over-trimmed
         try:
             if not entry.is_dir():
                 continue
@@ -806,7 +902,7 @@ def _copy_profile_tree(source: Path, target: Path, clone_root: Path, source_kind
     marker = {
         "source": str(source),
         "source_kind": source_kind,
-        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         # Disposable auto-clones may be reclaimed by the storage-cap sweep;
         # explicit/named profiles (explicit-* source kinds) never are.
         "auto_clean": not str(source_kind).startswith("explicit"),
@@ -929,7 +1025,7 @@ def _unique_clone_dir(base_clone: Path, suffix: str) -> Path:
     if not _profile_has_running_browser(candidate):
         return candidate
     return base_clone.with_name(
-        f"{base_clone.name}-{os.getpid()}-{safe_suffix}-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+        f"{base_clone.name}-{os.getpid()}-{safe_suffix}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
     )
 
 
@@ -946,7 +1042,7 @@ def _available_clone_dir(base_clone: Path) -> Path:
         if not _profile_has_running_browser(candidate):
             return candidate
 
-    return base_clone.with_name(f"{base_clone.name}-{os.getpid()}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}")
+    return base_clone.with_name(f"{base_clone.name}-{os.getpid()}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
 
 
 def _next_available_explicit_dir(requested: Path) -> Path:
@@ -961,7 +1057,7 @@ def _next_available_explicit_dir(requested: Path) -> Path:
         if not _profile_has_running_browser(candidate):
             return candidate
     return requested.with_name(
-        f"{requested.name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        f"{requested.name}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     )
 
 

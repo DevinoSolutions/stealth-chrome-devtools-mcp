@@ -177,6 +177,21 @@ class TestCopyProfileTree:
         data = json.loads(marker.read_text(encoding="utf-8"))
         assert data["source_kind"] == "test"
 
+    def test_marker_created_at_is_utc_z_seconds(self, tmp_session_root):
+        # Guards the datetime.utcnow() -> datetime.now(timezone.utc) migration:
+        # the marker timestamp must stay a naive-looking UTC instant with a 'Z'
+        # suffix and second precision (e.g. 2026-07-01T12:34:56Z). A naive
+        # now(timezone.utc).isoformat()+"Z" would corrupt it to '...+00:00Z'.
+        import re
+
+        dirs = tmp_session_root
+        target = dirs["sessions"] / "ts-clone"
+        _copy_profile_tree(dirs["snapshot"], target, dirs["sessions"], "test")
+        created_at = json.loads(
+            (target / ".stealth_chrome_devtools_mcp_clone.json").read_text(encoding="utf-8")
+        )["created_at"]
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", created_at), created_at
+
     def test_refuses_target_outside_clone_root(self, tmp_session_root):
         dirs = tmp_session_root
         outside = dirs["root"] / "outside-clone"
