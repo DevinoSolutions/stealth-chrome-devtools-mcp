@@ -30,7 +30,15 @@ jobs:
         run: uv sync --extra test
 
       - name: Run unit tests
-        run: uv run pytest -m "not integration" -v --tb=short
+        # Coverage gate: fail the build if unit coverage regresses below the
+        # floor. Set just under the current unit-only figure; ratchet up as the
+        # zero-coverage subsystems gain suites. Keeps the untested surface from
+        # silently growing on a green build.
+        run: >-
+          uv run pytest -m "not integration" -v --tb=short
+          --cov=src/stealth_chrome_devtools_mcp
+          --cov-report=term-missing
+          --cov-fail-under=38
 
   integration-tests:
     name: Integration Tests
