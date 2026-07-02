@@ -2841,7 +2841,8 @@ async def extract_element_assets(
         include_fonts=include_fonts,
         fetch_external=fetch_external
     ), instance_id=instance_id)
-    return await response_handler.handle_response(result, f"element_assets_{instance_id}_{selector.replace(' ', '_')}")
+    # handle_response is synchronous — awaiting its dict return raises TypeError.
+    return response_handler.handle_response(result, f"element_assets_{instance_id}_{selector.replace(' ', '_')}")
 
 
 @section_tool("element-extraction")
@@ -2912,7 +2913,8 @@ async def extract_related_files(
         follow_imports=follow_imports,
         max_depth=max_depth
     ), instance_id=instance_id)
-    return await response_handler.handle_response(result, f"related_files_{instance_id}")
+    # handle_response is synchronous — awaiting its dict return raises TypeError.
+    return response_handler.handle_response(result, f"related_files_{instance_id}")
 
 
 @section_tool("element-extraction")
@@ -3695,7 +3697,8 @@ async def discover_object_methods(
         for method in methods
     ]
     
-    return await response_handler.handle_response(
+    # handle_response is synchronous — awaiting its dict return raises TypeError.
+    return response_handler.handle_response(
         methods_data,
         f"object_methods_{object_path.replace('.', '_')}"
     )
