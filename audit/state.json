@@ -329,7 +329,7 @@
       "status": "DONE 2026-07-06",
       "landed": {
         "date": "2026-07-06",
-        "head_sha": "PENDING_FINAL_COMMIT",
+        "head_sha": "75825bb",
         "branch": "fix/singleton-version-aware-backend",
         "test_count": 415,
         "coverage": 42,
