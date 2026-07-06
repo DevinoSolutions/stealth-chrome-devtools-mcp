@@ -245,6 +245,22 @@ uses the same selectors as the automatic sweep, so the preview matches `--apply`
 - Chrome, Chromium, or Microsoft Edge
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
+## Error Reporting (opt-in)
+
+Error reporting via [Sentry](https://sentry.io) is available but **off by default**.
+No data is collected unless you explicitly enable it.
+
+To opt in (helps us diagnose issues when you need support):
+
+```bash
+pip install stealth-chrome-devtools-mcp[sentry]
+
+# Add to your .env or export in your shell:
+SENTRY_DSN=https://3206541bdab9246f00d7099e692e2ee2@sentry.devino.ca/34
+```
+
+To disable, simply unset `SENTRY_DSN` or remove it from your `.env`.
+
 ## Development setup
 
 ```bash
