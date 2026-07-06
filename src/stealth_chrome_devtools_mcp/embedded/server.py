@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import psutil
 from browser_manager import BrowserManager
 from cdp_element_cloner import CDPElementCloner
 from cdp_function_executor import CDPFunctionExecutor
