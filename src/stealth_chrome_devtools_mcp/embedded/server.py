@@ -41,6 +41,7 @@ from process_cleanup import process_cleanup
 from progressive_element_cloner import progressive_element_cloner
 from response_handler import response_handler
 
+from stealth_chrome_devtools_mcp.observability import sentry_init
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 DISABLED_SECTIONS = set()
@@ -4409,6 +4410,9 @@ if __name__ == "__main__":
             "startup",
             f"Disabled tool sections: {', '.join(sorted(DISABLED_SECTIONS))}",
         )
+
+    # Ship errors to Sentry when SENTRY_DSN is set (no-op otherwise).
+    sentry_init()
 
     if args.transport == "http":
         mcp.run(transport="http", host=args.host, port=args.port)

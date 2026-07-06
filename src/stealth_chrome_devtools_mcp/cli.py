@@ -17,6 +17,8 @@ import os
 import sys
 from pathlib import Path
 
+from stealth_chrome_devtools_mcp.observability import sentry_init
+
 EMBEDDED_DIR = Path(__file__).with_name("embedded")
 
 
@@ -305,6 +307,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # Ship errors to Sentry when SENTRY_DSN is set (no-op otherwise).
+    sentry_init()
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.command:

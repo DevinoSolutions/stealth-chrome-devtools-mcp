@@ -52,6 +52,11 @@ stealth-chrome-devtools = "stealth_chrome_devtools_mcp.cli:main"
 transpiler = [
     "py2js>=1.2.1",
 ]
+# Opt-in error shipping: `pip install stealth-chrome-devtools-mcp[sentry]` and set
+# SENTRY_DSN. observability.sentry_init() is a no-op unless the DSN is configured.
+sentry = [
+    "sentry-sdk==2.64.0",
+]
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -113,7 +118,14 @@ select = [
 #   COM / Q / ISC - the formatter owns those.
 #   FIX / TD - debt lives in the audit ledger (M14), not in TODO-comment policing.
 # E501/line-length IS enforced (human directive 2026-07-06).
-ignore = ["TRY003"]
+#
+# PLC0415 (import-outside-top-level) is OFF as a deliberate decision: function-
+# level imports are a pervasive, load-bearing idiom here (42 sites) - the
+# embedded/runpy/singleton architecture uses deferred imports to avoid import
+# cycles, and optional deps (e.g. observability's sentry_sdk) MUST import lazily
+# so a missing extra never breaks module load. It maps to none of the audit
+# findings; enforcing it would mean 42 risky hoists or 42 noqas for zero benefit.
+ignore = ["TRY003", "PLC0415"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 12
