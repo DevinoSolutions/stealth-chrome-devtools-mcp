@@ -24,7 +24,7 @@ class NetworkInterceptor:
         self._lock = asyncio.Lock()
 
     async def setup_interception(
-        self, tab: Tab, instance_id: str, block_resources: list[str] = None
+        self, tab: Tab, instance_id: str, block_resources: list[str] | None = None
     ):
         """
         Set up network interception for a tab.

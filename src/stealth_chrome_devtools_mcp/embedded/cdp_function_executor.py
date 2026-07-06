@@ -22,7 +22,12 @@ class ExecutionContext:
     """Represents a JavaScript execution context."""
 
     def __init__(
-        self, id: str, name: str, origin: str, unique_id: str, aux_data: dict = None
+        self,
+        id: str,
+        name: str,
+        origin: str,
+        unique_id: str,
+        aux_data: dict | None = None,
     ):
         """
         Args:
@@ -43,7 +48,11 @@ class FunctionInfo:
     """Information about a discovered JavaScript function."""
 
     def __init__(
-        self, name: str, path: str, signature: str = None, description: str = None
+        self,
+        name: str,
+        path: str,
+        signature: str | None = None,
+        description: str | None = None,
     ):
         """
         Args:
@@ -62,7 +71,10 @@ class FunctionCall:
     """Represents a function call to be executed."""
 
     def __init__(
-        self, function_path: str, args: list[Any] = None, context_id: str = None
+        self,
+        function_path: str,
+        args: list[Any] | None = None,
+        context_id: str | None = None,
     ):
         """
         Args:
@@ -112,7 +124,7 @@ class CDPFunctionExecutor:
         Returns:
             List[str]: List of command names.
         """
-        commands = [
+        return [
             "evaluate",
             "callFunctionOn",
             "addBinding",
@@ -135,7 +147,6 @@ class CDPFunctionExecutor:
             "getHeapUsage",
             "getIsolateId",
         ]
-        return commands
 
     async def execute_cdp_command(
         self, tab: Tab, command: str, params: dict[str, Any]
@@ -227,7 +238,7 @@ class CDPFunctionExecutor:
             return []
 
     async def discover_global_functions(
-        self, tab: Tab, context_id: str = None
+        self, tab: Tab, context_id: str | None = None
     ) -> list[FunctionInfo]:
         """
         Discovers all global JavaScript functions.
@@ -274,7 +285,7 @@ class CDPFunctionExecutor:
                 discoverFunctions(window, 'window');
                 discoverFunctions(document, 'document');
                 discoverFunctions(console, 'console');
-                const globalFuncs = ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 
+                const globalFuncs = ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
                                    'fetch', 'alert', 'confirm', 'prompt', 'parseInt', 'parseFloat'];
                 for (const funcName of globalFuncs) {
                     if (typeof window[funcName] === 'function') {
@@ -424,7 +435,7 @@ class CDPFunctionExecutor:
                     const pathParts = '{function_path}'.split('.');
                     let context = window;
                     let func = window;
-                    
+
                     for (let i = 0; i < pathParts.length; i++) {{
                         if (i === pathParts.length - 1) {{
                             func = context[pathParts[i]];
@@ -433,11 +444,11 @@ class CDPFunctionExecutor:
                             func = context;
                         }}
                     }}
-                    
+
                     if (typeof func !== 'function') {{
                         throw new Error('Not a function: {function_path}');
                     }}
-                    
+
                     const args = {js_args};
                     const result = func.apply(context, args);
                     return {{
@@ -544,7 +555,7 @@ class CDPFunctionExecutor:
             return {"success": False, "error": str(e)}
 
     async def inject_and_execute_script(
-        self, tab: Tab, script_code: str, context_id: str = None
+        self, tab: Tab, script_code: str, context_id: str | None = None
     ) -> dict[str, Any]:
         """
         Injects and executes custom JavaScript code.
@@ -790,10 +801,9 @@ class CDPFunctionExecutor:
 
             import asyncio
 
-            result = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self.inject_and_execute_script(tab, js_code), timeout=10.0
             )
-            return result
         except TimeoutError:
             return {
                 "success": False,
@@ -845,8 +855,7 @@ class CDPFunctionExecutor:
                     )
                 )
             ):
-                wrapped_code = f"(() => {{ {js_code}; return {last_line}; }})()"
-                return wrapped_code
+                return f"(() => {{ {js_code}; return {last_line}; }})()"
             return f"(() => {{ {js_code}; }})()"
 
         except ImportError:
@@ -908,9 +917,7 @@ class CDPFunctionExecutor:
         if last_line and "=" not in last_line and not last_line.endswith(":"):
             js_code = js_code.rsplit(";", 2)[0] + f"; return {last_line};"
 
-        wrapped_code = f"(function() {{ {js_code} }})()"
-
-        return wrapped_code
+        return f"(function() {{ {js_code} }})()"
 
     async def call_python_from_js(
         self, binding_name: str, args: list[Any]
@@ -949,7 +956,7 @@ class CDPFunctionExecutor:
             }
 
     async def get_function_executor_info(
-        self, instance_id: str = None
+        self, instance_id: str | None = None
     ) -> dict[str, Any]:
         """
         Gets information about the function executor state.

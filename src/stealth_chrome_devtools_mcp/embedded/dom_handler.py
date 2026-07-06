@@ -106,8 +106,8 @@ class DOMHandler:
                             is_visible = await elem.apply(
                                 """(elem) => {
                                     var style = window.getComputedStyle(elem);
-                                    return style.display !== 'none' && 
-                                           style.visibility !== 'hidden' && 
+                                    return style.display !== 'none' &&
+                                           style.visibility !== 'hidden' &&
                                            style.opacity !== '0';
                                 }"""
                             )
@@ -354,7 +354,7 @@ class DOMHandler:
                                 const value = elem.value;
                                 elem.value = value.substring(0, start) + '\\n' + value.substring(end);
                                 elem.selectionStart = elem.selectionEnd = start + 1;
-                                
+
                                 elem.dispatchEvent(new KeyboardEvent('keydown', {
                                     key: 'Enter',
                                     code: 'Enter',
@@ -370,7 +370,7 @@ class DOMHandler:
                                 const value = elem.value;
                                 elem.value = value.substring(0, start) + '\\n' + value.substring(end);
                                 elem.selectionStart = elem.selectionEnd = start + 1;
-                                
+
                                 elem.dispatchEvent(new KeyboardEvent('keydown', {
                                     key: 'Enter',
                                     code: 'Enter',
@@ -542,7 +542,7 @@ class DOMHandler:
             if hasattr(element, "update"):
                 await element.update()
 
-            state = {
+            return {
                 "tag_name": element.tag_name
                 if hasattr(element, "tag_name")
                 else "unknown",
@@ -572,8 +572,6 @@ class DOMHandler:
                 else 0,
                 "parent_tag": None,
             }
-
-            return state
 
         except Exception as e:
             raise Exception(f"Failed to get element state: {e!s}")
@@ -612,8 +610,8 @@ class DOMHandler:
                             is_visible = await element.apply(
                                 """(elem) => {
                                     var style = window.getComputedStyle(elem);
-                                    return style.display !== 'none' && 
-                                           style.visibility !== 'hidden' && 
+                                    return style.display !== 'none' &&
+                                           style.visibility !== 'hidden' &&
                                            style.opacity !== '0';
                                 }"""
                             )

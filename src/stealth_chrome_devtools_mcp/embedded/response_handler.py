@@ -29,7 +29,7 @@ def default_clone_output_dir() -> Path:
 class ResponseHandler:
     """Handle large responses by automatically falling back to file-based storage."""
 
-    def __init__(self, max_tokens: int = 20000, clone_dir: str = None):
+    def __init__(self, max_tokens: int = 20000, clone_dir: str | None = None):
         """
         Initialize the response handler.
 
@@ -66,7 +66,7 @@ class ResponseHandler:
         self,
         data: Any,
         fallback_filename_prefix: str = "large_response",
-        metadata: dict[str, Any] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Handle response data, automatically falling back to file storage if too large.

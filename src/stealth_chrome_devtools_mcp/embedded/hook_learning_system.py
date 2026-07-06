@@ -133,7 +133,7 @@ def process_request(request):
     new_headers = request["headers"].copy()
     new_headers["X-API-Key"] = "secret-api-key-123"
     new_headers["X-Custom-Client"] = "Browser-Hook-System"
-    
+
     return HookAction(
         action="modify",
         headers=new_headers
@@ -175,7 +175,7 @@ def process_request(request):
             "timestamp": datetime.now().isoformat()
         }
     }
-    
+
     return HookAction(
         action="fulfill",
         status_code=200,
@@ -195,16 +195,16 @@ def process_request(request):
 def process_request(request):
     # Block requests to social media trackers during work hours
     social_trackers = ["facebook.com", "twitter.com", "linkedin.com", "instagram.com"]
-    
+
     # Check if URL contains social tracker
     is_social_tracker = any(tracker in request["url"] for tracker in social_trackers)
-    
+
     # Check if it's tracking related
     is_tracker = "/track" in request["url"] or "/analytics" in request["url"]
-    
+
     if is_social_tracker and is_tracker:
         return HookAction(action="block")
-    
+
     # Otherwise continue normally
     return HookAction(action="continue")
 """,
@@ -217,14 +217,14 @@ def process_request(request):
                 "function": """
 def process_request(request):
     original_url = request["url"]
-    
+
     # Replace domain but keep path and parameters
     new_url = original_url.replace("old-domain.com", "new-domain.com")
-    
+
     # Add cache-busting parameter
     separator = "&" if "?" in new_url else "?"
     new_url += f"{separator}cache_bust=hook_modified"
-    
+
     return HookAction(action="redirect", url=new_url)
 """,
                 "explanation": "This hook rewrites URLs by replacing domains and adding parameters, useful for domain migrations.",
@@ -237,11 +237,11 @@ def process_request(request):
 def process_request(request):
     # Log important API calls for debugging
     print(f"[API LOG] {request['method']} {request['url']}")
-    
+
     # Log headers if they contain auth info
     if "authorization" in str(request["headers"]).lower():
         print(f"[API LOG] Has Authorization header")
-    
+
     # Always continue the request
     return HookAction(action="continue")
 """,
@@ -263,9 +263,9 @@ def process_request(request):
         "X-CSRF-Protection": "enabled",
         "X-Custom-Security": "browser-hook-system"
     })
-    
+
     return HookAction(
-        action="modify", 
+        action="modify",
         headers=security_headers
     )
 """,
@@ -279,7 +279,7 @@ def process_request(request):
 def process_request(request):
     # Simulate slow API by returning custom response immediately
     # (In real implementation, you'd add actual delays)
-    
+
     return HookAction(
         action="fulfill",
         status_code=200,
@@ -298,10 +298,10 @@ def process_request(request):
     # Only process responses (not requests)
     if request.get("stage") != "response":
         return HookAction(action="continue")
-    
+
     # Get response body
     response_body = request.get("response_body", "")
-    
+
     if "user_data" in response_body:
         # Replace sensitive data in API responses
         modified_body = response_body.replace(
@@ -309,14 +309,14 @@ def process_request(request):
         ).replace(
             '"phone":', '"phone_redacted":'
         )
-        
+
         return HookAction(
             action="fulfill",
             status_code=200,
             headers={"Content-Type": "application/json"},
             body=modified_body
         )
-    
+
     # Continue normally if no modification needed
     return HookAction(action="continue")
 """,
@@ -331,19 +331,19 @@ def process_request(request):
     # Only process responses
     if request.get("stage") != "response":
         return HookAction(action="continue")
-    
+
     # Add security headers to all responses
     security_headers = {
         "X-Content-Type-Options": "nosniff",
-        "X-Frame-Options": "DENY", 
+        "X-Frame-Options": "DENY",
         "X-XSS-Protection": "1; mode=block",
         "Strict-Transport-Security": "max-age=31536000"
     }
-    
+
     # Merge with existing headers
     current_headers = request.get("response_headers", {})
     merged_headers = {**current_headers, **security_headers}
-    
+
     return HookAction(
         action="modify",
         headers=merged_headers
@@ -360,7 +360,7 @@ def process_request(request):
     # Only process responses
     if request.get("stage") != "response":
         return HookAction(action="continue")
-    
+
     # Generate fake user data for testing
     fake_response = {
         "users": [
@@ -371,7 +371,7 @@ def process_request(request):
         "total": 3,
         "fake": True
     }
-    
+
     return HookAction(
         action="fulfill",
         status_code=200,
@@ -523,7 +523,7 @@ def process_request(request):
             # Check for dangerous operations
             dangerous_nodes = []
             for node in ast.walk(parsed):
-                if isinstance(node, ast.Import) or isinstance(node, ast.ImportFrom):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
                     warnings.append(
                         f"Imports may not work in hook context: {ast.dump(node)}"
                     )

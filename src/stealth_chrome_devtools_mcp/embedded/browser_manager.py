@@ -1128,6 +1128,7 @@ class BrowserManager:
                             f"Navigation to {url} timed out after {timeout}ms"
                         ) from error
                     raise
+        return None
 
     async def get_tab(
         self,
@@ -1282,7 +1283,7 @@ class BrowserManager:
             return False
 
     async def update_instance_state(
-        self, instance_id: str, url: str = None, title: str = None
+        self, instance_id: str, url: str | None = None, title: str | None = None
     ):
         """
         Update instance state after navigation or action.

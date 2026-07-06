@@ -1,13 +1,13 @@
 """Data models for browser MCP server."""
 
 from datetime import datetime
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class BrowserState(str, Enum):
+class BrowserState(StrEnum):
     """Browser instance states."""
 
     STARTING = "starting"
@@ -151,7 +151,7 @@ class ScriptResult(BaseModel):
     execution_time: float = Field(description="Execution time in milliseconds")
 
 
-class ElementAction(str, Enum):
+class ElementAction(StrEnum):
     """Types of element actions."""
 
     CLICK = "click"
@@ -163,7 +163,7 @@ class ElementAction(str, Enum):
     SCREENSHOT = "screenshot"
 
 
-class HookAction(str, Enum):
+class HookAction(StrEnum):
     """Types of network hook actions."""
 
     MODIFY = "modify"
@@ -173,14 +173,14 @@ class HookAction(str, Enum):
     LOG = "log"
 
 
-class HookStage(str, Enum):
+class HookStage(StrEnum):
     """Stages at which hooks can intercept."""
 
     REQUEST = "request"
     RESPONSE = "response"
 
 
-class HookStatus(str, Enum):
+class HookStatus(StrEnum):
     """Status of a hook."""
 
     ACTIVE = "active"
