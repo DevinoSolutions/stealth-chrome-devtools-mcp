@@ -40,7 +40,8 @@ class NetworkInterceptor:
                 # Convert resource types to URL patterns for blocking
                 url_patterns = []
                 for resource_type in block_resources:
-                    # Map resource types to URL patterns that typically identify these resources
+                    # Map resource types to URL patterns that typically
+                    # identify these resources
                     resource_patterns = {
                         "image": [
                             "*.jpg",
@@ -193,7 +194,9 @@ class NetworkInterceptor:
                         f"Connection lost while capturing response body: {e}",
                     )
                 except Exception:
-                    pass  # body unavailable for streaming/redirect/preflight responses (expected)
+                    # body unavailable for streaming/redirect/preflight
+                    # responses (expected)
+                    pass
 
             network_response = NetworkResponse(
                 request_id=request_id,
@@ -223,7 +226,8 @@ class NetworkInterceptor:
         Set resource type filters for network capture.
 
         instance_id: str - The browser instance identifier.
-        include_types: Optional[List[str]] - Only capture these types (Document, Stylesheet, Image, Media, Font, Script, XHR, Fetch, etc).
+        include_types: Optional[List[str]] - Only capture these types
+        (Document, Stylesheet, Image, Media, Font, Script, XHR, Fetch, etc).
         exclude_types: Optional[List[str]] - Exclude these types from capture.
         """
         async with self._lock:
@@ -398,7 +402,9 @@ class NetworkInterceptor:
                 f"Connection lost while fetching body for {request_id}: {e}",
             )
         except Exception:
-            pass  # body unavailable for streaming/redirect/preflight responses (expected)
+            # body unavailable for streaming/redirect/preflight responses
+            # (expected)
+            pass
         return None
 
     async def modify_headers(self, tab: Tab, headers: dict[str, str]):

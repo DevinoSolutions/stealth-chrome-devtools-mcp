@@ -5,6 +5,7 @@ import os
 import platform
 import shutil
 import sys
+from pathlib import Path
 
 from stealth_chrome_devtools_mcp.settings import get_settings
 
@@ -48,15 +49,16 @@ def is_running_in_container() -> bool:
             bool: True if docker indicator found in cgroup file.
         """
         try:
-            if not os.path.exists("/proc/1/cgroup"):
+            cgroup = Path("/proc/1/cgroup")
+            if not cgroup.exists():
                 return False
-            with open("/proc/1/cgroup") as f:
+            with cgroup.open() as f:
                 return "docker" in f.read()
         except (OSError, PermissionError):
             return False
 
     container_indicators = [
-        os.path.exists("/.dockerenv"),
+        Path("/.dockerenv").exists(),
         _check_cgroup_for_docker(),
         get_settings().container is not None,
         get_settings().kubernetes_service_host is not None,
@@ -67,7 +69,8 @@ def is_running_in_container() -> bool:
 
 def get_required_sandbox_args() -> list[str]:
     """
-    Get the required browser arguments for sandbox handling based on current environment.
+    Get the required browser arguments for sandbox handling based on current
+    environment.
 
     Returns:
         List[str]: List of browser arguments needed for current environment
@@ -116,7 +119,9 @@ def _stealth_blocked_args() -> dict:
         "--no-sandbox": "missing sandbox detectable via process topology",
         "--disable-gpu": "GPU absence detectable via WebGL probes",
         "--disable-dev-shm-usage": "signals headless container environment",
-        "--disable-software-rasterizer": "alters rendering pipeline (canvas fingerprint)",
+        "--disable-software-rasterizer": (
+            "alters rendering pipeline (canvas fingerprint)"
+        ),
         "--disable-webgl": "WebGL absence is a strong bot signal",
         "--disable-webgl2": "WebGL2 absence is a strong bot signal",
         "--disable-extensions": "real users have extensions",
@@ -142,7 +147,9 @@ def _stealth_blocked_args() -> dict:
         "--metrics-recording-only": "automation telemetry flag",
         "--safebrowsing-disable-auto-update": "automation default",
         "--disable-sync": "common in automation, absent in real profiles",
-        "--disable-component-extensions-with-background-pages": "component fingerprint mismatch",
+        "--disable-component-extensions-with-background-pages": (
+            "component fingerprint mismatch"
+        ),
         "--no-first-run": "automation convenience flag",
         "--no-default-browser-check": "automation convenience flag",
         "--disable-setuid-sandbox": "sandbox mismatch detectable",
@@ -287,7 +294,7 @@ def check_browser_executable() -> str | None:
     # First check static paths
     for path in possible_paths:
         try:
-            if os.path.isfile(path) and os.access(path, os.X_OK):
+            if Path(path).is_file() and os.access(path, os.X_OK):
                 return path
         except (OSError, PermissionError):
             # Handle potential permission issues on certain systems
@@ -309,7 +316,7 @@ def check_browser_executable() -> str | None:
             found_path = shutil.which(name)
             if (
                 found_path
-                and os.path.isfile(found_path)
+                and Path(found_path).is_file()
                 and os.access(found_path, os.X_OK)
             ):
                 return found_path
@@ -336,7 +343,8 @@ def validate_browser_environment() -> dict:
 
     if not browser_path:
         issues.append(
-            "Compatible browser executable not found (Chrome, Chromium, or Microsoft Edge)"
+            "Compatible browser executable not found "
+            "(Chrome, Chromium, or Microsoft Edge)"
         )
         recommendations.append(
             "Install a compatible browser (Chrome, Chromium, or Microsoft Edge)"
@@ -354,7 +362,8 @@ def validate_browser_environment() -> dict:
         # Add Edge-specific warnings if applicable
         if browser_type == "Microsoft Edge" and platform_info["system"] == "Linux":
             warnings.append(
-                "Microsoft Edge on Linux detected - ensure all dependencies are installed"
+                "Microsoft Edge on Linux detected - ensure all "
+                "dependencies are installed"
             )
 
     if platform_info["is_root"]:

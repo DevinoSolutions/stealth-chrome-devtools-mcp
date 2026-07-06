@@ -122,7 +122,8 @@ class DOMHandler:
                             debug_logger.log_info(
                                 "dom_handler",
                                 "query_elements",
-                                f"Visibility check skipped for element: {type(e).__name__}",
+                                "Visibility check skipped for element: "
+                                f"{type(e).__name__}",
                             )
 
                     bbox = None
@@ -283,12 +284,14 @@ class DOMHandler:
                 input_type = (element.attrs.get("type") or "").lower()
             if tag_name and tag_name != "input":
                 raise Exception(
-                    f"Selector '{selector}' resolved to <{tag_name}>, not a file input. "
+                    f"Selector '{selector}' resolved to <{tag_name}>, "
+                    "not a file input. "
                     'Point the selector at an <input type="file"> element.'
                 )
             if input_type and input_type != "file":
                 raise Exception(
-                    f'Selector \'{selector}\' is an <input type="{input_type}">, not type="file".'
+                    f"Selector '{selector}' is an <input type=\"{input_type}\">, "
+                    'not type="file".'
                 )
 
             await element.send_file(*resolved)
@@ -318,7 +321,8 @@ class DOMHandler:
             clear_first (bool): Clear input before typing.
             delay_ms (int): Delay between keystrokes in milliseconds.
             parse_newlines (bool): If True, parse \n as Enter key presses.
-            shift_enter (bool): If True, use Shift+Enter instead of Enter (for chat apps).
+            shift_enter (bool): If True, use Shift+Enter instead of Enter
+                (for chat apps).
 
         Returns:
             bool: True if typing succeeded, False otherwise.
@@ -352,7 +356,8 @@ class DOMHandler:
                                 const start = elem.selectionStart;
                                 const end = elem.selectionEnd;
                                 const value = elem.value;
-                                elem.value = value.substring(0, start) + '\\n' + value.substring(end);
+                                elem.value = value.substring(0, start)
+                                    + '\\n' + value.substring(end);
                                 elem.selectionStart = elem.selectionEnd = start + 1;
 
                                 elem.dispatchEvent(new KeyboardEvent('keydown', {
@@ -361,14 +366,16 @@ class DOMHandler:
                                     shiftKey: true,
                                     bubbles: true
                                 }));
-                                elem.dispatchEvent(new Event('input', { bubbles: true }));
+                                elem.dispatchEvent(
+                                    new Event('input', { bubbles: true }));
                             }""")
                         else:
                             await element.apply("""(elem) => {
                                 const start = elem.selectionStart;
                                 const end = elem.selectionEnd;
                                 const value = elem.value;
-                                elem.value = value.substring(0, start) + '\\n' + value.substring(end);
+                                elem.value = value.substring(0, start)
+                                    + '\\n' + value.substring(end);
                                 elem.selectionStart = elem.selectionEnd = start + 1;
 
                                 elem.dispatchEvent(new KeyboardEvent('keydown', {
@@ -376,7 +383,8 @@ class DOMHandler:
                                     code: 'Enter',
                                     bubbles: true
                                 }));
-                                elem.dispatchEvent(new Event('input', { bubbles: true }));
+                                elem.dispatchEvent(
+                                    new Event('input', { bubbles: true }));
                             }""")
                         await asyncio.sleep(delay_ms / 1000)
             else:
@@ -510,7 +518,8 @@ class DOMHandler:
                 safe_index = int(index)
                 await tab.evaluate(f"""
                     const select = document.querySelector({safe_selector});
-                    if (select && {safe_index} >= 0 && {safe_index} < select.options.length) {{
+                    if (select && {safe_index} >= 0
+                        && {safe_index} < select.options.length) {{
                         select.selectedIndex = {safe_index};
                         select.dispatchEvent(new Event('change', {{bubbles: true}}));
                     }}
@@ -624,7 +633,9 @@ class DOMHandler:
                             ConnectionError,
                             Exception,
                         ):
-                            pass  # visibility check may fail on detached/stale elements during wait
+                            # visibility check may fail on detached/stale
+                            # elements during wait
+                            pass
 
                     if text_content:
                         text = element.text_all
@@ -738,7 +749,8 @@ class DOMHandler:
 
         Args:
             tab (Tab): The browser tab object.
-            direction (str): Direction to scroll ('down', 'up', 'right', 'left', 'top', 'bottom').
+            direction (str): Direction to scroll ('down', 'up', 'right',
+                'left', 'top', 'bottom').
             amount (int): Amount to scroll in pixels.
             smooth (bool): Use smooth scrolling.
 
@@ -753,17 +765,26 @@ class DOMHandler:
                     f"window.scrollBy({{top: {amount}, left: 0, behavior: {behavior}}})"
                 )
             elif direction == "up":
-                script = f"window.scrollBy({{top: -{amount}, left: 0, behavior: {behavior}}})"
+                script = (
+                    f"window.scrollBy({{top: -{amount}, "
+                    f"left: 0, behavior: {behavior}}})"
+                )
             elif direction == "right":
                 script = (
                     f"window.scrollBy({{top: 0, left: {amount}, behavior: {behavior}}})"
                 )
             elif direction == "left":
-                script = f"window.scrollBy({{top: 0, left: -{amount}, behavior: {behavior}}})"
+                script = (
+                    f"window.scrollBy({{top: 0, left: -{amount}, "
+                    f"behavior: {behavior}}})"
+                )
             elif direction == "top":
                 script = f"window.scrollTo({{top: 0, left: 0, behavior: {behavior}}})"
             elif direction == "bottom":
-                script = f"window.scrollTo({{top: document.body.scrollHeight, left: 0, behavior: {behavior}}})"
+                script = (
+                    "window.scrollTo({top: document.body.scrollHeight, "
+                    f"left: 0, behavior: {behavior}}})"
+                )
             else:
                 raise ValueError(f"Invalid scroll direction: {direction}")
 

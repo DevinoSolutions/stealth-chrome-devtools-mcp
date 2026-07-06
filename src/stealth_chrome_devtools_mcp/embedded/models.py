@@ -1,7 +1,7 @@
 """Data models for browser MCP server."""
 
-from datetime import datetime
-from enum import Enum, StrEnum
+from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -34,7 +34,7 @@ class BrowserInstance(BaseModel):
 
     def update_activity(self):
         """Update last activity timestamp."""
-        self.last_activity = datetime.now()
+        self.last_activity = datetime.now(tz=timezone.utc)
 
 
 class NetworkRequest(BaseModel):
@@ -123,7 +123,11 @@ class BrowserOptions(BaseModel):
     sandbox: bool = Field(default=True, description="Enable browser sandbox mode")
     auto_clone: bool = Field(
         default=False,
-        description="Internal: profile is a disposable auto-clone of master and is deleted when the browser closes. Set by the server from the resolved profile role, never by callers.",
+        description=(
+            "Internal: profile is a disposable auto-clone of master and is "
+            "deleted when the browser closes. Set by the server from the "
+            "resolved profile role, never by callers."
+        ),
     )
 
 
@@ -137,7 +141,10 @@ class NavigationOptions(BaseModel):
     timeout: int = Field(
         default=30000,
         le=60000,
-        description="Navigation timeout in ms (max 60000). Most pages load in under 10s — use the default unless the page is known to be slow.",
+        description=(
+            "Navigation timeout in ms (max 60000). Most pages load in under "
+            "10s — use the default unless the page is known to be slow."
+        ),
     )
     referrer: str | None = Field(default=None, description="Referrer URL")
 

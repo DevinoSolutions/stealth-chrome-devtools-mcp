@@ -56,7 +56,10 @@ class HookLearningSystem:
                     },
                     "resource_type": {
                         "type": "str or None",
-                        "description": "Type of resource (Document, Script, Image, XHR, etc.)",
+                        "description": (
+                            "Type of resource (Document, Script, "
+                            "Image, XHR, etc.)"
+                        ),
                         "example": "Document",
                     },
                     "stage": {
@@ -86,12 +89,18 @@ class HookLearningSystem:
                     "modify": {
                         "description": "Modify request parameters",
                         "fields": ["url", "method", "headers", "post_data"],
-                        "example": 'HookAction(action="modify", headers={"X-Custom": "value"})',
+                        "example": (
+                            'HookAction(action="modify", '
+                            'headers={"X-Custom": "value"})'
+                        ),
                     },
                     "fulfill": {
                         "description": "Return custom response without sending request",
                         "fields": ["status_code", "headers", "body"],
-                        "example": 'HookAction(action="fulfill", status_code=200, body="Custom response")',
+                        "example": (
+                            'HookAction(action="fulfill", '
+                            'status_code=200, body="Custom response")'
+                        ),
                     },
                 },
             },
@@ -110,7 +119,11 @@ def process_request(request):
     # Block any request to doubleclick.net
     return HookAction(action="block")
 """,
-                "explanation": "This hook blocks all requests matching the URL pattern. No conditions needed since we always want to block ads.",
+                "explanation": (
+                    "This hook blocks all requests matching the URL "
+                    "pattern. No conditions needed since we always want "
+                    "to block ads."
+                ),
             },
             {
                 "name": "Simple Redirect",
@@ -121,7 +134,10 @@ def process_request(request):
     # Redirect to httpbin for testing
     return HookAction(action="redirect", url="https://httpbin.org/get")
 """,
-                "explanation": "This hook redirects any request to example.com to httpbin.org for testing purposes.",
+                "explanation": (
+                    "This hook redirects any request to example.com to "
+                    "httpbin.org for testing purposes."
+                ),
             },
             {
                 "name": "Header Modifier",
@@ -139,7 +155,10 @@ def process_request(request):
         headers=new_headers
     )
 """,
-                "explanation": "This hook adds custom headers to API requests. It copies existing headers and adds new ones.",
+                "explanation": (
+                    "This hook adds custom headers to API requests. It "
+                    "copies existing headers and adds new ones."
+                ),
             },
             {
                 "name": "Method Converter",
@@ -158,7 +177,10 @@ def process_request(request):
         post_data='{"converted": true, "original_url": "' + request["url"] + '"}'
     )
 """,
-                "explanation": "This hook converts GET requests to POST, adds JSON content-type header, and includes original URL in body.",
+                "explanation": (
+                    "This hook converts GET requests to POST, adds JSON "
+                    "content-type header, and includes original URL in body."
+                ),
             },
             {
                 "name": "Custom Response Generator",
@@ -183,7 +205,10 @@ def process_request(request):
         body=str(mock_data).replace("'", '"')  # Convert to JSON string
     )
 """,
-                "explanation": "This hook intercepts API requests and returns custom JSON responses without hitting the real server.",
+                "explanation": (
+                    "This hook intercepts API requests and returns custom "
+                    "JSON responses without hitting the real server."
+                ),
             },
             {
                 "name": "Conditional Blocker",
@@ -208,7 +233,10 @@ def process_request(request):
     # Otherwise continue normally
     return HookAction(action="continue")
 """,
-                "explanation": "This hook uses conditional logic to block social media trackers based on URL patterns and content.",
+                "explanation": (
+                    "This hook uses conditional logic to block social media "
+                    "trackers based on URL patterns and content."
+                ),
             },
             {
                 "name": "Dynamic URL Rewriter",
@@ -227,7 +255,10 @@ def process_request(request):
 
     return HookAction(action="redirect", url=new_url)
 """,
-                "explanation": "This hook rewrites URLs by replacing domains and adding parameters, useful for domain migrations.",
+                "explanation": (
+                    "This hook rewrites URLs by replacing domains and adding "
+                    "parameters, useful for domain migrations."
+                ),
             },
             {
                 "name": "Request Logger",
@@ -245,7 +276,10 @@ def process_request(request):
     # Always continue the request
     return HookAction(action="continue")
 """,
-                "explanation": "This hook logs request details for debugging/monitoring purposes but doesn't modify the request.",
+                "explanation": (
+                    "This hook logs request details for debugging/monitoring "
+                    "purposes but doesn't modify the request."
+                ),
             },
             {
                 "name": "Security Header Injector",
@@ -269,11 +303,17 @@ def process_request(request):
         headers=security_headers
     )
 """,
-                "explanation": "This hook adds security headers to POST/PUT/PATCH requests using custom conditions in requirements.",
+                "explanation": (
+                    "This hook adds security headers to POST/PUT/PATCH "
+                    "requests using custom conditions in requirements."
+                ),
             },
             {
                 "name": "Response Time Simulator",
-                "description": "Add artificial delays by fulfilling with delayed responses",
+                "description": (
+                    "Add artificial delays by fulfilling with delayed "
+                    "responses"
+                ),
                 "requirements": {"url_pattern": "*slow-api*"},
                 "function": """
 def process_request(request):
@@ -287,7 +327,10 @@ def process_request(request):
         body='{"message": "Simulated slow response", "delay": "3000ms"}'
     )
 """,
-                "explanation": "This hook simulates slow APIs by immediately returning responses instead of waiting for real server.",
+                "explanation": (
+                    "This hook simulates slow APIs by immediately returning "
+                    "responses instead of waiting for real server."
+                ),
             },
             {
                 "name": "Response Content Modifier",
@@ -320,7 +363,10 @@ def process_request(request):
     # Continue normally if no modification needed
     return HookAction(action="continue")
 """,
-                "explanation": "This response-stage hook modifies API response content to redact sensitive user data.",
+                "explanation": (
+                    "This response-stage hook modifies API response content "
+                    "to redact sensitive user data."
+                ),
             },
             {
                 "name": "Response Header Injector",
@@ -349,7 +395,10 @@ def process_request(request):
         headers=merged_headers
     )
 """,
-                "explanation": "This response-stage hook adds security headers to all responses for better protection.",
+                "explanation": (
+                    "This response-stage hook adds security headers to all "
+                    "responses for better protection."
+                ),
             },
             {
                 "name": "API Response Faker",
@@ -379,7 +428,10 @@ def process_request(request):
         body=str(fake_response).replace("'", '"')
     )
 """,
-                "explanation": "This response-stage hook replaces real API responses with fake data for testing environments.",
+                "explanation": (
+                    "This response-stage hook replaces real API responses "
+                    "with fake data for testing environments."
+                ),
             },
         ]
 
@@ -392,7 +444,10 @@ def process_request(request):
                 "fields": {
                     "url_pattern": {
                         "type": "str",
-                        "description": "Wildcard pattern to match URLs (* = any characters, ? = single character)",
+                        "description": (
+                            "Wildcard pattern to match URLs (* = any "
+                            "characters, ? = single character)"
+                        ),
                         "examples": [
                             "*example.com*",  # Any URL containing example.com
                             "https://api.*.com/*",  # Any subdomain of .com domains
@@ -403,7 +458,10 @@ def process_request(request):
                     },
                     "method": {
                         "type": "str",
-                        "description": "HTTP method to match (GET, POST, PUT, DELETE, etc.)",
+                        "description": (
+                            "HTTP method to match (GET, POST, PUT, "
+                            "DELETE, etc.)"
+                        ),
                         "examples": ["GET", "POST", "PUT", "DELETE"],
                     },
                     "resource_type": {
@@ -420,13 +478,22 @@ def process_request(request):
                     },
                     "stage": {
                         "type": "str",
-                        "description": "Stage of request processing (request = before sending, response = after receiving headers/body)",
+                        "description": (
+                            "Stage of request processing (request = before "
+                            "sending, response = after receiving headers/body)"
+                        ),
                         "examples": ["request", "response"],
-                        "note": "Response stage hooks can access response_body, response_status_code, and response_headers",
+                        "note": (
+                            "Response stage hooks can access response_body, "
+                            "response_status_code, and response_headers"
+                        ),
                     },
                     "custom_condition": {
                         "type": "str",
-                        "description": "Python expression evaluated with 'request' variable",
+                        "description": (
+                            "Python expression evaluated with 'request' "
+                            "variable"
+                        ),
                         "examples": [
                             "len(request['headers']) > 10",
                             "'json' in request['headers'].get('Content-Type', '')",
@@ -438,12 +505,18 @@ def process_request(request):
             },
             "best_practices": [
                 "Use specific URL patterns to avoid over-matching",
-                "Include method filters for POST/PUT hooks to avoid affecting GET requests",
+                (
+                    "Include method filters for POST/PUT hooks to avoid "
+                    "affecting GET requests"
+                ),
                 "Use custom conditions for complex matching logic",
                 "Test hooks with console logging before deploying",
                 "Always return a HookAction object",
                 "Handle exceptions gracefully",
-                "Use priority (lower = higher priority) to control hook execution order",
+                (
+                    "Use priority (lower = higher priority) to control "
+                    "hook execution order"
+                ),
             ],
         }
 
@@ -508,7 +581,8 @@ def process_request(request):
                     # Check function parameters
                     if len(node.args.args) != 1:
                         issues.append(
-                            "process_request function must take exactly one parameter (request)"
+                            "process_request function must take exactly one "
+                            "parameter (request)"
                         )
                     elif node.args.args[0].arg != "request":
                         warnings.append(
@@ -521,15 +595,17 @@ def process_request(request):
                 )
 
             # Check for dangerous operations
-            dangerous_nodes = []
             for node in ast.walk(parsed):
                 if isinstance(node, (ast.Import, ast.ImportFrom)):
                     warnings.append(
                         f"Imports may not work in hook context: {ast.dump(node)}"
                     )
-                elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                    if node.func.id in ["eval", "exec", "open", "input"]:
-                        issues.append(f"Dangerous function call: {node.func.id}")
+                elif (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in ["eval", "exec", "open", "input"]
+                ):
+                    issues.append(f"Dangerous function call: {node.func.id}")
 
             return {"valid": len(issues) == 0, "issues": issues, "warnings": warnings}
 

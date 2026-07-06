@@ -1,12 +1,13 @@
+import contextlib
 import gzip
 import json
-import os
 import pickle
+from pathlib import Path
 import sys
 import threading
 import traceback
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -17,19 +18,21 @@ class DebugLogger:
     MAX_WARNINGS = 1000
     MAX_INFO = 2000
     MAX_SEEN_ERRORS = 1000
+    _GZIP_THRESHOLD = 1000
+    _PICKLE_THRESHOLD = 100
 
     def __init__(self):
         """
         Initializes the DebugLogger.
 
         Variables:
-            self._errors (List[Dict[str, Any]]): Stores error logs (capped at MAX_ERRORS).
-            self._warnings (List[Dict[str, Any]]): Stores warning logs (capped at MAX_WARNINGS).
-            self._info (List[Dict[str, Any]]): Stores info logs (capped at MAX_INFO).
-            self._stats (Dict[str, int]): Stores statistics for errors, warnings, and calls.
-            self._lock (threading.Lock): Ensures thread safety for logging.
-            self._enabled (bool): Indicates if logging is enabled.
-            self._seen_errors (set): Track error signatures to prevent duplicates (capped at MAX_SEEN_ERRORS).
+            self._errors: Stores error logs (capped at MAX_ERRORS).
+            self._warnings: Stores warning logs (capped at MAX_WARNINGS).
+            self._info: Stores info logs (capped at MAX_INFO).
+            self._stats: Stores statistics for errors, warnings, and calls.
+            self._lock: Ensures thread safety for logging.
+            self._enabled: Indicates if logging is enabled.
+            self._seen_errors: Track error signatures (capped at MAX_SEEN_ERRORS).
         """
         self._errors: list[dict[str, Any]] = []
         self._warnings: list[dict[str, Any]] = []
@@ -52,10 +55,8 @@ class DebugLogger:
         """
         if not force and not self._enabled:
             return
-        try:
+        with contextlib.suppress(OSError, ValueError):
             print(message, file=sys.stderr)
-        except (OSError, ValueError):
-            pass  # stderr closed or broken pipe
 
     def log_error(
         self,
@@ -88,7 +89,7 @@ class DebugLogger:
             self._seen_errors.add(error_signature)
 
             error_entry = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "component": component,
                 "method": method,
                 "error_type": type(error).__name__,
@@ -123,7 +124,7 @@ class DebugLogger:
 
         with self._lock:
             warning_entry = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "component": component,
                 "method": method,
                 "message": message,
@@ -152,7 +153,7 @@ class DebugLogger:
 
         with self._lock:
             info_entry = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "component": component,
                 "method": method,
                 "message": message,
@@ -171,7 +172,8 @@ class DebugLogger:
         Get comprehensive debug view of all logged data.
 
         Returns:
-            Dict[str, Any]: Dictionary containing summary, recent errors/warnings, all errors/warnings, and component breakdown.
+            Dict[str, Any]: Summary, recent errors/warnings,
+                all errors/warnings, and component breakdown.
         """
         return self.get_debug_view_paginated()
 
@@ -185,12 +187,13 @@ class DebugLogger:
         Get paginated debug view of logged data with size limits.
 
         Args:
-            max_errors (Optional[int]): Maximum number of errors to include. None for all.
-            max_warnings (Optional[int]): Maximum number of warnings to include. None for all.
-            max_info (Optional[int]): Maximum number of info logs to include. None for all.
+            max_errors: Max errors to include. None for all.
+            max_warnings: Max warnings to include. None for all.
+            max_info: Max info logs to include. None for all.
 
         Returns:
-            Dict[str, Any]: Dictionary containing summary, recent errors/warnings, limited errors/warnings, and component breakdown.
+            Dict[str, Any]: Summary, recent errors/warnings,
+                limited errors/warnings, and component breakdown.
         """
         with self._lock:
             if max_errors is not None:
@@ -253,7 +256,8 @@ class DebugLogger:
         Get breakdown by component.
 
         Returns:
-            Dict[str, Dict[str, int]]: Dictionary mapping component names to their error, warning, and call counts.
+            Dict[str, Dict[str, int]]: Component names mapped
+                to their error, warning, and call counts.
         """
         breakdown = defaultdict(lambda: {"errors": 0, "warnings": 0, "calls": 0})
 
@@ -360,17 +364,17 @@ class DebugLogger:
         max_errors: int | None = None,
         max_warnings: int | None = None,
         max_info: int | None = None,
-        format: str = "auto",
+        fmt: str = "auto",
     ):
         """
         Export paginated debug logs to a file using fastest method available.
 
         Args:
-            filepath (str): Path to the file where logs will be exported.
-            max_errors (Optional[int]): Maximum number of errors to export. None for all.
-            max_warnings (Optional[int]): Maximum number of warnings to export. None for all.
-            max_info (Optional[int]): Maximum number of info logs to export. None for all.
-            format (str): Export format: 'json', 'pickle', 'gzip-pickle', 'auto' (default: 'auto').
+            filepath: Path to the output file.
+            max_errors: Max errors to export. None for all.
+            max_warnings: Max warnings to export. None for all.
+            max_info: Max info logs to export. None for all.
+            fmt: Export format ('json'/'pickle'/'gzip-pickle'/'auto').
 
         Returns:
             str: The filepath where logs were exported.
@@ -390,7 +394,7 @@ class DebugLogger:
                     "[DEBUG] Lock timeout - falling back to lock-free export"
                 )
                 return self._export_lockfree(
-                    filepath, max_errors, max_warnings, max_info, format
+                    filepath, max_errors, max_warnings, max_info, fmt
                 )
 
             self._lock_owner = "export_debug_logs"
@@ -409,25 +413,25 @@ class DebugLogger:
         except Exception as e:
             self._emit_stderr(f"[DEBUG] Exception in export: {e}")
             return self._export_lockfree(
-                filepath, max_errors, max_warnings, max_info, format
+                filepath, max_errors, max_warnings, max_info, fmt
             )
 
-        if format == "auto":
+        if fmt == "auto":
             total_items = (
                 debug_data["summary"]["returned_errors"]
                 + debug_data["summary"]["returned_warnings"]
                 + debug_data["summary"]["returned_info"]
             )
-            if total_items > 1000:
-                format = "gzip-pickle"
-            elif total_items > 100:
-                format = "pickle"
+            if total_items > self._GZIP_THRESHOLD:
+                fmt = "gzip-pickle"
+            elif total_items > self._PICKLE_THRESHOLD:
+                fmt = "pickle"
             else:
-                format = "json"
+                fmt = "json"
 
-        if format == "gzip-pickle":
+        if fmt == "gzip-pickle":
             return self._export_gzip_pickle(debug_data, filepath)
-        if format == "pickle":
+        if fmt == "pickle":
             return self._export_pickle(debug_data, filepath)
         return self._export_json(debug_data, filepath)
 
@@ -437,7 +441,7 @@ class DebugLogger:
         max_errors: int | None,
         max_warnings: int | None,
         max_info: int | None,
-        format: str,
+        fmt: str,
     ) -> str:
         """
         Lock-free export method that creates a snapshot without acquiring locks.
@@ -467,20 +471,20 @@ class DebugLogger:
             "all_info": info_snapshot,
         }
 
-        if format == "auto":
+        if fmt == "auto":
             total_items = (
                 len(errors_snapshot) + len(warnings_snapshot) + len(info_snapshot)
             )
-            if total_items > 1000:
-                format = "gzip-pickle"
-            elif total_items > 100:
-                format = "pickle"
+            if total_items > self._GZIP_THRESHOLD:
+                fmt = "gzip-pickle"
+            elif total_items > self._PICKLE_THRESHOLD:
+                fmt = "pickle"
             else:
-                format = "json"
+                fmt = "json"
 
-        if format == "gzip-pickle":
+        if fmt == "gzip-pickle":
             return self._export_gzip_pickle(debug_data, filepath)
-        if format == "pickle":
+        if fmt == "pickle":
             return self._export_pickle(debug_data, filepath)
         return self._export_json(debug_data, filepath)
 
@@ -491,7 +495,7 @@ class DebugLogger:
         with gzip.open(filepath, "wb") as f:
             pickle.dump(debug_data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        file_size = os.path.getsize(filepath)
+        file_size = Path(filepath).stat().st_size
         self._emit_stderr(
             f"[DEBUG] Exported {debug_data['summary']['returned_errors']} errors, "
             f"{debug_data['summary']['returned_warnings']} warnings, "
@@ -505,10 +509,10 @@ class DebugLogger:
         if not filepath.endswith(".pkl"):
             filepath = filepath.replace(".json", ".pkl")
 
-        with open(filepath, "wb") as f:
+        with Path(filepath).open("wb") as f:
             pickle.dump(debug_data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        file_size = os.path.getsize(filepath)
+        file_size = Path(filepath).stat().st_size
         self._emit_stderr(
             f"[DEBUG] Exported {debug_data['summary']['returned_errors']} errors, "
             f"{debug_data['summary']['returned_warnings']} warnings, "
@@ -519,10 +523,10 @@ class DebugLogger:
 
     def _export_json(self, debug_data: dict[str, Any], filepath: str) -> str:
         """Export using JSON (human readable but slower)."""
-        with open(filepath, "w") as f:
+        with Path(filepath).open("w") as f:
             json.dump(debug_data, f, separators=(",", ":"), default=str)
 
-        file_size = os.path.getsize(filepath)
+        file_size = Path(filepath).stat().st_size
         self._emit_stderr(
             f"[DEBUG] Exported {debug_data['summary']['returned_errors']} errors, "
             f"{debug_data['summary']['returned_warnings']} warnings, "

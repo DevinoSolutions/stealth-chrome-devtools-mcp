@@ -4,7 +4,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import Coroutine
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import nodriver as uc
@@ -30,12 +30,14 @@ from proxy_utils import (
 )
 
 from stealth_chrome_devtools_mcp.settings import get_settings
+import contextlib
 
 
 class BrowserManager:
     """Manages multiple browser instances."""
 
     NAVIGATION_RECYCLE_THRESHOLD = 25
+    _KILL_RETRIES = 3
 
     def __init__(self):
         self._instances: dict[str, dict] = {}
@@ -173,14 +175,10 @@ class BrowserManager:
                 "discard_instance",
                 f"Process finalize failed for {instance_id}: {e}",
             )
-        try:
+        with contextlib.suppress(KeyError):
             persistent_storage.remove_instance(instance_id)
-        except KeyError:
-            pass  # already removed
-        try:
+        with contextlib.suppress(KeyError):
             dynamic_hook_system.remove_instance(instance_id)
-        except KeyError:
-            pass  # already removed
         debug_logger.log_info(
             "browser_manager",
             "discard_instance",
@@ -247,7 +245,8 @@ class BrowserManager:
                         debug_logger.log_info(
                             "browser_manager",
                             "idle_reaper",
-                            f"Finalized {finalized_profiles} deferred temp profile cleanup entrie(s)",
+                            f"Finalized {finalized_profiles} deferred temp "
+                            "profile cleanup entrie(s)",
                         )
                 except Exception as error:
                     debug_logger.log_error(
@@ -283,7 +282,9 @@ class BrowserManager:
         debug_logger.log_info(
             "browser_manager",
             "start_idle_reaper",
-            f"Idle reaper started with timeout={self._idle_timeout_seconds_default}s interval={self._idle_reaper_interval_seconds}s",
+            f"Idle reaper started with "
+            f"timeout={self._idle_timeout_seconds_default}s "
+            f"interval={self._idle_reaper_interval_seconds}s",
         )
 
     async def stop_idle_reaper(self) -> None:
@@ -299,10 +300,8 @@ class BrowserManager:
             self._idle_reaper_task = None
             return
         self._idle_reaper_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await self._idle_reaper_task
-        except asyncio.CancelledError:
-            pass
         self._idle_reaper_task = None
 
     async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:
@@ -370,7 +369,11 @@ class BrowserManager:
             debug_logger.log_info(
                 "browser_manager",
                 "spawn_browser",
-                f"Platform: {platform_info['system']} | Root: {platform_info['is_root']} | Container: {platform_info['is_container']} | Sandbox: {options.sandbox} | Browser: {browser_type} ({browser_executable})",
+                f"Platform: {platform_info['system']} | "
+                f"Root: {platform_info['is_root']} | "
+                f"Container: {platform_info['is_container']} | "
+                f"Sandbox: {options.sandbox} | "
+                f"Browser: {browser_type} ({browser_executable})",
             )
 
             caller_args = list(options.browser_args or [])
@@ -506,7 +509,8 @@ class BrowserManager:
                     debug_logger.log_warning(
                         "browser_manager",
                         "spawn_browser",
-                        f"browser.stop() failed during cancel cleanup for {instance_id}: {stop_err}",
+                        f"browser.stop() failed during cancel cleanup "
+                        f"for {instance_id}: {stop_err}",
                     )
             if proxy_forwarder is not None:
                 try:
@@ -515,7 +519,8 @@ class BrowserManager:
                     debug_logger.log_warning(
                         "browser_manager",
                         "spawn_browser",
-                        f"Proxy close failed during cancel cleanup for {instance_id}: {proxy_err}",
+                        f"Proxy close failed during cancel cleanup "
+                        f"for {instance_id}: {proxy_err}",
                     )
             try:
                 process_cleanup.kill_browser_process(instance_id)
@@ -525,7 +530,8 @@ class BrowserManager:
                 debug_logger.log_warning(
                     "browser_manager",
                     "spawn_browser",
-                    f"Process cleanup failed during cancel for {instance_id}: {proc_err}",
+                    f"Process cleanup failed during cancel "
+                    f"for {instance_id}: {proc_err}",
                 )
             async with self._lock:
                 self._instances.pop(instance_id, None)
@@ -541,7 +547,8 @@ class BrowserManager:
                     debug_logger.log_warning(
                         "browser_manager",
                         "spawn_browser",
-                        f"browser.stop() failed during error cleanup for {instance_id}: {stop_err}",
+                        f"browser.stop() failed during error cleanup "
+                        f"for {instance_id}: {stop_err}",
                     )
             if proxy_forwarder is not None:
                 try:
@@ -550,7 +557,8 @@ class BrowserManager:
                     debug_logger.log_warning(
                         "browser_manager",
                         "spawn_browser",
-                        f"Proxy close failed during error cleanup for {instance_id}: {proxy_err}",
+                        f"Proxy close failed during error cleanup "
+                        f"for {instance_id}: {proxy_err}",
                     )
             try:
                 process_cleanup.kill_browser_process(instance_id)
@@ -558,7 +566,8 @@ class BrowserManager:
                 debug_logger.log_warning(
                     "browser_manager",
                     "spawn_browser",
-                    f"Process kill failed during error cleanup for {instance_id}: {proc_err}",
+                    f"Process kill failed during error cleanup "
+                    f"for {instance_id}: {proc_err}",
                 )
             instance.state = BrowserState.ERROR
             raise Exception(f"Failed to spawn browser: {e!s}")
@@ -743,13 +752,15 @@ class BrowserManager:
                 ):
                     import os
 
-                    for attempt in range(3):
+                    for attempt in range(self._KILL_RETRIES):
                         try:
                             browser._process.terminate()
                             debug_logger.log_info(
                                 "browser_manager",
                                 "terminate_process",
-                                f"terminated browser with pid {browser._process.pid} successfully on attempt {attempt + 1}",
+                                f"terminated browser with pid "
+                                f"{browser._process.pid} successfully on attempt "
+                                f"{attempt + 1}",
                             )
                             break
                         except Exception:
@@ -758,7 +769,9 @@ class BrowserManager:
                                 debug_logger.log_info(
                                     "browser_manager",
                                     "kill_process",
-                                    f"killed browser with pid {browser._process.pid} successfully on attempt {attempt + 1}",
+                                    f"killed browser with pid "
+                                    f"{browser._process.pid} successfully on "
+                                    f"attempt {attempt + 1}",
                                 )
                                 break
                             except Exception:
@@ -771,18 +784,21 @@ class BrowserManager:
                                         debug_logger.log_info(
                                             "browser_manager",
                                             "kill_process",
-                                            f"killed browser with pid {browser._process_pid} using signal 15 successfully on attempt {attempt + 1}",
+                                            f"killed browser with pid "
+                                            f"{browser._process_pid} using signal 15 "
+                                            f"successfully on attempt {attempt + 1}",
                                         )
                                         break
                                 except (PermissionError, ProcessLookupError) as e:
                                     debug_logger.log_info(
                                         "browser_manager",
                                         "kill_process",
-                                        f"browser already stopped or no permission to kill: {e}",
+                                        f"browser already stopped or no "
+                                        f"permission to kill: {e}",
                                     )
                                     break
                                 except Exception as e:
-                                    if attempt == 2:
+                                    if attempt == _KILL_RETRIES - 1:
                                         debug_logger.log_error(
                                             "browser_manager", "kill_process", e
                                         )
@@ -847,7 +863,8 @@ class BrowserManager:
                     "browser_manager",
                     "close_instance",
                     Exception(
-                        f"Forced cleanup failed for {instance_id}, Chrome process may be orphaned: {force_err}"
+                        f"Forced cleanup failed for {instance_id}, "
+                        f"Chrome process may be orphaned: {force_err}"
                     ),
                 )
             return True
@@ -872,7 +889,8 @@ class BrowserManager:
 
     @staticmethod
     def _is_recoverable_navigation_error(error: Exception) -> bool:
-        """Return whether a navigation error should trigger one stale-tab recovery attempt."""
+        """Return whether a navigation error should trigger one stale-tab
+        recovery attempt."""
         if isinstance(error, asyncio.TimeoutError):
             return True
 
@@ -943,13 +961,15 @@ class BrowserManager:
 
     async def get_navigation_tab(self, instance_id: str) -> Tab | None:
         """
-        Get a healthy tab for navigation, recovering from stale tracked tabs when needed.
+        Get a healthy tab for navigation, recovering from stale tracked tabs
+        when needed.
 
         Args:
             instance_id (str): Browser instance id.
 
         Returns:
-            Optional[Tab]: A valid navigation tab, or None if the instance does not exist.
+            Optional[Tab]: A valid navigation tab, or None if the instance
+            does not exist.
         """
         data = await self.get_instance(instance_id)
         if not data:
@@ -965,7 +985,10 @@ class BrowserManager:
         ):
             return await self._replace_main_tab(
                 instance_id,
-                reason=f"navigation recycle threshold {self.NAVIGATION_RECYCLE_THRESHOLD} reached",
+                reason=(
+                    f"navigation recycle threshold "
+                    f"{self.NAVIGATION_RECYCLE_THRESHOLD} reached"
+                ),
             )
 
         try:
@@ -1061,7 +1084,10 @@ class BrowserManager:
             else:
                 tab = await self._replace_main_tab(
                     instance_id,
-                    reason=f"recovering after navigation failure: {type(last_error).__name__ if last_error else 'unknown'}",
+                    reason=(
+                        f"recovering after navigation failure: "
+                        f"{type(last_error).__name__ if last_error else 'unknown'}"
+                    ),
                 )
 
             if not tab:
@@ -1119,7 +1145,8 @@ class BrowserManager:
                 debug_logger.log_warning(
                     "browser_manager",
                     "navigate",
-                    f"Navigation attempt {attempt + 1} failed for {instance_id}: {error}",
+                    f"Navigation attempt {attempt + 1} failed for "
+                    f"{instance_id}: {error}",
                     {"url": url, "attempt": attempt + 1},
                 )
                 if attempt == 1 or not self._is_recoverable_navigation_error(error):
@@ -1140,7 +1167,8 @@ class BrowserManager:
 
         Args:
             instance_id (str): The ID of the browser instance.
-            touch_activity (bool): Whether retrieving the tab should refresh last activity.
+            touch_activity (bool): Whether retrieving the tab should refresh
+            last activity.
 
         Returns:
             Optional[Tab]: The main tab if found, else None.
@@ -1162,7 +1190,8 @@ class BrowserManager:
 
         Args:
             instance_id (str): The ID of the browser instance.
-            touch_activity (bool): Whether retrieving the browser should refresh last activity.
+            touch_activity (bool): Whether retrieving the browser should
+            refresh last activity.
 
         Returns:
             Optional[Browser]: The browser object if found, else None.
@@ -1343,7 +1372,8 @@ class BrowserManager:
                     f"Storage access failed (connection issue) for {instance_id}: {e}",
                 )
             except Exception as e:
-                # Pages may block storage access (cross-origin, opaque origins, security policies)
+                # Pages may block storage access (cross-origin, opaque origins,
+                # security policies)
                 debug_logger.log_info(
                     "browser_manager",
                     "get_page_state",
@@ -1377,12 +1407,13 @@ class BrowserManager:
         Clean up inactive browser instances.
 
         Args:
-            timeout_seconds (Optional[int]): Override timeout in seconds for all instances. Uses per-instance values when None.
+            timeout_seconds (Optional[int]): Override timeout in seconds for
+            all instances. Uses per-instance values when None.
 
         Returns:
             int: Number of instances selected for idle cleanup.
         """
-        now = datetime.now()
+        now = datetime.now(tz=timezone.utc)
 
         to_close = []
         async with self._lock:

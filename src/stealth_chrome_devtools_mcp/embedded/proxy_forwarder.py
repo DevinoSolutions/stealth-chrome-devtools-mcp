@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import socket
 import ssl
 from ssl import SSLContext
@@ -12,6 +13,10 @@ from struct import error as struct_error
 from urllib.parse import urlparse
 
 from debug_logger import debug_logger
+
+_HTTP_REQUEST_LINE_MIN_PARTS = 3
+_MAX_PORT = 65535
+_SOCKS5_AUTH_USERNAME_PASSWORD = 2
 
 
 def _free_port() -> int:
@@ -25,7 +30,8 @@ def _free_port() -> int:
 
 
 class AuthenticatedProxyForwarder:
-    """Forward local unauthenticated proxy traffic to an authenticated upstream proxy."""
+    """Forward local unauthenticated proxy traffic to an authenticated
+    upstream proxy."""
 
     def __init__(
         self,
@@ -172,7 +178,7 @@ class AuthenticatedProxyForwarder:
 
             request_line_text = request_line.decode("utf-8", errors="ignore")
             parts = request_line_text.split()
-            if len(parts) < 3:
+            if len(parts) < _HTTP_REQUEST_LINE_MIN_PARTS:
                 await self._write_and_close(writer, b"HTTP/1.1 400 Bad Request\r\n\r\n")
                 return
 
@@ -193,7 +199,7 @@ class AuthenticatedProxyForwarder:
                     raise ValueError(
                         f"Invalid target port: {target_host_port}"
                     ) from error
-                if not host or port < 1 or port > 65535:
+                if not host or port < 1 or port > _MAX_PORT:
                     raise ValueError(f"Invalid target endpoint: {target_host_port}")
 
             while True:
@@ -349,7 +355,7 @@ class AuthenticatedProxyForwarder:
             await remote_writer.drain()
             _, auth_method = await read_struct(remote_reader, "!BB")
 
-            if auth_method == 2:
+            if auth_method == _SOCKS5_AUTH_USERNAME_PASSWORD:
                 auth_ticket = pack(
                     f"!BB{len(self.username)}sB{len(self.password)}s",
                     1,
@@ -435,7 +441,5 @@ class AuthenticatedProxyForwarder:
         if writer.is_closing():
             return
         writer.close()
-        try:
+        with contextlib.suppress(OSError, ConnectionError, BrokenPipeError):
             await writer.wait_closed()
-        except (OSError, ConnectionError, BrokenPipeError):
-            pass  # peer already disconnected

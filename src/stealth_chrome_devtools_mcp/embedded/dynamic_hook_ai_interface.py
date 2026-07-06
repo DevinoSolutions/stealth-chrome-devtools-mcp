@@ -168,7 +168,9 @@ class DynamicHookAIInterface:
         try:
             return {
                 "success": True,
-                "documentation": self.learning_system.get_request_object_documentation(),
+                "documentation": (
+                    self.learning_system.get_request_object_documentation()
+                ),
             }
 
         except Exception as e:

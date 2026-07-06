@@ -43,12 +43,15 @@ def _server():
     return server
 
 
+_BINARY_UNIT = 1024
+
+
 def _human(num: int) -> str:
     value = float(num)
     for unit in ("B", "KB", "MB", "GB", "TB"):
-        if value < 1024 or unit == "TB":
+        if value < _BINARY_UNIT or unit == "TB":
             return f"{value:.1f} {unit}"
-        value /= 1024
+        value /= _BINARY_UNIT
     return f"{value:.1f} TB"
 
 
@@ -82,9 +85,11 @@ def _collect_profiles(server) -> list[dict]:
 
     clone_root = server._clone_root_dir()
     if clone_root.exists():
-        for child in sorted(clone_root.iterdir()):
-            if child.is_dir():
-                rows.append(_row(child, _role(server, child)))
+        rows.extend(
+            _row(child, _role(server, child))
+            for child in sorted(clone_root.iterdir())
+            if child.is_dir()
+        )
     return rows
 
 
@@ -107,10 +112,12 @@ def _cmd_status(_args) -> int:
     print(f"version     : {singleton._server_version()}")
     print(f"session root: {root}  (exists: {root.exists()})")
     print(
-        f"clone cap   : {_human(server._clone_storage_cap_bytes())}  [STEALTH_MCP_CLONE_STORAGE_CAP_GB]"
+        f"clone cap   : {_human(server._clone_storage_cap_bytes())}  "
+        f"[STEALTH_MCP_CLONE_STORAGE_CAP_GB]"
     )
     print(
-        f"session cap : {_human(server._session_storage_cap_bytes())}  [STEALTH_MCP_SESSION_STORAGE_CAP_GB]"
+        f"session cap : {_human(server._session_storage_cap_bytes())}  "
+        f"[STEALTH_MCP_SESSION_STORAGE_CAP_GB]"
     )
     return 0
 
@@ -150,7 +157,8 @@ def _cmd_cleanup(args) -> int:
 
     if to_delete:
         print(
-            f"\ndelete {len(to_delete)} idle auto-clone(s) - frees {_human(delete_bytes)}:"
+            f"\ndelete {len(to_delete)} idle auto-clone(s) - frees "
+            f"{_human(delete_bytes)}:"
         )
         for path in to_delete:
             print(
@@ -158,11 +166,13 @@ def _cmd_cleanup(args) -> int:
             )
     if to_trim:
         print(
-            f"\ntrim {len(to_trim)} idle named profile(s) - frees ~{_human(trim_bytes)} (logins kept):"
+            f"\ntrim {len(to_trim)} idle named profile(s) - frees "
+            f"~{_human(trim_bytes)} (logins kept):"
         )
         for path in to_trim:
             print(
-                f"   - {path.name[:50]:50s} ~{_human(server._regenerable_size(path)):>10s}"
+                f"   - {path.name[:50]:50s} "
+                f"~{_human(server._regenerable_size(path)):>10s}"
             )
     print(f"\ntotal reclaimable: ~{_human(delete_bytes + trim_bytes)}")
 
@@ -173,7 +183,8 @@ def _cmd_cleanup(args) -> int:
     removed = server._enforce_clone_storage_cap_in(clone_root, clone_cap, "cli")
     freed = server._enforce_named_profile_trim_in(clone_root, session_cap, "cli")
     print(
-        f"\napplied: deleted {removed} auto-clone(s); trimmed {_human(freed)} from named profiles."
+        f"\napplied: deleted {removed} auto-clone(s); trimmed "
+        f"{_human(freed)} from named profiles."
     )
     return 0
 

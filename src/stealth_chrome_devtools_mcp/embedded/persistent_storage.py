@@ -49,7 +49,8 @@ class InMemoryStorage:
         Get browser instance data.
 
         instance_id: str - The unique identifier for the browser instance.
-        Returns: Optional[Dict[str, Any]] - The data for the browser instance, or None if not found.
+        Returns: Optional[Dict[str, Any]] - The data for the browser instance,
+        or None if not found.
         """
         with self._lock:
             return self._data.get("instances", {}).get(instance_id)

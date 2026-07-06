@@ -2,7 +2,7 @@
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -86,7 +86,7 @@ class ResponseHandler:
             return data
 
         # Data is too large, save to file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
         unique_id = str(uuid.uuid4())[:8]
         filename = f"{fallback_filename_prefix}_{timestamp}_{unique_id}.json"
         file_path = self.clone_dir / filename
@@ -94,7 +94,7 @@ class ResponseHandler:
         # Prepare file content with metadata
         file_content = {
             "metadata": {
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.now(tz=timezone.utc).isoformat(),
                 "estimated_tokens": estimated_tokens,
                 "auto_saved_due_to_size": True,
                 **(metadata or {}),
@@ -103,7 +103,7 @@ class ResponseHandler:
         }
 
         # Save to file
-        with open(file_path, "w", encoding="utf-8") as f:
+        with Path(file_path).open("w", encoding="utf-8") as f:
             json.dump(file_content, f, indent=2, ensure_ascii=False)
 
         # Return file info instead of data

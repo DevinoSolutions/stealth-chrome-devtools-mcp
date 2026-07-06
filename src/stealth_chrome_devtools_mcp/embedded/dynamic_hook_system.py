@@ -11,7 +11,7 @@ import fnmatch
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import nodriver as uc
@@ -65,7 +65,7 @@ class DynamicHook:
         self.requirements = requirements
         self.function_code = function_code
         self.priority = priority  # Lower number = higher priority
-        self.created_at = datetime.now()
+        self.created_at = datetime.now(tz=timezone.utc)
         self.trigger_count = 0
         self.last_triggered: datetime | None = None
         self.status = "active"
@@ -116,24 +116,31 @@ class DynamicHook:
         """Check if this hook matches the request."""
         try:
             # Check URL pattern
-            if "url_pattern" in self.requirements:
-                if not fnmatch.fnmatch(request.url, self.requirements["url_pattern"]):
-                    return False
+            if "url_pattern" in self.requirements and not fnmatch.fnmatch(
+                request.url, self.requirements["url_pattern"]
+            ):
+                return False
 
             # Check method
-            if "method" in self.requirements:
-                if request.method.upper() != self.requirements["method"].upper():
-                    return False
+            if (
+                "method" in self.requirements
+                and request.method.upper() != self.requirements["method"].upper()
+            ):
+                return False
 
             # Check resource type
-            if "resource_type" in self.requirements:
-                if request.resource_type != self.requirements["resource_type"]:
-                    return False
+            if (
+                "resource_type" in self.requirements
+                and request.resource_type != self.requirements["resource_type"]
+            ):
+                return False
 
             # Check stage
-            if "stage" in self.requirements:
-                if request.stage != self.requirements["stage"]:
-                    return False
+            if (
+                "stage" in self.requirements
+                and request.stage != self.requirements["stage"]
+            ):
+                return False
 
             # Check custom conditions (if any)
             if "custom_condition" in self.requirements:
@@ -150,7 +157,8 @@ class DynamicHook:
                     debug_logger.log_warning(
                         "dynamic_hook",
                         "matches",
-                        f"Custom condition eval failed for hook {self.name}: {cond_err}",
+                        f"Custom condition eval failed for hook {self.name}: "
+                        f"{cond_err}",
                     )
                     return False
 
@@ -166,7 +174,7 @@ class DynamicHook:
         """Execute the hook function."""
         try:
             self.trigger_count += 1
-            self.last_triggered = datetime.now()
+            self.last_triggered = datetime.now(tz=timezone.utc)
 
             debug_logger.log_info(
                 "dynamic_hook",
@@ -222,9 +230,12 @@ class DynamicHookSystem:
                     all_hooks.append(hook)
 
             for hook_id, hook in self.hooks.items():
-                if hook.status == "active" and hook_id not in instance_hook_ids:
-                    if not hasattr(hook, "instance_ids") or not hook.instance_ids:
-                        all_hooks.append(hook)
+                if (
+                    hook.status == "active"
+                    and hook_id not in instance_hook_ids
+                    and (not hasattr(hook, "instance_ids") or not hook.instance_ids)
+                ):
+                    all_hooks.append(hook)
 
             request_patterns = []
             response_patterns = []
@@ -282,7 +293,10 @@ class DynamicHookSystem:
             debug_logger.log_info(
                 "dynamic_hook_system",
                 "setup_interception",
-                f"Set up interception for instance {instance_id} with {len(all_patterns)} patterns ({len(request_patterns)} request, {len(response_patterns)} response)",
+                f"Set up interception for instance {instance_id} "
+                f"with {len(all_patterns)} patterns "
+                f"({len(request_patterns)} request, "
+                f"{len(response_patterns)} response)",
             )
 
         except Exception as e:
@@ -296,8 +310,9 @@ class DynamicHookSystem:
         """Handle intercepted requests and responses - process hooks immediately."""
         try:
             # Determine if this is request stage or response stage
-            # According to nodriver docs: "The stage of the request can be determined by presence of responseErrorReason
-            # and responseStatusCode -- the request is at the response stage if either of these fields is present"
+            # According to nodriver docs: "The stage of the request can be determined
+            # by presence of responseErrorReason and responseStatusCode -- the request
+            # is at the response stage if either of these fields is present"
             is_response_stage = (
                 hasattr(event, "response_status_code")
                 and event.response_status_code is not None
@@ -355,12 +370,14 @@ class DynamicHookSystem:
                     "dynamic_hook_system",
                     "_on_request_paused",
                     Exception(
-                        f"Failed to continue request after error, request may be stuck: {fallback_err}"
+                        f"Failed to continue request after error, "
+                        f"request may be stuck: {fallback_err}"
                     ),
                 )
 
     async def _process_request_hooks(self, tab, request: RequestInfo, event=None):
-        """Process hooks for a request/response in real-time with priority chain processing."""
+        """Process hooks for a request/response in real-time with priority chain
+        processing."""
         try:
             instance_hook_ids = self.instance_hooks.get(request.instance_id, [])
 
@@ -400,7 +417,8 @@ class DynamicHookSystem:
             debug_logger.log_info(
                 "dynamic_hook_system",
                 "_process_request_hooks",
-                f"Found {len(matching_hooks)} matching hooks for {request.stage} stage: {request.url}",
+                f"Found {len(matching_hooks)} matching hooks "
+                f"for {request.stage} stage: {request.url}",
             )
 
             response_body = None
@@ -452,7 +470,7 @@ class DynamicHookSystem:
                 action = HookAction(**action)
 
             hook.trigger_count += 1
-            hook.last_triggered = datetime.now()
+            hook.last_triggered = datetime.now(tz=timezone.utc)
 
             debug_logger.log_info(
                 "dynamic_hook_system",
@@ -488,7 +506,8 @@ class DynamicHookSystem:
                     "dynamic_hook_system",
                     "_process_request_hooks",
                     Exception(
-                        f"Failed to continue request after hook error, request may be stuck: {fallback_err}"
+                        f"Failed to continue request after hook error, "
+                        f"request may be stuck: {fallback_err}"
                     ),
                 )
 
@@ -743,7 +762,8 @@ class DynamicHookSystem:
                     "dynamic_hook_system",
                     "_execute_hook_action",
                     Exception(
-                        f"Failed to continue request after action error, request may be stuck: {fallback_err}"
+                        f"Failed to continue request after action error, "
+                        f"request may be stuck: {fallback_err}"
                     ),
                 )
 

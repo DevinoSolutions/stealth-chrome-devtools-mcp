@@ -27,6 +27,7 @@ class ProcessCleanup:
     """Manage tracked browser process cleanup and orphan profile recovery."""
 
     PROFILE_SWEEP_PREFIX = "uc_"
+    _MAX_CLEANUP_RETRIES = 5
 
     def __init__(self):
         """
@@ -35,7 +36,7 @@ class ProcessCleanup:
         Returns:
             None
         """
-        self.pid_file = Path(os.path.expanduser("~/.stealth_browser_pids.json"))
+        self.pid_file = Path("~/.stealth_browser_pids.json").expanduser()
         self.tracked_pids: set[int] = set()
         self.browser_processes: dict[str, dict[str, Any]] = {}
         self.orphan_profile_max_age_seconds = (
@@ -168,7 +169,7 @@ class ProcessCleanup:
         if sys.platform == "win32" and hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, self._signal_handler)
 
-    def _signal_handler(self, signum, frame):
+    def _signal_handler(self, signum, _frame):
         """
         Handle interpreter termination signals by cleaning tracked browser resources.
 
@@ -219,9 +220,8 @@ class ProcessCleanup:
         try:
             if not self.pid_file.exists():
                 return {}
-            with open(self.pid_file) as file_handle:
-                with self._file_lock(file_handle):
-                    data = json.load(file_handle)
+            with self.pid_file.open() as file_handle, self._file_lock(file_handle):
+                data = json.load(file_handle)
             return self._normalize_process_metadata(data.get("browser_processes", {}))
         except Exception as error:
             debug_logger.log_warning(
@@ -243,9 +243,8 @@ class ProcessCleanup:
                 "browser_processes": self.browser_processes,
                 "timestamp": time.time(),
             }
-            with open(self.pid_file, "w") as file_handle:
-                with self._file_lock(file_handle):
-                    json.dump(data, file_handle)
+            with self.pid_file.open("w") as file_handle, self._file_lock(file_handle):
+                json.dump(data, file_handle)
         except Exception as error:
             debug_logger.log_warning(
                 "process_cleanup",
@@ -280,7 +279,8 @@ class ProcessCleanup:
                 debug_logger.log_warning(
                     "process_cleanup",
                     "active_profiles",
-                    f"Failed inspecting process {getattr(process, 'pid', 'unknown')}: {error}",
+                    f"Failed inspecting process "
+                    f"{getattr(process, 'pid', 'unknown')}: {error}",
                 )
         return active_profile_dirs
 
@@ -316,7 +316,8 @@ class ProcessCleanup:
                 debug_logger.log_warning(
                     "process_cleanup",
                     "profile_pids",
-                    f"Failed inspecting process {getattr(process, 'pid', 'unknown')}: {error}",
+                    f"Failed inspecting process "
+                    f"{getattr(process, 'pid', 'unknown')}: {error}",
                 )
 
         return matching_pids
@@ -338,7 +339,8 @@ class ProcessCleanup:
                 ``self._init_time`` belong to the current run and are never killed.
 
         Returns:
-            bool: True if all associated browser processes were killed or already absent.
+            bool: True if all associated browser processes were killed or
+                already absent.
         """
         pids_to_kill = self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
         fallback_pid = metadata.get("pid")
@@ -357,7 +359,8 @@ class ProcessCleanup:
                         debug_logger.log_info(
                             "process_cleanup",
                             "recovery",
-                            f"Skipping PID {pid} for {instance_id}: started after server init",
+                            f"Skipping PID {pid} for {instance_id}: "
+                            f"started after server init",
                         )
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass  # gone or inaccessible — skip conservatively
@@ -408,7 +411,8 @@ class ProcessCleanup:
         Args:
             profile_dir (str): Profile directory to remove.
             instance_id (str): Browser instance id for diagnostics.
-            active_profile_dirs (Optional[Set[str]]): Active profile set used to avoid deleting in-use directories.
+            active_profile_dirs (Optional[Set[str]]): Active profile set used
+                to avoid deleting in-use directories.
 
         Returns:
             bool: True if the directory was removed or already absent.
@@ -421,18 +425,20 @@ class ProcessCleanup:
         if not path.exists():
             return True
 
-        for attempt in range(5):
+        last = self._MAX_CLEANUP_RETRIES - 1
+        for attempt in range(self._MAX_CLEANUP_RETRIES):
             current_active_profiles = (
                 active_profile_dirs
                 if active_profile_dirs is not None and attempt == 0
                 else self._get_active_browser_profile_dirs()
             )
             if normalized_profile_dir in current_active_profiles:
-                if attempt == 4:
+                if attempt == last:
                     debug_logger.log_info(
                         "process_cleanup",
                         "cleanup_profile",
-                        f"Skipping active profile directory for {instance_id}: {profile_dir}",
+                        f"Skipping active profile directory for "
+                        f"{instance_id}: {profile_dir}",
                     )
                     return False
                 time.sleep(0.15)
@@ -448,7 +454,7 @@ class ProcessCleanup:
             except FileNotFoundError:
                 return True
             except (PermissionError, OSError) as error:
-                if attempt == 4:
+                if attempt == last:
                     debug_logger.log_warning(
                         "process_cleanup",
                         "cleanup_profile",
@@ -471,7 +477,8 @@ class ProcessCleanup:
         Args:
             instance_id (str): Browser instance id.
             metadata (Dict[str, Any]): Persisted process metadata.
-            active_profile_dirs (Optional[Set[str]]): Active profile set used to avoid deleting live directories.
+            active_profile_dirs (Optional[Set[str]]): Active profile set used
+                to avoid deleting live directories.
 
         Returns:
             bool: True if cleanup succeeded or nothing needed to be removed.
@@ -507,11 +514,10 @@ class ProcessCleanup:
             return True
         if not metadata.get("user_data_dir"):
             return True
-        if metadata.get("uses_custom_data_dir") is True and not metadata.get(
-            "auto_clone"
-        ):
-            return True
-        return False
+        return bool(
+            metadata.get("uses_custom_data_dir") is True
+            and not metadata.get("auto_clone")
+        )
 
     def _sweep_orphaned_temp_profiles(self) -> int:
         """
@@ -624,7 +630,8 @@ class ProcessCleanup:
             instance_id: Browser instance identifier.
             browser_process: Browser process object with `.pid`.
             user_data_dir: Browser profile directory.
-            uses_custom_data_dir: Whether the profile directory was explicitly provided by the user.
+            uses_custom_data_dir: Whether the profile directory was explicitly
+                provided by the user.
             auto_clone: Whether the profile is a disposable auto-clone of master
                 that should be deleted once its browser closes.
 
@@ -642,15 +649,13 @@ class ProcessCleanup:
 
             pid = browser_process.pid
             create_time = None
-            try:
-                create_time = psutil.Process(pid).create_time()
-            except (
+            with contextlib.suppress(
                 psutil.NoSuchProcess,
                 psutil.AccessDenied,
                 psutil.ZombieProcess,
                 OSError,
             ):
-                pass  # process may have exited between spawn and this check
+                create_time = psutil.Process(pid).create_time()
             metadata = {
                 "pid": pid,
                 "create_time": create_time,
@@ -719,7 +724,8 @@ class ProcessCleanup:
 
     def kill_browser_process(self, instance_id: str) -> bool:
         """
-        Kill a specific tracked browser process and clean its temp profile when appropriate.
+        Kill a specific tracked browser process and clean its temp profile
+        when appropriate.
 
         Args:
             instance_id: Browser instance identifier.
@@ -807,15 +813,17 @@ class ProcessCleanup:
                 metadata,
                 active_profile_dirs=active_profile_dirs,
             )
-            if self._should_untrack_after_cleanup(metadata, cleaned):
-                if self.untrack_browser_process(instance_id):
-                    finalized_count += 1
+            if self._should_untrack_after_cleanup(
+                metadata, cleaned
+            ) and self.untrack_browser_process(instance_id):
+                finalized_count += 1
 
         if finalized_count:
             debug_logger.log_info(
                 "process_cleanup",
                 "cleanup_deferred_profiles",
-                f"Finalized {finalized_count} deferred browser profile cleanup entrie(s)",
+                f"Finalized {finalized_count} deferred browser profile "
+                f"cleanup entrie(s)",
             )
 
         return finalized_count
@@ -847,7 +855,8 @@ class ProcessCleanup:
                     debug_logger.log_warning(
                         "process_cleanup",
                         "kill_process",
-                        f"PID {pid} is not a browser process ({process_name}), skipping",
+                        f"PID {pid} is not a browser process "
+                        f"({process_name}), skipping",
                     )
                     return False
             except psutil.NoSuchProcess:

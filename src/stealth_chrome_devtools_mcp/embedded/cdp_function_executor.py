@@ -1,7 +1,9 @@
 """
-CDP Function Executor - Direct JavaScript function execution via Chrome DevTools Protocol
+CDP Function Executor - Direct JavaScript function execution via Chrome DevTools
+Protocol
 
-This module provides comprehensive function execution capabilities using nodriver's CDP access:
+This module provides comprehensive function execution capabilities using
+nodriver's CDP access:
 1. Direct CDP command execution
 2. JavaScript function discovery and execution
 3. Dynamic script injection and execution
@@ -23,7 +25,7 @@ class ExecutionContext:
 
     def __init__(
         self,
-        id: str,
+        ctx_id: str,
         name: str,
         origin: str,
         unique_id: str,
@@ -31,13 +33,13 @@ class ExecutionContext:
     ):
         """
         Args:
-            id (str): Execution context identifier.
-            name (str): Name of the context.
-            origin (str): Origin URL of the context.
-            unique_id (str): Unique identifier for the context.
-            aux_data (dict, optional): Auxiliary data for the context.
+            ctx_id: Execution context identifier.
+            name: Name of the context.
+            origin: Origin URL of the context.
+            unique_id: Unique identifier for the context.
+            aux_data: Auxiliary data for the context.
         """
-        self.id = id
+        self.id = ctx_id
         self.name = name
         self.origin = origin
         self.unique_id = unique_id
@@ -225,7 +227,7 @@ class CDPFunctionExecutor:
                 for i, ctx in enumerate(context_data.get("contexts", [])):
                     contexts.append(
                         ExecutionContext(
-                            id=str(i),
+                            ctx_id=str(i),
                             name=ctx["name"],
                             origin=ctx["origin"],
                             unique_id=f"{ctx['origin']}_{i}",
@@ -270,10 +272,12 @@ class CDPFunctionExecutor:
                                     functions.push({
                                         name: key,
                                         path: fullPath,
-                                        signature: value.toString().split('{')[0].trim(),
+                                        signature: value.toString()
+                                            .split('{')[0].trim(),
                                         description: `Function at ${fullPath}`
                                     });
-                                } else if (typeof value === 'object' && value !== null && depth < 2) {
+                                } else if (typeof value === 'object'
+                                    && value !== null && depth < 2) {
                                     discoverFunctions(value, fullPath, depth + 1);
                                 }
                             } catch (e) {
@@ -285,8 +289,12 @@ class CDPFunctionExecutor:
                 discoverFunctions(window, 'window');
                 discoverFunctions(document, 'document');
                 discoverFunctions(console, 'console');
-                const globalFuncs = ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
-                                   'fetch', 'alert', 'confirm', 'prompt', 'parseInt', 'parseFloat'];
+                const globalFuncs = [
+                    'setTimeout', 'setInterval',
+                    'clearTimeout', 'clearInterval',
+                    'fetch', 'alert', 'confirm',
+                    'prompt', 'parseInt', 'parseFloat'
+                ];
                 for (const funcName of globalFuncs) {
                     if (typeof window[funcName] === 'function') {
                         functions.push({
@@ -309,17 +317,15 @@ class CDPFunctionExecutor:
             )
             if result and result[0] and result[0].value:
                 functions_data = result[0].value
-                functions = []
-                for func_data in functions_data:
-                    functions.append(
-                        FunctionInfo(
-                            name=func_data["name"],
-                            path=func_data["path"],
-                            signature=func_data.get("signature"),
-                            description=func_data.get("description"),
-                        )
+                return [
+                    FunctionInfo(
+                        name=func_data["name"],
+                        path=func_data["path"],
+                        signature=func_data.get("signature"),
+                        description=func_data.get("description"),
                     )
-                return functions
+                    for func_data in functions_data
+                ]
             return []
         except Exception as e:
             debug_logger.log_error(
@@ -687,7 +693,8 @@ class CDPFunctionExecutor:
                 debug_logger.log_info(
                     "cdp_function_executor",
                     "execute_function_sequence",
-                    f"Executing call {i + 1}/{len(function_calls)}: {func_call.function_path}",
+                    f"Executing call {i + 1}/{len(function_calls)}: "
+                    f"{func_call.function_path}",
                 )
                 result = await self.call_discovered_function(
                     tab, func_call.function_path, func_call.args
@@ -744,7 +751,8 @@ class CDPFunctionExecutor:
                     window.{binding_name} = function(...args) {{
                         return new Promise((resolve, reject) => {{
                             const callId = Math.random().toString(36).substr(2, 9);
-                            window.addEventListener(`{binding_name}_response_${{callId}}`, function(event) {{
+                            const evtName = `{binding_name}_response_${{callId}}`;
+                            window.addEventListener(evtName, function(event) {{
                                 if (event.detail.success) {{
                                     resolve(event.detail.result);
                                 }} else {{
@@ -807,7 +815,8 @@ class CDPFunctionExecutor:
         except TimeoutError:
             return {
                 "success": False,
-                "error": "Python execution timeout - code may have infinite loop or syntax error",
+                "error": "Python execution timeout - code may have infinite loop "
+                "or syntax error",
             }
         except Exception as e:
             debug_logger.log_error(
@@ -903,11 +912,14 @@ class CDPFunctionExecutor:
             for py_syntax, js_syntax in replacements.items():
                 js_line = js_line.replace(py_syntax, js_syntax)
 
-            if "=" in js_line and not js_line.strip().startswith("//"):
-                if re.match(r"^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*=", js_line):
-                    js_line = re.sub(
-                        r"^(\s*)([a-zA-Z_][a-zA-Z0-9_]*\s*=)", r"\1let \2", js_line
-                    )
+            if (
+                "=" in js_line
+                and not js_line.strip().startswith("//")
+                and re.match(r"^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*=", js_line)
+            ):
+                js_line = re.sub(
+                    r"^(\s*)([a-zA-Z_][a-zA-Z0-9_]*\s*=)", r"\1let \2", js_line
+                )
 
             js_lines.append(js_line)
 
