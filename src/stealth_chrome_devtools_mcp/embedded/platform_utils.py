@@ -320,7 +320,7 @@ def check_browser_executable() -> str | None:
                 and os.access(found_path, os.X_OK)
             ):
                 return found_path
-        except Exception:
+        except Exception:  # noqa: S112,BLE001  plan_M10a,DEBT(F-181)
             continue
 
     return None

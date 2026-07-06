@@ -57,8 +57,7 @@ class HookLearningSystem:
                     "resource_type": {
                         "type": "str or None",
                         "description": (
-                            "Type of resource (Document, Script, "
-                            "Image, XHR, etc.)"
+                            "Type of resource (Document, Script, Image, XHR, etc.)"
                         ),
                         "example": "Document",
                     },
@@ -90,8 +89,7 @@ class HookLearningSystem:
                         "description": "Modify request parameters",
                         "fields": ["url", "method", "headers", "post_data"],
                         "example": (
-                            'HookAction(action="modify", '
-                            'headers={"X-Custom": "value"})'
+                            'HookAction(action="modify", headers={"X-Custom": "value"})'
                         ),
                     },
                     "fulfill": {
@@ -311,8 +309,7 @@ def process_request(request):
             {
                 "name": "Response Time Simulator",
                 "description": (
-                    "Add artificial delays by fulfilling with delayed "
-                    "responses"
+                    "Add artificial delays by fulfilling with delayed responses"
                 ),
                 "requirements": {"url_pattern": "*slow-api*"},
                 "function": """
@@ -459,8 +456,7 @@ def process_request(request):
                     "method": {
                         "type": "str",
                         "description": (
-                            "HTTP method to match (GET, POST, PUT, "
-                            "DELETE, etc.)"
+                            "HTTP method to match (GET, POST, PUT, DELETE, etc.)"
                         ),
                         "examples": ["GET", "POST", "PUT", "DELETE"],
                     },
@@ -491,8 +487,7 @@ def process_request(request):
                     "custom_condition": {
                         "type": "str",
                         "description": (
-                            "Python expression evaluated with 'request' "
-                            "variable"
+                            "Python expression evaluated with 'request' variable"
                         ),
                         "examples": [
                             "len(request['headers']) > 10",
@@ -611,7 +606,7 @@ def process_request(request):
 
         except SyntaxError as e:
             return {"valid": False, "issues": [f"Syntax error: {e}"], "warnings": []}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  DEBT(F-181)
             return {"valid": False, "issues": [f"Parse error: {e}"], "warnings": []}
 
 

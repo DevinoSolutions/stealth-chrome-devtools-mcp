@@ -97,10 +97,10 @@ class DynamicHook:
                 },
             }
 
-            exec(self.function_code, namespace)
+            exec(self.function_code, namespace)  # noqa: S102  PERMANENT(exec hook code by design)
 
             if "process_request" not in namespace:
-                raise ValueError("Function must define 'process_request(request)'")
+                raise ValueError("Function must define 'process_request(request)'")  # noqa: TRY301  plan_M4ph1
 
             return namespace["process_request"]
 
@@ -110,9 +110,9 @@ class DynamicHook:
                 "compile_function",
                 f"Failed to compile function for hook {self.name}: {e}",
             )
-            return lambda request: HookAction(action="continue")
+            return lambda request: HookAction(action="continue")  # noqa: ARG005  PERMANENT(interface stability)
 
-    def matches(self, request: RequestInfo) -> bool:
+    def matches(self, request: RequestInfo) -> bool:  # noqa: PLR0911  DEBT(F-165)
         """Check if this hook matches the request."""
         try:
             # Check URL pattern
@@ -150,7 +150,7 @@ class DynamicHook:
                     "__builtins__": {"len": len, "str": str},
                 }
                 try:
-                    result = eval(condition_code, namespace)
+                    result = eval(condition_code, namespace)  # noqa: S307  PERMANENT(eval hook matching by design)
                     if not result:
                         return False
                 except Exception as cond_err:
@@ -375,7 +375,7 @@ class DynamicHookSystem:
                     ),
                 )
 
-    async def _process_request_hooks(self, tab, request: RequestInfo, event=None):
+    async def _process_request_hooks(self, tab, request: RequestInfo, event=None):  # noqa: C901,PLR0912,PLR0915  DEBT(F-165)
         """Process hooks for a request/response in real-time with priority chain
         processing."""
         try:
@@ -624,8 +624,12 @@ class DynamicHookSystem:
         """Remove a browser instance and its hook associations."""
         self.instance_hooks.pop(instance_id, None)
 
-    async def _execute_hook_action(
-        self, tab, request: RequestInfo, action: HookAction, event=None
+    async def _execute_hook_action(  # noqa: C901,PLR0912  DEBT(F-165)
+        self,
+        tab,
+        request: RequestInfo,
+        action: HookAction,
+        event=None,  # noqa: ARG002  PERMANENT(interface stability)
     ):
         """Execute a hook action for either request or response stage."""
         try:

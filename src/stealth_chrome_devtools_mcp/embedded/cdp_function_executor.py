@@ -168,7 +168,7 @@ class CDPFunctionExecutor:
             await self.enable_runtime(tab)
             cdp_method = getattr(uc.cdp.runtime, command, None)
             if not cdp_method:
-                raise ValueError(f"Unknown CDP command: {command}")
+                raise ValueError(f"Unknown CDP command: {command}")  # noqa: TRY301  plan_M4ph1
             result = await tab.send(cdp_method(**params))
             debug_logger.log_info(
                 "cdp_function_executor",
@@ -240,7 +240,9 @@ class CDPFunctionExecutor:
             return []
 
     async def discover_global_functions(
-        self, tab: Tab, context_id: str | None = None
+        self,
+        tab: Tab,
+        context_id: str | None = None,  # noqa: ARG002  PERMANENT(interface stability)
     ) -> list[FunctionInfo]:
         """
         Discovers all global JavaScript functions.
@@ -561,7 +563,10 @@ class CDPFunctionExecutor:
             return {"success": False, "error": str(e)}
 
     async def inject_and_execute_script(
-        self, tab: Tab, script_code: str, context_id: str | None = None
+        self,
+        tab: Tab,
+        script_code: str,
+        context_id: str | None = None,  # noqa: ARG002  PERMANENT(interface stability)
     ) -> dict[str, Any]:
         """
         Injects and executes custom JavaScript code.

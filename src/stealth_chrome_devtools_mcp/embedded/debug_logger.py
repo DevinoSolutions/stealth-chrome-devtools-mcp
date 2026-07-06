@@ -2,12 +2,12 @@ import contextlib
 import gzip
 import json
 import pickle
-from pathlib import Path
 import sys
 import threading
 import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -56,7 +56,7 @@ class DebugLogger:
         if not force and not self._enabled:
             return
         with contextlib.suppress(OSError, ValueError):
-            print(message, file=sys.stderr)
+            print(message, file=sys.stderr)  # noqa: T201  plan_M3
 
     def log_error(
         self,
@@ -296,7 +296,7 @@ class DebugLogger:
                 self._emit_stderr(
                     "[DEBUG] Failed to clear logs - timeout acquiring lock"
                 )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  DEBT(F-181)
             self._emit_stderr(f"[DEBUG] Error clearing logs: {e}")
 
     def clear_debug_view_safe(self):
@@ -305,7 +305,7 @@ class DebugLogger:
         """
         try:
             self.clear_debug_view()
-        except Exception:
+        except Exception:  # noqa: BLE001  DEBT(F-181)
             self._errors = []
             self._warnings = []
             self._info = []
@@ -410,7 +410,7 @@ class DebugLogger:
                 self._lock_acquired_time = 0
                 self._lock.release()
                 self._emit_stderr("[DEBUG] Lock released by export_debug_logs")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  DEBT(F-181)
             self._emit_stderr(f"[DEBUG] Exception in export: {e}")
             return self._export_lockfree(
                 filepath, max_errors, max_warnings, max_info, fmt

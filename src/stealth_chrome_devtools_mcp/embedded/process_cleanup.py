@@ -322,7 +322,7 @@ class ProcessCleanup:
 
         return matching_pids
 
-    def _kill_processes_for_metadata(
+    def _kill_processes_for_metadata(  # noqa: PLR0912  plan_M11a
         self,
         instance_id: str,
         metadata: dict[str, Any],
@@ -399,7 +399,7 @@ class ProcessCleanup:
                 success = False
         return success
 
-    def _cleanup_profile_dir(
+    def _cleanup_profile_dir(  # noqa: PLR0911  plan_M11a
         self,
         profile_dir: str,
         instance_id: str,
@@ -828,7 +828,7 @@ class ProcessCleanup:
 
         return finalized_count
 
-    def _kill_process_by_pid(self, pid: int, instance_id: str = "unknown") -> bool:
+    def _kill_process_by_pid(self, pid: int, instance_id: str = "unknown") -> bool:  # noqa: PLR0911  plan_M11a
         """
         Kill a browser process by PID using escalating termination methods.
 

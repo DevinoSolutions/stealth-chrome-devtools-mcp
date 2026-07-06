@@ -101,7 +101,7 @@ def redact_launch_arg(arg: str) -> str:
                     (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
                 )
                 return f"{prefix}{sanitized}"
-        except Exception:
+        except Exception:  # noqa: BLE001  DEBT(F-181)
             return prefix + "<redacted>"
 
     if "://" in arg and "@" in arg:
@@ -116,7 +116,7 @@ def redact_launch_arg(arg: str) -> str:
                 return urlunsplit(
                     (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001  DEBT(F-181)
             return "<redacted>"
 
     return arg

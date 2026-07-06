@@ -1,6 +1,7 @@
 """Browser instance management with nodriver."""
 
 import asyncio
+import contextlib
 import time
 import uuid
 from collections.abc import Coroutine
@@ -30,7 +31,6 @@ from proxy_utils import (
 )
 
 from stealth_chrome_devtools_mcp.settings import get_settings
-import contextlib
 
 
 class BrowserManager:
@@ -82,7 +82,7 @@ class BrowserManager:
         return filtered
 
     @staticmethod
-    def _build_spawn_diagnostics(
+    def _build_spawn_diagnostics(  # noqa: PLR0913  PERMANENT(function interface)
         *,
         launch_args: list[str],
         proxy_server: str | None,
@@ -304,7 +304,7 @@ class BrowserManager:
             await self._idle_reaper_task
         self._idle_reaper_task = None
 
-    async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:
+    async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)
         """
         Spawn a new browser instance with given options.
 
@@ -339,7 +339,7 @@ class BrowserManager:
                 try:
                     proxy_config = parse_proxy_config(options.proxy)
                 except ProxyConfigError as error:
-                    raise Exception(str(error))
+                    raise Exception(str(error))  # noqa: B904  plan_M4ph1
                 if proxy_config.username is not None:
                     proxy_forwarder = AuthenticatedProxyForwarder(options.proxy)
                     await proxy_forwarder.start()
@@ -350,7 +350,7 @@ class BrowserManager:
             # Detect the best available browser executable (Chrome, Chromium, or Edge)
             browser_executable = check_browser_executable()
             if not browser_executable:
-                raise Exception(
+                raise Exception(  # noqa: TRY301  plan_M4ph1
                     "No compatible browser found (Chrome, Chromium, or Microsoft Edge)"
                 )
 
@@ -458,7 +458,7 @@ class BrowserManager:
 
             await asyncio.sleep(0.2)
             if not self._browser_process_is_alive(browser):
-                raise Exception("Browser process exited immediately after launch")
+                raise Exception("Browser process exited immediately after launch")  # noqa: TRY301  plan_M4ph1
 
             spawn_diagnostics = self._build_spawn_diagnostics(
                 launch_args=launch_args,
@@ -570,7 +570,7 @@ class BrowserManager:
                     f"for {instance_id}: {proc_err}",
                 )
             instance.state = BrowserState.ERROR
-            raise Exception(f"Failed to spawn browser: {e!s}")
+            raise Exception(f"Failed to spawn browser: {e!s}")  # noqa: B904  plan_M4ph1
 
         return instance
 
@@ -633,7 +633,7 @@ class BrowserManager:
                     )
             return [data["instance"] for data in self._instances.values()]
 
-    async def close_instance(self, instance_id: str) -> bool:
+    async def close_instance(self, instance_id: str) -> bool:  # noqa: C901,PLR0915  DEBT(F-702)
         """
         Close and remove a browser instance.
 
@@ -645,7 +645,7 @@ class BrowserManager:
         """
         import asyncio
 
-        async def _do_close():
+        async def _do_close():  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)
             async with self._lock:
                 if instance_id not in self._instances:
                     return False
@@ -798,7 +798,7 @@ class BrowserManager:
                                     )
                                     break
                                 except Exception as e:
-                                    if attempt == _KILL_RETRIES - 1:
+                                    if attempt == self._KILL_RETRIES - 1:
                                         debug_logger.log_error(
                                             "browser_manager", "kill_process", e
                                         )
@@ -1058,7 +1058,7 @@ class BrowserManager:
         instance_id: str,
         url: str,
         wait_until: str = "load",
-        timeout: int = 30000,
+        timeout: int = 30000,  # noqa: ASYNC109  plan_M7
         referrer: str | None = None,
     ) -> dict[str, Any]:
         """
@@ -1115,7 +1115,7 @@ class BrowserManager:
                 elapsed = time.monotonic() - start_time
                 remaining = timeout_seconds - elapsed
                 if remaining <= 0:
-                    raise TimeoutError("Navigation result budget exhausted")
+                    raise TimeoutError("Navigation result budget exhausted")  # noqa: TRY301  plan_M4ph1
 
                 final_url = await asyncio.wait_for(
                     tab.evaluate("window.location.href"),
@@ -1400,7 +1400,7 @@ class BrowserManager:
             )
 
         except Exception as e:
-            raise Exception(f"Failed to get page state: {e!s}")
+            raise Exception(f"Failed to get page state: {e!s}")  # noqa: B904  plan_M4ph1
 
     async def cleanup_inactive(self, timeout_seconds: int | None = None) -> int:
         """

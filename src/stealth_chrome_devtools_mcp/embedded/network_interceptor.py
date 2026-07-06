@@ -193,9 +193,9 @@ class NetworkInterceptor:
                         "_on_response",
                         f"Connection lost while capturing response body: {e}",
                     )
-                except Exception:
+                except Exception:  # noqa: S110  plan_M10a
                     # body unavailable for streaming/redirect/preflight
-                    # responses (expected)
+                    # responses (expected)  # noqa: ERA001  PERMANENT(sentinel)
                     pass
 
             network_response = NetworkResponse(
@@ -248,7 +248,7 @@ class NetworkInterceptor:
                 instance_id, {"include": [], "exclude": []}
             )
 
-    async def search_requests(
+    async def search_requests(  # noqa: PLR0913  PERMANENT(function interface)
         self,
         instance_id: str,
         url_pattern: str | None = None,
@@ -306,7 +306,7 @@ class NetworkInterceptor:
                         body_str = response.body.decode("utf-8", errors="ignore")
                         if response_contains.lower() not in body_str.lower():
                             continue
-                    except Exception:
+                    except Exception:  # noqa: S112  plan_M10a
                         continue  # skip if body can't be decoded for search
 
                 matches.append(
@@ -401,9 +401,9 @@ class NetworkInterceptor:
                 "get_response_body",
                 f"Connection lost while fetching body for {request_id}: {e}",
             )
-        except Exception:
+        except Exception:  # noqa: S110  plan_M10a
             # body unavailable for streaming/redirect/preflight responses
-            # (expected)
+            # (expected)  # noqa: ERA001  PERMANENT(expected body-unavailable sentinel)
             pass
         return None
 
@@ -482,7 +482,7 @@ class NetworkInterceptor:
                         }
                     )
 
-            Path(filepath).write_text(json.dumps(data, indent=2))
+            Path(filepath).write_text(json.dumps(data, indent=2))  # noqa: ASYNC240  plan_M7
             return True
 
     async def import_from_json(self, instance_id: str, filepath: str) -> bool:
@@ -493,7 +493,7 @@ class NetworkInterceptor:
         filepath: str - Path to JSON file.
         Returns: bool - True if successful.
         """
-        data = json.loads(Path(filepath).read_text())
+        data = json.loads(Path(filepath).read_text())  # noqa: ASYNC240  plan_M7
 
         async with self._lock:
             if instance_id not in self._instance_requests:

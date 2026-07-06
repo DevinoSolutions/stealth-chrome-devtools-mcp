@@ -262,7 +262,7 @@ class DynamicHookAIInterface:
             )
             return {"success": False, "error": str(e)}
 
-    async def create_simple_hook(
+    async def create_simple_hook(  # noqa: PLR0913  PERMANENT(function interface)
         self,
         name: str,
         url_pattern: str,

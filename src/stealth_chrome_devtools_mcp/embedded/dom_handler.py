@@ -15,7 +15,7 @@ class DOMHandler:
     """Handles DOM queries and element interactions."""
 
     @staticmethod
-    async def query_elements(
+    async def query_elements(  # noqa: C901,PLR0912,PLR0915  PERMANENT(stable-but-complex per stage0/metrics)
         tab: Tab,
         selector: str,
         text_filter: str | None = None,
@@ -204,7 +204,10 @@ class DOMHandler:
 
     @staticmethod
     async def click_element(
-        tab: Tab, selector: str, text_match: str | None = None, timeout: int = 10000
+        tab: Tab,
+        selector: str,
+        text_match: str | None = None,
+        timeout: int = 10000,  # noqa: ASYNC109  plan_M7
     ) -> bool:
         """
         Click an element with smart retry logic.
@@ -244,7 +247,10 @@ class DOMHandler:
 
     @staticmethod
     async def upload_file(
-        tab: Tab, selector: str, file_paths: list[str], timeout: int = 10000
+        tab: Tab,
+        selector: str,
+        file_paths: list[str],
+        timeout: int = 10000,  # noqa: ASYNC109  plan_M7
     ) -> dict[str, Any]:
         """
         Attach local file(s) to a file input via CDP (DOM.setFileInputFiles).
@@ -269,7 +275,7 @@ class DOMHandler:
 
             resolved: list[str] = []
             for raw_path in file_paths:
-                path = Path(str(raw_path)).expanduser()
+                path = Path(str(raw_path)).expanduser()  # noqa: ASYNC240  plan_M7
                 if not path.is_file():
                     raise Exception(f"File not found: {path}")
                 resolved.append(str(path.resolve()))
@@ -302,7 +308,7 @@ class DOMHandler:
             raise Exception(f"Failed to upload file: {e!s}")
 
     @staticmethod
-    async def type_text(
+    async def type_text(  # noqa: PLR0913  PERMANENT(function interface)
         tab: Tab,
         selector: str,
         text: str,
@@ -589,7 +595,7 @@ class DOMHandler:
     async def wait_for_element(
         tab: Tab,
         selector: str,
-        timeout: int = 30000,
+        timeout: int = 30000,  # noqa: ASYNC109  plan_M7
         visible: bool = True,
         text_content: str | None = None,
     ) -> bool:
@@ -627,7 +633,7 @@ class DOMHandler:
                             if not is_visible:
                                 await asyncio.sleep(0.5)
                                 continue
-                        except (
+                        except (  # noqa: S110  plan_M10a
                             AttributeError,
                             RuntimeError,
                             ConnectionError,
@@ -730,7 +736,7 @@ class DOMHandler:
                                     else None,
                                 }
                             )
-                    except Exception:
+                    except Exception:  # noqa: S112  plan_M10a
                         continue
 
                 content["frames"] = frames

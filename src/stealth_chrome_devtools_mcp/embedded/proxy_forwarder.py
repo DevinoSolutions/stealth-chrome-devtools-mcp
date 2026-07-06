@@ -132,8 +132,8 @@ class AuthenticatedProxyForwarder:
                 await self._handle_http_request(reader, writer)
                 return
 
-            raise ValueError(f"Unsupported proxy scheme: {self.scheme}")
-        except Exception as error:
+            raise ValueError(f"Unsupported proxy scheme: {self.scheme}")  # noqa: TRY301  plan_M4ph1
+        except Exception as error:  # noqa: BLE001  DEBT(F-181)
             debug_logger.log_error(
                 "proxy_forwarder",
                 "handle_request",
@@ -142,7 +142,7 @@ class AuthenticatedProxyForwarder:
             )
             await self._close_writer(writer)
 
-    async def _handle_http_request(
+    async def _handle_http_request(  # noqa: C901,PLR0911,PLR0912,PLR0915  PERMANENT(stable-but-complex per stage0/metrics)
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
@@ -200,7 +200,7 @@ class AuthenticatedProxyForwarder:
                         f"Invalid target port: {target_host_port}"
                     ) from error
                 if not host or port < 1 or port > _MAX_PORT:
-                    raise ValueError(f"Invalid target endpoint: {target_host_port}")
+                    raise ValueError(f"Invalid target endpoint: {target_host_port}")  # noqa: TRY301  plan_M4ph1
 
             while True:
                 header = await asyncio.wait_for(
@@ -296,7 +296,7 @@ class AuthenticatedProxyForwarder:
                 await self._close_writer(remote_writer)
             await self._close_writer(writer)
 
-    async def _handle_socks_request(
+    async def _handle_socks_request(  # noqa: PLR0915  PERMANENT(stable-but-complex per stage0/metrics)
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
@@ -410,7 +410,7 @@ class AuthenticatedProxyForwarder:
                 await writer.drain()
             except TimeoutError:
                 continue
-            except Exception:
+            except Exception:  # noqa: BLE001  DEBT(F-181)
                 break
         event.set()
 

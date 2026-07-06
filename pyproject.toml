@@ -125,7 +125,7 @@ select = [
 # cycles, and optional deps (e.g. observability's sentry_sdk) MUST import lazily
 # so a missing extra never breaks module load. It maps to none of the audit
 # findings; enforcing it would mean 42 risky hoists or 42 noqas for zero benefit.
-ignore = ["TRY003", "PLC0415"]
+ignore = ["TRY003", "PLC0415", "UP017"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 12
@@ -143,5 +143,91 @@ ban-relative-imports = "all"
 "asyncio.get_event_loop".msg = "Deprecated; use asyncio.get_running_loop()."
 
 [tool.ruff.lint.per-file-ignores]
+# ── PERMANENT exemptions ────────────────────────────────────────────────────
 "src/stealth_chrome_devtools_mcp/cli.py" = ["T20"]  # PERMANENT(print is the CLI's UI)
-"tests/**" = ["S101", "ANN", "PLR2004", "ARG", "S105", "S106", "S107", "INP001"]  # PERMANENT(pytest idioms: assert, no annotations, magic values, unused fixtures, fake secrets, non-package dir)
+"tests/**" = [
+    "S101", "ANN", "PLR2004", "ARG", "S105", "S106", "S107", "INP001",
+    "TID251",   # tests legitimately set os.environ / use subprocess.DEVNULL
+    "S603",     # spawn backend / helper subprocesses
+    "S104",     # assert 0.0.0.0 bind behaviour
+    "S108",     # hardcoded temp paths in fixtures
+    "S110", "S112",  # swallow-in-teardown cleanup
+    "BLE001",   # broad except in cleanup / negative assertions
+    "B017",     # pytest.raises(Exception) intentional broad assertion
+    "ASYNC109", "ASYNC110", "ASYNC220", "ASYNC230", "ASYNC240",
+    "PLW0603",  # module-global test state
+    "T20",      # diagnostic / stress scripts print
+    "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+    "DTZ",      # naive datetime fine in test fixtures
+    "E501",     # long assertion lines / test data
+    "SIM105", "SIM117",  # test clarity over concision
+    "PLW0108", "PLW2901",  # test scaffolding
+    "RUF059",   # unused unpacking in test assertions
+    "F841",     # unused variables in test setup
+    "N806",     # test variable naming
+    "PTH109", "PTH111", "PTH118", "PTH120",  # os.path usage in tests
+    "RET504",   # unnecessary assign before return in tests
+    "C401",     # unnecessary generator → set in tests
+    "E741",     # ambiguous variable name in tests
+    "TRY300",   # try-consider-else in test assertions
+    "RUF100",   # unused noqa (may lag behind fixes)
+]
+# ── Fully-plan-owned files (§2 line 101 — file-wide, every code enumerated) ─
+"src/stealth_chrome_devtools_mcp/embedded/server.py" = [
+    "A002", "ANN001", "ANN201", "ANN202", "ANN401", "ARG001", "ARG005",
+    "ASYNC109", "ASYNC230", "ASYNC240", "B904", "BLE001", "C901",
+    "DTZ005", "DTZ006", "E501", "PERF401", "PIE810", "PLR0912", "PLR0913",
+    "PLR2004", "PLW0602", "PLW0603", "PLW2901", "PTH100", "PTH101",
+    "PTH105", "PTH108", "PTH109", "PTH123", "RET504", "RUF013", "S102",
+    "S112", "SIM105", "T201", "TID251", "TRY002", "TRY300", "TRY301", "W293",
+]  # plan_M4ph1 (F-101 god-file split + M3/M10a except surface)
+"src/stealth_chrome_devtools_mcp/embedded/singleton.py" = [
+    "ANN001", "ANN201", "ANN202", "BLE001", "C901", "E501", "PLR0915",
+    "PLR2004", "PTH123", "S110", "S603", "SIM105", "SIM115", "T201",
+    "TID251", "TRY300",
+]  # plan_M3 (F-183 spine: DEVNULL/prints/cold-start) + DEBT(F-740)
+"src/stealth_chrome_devtools_mcp/embedded/element_cloner.py" = [
+    "ANN001", "ANN202", "ANN204", "ARG002", "ASYNC210", "ASYNC230",
+    "BLE001", "C901", "E501", "PLR0912", "PLR0913", "PLR2004", "PTH123",
+    "RUF013", "SIM102", "TID251", "TID252", "TRY300",
+]  # plan_M5b (cloner consolidation)
+"src/stealth_chrome_devtools_mcp/embedded/cdp_element_cloner.py" = [
+    "ANN001", "ANN204", "BLE001", "DTZ005", "E501", "PERF401",
+    "TID251", "TRY300",
+]  # plan_M5b
+"src/stealth_chrome_devtools_mcp/embedded/comprehensive_element_cloner.py" = [
+    "ANN001", "ANN204", "BLE001", "E402", "E501", "PLR0912", "PLR2004",
+    "TID251", "TRY300", "W293",
+]  # plan_M5b
+"src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py" = [
+    "ANN001", "ANN202", "ANN204", "BLE001", "DTZ005", "DTZ006", "E402",
+    "PLR0913", "PTH123", "RET504", "RUF013", "TID251", "TID252", "TRY300",
+]  # plan_M5b
+"src/stealth_chrome_devtools_mcp/embedded/progressive_element_cloner.py" = [
+    "ANN001", "ANN204", "BLE001", "C401", "TID251",
+]  # plan_M5b
+"src/stealth_chrome_devtools_mcp/embedded/response_stage_hooks.py" = [
+    "ANN001", "ANN204", "ARG002", "BLE001", "E501",
+]  # plan_M12a (deletes ResponseStageProcessor with its test choreography)
+# ── Error-surface files (>3 sites → file-wide; §1 rule) ────────────────────
+"src/stealth_chrome_devtools_mcp/embedded/dom_handler.py" = [
+    "B904", "BLE001", "TRY002", "TRY300", "TRY301",
+]  # DEBT(F-181) broad-except + plan_M4ph1 error-envelope
+"src/stealth_chrome_devtools_mcp/embedded/browser_manager.py" = [
+    "BLE001", "TRY002", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/network_interceptor.py" = [
+    "B904", "BLE001", "TRY002", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/cdp_function_executor.py" = [
+    "BLE001", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py" = [
+    "BLE001", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py" = [
+    "BLE001", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_ai_interface.py" = [
+    "BLE001", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
