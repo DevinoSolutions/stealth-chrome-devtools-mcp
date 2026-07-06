@@ -21,9 +21,8 @@ the env override so they never touch the real home directory.
 from pathlib import Path
 
 import response_handler as rh_mod
-from response_handler import ResponseHandler, default_clone_output_dir
 from file_based_element_cloner import FileBasedElementCloner
-
+from response_handler import ResponseHandler, default_clone_output_dir
 
 # .../src/stealth_chrome_devtools_mcp/embedded
 PACKAGE_EMBEDDED_DIR = Path(rh_mod.__file__).resolve().parent
@@ -43,7 +42,10 @@ def _is_within(child: Path, parent: Path) -> bool:
 class TestDefaultCloneOutputDir:
     def test_defaults_to_user_state_dir(self, monkeypatch):
         monkeypatch.delenv(ENV_VAR, raising=False)
-        assert default_clone_output_dir() == Path.home() / ".stealth-mcp" / "element_clones"
+        assert (
+            default_clone_output_dir()
+            == Path.home() / ".stealth-mcp" / "element_clones"
+        )
 
     def test_env_override_is_honored(self, monkeypatch, tmp_path):
         monkeypatch.setenv(ENV_VAR, str(tmp_path / "out"))
@@ -55,7 +57,10 @@ class TestDefaultCloneOutputDir:
 
     def test_blank_env_falls_back_to_default(self, monkeypatch):
         monkeypatch.setenv(ENV_VAR, "   ")
-        assert default_clone_output_dir() == Path.home() / ".stealth-mcp" / "element_clones"
+        assert (
+            default_clone_output_dir()
+            == Path.home() / ".stealth-mcp" / "element_clones"
+        )
 
     def test_default_is_never_inside_the_package(self, monkeypatch):
         monkeypatch.delenv(ENV_VAR, raising=False)

@@ -55,7 +55,9 @@ class TestHandleResponse:
 
         result = h.handle_response(data, metadata={"tool": "list_network_requests"})
 
-        on_disk = json.loads((tmp_path / result["filename"]).read_text(encoding="utf-8"))
+        on_disk = json.loads(
+            (tmp_path / result["filename"]).read_text(encoding="utf-8")
+        )
         assert on_disk["data"] == data
         assert on_disk["metadata"]["auto_saved_due_to_size"] is True
         assert on_disk["metadata"]["tool"] == "list_network_requests"

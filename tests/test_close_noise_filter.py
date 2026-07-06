@@ -42,36 +42,52 @@ async def _install_with_previous(previous_handler):
 
 
 class TestCloseNoiseFilter:
-
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("exc_name", [
-        "ConnectionClosedOK",     # clean close (already handled before the fix)
-        "ConnectionClosedError",  # abnormal close (added by the fix)
-        "ConnectionClosed",       # base class
-    ])
+    @pytest.mark.parametrize(
+        "exc_name",
+        [
+            "ConnectionClosedOK",  # clean close (already handled before the fix)
+            "ConnectionClosedError",  # abnormal close (added by the fix)
+            "ConnectionClosed",  # base class
+        ],
+    )
     async def test_websocket_closes_are_swallowed(self, exc_name):
         delegated = []
-        loop, handler = await _install_with_previous(lambda l, ctx: delegated.append(ctx))
-        handler(loop, {
-            "exception": _make_exc(exc_name, "websockets.exceptions"),
-            "message": "task exception was never retrieved",
-        })
+        loop, handler = await _install_with_previous(
+            lambda l, ctx: delegated.append(ctx)
+        )
+        handler(
+            loop,
+            {
+                "exception": _make_exc(exc_name, "websockets.exceptions"),
+                "message": "task exception was never retrieved",
+            },
+        )
         assert delegated == [], f"{exc_name} from websockets should be swallowed"
 
     @pytest.mark.asyncio
     async def test_other_exceptions_are_delegated(self):
         delegated = []
-        loop, handler = await _install_with_previous(lambda l, ctx: delegated.append(ctx))
+        loop, handler = await _install_with_previous(
+            lambda l, ctx: delegated.append(ctx)
+        )
         handler(loop, {"exception": ValueError("a real bug"), "message": "boom"})
-        assert len(delegated) == 1, "non-websocket errors must reach the default handler"
+        assert len(delegated) == 1, (
+            "non-websocket errors must reach the default handler"
+        )
 
     @pytest.mark.asyncio
     async def test_non_websockets_connection_closed_is_delegated(self):
         """A same-named error from a different module must NOT be swallowed."""
         delegated = []
-        loop, handler = await _install_with_previous(lambda l, ctx: delegated.append(ctx))
-        handler(loop, {
-            "exception": _make_exc("ConnectionClosedError", "some.other.module"),
-            "message": "boom",
-        })
+        loop, handler = await _install_with_previous(
+            lambda l, ctx: delegated.append(ctx)
+        )
+        handler(
+            loop,
+            {
+                "exception": _make_exc("ConnectionClosedError", "some.other.module"),
+                "message": "boom",
+            },
+        )
         assert len(delegated) == 1

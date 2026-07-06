@@ -10,21 +10,18 @@ Validates that:
 No browser required — pure logic tests with mocked psutil.
 """
 
-import json
 import os
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import psutil
 import pytest
-
 from process_cleanup import ProcessCleanup
-
 
 # ---------------------------------------------------------------------------
 # ProcessCleanup init
 # ---------------------------------------------------------------------------
+
 
 class TestProcessCleanupInit:
     def test_init_time_set_before_recovery(self):
@@ -36,16 +33,20 @@ class TestProcessCleanupInit:
         def patched_recover(self_obj):
             call_order.append(("recover", hasattr(self_obj, "_init_time")))
 
-        with patch.object(ProcessCleanup, "_recover_orphaned_processes", patched_recover):
-            with patch.object(ProcessCleanup, "_setup_cleanup_handlers", lambda self: None):
-                pc = ProcessCleanup.__new__(ProcessCleanup)
-                pc.pid_file = Path(os.path.expanduser("~/.stealth_browser_pids_test.json"))
-                pc.tracked_pids = set()
-                pc.browser_processes = {}
-                pc.orphan_profile_max_age_seconds = 21600
-                pc._init_time = time.time()
-                pc._setup_cleanup_handlers()
-                pc._recover_orphaned_processes()
+        with (
+            patch.object(
+                ProcessCleanup, "_recover_orphaned_processes", patched_recover
+            ),
+            patch.object(ProcessCleanup, "_setup_cleanup_handlers", lambda self: None),
+        ):
+            pc = ProcessCleanup.__new__(ProcessCleanup)
+            pc.pid_file = Path(os.path.expanduser("~/.stealth_browser_pids_test.json"))
+            pc.tracked_pids = set()
+            pc.browser_processes = {}
+            pc.orphan_profile_max_age_seconds = 21600
+            pc._init_time = time.time()
+            pc._setup_cleanup_handlers()
+            pc._recover_orphaned_processes()
 
         assert call_order == [("recover", True)]
 
@@ -53,6 +54,7 @@ class TestProcessCleanupInit:
 # ---------------------------------------------------------------------------
 # _normalize_process_metadata
 # ---------------------------------------------------------------------------
+
 
 class TestNormalizeProcessMetadata:
     def test_legacy_int_format(self):
@@ -106,6 +108,7 @@ class TestNormalizeProcessMetadata:
 # _extract_profile_dir_from_cmdline
 # ---------------------------------------------------------------------------
 
+
 class TestExtractProfileDir:
     def test_equals_format(self):
         cmdline = ["chrome.exe", "--user-data-dir=/tmp/profile", "--no-sandbox"]
@@ -139,21 +142,25 @@ class TestExtractProfileDir:
 # _is_browser_process_name
 # ---------------------------------------------------------------------------
 
+
 class TestIsBrowserProcessName:
-    @pytest.mark.parametrize("name,expected", [
-        ("chrome.exe", True),
-        ("Chrome", True),
-        ("google-chrome-stable", True),
-        ("chromium-browser", True),
-        ("msedge.exe", True),
-        ("Microsoft Edge", True),
-        ("brave", True),
-        ("Brave Browser", True),
-        ("python.exe", False),
-        ("node", False),
-        ("firefox", False),
-        ("", False),
-    ])
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("chrome.exe", True),
+            ("Chrome", True),
+            ("google-chrome-stable", True),
+            ("chromium-browser", True),
+            ("msedge.exe", True),
+            ("Microsoft Edge", True),
+            ("brave", True),
+            ("Brave Browser", True),
+            ("python.exe", False),
+            ("node", False),
+            ("firefox", False),
+            ("", False),
+        ],
+    )
     def test_browser_detection(self, name, expected):
         assert ProcessCleanup._is_browser_process_name(name) is expected
 
@@ -161,6 +168,7 @@ class TestIsBrowserProcessName:
 # ---------------------------------------------------------------------------
 # Recovery filtering (create_time guard)
 # ---------------------------------------------------------------------------
+
 
 class TestRecoveryFiltering:
     """Test that _kill_processes_for_metadata respects create_time in recovery mode."""
@@ -187,6 +195,7 @@ class TestRecoveryFiltering:
         }
 
         killed = []
+
         def mock_kill_by_pid(pid, instance_id):
             killed.append(pid)
             return True
@@ -197,7 +206,9 @@ class TestRecoveryFiltering:
                     mock_proc = MagicMock()
                     mock_proc.create_time.return_value = 1700000050.0
                     mock_proc_cls.return_value = mock_proc
-                    pc._kill_processes_for_metadata("test-instance", metadata, recovery=True)
+                    pc._kill_processes_for_metadata(
+                        "test-instance", metadata, recovery=True
+                    )
 
         assert 99999 in killed
 
@@ -213,6 +224,7 @@ class TestRecoveryFiltering:
         }
 
         killed = []
+
         def mock_kill_by_pid(pid, instance_id):
             killed.append(pid)
             return True
@@ -223,7 +235,9 @@ class TestRecoveryFiltering:
                     mock_proc = MagicMock()
                     mock_proc.create_time.return_value = 1700000200.0
                     mock_proc_cls.return_value = mock_proc
-                    pc._kill_processes_for_metadata("test-instance", metadata, recovery=True)
+                    pc._kill_processes_for_metadata(
+                        "test-instance", metadata, recovery=True
+                    )
 
         assert 88888 not in killed
 
@@ -239,13 +253,16 @@ class TestRecoveryFiltering:
         }
 
         killed = []
+
         def mock_kill_by_pid(pid, instance_id):
             killed.append(pid)
             return True
 
         with patch.object(pc, "_get_browser_pids_for_profile", return_value={77777}):
             with patch.object(pc, "_kill_process_by_pid", mock_kill_by_pid):
-                pc._kill_processes_for_metadata("test-instance", metadata, recovery=False)
+                pc._kill_processes_for_metadata(
+                    "test-instance", metadata, recovery=False
+                )
 
         assert 77777 in killed
 
@@ -253,6 +270,7 @@ class TestRecoveryFiltering:
 # ---------------------------------------------------------------------------
 # PID file persistence
 # ---------------------------------------------------------------------------
+
 
 class TestPidFilePersistence:
     def test_save_and_load(self, tmp_path):
@@ -284,6 +302,7 @@ class TestPidFilePersistence:
 # Auto-clone lifecycle (disposable profiles copied from master)
 # ---------------------------------------------------------------------------
 
+
 class TestAutoCloneCleanup:
     """Auto-clones (profile_role == 'clone') must be deleted on close even
     though they carry a user_data_dir (uses_custom_data_dir is True), while
@@ -313,7 +332,9 @@ class TestAutoCloneCleanup:
             "auto_clone": True,
             "timestamp": 0,
         }
-        result = pc._cleanup_profile_for_metadata("inst", metadata, active_profile_dirs=set())
+        result = pc._cleanup_profile_for_metadata(
+            "inst", metadata, active_profile_dirs=set()
+        )
         assert result is True
         assert not clone.exists()
 
@@ -331,7 +352,9 @@ class TestAutoCloneCleanup:
             "auto_clone": False,
             "timestamp": 0,
         }
-        result = pc._cleanup_profile_for_metadata("inst", metadata, active_profile_dirs=set())
+        result = pc._cleanup_profile_for_metadata(
+            "inst", metadata, active_profile_dirs=set()
+        )
         assert result is False
         assert named.exists()
 
@@ -349,7 +372,9 @@ class TestAutoCloneCleanup:
             "auto_clone": False,
             "timestamp": 0,
         }
-        result = pc._cleanup_profile_for_metadata("inst", metadata, active_profile_dirs=set())
+        result = pc._cleanup_profile_for_metadata(
+            "inst", metadata, active_profile_dirs=set()
+        )
         assert result is False
         assert master.exists()
 
@@ -368,8 +393,12 @@ class TestAutoCloneCleanup:
             "timestamp": 0,
         }
         # Profile reported active on every probe → deletion must be refused.
-        with patch.object(pc, "_get_active_browser_profile_dirs", return_value={normalized}), \
-             patch("process_cleanup.time.sleep"):
+        with (
+            patch.object(
+                pc, "_get_active_browser_profile_dirs", return_value={normalized}
+            ),
+            patch("process_cleanup.time.sleep"),
+        ):
             result = pc._cleanup_profile_for_metadata(
                 "inst", metadata, active_profile_dirs={normalized}
             )
@@ -392,16 +421,28 @@ class TestShouldUntrackAfterCleanup:
         assert ProcessCleanup._should_untrack_after_cleanup(meta, cleaned=False) is True
 
     def test_named_profile_untracks_without_delete(self):
-        meta = {"user_data_dir": "/x", "uses_custom_data_dir": True, "auto_clone": False}
+        meta = {
+            "user_data_dir": "/x",
+            "uses_custom_data_dir": True,
+            "auto_clone": False,
+        }
         assert ProcessCleanup._should_untrack_after_cleanup(meta, cleaned=False) is True
 
     def test_auto_clone_stays_tracked_until_deleted(self):
         meta = {"user_data_dir": "/x", "uses_custom_data_dir": True, "auto_clone": True}
-        assert ProcessCleanup._should_untrack_after_cleanup(meta, cleaned=False) is False
+        assert (
+            ProcessCleanup._should_untrack_after_cleanup(meta, cleaned=False) is False
+        )
 
     def test_temp_profile_stays_tracked_until_deleted(self):
-        meta = {"user_data_dir": "/x", "uses_custom_data_dir": False, "auto_clone": False}
-        assert ProcessCleanup._should_untrack_after_cleanup(meta, cleaned=False) is False
+        meta = {
+            "user_data_dir": "/x",
+            "uses_custom_data_dir": False,
+            "auto_clone": False,
+        }
+        assert (
+            ProcessCleanup._should_untrack_after_cleanup(meta, cleaned=False) is False
+        )
 
 
 class TestAutoCloneMetadata:

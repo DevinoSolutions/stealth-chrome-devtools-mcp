@@ -1,5 +1,6 @@
 import threading
-from typing import Any, Dict, Optional
+from typing import Any
+
 
 class InMemoryStorage:
     """Thread-safe in-memory storage for browser instance data."""
@@ -11,9 +12,9 @@ class InMemoryStorage:
         self: InMemoryStorage - The storage instance.
         """
         self._lock = threading.RLock()
-        self._data: Dict[str, Any] = {"instances": {}}
+        self._data: dict[str, Any] = {"instances": {}}
 
-    def store_instance(self, instance_id: str, data: Dict[str, Any]):
+    def store_instance(self, instance_id: str, data: dict[str, Any]):
         """
         Store browser instance data.
 
@@ -21,17 +22,17 @@ class InMemoryStorage:
         data: Dict[str, Any] - The data associated with the browser instance.
         """
         with self._lock:
-            if 'instances' not in self._data:
-                self._data['instances'] = {}
+            if "instances" not in self._data:
+                self._data["instances"] = {}
             serializable_data = {
-                'instance_id': instance_id,
-                'state': data.get('state', 'unknown'),
-                'created_at': data.get('created_at', ''),
-                'current_url': data.get('current_url', ''),
-                'title': data.get('title', ''),
-                'tabs': []
+                "instance_id": instance_id,
+                "state": data.get("state", "unknown"),
+                "created_at": data.get("created_at", ""),
+                "current_url": data.get("current_url", ""),
+                "title": data.get("title", ""),
+                "tabs": [],
             }
-            self._data['instances'][instance_id] = serializable_data
+            self._data["instances"][instance_id] = serializable_data
 
     def remove_instance(self, instance_id: str):
         """
@@ -40,20 +41,21 @@ class InMemoryStorage:
         instance_id: str - The unique identifier for the browser instance to remove.
         """
         with self._lock:
-            if 'instances' in self._data and instance_id in self._data['instances']:
-                del self._data['instances'][instance_id]
+            if "instances" in self._data and instance_id in self._data["instances"]:
+                del self._data["instances"][instance_id]
 
-    def get_instance(self, instance_id: str) -> Optional[Dict[str, Any]]:
+    def get_instance(self, instance_id: str) -> dict[str, Any] | None:
         """
         Get browser instance data.
 
         instance_id: str - The unique identifier for the browser instance.
-        Returns: Optional[Dict[str, Any]] - The data for the browser instance, or None if not found.
+        Returns: Optional[Dict[str, Any]] - The data for the browser instance,
+        or None if not found.
         """
         with self._lock:
-            return self._data.get('instances', {}).get(instance_id)
+            return self._data.get("instances", {}).get(instance_id)
 
-    def list_instances(self) -> Dict[str, Any]:
+    def list_instances(self) -> dict[str, Any]:
         """
         List all stored instances.
 
@@ -91,5 +93,6 @@ class InMemoryStorage:
         """
         with self._lock:
             self._data[key] = value
+
 
 persistent_storage = InMemoryStorage()

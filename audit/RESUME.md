@@ -1,0 +1,41 @@
+# RESUME BRIEF — read this first after compaction
+
+**What this is:** a foundational-audit pipeline (AUDIT → triage → PLAN → approve → **[quality-gates interlude]** → FIX → CODIFY) for `stealth-chrome-devtools-mcp`. Conversation memory is gone after compaction; **everything authoritative is on disk under `audit/`.** Read this file, then `audit/state.json`.
+
+## Where we are (updated 2026-07-06, post-gates)
+- **Stages 0, 1, 1b, triage, 2 (PLAN), and 2.5-gates are COMPLETE.**
+- **2.5-gates LANDED** (14 commits): ruff 0 violations, ty 0 errors/39 warnings, vulture 0 findings, all 6 gates green, husky armed, CI quality job added. 415 tests, 42% coverage (gate 41). 56 inline noqa + 21 per-file-ignores, all owner-tagged.
+- Four approved amendments ride their plans in-file: M3-A1 (F-764 RLock), M8-A1 (F-509 auto-port-fallback), M4Ph1-A1+A1.5 (full 21-site error-envelope sweep with G1–G7 pins), M14-A1 (F-741 CLI renames + **X-HARD** env rename). `plan_M5a.md` is NOT executable — folded into M5b.
+
+## NEXT ACTION
+**Stage 3 FIX**: fresh session, paste `audit/STAGE3_RESUME_PROMPT.md`. It reads its baseline from `stages['2.5-gates'].landed` in state.json.
+
+## HONEST STATUS — what is NOT done / NOT tested (do not let summaries imply otherwise)
+- **Zero of the 12 approved plans is executed.** Every fix exists only as a plan. The two Critical findings (wedged-but-alive backend jams eviction forever, F-301/F-501) are **live bugs today**.
+- **The characterization net (M6) does not exist yet** — there are currently NO behavior pins over the 96-tool dispatch surface; the structural refactors (M4-Ph1, M5b) are unprotected until M6 lands (that ordering is designed-in: M6 is plan 8 of 12).
+- Coverage is only ~40.9% (gate 39). **Integration tests were never run during the audit** (only `-m "not integration"`); no audit claim was validated against a live browser — findings are quote-verified against source, fixes are unproven.
+- Plan anchors were verified at pinned SHA `2267b83d` only; the gates workstream will shift lines repo-wide (format commit + env-read migration) — plans re-anchor by SYMBOL, §1.3 line tables become approximate.
+- **34 known dependency vulnerabilities** (stage-0 tooling scan) are owned by NO plan and are OUT of the gates scope — an open item.
+- The gates workstream is DONE. Pre-push timing: ~65-80s on the original machine (acceptable).
+- Deferred by design (recorded, not forgotten): M10b/M11b/M4-Ph2 (DEFER), M12b (REJECT), plus the M14 debt ledger items (F-740, F-702, F-703, F-603 cross-module, F-606, F-765, M1 probe-body dedup, styles-twin merge).
+
+## Stage 3 discipline (detail + per-plan rulings in STAGE3_RESUME_PROMPT.md and state.json)
+- Branch `audit/fixes-2026-07-02` off the **post-gates HEAD** (recorded in `2.5-gates.landed`).
+- **Serial order:** M3+A1(M10a) → M1 → M8+A1 → M2 → M7 → M11a+M15 → M9 → M6 → M12a → M4-Ph1+A1 → M5b → M14+A1. Each plan executes from the prior plan's final commit; landing M14 completes Stage 4 (CODIFY) too.
+- One PR per plan (M3 = two stacked PRs). Pinning/characterization tests FIRST; full non-integration suite green at every checkpoint; **husky gates green at every checkpoint, `--no-verify` banned**; each plan deletes its `plan_M<N>`-tagged suppressions; re-anchor by SYMBOL.
+- Gates-era adaptations are PRE-AUTHORIZED and recorded in `cross_review_notes` (last 4 entries): `env_utils.py` is SUPERSEDED by `settings.py` (never create it); new plan env vars become Settings fields; M14's X-HARD env-rename edit site moved into `settings.py`.
+- The 4 lenses (`audit/ADDENDUM_LENSES.md`) bind fixes — a fix introducing a second way of doing something is a defect. **Deviation from an approved plan → STOP and ask the human.** Update + JSON-validate `audit/state.json` after each plan lands.
+
+## Pinned facts (post-gates baseline — read from `stages['2.5-gates'].landed`)
+- Branch `fix/singleton-version-aware-backend`. **Gates ACTIVE** — husky pre-commit runs 6 checks, pre-push runs unit tests.
+- Baseline: **415 passed**, 42% coverage, gate 41. **`uv run` is BROKEN in this checkout** (path has `&`+spaces) — always use `.venv\Scripts\python.exe` directly; `uv` works in CI.
+- Context: LOCAL single-user tool, 0 external users — breaking changes are FREE. Priorities: (1) maintainability (2) operability (3) performance (order-of-magnitude only).
+- Tool count: **96 at HEAD** (gates changed nothing); **94 post-M2**, pinned by M6, unchanged through M14.
+- OneDrive checkout quirk: subagent writes can look missing to a fresh read for minutes — check mtime+size and ask the agent before re-tasking.
+
+## Authoritative docs map
+- `audit/state.json` — master state: per-plan status, **resolved_decisions (binding)**, **cross_review_notes (35, binding cross-plan directives)**, `2.5-gates` block, history.
+- `audit/GATES_TASK_OPUS.md` — paste-ready quality-gates task for a fresh Opus chat (runs FIRST).
+- `audit/STAGE3_RESUME_PROMPT.md` — paste-ready Stage-3 kickoff (runs AFTER gates; self-gating on `2.5-gates.landed`).
+- `audit/stage2/plan_*.md` — the 12 approved plans (+ folded plan_M5a analysis). Each carries verified anchors, §1.3 shift tables, test strategy, rollback, and its approval stamp/gate rulings. **Anchors in plans supersede any older cheat-sheets; symbols supersede line numbers post-gates.**
+- `audit/ADDENDUM_LENSES.md` — the 4 binding lenses. `audit/REPORT.md` — Stage-1 synthesis (15 root causes). `audit/findings.json` — 99-record ledger (extract via script, don't read whole). `audit/TRIAGE.md` — superseded by STAGE2_BRIEF/state.json where they differ.

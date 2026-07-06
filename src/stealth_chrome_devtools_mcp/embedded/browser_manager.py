@@ -1,22 +1,25 @@
 """Browser instance management with nodriver."""
 
 import asyncio
-import os
-import sys
+import contextlib
 import time
 import uuid
-from typing import Any, Dict, Optional, List
-from datetime import datetime, timedelta
+from collections.abc import Coroutine
+from datetime import datetime, timezone
+from typing import Any
 
 import nodriver as uc
 import psutil
-from nodriver import Browser, Tab
-
 from debug_logger import debug_logger
-from models import BrowserInstance, BrowserState, BrowserOptions, PageState
-from persistent_storage import persistent_storage
 from dynamic_hook_system import dynamic_hook_system
-from platform_utils import get_platform_info, check_browser_executable, merge_browser_args
+from models import BrowserInstance, BrowserOptions, BrowserState, PageState
+from nodriver import Browser, Tab
+from persistent_storage import persistent_storage
+from platform_utils import (
+    check_browser_executable,
+    get_platform_info,
+    merge_browser_args,
+)
 from process_cleanup import process_cleanup
 from proxy_forwarder import AuthenticatedProxyForwarder
 from proxy_utils import (
@@ -27,60 +30,49 @@ from proxy_utils import (
     redact_launch_arg,
 )
 
-
-def _parse_nonnegative_int_env(
-    name: str,
-    default: int,
-    minimum: int = 0,
-) -> int:
-    """
-    Parse a non-negative integer environment variable with a fallback default.
-
-    Args:
-        name (str): Environment variable name.
-        default (int): Fallback value if parsing fails.
-        minimum (int): Minimum accepted value.
-
-    Returns:
-        int: Parsed integer or the provided default.
-    """
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        parsed = int(value.strip())
-    except (TypeError, ValueError):
-        return default
-    if parsed < minimum:
-        return default
-    return parsed
+from stealth_chrome_devtools_mcp.settings import get_settings
 
 
 class BrowserManager:
     """Manages multiple browser instances."""
 
     NAVIGATION_RECYCLE_THRESHOLD = 25
-    DEFAULT_IDLE_TIMEOUT_SECONDS = 600
-    DEFAULT_IDLE_REAPER_INTERVAL_SECONDS = 60
+    _KILL_RETRIES = 3
 
     def __init__(self):
-        self._instances: Dict[str, dict] = {}
+        self._instances: dict[str, dict] = {}
         self._lock = asyncio.Lock()
-        self._spawn_diagnostics: Dict[str, Dict[str, Any]] = {}
-        self._proxy_forwarders: Dict[str, AuthenticatedProxyForwarder] = {}
-        self._idle_timeout_seconds_default = _parse_nonnegative_int_env(
-            "BROWSER_IDLE_TIMEOUT",
-            self.DEFAULT_IDLE_TIMEOUT_SECONDS,
-        )
-        self._idle_reaper_interval_seconds = _parse_nonnegative_int_env(
-            "BROWSER_IDLE_REAPER_INTERVAL",
-            self.DEFAULT_IDLE_REAPER_INTERVAL_SECONDS,
-            minimum=1,
-        )
-        self._idle_reaper_task: Optional[asyncio.Task] = None
+        self._spawn_diagnostics: dict[str, dict[str, Any]] = {}
+        self._proxy_forwarders: dict[str, AuthenticatedProxyForwarder] = {}
+        self._idle_timeout_seconds_default = get_settings().browser_idle_timeout
+        self._idle_reaper_interval_seconds = get_settings().browser_idle_reaper_interval
+        self._idle_reaper_task: asyncio.Task | None = None
+        # Strong refs to fire-and-forget background tasks so the event loop can't
+        # garbage-collect them mid-run; the done-callback discards each entry and
+        # surfaces any failure instead of letting it vanish (RUF006).
+        self._background_tasks: set[asyncio.Task] = set()
+
+    def _run_in_background(
+        self, coro: Coroutine[object, object, object], label: str
+    ) -> asyncio.Task:
+        """Schedule a fire-and-forget coroutine while holding a strong reference to
+        its task (RUF006) and surfacing any exception via the debug logger instead
+        of silently dropping it."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+
+        def _on_done(finished: asyncio.Task) -> None:
+            self._background_tasks.discard(finished)
+            if not finished.cancelled():
+                error = finished.exception()
+                if error is not None:
+                    debug_logger.log_error("browser_manager", label, error)
+
+        task.add_done_callback(_on_done)
+        return task
 
     @staticmethod
-    def _append_user_agent_arg(args: List[str], user_agent: Optional[str]) -> List[str]:
+    def _append_user_agent_arg(args: list[str], user_agent: str | None) -> list[str]:
         """Merge a user agent override into launch arguments."""
         if not user_agent:
             return args
@@ -90,17 +82,17 @@ class BrowserManager:
         return filtered
 
     @staticmethod
-    def _build_spawn_diagnostics(
+    def _build_spawn_diagnostics(  # noqa: PLR0913  PERMANENT(function interface)
         *,
-        launch_args: List[str],
-        proxy_server: Optional[str],
-        launch_proxy_server: Optional[str],
-        timezone_id: Optional[str],
+        launch_args: list[str],
+        proxy_server: str | None,
+        launch_proxy_server: str | None,
+        timezone_id: str | None,
         idle_timeout_seconds: int,
         sandbox: bool,
         headless: bool,
-        user_data_dir: Optional[str],
-    ) -> Dict[str, Any]:
+        user_data_dir: str | None,
+    ) -> dict[str, Any]:
         """Build redacted diagnostics for a spawned browser instance."""
         return {
             "effective_browser_args": [redact_launch_arg(arg) for arg in launch_args],
@@ -117,8 +109,8 @@ class BrowserManager:
     async def _apply_timezone_override(
         *,
         tab: Tab,
-        timezone_id: Optional[str],
-    ) -> Optional[str]:
+        timezone_id: str | None,
+    ) -> str | None:
         """Apply a CDP timezone override to a browser tab."""
         if not timezone_id:
             return None
@@ -127,7 +119,9 @@ class BrowserManager:
         if not trimmed_timezone:
             return None
 
-        await tab.send(uc.cdp.emulation.set_timezone_override(timezone_id=trimmed_timezone))
+        await tab.send(
+            uc.cdp.emulation.set_timezone_override(timezone_id=trimmed_timezone)
+        )
         return trimmed_timezone
 
     @staticmethod
@@ -159,7 +153,9 @@ class BrowserManager:
 
         return True
 
-    def _discard_instance_unlocked(self, instance_id: str, data: dict, reason: str) -> None:
+    def _discard_instance_unlocked(
+        self, instance_id: str, data: dict, reason: str
+    ) -> None:
         instance = data.get("instance")
         if instance is not None:
             instance.state = BrowserState.CLOSED
@@ -167,23 +163,22 @@ class BrowserManager:
         self._spawn_diagnostics.pop(instance_id, None)
         proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
         if proxy_forwarder is not None:
-            asyncio.create_task(proxy_forwarder.close())
+            self._run_in_background(
+                proxy_forwarder.close(), "discard_instance_proxy_close"
+            )
         try:
             process_cleanup.finalize_browser_process(instance_id)
             process_cleanup.cleanup_deferred_profiles()
         except (OSError, psutil.Error, KeyError) as e:
             debug_logger.log_warning(
-                "browser_manager", "discard_instance",
+                "browser_manager",
+                "discard_instance",
                 f"Process finalize failed for {instance_id}: {e}",
             )
-        try:
+        with contextlib.suppress(KeyError):
             persistent_storage.remove_instance(instance_id)
-        except KeyError:
-            pass  # already removed
-        try:
+        with contextlib.suppress(KeyError):
             dynamic_hook_system.remove_instance(instance_id)
-        except KeyError:
-            pass  # already removed
         debug_logger.log_info(
             "browser_manager",
             "discard_instance",
@@ -199,7 +194,7 @@ class BrowserManager:
 
     def _resolve_idle_timeout_seconds(
         self,
-        override: Optional[int],
+        override: int | None,
     ) -> int:
         """
         Resolve the effective idle timeout for a browser instance.
@@ -250,7 +245,8 @@ class BrowserManager:
                         debug_logger.log_info(
                             "browser_manager",
                             "idle_reaper",
-                            f"Finalized {finalized_profiles} deferred temp profile cleanup entrie(s)",
+                            f"Finalized {finalized_profiles} deferred temp "
+                            "profile cleanup entrie(s)",
                         )
                 except Exception as error:
                     debug_logger.log_error(
@@ -286,7 +282,9 @@ class BrowserManager:
         debug_logger.log_info(
             "browser_manager",
             "start_idle_reaper",
-            f"Idle reaper started with timeout={self._idle_timeout_seconds_default}s interval={self._idle_reaper_interval_seconds}s",
+            f"Idle reaper started with "
+            f"timeout={self._idle_timeout_seconds_default}s "
+            f"interval={self._idle_reaper_interval_seconds}s",
         )
 
     async def stop_idle_reaper(self) -> None:
@@ -302,13 +300,11 @@ class BrowserManager:
             self._idle_reaper_task = None
             return
         self._idle_reaper_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await self._idle_reaper_task
-        except asyncio.CancelledError:
-            pass
         self._idle_reaper_task = None
 
-    async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:
+    async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)
         """
         Spawn a new browser instance with given options.
 
@@ -324,15 +320,18 @@ class BrowserManager:
             instance_id=instance_id,
             headless=options.headless,
             user_agent=options.user_agent,
-            viewport={"width": options.viewport_width, "height": options.viewport_height}
+            viewport={
+                "width": options.viewport_width,
+                "height": options.viewport_height,
+            },
         )
 
-        browser: Optional[Browser] = None
-        proxy_forwarder: Optional[AuthenticatedProxyForwarder] = None
+        browser: Browser | None = None
+        proxy_forwarder: AuthenticatedProxyForwarder | None = None
         try:
             platform_info = get_platform_info()
-            proxy_config: Optional[ProxyConfig] = None
-            launch_proxy_server: Optional[str] = None
+            proxy_config: ProxyConfig | None = None
+            launch_proxy_server: str | None = None
             idle_timeout_seconds = self._resolve_idle_timeout_seconds(
                 options.idle_timeout_seconds,
             )
@@ -340,32 +339,41 @@ class BrowserManager:
                 try:
                     proxy_config = parse_proxy_config(options.proxy)
                 except ProxyConfigError as error:
-                    raise Exception(str(error))
+                    raise Exception(str(error))  # noqa: B904  plan_M4ph1
                 if proxy_config.username is not None:
                     proxy_forwarder = AuthenticatedProxyForwarder(options.proxy)
                     await proxy_forwarder.start()
                     launch_proxy_server = proxy_forwarder.proxy_server
                 else:
                     launch_proxy_server = proxy_config.server
-            
+
             # Detect the best available browser executable (Chrome, Chromium, or Edge)
             browser_executable = check_browser_executable()
             if not browser_executable:
-                raise Exception("No compatible browser found (Chrome, Chromium, or Microsoft Edge)")
-            
+                raise Exception(  # noqa: TRY301  plan_M4ph1
+                    "No compatible browser found (Chrome, Chromium, or Microsoft Edge)"
+                )
+
             # Identify browser type for logging
             browser_type = "Unknown"
-            if 'edge' in browser_executable.lower() or 'msedge' in browser_executable.lower():
+            if (
+                "edge" in browser_executable.lower()
+                or "msedge" in browser_executable.lower()
+            ):
                 browser_type = "Microsoft Edge"
-            elif 'chromium' in browser_executable.lower():
+            elif "chromium" in browser_executable.lower():
                 browser_type = "Chromium"
-            elif 'chrome' in browser_executable.lower():
+            elif "chrome" in browser_executable.lower():
                 browser_type = "Google Chrome"
-            
+
             debug_logger.log_info(
                 "browser_manager",
                 "spawn_browser",
-                f"Platform: {platform_info['system']} | Root: {platform_info['is_root']} | Container: {platform_info['is_container']} | Sandbox: {options.sandbox} | Browser: {browser_type} ({browser_executable})"
+                f"Platform: {platform_info['system']} | "
+                f"Root: {platform_info['is_root']} | "
+                f"Container: {platform_info['is_container']} | "
+                f"Sandbox: {options.sandbox} | "
+                f"Browser: {browser_type} ({browser_executable})",
             )
 
             caller_args = list(options.browser_args or [])
@@ -377,7 +385,8 @@ class BrowserManager:
             launch_args, stealth_warnings = merge_browser_args(caller_args)
             if stealth_warnings:
                 debug_logger.log_warning(
-                    "browser_manager", "stealth_filter",
+                    "browser_manager",
+                    "stealth_filter",
                     f"Stripped {len(stealth_warnings)} detectable arg(s): "
                     + "; ".join(stealth_warnings),
                 )
@@ -393,20 +402,22 @@ class BrowserManager:
                 user_data_dir=options.user_data_dir,
                 sandbox=options.sandbox,
                 browser_executable_path=browser_executable,
-                browser_args=launch_args
+                browser_args=launch_args,
             )
 
             browser = await uc.start(config=config)
             tab = browser.main_tab
             config_obj = getattr(browser, "config", None)
-            actual_user_data_dir = getattr(config_obj, "user_data_dir", options.user_data_dir)
+            actual_user_data_dir = getattr(
+                config_obj, "user_data_dir", options.user_data_dir
+            )
             uses_custom_data_dir = getattr(
                 config_obj,
                 "uses_custom_data_dir",
                 bool(options.user_data_dir),
             )
 
-            if hasattr(browser, '_process') and browser._process:
+            if hasattr(browser, "_process") and browser._process:
                 process_cleanup.track_browser_process(
                     instance_id,
                     browser._process,
@@ -415,19 +426,22 @@ class BrowserManager:
                     auto_clone=options.auto_clone,
                 )
             else:
-                debug_logger.log_warning("browser_manager", "spawn_browser", 
-                                       f"Browser {instance_id} has no process to track")
+                debug_logger.log_warning(
+                    "browser_manager",
+                    "spawn_browser",
+                    f"Browser {instance_id} has no process to track",
+                )
 
             if options.extra_headers:
-                await tab.send(uc.cdp.network.set_extra_http_headers(
-                    headers=options.extra_headers
-                ))
+                await tab.send(
+                    uc.cdp.network.set_extra_http_headers(headers=options.extra_headers)
+                )
 
             await tab.set_window_size(
                 left=0,
-                top=0, 
+                top=0,
                 width=options.viewport_width,
-                height=options.viewport_height
+                height=options.viewport_height,
             )
             debug_logger.log_info(
                 "browser_manager",
@@ -444,7 +458,7 @@ class BrowserManager:
 
             await asyncio.sleep(0.2)
             if not self._browser_process_is_alive(browser):
-                raise Exception("Browser process exited immediately after launch")
+                raise Exception("Browser process exited immediately after launch")  # noqa: TRY301  plan_M4ph1
 
             spawn_diagnostics = self._build_spawn_diagnostics(
                 launch_args=launch_args,
@@ -464,25 +478,28 @@ class BrowserManager:
 
             async with self._lock:
                 self._instances[instance_id] = {
-                    'browser': browser,
-                    'tab': tab,
-                    'instance': instance,
-                    'options': options,
-                    'navigation_count': 0,
-                    'idle_timeout_seconds': idle_timeout_seconds,
-                    'spawn_diagnostics': spawn_diagnostics,
-                    'network_data': []
+                    "browser": browser,
+                    "tab": tab,
+                    "instance": instance,
+                    "options": options,
+                    "navigation_count": 0,
+                    "idle_timeout_seconds": idle_timeout_seconds,
+                    "spawn_diagnostics": spawn_diagnostics,
+                    "network_data": [],
                 }
 
             instance.state = BrowserState.READY
             instance.update_activity()
 
-            persistent_storage.store_instance(instance_id, {
-                'state': instance.state.value,
-                'created_at': instance.created_at.isoformat(),
-                'current_url': getattr(tab, 'url', ''),
-                'title': 'Browser Instance'
-            })
+            persistent_storage.store_instance(
+                instance_id,
+                {
+                    "state": instance.state.value,
+                    "created_at": instance.created_at.isoformat(),
+                    "current_url": getattr(tab, "url", ""),
+                    "title": "Browser Instance",
+                },
+            )
 
         except asyncio.CancelledError:
             if browser is not None:
@@ -490,16 +507,20 @@ class BrowserManager:
                     await self._stop_browser(browser)
                 except (OSError, RuntimeError, ConnectionError) as stop_err:
                     debug_logger.log_warning(
-                        "browser_manager", "spawn_browser",
-                        f"browser.stop() failed during cancel cleanup for {instance_id}: {stop_err}",
+                        "browser_manager",
+                        "spawn_browser",
+                        f"browser.stop() failed during cancel cleanup "
+                        f"for {instance_id}: {stop_err}",
                     )
             if proxy_forwarder is not None:
                 try:
                     await proxy_forwarder.close()
                 except (OSError, ConnectionError) as proxy_err:
                     debug_logger.log_warning(
-                        "browser_manager", "spawn_browser",
-                        f"Proxy close failed during cancel cleanup for {instance_id}: {proxy_err}",
+                        "browser_manager",
+                        "spawn_browser",
+                        f"Proxy close failed during cancel cleanup "
+                        f"for {instance_id}: {proxy_err}",
                     )
             try:
                 process_cleanup.kill_browser_process(instance_id)
@@ -507,8 +528,10 @@ class BrowserManager:
                 process_cleanup.cleanup_deferred_profiles()
             except (OSError, psutil.Error, ProcessLookupError) as proc_err:
                 debug_logger.log_warning(
-                    "browser_manager", "spawn_browser",
-                    f"Process cleanup failed during cancel for {instance_id}: {proc_err}",
+                    "browser_manager",
+                    "spawn_browser",
+                    f"Process cleanup failed during cancel "
+                    f"for {instance_id}: {proc_err}",
                 )
             async with self._lock:
                 self._instances.pop(instance_id, None)
@@ -522,29 +545,35 @@ class BrowserManager:
                     await self._stop_browser(browser)
                 except (OSError, RuntimeError, ConnectionError) as stop_err:
                     debug_logger.log_warning(
-                        "browser_manager", "spawn_browser",
-                        f"browser.stop() failed during error cleanup for {instance_id}: {stop_err}",
+                        "browser_manager",
+                        "spawn_browser",
+                        f"browser.stop() failed during error cleanup "
+                        f"for {instance_id}: {stop_err}",
                     )
             if proxy_forwarder is not None:
                 try:
                     await proxy_forwarder.close()
                 except (OSError, ConnectionError) as proxy_err:
                     debug_logger.log_warning(
-                        "browser_manager", "spawn_browser",
-                        f"Proxy close failed during error cleanup for {instance_id}: {proxy_err}",
+                        "browser_manager",
+                        "spawn_browser",
+                        f"Proxy close failed during error cleanup "
+                        f"for {instance_id}: {proxy_err}",
                     )
             try:
                 process_cleanup.kill_browser_process(instance_id)
             except (OSError, psutil.Error, ProcessLookupError) as proc_err:
                 debug_logger.log_warning(
-                    "browser_manager", "spawn_browser",
-                    f"Process kill failed during error cleanup for {instance_id}: {proc_err}",
+                    "browser_manager",
+                    "spawn_browser",
+                    f"Process kill failed during error cleanup "
+                    f"for {instance_id}: {proc_err}",
                 )
             instance.state = BrowserState.ERROR
-            raise Exception(f"Failed to spawn browser: {str(e)}")
+            raise Exception(f"Failed to spawn browser: {e!s}")  # noqa: B904  plan_M4ph1
 
         return instance
-    
+
     async def _setup_dynamic_hooks(self, tab: Tab, instance_id: str) -> bool:
         """Setup dynamic hook system for browser instance."""
         try:
@@ -568,7 +597,7 @@ class BrowserManager:
             )
             return False
 
-    async def get_instance(self, instance_id: str) -> Optional[dict]:
+    async def get_instance(self, instance_id: str) -> dict | None:
         """
         Get browser instance by ID.
 
@@ -581,11 +610,13 @@ class BrowserManager:
         async with self._lock:
             data = self._instances.get(instance_id)
             if data and not self._browser_process_is_alive(data["browser"]):
-                self._discard_instance_unlocked(instance_id, data, "browser process is not running")
+                self._discard_instance_unlocked(
+                    instance_id, data, "browser process is not running"
+                )
                 return None
             return data
 
-    async def list_instances(self) -> List[BrowserInstance]:
+    async def list_instances(self) -> list[BrowserInstance]:
         """
         List all browser instances.
 
@@ -600,9 +631,9 @@ class BrowserManager:
                         data,
                         "browser process is not running",
                     )
-            return [data['instance'] for data in self._instances.values()]
+            return [data["instance"] for data in self._instances.values()]
 
-    async def close_instance(self, instance_id: str) -> bool:
+    async def close_instance(self, instance_id: str) -> bool:  # noqa: C901,PLR0915  DEBT(F-702)
         """
         Close and remove a browser instance.
 
@@ -613,29 +644,31 @@ class BrowserManager:
             bool: True if closed successfully, False otherwise.
         """
         import asyncio
-        
-        async def _do_close():
+
+        async def _do_close():  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)
             async with self._lock:
                 if instance_id not in self._instances:
                     return False
 
                 data = self._instances[instance_id]
-                browser = data['browser']
-                instance = data['instance']
+                browser = data["browser"]
+                instance = data["instance"]
 
                 try:
-                    if hasattr(browser, 'tabs') and browser.tabs:
+                    if hasattr(browser, "tabs") and browser.tabs:
                         for tab in browser.tabs[:]:
                             try:
                                 await tab.close()
                             except Exception as tab_err:
                                 debug_logger.log_warning(
-                                    "browser_manager", "close_instance",
+                                    "browser_manager",
+                                    "close_instance",
                                     f"Failed to close tab for {instance_id}: {tab_err}",
                                 )
                 except Exception as tabs_err:
                     debug_logger.log_warning(
-                        "browser_manager", "close_instance",
+                        "browser_manager",
+                        "close_instance",
                         f"Failed to close tabs for {instance_id}: {tabs_err}",
                     )
 
@@ -650,14 +683,19 @@ class BrowserManager:
                 # for the whole 5s wait_for budget and making every close 6-8s.
                 try:
                     import nodriver.cdp.browser as cdp_browser
-                    if getattr(browser, "connection", None) and not browser.connection.closed:
+
+                    if (
+                        getattr(browser, "connection", None)
+                        and not browser.connection.closed
+                    ):
                         await asyncio.wait_for(
                             browser.connection.send(cdp_browser.close()),
                             timeout=2.0,
                         )
-                except (asyncio.TimeoutError, Exception) as cdp_err:
+                except (TimeoutError, Exception) as cdp_err:
                     debug_logger.log_info(
-                        "browser_manager", "close_instance",
+                        "browser_manager",
+                        "close_instance",
                         f"CDP browser.close() skipped for {instance_id}: {cdp_err}",
                     )
 
@@ -669,26 +707,32 @@ class BrowserManager:
                             browser.connection.disconnect(), timeout=2.0
                         )
                         debug_logger.log_info(
-                            "browser_manager", "close_connection",
+                            "browser_manager",
+                            "close_connection",
                             "closed websocket connection",
                         )
-                except (asyncio.TimeoutError, Exception) as e:
+                except (TimeoutError, Exception) as e:
                     debug_logger.log_info(
-                        "browser_manager", "close_connection",
+                        "browser_manager",
+                        "close_connection",
                         f"connection disconnect failed or timed out: {e}",
                     )
 
                 try:
                     process_cleanup.kill_browser_process(instance_id)
                 except Exception as e:
-                    debug_logger.log_warning("browser_manager", "close_instance",
-                                           f"Process cleanup failed for {instance_id}: {e}")
+                    debug_logger.log_warning(
+                        "browser_manager",
+                        "close_instance",
+                        f"Process cleanup failed for {instance_id}: {e}",
+                    )
 
                 try:
                     await self._stop_browser(browser)
                 except Exception as stop_err:
                     debug_logger.log_warning(
-                        "browser_manager", "close_instance",
+                        "browser_manager",
+                        "close_instance",
                         f"browser.stop() failed for {instance_id}: {stop_err}",
                     )
 
@@ -696,46 +740,80 @@ class BrowserManager:
                     await self._close_proxy_forwarder(instance_id)
                 except Exception as proxy_err:
                     debug_logger.log_warning(
-                        "browser_manager", "close_instance",
+                        "browser_manager",
+                        "close_instance",
                         f"Proxy forwarder close failed for {instance_id}: {proxy_err}",
                     )
 
-                if hasattr(browser, '_process') and browser._process and browser._process.returncode is None:
+                if (
+                    hasattr(browser, "_process")
+                    and browser._process
+                    and browser._process.returncode is None
+                ):
                     import os
 
-                    for attempt in range(3):
+                    for attempt in range(self._KILL_RETRIES):
                         try:
                             browser._process.terminate()
-                            debug_logger.log_info("browser_manager", "terminate_process", f"terminated browser with pid {browser._process.pid} successfully on attempt {attempt + 1}")
+                            debug_logger.log_info(
+                                "browser_manager",
+                                "terminate_process",
+                                f"terminated browser with pid "
+                                f"{browser._process.pid} successfully on attempt "
+                                f"{attempt + 1}",
+                            )
                             break
                         except Exception:
                             try:
                                 browser._process.kill()
-                                debug_logger.log_info("browser_manager", "kill_process", f"killed browser with pid {browser._process.pid} successfully on attempt {attempt + 1}")
+                                debug_logger.log_info(
+                                    "browser_manager",
+                                    "kill_process",
+                                    f"killed browser with pid "
+                                    f"{browser._process.pid} successfully on "
+                                    f"attempt {attempt + 1}",
+                                )
                                 break
                             except Exception:
                                 try:
-                                    if hasattr(browser, '_process_pid') and browser._process_pid:
+                                    if (
+                                        hasattr(browser, "_process_pid")
+                                        and browser._process_pid
+                                    ):
                                         os.kill(browser._process_pid, 15)
-                                        debug_logger.log_info("browser_manager", "kill_process", f"killed browser with pid {browser._process_pid} using signal 15 successfully on attempt {attempt + 1}")
+                                        debug_logger.log_info(
+                                            "browser_manager",
+                                            "kill_process",
+                                            f"killed browser with pid "
+                                            f"{browser._process_pid} using signal 15 "
+                                            f"successfully on attempt {attempt + 1}",
+                                        )
                                         break
                                 except (PermissionError, ProcessLookupError) as e:
-                                    debug_logger.log_info("browser_manager", "kill_process", f"browser already stopped or no permission to kill: {e}")
+                                    debug_logger.log_info(
+                                        "browser_manager",
+                                        "kill_process",
+                                        f"browser already stopped or no "
+                                        f"permission to kill: {e}",
+                                    )
                                     break
                                 except Exception as e:
-                                    if attempt == 2:
-                                        debug_logger.log_error("browser_manager", "kill_process", e)
+                                    if attempt == self._KILL_RETRIES - 1:
+                                        debug_logger.log_error(
+                                            "browser_manager", "kill_process", e
+                                        )
 
                 try:
-                    if hasattr(browser, '_process'):
+                    if hasattr(browser, "_process"):
                         browser._process = None
-                    if hasattr(browser, '_process_pid'):
+                    if hasattr(browser, "_process_pid"):
                         browser._process_pid = None
 
                     instance.state = BrowserState.CLOSED
                 except Exception as state_err:
                     debug_logger.log_warning(
-                        "browser_manager", "close_instance",
+                        "browser_manager",
+                        "close_instance",
                         f"Failed to clear process refs for {instance_id}: {state_err}",
                     )
 
@@ -755,16 +833,20 @@ class BrowserManager:
                 persistent_storage.remove_instance(instance_id)
 
                 return True
-        
+
         try:
             return await asyncio.wait_for(_do_close(), timeout=5.0)
-        except asyncio.TimeoutError:
-            debug_logger.log_warning("browser_manager", "close_instance", f"Close timeout for {instance_id}, forcing cleanup")
+        except TimeoutError:
+            debug_logger.log_warning(
+                "browser_manager",
+                "close_instance",
+                f"Close timeout for {instance_id}, forcing cleanup",
+            )
             try:
                 async with self._lock:
                     if instance_id in self._instances:
                         data = self._instances[instance_id]
-                        data['instance'].state = BrowserState.CLOSED
+                        data["instance"].state = BrowserState.CLOSED
                         process_cleanup.kill_browser_process(instance_id)
                         process_cleanup.finalize_browser_process(instance_id)
                         process_cleanup.cleanup_deferred_profiles()
@@ -772,24 +854,30 @@ class BrowserManager:
                         self._spawn_diagnostics.pop(instance_id, None)
                         proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
                         if proxy_forwarder is not None:
-                            asyncio.create_task(proxy_forwarder.close())
+                            self._run_in_background(
+                                proxy_forwarder.close(), "close_instance_proxy_close"
+                            )
                         persistent_storage.remove_instance(instance_id)
             except Exception as force_err:
                 debug_logger.log_error(
-                    "browser_manager", "close_instance",
-                    Exception(f"Forced cleanup failed for {instance_id}, Chrome process may be orphaned: {force_err}"),
+                    "browser_manager",
+                    "close_instance",
+                    Exception(
+                        f"Forced cleanup failed for {instance_id}, "
+                        f"Chrome process may be orphaned: {force_err}"
+                    ),
                 )
             return True
         except Exception as e:
             debug_logger.log_error("browser_manager", "close_instance", e)
             return False
 
-    async def get_spawn_diagnostics(self, instance_id: str) -> Optional[Dict[str, Any]]:
+    async def get_spawn_diagnostics(self, instance_id: str) -> dict[str, Any] | None:
         """Get spawn diagnostics for an instance."""
         return self._spawn_diagnostics.get(instance_id)
 
     @staticmethod
-    def _get_tab_target_id(tab: Optional[Tab]) -> Optional[str]:
+    def _get_tab_target_id(tab: Tab | None) -> str | None:
         """Get a stable target id string for a tab when available."""
         if tab is None:
             return None
@@ -801,7 +889,8 @@ class BrowserManager:
 
     @staticmethod
     def _is_recoverable_navigation_error(error: Exception) -> bool:
-        """Return whether a navigation error should trigger one stale-tab recovery attempt."""
+        """Return whether a navigation error should trigger one stale-tab
+        recovery attempt."""
         if isinstance(error, asyncio.TimeoutError):
             return True
 
@@ -824,7 +913,7 @@ class BrowserManager:
         instance_id: str,
         reason: str,
         close_existing: bool = True,
-    ) -> Optional[Tab]:
+    ) -> Tab | None:
         """
         Replace the tracked main tab for an instance with a fresh about:blank tab.
 
@@ -853,7 +942,8 @@ class BrowserManager:
                     await previous_tab.close()
                 except (ConnectionError, RuntimeError, OSError) as e:
                     debug_logger.log_warning(
-                        "browser_manager", "_replace_main_tab",
+                        "browser_manager",
+                        "_replace_main_tab",
                         f"Failed to close previous tab for {instance_id}: {e}",
                     )
 
@@ -869,15 +959,17 @@ class BrowserManager:
         )
         return new_tab
 
-    async def get_navigation_tab(self, instance_id: str) -> Optional[Tab]:
+    async def get_navigation_tab(self, instance_id: str) -> Tab | None:
         """
-        Get a healthy tab for navigation, recovering from stale tracked tabs when needed.
+        Get a healthy tab for navigation, recovering from stale tracked tabs
+        when needed.
 
         Args:
             instance_id (str): Browser instance id.
 
         Returns:
-            Optional[Tab]: A valid navigation tab, or None if the instance does not exist.
+            Optional[Tab]: A valid navigation tab, or None if the instance
+            does not exist.
         """
         data = await self.get_instance(instance_id)
         if not data:
@@ -893,7 +985,10 @@ class BrowserManager:
         ):
             return await self._replace_main_tab(
                 instance_id,
-                reason=f"navigation recycle threshold {self.NAVIGATION_RECYCLE_THRESHOLD} reached",
+                reason=(
+                    f"navigation recycle threshold "
+                    f"{self.NAVIGATION_RECYCLE_THRESHOLD} reached"
+                ),
             )
 
         try:
@@ -940,7 +1035,7 @@ class BrowserManager:
             timeout_seconds (float): Remaining timeout budget in seconds.
         """
         if timeout_seconds <= 0:
-            raise asyncio.TimeoutError("Navigation wait budget exhausted")
+            raise TimeoutError("Navigation wait budget exhausted")
 
         if wait_until == "domcontentloaded":
             await asyncio.wait_for(
@@ -963,9 +1058,9 @@ class BrowserManager:
         instance_id: str,
         url: str,
         wait_until: str = "load",
-        timeout: int = 30000,
-        referrer: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        timeout: int = 30000,  # noqa: ASYNC109  plan_M7
+        referrer: str | None = None,
+    ) -> dict[str, Any]:
         """
         Navigate with timeout enforcement and one automatic tab-recovery retry.
 
@@ -980,7 +1075,7 @@ class BrowserManager:
             Dict[str, Any]: Navigation result payload.
         """
         timeout_seconds = max(timeout, 1) / 1000
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
 
         for attempt in range(2):
             await self.touch_instance(instance_id)
@@ -989,7 +1084,10 @@ class BrowserManager:
             else:
                 tab = await self._replace_main_tab(
                     instance_id,
-                    reason=f"recovering after navigation failure: {type(last_error).__name__ if last_error else 'unknown'}",
+                    reason=(
+                        f"recovering after navigation failure: "
+                        f"{type(last_error).__name__ if last_error else 'unknown'}"
+                    ),
                 )
 
             if not tab:
@@ -1017,7 +1115,7 @@ class BrowserManager:
                 elapsed = time.monotonic() - start_time
                 remaining = timeout_seconds - elapsed
                 if remaining <= 0:
-                    raise asyncio.TimeoutError("Navigation result budget exhausted")
+                    raise TimeoutError("Navigation result budget exhausted")  # noqa: TRY301  plan_M4ph1
 
                 final_url = await asyncio.wait_for(
                     tab.evaluate("window.location.href"),
@@ -1047,7 +1145,8 @@ class BrowserManager:
                 debug_logger.log_warning(
                     "browser_manager",
                     "navigate",
-                    f"Navigation attempt {attempt + 1} failed for {instance_id}: {error}",
+                    f"Navigation attempt {attempt + 1} failed for "
+                    f"{instance_id}: {error}",
                     {"url": url, "attempt": attempt + 1},
                 )
                 if attempt == 1 or not self._is_recoverable_navigation_error(error):
@@ -1056,18 +1155,20 @@ class BrowserManager:
                             f"Navigation to {url} timed out after {timeout}ms"
                         ) from error
                     raise
+        return None
 
     async def get_tab(
         self,
         instance_id: str,
         touch_activity: bool = True,
-    ) -> Optional[Tab]:
+    ) -> Tab | None:
         """
         Get the main tab for a browser instance.
 
         Args:
             instance_id (str): The ID of the browser instance.
-            touch_activity (bool): Whether retrieving the tab should refresh last activity.
+            touch_activity (bool): Whether retrieving the tab should refresh
+            last activity.
 
         Returns:
             Optional[Tab]: The main tab if found, else None.
@@ -1076,20 +1177,21 @@ class BrowserManager:
         if data:
             if touch_activity:
                 await self.touch_instance(instance_id)
-            return data['tab']
+            return data["tab"]
         return None
 
     async def get_browser(
         self,
         instance_id: str,
         touch_activity: bool = True,
-    ) -> Optional[Browser]:
+    ) -> Browser | None:
         """
         Get the browser object for an instance.
 
         Args:
             instance_id (str): The ID of the browser instance.
-            touch_activity (bool): Whether retrieving the browser should refresh last activity.
+            touch_activity (bool): Whether retrieving the browser should
+            refresh last activity.
 
         Returns:
             Optional[Browser]: The browser object if found, else None.
@@ -1098,10 +1200,10 @@ class BrowserManager:
         if data:
             if touch_activity:
                 await self.touch_instance(instance_id)
-            return data['browser']
+            return data["browser"]
         return None
 
-    async def list_tabs(self, instance_id: str) -> List[Dict[str, str]]:
+    async def list_tabs(self, instance_id: str) -> list[dict[str, str]]:
         """
         List all tabs for a browser instance.
 
@@ -1120,12 +1222,14 @@ class BrowserManager:
         tabs = []
         for tab in browser.tabs:
             await tab
-            tabs.append({
-                'tab_id': str(tab.target.target_id),
-                'url': getattr(tab, 'url', '') or '',
-                'title': getattr(tab.target, 'title', '') or 'Untitled',
-                'type': getattr(tab.target, 'type_', 'page')
-            })
+            tabs.append(
+                {
+                    "tab_id": str(tab.target.target_id),
+                    "url": getattr(tab, "url", "") or "",
+                    "title": getattr(tab.target, "title", "") or "Untitled",
+                    "type": getattr(tab.target, "type_", "page"),
+                }
+            )
 
         return tabs
 
@@ -1159,13 +1263,13 @@ class BrowserManager:
             await target_tab.bring_to_front()
             async with self._lock:
                 if instance_id in self._instances:
-                    self._instances[instance_id]['tab'] = target_tab
+                    self._instances[instance_id]["tab"] = target_tab
 
             return True
         except Exception:
             return False
 
-    async def get_active_tab(self, instance_id: str) -> Optional[Tab]:
+    async def get_active_tab(self, instance_id: str) -> Tab | None:
         """
         Get the currently active tab.
 
@@ -1207,7 +1311,9 @@ class BrowserManager:
         except Exception:
             return False
 
-    async def update_instance_state(self, instance_id: str, url: str = None, title: str = None):
+    async def update_instance_state(
+        self, instance_id: str, url: str | None = None, title: str | None = None
+    ):
         """
         Update instance state after navigation or action.
 
@@ -1218,14 +1324,14 @@ class BrowserManager:
         """
         async with self._lock:
             if instance_id in self._instances:
-                instance = self._instances[instance_id]['instance']
+                instance = self._instances[instance_id]["instance"]
                 if url:
                     instance.current_url = url
                 if title:
                     instance.title = title
         await self.touch_instance(instance_id)
 
-    async def get_page_state(self, instance_id: str) -> Optional[PageState]:
+    async def get_page_state(self, instance_id: str) -> PageState | None:
         """
         Get complete page state for an instance.
 
@@ -1261,13 +1367,16 @@ class BrowserManager:
                     session_storage[key] = value
             except (RuntimeError, ConnectionError) as e:
                 debug_logger.log_warning(
-                    "browser_manager", "get_page_state",
+                    "browser_manager",
+                    "get_page_state",
                     f"Storage access failed (connection issue) for {instance_id}: {e}",
                 )
             except Exception as e:
-                # Pages may block storage access (cross-origin, opaque origins, security policies)
+                # Pages may block storage access (cross-origin, opaque origins,
+                # security policies)
                 debug_logger.log_info(
-                    "browser_manager", "get_page_state",
+                    "browser_manager",
+                    "get_page_state",
                     f"Storage access unavailable for {instance_id}: {e}",
                 )
 
@@ -1284,35 +1393,38 @@ class BrowserManager:
                 url=url,
                 title=title,
                 ready_state=ready_state,
-                cookies=cookies.get('cookies', []),
+                cookies=cookies.get("cookies", []),
                 local_storage=local_storage,
                 session_storage=session_storage,
-                viewport=viewport
+                viewport=viewport,
             )
 
         except Exception as e:
-            raise Exception(f"Failed to get page state: {str(e)}")
+            raise Exception(f"Failed to get page state: {e!s}")  # noqa: B904  plan_M4ph1
 
-    async def cleanup_inactive(self, timeout_seconds: Optional[int] = None) -> int:
+    async def cleanup_inactive(self, timeout_seconds: int | None = None) -> int:
         """
         Clean up inactive browser instances.
 
         Args:
-            timeout_seconds (Optional[int]): Override timeout in seconds for all instances. Uses per-instance values when None.
+            timeout_seconds (Optional[int]): Override timeout in seconds for
+            all instances. Uses per-instance values when None.
 
         Returns:
             int: Number of instances selected for idle cleanup.
         """
-        now = datetime.now()
+        now = datetime.now(tz=timezone.utc)
 
         to_close = []
         async with self._lock:
             for instance_id, data in self._instances.items():
-                instance = data['instance']
+                instance = data["instance"]
                 effective_timeout = (
                     timeout_seconds
                     if timeout_seconds is not None
-                    else data.get('idle_timeout_seconds', self._idle_timeout_seconds_default)
+                    else data.get(
+                        "idle_timeout_seconds", self._idle_timeout_seconds_default
+                    )
                 )
                 if effective_timeout <= 0:
                     continue

@@ -7,9 +7,8 @@ continue so the intercepted request/response is never left hanging.
 """
 
 import pytest
-
-from response_stage_hooks import ResponseStageProcessor
 from dynamic_hook_system import HookAction, RequestInfo
+from response_stage_hooks import ResponseStageProcessor
 
 
 class FakeTab:
@@ -22,13 +21,17 @@ class FakeTab:
             self.sent.append(command)
             raise RuntimeError("cdp send failed")
         self.sent.append(command)
-        return None
 
 
 def _req(stage="response"):
-    return RequestInfo(request_id="r1", instance_id="i1",
-                       url="https://example.com/api", method="GET",
-                       headers={}, stage=stage)
+    return RequestInfo(
+        request_id="r1",
+        instance_id="i1",
+        url="https://example.com/api",
+        method="GET",
+        headers={},
+        stage=stage,
+    )
 
 
 def _proc():
@@ -36,12 +39,17 @@ def _proc():
 
 
 class TestResponseAction:
-    @pytest.mark.parametrize("action", [
-        HookAction(action="block"),
-        HookAction(action="fulfill", status_code=200, headers={"X": "y"}, body="hi"),
-        HookAction(action="modify", status_code=302, headers={"X": "y"}),
-        HookAction(action="continue"),
-    ])
+    @pytest.mark.parametrize(
+        "action",
+        [
+            HookAction(action="block"),
+            HookAction(
+                action="fulfill", status_code=200, headers={"X": "y"}, body="hi"
+            ),
+            HookAction(action="modify", status_code=302, headers={"X": "y"}),
+            HookAction(action="continue"),
+        ],
+    )
     async def test_each_action_dispatches_one_command(self, action):
         tab = FakeTab()
         await _proc().execute_response_action(tab, _req(), action, event=None)
@@ -53,17 +61,22 @@ class TestResponseAction:
         await _proc().execute_response_action(
             tab, _req(), HookAction(action="block"), event=None
         )
-        assert len(tab.sent) == 2, "must attempt a fallback continue after a failed action"
+        assert len(tab.sent) == 2, (
+            "must attempt a fallback continue after a failed action"
+        )
 
 
 class TestRequestAction:
-    @pytest.mark.parametrize("action", [
-        HookAction(action="block"),
-        HookAction(action="redirect", url="https://example.com/other"),
-        HookAction(action="fulfill", status_code=200, body="hi"),
-        HookAction(action="modify", headers={"X": "y"}, method="POST"),
-        HookAction(action="continue"),
-    ])
+    @pytest.mark.parametrize(
+        "action",
+        [
+            HookAction(action="block"),
+            HookAction(action="redirect", url="https://example.com/other"),
+            HookAction(action="fulfill", status_code=200, body="hi"),
+            HookAction(action="modify", headers={"X": "y"}, method="POST"),
+            HookAction(action="continue"),
+        ],
+    )
     async def test_each_action_dispatches_one_command(self, action):
         tab = FakeTab()
         await _proc().execute_request_action(tab, _req(stage="request"), action)
@@ -74,4 +87,6 @@ class TestRequestAction:
         await _proc().execute_request_action(
             tab, _req(stage="request"), HookAction(action="block")
         )
-        assert len(tab.sent) == 2, "must attempt a fallback continue after a failed action"
+        assert len(tab.sent) == 2, (
+            "must attempt a fallback continue after a failed action"
+        )

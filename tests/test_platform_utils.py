@@ -11,9 +11,9 @@ deterministic across CI environments.
 import platform_utils
 from platform_utils import (
     filter_stealth_args,
-    merge_browser_args,
-    get_required_sandbox_args,
     get_platform_info,
+    get_required_sandbox_args,
+    merge_browser_args,
 )
 
 

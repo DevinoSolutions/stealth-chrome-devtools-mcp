@@ -1,14 +1,16 @@
 """Shared fixtures for stealth-chrome-devtools-mcp test suite."""
 
-import os
-import sys
-import shutil
 import json
+import os
+import shutil
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from stealth_chrome_devtools_mcp.settings import get_settings
 
 # ── Make embedded/ importable the same way the real entrypoint does ──
 EMBEDDED_DIR = (
@@ -35,6 +37,17 @@ os.environ.setdefault(
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _reset_settings_cache():
+    """Every test gets a fresh Settings read. ``get_settings()`` is process-cached
+    (``@lru_cache``), so without this an env mutation via ``monkeypatch`` /
+    ``patch.dict`` would be invisible to any migrated code that reads Settings."""
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture()
 def tmp_session_root(tmp_path):
     """
@@ -53,11 +66,16 @@ def tmp_session_root(tmp_path):
     shutil.copytree(str(master.parent), str(snapshot.parent))
     # Write clone marker so snapshot is recognised
     marker = snapshot.parent / ".stealth_chrome_devtools_mcp_clone.json"
-    marker.write_text(json.dumps({
-        "source": str(master.parent),
-        "source_kind": "test-fixture",
-        "created_at": "2026-01-01T00:00:00Z",
-    }), encoding="utf-8")
+    marker.write_text(
+        json.dumps(
+            {
+                "source": str(master.parent),
+                "source_kind": "test-fixture",
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     sessions = tmp_path / "sessions"
     sessions.mkdir()

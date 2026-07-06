@@ -4,25 +4,24 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import Any
 
-from nodriver import Tab, Element
-from models import ElementInfo, ElementAction
 from debug_logger import debug_logger
-
+from models import ElementInfo
+from nodriver import Tab
 
 
 class DOMHandler:
     """Handles DOM queries and element interactions."""
 
     @staticmethod
-    async def query_elements(
+    async def query_elements(  # noqa: C901,PLR0912,PLR0915  PERMANENT(stable-but-complex per stage0/metrics)
         tab: Tab,
         selector: str,
-        text_filter: Optional[str] = None,
+        text_filter: str | None = None,
         visible_only: bool = True,
-        limit: Optional[Any] = None
-    ) -> List[ElementInfo]:
+        limit: Any | None = None,
+    ) -> list[ElementInfo]:
         """
         Query elements with advanced filtering.
 
@@ -43,40 +42,60 @@ class DOMHandler:
                     processed_limit = limit
                 elif isinstance(limit, str) and limit.isdigit():
                     processed_limit = int(limit)
-                elif isinstance(limit, str) and limit.strip() == '':
+                elif isinstance(limit, str) and limit.strip() == "":
                     processed_limit = None
                 else:
-                    debug_logger.log_warning('DOMHandler', 'query_elements',
-                                            f'Invalid limit parameter: {limit} (type: {type(limit)})')
+                    debug_logger.log_warning(
+                        "DOMHandler",
+                        "query_elements",
+                        f"Invalid limit parameter: {limit} (type: {type(limit)})",
+                    )
                     processed_limit = None
             except (ValueError, TypeError) as e:
-                debug_logger.log_error('DOMHandler', 'query_elements', e,
-                                      {'limit_value': limit, 'limit_type': type(limit)})
+                debug_logger.log_error(
+                    "DOMHandler",
+                    "query_elements",
+                    e,
+                    {"limit_value": limit, "limit_type": type(limit)},
+                )
                 processed_limit = None
 
-        debug_logger.log_info('DOMHandler', 'query_elements',
-                             f'Starting query with selector: {selector}',
-                             {'text_filter': text_filter, 'visible_only': visible_only,
-                              'limit': limit, 'processed_limit': processed_limit})
+        debug_logger.log_info(
+            "DOMHandler",
+            "query_elements",
+            f"Starting query with selector: {selector}",
+            {
+                "text_filter": text_filter,
+                "visible_only": visible_only,
+                "limit": limit,
+                "processed_limit": processed_limit,
+            },
+        )
         try:
-            if selector.startswith('//'):
+            if selector.startswith("//"):
                 elements = await tab.xpath(selector)
-                debug_logger.log_info('DOMHandler', 'query_elements',
-                                     f'XPath query returned {len(elements)} elements')
+                debug_logger.log_info(
+                    "DOMHandler",
+                    "query_elements",
+                    f"XPath query returned {len(elements)} elements",
+                )
             else:
                 elements = await tab.select_all(selector)
-                debug_logger.log_info('DOMHandler', 'query_elements',
-                                     f'CSS query returned {len(elements)} elements')
+                debug_logger.log_info(
+                    "DOMHandler",
+                    "query_elements",
+                    f"CSS query returned {len(elements)} elements",
+                )
 
             results = []
             for idx, elem in enumerate(elements):
                 try:
-                    if hasattr(elem, 'update'):
+                    if hasattr(elem, "update"):
                         await elem.update()
 
-                    tag_name = elem.tag_name if hasattr(elem, 'tag_name') else 'unknown'
-                    text_content = elem.text_all if hasattr(elem, 'text_all') else ''
-                    attrs = elem.attrs if hasattr(elem, 'attrs') else {}
+                    tag_name = elem.tag_name if hasattr(elem, "tag_name") else "unknown"
+                    text_content = elem.text_all if hasattr(elem, "text_all") else ""
+                    attrs = elem.attrs if hasattr(elem, "attrs") else {}
 
                     if text_filter and text_filter.lower() not in text_content.lower():
                         continue
@@ -87,17 +106,24 @@ class DOMHandler:
                             is_visible = await elem.apply(
                                 """(elem) => {
                                     var style = window.getComputedStyle(elem);
-                                    return style.display !== 'none' && 
-                                           style.visibility !== 'hidden' && 
+                                    return style.display !== 'none' &&
+                                           style.visibility !== 'hidden' &&
                                            style.opacity !== '0';
                                 }"""
                             )
                             if not is_visible:
                                 continue
-                        except (AttributeError, RuntimeError, ConnectionError, Exception) as e:
+                        except (
+                            AttributeError,
+                            RuntimeError,
+                            ConnectionError,
+                            Exception,
+                        ) as e:
                             debug_logger.log_info(
-                                "dom_handler", "query_elements",
-                                f"Visibility check skipped for element: {type(e).__name__}",
+                                "dom_handler",
+                                "query_elements",
+                                "Visibility check skipped for element: "
+                                f"{type(e).__name__}",
                             )
 
                     bbox = None
@@ -105,14 +131,20 @@ class DOMHandler:
                         position = await elem.get_position()
                         if position:
                             bbox = {
-                                'x': position.x,
-                                'y': position.y,
-                                'width': position.width,
-                                'height': position.height
+                                "x": position.x,
+                                "y": position.y,
+                                "width": position.width,
+                                "height": position.height,
                             }
-                    except (AttributeError, RuntimeError, ConnectionError, Exception) as e:
+                    except (
+                        AttributeError,
+                        RuntimeError,
+                        ConnectionError,
+                        Exception,
+                    ) as e:
                         debug_logger.log_info(
-                            "dom_handler", "query_elements",
+                            "dom_handler",
+                            "query_elements",
                             f"Position unavailable for element: {type(e).__name__}",
                         )
 
@@ -120,7 +152,7 @@ class DOMHandler:
 
                     children_count = 0
                     try:
-                        if hasattr(elem, 'children'):
+                        if hasattr(elem, "children"):
                             children = elem.children
                             children_count = len(children) if children else 0
                     except (AttributeError, TypeError):
@@ -134,37 +166,48 @@ class DOMHandler:
                         is_visible=is_visible,
                         is_clickable=is_clickable,
                         bounding_box=bbox,
-                        children_count=children_count
+                        children_count=children_count,
                     )
 
                     results.append(element_info)
 
                     if processed_limit and len(results) >= processed_limit:
-                        debug_logger.log_info('DOMHandler', 'query_elements',
-                                             f'Reached limit of {processed_limit} results')
+                        debug_logger.log_info(
+                            "DOMHandler",
+                            "query_elements",
+                            f"Reached limit of {processed_limit} results",
+                        )
                         break
 
                 except Exception as elem_error:
-                    debug_logger.log_error('DOMHandler', 'query_elements',
-                                          elem_error,
-                                          {'element_index': idx, 'selector': selector})
+                    debug_logger.log_error(
+                        "DOMHandler",
+                        "query_elements",
+                        elem_error,
+                        {"element_index": idx, "selector": selector},
+                    )
                     continue
 
-            debug_logger.log_info('DOMHandler', 'query_elements',
-                                 f'Returning {len(results)} results')
+            debug_logger.log_info(
+                "DOMHandler", "query_elements", f"Returning {len(results)} results"
+            )
             return results
 
         except Exception as e:
-            debug_logger.log_error('DOMHandler', 'query_elements', e,
-                                  {'selector': selector, 'tab': str(tab)})
+            debug_logger.log_error(
+                "DOMHandler",
+                "query_elements",
+                e,
+                {"selector": selector, "tab": str(tab)},
+            )
             return []
 
     @staticmethod
     async def click_element(
         tab: Tab,
         selector: str,
-        text_match: Optional[str] = None,
-        timeout: int = 10000
+        text_match: str | None = None,
+        timeout: int = 10000,  # noqa: ASYNC109  plan_M7
     ) -> bool:
         """
         Click an element with smart retry logic.
@@ -184,7 +227,7 @@ class DOMHandler:
             if text_match:
                 element = await tab.find(text_match, best_match=True)
             else:
-                element = await tab.select(selector, timeout=timeout/1000)
+                element = await tab.select(selector, timeout=timeout / 1000)
 
             if not element:
                 raise Exception(f"Element not found: {selector}")
@@ -200,15 +243,15 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to click element: {str(e)}")
+            raise Exception(f"Failed to click element: {e!s}")
 
     @staticmethod
     async def upload_file(
         tab: Tab,
         selector: str,
-        file_paths: List[str],
-        timeout: int = 10000
-    ) -> Dict[str, Any]:
+        file_paths: list[str],
+        timeout: int = 10000,  # noqa: ASYNC109  plan_M7
+    ) -> dict[str, Any]:
         """
         Attach local file(s) to a file input via CDP (DOM.setFileInputFiles).
 
@@ -230,9 +273,9 @@ class DOMHandler:
             if not file_paths:
                 raise Exception("No file paths provided")
 
-            resolved: List[str] = []
+            resolved: list[str] = []
             for raw_path in file_paths:
-                path = Path(str(raw_path)).expanduser()
+                path = Path(str(raw_path)).expanduser()  # noqa: ASYNC240  plan_M7
                 if not path.is_file():
                     raise Exception(f"File not found: {path}")
                 resolved.append(str(path.resolve()))
@@ -247,12 +290,14 @@ class DOMHandler:
                 input_type = (element.attrs.get("type") or "").lower()
             if tag_name and tag_name != "input":
                 raise Exception(
-                    f"Selector '{selector}' resolved to <{tag_name}>, not a file input. "
-                    "Point the selector at an <input type=\"file\"> element."
+                    f"Selector '{selector}' resolved to <{tag_name}>, "
+                    "not a file input. "
+                    'Point the selector at an <input type="file"> element.'
                 )
             if input_type and input_type != "file":
                 raise Exception(
-                    f"Selector '{selector}' is an <input type=\"{input_type}\">, not type=\"file\"."
+                    f"Selector '{selector}' is an <input type=\"{input_type}\">, "
+                    'not type="file".'
                 )
 
             await element.send_file(*resolved)
@@ -260,17 +305,17 @@ class DOMHandler:
             return {"uploaded": resolved, "count": len(resolved)}
 
         except Exception as e:
-            raise Exception(f"Failed to upload file: {str(e)}")
+            raise Exception(f"Failed to upload file: {e!s}")
 
     @staticmethod
-    async def type_text(
+    async def type_text(  # noqa: PLR0913  PERMANENT(function interface)
         tab: Tab,
         selector: str,
         text: str,
         clear_first: bool = True,
         delay_ms: int = 50,
         parse_newlines: bool = False,
-        shift_enter: bool = False
+        shift_enter: bool = False,
     ) -> bool:
         """
         Type text with human-like delays and optional newline parsing.
@@ -282,7 +327,8 @@ class DOMHandler:
             clear_first (bool): Clear input before typing.
             delay_ms (int): Delay between keystrokes in milliseconds.
             parse_newlines (bool): If True, parse \n as Enter key presses.
-            shift_enter (bool): If True, use Shift+Enter instead of Enter (for chat apps).
+            shift_enter (bool): If True, use Shift+Enter instead of Enter
+                (for chat apps).
 
         Returns:
             bool: True if typing succeeded, False otherwise.
@@ -299,50 +345,53 @@ class DOMHandler:
                 try:
                     await element.apply("(elem) => { elem.value = ''; }")
                 except Exception:
-                    await element.send_keys('\ue009' + 'a')  # Ctrl+A fallback
-                    await element.send_keys('\ue017')
+                    await element.send_keys("\ue009" + "a")  # Ctrl+A fallback
+                    await element.send_keys("\ue017")
                 await asyncio.sleep(0.1)
 
             if parse_newlines:
-                from nodriver import cdp
-                lines = text.split('\n')
+                lines = text.split("\n")
                 for i, line in enumerate(lines):
                     for char in line:
                         await element.send_keys(char)
                         await asyncio.sleep(delay_ms / 1000)
-                    
+
                     if i < len(lines) - 1:
                         if shift_enter:
-                            await element.apply('''(elem) => {
+                            await element.apply("""(elem) => {
                                 const start = elem.selectionStart;
                                 const end = elem.selectionEnd;
                                 const value = elem.value;
-                                elem.value = value.substring(0, start) + '\\n' + value.substring(end);
+                                elem.value = value.substring(0, start)
+                                    + '\\n' + value.substring(end);
                                 elem.selectionStart = elem.selectionEnd = start + 1;
-                                
+
                                 elem.dispatchEvent(new KeyboardEvent('keydown', {
                                     key: 'Enter',
                                     code: 'Enter',
                                     shiftKey: true,
                                     bubbles: true
                                 }));
-                                elem.dispatchEvent(new Event('input', { bubbles: true }));
-                            }''')
+                                elem.dispatchEvent(
+                                    new Event('input', { bubbles: true }));
+                            }""")
                         else:
-                            await element.apply('''(elem) => {
+                            await element.apply("""(elem) => {
                                 const start = elem.selectionStart;
                                 const end = elem.selectionEnd;
                                 const value = elem.value;
-                                elem.value = value.substring(0, start) + '\\n' + value.substring(end);
+                                elem.value = value.substring(0, start)
+                                    + '\\n' + value.substring(end);
                                 elem.selectionStart = elem.selectionEnd = start + 1;
-                                
+
                                 elem.dispatchEvent(new KeyboardEvent('keydown', {
                                     key: 'Enter',
                                     code: 'Enter',
                                     bubbles: true
                                 }));
-                                elem.dispatchEvent(new Event('input', { bubbles: true }));
-                            }''')
+                                elem.dispatchEvent(
+                                    new Event('input', { bubbles: true }));
+                            }""")
                         await asyncio.sleep(delay_ms / 1000)
             else:
                 for char in text:
@@ -352,14 +401,11 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to type text: {str(e)}")
+            raise Exception(f"Failed to type text: {e!s}")
 
     @staticmethod
     async def paste_text(
-        tab: Tab,
-        selector: str,
-        text: str,
-        clear_first: bool = True
+        tab: Tab, selector: str, text: str, clear_first: bool = True
     ) -> bool:
         """
         Paste text instantly using nodriver's insert_text method.
@@ -375,7 +421,7 @@ class DOMHandler:
             bool: True if pasting succeeded, False otherwise.
         """
         from nodriver import cdp
-        
+
         try:
             element = await tab.select(selector)
             if not element:
@@ -388,32 +434,40 @@ class DOMHandler:
                 try:
                     await element.apply("(elem) => { elem.value = ''; }")
                 except Exception:
-                    await tab.send(cdp.input_.dispatch_key_event(  # Ctrl+A fallback
-                        "rawKeyDown", 
-                        modifiers=2,  # Ctrl
-                        key="a",
-                        code="KeyA",
-                        windows_virtual_key_code=65
-                    ))
-                    await tab.send(cdp.input_.dispatch_key_event(
-                        "keyUp", 
-                        modifiers=2,  # Ctrl
-                        key="a",
-                        code="KeyA",
-                        windows_virtual_key_code=65
-                    ))
-                    await tab.send(cdp.input_.dispatch_key_event(
-                        "rawKeyDown",
-                        key="Delete",
-                        code="Delete",
-                        windows_virtual_key_code=46
-                    ))
-                    await tab.send(cdp.input_.dispatch_key_event(
-                        "keyUp",
-                        key="Delete", 
-                        code="Delete",
-                        windows_virtual_key_code=46
-                    ))
+                    await tab.send(
+                        cdp.input_.dispatch_key_event(  # Ctrl+A fallback
+                            "rawKeyDown",
+                            modifiers=2,  # Ctrl
+                            key="a",
+                            code="KeyA",
+                            windows_virtual_key_code=65,
+                        )
+                    )
+                    await tab.send(
+                        cdp.input_.dispatch_key_event(
+                            "keyUp",
+                            modifiers=2,  # Ctrl
+                            key="a",
+                            code="KeyA",
+                            windows_virtual_key_code=65,
+                        )
+                    )
+                    await tab.send(
+                        cdp.input_.dispatch_key_event(
+                            "rawKeyDown",
+                            key="Delete",
+                            code="Delete",
+                            windows_virtual_key_code=46,
+                        )
+                    )
+                    await tab.send(
+                        cdp.input_.dispatch_key_event(
+                            "keyUp",
+                            key="Delete",
+                            code="Delete",
+                            windows_virtual_key_code=46,
+                        )
+                    )
                 await asyncio.sleep(0.1)
 
             await tab.send(cdp.input_.insert_text(text))
@@ -421,15 +475,15 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to paste text: {str(e)}")
+            raise Exception(f"Failed to paste text: {e!s}")
 
     @staticmethod
     async def select_option(
         tab: Tab,
         selector: str,
-        value: Optional[str] = None,
-        text: Optional[str] = None,
-        index: Optional[int] = None
+        value: str | None = None,
+        text: str | None = None,
+        index: int | None = None,
     ) -> bool:
         """
         Select option from dropdown using nodriver's native methods.
@@ -465,12 +519,13 @@ class DOMHandler:
                 """)
                 return True
 
-            elif index is not None:
+            if index is not None:
                 safe_selector = json.dumps(selector)
                 safe_index = int(index)
                 await tab.evaluate(f"""
                     const select = document.querySelector({safe_selector});
-                    if (select && {safe_index} >= 0 && {safe_index} < select.options.length) {{
+                    if (select && {safe_index} >= 0
+                        && {safe_index} < select.options.length) {{
                         select.selectedIndex = {safe_index};
                         select.dispatchEvent(new Event('change', {{bubbles: true}}));
                     }}
@@ -480,13 +535,10 @@ class DOMHandler:
             raise Exception("No selection criteria provided (value, text, or index)")
 
         except Exception as e:
-            raise Exception(f"Failed to select option: {str(e)}")
+            raise Exception(f"Failed to select option: {e!s}")
 
     @staticmethod
-    async def get_element_state(
-        tab: Tab,
-        selector: str
-    ) -> Dict[str, Any]:
+    async def get_element_state(tab: Tab, selector: str) -> dict[str, Any]:
         """
         Get complete state of an element.
 
@@ -502,40 +554,50 @@ class DOMHandler:
             if not element:
                 raise Exception(f"Element not found: {selector}")
 
-            if hasattr(element, 'update'):
+            if hasattr(element, "update"):
                 await element.update()
 
-            state = {
-                'tag_name': element.tag_name if hasattr(element, 'tag_name') else 'unknown',
-                'text': element.text if hasattr(element, 'text') else '',
-                'text_all': element.text_all if hasattr(element, 'text_all') else '',
-                'attributes': element.attrs if hasattr(element, 'attrs') else {},
-                'is_visible': True,
-                'is_clickable': False,
-                'is_enabled': True,
-                'value': element.attrs.get('value') if hasattr(element, 'attrs') else None,
-                'href': element.attrs.get('href') if hasattr(element, 'attrs') else None,
-                'src': element.attrs.get('src') if hasattr(element, 'attrs') else None,
-                'class': element.attrs.get('class') if hasattr(element, 'attrs') else None,
-                'id': element.attrs.get('id') if hasattr(element, 'attrs') else None,
-                'position': await element.get_position() if hasattr(element, 'get_position') else None,
-                'computed_style': {},
-                'children_count': len(element.children) if hasattr(element, 'children') and element.children else 0,
-                'parent_tag': None
+            return {
+                "tag_name": element.tag_name
+                if hasattr(element, "tag_name")
+                else "unknown",
+                "text": element.text if hasattr(element, "text") else "",
+                "text_all": element.text_all if hasattr(element, "text_all") else "",
+                "attributes": element.attrs if hasattr(element, "attrs") else {},
+                "is_visible": True,
+                "is_clickable": False,
+                "is_enabled": True,
+                "value": element.attrs.get("value")
+                if hasattr(element, "attrs")
+                else None,
+                "href": element.attrs.get("href")
+                if hasattr(element, "attrs")
+                else None,
+                "src": element.attrs.get("src") if hasattr(element, "attrs") else None,
+                "class": element.attrs.get("class")
+                if hasattr(element, "attrs")
+                else None,
+                "id": element.attrs.get("id") if hasattr(element, "attrs") else None,
+                "position": await element.get_position()
+                if hasattr(element, "get_position")
+                else None,
+                "computed_style": {},
+                "children_count": len(element.children)
+                if hasattr(element, "children") and element.children
+                else 0,
+                "parent_tag": None,
             }
 
-            return state
-
         except Exception as e:
-            raise Exception(f"Failed to get element state: {str(e)}")
+            raise Exception(f"Failed to get element state: {e!s}")
 
     @staticmethod
     async def wait_for_element(
         tab: Tab,
         selector: str,
-        timeout: int = 30000,
+        timeout: int = 30000,  # noqa: ASYNC109  plan_M7
         visible: bool = True,
-        text_content: Optional[str] = None
+        text_content: str | None = None,
     ) -> bool:
         """
         Wait for element to appear and match conditions.
@@ -563,16 +625,23 @@ class DOMHandler:
                             is_visible = await element.apply(
                                 """(elem) => {
                                     var style = window.getComputedStyle(elem);
-                                    return style.display !== 'none' && 
-                                           style.visibility !== 'hidden' && 
+                                    return style.display !== 'none' &&
+                                           style.visibility !== 'hidden' &&
                                            style.opacity !== '0';
                                 }"""
                             )
                             if not is_visible:
                                 await asyncio.sleep(0.5)
                                 continue
-                        except (AttributeError, RuntimeError, ConnectionError, Exception):
-                            pass  # visibility check may fail on detached/stale elements during wait
+                        except (  # noqa: S110  plan_M10a
+                            AttributeError,
+                            RuntimeError,
+                            ConnectionError,
+                            Exception,
+                        ):
+                            # visibility check may fail on detached/stale
+                            # elements during wait
+                            pass
 
                     if text_content:
                         text = element.text_all
@@ -591,9 +660,7 @@ class DOMHandler:
 
     @staticmethod
     async def execute_script(
-        tab: Tab,
-        script: str,
-        args: Optional[List[Any]] = None
+        tab: Tab, script: str, args: list[Any] | None = None
     ) -> Any:
         """
         Execute JavaScript in page context.
@@ -609,20 +676,21 @@ class DOMHandler:
         try:
             if args:
                 serialized_args = ",".join(json.dumps(a) for a in args)
-                result = await tab.evaluate(f'(function() {{ {script} }})({serialized_args})')
+                result = await tab.evaluate(
+                    f"(function() {{ {script} }})({serialized_args})"
+                )
             else:
                 result = await tab.evaluate(script)
 
             return result
 
         except Exception as e:
-            raise Exception(f"Failed to execute script: {str(e)}")
+            raise Exception(f"Failed to execute script: {e!s}")
 
     @staticmethod
     async def get_page_content(
-        tab: Tab,
-        include_frames: bool = False
-    ) -> Dict[str, str]:
+        tab: Tab, include_frames: bool = False
+    ) -> dict[str, str]:
         """
         Get page HTML and text content.
 
@@ -638,49 +706,57 @@ class DOMHandler:
             text = await tab.evaluate("document.body.innerText")
 
             content = {
-                'html': html,
-                'text': text,
-                'url': await tab.evaluate("window.location.href"),
-                'title': await tab.evaluate("document.title")
+                "html": html,
+                "text": text,
+                "url": await tab.evaluate("window.location.href"),
+                "title": await tab.evaluate("document.title"),
             }
 
             if include_frames:
                 frames = []
-                iframe_elements = await tab.select_all('iframe')
+                iframe_elements = await tab.select_all("iframe")
 
                 for i, iframe in enumerate(iframe_elements):
                     try:
-                        src = iframe.attrs.get('src') if hasattr(iframe, 'attrs') else None
+                        src = (
+                            iframe.attrs.get("src")
+                            if hasattr(iframe, "attrs")
+                            else None
+                        )
                         if src:
-                            frames.append({
-                                'index': i,
-                                'src': src,
-                                'id': iframe.attrs.get('id') if hasattr(iframe, 'attrs') else None,
-                                'name': iframe.attrs.get('name') if hasattr(iframe, 'attrs') else None
-                            })
-                    except Exception:
+                            frames.append(
+                                {
+                                    "index": i,
+                                    "src": src,
+                                    "id": iframe.attrs.get("id")
+                                    if hasattr(iframe, "attrs")
+                                    else None,
+                                    "name": iframe.attrs.get("name")
+                                    if hasattr(iframe, "attrs")
+                                    else None,
+                                }
+                            )
+                    except Exception:  # noqa: S112  plan_M10a
                         continue
 
-                content['frames'] = frames
+                content["frames"] = frames
 
             return content
 
         except Exception as e:
-            raise Exception(f"Failed to get page content: {str(e)}")
+            raise Exception(f"Failed to get page content: {e!s}")
 
     @staticmethod
     async def scroll_page(
-        tab: Tab,
-        direction: str = "down",
-        amount: int = 500,
-        smooth: bool = True
+        tab: Tab, direction: str = "down", amount: int = 500, smooth: bool = True
     ) -> bool:
         """
         Scroll the page in specified direction.
 
         Args:
             tab (Tab): The browser tab object.
-            direction (str): Direction to scroll ('down', 'up', 'right', 'left', 'top', 'bottom').
+            direction (str): Direction to scroll ('down', 'up', 'right',
+                'left', 'top', 'bottom').
             amount (int): Amount to scroll in pixels.
             smooth (bool): Use smooth scrolling.
 
@@ -691,17 +767,30 @@ class DOMHandler:
             behavior = "'smooth'" if smooth else "'instant'"
 
             if direction == "down":
-                script = f"window.scrollBy({{top: {amount}, left: 0, behavior: {behavior}}})"
+                script = (
+                    f"window.scrollBy({{top: {amount}, left: 0, behavior: {behavior}}})"
+                )
             elif direction == "up":
-                script = f"window.scrollBy({{top: -{amount}, left: 0, behavior: {behavior}}})"
+                script = (
+                    f"window.scrollBy({{top: -{amount}, "
+                    f"left: 0, behavior: {behavior}}})"
+                )
             elif direction == "right":
-                script = f"window.scrollBy({{top: 0, left: {amount}, behavior: {behavior}}})"
+                script = (
+                    f"window.scrollBy({{top: 0, left: {amount}, behavior: {behavior}}})"
+                )
             elif direction == "left":
-                script = f"window.scrollBy({{top: 0, left: -{amount}, behavior: {behavior}}})"
+                script = (
+                    f"window.scrollBy({{top: 0, left: -{amount}, "
+                    f"behavior: {behavior}}})"
+                )
             elif direction == "top":
                 script = f"window.scrollTo({{top: 0, left: 0, behavior: {behavior}}})"
             elif direction == "bottom":
-                script = f"window.scrollTo({{top: document.body.scrollHeight, left: 0, behavior: {behavior}}})"
+                script = (
+                    "window.scrollTo({top: document.body.scrollHeight, "
+                    f"left: 0, behavior: {behavior}}})"
+                )
             else:
                 raise ValueError(f"Invalid scroll direction: {direction}")
 
@@ -711,4 +800,4 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to scroll page: {str(e)}")
+            raise Exception(f"Failed to scroll page: {e!s}")

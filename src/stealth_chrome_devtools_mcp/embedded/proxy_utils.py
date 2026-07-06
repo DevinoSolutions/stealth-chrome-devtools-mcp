@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -16,8 +15,8 @@ class ProxyConfig:
     """Parsed proxy configuration."""
 
     server: str
-    username: Optional[str] = None
-    password: Optional[str] = None
+    username: str | None = None
+    password: str | None = None
 
 
 def _format_host(hostname: str) -> str:
@@ -52,13 +51,9 @@ def parse_proxy_config(proxy_url: str) -> ProxyConfig:
     username = parsed.username or None
     password = parsed.password or None
     if username is not None and password is None:
-        raise ProxyConfigError(
-            f"Invalid proxy URL (username requires password): {raw}"
-        )
+        raise ProxyConfigError(f"Invalid proxy URL (username requires password): {raw}")
     if password is not None and username is None:
-        raise ProxyConfigError(
-            f"Invalid proxy URL (password requires username): {raw}"
-        )
+        raise ProxyConfigError(f"Invalid proxy URL (password requires username): {raw}")
 
     host = _format_host(hostname)
     netloc = host
@@ -74,7 +69,7 @@ def parse_proxy_config(proxy_url: str) -> ProxyConfig:
     )
 
 
-def merge_proxy_server_arg(args: List[str], proxy_server: Optional[str]) -> List[str]:
+def merge_proxy_server_arg(args: list[str], proxy_server: str | None) -> list[str]:
     """Ensure args contain exactly one --proxy-server=... entry."""
 
     if not proxy_server:
@@ -106,7 +101,7 @@ def redact_launch_arg(arg: str) -> str:
                     (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
                 )
                 return f"{prefix}{sanitized}"
-        except Exception:
+        except Exception:  # noqa: BLE001  DEBT(F-181)
             return prefix + "<redacted>"
 
     if "://" in arg and "@" in arg:
@@ -121,7 +116,7 @@ def redact_launch_arg(arg: str) -> str:
                 return urlunsplit(
                     (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001  DEBT(F-181)
             return "<redacted>"
 
     return arg

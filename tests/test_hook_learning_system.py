@@ -13,8 +13,13 @@ class TestDocumentationGetters:
     def test_request_object_documentation_shape(self):
         doc = HookLearningSystem.get_request_object_documentation()
         assert "url" in doc["request_object"]["fields"]
-        assert set(doc["hook_action"]["actions"]) >= {"continue", "block", "redirect",
-                                                       "modify", "fulfill"}
+        assert set(doc["hook_action"]["actions"]) >= {
+            "continue",
+            "block",
+            "redirect",
+            "modify",
+            "fulfill",
+        }
 
     def test_hook_examples_are_wellformed(self):
         examples = HookLearningSystem.get_hook_examples()

@@ -26,11 +26,12 @@ import time
 
 import server
 
-
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
 
-def _make_clone(root, name, *, size_bytes, source_kind="master-snapshot", auto_clean=True):
+def _make_clone(
+    root, name, *, size_bytes, source_kind="master-snapshot", auto_clean=True
+):
     d = root / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "data.bin").write_bytes(b"x" * size_bytes)
@@ -100,8 +101,13 @@ class TestTrashIsInvisibleToScans:
         # Named profile (4 KB) is UNDER the 6 KB session cap on its own; only the
         # 4 KB of trash pushes the raw total over. Trash must not count, so the
         # named profile must not be selected for trimming.
-        named = _make_clone(tmp_path, "github", size_bytes=4000,
-                            source_kind="explicit-master", auto_clean=False)
+        named = _make_clone(
+            tmp_path,
+            "github",
+            size_bytes=4000,
+            source_kind="explicit-master",
+            auto_clean=False,
+        )
         _make_clone(server._clone_trash_dir(tmp_path), "old-evicted", size_bytes=4000)
 
         victims = server._named_profiles_over_session_cap(tmp_path, cap_bytes=6000)
@@ -115,8 +121,8 @@ class TestPurge:
         trash = server._clone_trash_dir(tmp_path)
         old = _make_clone(trash, "ancient", size_bytes=100)
         fresh = _make_clone(trash, "recent", size_bytes=100)
-        _set_mtime(old, 1_000)                 # epoch-ancient
-        _set_mtime(fresh, time.time())         # just now
+        _set_mtime(old, 1_000)  # epoch-ancient
+        _set_mtime(fresh, time.time())  # just now
 
         purged = server._purge_expired_trash(tmp_path, max_age_seconds=3600)
 
@@ -136,7 +142,9 @@ class TestSweepWiring:
             server.process_cleanup, "cleanup_deferred_profiles", lambda: None
         )
 
-        ancient = _make_clone(server._clone_trash_dir(tmp_path), "ancient", size_bytes=100)
+        ancient = _make_clone(
+            server._clone_trash_dir(tmp_path), "ancient", size_bytes=100
+        )
         _set_mtime(ancient, 1_000)  # far older than the default 24h retention
 
         old = _make_clone(tmp_path, "old", size_bytes=4096)
@@ -150,6 +158,7 @@ class TestSweepWiring:
 
         assert not ancient.exists(), "sweep must purge expired trash"
         assert not old.exists(), "sweep must evict the oldest over-cap auto-clone"
-        assert (server._clone_trash_dir(tmp_path) / "old" / "data.bin").exists(), \
+        assert (server._clone_trash_dir(tmp_path) / "old" / "data.bin").exists(), (
             "evicted clone must be recoverable from trash after the sweep"
+        )
         assert new.exists()

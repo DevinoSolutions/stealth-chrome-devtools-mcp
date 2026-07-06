@@ -10,24 +10,32 @@ Safety focus: a malformed or malicious hook function must NEVER crash request
 processing — every bad path must degrade to HookAction("continue").
 """
 
-import pytest
-
 from dynamic_hook_system import (
-    RequestInfo,
-    HookAction,
     DynamicHook,
     DynamicHookSystem,
+    HookAction,
+    RequestInfo,
 )
-
 
 CONTINUE = "def process_request(request):\n    return HookAction(action='continue')\n"
 
 
-def _req(url="https://example.com/api/data", method="GET", *, stage="request",
-         resource_type=None, headers=None):
+def _req(
+    url="https://example.com/api/data",
+    method="GET",
+    *,
+    stage="request",
+    resource_type=None,
+    headers=None,
+):
     return RequestInfo(
-        request_id="req-1", instance_id="inst-1", url=url, method=method,
-        headers=headers or {}, resource_type=resource_type, stage=stage,
+        request_id="req-1",
+        instance_id="inst-1",
+        url=url,
+        method=method,
+        headers=headers or {},
+        resource_type=resource_type,
+        stage=stage,
     )
 
 
@@ -62,16 +70,26 @@ class TestMatches:
         assert _hook({"method": "POST"}).matches(_req(method="GET")) is False
 
     def test_resource_type_filter(self):
-        assert _hook({"resource_type": "XHR"}).matches(_req(resource_type="XHR")) is True
-        assert _hook({"resource_type": "XHR"}).matches(_req(resource_type="Document")) is False
+        assert (
+            _hook({"resource_type": "XHR"}).matches(_req(resource_type="XHR")) is True
+        )
+        assert (
+            _hook({"resource_type": "XHR"}).matches(_req(resource_type="Document"))
+            is False
+        )
 
     def test_stage_filter(self):
         assert _hook({"stage": "response"}).matches(_req(stage="response")) is True
         assert _hook({"stage": "response"}).matches(_req(stage="request")) is False
 
     def test_custom_condition_true_and_false(self):
-        assert _hook({"custom_condition": "len(request.url) > 5"}).matches(_req()) is True
-        assert _hook({"custom_condition": "request.method == 'POST'"}).matches(_req()) is False
+        assert (
+            _hook({"custom_condition": "len(request.url) > 5"}).matches(_req()) is True
+        )
+        assert (
+            _hook({"custom_condition": "request.method == 'POST'"}).matches(_req())
+            is False
+        )
 
     def test_custom_condition_error_fails_closed(self):
         # A broken condition must not match (and must not raise).
@@ -85,14 +103,20 @@ class TestMatches:
 
 class TestProcess:
     def test_hookaction_return_is_passed_through(self):
-        h = _hook({}, code="def process_request(request):\n    return HookAction(action='block')\n")
+        h = _hook(
+            {},
+            code="def process_request(request):\n    return HookAction(action='block')\n",
+        )
         result = h.process(_req())
         assert result.action == "block"
         assert h.trigger_count == 1
         assert h.last_triggered is not None
 
     def test_dict_return_is_coerced(self):
-        h = _hook({}, code="def process_request(request):\n    return {'action': 'redirect', 'url': 'https://x'}\n")
+        h = _hook(
+            {},
+            code="def process_request(request):\n    return {'action': 'redirect', 'url': 'https://x'}\n",
+        )
         result = h.process(_req())
         assert result.action == "redirect" and result.url == "https://x"
 
@@ -101,7 +125,9 @@ class TestProcess:
         assert h.process(_req()).action == "continue"
 
     def test_function_exception_becomes_continue(self):
-        h = _hook({}, code="def process_request(request):\n    raise RuntimeError('boom')\n")
+        h = _hook(
+            {}, code="def process_request(request):\n    raise RuntimeError('boom')\n"
+        )
         assert h.process(_req()).action == "continue"
 
     def test_uncompilable_code_falls_back_to_continue(self):
@@ -114,17 +140,22 @@ class TestProcess:
 
     def test_function_receives_dict_not_object(self):
         # process() passes request.to_dict(); a hook using dict access must work.
-        h = _hook({}, code=(
-            "def process_request(request):\n"
-            "    return HookAction(action='block' if request['method'] == 'GET' else 'continue')\n"
-        ))
+        h = _hook(
+            {},
+            code=(
+                "def process_request(request):\n"
+                "    return HookAction(action='block' if request['method'] == 'GET' else 'continue')\n"
+            ),
+        )
         assert h.process(_req(method="GET")).action == "block"
 
 
 class TestRegistry:
     async def test_create_hook_scoped_to_instances(self):
         sys = DynamicHookSystem()
-        hid = await sys.create_hook("h", {"url_pattern": "*"}, CONTINUE, instance_ids=["inst-1"])
+        hid = await sys.create_hook(
+            "h", {"url_pattern": "*"}, CONTINUE, instance_ids=["inst-1"]
+        )
         assert hid in sys.hooks
         assert sys.instance_hooks["inst-1"] == [hid]
 
@@ -136,7 +167,9 @@ class TestRegistry:
 
     async def test_remove_hook_drops_hook_and_associations(self):
         sys = DynamicHookSystem()
-        hid = await sys.create_hook("h", {"url_pattern": "*"}, CONTINUE, instance_ids=["inst-1"])
+        hid = await sys.create_hook(
+            "h", {"url_pattern": "*"}, CONTINUE, instance_ids=["inst-1"]
+        )
         assert await sys.remove_hook(hid) is True
         assert hid not in sys.hooks
         assert hid not in sys.instance_hooks["inst-1"]
@@ -144,9 +177,13 @@ class TestRegistry:
 
     async def test_list_and_details(self):
         sys = DynamicHookSystem()
-        hid = await sys.create_hook("named", {"url_pattern": "*"}, CONTINUE, instance_ids=["inst-1"])
+        hid = await sys.create_hook(
+            "named", {"url_pattern": "*"}, CONTINUE, instance_ids=["inst-1"]
+        )
         listing = sys.list_hooks()
-        assert listing and listing[0]["hook_id"] == hid and listing[0]["name"] == "named"
+        assert (
+            listing and listing[0]["hook_id"] == hid and listing[0]["name"] == "named"
+        )
         details = sys.get_hook_details(hid)
         assert details["function_code"] == CONTINUE
         assert sys.get_hook_details("nope") is None

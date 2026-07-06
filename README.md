@@ -49,7 +49,7 @@ Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, e
   "mcpServers": {
     "stealth-chrome-devtools-mcp": {
       "command": "uvx",
-      "args": ["stealth-chrome-devtools-mcp"]
+      "args": ["stealth-chrome-devtools-mcp==1.0.0"]
     }
   }
 }
@@ -58,7 +58,7 @@ Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, e
 Or install via pip:
 
 ```bash
-pip install stealth-chrome-devtools-mcp
+pip install stealth-chrome-devtools-mcp==1.0.0
 ```
 
 ### Local Development
@@ -244,6 +244,33 @@ uses the same selectors as the automatic sweep, so the preview matches `--apply`
 - Python 3.11+
 - Chrome, Chromium, or Microsoft Edge
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
+
+## Error Reporting (opt-in)
+
+Error reporting via [Sentry](https://sentry.io) is available but **off by default**.
+No data is collected unless you explicitly enable it.
+
+To opt in (helps us diagnose issues when you need support):
+
+```bash
+pip install stealth-chrome-devtools-mcp[sentry]
+
+# Add to your .env or export in your shell:
+SENTRY_DSN=https://3206541bdab9246f00d7099e692e2ee2@sentry.devino.ca/34
+```
+
+To disable, simply unset `SENTRY_DSN` or remove it from your `.env`.
+
+## Development setup
+
+```bash
+uv sync --extra dev --extra test   # install linters + test deps
+npm install                        # arm husky pre-commit/pre-push hooks
+```
+
+The six quality gates run automatically on every commit:
+ruff format, ruff check, ty check, vulture, suppression-owner check, file-budget check.
+Unit tests run on pre-push.
 
 ## License
 

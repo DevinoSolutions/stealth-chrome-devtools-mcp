@@ -19,9 +19,8 @@ import time
 import server
 from process_cleanup import ProcessCleanup
 
-
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
-GIB = 1024 ** 3
+GIB = 1024**3
 
 
 def _make_leaked_clone(clone_root, name):
@@ -81,4 +80,6 @@ def test_storage_sweep_reclaims_deferred_leaked_clone(tmp_path, monkeypatch):
     )
 
     assert not leaked.exists(), "sweep must drive deferred cleanup of the leaked clone"
-    assert "dead-instance" not in pc.browser_processes, "entry must be untracked after reclaim"
+    assert "dead-instance" not in pc.browser_processes, (
+        "entry must be untracked after reclaim"
+    )
