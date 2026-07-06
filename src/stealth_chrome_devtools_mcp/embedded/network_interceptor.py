@@ -194,8 +194,8 @@ class NetworkInterceptor:
                         f"Connection lost while capturing response body: {e}",
                     )
                 except Exception:  # noqa: S110  plan_M10a
-                    # body unavailable for streaming/redirect/preflight
-                    # responses (expected)  # noqa: ERA001  PERMANENT(sentinel)
+                    # body unavailable for streaming/redirect
+                    # /preflight (expected)
                     pass
 
             network_response = NetworkResponse(
