@@ -49,7 +49,7 @@ Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, e
   "mcpServers": {
     "stealth-chrome-devtools-mcp": {
       "command": "uvx",
-      "args": ["stealth-chrome-devtools-mcp"]
+      "args": ["stealth-chrome-devtools-mcp==1.0.0"]
     }
   }
 }
@@ -58,7 +58,7 @@ Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, e
 Or install via pip:
 
 ```bash
-pip install stealth-chrome-devtools-mcp
+pip install stealth-chrome-devtools-mcp==1.0.0
 ```
 
 ### Local Development
