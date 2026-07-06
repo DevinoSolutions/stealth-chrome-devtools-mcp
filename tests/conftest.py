@@ -35,6 +35,7 @@ os.environ.setdefault(
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def tmp_session_root(tmp_path):
     """
@@ -53,11 +54,16 @@ def tmp_session_root(tmp_path):
     shutil.copytree(str(master.parent), str(snapshot.parent))
     # Write clone marker so snapshot is recognised
     marker = snapshot.parent / ".stealth_chrome_devtools_mcp_clone.json"
-    marker.write_text(json.dumps({
-        "source": str(master.parent),
-        "source_kind": "test-fixture",
-        "created_at": "2026-01-01T00:00:00Z",
-    }), encoding="utf-8")
+    marker.write_text(
+        json.dumps(
+            {
+                "source": str(master.parent),
+                "source_kind": "test-fixture",
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     sessions = tmp_path / "sessions"
     sessions.mkdir()

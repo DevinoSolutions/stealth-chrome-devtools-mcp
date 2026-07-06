@@ -119,7 +119,9 @@ class TestEnsureServerRunningNonBlocking:
 def _initialized_notification():
     from mcp.types import JSONRPCNotification
 
-    note = JSONRPCNotification(jsonrpc="2.0", method="notifications/initialized", params={})
+    note = JSONRPCNotification(
+        jsonrpc="2.0", method="notifications/initialized", params={}
+    )
     return SessionMessage(message=JSONRPCMessage(note))
 
 
@@ -147,10 +149,19 @@ class TestFastHandshakeEndToEnd:
 
         backend = subprocess.Popen(
             [
-                sys.executable, "-m", "stealth_chrome_devtools_mcp",
-                "--transport", "http", "--port", str(port), "--host", "127.0.0.1",
+                sys.executable,
+                "-m",
+                "stealth_chrome_devtools_mcp",
+                "--transport",
+                "http",
+                "--port",
+                str(port),
+                "--host",
+                "127.0.0.1",
             ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
             env=env,
         )
         try:
@@ -182,7 +193,9 @@ class TestFastHandshakeEndToEnd:
             # exactly one initialize response (id=1) — backend's dup swallowed
             assert isinstance(init_reply, JSONRPCResponse)
             assert init_reply.id == 1
-            assert init_reply.result["serverInfo"]["name"] == "stealth-chrome-devtools-mcp"
+            assert (
+                init_reply.result["serverInfo"]["name"] == "stealth-chrome-devtools-mcp"
+            )
             # tools/list (id=2) came from the real backend with real tools
             assert isinstance(tools_reply, JSONRPCResponse)
             assert tools_reply.id == 2
@@ -223,10 +236,19 @@ class TestProxyExitsOnClientDisconnect:
 
         backend = subprocess.Popen(
             [
-                sys.executable, "-m", "stealth_chrome_devtools_mcp",
-                "--transport", "http", "--port", str(port), "--host", "127.0.0.1",
+                sys.executable,
+                "-m",
+                "stealth_chrome_devtools_mcp",
+                "--transport",
+                "http",
+                "--port",
+                str(port),
+                "--host",
+                "127.0.0.1",
             ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
             env=env,
         )
         try:
@@ -298,10 +320,19 @@ class TestEntrypointExitsOnDisconnect:
         env["STEALTH_MCP_NO_AUTO_RECOVERY"] = "1"
 
         proc = subprocess.Popen(
-            [sys.executable, "-m", "stealth_chrome_devtools_mcp",
-             "--singleton-port", str(port)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, bufsize=1, env=env,
+            [
+                sys.executable,
+                "-m",
+                "stealth_chrome_devtools_mcp",
+                "--singleton-port",
+                str(port),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            env=env,
         )
         spawned = []
         try:
@@ -317,9 +348,14 @@ class TestEntrypointExitsOnDisconnect:
             threading.Thread(target=_reader, daemon=True).start()
 
             init = {
-                "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                "params": {"protocolVersion": "2025-03-26", "capabilities": {},
-                           "clientInfo": {"name": "entrypoint-test", "version": "1"}},
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "entrypoint-test", "version": "1"},
+                },
             }
             proc.stdin.write(json.dumps(init) + "\n")
             proc.stdin.flush()

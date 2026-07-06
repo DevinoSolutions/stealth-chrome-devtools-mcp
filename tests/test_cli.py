@@ -24,7 +24,8 @@ def _named(sessions, name, *, model_mb):
     d = sessions / name
     d.mkdir(parents=True, exist_ok=True)
     (d / MARKER).write_text(
-        json.dumps({"source_kind": "explicit-master", "auto_clean": False}), encoding="utf-8"
+        json.dumps({"source_kind": "explicit-master", "auto_clean": False}),
+        encoding="utf-8",
     )
     _write(d / "OptGuideOnDeviceModel" / "model.bin", b"x" * (model_mb * 1024 * 1024))
     _write(d / "Default" / "Cache" / "data", b"x" * 4096)
@@ -37,7 +38,8 @@ def _auto(sessions, name, *, mb):
     d = sessions / name
     d.mkdir(parents=True, exist_ok=True)
     (d / MARKER).write_text(
-        json.dumps({"source_kind": "master-snapshot", "auto_clean": True}), encoding="utf-8"
+        json.dumps({"source_kind": "master-snapshot", "auto_clean": True}),
+        encoding="utf-8",
     )
     _write(d / "Default" / "Cache" / "data", b"x" * (mb * 1024 * 1024))
     return d
@@ -76,7 +78,9 @@ class TestCleanup:
         auto = _auto(sessions, "sess-auto", mb=4)
 
         # Tiny caps so both the auto-clone and the named profile are over.
-        rc = cli.main(["cleanup", "--clone-cap-gb", "0.001", "--session-cap-gb", "0.001"])
+        rc = cli.main(
+            ["cleanup", "--clone-cap-gb", "0.001", "--session-cap-gb", "0.001"]
+        )
         out = capsys.readouterr().out.lower()
 
         assert rc == 0
@@ -92,14 +96,21 @@ class TestCleanup:
         auto = _auto(sessions, "sess-auto", mb=4)
 
         rc = cli.main(
-            ["cleanup", "--apply", "--clone-cap-gb", "0.001", "--session-cap-gb", "0.001"]
+            [
+                "cleanup",
+                "--apply",
+                "--clone-cap-gb",
+                "0.001",
+                "--session-cap-gb",
+                "0.001",
+            ]
         )
         out = capsys.readouterr().out.lower()
 
         assert rc == 0
         assert "applied" in out
-        assert not auto.exists()                                  # auto-clone deleted
-        assert not (named / "OptGuideOnDeviceModel").exists()     # named trimmed
+        assert not auto.exists()  # auto-clone deleted
+        assert not (named / "OptGuideOnDeviceModel").exists()  # named trimmed
         assert (named / "Default" / "Cookies").read_bytes() == b"COOKIES"  # logins kept
 
     def test_within_caps_reclaims_nothing(self, tmp_session_root, capsys):

@@ -49,17 +49,32 @@ def _write_marker(clone_dir, data):
 def _make_legacy_clone(root, name, *, size_bytes, source_kind="master-snapshot"):
     """A clone as an OLD build wrote it: source_kind only, no ``auto_clean`` key."""
     d = root / name
-    _write_marker(d, {"source": "master", "source_kind": source_kind,
-                      "created_at": "2026-01-01T00:00:00Z"})
+    _write_marker(
+        d,
+        {
+            "source": "master",
+            "source_kind": source_kind,
+            "created_at": "2026-01-01T00:00:00Z",
+        },
+    )
     (d / "data.bin").write_bytes(b"x" * size_bytes)
     return d
 
 
-def _make_modern_clone(root, name, *, size_bytes, auto_clean, source_kind="master-snapshot"):
+def _make_modern_clone(
+    root, name, *, size_bytes, auto_clean, source_kind="master-snapshot"
+):
     """A clone as the CURRENT build writes it: explicit ``auto_clean`` flag."""
     d = root / name
-    _write_marker(d, {"source": "master", "source_kind": source_kind,
-                      "auto_clean": auto_clean, "created_at": "2026-01-01T00:00:00Z"})
+    _write_marker(
+        d,
+        {
+            "source": "master",
+            "source_kind": source_kind,
+            "auto_clean": auto_clean,
+            "created_at": "2026-01-01T00:00:00Z",
+        },
+    )
     (d / "data.bin").write_bytes(b"x" * size_bytes)
     return d
 
@@ -72,7 +87,9 @@ class TestLegacyMarkerClassification:
     def test_legacy_master_snapshot_marker_is_not_auto(self, tmp_path):
         # The exact real-world shape: a named business profile cloned from a plain
         # master-snapshot by a build that never wrote auto_clean.
-        d = _make_legacy_clone(tmp_path, "discord-lead-gen-f5d195b036f2", size_bytes=100)
+        d = _make_legacy_clone(
+            tmp_path, "discord-lead-gen-f5d195b036f2", size_bytes=100
+        )
         assert _clone_is_auto(d) is False, (
             "a legacy marker without an explicit auto_clean flag must never be "
             "classified as a disposable auto-clone"
@@ -80,13 +97,19 @@ class TestLegacyMarkerClassification:
 
     def test_legacy_explicit_source_marker_is_not_auto(self, tmp_path):
         # Legacy explicit profiles were already safe; keep them safe.
-        d = _make_legacy_clone(tmp_path, "github-session",
-                               size_bytes=100, source_kind="explicit-master-snapshot")
+        d = _make_legacy_clone(
+            tmp_path,
+            "github-session",
+            size_bytes=100,
+            source_kind="explicit-master-snapshot",
+        )
         assert _clone_is_auto(d) is False
 
     def test_modern_auto_clean_true_is_auto(self, tmp_path):
         # The fix must NOT neuter cleanup of genuine auto-clones.
-        d = _make_modern_clone(tmp_path, "stealth-auto", size_bytes=100, auto_clean=True)
+        d = _make_modern_clone(
+            tmp_path, "stealth-auto", size_bytes=100, auto_clean=True
+        )
         assert _clone_is_auto(d) is True
 
     def test_modern_auto_clean_false_is_not_auto(self, tmp_path):
@@ -100,8 +123,12 @@ class TestSweepNeverDeletesLegacyNamedProfile:
     ):
         # A legacy business profile: oldest (first eviction candidate by ordering),
         # not running, not protected, and the clone root is well over cap.
-        business = _make_legacy_clone(tmp_path, "superbooks-7cf1e3db6477", size_bytes=8000)
-        auto = _make_modern_clone(tmp_path, "stealth-auto", size_bytes=8000, auto_clean=True)
+        business = _make_legacy_clone(
+            tmp_path, "superbooks-7cf1e3db6477", size_bytes=8000
+        )
+        auto = _make_modern_clone(
+            tmp_path, "stealth-auto", size_bytes=8000, auto_clean=True
+        )
         _set_mtime(business, 1_000)  # oldest -> would be evicted first if it were auto
         _set_mtime(auto, 2_000)
 
@@ -117,9 +144,13 @@ class TestSweepNeverDeletesLegacyNamedProfile:
         assert not auto.exists(), "the genuine auto-clone should be reclaimed instead"
         assert removed == 1
 
-    def test_sweep_still_reclaims_modern_auto_clone_over_cap(self, tmp_path, monkeypatch):
+    def test_sweep_still_reclaims_modern_auto_clone_over_cap(
+        self, tmp_path, monkeypatch
+    ):
         # Guard: the fix leaves real auto-clone reclamation intact.
-        auto = _make_modern_clone(tmp_path, "stealth-auto", size_bytes=8000, auto_clean=True)
+        auto = _make_modern_clone(
+            tmp_path, "stealth-auto", size_bytes=8000, auto_clean=True
+        )
         _set_mtime(auto, 1_000)
         monkeypatch.setattr(server, "_profile_has_running_browser", lambda p: False)
 

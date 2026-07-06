@@ -39,33 +39,43 @@ def _unwrap(fn):
 # _script_rejection_reason — pure logic, no browser
 # ---------------------------------------------------------------------------
 
+
 class TestScriptDenylist:
     """Blocking patterns are rejected with an actionable message."""
 
-    @pytest.mark.parametrize("script", [
-        "var x=new XMLHttpRequest(); x.open('GET', url, false); x.send();",
-        "xhr.open('POST', '/api', false)",
-        "r.open( 'GET', u , false )",
-    ])
+    @pytest.mark.parametrize(
+        "script",
+        [
+            "var x=new XMLHttpRequest(); x.open('GET', url, false); x.send();",
+            "xhr.open('POST', '/api', false)",
+            "r.open( 'GET', u , false )",
+        ],
+    )
     def test_sync_xhr_rejected(self, script):
         reason = _script_rejection_reason(script)
         assert reason is not None
         assert "Synchronous" in reason and "fetch" in reason
 
-    @pytest.mark.parametrize("script", [
-        "while (true) { work(); }",
-        "while(1){}",
-        "for (;;) { tick(); }",
-        "for(;;){}",
-    ])
+    @pytest.mark.parametrize(
+        "script",
+        [
+            "while (true) { work(); }",
+            "while(1){}",
+            "for (;;) { tick(); }",
+            "for(;;){}",
+        ],
+    )
     def test_infinite_loops_rejected(self, script):
         assert _script_rejection_reason(script) is not None
 
-    @pytest.mark.parametrize("script", [
-        "alert('hi')",
-        "window.confirm('ok?')",
-        "const v = prompt('name')",
-    ])
+    @pytest.mark.parametrize(
+        "script",
+        [
+            "alert('hi')",
+            "window.confirm('ok?')",
+            "const v = prompt('name')",
+        ],
+    )
     def test_blocking_dialogs_rejected(self, script):
         assert _script_rejection_reason(script) is not None
 
@@ -77,14 +87,17 @@ class TestScriptDenylist:
     def test_script_exactly_at_limit_allowed(self):
         assert _script_rejection_reason("a" * MAX_USER_SCRIPT_BYTES) is None
 
-    @pytest.mark.parametrize("script", [
-        "const r = await fetch('/x'); return r.status;",
-        "document.querySelector('#f').files.length",
-        "window.open('https://example.com', '_blank', 'noopener')",
-        "el.setAttribute('aria-hidden', false)",
-        "[...document.querySelectorAll('a')].map(a => a.href)",
-        "indexedDB; document.title",
-    ])
+    @pytest.mark.parametrize(
+        "script",
+        [
+            "const r = await fetch('/x'); return r.status;",
+            "document.querySelector('#f').files.length",
+            "window.open('https://example.com', '_blank', 'noopener')",
+            "el.setAttribute('aria-hidden', false)",
+            "[...document.querySelectorAll('a')].map(a => a.href)",
+            "indexedDB; document.title",
+        ],
+    )
     def test_benign_scripts_allowed(self, script):
         assert _script_rejection_reason(script) is None
 
@@ -100,6 +113,7 @@ class TestScriptDenylist:
 # ---------------------------------------------------------------------------
 # execute_script tool — rejection happens before any browser lookup
 # ---------------------------------------------------------------------------
+
 
 class TestExecuteScriptToolGuard:
     """The tool returns a structured rejection without needing a live instance."""

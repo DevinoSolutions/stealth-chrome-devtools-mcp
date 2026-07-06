@@ -52,13 +52,9 @@ def parse_proxy_config(proxy_url: str) -> ProxyConfig:
     username = parsed.username or None
     password = parsed.password or None
     if username is not None and password is None:
-        raise ProxyConfigError(
-            f"Invalid proxy URL (username requires password): {raw}"
-        )
+        raise ProxyConfigError(f"Invalid proxy URL (username requires password): {raw}")
     if password is not None and username is None:
-        raise ProxyConfigError(
-            f"Invalid proxy URL (password requires username): {raw}"
-        )
+        raise ProxyConfigError(f"Invalid proxy URL (password requires username): {raw}")
 
     host = _format_host(hostname)
     netloc = host

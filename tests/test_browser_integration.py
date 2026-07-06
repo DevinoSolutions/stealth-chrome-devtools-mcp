@@ -21,7 +21,10 @@ import importlib.util
 _spec = importlib.util.spec_from_file_location(
     "server",
     Path(__file__).resolve().parent.parent
-    / "src" / "stealth_chrome_devtools_mcp" / "embedded" / "server.py",
+    / "src"
+    / "stealth_chrome_devtools_mcp"
+    / "embedded"
+    / "server.py",
 )
 _server_mod = importlib.util.module_from_spec(_spec)
 sys.modules.setdefault("server", _server_mod)
@@ -42,7 +45,12 @@ pytestmark = pytest.mark.integration
 _can_run = False
 _needs_no_sandbox = False
 try:
-    from platform_utils import check_browser_executable, is_running_as_root, is_running_in_container
+    from platform_utils import (
+        check_browser_executable,
+        is_running_as_root,
+        is_running_in_container,
+    )
+
     _can_run = _server_mod is not None and check_browser_executable() is not None
     _needs_no_sandbox = (
         is_running_as_root()
@@ -53,12 +61,16 @@ except Exception:
     pass
 
 if not _can_run:
-    pytestmark = [pytest.mark.integration, pytest.mark.skip("Chrome not available or server failed to load")]
+    pytestmark = [
+        pytest.mark.integration,
+        pytest.mark.skip("Chrome not available or server failed to load"),
+    ]
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _get_fn(name):
     """Get an unwrapped server function by name."""
@@ -91,7 +103,9 @@ async def _warmup_chrome():
     spawn = _get_fn("spawn_browser")
     close = _get_fn("close_instance")
     try:
-        result = await spawn(headless=True, user_data_dir="ci-warmup", **_sandbox_kwargs())
+        result = await spawn(
+            headless=True, user_data_dir="ci-warmup", **_sandbox_kwargs()
+        )
         await close(instance_id=result["instance_id"])
     except Exception:
         pass  # warmup failure is non-fatal
@@ -101,6 +115,7 @@ async def _warmup_chrome():
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestBrowserSpawnAndClose:
     """Basic spawn → verify → close lifecycle."""
@@ -121,7 +136,9 @@ class TestBrowserSpawnAndClose:
         iid = result["instance_id"]
 
         closed = await close(instance_id=iid)
-        assert closed is True or (isinstance(closed, dict) and closed.get("result") is True)
+        assert closed is True or (
+            isinstance(closed, dict) and closed.get("result") is True
+        )
 
     @pytest.mark.asyncio
     async def test_spawn_with_relative_user_data_dir(self, tmp_path):
@@ -129,7 +146,9 @@ class TestBrowserSpawnAndClose:
         spawn = _get_fn("spawn_browser")
         close = _get_fn("close_instance")
 
-        result = await spawn(headless=True, user_data_dir="integration-test-profile", **_sandbox_kwargs())
+        result = await spawn(
+            headless=True, user_data_dir="integration-test-profile", **_sandbox_kwargs()
+        )
         iid = result["instance_id"]
         udd = result["spawn_diagnostics"]["user_data_dir"]
 
@@ -225,7 +244,9 @@ class TestCloseKillsProcessTree:
         navigate = _get_fn("navigate")
         close = _get_fn("close_instance")
 
-        result = await spawn(headless=True, user_data_dir="tree-kill-test", **_sandbox_kwargs())
+        result = await spawn(
+            headless=True, user_data_dir="tree-kill-test", **_sandbox_kwargs()
+        )
         iid = result["instance_id"]
         # Navigate so a renderer child definitely exists.
         await navigate(instance_id=iid, url=self.DATA_URL)
@@ -246,7 +267,9 @@ class TestCloseKillsProcessTree:
 
             # Give the OS a beat to reap the tree.
             deadline = time.monotonic() + 8.0
-            while time.monotonic() < deadline and any(psutil.pid_exists(p) for p in tree):
+            while time.monotonic() < deadline and any(
+                psutil.pid_exists(p) for p in tree
+            ):
                 await asyncio.sleep(0.2)
 
             survivors = [p for p in tree if psutil.pid_exists(p)]
@@ -557,22 +580,29 @@ class TestOverCapSweepPreservesLiveAndLegacyProfiles:
 
     MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
-    def _seed(self, sessions, name, *, auto_clean, mtime, source_kind="master-snapshot"):
+    def _seed(
+        self, sessions, name, *, auto_clean, mtime, source_kind="master-snapshot"
+    ):
         import json as _json
 
         d = sessions / name
         d.mkdir(parents=True, exist_ok=True)
         (d / "data.bin").write_bytes(b"x" * 4096)
-        marker = {"source": "master", "source_kind": source_kind,
-                  "created_at": "2026-01-01T00:00:00Z"}
-        if auto_clean is not None:                 # legacy markers omit the flag
+        marker = {
+            "source": "master",
+            "source_kind": source_kind,
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        if auto_clean is not None:  # legacy markers omit the flag
             marker["auto_clean"] = auto_clean
         (d / self.MARKER).write_text(_json.dumps(marker), encoding="utf-8")
         os.utime(d, (mtime, mtime))
         return d
 
     @pytest.mark.asyncio
-    async def test_sweep_spares_running_clone_and_legacy_profile(self, tmp_session_root):
+    async def test_sweep_spares_running_clone_and_legacy_profile(
+        self, tmp_session_root
+    ):
         spawn = _get_fn("spawn_browser")
         close = _get_fn("close_instance")
         enforce = _get_fn("_enforce_clone_storage_cap_in")
@@ -582,7 +612,9 @@ class TestOverCapSweepPreservesLiveAndLegacyProfiles:
         legacy = self._seed(sessions, "acme-payroll", auto_clean=None, mtime=1_000)
         # A genuinely idle, disposable auto-clone (modern marker) — the only dir
         # the sweep is allowed to reclaim. Oldest, so first by eviction ordering.
-        idle_auto = self._seed(sessions, "stealth-idle-clone", auto_clean=True, mtime=500)
+        idle_auto = self._seed(
+            sessions, "stealth-idle-clone", auto_clean=True, mtime=500
+        )
 
         master_inst = await spawn(headless=True, **_sandbox_kwargs())
         master_iid = master_inst["instance_id"]

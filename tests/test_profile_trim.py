@@ -33,11 +33,14 @@ def _named_profile(root, name, *, model_mb=0):
     d = root / name
     d.mkdir(parents=True, exist_ok=True)
     (d / MARKER).write_text(
-        json.dumps({"source_kind": "explicit-master", "auto_clean": False}), encoding="utf-8"
+        json.dumps({"source_kind": "explicit-master", "auto_clean": False}),
+        encoding="utf-8",
     )
     # regenerable — profile-root model store + Default/ caches
     if model_mb:
-        _write(d / "OptGuideOnDeviceModel" / "model.bin", b"x" * (model_mb * 1024 * 1024))
+        _write(
+            d / "OptGuideOnDeviceModel" / "model.bin", b"x" * (model_mb * 1024 * 1024)
+        )
     _write(d / "Default" / "Cache" / "data_0", b"x" * 4096)
     _write(d / "Default" / "Code Cache" / "js" / "blob", b"x" * 4096)
     _write(d / "Default" / "Service Worker" / "CacheStorage" / "big", b"x" * 4096)
@@ -53,7 +56,8 @@ def _auto_clone(root, name, *, mb=1):
     d = root / name
     d.mkdir(parents=True, exist_ok=True)
     (d / MARKER).write_text(
-        json.dumps({"source_kind": "master-snapshot", "auto_clean": True}), encoding="utf-8"
+        json.dumps({"source_kind": "master-snapshot", "auto_clean": True}),
+        encoding="utf-8",
     )
     _write(d / "Default" / "Cache" / "data", b"x" * (mb * 1024 * 1024))
     return d
@@ -86,7 +90,9 @@ class TestTrimProfile:
         # session state preserved exactly
         assert (d / "Default" / "Cookies").read_bytes() == b"COOKIES"
         assert (d / "Default" / "Login Data").read_bytes() == b"LOGINS"
-        assert (d / "Default" / "Local Storage" / "leveldb" / "000003.log").read_bytes() == b"LOCALSTATE"
+        assert (
+            d / "Default" / "Local Storage" / "leveldb" / "000003.log"
+        ).read_bytes() == b"LOCALSTATE"
         assert (d / "Default" / "Preferences").read_bytes() == b"PREFS"
         assert freed > 8 * 1024 * 1024  # at least the model
 
@@ -94,7 +100,7 @@ class TestTrimProfile:
 class TestNamedProfileTrimCap:
     def test_under_cap_is_noop(self, tmp_path):
         _named_profile(tmp_path, "a", model_mb=1)
-        assert _enforce_named_profile_trim_in(tmp_path, cap_bytes=10 ** 9) == 0
+        assert _enforce_named_profile_trim_in(tmp_path, cap_bytes=10**9) == 0
         assert (tmp_path / "a" / "OptGuideOnDeviceModel").exists()
 
     def test_cap_zero_disables(self, tmp_path):
@@ -113,7 +119,7 @@ class TestNamedProfileTrimCap:
         assert freed > 0
         assert not (big / "OptGuideOnDeviceModel").exists()
         assert (big / "Default" / "Cookies").read_bytes() == b"COOKIES"  # logins kept
-        assert (small / "OptGuideOnDeviceModel").exists()                # untouched
+        assert (small / "OptGuideOnDeviceModel").exists()  # untouched
 
     def test_never_trims_auto_clones(self, tmp_path):
         a = _auto_clone(tmp_path, "sess-auto", mb=50)

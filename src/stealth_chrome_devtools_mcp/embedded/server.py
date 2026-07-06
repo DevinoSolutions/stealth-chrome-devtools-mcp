@@ -168,7 +168,9 @@ def _install_asyncio_close_noise_filter() -> None:
 
     previous_handler = loop.get_exception_handler()
 
-    def exception_handler(loop: asyncio.AbstractEventLoop, context: Dict[str, Any]) -> None:
+    def exception_handler(
+        loop: asyncio.AbstractEventLoop, context: Dict[str, Any]
+    ) -> None:
         exception = context.get("exception")
         if (
             exception is not None
@@ -214,10 +216,9 @@ def _install_nodriver_cookie_compat() -> None:
     setattr(cdp_network.Cookie, marker, True)
 
 
-DEBUG_LOGGING_ENABLED = (
-    parse_bool_env("STEALTH_BROWSER_DEBUG", default=False)
-    or parse_bool_env("DEBUG", default=False)
-)
+DEBUG_LOGGING_ENABLED = parse_bool_env(
+    "STEALTH_BROWSER_DEBUG", default=False
+) or parse_bool_env("DEBUG", default=False)
 
 os.environ.setdefault("BROWSER_IDLE_TIMEOUT", "0")
 
@@ -279,7 +280,8 @@ def _profile_has_running_browser(profile_dir: Path) -> bool:
                     continue
     except (psutil.Error, OSError, AttributeError) as e:
         debug_logger.log_warning(
-            "server", "_profile_has_running_browser",
+            "server",
+            "_profile_has_running_browser",
             f"PID check failed for profile {profile_dir}: {e}",
         )
     return any(
@@ -293,38 +295,40 @@ def _profile_has_running_browser(profile_dir: Path) -> bool:
 # excluded when cloning a profile (_profile_ignore_names) and trimmed from idle
 # profiles under storage pressure (_trim_profile_regenerable), so the clone path
 # and the trim path can never drift apart.
-_REGENERABLE_PROFILE_NAMES = frozenset({
-    "BrowserMetrics",
-    "CertificateRevocation",
-    "Crashpad",
-    "Crash Reports",
-    "DawnCache",
-    "GPUCache",
-    "GrShaderCache",
-    "GraphiteDawnCache",
-    "LOCK",
-    "lockfile",
-    "Safe Browsing",
-    "ShaderCache",
-    "SingletonCookie",
-    "SingletonLock",
-    "SingletonSocket",
-    "component_crx_cache",
-    # Heavy, regenerable caches and on-device AI models — typically ~98% of a
-    # Chrome profile by size (the on-device model alone can be ~4 GB). Excluding
-    # or trimming them leaves only real session state: cookies, logins, Web
-    # Data, Local Storage, Preferences. Chrome rebuilds them all on next launch.
-    "Cache",
-    "Code Cache",
-    "Service Worker",
-    "blob_storage",
-    "Download Service",
-    "extensions_crx_cache",
-    "optimization_guide_model_store",
-    "optimization_guide_hint_cache_store",
-    "OptGuideOnDeviceModel",
-    "OptGuideOnDeviceClassifierModel",
-})
+_REGENERABLE_PROFILE_NAMES = frozenset(
+    {
+        "BrowserMetrics",
+        "CertificateRevocation",
+        "Crashpad",
+        "Crash Reports",
+        "DawnCache",
+        "GPUCache",
+        "GrShaderCache",
+        "GraphiteDawnCache",
+        "LOCK",
+        "lockfile",
+        "Safe Browsing",
+        "ShaderCache",
+        "SingletonCookie",
+        "SingletonLock",
+        "SingletonSocket",
+        "component_crx_cache",
+        # Heavy, regenerable caches and on-device AI models — typically ~98% of a
+        # Chrome profile by size (the on-device model alone can be ~4 GB). Excluding
+        # or trimming them leaves only real session state: cookies, logins, Web
+        # Data, Local Storage, Preferences. Chrome rebuilds them all on next launch.
+        "Cache",
+        "Code Cache",
+        "Service Worker",
+        "blob_storage",
+        "Download Service",
+        "extensions_crx_cache",
+        "optimization_guide_model_store",
+        "optimization_guide_hint_cache_store",
+        "OptGuideOnDeviceModel",
+        "OptGuideOnDeviceClassifierModel",
+    }
+)
 
 
 def _clone_storage_cap_bytes() -> int:
@@ -337,7 +341,7 @@ def _clone_storage_cap_bytes() -> int:
     gb = parse_float_env("STEALTH_MCP_CLONE_STORAGE_CAP_GB", 10.0)
     if gb <= 0:
         return 0
-    return int(gb * (1024 ** 3))
+    return int(gb * (1024**3))
 
 
 def _dir_size_bytes(path: Path) -> int:
@@ -551,7 +555,9 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> List[Path]:
     return victims
 
 
-def _enforce_clone_storage_cap_in(clone_root: Path, cap_bytes: int, reason: str = "") -> int:
+def _enforce_clone_storage_cap_in(
+    clone_root: Path, cap_bytes: int, reason: str = ""
+) -> int:
     """Evict the oldest idle auto-clones until total auto-clone storage under
     ``clone_root`` is within ``cap_bytes``. Returns the number of dirs evicted.
     Selection (and its safety invariants) lives in ``_idle_autoclones_over_cap``.
@@ -588,7 +594,7 @@ def _session_storage_cap_bytes() -> int:
     gb = parse_float_env("STEALTH_MCP_SESSION_STORAGE_CAP_GB", 20.0)
     if gb <= 0:
         return 0
-    return int(gb * (1024 ** 3))
+    return int(gb * (1024**3))
 
 
 def _clone_is_named(clone_dir: Path) -> bool:
@@ -629,7 +635,8 @@ def _regenerable_dirs_in_profile(profile_dir: Path) -> List[Path]:
     _scan(profile_dir)
     try:
         subdirs = [
-            c for c in profile_dir.iterdir()
+            c
+            for c in profile_dir.iterdir()
             if c.is_dir() and c.name not in _REGENERABLE_PROFILE_NAMES
         ]
     except OSError:
@@ -692,7 +699,9 @@ def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> List[P
         return []
 
     victims: List[Path] = []
-    for _size, entry in sorted(sized, key=lambda item: item[0], reverse=True):  # largest first
+    for _size, entry in sorted(
+        sized, key=lambda item: item[0], reverse=True
+    ):  # largest first
         if total <= cap_bytes:
             break
         if not _clone_is_named(entry) or _profile_has_running_browser(entry):
@@ -702,7 +711,9 @@ def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> List[P
     return victims
 
 
-def _enforce_named_profile_trim_in(clone_root: Path, cap_bytes: int, reason: str = "") -> int:
+def _enforce_named_profile_trim_in(
+    clone_root: Path, cap_bytes: int, reason: str = ""
+) -> int:
     """Trim regenerable data from the largest idle named profiles until total
     clone-root storage is within ``cap_bytes``. Returns bytes freed. Selection
     (and its safety invariants) lives in ``_named_profiles_over_session_cap``.
@@ -729,7 +740,9 @@ def _enforce_session_storage(reason: str = "") -> None:
         _enforce_clone_storage_cap_in(clone_root, _clone_storage_cap_bytes(), reason)
         _enforce_named_profile_trim_in(clone_root, _session_storage_cap_bytes(), reason)
     except Exception as error:
-        debug_logger.log_warning("server", "session_storage_sweep", f"sweep failed: {error}")
+        debug_logger.log_warning(
+            "server", "session_storage_sweep", f"sweep failed: {error}"
+        )
 
 
 # Strong refs to in-flight housekeeping sweeps so the event loop cannot GC them
@@ -757,7 +770,9 @@ def _run_storage_sweep(
         _enforce_named_profile_trim_in(clone_root, session_cap, reason)
         process_cleanup.cleanup_deferred_profiles()
     except Exception as error:
-        debug_logger.log_warning("server", "session_storage_sweep", f"sweep failed: {error}")
+        debug_logger.log_warning(
+            "server", "session_storage_sweep", f"sweep failed: {error}"
+        )
 
 
 def _spawn_background_sweep(reason: str = "") -> None:
@@ -776,7 +791,9 @@ def _spawn_background_sweep(reason: str = "") -> None:
     session_cap = _session_storage_cap_bytes()
 
     task = asyncio.create_task(
-        asyncio.to_thread(_run_storage_sweep, clone_root, clone_cap, session_cap, reason)
+        asyncio.to_thread(
+            _run_storage_sweep, clone_root, clone_cap, session_cap, reason
+        )
     )
     _BACKGROUND_SWEEPS.add(task)
     task.add_done_callback(_BACKGROUND_SWEEPS.discard)
@@ -810,7 +827,11 @@ def _copy_profile_file(source: str, target: str) -> str:
     if last_error is not None:
         log_warning = getattr(debug_logger, "log_warning", None)
         if callable(log_warning):
-            log_warning("profile", "copy_skip", f"Skipping locked profile file {source}: {last_error}")
+            log_warning(
+                "profile",
+                "copy_skip",
+                f"Skipping locked profile file {source}: {last_error}",
+            )
     return target
 
 
@@ -833,7 +854,8 @@ def _copy_profile_delta(source: Path, target: Path) -> None:
                 if (
                     not target_file.exists()
                     or source_file.stat().st_size != target_file.stat().st_size
-                    or int(source_file.stat().st_mtime) != int(target_file.stat().st_mtime)
+                    or int(source_file.stat().st_mtime)
+                    != int(target_file.stat().st_mtime)
                 ):
                     _copy_profile_file(str(source_file), str(target_file))
             except (PermissionError, OSError):
@@ -885,7 +907,9 @@ def _rmtree_robust(path: Path, retries: int = 3) -> None:
                 )
 
 
-def _copy_profile_tree(source: Path, target: Path, clone_root: Path, source_kind: str = "profile") -> None:
+def _copy_profile_tree(
+    source: Path, target: Path, clone_root: Path, source_kind: str = "profile"
+) -> None:
     if not source.exists():
         target.mkdir(parents=True, exist_ok=True)
         return
@@ -940,7 +964,9 @@ def _refresh_master_snapshot_if_safe(reason: str) -> Dict[str, Any]:
         return result
 
     try:
-        _copy_profile_tree(master, snapshot, _default_session_root(), f"master-snapshot-{reason}")
+        _copy_profile_tree(
+            master, snapshot, _default_session_root(), f"master-snapshot-{reason}"
+        )
         result["snapshot_refreshed"] = True
     except Exception as exc:
         result["snapshot_error"] = f"{type(exc).__name__}: {exc}"
@@ -976,12 +1002,16 @@ def _root_to_path(root: Any) -> Optional[str]:
     value = str(value)
     if value.startswith("file://"):
         parsed = urllib.parse.urlparse(value)
-        return urllib.parse.unquote(parsed.path.lstrip("/") if os.name == "nt" else parsed.path)
+        return urllib.parse.unquote(
+            parsed.path.lstrip("/") if os.name == "nt" else parsed.path
+        )
     return value if value else None
 
 
 async def _client_session_seed() -> str:
-    configured = os.getenv("STEALTH_CHROME_PROFILE_KEY") or os.getenv("BROWSER_PROFILE_KEY")
+    configured = os.getenv("STEALTH_CHROME_PROFILE_KEY") or os.getenv(
+        "BROWSER_PROFILE_KEY"
+    )
     if configured:
         return configured
 
@@ -1042,7 +1072,9 @@ def _available_clone_dir(base_clone: Path) -> Path:
         if not _profile_has_running_browser(candidate):
             return candidate
 
-    return base_clone.with_name(f"{base_clone.name}-{os.getpid()}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
+    return base_clone.with_name(
+        f"{base_clone.name}-{os.getpid()}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    )
 
 
 def _next_available_explicit_dir(requested: Path) -> Path:
@@ -1061,7 +1093,9 @@ def _next_available_explicit_dir(requested: Path) -> Path:
     )
 
 
-def _copy_clone_from_source(source: Path, clone: Path, clone_root: Path, source_kind: str) -> Dict[str, Any]:
+def _copy_clone_from_source(
+    source: Path, clone: Path, clone_root: Path, source_kind: str
+) -> Dict[str, Any]:
     selection: Dict[str, Any] = {
         "user_data_dir": str(clone),
         "profile_role": "clone",
@@ -1099,10 +1133,16 @@ async def _resolve_profile_selection(
             # sessions/github-session.  This avoids the double-sessions path
             # sessions/sessions/github-session when the user includes the prefix.
             anchored = _default_session_root() / explicit
-            explicit = anchored if _is_relative_to(anchored, clone_root) else clone_root / explicit
+            explicit = (
+                anchored
+                if _is_relative_to(anchored, clone_root)
+                else clone_root / explicit
+            )
         # If the requested path (inside clone_root) is already held by a running
         # browser, find the next free numbered variant rather than crashing.
-        if _is_relative_to(explicit, clone_root) and _profile_has_running_browser(explicit):
+        if _is_relative_to(explicit, clone_root) and _profile_has_running_browser(
+            explicit
+        ):
             explicit = _next_available_explicit_dir(explicit)
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
             # Refresh stale snapshot before copying so the clone carries the
@@ -1110,7 +1150,9 @@ async def _resolve_profile_selection(
             if _snapshot_needs_refresh():
                 _refresh_master_snapshot_if_safe("pre-clone-stale")
             source = snapshot if snapshot.exists() else master
-            source_kind = "explicit-master-snapshot" if source == snapshot else "explicit-master"
+            source_kind = (
+                "explicit-master-snapshot" if source == snapshot else "explicit-master"
+            )
             _copy_profile_tree(source, explicit, clone_root, source_kind)
         explicit.parent.mkdir(parents=True, exist_ok=True)
         return {
@@ -1130,7 +1172,11 @@ async def _resolve_profile_selection(
         }
 
     base_clone = await _clone_profile_dir_for_session(clone_root)
-    clone = _unique_clone_dir(base_clone, clone_suffix) if clone_suffix else _available_clone_dir(base_clone)
+    clone = (
+        _unique_clone_dir(base_clone, clone_suffix)
+        if clone_suffix
+        else _available_clone_dir(base_clone)
+    )
     clone_root.mkdir(parents=True, exist_ok=True)
     # Backstop against unbounded session bloat: kick a background sweep (delete
     # idle auto-clones over the clone cap; trim idle named profiles over the
@@ -1209,11 +1255,14 @@ def is_section_enabled(section: str) -> bool:
     """Check if a tool section is enabled."""
     return section not in DISABLED_SECTIONS
 
+
 def section_tool(section: str):
     """Decorator that registers tools and tracks section membership."""
+
     def decorator(func):
         SECTION_TOOLS[section].append(func.__name__)
         return mcp.tool(func)
+
     return decorator
 
 
@@ -1227,6 +1276,7 @@ def apply_disabled_sections() -> None:
                 # Tool may already be removed by another section policy.
                 continue
 
+
 @asynccontextmanager
 async def app_lifespan(server):
     """
@@ -1237,7 +1287,9 @@ async def app_lifespan(server):
     """
     _install_asyncio_close_noise_filter()
     _install_nodriver_cookie_compat()
-    debug_logger.log_info("server", "startup", "Starting Browser Automation MCP Server...")
+    debug_logger.log_info(
+        "server", "startup", "Starting Browser Automation MCP Server..."
+    )
     try:
         await browser_manager.start_idle_reaper()
         # Reclaim leaked auto-clones and trim oversized idle named profiles left
@@ -1246,7 +1298,9 @@ async def app_lifespan(server):
         _spawn_background_sweep("startup")
         yield
     finally:
-        debug_logger.log_info("server", "shutdown", "Shutting down Browser Automation MCP Server...")
+        debug_logger.log_info(
+            "server", "shutdown", "Shutting down Browser Automation MCP Server..."
+        )
         try:
             await browser_manager.stop_idle_reaper()
         except Exception as e:
@@ -1256,7 +1310,7 @@ async def app_lifespan(server):
             debug_logger.log_info("server", "cleanup", "All browser instances closed")
         except Exception as e:
             debug_logger.log_error("server", "cleanup", e)
-        
+
         try:
             process_cleanup._cleanup_all_tracked()
             debug_logger.log_info("server", "cleanup", "Process cleanup complete")
@@ -1271,10 +1325,15 @@ async def app_lifespan(server):
                     f"Clearing in-memory storage with {len(persistent_instances['instances'])} instances...",
                 )
                 persistent_storage.clear_all()
-                debug_logger.log_info("server", "storage_cleanup", "In-memory storage cleared")
+                debug_logger.log_info(
+                    "server", "storage_cleanup", "In-memory storage cleared"
+                )
         except Exception as e:
             debug_logger.log_error("server", "storage_cleanup", e)
-        debug_logger.log_info("server", "shutdown", "Browser Automation MCP Server shutdown complete")
+        debug_logger.log_info(
+            "server", "shutdown", "Browser Automation MCP Server shutdown complete"
+        )
+
 
 mcp = FastMCP(
     name="Browser Automation MCP",
@@ -1302,6 +1361,7 @@ cdp_function_executor = CDPFunctionExecutor()
 if DEBUG_LOGGING_ENABLED:
     debug_logger.enable()
 
+
 @section_tool("browser-management")
 async def spawn_browser(
     headless: bool = False,
@@ -1315,7 +1375,7 @@ async def spawn_browser(
     block_resources: List[str] = None,
     extra_headers: Dict[str, str] = None,
     user_data_dir: Optional[str] = None,
-    sandbox: Optional[Any] = None
+    sandbox: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Spawn a new browser instance.
@@ -1344,16 +1404,16 @@ async def spawn_browser(
     """
     try:
         from platform_utils import is_running_as_root, is_running_in_container
-        
+
         if sandbox is None:
             sandbox = not (is_running_as_root() or is_running_in_container())
         elif isinstance(sandbox, str):
-            sandbox = sandbox.lower() in ('true', '1', 'yes', 'on', 'enabled')
+            sandbox = sandbox.lower() in ("true", "1", "yes", "on", "enabled")
         elif isinstance(sandbox, int):
             sandbox = bool(sandbox)
         elif not isinstance(sandbox, bool):
             sandbox = bool(sandbox)
-        
+
         profile_selection = await _resolve_profile_selection(user_data_dir)
         spawn_errors = []
 
@@ -1385,7 +1445,9 @@ async def spawn_browser(
                 # unreclaimable) for the rest of the process.
                 if profile_selection.get("profile_role") == "clone":
                     _release_clone_dir(selected_user_data_dir)
-                fallback_selection = await _fallback_profile_selection(profile_selection, spawn_attempt)
+                fallback_selection = await _fallback_profile_selection(
+                    profile_selection, spawn_attempt
+                )
                 if fallback_selection is None:
                     raise
                 profile_selection = fallback_selection
@@ -1397,9 +1459,13 @@ async def spawn_browser(
             await network_interceptor.setup_interception(
                 tab, instance.instance_id, block_resources
             )
-        spawn_diagnostics = await browser_manager.get_spawn_diagnostics(instance.instance_id)
+        spawn_diagnostics = await browser_manager.get_spawn_diagnostics(
+            instance.instance_id
+        )
         if isinstance(spawn_diagnostics, dict):
-            spawn_diagnostics["profile_selection"] = _public_profile_selection(profile_selection)
+            spawn_diagnostics["profile_selection"] = _public_profile_selection(
+                profile_selection
+            )
             if spawn_errors:
                 spawn_diagnostics["profile_selection"]["spawn_retries"] = spawn_errors
             if profile_selection.get("profile_role") == "explicit":
@@ -1418,6 +1484,7 @@ async def spawn_browser(
     except Exception as e:
         raise Exception(f"Failed to spawn browser: {str(e)}")
 
+
 @section_tool("browser-management")
 async def list_instances() -> List[Dict[str, Any]]:
     """
@@ -1430,24 +1497,29 @@ async def list_instances() -> List[Dict[str, Any]]:
     storage_instances = persistent_storage.list_instances()
     result = []
     for inst in memory_instances:
-        result.append({
-            "instance_id": inst.instance_id,
-            "state": inst.state,
-            "current_url": inst.current_url,
-            "title": inst.title,
-            "source": "active"
-        })
+        result.append(
+            {
+                "instance_id": inst.instance_id,
+                "state": inst.state,
+                "current_url": inst.current_url,
+                "title": inst.title,
+                "source": "active",
+            }
+        )
     memory_ids = {inst.instance_id for inst in memory_instances}
     for instance_id, inst_data in storage_instances.get("instances", {}).items():
         if instance_id not in memory_ids:
-            result.append({
-                "instance_id": inst_data["instance_id"],
-                "state": inst_data["state"] + " (stored)",
-                "current_url": inst_data["current_url"],
-                "title": inst_data["title"],
-                "source": "stored"
-            })
+            result.append(
+                {
+                    "instance_id": inst_data["instance_id"],
+                    "state": inst_data["state"] + " (stored)",
+                    "current_url": inst_data["current_url"],
+                    "title": inst_data["title"],
+                    "source": "stored",
+                }
+            )
     return result
+
 
 @section_tool("browser-management")
 async def close_instance(instance_id: str) -> bool:
@@ -1472,11 +1544,16 @@ async def close_instance(instance_id: str) -> bool:
         dynamic_hook_system.remove_instance(instance_id)
         # Instance is gone — lift sweep protection for its disposable clone so the
         # storage cap can reclaim it later if the on-close delete was deferred.
-        if profile_selection.get("profile_role") == "clone" and profile_selection.get("user_data_dir"):
+        if profile_selection.get("profile_role") == "clone" and profile_selection.get(
+            "user_data_dir"
+        ):
             _release_clone_dir(profile_selection["user_data_dir"])
         if should_refresh_snapshot:
-            await asyncio.to_thread(_refresh_master_snapshot_if_safe, "after-master-close")
+            await asyncio.to_thread(
+                _refresh_master_snapshot_if_safe, "after-master-close"
+            )
     return success
+
 
 @section_tool("browser-management")
 async def get_instance_state(instance_id: str) -> Optional[Dict[str, Any]]:
@@ -1537,13 +1614,14 @@ async def get_instance_state(instance_id: str) -> Optional[Dict[str, Any]]:
         return result
     return None
 
+
 @section_tool("browser-management")
 async def navigate(
     instance_id: str,
     url: str,
     wait_until: str = "load",
     timeout: int = 30000,
-    referrer: Optional[str] = None
+    referrer: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Navigate to a URL.
@@ -1572,6 +1650,7 @@ async def navigate(
         instance_id=instance_id,
     )
 
+
 @section_tool("browser-management")
 async def go_back(instance_id: str) -> bool:
     """
@@ -1589,6 +1668,7 @@ async def go_back(instance_id: str) -> bool:
     await _with_cdp_timeout(tab.back(), instance_id=instance_id)
     return True
 
+
 @section_tool("browser-management")
 async def go_forward(instance_id: str) -> bool:
     """
@@ -1605,6 +1685,7 @@ async def go_forward(instance_id: str) -> bool:
         raise Exception(f"Instance not found: {instance_id}")
     await _with_cdp_timeout(tab.forward(), instance_id=instance_id)
     return True
+
 
 @section_tool("browser-management")
 async def reload_page(instance_id: str, ignore_cache: bool = False) -> bool:
@@ -1624,13 +1705,14 @@ async def reload_page(instance_id: str, ignore_cache: bool = False) -> bool:
     await _with_cdp_timeout(tab.reload(), instance_id=instance_id)
     return True
 
+
 @section_tool("element-interaction")
 async def query_elements(
     instance_id: str,
     selector: str,
     text_filter: Optional[str] = None,
     visible_only: bool = True,
-    limit: Optional[Any] = None
+    limit: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """
     Query DOM elements.
@@ -1648,31 +1730,45 @@ async def query_elements(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    debug_logger.log_info('Server', 'query_elements', f'Received limit parameter: {limit} (type: {type(limit)})')
-    elements = await _with_cdp_timeout(dom_handler.query_elements(
-        tab, selector, text_filter, visible_only, limit
-    ), instance_id=instance_id)
-    debug_logger.log_info('Server', 'query_elements', f'DOM handler returned {len(elements)} elements')
+    debug_logger.log_info(
+        "Server",
+        "query_elements",
+        f"Received limit parameter: {limit} (type: {type(limit)})",
+    )
+    elements = await _with_cdp_timeout(
+        dom_handler.query_elements(tab, selector, text_filter, visible_only, limit),
+        instance_id=instance_id,
+    )
+    debug_logger.log_info(
+        "Server", "query_elements", f"DOM handler returned {len(elements)} elements"
+    )
     result = []
     for i, elem in enumerate(elements):
         try:
-            if hasattr(elem, 'model_dump'):
+            if hasattr(elem, "model_dump"):
                 elem_dict = elem.model_dump()
             else:
                 elem_dict = elem.dict()
             result.append(elem_dict)
-            debug_logger.log_info('Server', 'query_elements', f'Converted element {i+1} to dict: {list(elem_dict.keys())}')
+            debug_logger.log_info(
+                "Server",
+                "query_elements",
+                f"Converted element {i + 1} to dict: {list(elem_dict.keys())}",
+            )
         except Exception as e:
-            debug_logger.log_error('Server', 'query_elements', e, {'element_index': i})
-    debug_logger.log_info('Server', 'query_elements', f'Returning {len(result)} results to MCP client')
+            debug_logger.log_error("Server", "query_elements", e, {"element_index": i})
+    debug_logger.log_info(
+        "Server", "query_elements", f"Returning {len(result)} results to MCP client"
+    )
     return result if result else []
+
 
 @section_tool("element-interaction")
 async def click_element(
     instance_id: str,
     selector: str,
     text_match: Optional[str] = None,
-    timeout: int = 10000
+    timeout: int = 10000,
 ) -> bool:
     """
     Click an element.
@@ -1690,14 +1786,18 @@ async def click_element(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(dom_handler.click_element(tab, selector, text_match, timeout), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        dom_handler.click_element(tab, selector, text_match, timeout),
+        instance_id=instance_id,
+    )
+
 
 @section_tool("element-interaction")
 async def upload_file(
     instance_id: str,
     selector: str,
     file_paths: Union[str, List[str]],
-    timeout: int = 10000
+    timeout: int = 10000,
 ) -> Dict[str, Any]:
     """
     Upload local file(s) to a file input. USE THIS for file uploads.
@@ -1727,6 +1827,7 @@ async def upload_file(
         instance_id=instance_id,
     )
 
+
 @section_tool("element-interaction")
 async def type_text(
     instance_id: str,
@@ -1735,7 +1836,7 @@ async def type_text(
     clear_first: bool = True,
     delay_ms: int = 50,
     parse_newlines: bool = False,
-    shift_enter: bool = False
+    shift_enter: bool = False,
 ) -> bool:
     """
     Type text into an input field.
@@ -1757,14 +1858,18 @@ async def type_text(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(dom_handler.type_text(tab, selector, text, clear_first, delay_ms, parse_newlines, shift_enter), timeout=60, instance_id=instance_id)
+    return await _with_cdp_timeout(
+        dom_handler.type_text(
+            tab, selector, text, clear_first, delay_ms, parse_newlines, shift_enter
+        ),
+        timeout=60,
+        instance_id=instance_id,
+    )
+
 
 @section_tool("element-interaction")
 async def paste_text(
-    instance_id: str,
-    selector: str,
-    text: str,
-    clear_first: bool = True
+    instance_id: str, selector: str, text: str, clear_first: bool = True
 ) -> bool:
     """
     Paste text instantly into an input field.
@@ -1781,7 +1886,11 @@ async def paste_text(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(dom_handler.paste_text(tab, selector, text, clear_first), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        dom_handler.paste_text(tab, selector, text, clear_first),
+        instance_id=instance_id,
+    )
+
 
 @section_tool("element-interaction")
 async def select_option(
@@ -1789,7 +1898,7 @@ async def select_option(
     selector: str,
     value: Optional[str] = None,
     text: Optional[str] = None,
-    index: Optional[Any] = None
+    index: Optional[Any] = None,
 ) -> bool:
     """
     Select an option from a dropdown.
@@ -1807,21 +1916,22 @@ async def select_option(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    
+
     converted_index = None
     if index is not None:
         try:
             converted_index = int(index)
         except (ValueError, TypeError):
             raise Exception(f"Invalid index value: {index}. Must be a number.")
-    
-    return await _with_cdp_timeout(dom_handler.select_option(tab, selector, value, text, converted_index), instance_id=instance_id)
+
+    return await _with_cdp_timeout(
+        dom_handler.select_option(tab, selector, value, text, converted_index),
+        instance_id=instance_id,
+    )
+
 
 @section_tool("element-interaction")
-async def get_element_state(
-    instance_id: str,
-    selector: str
-) -> Dict[str, Any]:
+async def get_element_state(instance_id: str, selector: str) -> Dict[str, Any]:
     """
     Get complete state of an element.
 
@@ -1835,7 +1945,10 @@ async def get_element_state(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(dom_handler.get_element_state(tab, selector), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        dom_handler.get_element_state(tab, selector), instance_id=instance_id
+    )
+
 
 @section_tool("element-interaction")
 async def wait_for_element(
@@ -1843,7 +1956,7 @@ async def wait_for_element(
     selector: str,
     timeout: int = 30000,
     visible: bool = True,
-    text_content: Optional[str] = None
+    text_content: Optional[str] = None,
 ) -> bool:
     """
     Wait for an element to appear.
@@ -1862,14 +1975,16 @@ async def wait_for_element(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(dom_handler.wait_for_element(tab, selector, timeout, visible, text_content), timeout=max(timeout/1000 + 5, CDP_OPERATION_TIMEOUT), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        dom_handler.wait_for_element(tab, selector, timeout, visible, text_content),
+        timeout=max(timeout / 1000 + 5, CDP_OPERATION_TIMEOUT),
+        instance_id=instance_id,
+    )
+
 
 @section_tool("element-interaction")
 async def scroll_page(
-    instance_id: str,
-    direction: str = "down",
-    amount: int = 500,
-    smooth: bool = True
+    instance_id: str, direction: str = "down", amount: int = 500, smooth: bool = True
 ) -> bool:
     """
     Scroll the page.
@@ -1888,14 +2003,17 @@ async def scroll_page(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(dom_handler.scroll_page(tab, direction, amount, smooth), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        dom_handler.scroll_page(tab, direction, amount, smooth), instance_id=instance_id
+    )
+
 
 @section_tool("element-interaction")
 async def execute_script(
     instance_id: str,
     script: str,
     args: Optional[List[Any]] = None,
-    timeout_ms: Optional[int] = None
+    timeout_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Execute JavaScript in the page and return its value.
@@ -1927,7 +2045,10 @@ async def execute_script(
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
     if timeout_ms is not None:
-        timeout_s = _clamp_timeout(timeout_ms, default=int(EXECUTE_SCRIPT_TIMEOUT * 1000)) / 1000
+        timeout_s = (
+            _clamp_timeout(timeout_ms, default=int(EXECUTE_SCRIPT_TIMEOUT * 1000))
+            / 1000
+        )
     else:
         timeout_s = EXECUTE_SCRIPT_TIMEOUT
     try:
@@ -1936,22 +2057,14 @@ async def execute_script(
             timeout=timeout_s,
             instance_id=instance_id,
         )
-        return {
-            "success": True,
-            "result": result,
-            "error": None
-        }
+        return {"success": True, "result": result, "error": None}
     except Exception as e:
-        return {
-            "success": False,
-            "result": None,
-            "error": str(e)
-        }
+        return {"success": False, "result": None, "error": str(e)}
+
 
 @section_tool("element-interaction")
 async def get_page_content(
-    instance_id: str,
-    include_frames: bool = False
+    instance_id: str, include_frames: bool = False
 ) -> Dict[str, Any]:
     """
     Get page HTML and text content.
@@ -1966,20 +2079,23 @@ async def get_page_content(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    content = await _with_cdp_timeout(dom_handler.get_page_content(tab, include_frames), instance_id=instance_id)
-    
-    return response_handler.handle_response(
-        content, 
-        "page_content", 
-        {"instance_id": instance_id, "include_frames": include_frames}
+    content = await _with_cdp_timeout(
+        dom_handler.get_page_content(tab, include_frames), instance_id=instance_id
     )
+
+    return response_handler.handle_response(
+        content,
+        "page_content",
+        {"instance_id": instance_id, "include_frames": include_frames},
+    )
+
 
 @section_tool("element-interaction")
 async def take_screenshot(
     instance_id: str,
     full_page: bool = False,
     format: str = "png",
-    file_path: Optional[str] = None
+    file_path: Optional[str] = None,
 ) -> Union[str, Dict[str, Any]]:
     """
     Take a screenshot of the page.
@@ -1995,51 +2111,55 @@ async def take_screenshot(
     """
     from PIL import Image
     import io
-    
+
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    
+
     if file_path:
         save_path = Path(file_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         await _with_cdp_timeout(tab.save_screenshot(save_path), instance_id=instance_id)
         return f"Screenshot saved. AI agents should use the Read tool to view this image: {str(save_path.absolute())}"
 
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
         tmp_path = Path(tmp_file.name)
 
     try:
         await _with_cdp_timeout(tab.save_screenshot(tmp_path), instance_id=instance_id)
-        
+
         with Image.open(tmp_path) as img:
-            if img.mode in ('RGBA', 'LA', 'P') and format.lower() == 'jpeg':
-                background = Image.new('RGB', img.size, (255, 255, 255))
-                if img.mode == 'P':
-                    img = img.convert('RGBA')
-                background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+            if img.mode in ("RGBA", "LA", "P") and format.lower() == "jpeg":
+                background = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode == "P":
+                    img = img.convert("RGBA")
+                background.paste(
+                    img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None
+                )
                 img = background
-            
+
             output_buffer = io.BytesIO()
-            
-            if format.lower() == 'jpeg':
-                img.save(output_buffer, format='JPEG', quality=85, optimize=True)
+
+            if format.lower() == "jpeg":
+                img.save(output_buffer, format="JPEG", quality=85, optimize=True)
             else:
-                img.save(output_buffer, format='PNG', optimize=True)
-            
+                img.save(output_buffer, format="PNG", optimize=True)
+
             compressed_bytes = output_buffer.getvalue()
-            
+
             base64_size = len(compressed_bytes) * 1.33
             estimated_tokens = int(base64_size / 4)
-            
+
             if estimated_tokens > 20000:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                screenshot_filename = f"screenshot_{timestamp}_{instance_id[:8]}.{format.lower()}"
+                screenshot_filename = (
+                    f"screenshot_{timestamp}_{instance_id[:8]}.{format.lower()}"
+                )
                 screenshot_path = response_handler.clone_dir / screenshot_filename
-                
-                with open(screenshot_path, 'wb') as f:
+
+                with open(screenshot_path, "wb") as f:
                     f.write(compressed_bytes)
-                
+
                 file_size_kb = len(compressed_bytes) / 1024
                 return {
                     "file_path": str(screenshot_path),
@@ -2047,11 +2167,11 @@ async def take_screenshot(
                     "file_size_kb": round(file_size_kb, 2),
                     "estimated_tokens": estimated_tokens,
                     "reason": "Screenshot too large, automatically saved to file",
-                    "message": f"Screenshot saved. AI agents should use the Read tool to view this image: {str(screenshot_path)}"
+                    "message": f"Screenshot saved. AI agents should use the Read tool to view this image: {str(screenshot_path)}",
                 }
-            
-            return base64.b64encode(compressed_bytes).decode('utf-8')
-            
+
+            return base64.b64encode(compressed_bytes).decode("utf-8")
+
     finally:
         if tmp_path.exists():
             os.unlink(tmp_path)
@@ -2059,8 +2179,7 @@ async def take_screenshot(
 
 @section_tool("network-debugging")
 async def list_network_requests(
-    instance_id: str,
-    filter_type: Optional[str] = None
+    instance_id: str, filter_type: Optional[str] = None
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     List captured network requests.
@@ -2079,18 +2198,16 @@ async def list_network_requests(
             "url": req.url,
             "method": req.method,
             "resource_type": req.resource_type,
-            "timestamp": req.timestamp.isoformat()
+            "timestamp": req.timestamp.isoformat(),
         }
         for req in requests
     ]
-    
+
     return response_handler.handle_response(formatted_requests, "network_requests")
 
 
 @section_tool("network-debugging")
-async def get_request_details(
-    request_id: str
-) -> Optional[Dict[str, Any]]:
+async def get_request_details(request_id: str) -> Optional[Dict[str, Any]]:
     """
     Get detailed information about a network request.
 
@@ -2107,9 +2224,7 @@ async def get_request_details(
 
 
 @section_tool("network-debugging")
-async def get_response_details(
-    request_id: str
-) -> Optional[Dict[str, Any]]:
+async def get_response_details(request_id: str) -> Optional[Dict[str, Any]]:
     """
     Get response details for a network request.
 
@@ -2126,10 +2241,7 @@ async def get_response_details(
 
 
 @section_tool("network-debugging")
-async def get_response_content(
-    instance_id: str,
-    request_id: str
-) -> Optional[str]:
+async def get_response_content(instance_id: str, request_id: str) -> Optional[str]:
     """
     Get response body content.
 
@@ -2143,13 +2255,16 @@ async def get_response_content(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    body = await _with_cdp_timeout(network_interceptor.get_response_body(tab, request_id), instance_id=instance_id)
+    body = await _with_cdp_timeout(
+        network_interceptor.get_response_body(tab, request_id), instance_id=instance_id
+    )
     if body:
         try:
-            return body.decode('utf-8')
+            return body.decode("utf-8")
         except UnicodeDecodeError:
             import base64
-            return base64.b64encode(body).decode('utf-8')
+
+            return base64.b64encode(body).decode("utf-8")
     return None
 
 
@@ -2196,10 +2311,7 @@ async def search_network_requests(
 
 
 @section_tool("network-debugging")
-async def export_network_data(
-    instance_id: str,
-    filepath: str
-) -> bool:
+async def export_network_data(instance_id: str, filepath: str) -> bool:
     """
     Export network data to JSON file.
 
@@ -2214,10 +2326,7 @@ async def export_network_data(
 
 
 @section_tool("network-debugging")
-async def import_network_data(
-    instance_id: str,
-    filepath: str
-) -> bool:
+async def import_network_data(instance_id: str, filepath: str) -> bool:
     """
     Import network data from JSON file.
 
@@ -2250,14 +2359,14 @@ async def set_network_capture_filters(
     Returns:
         bool: True if successful.
     """
-    await network_interceptor.set_capture_filters(instance_id, include_types, exclude_types)
+    await network_interceptor.set_capture_filters(
+        instance_id, include_types, exclude_types
+    )
     return True
 
 
 @section_tool("network-debugging")
-async def get_network_capture_filters(
-    instance_id: str
-) -> Dict[str, List[str]]:
+async def get_network_capture_filters(instance_id: str) -> Dict[str, List[str]]:
     """
     Get current network capture filters.
 
@@ -2271,10 +2380,7 @@ async def get_network_capture_filters(
 
 
 @section_tool("network-debugging")
-async def modify_headers(
-    instance_id: str,
-    headers: Dict[str, str]
-) -> bool:
+async def modify_headers(instance_id: str, headers: Dict[str, str]) -> bool:
     """
     Modify request headers for future requests.
 
@@ -2288,13 +2394,14 @@ async def modify_headers(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(network_interceptor.modify_headers(tab, headers), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        network_interceptor.modify_headers(tab, headers), instance_id=instance_id
+    )
 
 
 @section_tool("cookies-storage")
 async def get_cookies(
-    instance_id: str,
-    urls: Optional[List[str]] = None
+    instance_id: str, urls: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
     """
     Get cookies for current page or specific URLs.
@@ -2309,7 +2416,9 @@ async def get_cookies(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(network_interceptor.get_cookies(tab, urls), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        network_interceptor.get_cookies(tab, urls), instance_id=instance_id
+    )
 
 
 @section_tool("cookies-storage")
@@ -2322,7 +2431,7 @@ async def set_cookie(
     path: str = "/",
     secure: bool = False,
     http_only: bool = False,
-    same_site: Optional[str] = None
+    same_site: Optional[str] = None,
 ) -> bool:
     """
     Set a cookie.
@@ -2344,20 +2453,20 @@ async def set_cookie(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    
+
     if not url and not domain:
-        current_url = tab.url if hasattr(tab, 'url') else None
+        current_url = tab.url if hasattr(tab, "url") else None
         if current_url:
             url = current_url
         else:
             raise Exception("At least one of 'url' or 'domain' must be specified")
-    
+
     cookie = {
         "name": name,
         "value": value,
         "path": path,
         "secure": secure,
-        "http_only": http_only
+        "http_only": http_only,
     }
     if url:
         cookie["url"] = url
@@ -2365,14 +2474,13 @@ async def set_cookie(
         cookie["domain"] = domain
     if same_site:
         cookie["same_site"] = same_site
-    return await _with_cdp_timeout(network_interceptor.set_cookie(tab, cookie), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        network_interceptor.set_cookie(tab, cookie), instance_id=instance_id
+    )
 
 
 @section_tool("cookies-storage")
-async def clear_cookies(
-    instance_id: str,
-    url: Optional[str] = None
-) -> bool:
+async def clear_cookies(instance_id: str, url: Optional[str] = None) -> bool:
     """
     Clear cookies.
 
@@ -2386,7 +2494,9 @@ async def clear_cookies(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(network_interceptor.clear_cookies(tab, url), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        network_interceptor.clear_cookies(tab, url), instance_id=instance_id
+    )
 
 
 @mcp.resource("browser://{instance_id}/state")
@@ -2461,7 +2571,7 @@ async def get_debug_view(
     max_errors: int = 50,
     max_warnings: int = 50,
     max_info: int = 50,
-    include_all: bool = False
+    include_all: bool = False,
 ) -> Dict[str, Any]:
     """
     Get comprehensive debug view with all logged errors and statistics.
@@ -2478,7 +2588,7 @@ async def get_debug_view(
     debug_data = debug_logger.get_debug_view_paginated(
         max_errors=max_errors if not include_all else None,
         max_warnings=max_warnings if not include_all else None,
-        max_info=max_info if not include_all else None
+        max_info=max_info if not include_all else None,
     )
     return debug_data
 
@@ -2493,8 +2603,7 @@ async def clear_debug_view() -> bool:
     """
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(debug_logger.clear_debug_view_safe),
-            timeout=10.0
+            asyncio.to_thread(debug_logger.clear_debug_view_safe), timeout=10.0
         )
         return True
     except asyncio.TimeoutError:
@@ -2508,7 +2617,7 @@ async def export_debug_logs(
     max_warnings: int = 100,
     max_info: int = 100,
     include_all: bool = False,
-    format: str = "auto"
+    format: str = "auto",
 ) -> str:
     """
     Export debug logs to a file using the fastest available method with timeout protection.
@@ -2536,9 +2645,9 @@ async def export_debug_logs(
                 max_errors if not include_all else None,
                 max_warnings if not include_all else None,
                 max_info if not include_all else None,
-                format
+                format,
             ),
-            timeout=30.0
+            timeout=30.0,
         )
         return filepath
     except asyncio.TimeoutError:
@@ -2570,14 +2679,13 @@ async def list_tabs(instance_id: str) -> List[Dict[str, str]]:
     Returns:
         List[Dict[str, str]]: List of tabs with their details.
     """
-    return await _with_cdp_timeout(browser_manager.list_tabs(instance_id), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        browser_manager.list_tabs(instance_id), instance_id=instance_id
+    )
 
 
 @section_tool("tabs")
-async def switch_tab(
-    instance_id: str,
-    tab_id: str
-) -> bool:
+async def switch_tab(instance_id: str, tab_id: str) -> bool:
     """
     Switch to a specific tab by bringing it to front.
 
@@ -2588,14 +2696,13 @@ async def switch_tab(
     Returns:
         bool: True if switched successfully.
     """
-    return await _with_cdp_timeout(browser_manager.switch_to_tab(instance_id, tab_id), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        browser_manager.switch_to_tab(instance_id, tab_id), instance_id=instance_id
+    )
 
 
 @section_tool("tabs")
-async def close_tab(
-    instance_id: str,
-    tab_id: str
-) -> bool:
+async def close_tab(instance_id: str, tab_id: str) -> bool:
     """
     Close a specific tab.
 
@@ -2606,7 +2713,9 @@ async def close_tab(
     Returns:
         bool: True if closed successfully.
     """
-    return await _with_cdp_timeout(browser_manager.close_tab(instance_id, tab_id), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        browser_manager.close_tab(instance_id, tab_id), instance_id=instance_id
+    )
 
 
 @section_tool("tabs")
@@ -2620,23 +2729,22 @@ async def get_active_tab(instance_id: str) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Active tab information.
     """
-    tab = await _with_cdp_timeout(browser_manager.get_active_tab(instance_id), instance_id=instance_id)
+    tab = await _with_cdp_timeout(
+        browser_manager.get_active_tab(instance_id), instance_id=instance_id
+    )
     if not tab:
         return {"error": "No active tab found"}
     await _with_cdp_timeout(tab, instance_id=instance_id)
     return {
         "tab_id": str(tab.target.target_id),
-        "url": getattr(tab, 'url', '') or '',
-        "title": getattr(tab.target, 'title', '') or 'Untitled',
-        "type": getattr(tab.target, 'type_', 'page')
+        "url": getattr(tab, "url", "") or "",
+        "title": getattr(tab.target, "title", "") or "Untitled",
+        "type": getattr(tab.target, "type_", "page"),
     }
 
 
 @section_tool("tabs")
-async def new_tab(
-    instance_id: str,
-    url: str = "about:blank"
-) -> Dict[str, Any]:
+async def new_tab(instance_id: str, url: str = "about:blank") -> Dict[str, Any]:
     """
     Open a new tab in the browser instance.
 
@@ -2651,13 +2759,15 @@ async def new_tab(
     if not browser:
         raise Exception(f"Instance not found: {instance_id}")
     try:
-        new_tab_obj = await _with_cdp_timeout(browser.get(url, new_tab=True), instance_id=instance_id)
+        new_tab_obj = await _with_cdp_timeout(
+            browser.get(url, new_tab=True), instance_id=instance_id
+        )
         await _with_cdp_timeout(new_tab_obj, instance_id=instance_id)
         return {
             "tab_id": str(new_tab_obj.target.target_id),
-            "url": getattr(new_tab_obj, 'url', '') or url,
-            "title": getattr(new_tab_obj.target, 'title', '') or 'New Tab',
-            "type": getattr(new_tab_obj.target, 'type_', 'page')
+            "url": getattr(new_tab_obj, "url", "") or url,
+            "title": getattr(new_tab_obj.target, "title", "") or "New Tab",
+            "type": getattr(new_tab_obj.target, "type_", "page"),
         }
     except Exception as e:
         raise Exception(f"Failed to create new tab: {str(e)}")
@@ -2670,7 +2780,7 @@ async def extract_element_styles(
     include_computed: bool = True,
     include_css_rules: bool = True,
     include_pseudo: bool = True,
-    include_inheritance: bool = False
+    include_inheritance: bool = False,
 ) -> Dict[str, Any]:
     """
     Extract complete styling information from an element.
@@ -2689,14 +2799,17 @@ async def extract_element_styles(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(element_cloner.extract_element_styles(
-        tab,
-        selector=selector,
-        include_computed=include_computed,
-        include_css_rules=include_css_rules,
-        include_pseudo=include_pseudo,
-        include_inheritance=include_inheritance
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        element_cloner.extract_element_styles(
+            tab,
+            selector=selector,
+            include_computed=include_computed,
+            include_css_rules=include_css_rules,
+            include_pseudo=include_pseudo,
+            include_inheritance=include_inheritance,
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("element-extraction")
@@ -2706,7 +2819,7 @@ async def extract_element_structure(
     include_children: bool = False,
     include_attributes: bool = True,
     include_data_attributes: bool = True,
-    max_depth: int = 3
+    max_depth: int = 3,
 ) -> Dict[str, Any]:
     """
     Extract complete HTML structure and DOM information.
@@ -2725,14 +2838,17 @@ async def extract_element_structure(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(element_cloner.extract_element_structure(
-        tab,
-        selector=selector,
-        include_children=include_children,
-        include_attributes=include_attributes,
-        include_data_attributes=include_data_attributes,
-        max_depth=max_depth
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        element_cloner.extract_element_structure(
+            tab,
+            selector=selector,
+            include_children=include_children,
+            include_attributes=include_attributes,
+            include_data_attributes=include_data_attributes,
+            max_depth=max_depth,
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("element-extraction")
@@ -2742,7 +2858,7 @@ async def extract_element_events(
     include_inline: bool = True,
     include_listeners: bool = True,
     include_framework: bool = True,
-    analyze_handlers: bool = False
+    analyze_handlers: bool = False,
 ) -> Dict[str, Any]:
     """
     Extract complete event listener and JavaScript handler information.
@@ -2761,14 +2877,17 @@ async def extract_element_events(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(element_cloner.extract_element_events(
-        tab,
-        selector=selector,
-        include_inline=include_inline,
-        include_listeners=include_listeners,
-        include_framework=include_framework,
-        analyze_handlers=analyze_handlers
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        element_cloner.extract_element_events(
+            tab,
+            selector=selector,
+            include_inline=include_inline,
+            include_listeners=include_listeners,
+            include_framework=include_framework,
+            analyze_handlers=analyze_handlers,
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("element-extraction")
@@ -2778,7 +2897,7 @@ async def extract_element_animations(
     include_css_animations: bool = True,
     include_transitions: bool = True,
     include_transforms: bool = True,
-    analyze_keyframes: bool = True
+    analyze_keyframes: bool = True,
 ) -> Dict[str, Any]:
     """
     Extract CSS animations, transitions, and transforms.
@@ -2797,14 +2916,17 @@ async def extract_element_animations(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(element_cloner.extract_element_animations(
-        tab,
-        selector=selector,
-        include_css_animations=include_css_animations,
-        include_transitions=include_transitions,
-        include_transforms=include_transforms,
-        analyze_keyframes=analyze_keyframes
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        element_cloner.extract_element_animations(
+            tab,
+            selector=selector,
+            include_css_animations=include_css_animations,
+            include_transitions=include_transitions,
+            include_transforms=include_transforms,
+            analyze_keyframes=analyze_keyframes,
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("element-extraction")
@@ -2814,7 +2936,7 @@ async def extract_element_assets(
     include_images: bool = True,
     include_backgrounds: bool = True,
     include_fonts: bool = True,
-    fetch_external: bool = False
+    fetch_external: bool = False,
 ) -> Dict[str, Any]:
     """
     Extract all assets related to an element (images, fonts, etc.).
@@ -2833,16 +2955,21 @@ async def extract_element_assets(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    result = await _with_cdp_timeout(element_cloner.extract_element_assets(
-        tab,
-        selector=selector,
-        include_images=include_images,
-        include_backgrounds=include_backgrounds,
-        include_fonts=include_fonts,
-        fetch_external=fetch_external
-    ), instance_id=instance_id)
+    result = await _with_cdp_timeout(
+        element_cloner.extract_element_assets(
+            tab,
+            selector=selector,
+            include_images=include_images,
+            include_backgrounds=include_backgrounds,
+            include_fonts=include_fonts,
+            fetch_external=fetch_external,
+        ),
+        instance_id=instance_id,
+    )
     # handle_response is synchronous — awaiting its dict return raises TypeError.
-    return response_handler.handle_response(result, f"element_assets_{instance_id}_{selector.replace(' ', '_')}")
+    return response_handler.handle_response(
+        result, f"element_assets_{instance_id}_{selector.replace(' ', '_')}"
+    )
 
 
 @section_tool("element-extraction")
@@ -2857,7 +2984,7 @@ async def extract_element_styles_cdp(
     """
     Extract element styles using direct CDP calls (no JavaScript evaluation).
     This prevents hanging issues by using nodriver's native CDP methods.
-    
+
     Args:
         instance_id (str): Browser instance ID
         selector (str): CSS selector for the element
@@ -2865,21 +2992,24 @@ async def extract_element_styles_cdp(
         include_css_rules (bool): Include matching CSS rules
         include_pseudo (bool): Include pseudo-element styles
         include_inheritance (bool): Include style inheritance chain
-    
+
     Returns:
         Dict[str, Any]: Styling data extracted using CDP
     """
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(element_cloner.extract_element_styles_cdp(
-        tab,
-        selector=selector,
-        include_computed=include_computed,
-        include_css_rules=include_css_rules,
-        include_pseudo=include_pseudo,
-        include_inheritance=include_inheritance
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        element_cloner.extract_element_styles_cdp(
+            tab,
+            selector=selector,
+            include_computed=include_computed,
+            include_css_rules=include_css_rules,
+            include_pseudo=include_pseudo,
+            include_inheritance=include_inheritance,
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("element-extraction")
@@ -2888,7 +3018,7 @@ async def extract_related_files(
     analyze_css: bool = True,
     analyze_js: bool = True,
     follow_imports: bool = False,
-    max_depth: int = 2
+    max_depth: int = 2,
 ) -> Dict[str, Any]:
     """
     Discover and analyze related CSS/JS files for context.
@@ -2906,22 +3036,23 @@ async def extract_related_files(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    result = await _with_cdp_timeout(element_cloner.extract_related_files(
-        tab,
-        analyze_css=analyze_css,
-        analyze_js=analyze_js,
-        follow_imports=follow_imports,
-        max_depth=max_depth
-    ), instance_id=instance_id)
+    result = await _with_cdp_timeout(
+        element_cloner.extract_related_files(
+            tab,
+            analyze_css=analyze_css,
+            analyze_js=analyze_js,
+            follow_imports=follow_imports,
+            max_depth=max_depth,
+        ),
+        instance_id=instance_id,
+    )
     # handle_response is synchronous — awaiting its dict return raises TypeError.
     return response_handler.handle_response(result, f"related_files_{instance_id}")
 
 
 @section_tool("element-extraction")
 async def clone_element_complete(
-    instance_id: str,
-    selector: str,
-    extraction_options: Optional[str] = None
+    instance_id: str, selector: str, extraction_options: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Master function that extracts ALL element data using specialized functions.
@@ -2954,20 +3085,27 @@ async def clone_element_complete(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    result = await _with_cdp_timeout(comprehensive_element_cloner.extract_complete_element(
-        tab,
-        selector=selector,
-        include_children=parsed_options.get('structure', {}).get('include_children', True) if parsed_options else True
-    ), instance_id=instance_id)
-    
+    result = await _with_cdp_timeout(
+        comprehensive_element_cloner.extract_complete_element(
+            tab,
+            selector=selector,
+            include_children=parsed_options.get("structure", {}).get(
+                "include_children", True
+            )
+            if parsed_options
+            else True,
+        ),
+        instance_id=instance_id,
+    )
+
     return response_handler.handle_response(
         result,
         fallback_filename_prefix="complete_clone",
         metadata={
             "selector": selector,
             "extraction_options": parsed_options,
-            "url": getattr(tab, 'url', 'unknown')
-        }
+            "url": getattr(tab, "url", "unknown"),
+        },
     )
 
 
@@ -2981,27 +3119,27 @@ async def hot_reload() -> str:
     """
     try:
         modules_to_reload = [
-            'browser_manager',
-            'network_interceptor',
-            'dom_handler',
-            'debug_logger',
-            'models'
+            "browser_manager",
+            "network_interceptor",
+            "dom_handler",
+            "debug_logger",
+            "models",
         ]
         reloaded_modules = []
         for module_name in modules_to_reload:
             if module_name in sys.modules:
                 importlib.reload(sys.modules[module_name])
                 reloaded_modules.append(module_name)
-                if module_name == 'browser_manager':
+                if module_name == "browser_manager":
                     global browser_manager, BrowserManager
                     browser_manager = BrowserManager()
-                elif module_name == 'network_interceptor':
+                elif module_name == "network_interceptor":
                     global network_interceptor, NetworkInterceptor
                     network_interceptor = NetworkInterceptor()
-                elif module_name == 'dom_handler':
+                elif module_name == "dom_handler":
                     global dom_handler, DOMHandler
                     dom_handler = DOMHandler()
-                elif module_name == 'debug_logger':
+                elif module_name == "debug_logger":
                     global debug_logger
                     from debug_logger import debug_logger
         return f"Hot reload completed. Reloaded modules: {', '.join(reloaded_modules)}"
@@ -3020,17 +3158,19 @@ async def reload_status() -> str:
     try:
         modules_info = []
         modules_to_check = [
-            'browser_manager',
-            'network_interceptor',
-            'dom_handler',
-            'debug_logger',
-            'models',
-            'persistent_storage'
+            "browser_manager",
+            "network_interceptor",
+            "dom_handler",
+            "debug_logger",
+            "models",
+            "persistent_storage",
         ]
         for module_name in modules_to_check:
             if module_name in sys.modules:
                 module = sys.modules[module_name]
-                modules_info.append(f"✅ {module_name}: {getattr(module, '__file__', 'built-in')}")
+                modules_info.append(
+                    f"✅ {module_name}: {getattr(module, '__file__', 'built-in')}"
+                )
             else:
                 modules_info.append(f"❌ {module_name}: Not loaded")
         return "\n".join(modules_info)
@@ -3042,7 +3182,7 @@ async def reload_status() -> str:
 async def validate_browser_environment_tool() -> Dict[str, Any]:
     """
     Validate browser environment and diagnose potential issues.
-    
+
     Returns:
         Dict[str, Any]: Environment validation results with platform info and recommendations
     """
@@ -3054,15 +3194,13 @@ async def validate_browser_environment_tool() -> Dict[str, Any]:
             "platform_info": get_platform_info(),
             "is_ready": False,
             "issues": [f"Validation failed: {str(e)}"],
-            "warnings": []
+            "warnings": [],
         }
 
 
 @section_tool("progressive-cloning")
 async def clone_element_progressive(
-    instance_id: str,
-    selector: str,
-    include_children: bool = True
+    instance_id: str, selector: str, include_children: bool = True
 ) -> Dict[str, Any]:
     """
     Clone element progressively - returns lightweight base structure with element_id.
@@ -3078,14 +3216,19 @@ async def clone_element_progressive(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(progressive_element_cloner.clone_element_progressive(tab, selector, include_children), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        progressive_element_cloner.clone_element_progressive(
+            tab, selector, include_children
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("progressive-cloning")
 async def expand_styles(
     element_id: str,
     categories: Optional[List[str]] = None,
-    properties: Optional[List[str]] = None
+    properties: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Expand styles data for a stored element.
@@ -3103,8 +3246,7 @@ async def expand_styles(
 
 @section_tool("progressive-cloning")
 async def expand_events(
-    element_id: str,
-    event_types: Optional[List[str]] = None
+    element_id: str, event_types: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Expand event listeners data for a stored element.
@@ -3121,9 +3263,7 @@ async def expand_events(
 
 @section_tool("progressive-cloning")
 async def expand_children(
-    element_id: str,
-    depth_range: Optional[List] = None,
-    max_count: Optional[Any] = None
+    element_id: str, depth_range: Optional[List] = None, max_count: Optional[Any] = None
 ) -> Dict[str, Any]:
     """
     Expand children data for a stored element.
@@ -3141,23 +3281,24 @@ async def expand_children(
             max_count = int(max_count) if max_count else None
         except ValueError:
             return {"error": f"Invalid max_count value: {max_count}"}
-    
+
     if isinstance(depth_range, list):
         try:
             depth_range = [int(x) if isinstance(x, str) else x for x in depth_range]
         except ValueError:
             return {"error": f"Invalid depth_range values: {depth_range}"}
-    
+
     depth_tuple = tuple(depth_range) if depth_range else None
 
-    result = progressive_element_cloner.expand_children(element_id, depth_tuple, max_count)
+    result = progressive_element_cloner.expand_children(
+        element_id, depth_tuple, max_count
+    )
     return response_handler.handle_response(result, f"expand_children_{element_id}")
 
 
 @section_tool("progressive-cloning")
 async def expand_css_rules(
-    element_id: str,
-    source_types: Optional[List[str]] = None
+    element_id: str, source_types: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Expand CSS rules data for a stored element.
@@ -3173,9 +3314,7 @@ async def expand_css_rules(
 
 
 @section_tool("progressive-cloning")
-async def expand_pseudo_elements(
-    element_id: str
-) -> Dict[str, Any]:
+async def expand_pseudo_elements(element_id: str) -> Dict[str, Any]:
     """
     Expand pseudo-elements data for a stored element.
 
@@ -3189,9 +3328,7 @@ async def expand_pseudo_elements(
 
 
 @section_tool("progressive-cloning")
-async def expand_animations(
-    element_id: str
-) -> Dict[str, Any]:
+async def expand_animations(element_id: str) -> Dict[str, Any]:
     """
     Expand animations and fonts data for a stored element.
 
@@ -3216,9 +3353,7 @@ async def list_stored_elements() -> Dict[str, Any]:
 
 
 @section_tool("progressive-cloning")
-async def clear_stored_element(
-    element_id: str
-) -> Dict[str, Any]:
+async def clear_stored_element(element_id: str) -> Dict[str, Any]:
     """
     Clear a specific stored element.
 
@@ -3244,9 +3379,7 @@ async def clear_all_elements() -> Dict[str, Any]:
 
 @section_tool("file-extraction")
 async def clone_element_to_file(
-    instance_id: str,
-    selector: str,
-    extraction_options: Optional[str] = None
+    instance_id: str, selector: str, extraction_options: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Clone element completely and save to file, returning file path instead of full data.
@@ -3272,16 +3405,17 @@ async def clone_element_to_file(
             parsed_options = json.loads(extraction_options)
         except json.JSONDecodeError:
             return {"error": "Invalid extraction_options JSON"}
-    return await _with_cdp_timeout(file_based_element_cloner.clone_element_complete_to_file(
-        tab, selector=selector, extraction_options=parsed_options
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        file_based_element_cloner.clone_element_complete_to_file(
+            tab, selector=selector, extraction_options=parsed_options
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("file-extraction")
 async def extract_complete_element_to_file(
-    instance_id: str,
-    selector: str,
-    include_children: bool = True
+    instance_id: str, selector: str, include_children: bool = True
 ) -> Dict[str, Any]:
     """
     Extract complete element using working comprehensive cloner and save to file.
@@ -3300,23 +3434,24 @@ async def extract_complete_element_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(file_based_element_cloner.extract_complete_element_to_file(
-        tab, selector, include_children
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        file_based_element_cloner.extract_complete_element_to_file(
+            tab, selector, include_children
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("element-extraction")
 async def extract_complete_element_cdp(
-    instance_id: str,
-    selector: str,
-    include_children: bool = True
+    instance_id: str, selector: str, include_children: bool = True
 ) -> Dict[str, Any]:
     """
     Extract complete element using native CDP methods for 100% accuracy.
 
     This uses Chrome DevTools Protocol's native methods to extract:
     - Complete computed styles via CSS.getComputedStyleForNode
-    - Matched CSS rules via CSS.getMatchedStylesForNode  
+    - Matched CSS rules via CSS.getMatchedStylesForNode
     - Event listeners via DOMDebugger.getEventListeners
     - Complete DOM structure and attributes
 
@@ -3335,7 +3470,10 @@ async def extract_complete_element_cdp(
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
     cdp_cloner = CDPElementCloner()
-    return await _with_cdp_timeout(cdp_cloner.extract_complete_element_cdp(tab, selector, include_children), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        cdp_cloner.extract_complete_element_cdp(tab, selector, include_children),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("file-extraction")
@@ -3345,7 +3483,7 @@ async def extract_element_styles_to_file(
     include_computed: bool = True,
     include_css_rules: bool = True,
     include_pseudo: bool = True,
-    include_inheritance: bool = False
+    include_inheritance: bool = False,
 ) -> Dict[str, Any]:
     """
     Extract element styles and save to file, returning file path.
@@ -3364,14 +3502,17 @@ async def extract_element_styles_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(file_based_element_cloner.extract_element_styles_to_file(
-        tab,
-        selector=selector,
-        include_computed=include_computed,
-        include_css_rules=include_css_rules,
-        include_pseudo=include_pseudo,
-        include_inheritance=include_inheritance
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        file_based_element_cloner.extract_element_styles_to_file(
+            tab,
+            selector=selector,
+            include_computed=include_computed,
+            include_css_rules=include_css_rules,
+            include_pseudo=include_pseudo,
+            include_inheritance=include_inheritance,
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("file-extraction")
@@ -3381,7 +3522,7 @@ async def extract_element_structure_to_file(
     include_children: bool = False,
     include_attributes: bool = True,
     include_data_attributes: bool = True,
-    max_depth: int = 3
+    max_depth: int = 3,
 ) -> Dict[str, Any]:
     """
     Extract element structure and save to file, returning file path.
@@ -3400,14 +3541,17 @@ async def extract_element_structure_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(file_based_element_cloner.extract_element_structure_to_file(
-        tab,
-        selector=selector,
-        include_children=include_children,
-        include_attributes=include_attributes,
-        include_data_attributes=include_data_attributes,
-        max_depth=max_depth
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        file_based_element_cloner.extract_element_structure_to_file(
+            tab,
+            selector=selector,
+            include_children=include_children,
+            include_attributes=include_attributes,
+            include_data_attributes=include_data_attributes,
+            max_depth=max_depth,
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("file-extraction")
@@ -3417,7 +3561,7 @@ async def extract_element_events_to_file(
     include_inline: bool = True,
     include_listeners: bool = True,
     include_framework: bool = True,
-    analyze_handlers: bool = True
+    analyze_handlers: bool = True,
 ) -> Dict[str, Any]:
     """
     Extract element events and save to file, returning file path.
@@ -3436,14 +3580,17 @@ async def extract_element_events_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(file_based_element_cloner.extract_element_events_to_file(
-        tab,
-        selector=selector,
-        include_inline=include_inline,
-        include_listeners=include_listeners,
-        include_framework=include_framework,
-        analyze_handlers=analyze_handlers
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        file_based_element_cloner.extract_element_events_to_file(
+            tab,
+            selector=selector,
+            include_inline=include_inline,
+            include_listeners=include_listeners,
+            include_framework=include_framework,
+            analyze_handlers=analyze_handlers,
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("file-extraction")
@@ -3453,7 +3600,7 @@ async def extract_element_animations_to_file(
     include_css_animations: bool = True,
     include_transitions: bool = True,
     include_transforms: bool = True,
-    analyze_keyframes: bool = True
+    analyze_keyframes: bool = True,
 ) -> Dict[str, Any]:
     """
     Extract element animations and save to file, returning file path.
@@ -3472,14 +3619,17 @@ async def extract_element_animations_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(file_based_element_cloner.extract_element_animations_to_file(
-        tab,
-        selector=selector,
-        include_css_animations=include_css_animations,
-        include_transitions=include_transitions,
-        include_transforms=include_transforms,
-        analyze_keyframes=analyze_keyframes
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        file_based_element_cloner.extract_element_animations_to_file(
+            tab,
+            selector=selector,
+            include_css_animations=include_css_animations,
+            include_transitions=include_transitions,
+            include_transforms=include_transforms,
+            analyze_keyframes=analyze_keyframes,
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("file-extraction")
@@ -3489,7 +3639,7 @@ async def extract_element_assets_to_file(
     include_images: bool = True,
     include_backgrounds: bool = True,
     include_fonts: bool = True,
-    fetch_external: bool = False
+    fetch_external: bool = False,
 ) -> Dict[str, Any]:
     """
     Extract element assets and save to file, returning file path.
@@ -3508,14 +3658,17 @@ async def extract_element_assets_to_file(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await _with_cdp_timeout(file_based_element_cloner.extract_element_assets_to_file(
-        tab,
-        selector=selector,
-        include_images=include_images,
-        include_backgrounds=include_backgrounds,
-        include_fonts=include_fonts,
-        fetch_external=fetch_external
-    ), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        file_based_element_cloner.extract_element_assets_to_file(
+            tab,
+            selector=selector,
+            include_images=include_images,
+            include_backgrounds=include_backgrounds,
+            include_fonts=include_fonts,
+            fetch_external=fetch_external,
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("file-extraction")
@@ -3530,9 +3683,7 @@ async def list_clone_files() -> List[Dict[str, Any]]:
 
 
 @section_tool("file-extraction")
-async def cleanup_clone_files(
-    max_age_hours: int = 24
-) -> Dict[str, int]:
+async def cleanup_clone_files(max_age_hours: int = 24) -> Dict[str, int]:
     """
     Clean up old clone files to save disk space.
 
@@ -3559,9 +3710,7 @@ async def list_cdp_commands() -> List[str]:
 
 @section_tool("cdp-functions")
 async def execute_cdp_command(
-    instance_id: str,
-    command: str,
-    params: Dict[str, Any] = None
+    instance_id: str, command: str, params: Dict[str, Any] = None
 ) -> Dict[str, Any]:
     """
     Execute any CDP Runtime command with given parameters.
@@ -3570,29 +3719,30 @@ async def execute_cdp_command(
         instance_id (str): Browser instance ID.
         command (str): CDP command name (e.g., 'evaluate', 'callFunctionOn').
         params (Dict[str, Any], optional): Command parameters as a dictionary.
-                IMPORTANT: Use snake_case parameter names (e.g., 'return_by_value') 
-                NOT camelCase ('returnByValue'). The nodriver library expects 
+                IMPORTANT: Use snake_case parameter names (e.g., 'return_by_value')
+                NOT camelCase ('returnByValue'). The nodriver library expects
                 Python-style parameter names.
 
     Returns:
         Dict[str, Any]: Command execution result.
-        
+
     Example:
         # Correct - use snake_case
         params = {"expression": "document.title", "return_by_value": True}
-        
+
         params = {"expression": "document.title", "returnByValue": True}
     """
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await _with_cdp_timeout(cdp_function_executor.execute_cdp_command(tab, command, params or {}), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        cdp_function_executor.execute_cdp_command(tab, command, params or {}),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("cdp-functions")
-async def get_execution_contexts(
-    instance_id: str
-) -> List[Dict[str, Any]]:
+async def get_execution_contexts(instance_id: str) -> List[Dict[str, Any]]:
     """
     Get all available JavaScript execution contexts.
 
@@ -3605,14 +3755,16 @@ async def get_execution_contexts(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return []
-    contexts = await _with_cdp_timeout(cdp_function_executor.get_execution_contexts(tab), instance_id=instance_id)
+    contexts = await _with_cdp_timeout(
+        cdp_function_executor.get_execution_contexts(tab), instance_id=instance_id
+    )
     return [
         {
             "id": ctx.id,
             "name": ctx.name,
             "origin": ctx.origin,
             "unique_id": ctx.unique_id,
-            "aux_data": ctx.aux_data
+            "aux_data": ctx.aux_data,
         }
         for ctx in contexts
     ]
@@ -3620,8 +3772,7 @@ async def get_execution_contexts(
 
 @section_tool("cdp-functions")
 async def discover_global_functions(
-    instance_id: str,
-    context_id: str = None
+    instance_id: str, context_id: str = None
 ) -> List[Dict[str, Any]]:
     """
     Discover all global JavaScript functions available in the page.
@@ -3636,42 +3787,46 @@ async def discover_global_functions(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return []
-    functions = await _with_cdp_timeout(cdp_function_executor.discover_global_functions(tab, context_id), instance_id=instance_id)
+    functions = await _with_cdp_timeout(
+        cdp_function_executor.discover_global_functions(tab, context_id),
+        instance_id=instance_id,
+    )
     result = [
         {
             "name": func.name,
             "path": func.path,
             "signature": func.signature,
-            "description": func.description
+            "description": func.description,
         }
         for func in functions
     ]
-    
+
     file_response = response_handler.handle_response(
         result,
         fallback_filename_prefix="global_functions",
         metadata={
             "context_id": context_id,
             "function_count": len(result),
-            "url": getattr(tab, 'url', 'unknown')
-        }
+            "url": getattr(tab, "url", "unknown"),
+        },
     )
-    
+
     if isinstance(file_response, dict) and "file_path" in file_response:
-        return [{
-            "name": "LARGE_RESPONSE_SAVED_TO_FILE",
-            "path": "file_storage",
-            "signature": "automatic_file_fallback",
-            "description": f"Response too large ({file_response['estimated_tokens']} tokens), saved to: {file_response['filename']}"
-        }]
-    
+        return [
+            {
+                "name": "LARGE_RESPONSE_SAVED_TO_FILE",
+                "path": "file_storage",
+                "signature": "automatic_file_fallback",
+                "description": f"Response too large ({file_response['estimated_tokens']} tokens), saved to: {file_response['filename']}",
+            }
+        ]
+
     return file_response
 
 
 @section_tool("cdp-functions")
 async def discover_object_methods(
-    instance_id: str,
-    object_path: str
+    instance_id: str, object_path: str
 ) -> List[Dict[str, Any]]:
     """
     Discover methods of a specific JavaScript object.
@@ -3686,29 +3841,29 @@ async def discover_object_methods(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return []
-    methods = await _with_cdp_timeout(cdp_function_executor.discover_object_methods(tab, object_path), instance_id=instance_id)
+    methods = await _with_cdp_timeout(
+        cdp_function_executor.discover_object_methods(tab, object_path),
+        instance_id=instance_id,
+    )
     methods_data = [
         {
             "name": method.name,
             "path": method.path,
             "signature": method.signature,
-            "description": method.description
+            "description": method.description,
         }
         for method in methods
     ]
-    
+
     # handle_response is synchronous — awaiting its dict return raises TypeError.
     return response_handler.handle_response(
-        methods_data,
-        f"object_methods_{object_path.replace('.', '_')}"
+        methods_data, f"object_methods_{object_path.replace('.', '_')}"
     )
 
 
 @section_tool("cdp-functions")
 async def call_javascript_function(
-    instance_id: str,
-    function_path: str,
-    args: List[Any] = None
+    instance_id: str, function_path: str, args: List[Any] = None
 ) -> Dict[str, Any]:
     """
     Call a JavaScript function with arguments.
@@ -3724,13 +3879,15 @@ async def call_javascript_function(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await _with_cdp_timeout(cdp_function_executor.call_discovered_function(tab, function_path, args or []), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        cdp_function_executor.call_discovered_function(tab, function_path, args or []),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("cdp-functions")
 async def inspect_function_signature(
-    instance_id: str,
-    function_path: str
+    instance_id: str, function_path: str
 ) -> Dict[str, Any]:
     """
     Inspect a JavaScript function's signature and details.
@@ -3745,14 +3902,15 @@ async def inspect_function_signature(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await _with_cdp_timeout(cdp_function_executor.inspect_function_signature(tab, function_path), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        cdp_function_executor.inspect_function_signature(tab, function_path),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("cdp-functions")
 async def inject_and_execute_script(
-    instance_id: str,
-    script_code: str,
-    context_id: str = None
+    instance_id: str, script_code: str, context_id: str = None
 ) -> Dict[str, Any]:
     """
     Inject and execute custom JavaScript code.
@@ -3768,14 +3926,15 @@ async def inject_and_execute_script(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await _with_cdp_timeout(cdp_function_executor.inject_and_execute_script(tab, script_code, context_id), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        cdp_function_executor.inject_and_execute_script(tab, script_code, context_id),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("cdp-functions")
 async def create_persistent_function(
-    instance_id: str,
-    function_name: str,
-    function_code: str
+    instance_id: str, function_name: str, function_code: str
 ) -> Dict[str, Any]:
     """
     Create a persistent JavaScript function that survives page reloads.
@@ -3791,13 +3950,17 @@ async def create_persistent_function(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await _with_cdp_timeout(cdp_function_executor.create_persistent_function(tab, function_name, function_code, instance_id), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        cdp_function_executor.create_persistent_function(
+            tab, function_name, function_code, instance_id
+        ),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("cdp-functions")
 async def execute_function_sequence(
-    instance_id: str,
-    function_calls: List[Dict[str, Any]]
+    instance_id: str, function_calls: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """
     Execute a sequence of JavaScript function calls.
@@ -3810,24 +3973,28 @@ async def execute_function_sequence(
         List[Dict[str, Any]]: List of function call results.
     """
     from cdp_function_executor import FunctionCall
+
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return [{"success": False, "error": f"Instance not found: {instance_id}"}]
     calls = []
     for call_data in function_calls:
-        calls.append(FunctionCall(
-            function_path=call_data['function_path'],
-            args=call_data.get('args', []),
-            context_id=call_data.get('context_id')
-        ))
-    return await _with_cdp_timeout(cdp_function_executor.execute_function_sequence(tab, calls), instance_id=instance_id)
+        calls.append(
+            FunctionCall(
+                function_path=call_data["function_path"],
+                args=call_data.get("args", []),
+                context_id=call_data.get("context_id"),
+            )
+        )
+    return await _with_cdp_timeout(
+        cdp_function_executor.execute_function_sequence(tab, calls),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("cdp-functions")
 async def create_python_binding(
-    instance_id: str,
-    binding_name: str,
-    python_code: str
+    instance_id: str, binding_name: str, python_code: str
 ) -> Dict[str, Any]:
     """
     Create a binding that allows JavaScript to call Python functions.
@@ -3848,20 +4015,27 @@ async def create_python_binding(
         exec(python_code, exec_globals)
         python_function = None
         for name, obj in exec_globals.items():
-            if callable(obj) and not name.startswith('_'):
+            if callable(obj) and not name.startswith("_"):
                 python_function = obj
                 break
         if not python_function:
             return {"success": False, "error": "No function found in Python code"}
-        return await _with_cdp_timeout(cdp_function_executor.create_python_binding(tab, binding_name, python_function), instance_id=instance_id)
+        return await _with_cdp_timeout(
+            cdp_function_executor.create_python_binding(
+                tab, binding_name, python_function
+            ),
+            instance_id=instance_id,
+        )
     except Exception as e:
-        return {"success": False, "error": f"Failed to create Python function: {str(e)}"}
+        return {
+            "success": False,
+            "error": f"Failed to create Python function: {str(e)}",
+        }
 
 
 @section_tool("cdp-functions")
 async def execute_python_in_browser(
-    instance_id: str,
-    python_code: str
+    instance_id: str, python_code: str
 ) -> Dict[str, Any]:
     """
     Execute Python code by translating it to JavaScript.
@@ -3876,13 +4050,14 @@ async def execute_python_in_browser(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
-    return await _with_cdp_timeout(cdp_function_executor.execute_python_in_browser(tab, python_code), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        cdp_function_executor.execute_python_in_browser(tab, python_code),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("cdp-functions")
-async def get_function_executor_info(
-    instance_id: str = None
-) -> Dict[str, Any]:
+async def get_function_executor_info(instance_id: str = None) -> Dict[str, Any]:
     """
     Get information about the CDP function executor state.
 
@@ -3892,7 +4067,10 @@ async def get_function_executor_info(
     Returns:
         Dict[str, Any]: Function executor state and capabilities.
     """
-    return await _with_cdp_timeout(cdp_function_executor.get_function_executor_info(instance_id), instance_id=instance_id)
+    return await _with_cdp_timeout(
+        cdp_function_executor.get_function_executor_info(instance_id),
+        instance_id=instance_id,
+    )
 
 
 @section_tool("dynamic-hooks")
@@ -3901,24 +4079,24 @@ async def create_dynamic_hook(
     requirements: Dict[str, Any],
     function_code: str,
     instance_ids: Optional[List[str]] = None,
-    priority: int = 100
+    priority: int = 100,
 ) -> Dict[str, Any]:
     """
     Create a new dynamic hook with AI-generated Python function.
-    
+
     This is the new powerful hook system that allows AI to write custom Python functions
     that process network requests in real-time with no pending state.
-    
+
     Args:
         name (str): Human-readable hook name
         requirements (Dict[str, Any]): Matching criteria (url_pattern, method, resource_type, custom_condition)
         function_code (str): Python function code that processes requests (must define process_request(request))
         instance_ids (Optional[List[str]]): Browser instances to apply hook to (all if None)
         priority (int): Hook priority (lower = higher priority)
-        
+
     Returns:
         Dict[str, Any]: Hook creation result with hook_id
-        
+
     Example function_code:
         ```python
         def process_request(request):
@@ -3932,7 +4110,7 @@ async def create_dynamic_hook(
         requirements=requirements,
         function_code=function_code,
         instance_ids=instance_ids,
-        priority=priority
+        priority=priority,
     )
 
 
@@ -3943,11 +4121,11 @@ async def create_simple_dynamic_hook(
     action: str,
     target_url: Optional[str] = None,
     custom_headers: Optional[Dict[str, str]] = None,
-    instance_ids: Optional[List[str]] = None
+    instance_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Create a simple dynamic hook using predefined templates (easier for AI).
-    
+
     Args:
         name (str): Hook name
         url_pattern (str): URL pattern to match
@@ -3955,7 +4133,7 @@ async def create_simple_dynamic_hook(
         target_url (Optional[str]): Target URL for redirect action
         custom_headers (Optional[Dict[str, str]]): Headers to add for add_headers action
         instance_ids (Optional[List[str]]): Browser instances to apply hook to
-        
+
     Returns:
         Dict[str, Any]: Hook creation result
     """
@@ -3965,7 +4143,7 @@ async def create_simple_dynamic_hook(
         action=action,
         target_url=target_url,
         custom_headers=custom_headers,
-        instance_ids=instance_ids
+        instance_ids=instance_ids,
     )
 
 
@@ -3973,10 +4151,10 @@ async def create_simple_dynamic_hook(
 async def list_dynamic_hooks(instance_id: Optional[str] = None) -> Dict[str, Any]:
     """
     List all dynamic hooks.
-    
+
     Args:
         instance_id (Optional[str]): Optional filter by browser instance
-        
+
     Returns:
         Dict[str, Any]: List of hooks with details and statistics
     """
@@ -3987,10 +4165,10 @@ async def list_dynamic_hooks(instance_id: Optional[str] = None) -> Dict[str, Any
 async def get_dynamic_hook_details(hook_id: str) -> Dict[str, Any]:
     """
     Get detailed information about a specific dynamic hook.
-    
+
     Args:
         hook_id (str): Hook identifier
-        
+
     Returns:
         Dict[str, Any]: Detailed hook information including function code
     """
@@ -4001,10 +4179,10 @@ async def get_dynamic_hook_details(hook_id: str) -> Dict[str, Any]:
 async def remove_dynamic_hook(hook_id: str) -> Dict[str, Any]:
     """
     Remove a dynamic hook.
-    
+
     Args:
         hook_id (str): Hook identifier to remove
-        
+
     Returns:
         Dict[str, Any]: Removal status
     """
@@ -4015,7 +4193,7 @@ async def remove_dynamic_hook(hook_id: str) -> Dict[str, Any]:
 def get_hook_documentation() -> Dict[str, Any]:
     """
     Get comprehensive documentation for creating hook functions (AI learning).
-    
+
     Returns:
         Dict[str, Any]: Documentation of request object structure and HookAction types
     """
@@ -4026,7 +4204,7 @@ def get_hook_documentation() -> Dict[str, Any]:
 def get_hook_examples() -> Dict[str, Any]:
     """
     Get example hook functions for AI learning.
-    
+
     Returns:
         Dict[str, Any]: Collection of example hook functions with explanations
     """
@@ -4037,7 +4215,7 @@ def get_hook_examples() -> Dict[str, Any]:
 def get_hook_requirements_documentation() -> Dict[str, Any]:
     """
     Get documentation on hook requirements and matching criteria.
-    
+
     Returns:
         Dict[str, Any]: Requirements documentation and best practices
     """
@@ -4048,7 +4226,7 @@ def get_hook_requirements_documentation() -> Dict[str, Any]:
 def get_hook_common_patterns() -> Dict[str, Any]:
     """
     Get common hook patterns and use cases.
-    
+
     Returns:
         Dict[str, Any]: Common patterns like ad blocking, API proxying, etc.
     """
@@ -4059,10 +4237,10 @@ def get_hook_common_patterns() -> Dict[str, Any]:
 def validate_hook_function(function_code: str) -> Dict[str, Any]:
     """
     Validate hook function code for common issues before creating.
-    
+
     Args:
         function_code (str): Python function code to validate
-        
+
     Returns:
         Dict[str, Any]: Validation results with issues and warnings
     """
@@ -4082,44 +4260,94 @@ def build_arg_parser():
     """
     import argparse
 
-    parser = argparse.ArgumentParser(description="Stealth Browser MCP Server with 90 tools")
-    parser.add_argument("--transport", choices=["stdio", "http"], default="stdio",
-                      help="Transport protocol to use")
-    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8000)),
-                      help="Port for HTTP transport")
-    parser.add_argument("--host", default="127.0.0.1",
-                      help="Host for HTTP transport. Defaults to loopback because "
-                           "the backend is unauthenticated and drives logged-in "
-                           "browser profiles; pass 0.0.0.0 only to deliberately "
-                           "expose it.")
-    
-    parser.add_argument("--disable-browser-management", action="store_true",
-                      help="Disable browser management tools (spawn, navigate, close, etc.)")
-    parser.add_argument("--disable-element-interaction", action="store_true",
-                      help="Disable element interaction tools (click, type, scroll, etc.)")
-    parser.add_argument("--disable-element-extraction", action="store_true",
-                      help="Disable element extraction tools (styles, structure, events, etc.)")
-    parser.add_argument("--disable-file-extraction", action="store_true",
-                      help="Disable file-based extraction tools")
-    parser.add_argument("--disable-network-debugging", action="store_true",
-                      help="Disable network debugging and interception tools")
-    parser.add_argument("--disable-cdp-functions", action="store_true",
-                      help="Disable CDP function execution tools")
-    parser.add_argument("--disable-progressive-cloning", action="store_true",
-                      help="Disable progressive element cloning tools")
-    parser.add_argument("--disable-cookies-storage", action="store_true",
-                      help="Disable cookie and storage management tools")
-    parser.add_argument("--disable-tabs", action="store_true",
-                      help="Disable tab management tools")
-    parser.add_argument("--disable-debugging", action="store_true",
-                      help="Disable debug and system tools")
-    parser.add_argument("--disable-dynamic-hooks", action="store_true",
-                      help="Disable dynamic network hook system")
-    
-    parser.add_argument("--minimal", action="store_true",
-                      help="Enable only core browser management and element interaction (disable everything else)")
-    parser.add_argument("--list-sections", action="store_true",
-                      help="List all available tool sections and exit")
+    parser = argparse.ArgumentParser(
+        description="Stealth Browser MCP Server with 90 tools"
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="Transport protocol to use",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("PORT", 8000)),
+        help="Port for HTTP transport",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host for HTTP transport. Defaults to loopback because "
+        "the backend is unauthenticated and drives logged-in "
+        "browser profiles; pass 0.0.0.0 only to deliberately "
+        "expose it.",
+    )
+
+    parser.add_argument(
+        "--disable-browser-management",
+        action="store_true",
+        help="Disable browser management tools (spawn, navigate, close, etc.)",
+    )
+    parser.add_argument(
+        "--disable-element-interaction",
+        action="store_true",
+        help="Disable element interaction tools (click, type, scroll, etc.)",
+    )
+    parser.add_argument(
+        "--disable-element-extraction",
+        action="store_true",
+        help="Disable element extraction tools (styles, structure, events, etc.)",
+    )
+    parser.add_argument(
+        "--disable-file-extraction",
+        action="store_true",
+        help="Disable file-based extraction tools",
+    )
+    parser.add_argument(
+        "--disable-network-debugging",
+        action="store_true",
+        help="Disable network debugging and interception tools",
+    )
+    parser.add_argument(
+        "--disable-cdp-functions",
+        action="store_true",
+        help="Disable CDP function execution tools",
+    )
+    parser.add_argument(
+        "--disable-progressive-cloning",
+        action="store_true",
+        help="Disable progressive element cloning tools",
+    )
+    parser.add_argument(
+        "--disable-cookies-storage",
+        action="store_true",
+        help="Disable cookie and storage management tools",
+    )
+    parser.add_argument(
+        "--disable-tabs", action="store_true", help="Disable tab management tools"
+    )
+    parser.add_argument(
+        "--disable-debugging",
+        action="store_true",
+        help="Disable debug and system tools",
+    )
+    parser.add_argument(
+        "--disable-dynamic-hooks",
+        action="store_true",
+        help="Disable dynamic network hook system",
+    )
+
+    parser.add_argument(
+        "--minimal",
+        action="store_true",
+        help="Enable only core browser management and element interaction (disable everything else)",
+    )
+    parser.add_argument(
+        "--list-sections",
+        action="store_true",
+        help="List all available tool sections and exit",
+    )
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -4132,7 +4360,7 @@ def build_arg_parser():
         default=parse_bool_env("XPOOL_SAFE_MODE", default=False),
         help="Enable xpool-safe surface (disables cdp-functions tools that trigger Runtime.enable)",
     )
-    
+
     return parser
 
 
@@ -4141,11 +4369,13 @@ if __name__ == "__main__":
 
     if args.debug and not debug_logger._enabled:
         debug_logger.enable()
-    
+
     if args.list_sections:
         print("Available tool sections:")
         print("  browser-management: Core browser operations (11 tools)")
-        print("  element-interaction: Page interaction and element manipulation (8 tools)")
+        print(
+            "  element-interaction: Page interaction and element manipulation (8 tools)"
+        )
         print("  element-extraction: Element cloning and extraction (10 tools)")
         print("  file-extraction: File-based extraction tools (9 tools)")
         print("  network-debugging: Network monitoring and interception (10 tools)")
@@ -4158,14 +4388,22 @@ if __name__ == "__main__":
         print("\nUse --disable-<section-name> to disable specific sections")
         print("Use --minimal to enable only core functionality")
         sys.exit(0)
-    
+
     if args.minimal:
-        DISABLED_SECTIONS.update([
-            "element-extraction", "file-extraction", "network-debugging",
-            "cdp-functions", "progressive-cloning", "cookies-storage",
-            "tabs", "debugging", "dynamic-hooks"
-        ])
-    
+        DISABLED_SECTIONS.update(
+            [
+                "element-extraction",
+                "file-extraction",
+                "network-debugging",
+                "cdp-functions",
+                "progressive-cloning",
+                "cookies-storage",
+                "tabs",
+                "debugging",
+                "dynamic-hooks",
+            ]
+        )
+
     if args.disable_browser_management:
         DISABLED_SECTIONS.add("browser-management")
     if args.disable_element_interaction:
@@ -4193,14 +4431,14 @@ if __name__ == "__main__":
         DISABLED_SECTIONS.add("cdp-functions")
 
     apply_disabled_sections()
-    
+
     if DISABLED_SECTIONS:
         debug_logger.log_info(
             "server",
             "startup",
             f"Disabled tool sections: {', '.join(sorted(DISABLED_SECTIONS))}",
         )
-    
+
     if args.transport == "http":
         mcp.run(transport="http", host=args.host, port=args.port)
     else:

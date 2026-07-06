@@ -49,7 +49,12 @@ class ProcessCleanup:
         # package to reuse profile helpers without taking over process
         # lifecycle. Honor an opt-out so importing never kills the running
         # server's browsers, deletes their profiles, or wipes PID tracking.
-        if os.getenv("STEALTH_MCP_NO_AUTO_RECOVERY", "").strip().lower() in {"1", "true", "yes", "on"}:
+        if os.getenv("STEALTH_MCP_NO_AUTO_RECOVERY", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
             return
         self._setup_cleanup_handlers()
         self._recover_orphaned_processes()
@@ -501,7 +506,9 @@ class ProcessCleanup:
         Returns:
             bool: True if cleanup succeeded or nothing needed to be removed.
         """
-        if metadata.get("uses_custom_data_dir") is True and not metadata.get("auto_clone"):
+        if metadata.get("uses_custom_data_dir") is True and not metadata.get(
+            "auto_clone"
+        ):
             return False
 
         profile_dir = metadata.get("user_data_dir")
@@ -530,7 +537,9 @@ class ProcessCleanup:
             return True
         if not metadata.get("user_data_dir"):
             return True
-        if metadata.get("uses_custom_data_dir") is True and not metadata.get("auto_clone"):
+        if metadata.get("uses_custom_data_dir") is True and not metadata.get(
+            "auto_clone"
+        ):
             return True
         return False
 
@@ -608,7 +617,9 @@ class ProcessCleanup:
 
         for instance_id, metadata in saved_processes.items():
             try:
-                if self._kill_processes_for_metadata(instance_id, metadata, recovery=True):
+                if self._kill_processes_for_metadata(
+                    instance_id, metadata, recovery=True
+                ):
                     recovered_count += 1
                 self._cleanup_profile_for_metadata(instance_id, metadata)
             except Exception as error:
@@ -663,7 +674,12 @@ class ProcessCleanup:
             create_time = None
             try:
                 create_time = psutil.Process(pid).create_time()
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            except (
+                psutil.NoSuchProcess,
+                psutil.AccessDenied,
+                psutil.ZombieProcess,
+                OSError,
+            ):
                 pass  # process may have exited between spawn and this check
             metadata = {
                 "pid": pid,
@@ -953,7 +969,9 @@ class ProcessCleanup:
 
         cleaned_count = 0
         for instance_id in list(self.browser_processes.keys()):
-            if self.kill_browser_process(instance_id) or self.finalize_browser_process(instance_id):
+            if self.kill_browser_process(instance_id) or self.finalize_browser_process(
+                instance_id
+            ):
                 cleaned_count += 1
 
         debug_logger.log_info(
@@ -1013,7 +1031,9 @@ class ProcessCleanup:
 
         pid = metadata.get("pid")
         if not isinstance(pid, int):
-            return bool(self._get_browser_pids_for_profile(metadata.get("user_data_dir")))
+            return bool(
+                self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
+            )
 
         return psutil.pid_exists(pid) or bool(
             self._get_browser_pids_for_profile(metadata.get("user_data_dir"))

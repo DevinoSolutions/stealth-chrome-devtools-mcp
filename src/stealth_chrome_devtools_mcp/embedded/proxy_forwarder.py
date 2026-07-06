@@ -40,9 +40,7 @@ class AuthenticatedProxyForwarder:
             ssl_context (Optional[SSLContext]): SSL context for HTTPS upstream proxies.
         """
         raw_value = proxy_server.strip()
-        normalized_value = (
-            raw_value if "://" in raw_value else f"http://{raw_value}"
-        )
+        normalized_value = raw_value if "://" in raw_value else f"http://{raw_value}"
         parsed = urlparse(normalized_value)
 
         if not parsed.scheme:
@@ -192,7 +190,9 @@ class AuthenticatedProxyForwarder:
                 try:
                     port = int(port_text)
                 except ValueError as error:
-                    raise ValueError(f"Invalid target port: {target_host_port}") from error
+                    raise ValueError(
+                        f"Invalid target port: {target_host_port}"
+                    ) from error
                 if not host or port < 1 or port > 65535:
                     raise ValueError(f"Invalid target endpoint: {target_host_port}")
 
@@ -213,7 +213,9 @@ class AuthenticatedProxyForwarder:
 
             connection_args = {"host": self.fw_host, "port": self.fw_port}
             if self.use_ssl:
-                connection_args["ssl"] = self.ssl_context or ssl.create_default_context()
+                connection_args["ssl"] = (
+                    self.ssl_context or ssl.create_default_context()
+                )
 
             remote_reader, remote_writer = await asyncio.wait_for(
                 asyncio.open_connection(**connection_args),

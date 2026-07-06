@@ -52,7 +52,9 @@ def _initialized_note():
     from mcp.shared.message import SessionMessage
     from mcp.types import JSONRPCMessage, JSONRPCNotification
 
-    note = JSONRPCNotification(jsonrpc="2.0", method="notifications/initialized", params={})
+    note = JSONRPCNotification(
+        jsonrpc="2.0", method="notifications/initialized", params={}
+    )
     return SessionMessage(message=JSONRPCMessage(note))
 
 
@@ -159,10 +161,19 @@ class TestProxyExitsOnBackendDeath:
 
         backend = subprocess.Popen(
             [
-                sys.executable, "-m", "stealth_chrome_devtools_mcp",
-                "--transport", "http", "--port", str(port), "--host", "127.0.0.1",
+                sys.executable,
+                "-m",
+                "stealth_chrome_devtools_mcp",
+                "--transport",
+                "http",
+                "--port",
+                str(port),
+                "--host",
+                "127.0.0.1",
             ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
             env=env,
         )
         try:

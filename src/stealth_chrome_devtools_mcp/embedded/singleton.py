@@ -220,9 +220,12 @@ def _start_server_process(port: int):
         sys.executable,
         "-m",
         "stealth_chrome_devtools_mcp",
-        "--transport", "http",
-        "--port", str(port),
-        "--host", "127.0.0.1",
+        "--transport",
+        "http",
+        "--port",
+        str(port),
+        "--host",
+        "127.0.0.1",
     ]
 
     kwargs: dict = {
@@ -313,7 +316,9 @@ def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:
     return port
 
 
-async def _await_backend_http(url: str, deadline_seconds: float = BACKEND_READY_TIMEOUT) -> bool:
+async def _await_backend_http(
+    url: str, deadline_seconds: float = BACKEND_READY_TIMEOUT
+) -> bool:
     """Poll the backend with a real ``initialize`` until it returns HTTP 200.
 
     Stronger than a socket probe *and* than "any HTTP response": a freshly bound
@@ -444,7 +449,9 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                             "version": _server_version(),
                         },
                     }
-                    response = JSONRPCResponse(jsonrpc="2.0", id=inner.id, result=result)
+                    response = JSONRPCResponse(
+                        jsonrpc="2.0", id=inner.id, result=result
+                    )
                     await client_write.send(
                         SessionMessage(message=JSONRPCMessage(response))
                     )

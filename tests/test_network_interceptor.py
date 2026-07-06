@@ -14,12 +14,20 @@ from models import NetworkRequest, NetworkResponse
 
 
 def _req(rid, url, method="GET", post_data=None, resource_type="XHR", iid="i1"):
-    return NetworkRequest(request_id=rid, instance_id=iid, url=url, method=method,
-                          post_data=post_data, resource_type=resource_type)
+    return NetworkRequest(
+        request_id=rid,
+        instance_id=iid,
+        url=url,
+        method=method,
+        post_data=post_data,
+        resource_type=resource_type,
+    )
 
 
 def _resp(rid, status=200, body=None, content_type="application/json"):
-    return NetworkResponse(request_id=rid, status=status, content_type=content_type, body=body)
+    return NetworkResponse(
+        request_id=rid, status=status, content_type=content_type, body=body
+    )
 
 
 def _seed(interceptor, iid, rows):
@@ -34,15 +42,38 @@ def _seed(interceptor, iid, rows):
 
 def _fixture():
     ni = NetworkInterceptor()
-    _seed(ni, "i1", [
-        ("r1", _req("r1", "https://api.example.com/users", "GET", resource_type="XHR"),
-         _resp("r1", 200, body=b'{"users":[1,2]}')),
-        ("r2", _req("r2", "https://api.example.com/login", "POST",
-                    post_data='{"password":"hunter2"}', resource_type="XHR"),
-         _resp("r2", 401, body=b'unauthorized access')),
-        ("r3", _req("r3", "https://cdn.example.com/app.js", "GET", resource_type="Script"),
-         _resp("r3", 200, body=b'console.log(1)')),
-    ])
+    _seed(
+        ni,
+        "i1",
+        [
+            (
+                "r1",
+                _req("r1", "https://api.example.com/users", "GET", resource_type="XHR"),
+                _resp("r1", 200, body=b'{"users":[1,2]}'),
+            ),
+            (
+                "r2",
+                _req(
+                    "r2",
+                    "https://api.example.com/login",
+                    "POST",
+                    post_data='{"password":"hunter2"}',
+                    resource_type="XHR",
+                ),
+                _resp("r2", 401, body=b"unauthorized access"),
+            ),
+            (
+                "r3",
+                _req(
+                    "r3",
+                    "https://cdn.example.com/app.js",
+                    "GET",
+                    resource_type="Script",
+                ),
+                _resp("r3", 200, body=b"console.log(1)"),
+            ),
+        ],
+    )
     return ni
 
 
@@ -53,8 +84,13 @@ class TestCaptureFilters:
 
     async def test_set_and_get_filters(self):
         ni = NetworkInterceptor()
-        await ni.set_capture_filters("i1", include_types=["XHR"], exclude_types=["Image"])
-        assert await ni.get_capture_filters("i1") == {"include": ["XHR"], "exclude": ["Image"]}
+        await ni.set_capture_filters(
+            "i1", include_types=["XHR"], exclude_types=["Image"]
+        )
+        assert await ni.get_capture_filters("i1") == {
+            "include": ["XHR"],
+            "exclude": ["Image"],
+        }
 
 
 class TestSearchRequests:
@@ -80,7 +116,9 @@ class TestSearchRequests:
         assert [r["request_id"] for r in result["results"]] == ["r2"]
 
     async def test_response_contains_searches_body(self):
-        result = await _fixture().search_requests("i1", response_contains="unauthorized")
+        result = await _fixture().search_requests(
+            "i1", response_contains="unauthorized"
+        )
         assert [r["request_id"] for r in result["results"]] == ["r2"]
 
     async def test_resource_type_filter(self):
@@ -89,7 +127,11 @@ class TestSearchRequests:
 
     async def test_pagination_reports_has_more(self):
         page1 = await _fixture().search_requests("i1", limit=2, offset=0)
-        assert len(page1["results"]) == 2 and page1["total"] == 3 and page1["has_more"] is True
+        assert (
+            len(page1["results"]) == 2
+            and page1["total"] == 3
+            and page1["has_more"] is True
+        )
         page2 = await _fixture().search_requests("i1", limit=2, offset=2)
         assert len(page2["results"]) == 1 and page2["has_more"] is False
 

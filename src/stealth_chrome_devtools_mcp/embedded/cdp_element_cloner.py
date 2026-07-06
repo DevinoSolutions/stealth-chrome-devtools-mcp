@@ -6,7 +6,7 @@ This module provides comprehensive element extraction using the full power of
 Chrome DevTools Protocol (CDP) through nodriver. It extracts:
 
 1. Complete computed styles using CDP CSS.getComputedStyleForNode
-2. Matched CSS rules using CDP CSS.getMatchedStylesForNode  
+2. Matched CSS rules using CDP CSS.getMatchedStylesForNode
 3. Event listeners using CDP DOMDebugger.getEventListeners
 4. All stylesheet information via CDP CSS domain
 5. Complete DOM structure and attributes
@@ -31,10 +31,7 @@ class CDPElementCloner:
         """Initialize the CDP element cloner."""
 
     async def extract_complete_element_cdp(
-        self,
-        tab,
-        selector: str,
-        include_children: bool = True
+        self, tab, selector: str, include_children: bool = True
     ) -> Dict[str, Any]:
         """
         Extract complete element data using proper CDP methods.
@@ -51,7 +48,11 @@ class CDPElementCloner:
         capabilities for CSS rules, event listeners, and style information.
         """
         try:
-            debug_logger.log_info("cdp_cloner", "extract_complete", f"Starting CDP extraction for {selector}")
+            debug_logger.log_info(
+                "cdp_cloner",
+                "extract_complete",
+                f"Starting CDP extraction for {selector}",
+            )
             await tab.send(uc.cdp.dom.enable())
             await tab.send(uc.cdp.css.enable())
             await tab.send(uc.cdp.runtime.enable())
@@ -77,19 +78,25 @@ class CDPElementCloner:
                     "computed_styles": computed_styles,
                     "matched_styles": matched_styles,
                     "event_listeners": event_listeners,
-                    "children": children
+                    "children": children,
                 },
                 "extraction_stats": {
                     "computed_styles_count": len(computed_styles),
                     "css_rules_count": len(matched_styles.get("matchedCSSRules", [])),
                     "event_listeners_count": len(event_listeners),
-                    "children_count": len(children)
-                }
+                    "children_count": len(children),
+                },
             }
-            debug_logger.log_info("cdp_cloner", "extract_complete", f"CDP extraction completed successfully")
+            debug_logger.log_info(
+                "cdp_cloner",
+                "extract_complete",
+                f"CDP extraction completed successfully",
+            )
             return result
         except Exception as e:
-            debug_logger.log_error("cdp_cloner", "extract_complete", f"CDP extraction failed: {str(e)}")
+            debug_logger.log_error(
+                "cdp_cloner", "extract_complete", f"CDP extraction failed: {str(e)}"
+            )
             return {"error": f"CDP extraction failed: {str(e)}"}
 
     async def _get_element_html(self, tab, node_id) -> Dict[str, Any]:
@@ -114,12 +121,19 @@ class CDPElementCloner:
                 "nodeValue": node_details.node_value,
                 "outerHTML": outer_html,
                 "attributes": [
-                    {"name": node_details.attributes[i], "value": node_details.attributes[i+1]}
+                    {
+                        "name": node_details.attributes[i],
+                        "value": node_details.attributes[i + 1],
+                    }
                     for i in range(0, len(node_details.attributes or []), 2)
-                ] if node_details.attributes else []
+                ]
+                if node_details.attributes
+                else [],
             }
         except Exception as e:
-            debug_logger.log_error("cdp_cloner", "_get_element_html", f"Failed: {str(e)}")
+            debug_logger.log_error(
+                "cdp_cloner", "_get_element_html", f"Failed: {str(e)}"
+            )
             return {"error": str(e)}
 
     async def _get_computed_styles_cdp(self, tab, node_id) -> Dict[str, str]:
@@ -134,14 +148,22 @@ class CDPElementCloner:
             Dict[str, str]: Dictionary of computed style properties and their values.
         """
         try:
-            computed_styles_list = await tab.send(uc.cdp.css.get_computed_style_for_node(node_id))
+            computed_styles_list = await tab.send(
+                uc.cdp.css.get_computed_style_for_node(node_id)
+            )
             styles = {}
             for style_prop in computed_styles_list:
                 styles[style_prop.name] = style_prop.value
-            debug_logger.log_info("cdp_cloner", "_get_computed_styles", f"Got {len(styles)} computed styles")
+            debug_logger.log_info(
+                "cdp_cloner",
+                "_get_computed_styles",
+                f"Got {len(styles)} computed styles",
+            )
             return styles
         except Exception as e:
-            debug_logger.log_error("cdp_cloner", "_get_computed_styles", f"Failed: {str(e)}")
+            debug_logger.log_error(
+                "cdp_cloner", "_get_computed_styles", f"Failed: {str(e)}"
+            )
             return {}
 
     async def _get_matched_styles_cdp(self, tab, node_id) -> Dict[str, Any]:
@@ -156,20 +178,43 @@ class CDPElementCloner:
             Dict[str, Any]: Dictionary containing inline style, attribute style, matched rules, pseudo elements, and inherited styles.
         """
         try:
-            matched_result = await tab.send(uc.cdp.css.get_matched_styles_for_node(node_id))
-            inline_style, attributes_style, matched_rules, pseudo_elements, inherited = matched_result[:5]
+            matched_result = await tab.send(
+                uc.cdp.css.get_matched_styles_for_node(node_id)
+            )
+            (
+                inline_style,
+                attributes_style,
+                matched_rules,
+                pseudo_elements,
+                inherited,
+            ) = matched_result[:5]
             result = {
-                "inlineStyle": self._css_style_to_dict(inline_style) if inline_style else None,
-                "attributesStyle": self._css_style_to_dict(attributes_style) if attributes_style else None,
-                "matchedCSSRules": [self._rule_match_to_dict(rule) for rule in (matched_rules or [])],
-                "pseudoElements": [self._pseudo_element_to_dict(pe) for pe in (pseudo_elements or [])],
-                "inherited": [self._inherited_style_to_dict(inh) for inh in (inherited or [])]
+                "inlineStyle": self._css_style_to_dict(inline_style)
+                if inline_style
+                else None,
+                "attributesStyle": self._css_style_to_dict(attributes_style)
+                if attributes_style
+                else None,
+                "matchedCSSRules": [
+                    self._rule_match_to_dict(rule) for rule in (matched_rules or [])
+                ],
+                "pseudoElements": [
+                    self._pseudo_element_to_dict(pe) for pe in (pseudo_elements or [])
+                ],
+                "inherited": [
+                    self._inherited_style_to_dict(inh) for inh in (inherited or [])
+                ],
             }
-            debug_logger.log_info("cdp_cloner", "_get_matched_styles", 
-                                  f"Got {len(result['matchedCSSRules'])} CSS rules")
+            debug_logger.log_info(
+                "cdp_cloner",
+                "_get_matched_styles",
+                f"Got {len(result['matchedCSSRules'])} CSS rules",
+            )
             return result
         except Exception as e:
-            debug_logger.log_error("cdp_cloner", "_get_matched_styles", f"Failed: {str(e)}")
+            debug_logger.log_error(
+                "cdp_cloner", "_get_matched_styles", f"Failed: {str(e)}"
+            )
             return {}
 
     async def _get_event_listeners_cdp(self, tab, node_id) -> List[Dict[str, Any]]:
@@ -192,23 +237,32 @@ class CDPElementCloner:
             )
             result = []
             for listener in event_listeners:
-                result.append({
-                    "type": listener.type_,
-                    "useCapture": listener.use_capture,
-                    "passive": listener.passive,
-                    "once": listener.once,
-                    "scriptId": str(listener.script_id),
-                    "lineNumber": listener.line_number,
-                    "columnNumber": listener.column_number,
-                    "hasHandler": listener.handler is not None,
-                    "hasOriginalHandler": listener.original_handler is not None,
-                    "backendNodeId": int(listener.backend_node_id) if listener.backend_node_id else None
-                })
-            debug_logger.log_info("cdp_cloner", "_get_event_listeners", 
-                                  f"Got {len(result)} event listeners")
+                result.append(
+                    {
+                        "type": listener.type_,
+                        "useCapture": listener.use_capture,
+                        "passive": listener.passive,
+                        "once": listener.once,
+                        "scriptId": str(listener.script_id),
+                        "lineNumber": listener.line_number,
+                        "columnNumber": listener.column_number,
+                        "hasHandler": listener.handler is not None,
+                        "hasOriginalHandler": listener.original_handler is not None,
+                        "backendNodeId": int(listener.backend_node_id)
+                        if listener.backend_node_id
+                        else None,
+                    }
+                )
+            debug_logger.log_info(
+                "cdp_cloner",
+                "_get_event_listeners",
+                f"Got {len(result)} event listeners",
+            )
             return result
         except Exception as e:
-            debug_logger.log_error("cdp_cloner", "_get_event_listeners", f"Failed: {str(e)}")
+            debug_logger.log_error(
+                "cdp_cloner", "_get_event_listeners", f"Failed: {str(e)}"
+            )
             return []
 
     async def _get_children_cdp(self, tab, node_id) -> List[Dict[str, Any]]:
@@ -224,18 +278,24 @@ class CDPElementCloner:
         """
         try:
             await tab.send(uc.cdp.dom.request_child_nodes(node_id=node_id, depth=1))
-            node_details = await tab.send(uc.cdp.dom.describe_node(node_id=node_id, depth=1))
+            node_details = await tab.send(
+                uc.cdp.dom.describe_node(node_id=node_id, depth=1)
+            )
             children = []
             if node_details.children:
                 for child in node_details.children:
                     if child.node_type == 1:
                         child_html = await self._get_element_html(tab, child.node_id)
-                        child_computed = await self._get_computed_styles_cdp(tab, child.node_id)
-                        children.append({
-                            "html": child_html,
-                            "computed_styles": child_computed,
-                            "depth": 1
-                        })
+                        child_computed = await self._get_computed_styles_cdp(
+                            tab, child.node_id
+                        )
+                        children.append(
+                            {
+                                "html": child_html,
+                                "computed_styles": child_computed,
+                                "depth": 1,
+                            }
+                        )
             return children
         except Exception as e:
             debug_logger.log_error("cdp_cloner", "_get_children", f"Failed: {str(e)}")
@@ -263,10 +323,10 @@ class CDPElementCloner:
                     "implicit": prop.implicit,
                     "text": prop.text or "",
                     "parsedOk": prop.parsed_ok,
-                    "disabled": prop.disabled
+                    "disabled": prop.disabled,
                 }
                 for prop in css_style.css_properties_
-            ]
+            ],
         }
 
     def _rule_match_to_dict(self, rule_match) -> Dict[str, Any]:
@@ -282,11 +342,15 @@ class CDPElementCloner:
         return {
             "matchingSelectors": rule_match.matching_selectors,
             "rule": {
-                "selectorText": rule_match.rule.selector_list.text if rule_match.rule.selector_list else "",
+                "selectorText": rule_match.rule.selector_list.text
+                if rule_match.rule.selector_list
+                else "",
                 "origin": str(rule_match.rule.origin),
                 "style": self._css_style_to_dict(rule_match.rule.style),
-                "styleSheetId": str(rule_match.rule.style_sheet_id_) if rule_match.rule.style_sheet_id_ else None
-            }
+                "styleSheetId": str(rule_match.rule.style_sheet_id_)
+                if rule_match.rule.style_sheet_id_
+                else None,
+            },
         }
 
     def _pseudo_element_to_dict(self, pseudo_element) -> Dict[str, Any]:
@@ -302,7 +366,9 @@ class CDPElementCloner:
         return {
             "pseudoType": str(pseudo_element.pseudo_type),
             "pseudoIdentifier": pseudo_element.pseudo_identifier_,
-            "matches": [self._rule_match_to_dict(match) for match in pseudo_element.matches_]
+            "matches": [
+                self._rule_match_to_dict(match) for match in pseudo_element.matches_
+            ],
         }
 
     def _inherited_style_to_dict(self, inherited_style) -> Dict[str, Any]:
@@ -316,6 +382,11 @@ class CDPElementCloner:
             Dict[str, Any]: Dictionary describing inherited styles.
         """
         return {
-            "inlineStyle": self._css_style_to_dict(inherited_style.inline_style) if inherited_style.inline_style else None,
-            "matchedCSSRules": [self._rule_match_to_dict(rule) for rule in inherited_style.matched_css_rules]
+            "inlineStyle": self._css_style_to_dict(inherited_style.inline_style)
+            if inherited_style.inline_style
+            else None,
+            "matchedCSSRules": [
+                self._rule_match_to_dict(rule)
+                for rule in inherited_style.matched_css_rules
+            ],
         }

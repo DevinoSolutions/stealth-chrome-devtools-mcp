@@ -24,7 +24,9 @@ class NetworkInterceptor:
         self._instance_filters: Dict[str, Dict[str, List[str]]] = {}
         self._lock = asyncio.Lock()
 
-    async def setup_interception(self, tab: Tab, instance_id: str, block_resources: List[str] = None):
+    async def setup_interception(
+        self, tab: Tab, instance_id: str, block_resources: List[str] = None
+    ):
         """
         Set up network interception for a tab.
 
@@ -34,20 +36,29 @@ class NetworkInterceptor:
         """
         try:
             await tab.send(uc.cdp.network.enable())
-            
+
             if block_resources:
                 # Convert resource types to URL patterns for blocking
                 url_patterns = []
                 for resource_type in block_resources:
                     # Map resource types to URL patterns that typically identify these resources
                     resource_patterns = {
-                        'image': ['*.jpg', '*.jpeg', '*.png', '*.gif', '*.webp', '*.svg', '*.bmp', '*.ico'],
-                        'stylesheet': ['*.css'],
-                        'font': ['*.woff', '*.woff2', '*.ttf', '*.otf', '*.eot'],
-                        'script': ['*.js', '*.mjs'],
-                        'media': ['*.mp4', '*.mp3', '*.wav', '*.avi', '*.webm']
+                        "image": [
+                            "*.jpg",
+                            "*.jpeg",
+                            "*.png",
+                            "*.gif",
+                            "*.webp",
+                            "*.svg",
+                            "*.bmp",
+                            "*.ico",
+                        ],
+                        "stylesheet": ["*.css"],
+                        "font": ["*.woff", "*.woff2", "*.ttf", "*.otf", "*.eot"],
+                        "script": ["*.js", "*.mjs"],
+                        "media": ["*.mp4", "*.mp3", "*.wav", "*.avi", "*.webm"],
                     }
-                    
+
                     if resource_type.lower() in resource_patterns:
                         url_patterns.extend(resource_patterns[resource_type.lower()])
                         debug_logger.log_info(
@@ -65,7 +76,7 @@ class NetworkInterceptor:
                             "Added custom URL pattern",
                             resource_type,
                         )
-                
+
                 # Use network.set_blocked_ur_ls to block the URL patterns
                 if url_patterns:
                     await tab.send(uc.cdp.network.set_blocked_ur_ls(urls=url_patterns))
@@ -75,16 +86,18 @@ class NetworkInterceptor:
                         f"Blocked {len(url_patterns)} URL patterns",
                         url_patterns,
                     )
-            
+
             tab.add_handler(
                 uc.cdp.network.RequestWillBeSent,
                 lambda event: asyncio.create_task(self._on_request(event, instance_id)),
             )
             tab.add_handler(
                 uc.cdp.network.ResponseReceived,
-                lambda event: asyncio.create_task(self._on_response(event, instance_id, tab)),
+                lambda event: asyncio.create_task(
+                    self._on_response(event, instance_id, tab)
+                ),
             )
-            
+
             async with self._lock:
                 if instance_id not in self._instance_requests:
                     self._instance_requests[instance_id] = []
@@ -109,9 +122,17 @@ class NetworkInterceptor:
                 include = filters.get("include", [])
                 exclude = filters.get("exclude", [])
 
-                if include and resource_type and resource_type.lower() not in [t.lower() for t in include]:
+                if (
+                    include
+                    and resource_type
+                    and resource_type.lower() not in [t.lower() for t in include]
+                ):
                     return
-                if exclude and resource_type and resource_type.lower() in [t.lower() for t in exclude]:
+                if (
+                    exclude
+                    and resource_type
+                    and resource_type.lower() in [t.lower() for t in exclude]
+                ):
                     return
 
             cookies = {}
@@ -137,7 +158,8 @@ class NetworkInterceptor:
                 self._instance_requests[instance_id].append(request_id)
         except Exception as e:
             debug_logger.log_warning(
-                "network_interceptor", "_on_request",
+                "network_interceptor",
+                "_on_request",
                 f"Failed to capture request for {instance_id}: {e}",
             )
 
@@ -156,7 +178,9 @@ class NetworkInterceptor:
             body = None
             if tab:
                 try:
-                    result = await tab.send(uc.cdp.network.get_response_body(request_id=request_id))
+                    result = await tab.send(
+                        uc.cdp.network.get_response_body(request_id=request_id)
+                    )
                     if result:
                         body_str, base64_encoded = result
                         if base64_encoded:
@@ -165,7 +189,8 @@ class NetworkInterceptor:
                             body = body_str.encode("utf-8")
                 except (ConnectionError, RuntimeError) as e:
                     debug_logger.log_warning(
-                        "network_interceptor", "_on_response",
+                        "network_interceptor",
+                        "_on_response",
                         f"Connection lost while capturing response body: {e}",
                     )
                 except Exception:
@@ -175,17 +200,19 @@ class NetworkInterceptor:
                 request_id=request_id,
                 status=response.status,
                 headers=dict(response.headers) if hasattr(response, "headers") else {},
-                content_type=response.mime_type if hasattr(response, "mime_type") else None,
+                content_type=response.mime_type
+                if hasattr(response, "mime_type")
+                else None,
                 body=body,
             )
             async with self._lock:
                 self._responses[request_id] = network_response
         except Exception as e:
             debug_logger.log_warning(
-                "network_interceptor", "_on_response",
+                "network_interceptor",
+                "_on_response",
                 f"Failed to capture response for {instance_id}: {e}",
             )
-
 
     async def set_capture_filters(
         self,
@@ -214,7 +241,9 @@ class NetworkInterceptor:
         Returns: Dict[str, List[str]] - Current filters.
         """
         async with self._lock:
-            return self._instance_filters.get(instance_id, {"include": [], "exclude": []})
+            return self._instance_filters.get(
+                instance_id, {"include": [], "exclude": []}
+            )
 
     async def search_requests(
         self,
@@ -257,30 +286,38 @@ class NetworkInterceptor:
                     continue
                 if method and request.method.upper() != method.upper():
                     continue
-                if resource_type and (not request.resource_type or resource_type.lower() not in request.resource_type.lower()):
+                if resource_type and (
+                    not request.resource_type
+                    or resource_type.lower() not in request.resource_type.lower()
+                ):
                     continue
                 if status_code and (not response or response.status != status_code):
                     continue
-                if payload_contains and (not request.post_data or payload_contains.lower() not in request.post_data.lower()):
+                if payload_contains and (
+                    not request.post_data
+                    or payload_contains.lower() not in request.post_data.lower()
+                ):
                     continue
                 if response_contains and response and response.body:
                     try:
-                        body_str = response.body.decode('utf-8', errors='ignore')
+                        body_str = response.body.decode("utf-8", errors="ignore")
                         if response_contains.lower() not in body_str.lower():
                             continue
                     except Exception:
                         continue  # skip if body can't be decoded for search
 
-                matches.append({
-                    "request_id": req_id,
-                    "url": request.url,
-                    "method": request.method,
-                    "status": response.status if response else None,
-                    "resource_type": request.resource_type,
-                })
+                matches.append(
+                    {
+                        "request_id": req_id,
+                        "url": request.url,
+                        "method": request.method,
+                        "status": response.status if response else None,
+                        "resource_type": request.resource_type,
+                    }
+                )
 
             total = len(matches)
-            paginated = matches[offset:offset + limit]
+            paginated = matches[offset : offset + limit]
 
             return {
                 "results": paginated,
@@ -290,7 +327,9 @@ class NetworkInterceptor:
                 "has_more": offset + limit < total,
             }
 
-    async def list_requests(self, instance_id: str, filter_type: Optional[str] = None) -> List[NetworkRequest]:
+    async def list_requests(
+        self, instance_id: str, filter_type: Optional[str] = None
+    ) -> List[NetworkRequest]:
         """
         List all requests for an instance.
 
@@ -305,7 +344,10 @@ class NetworkInterceptor:
                 if req_id in self._requests:
                     request = self._requests[req_id]
                     if filter_type:
-                        if request.resource_type and filter_type.lower() in request.resource_type.lower():
+                        if (
+                            request.resource_type
+                            and filter_type.lower() in request.resource_type.lower()
+                        ):
                             requests.append(request)
                     else:
                         requests.append(request)
@@ -342,7 +384,9 @@ class NetworkInterceptor:
         try:
             # Convert string to RequestId object
             request_id_obj = uc.cdp.network.RequestId(request_id)
-            result = await tab.send(uc.cdp.network.get_response_body(request_id=request_id_obj))
+            result = await tab.send(
+                uc.cdp.network.get_response_body(request_id=request_id_obj)
+            )
             if result:
                 body, base64_encoded = result  # Result is a tuple (body, base64Encoded)
                 if base64_encoded:
@@ -351,7 +395,8 @@ class NetworkInterceptor:
                     return body.encode("utf-8")
         except (ConnectionError, RuntimeError) as e:
             debug_logger.log_warning(
-                "network_interceptor", "get_response_body",
+                "network_interceptor",
+                "get_response_body",
                 f"Connection lost while fetching body for {request_id}: {e}",
             )
         except Exception:
@@ -383,7 +428,9 @@ class NetworkInterceptor:
         Returns: bool - True if successful.
         """
         try:
-            await tab.send(uc.cdp.network.set_user_agent_override(user_agent=user_agent))
+            await tab.send(
+                uc.cdp.network.set_user_agent_override(user_agent=user_agent)
+            )
             return True
         except Exception as e:
             raise Exception(f"Failed to set user agent: {str(e)}")
@@ -403,27 +450,33 @@ class NetworkInterceptor:
             for req_id in request_ids:
                 if req_id in self._requests:
                     req = self._requests[req_id]
-                    data["requests"].append({
-                        "request_id": req.request_id,
-                        "url": req.url,
-                        "method": req.method,
-                        "headers": req.headers,
-                        "cookies": req.cookies,
-                        "post_data": req.post_data,
-                        "resource_type": req.resource_type,
-                        "timestamp": req.timestamp.isoformat(),
-                    })
+                    data["requests"].append(
+                        {
+                            "request_id": req.request_id,
+                            "url": req.url,
+                            "method": req.method,
+                            "headers": req.headers,
+                            "cookies": req.cookies,
+                            "post_data": req.post_data,
+                            "resource_type": req.resource_type,
+                            "timestamp": req.timestamp.isoformat(),
+                        }
+                    )
 
                 if req_id in self._responses:
                     resp = self._responses[req_id]
-                    data["responses"].append({
-                        "request_id": resp.request_id,
-                        "status": resp.status,
-                        "headers": resp.headers,
-                        "content_type": resp.content_type,
-                        "body": base64.b64encode(resp.body).decode('utf-8') if resp.body else None,
-                        "timestamp": resp.timestamp.isoformat(),
-                    })
+                    data["responses"].append(
+                        {
+                            "request_id": resp.request_id,
+                            "status": resp.status,
+                            "headers": resp.headers,
+                            "content_type": resp.content_type,
+                            "body": base64.b64encode(resp.body).decode("utf-8")
+                            if resp.body
+                            else None,
+                            "timestamp": resp.timestamp.isoformat(),
+                        }
+                    )
 
             Path(filepath).write_text(json.dumps(data, indent=2))
             return True
@@ -464,7 +517,9 @@ class NetworkInterceptor:
                     status=resp_data["status"],
                     headers=resp_data["headers"],
                     content_type=resp_data.get("content_type"),
-                    body=base64.b64decode(resp_data["body"]) if resp_data.get("body") else None,
+                    body=base64.b64decode(resp_data["body"])
+                    if resp_data.get("body")
+                    else None,
                     timestamp=datetime.fromisoformat(resp_data["timestamp"]),
                 )
                 self._responses[resp.request_id] = resp
@@ -480,7 +535,9 @@ class NetworkInterceptor:
         Returns: bool - True if successful.
         """
         try:
-            await tab.send(uc.cdp.network.set_cache_disabled(cache_disabled=not enabled))
+            await tab.send(
+                uc.cdp.network.set_cache_disabled(cache_disabled=not enabled)
+            )
             return True
         except Exception as e:
             raise Exception(f"Failed to set cache state: {str(e)}")
@@ -512,10 +569,7 @@ class NetworkInterceptor:
                 cookies = await tab.send(uc.cdp.network.get_cookies(urls=[url]))
                 for cookie in cookies:
                     await tab.send(
-                        uc.cdp.network.delete_cookies(
-                            name=cookie.name,
-                            url=url
-                        )
+                        uc.cdp.network.delete_cookies(name=cookie.name, url=url)
                     )
             else:
                 # Clear all browser cookies using the proper method
@@ -538,7 +592,9 @@ class NetworkInterceptor:
         except Exception as e:
             raise Exception(f"Failed to set cookie: {str(e)}")
 
-    async def get_cookies(self, tab: Tab, urls: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    async def get_cookies(
+        self, tab: Tab, urls: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
         """
         Get cookies.
 

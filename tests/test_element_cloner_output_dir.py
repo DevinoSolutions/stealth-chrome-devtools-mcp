@@ -9,6 +9,7 @@ read-only). The default now resolves to a stable, writable, per-user location
 which is independent of both CWD and the install location. An explicit relative
 path is still anchored to the package for backward compatibility.
 """
+
 import os
 import sys
 from pathlib import Path
@@ -40,6 +41,7 @@ def _import_cloner_class():
     if str(EMBEDDED_DIR) not in sys.path:
         sys.path.insert(0, str(EMBEDDED_DIR))
     from file_based_element_cloner import FileBasedElementCloner
+
     return FileBasedElementCloner
 
 
@@ -60,7 +62,9 @@ class TestOutputDirResolution:
         package_root = Path(EMBEDDED_DIR).resolve().parent
         assert cloner.output_dir == default_clone_output_dir()
         assert package_root not in cloner.output_dir.resolve().parents
-        assert cloner.output_dir.resolve() != (package_root / "element_clones").resolve()
+        assert (
+            cloner.output_dir.resolve() != (package_root / "element_clones").resolve()
+        )
 
     def test_relative_dir_does_not_use_cwd(self, tmp_path):
         """Even from a weird CWD the output dir must NOT land there."""

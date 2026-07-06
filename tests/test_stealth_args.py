@@ -14,6 +14,7 @@ from platform_utils import filter_stealth_args, merge_browser_args
 # filter_stealth_args
 # ---------------------------------------------------------------------------
 
+
 class TestFilterStealthArgs:
     """Tests for the stealth arg filter."""
 
@@ -161,7 +162,11 @@ class TestFilterStealthArgs:
             "--proxy-server=http://proxy:8080",
         ]
         clean, warnings = filter_stealth_args(args)
-        assert clean == ["--start-maximized", "--lang=en-US", "--proxy-server=http://proxy:8080"]
+        assert clean == [
+            "--start-maximized",
+            "--lang=en-US",
+            "--proxy-server=http://proxy:8080",
+        ]
         assert len(warnings) == 2
 
     def test_case_insensitive(self):
@@ -175,6 +180,7 @@ class TestFilterStealthArgs:
     def test_all_blocked_flags_individually(self):
         """Every flag in the blocklist should be stripped when passed alone."""
         from platform_utils import _stealth_blocked_args
+
         blocked = _stealth_blocked_args()
         for flag in blocked:
             clean, warnings = filter_stealth_args([flag])
@@ -185,6 +191,7 @@ class TestFilterStealthArgs:
 # ---------------------------------------------------------------------------
 # merge_browser_args
 # ---------------------------------------------------------------------------
+
 
 class TestMergeBrowserArgs:
     """Tests for merge_browser_args tuple return."""

@@ -19,8 +19,9 @@ from proxy_utils import (
 class TestParseProxyConfig:
     def test_full_url_with_credentials(self):
         cfg = parse_proxy_config("http://user:pass@host.example:8080")
-        assert cfg == ProxyConfig(server="http://host.example:8080",
-                                  username="user", password="pass")
+        assert cfg == ProxyConfig(
+            server="http://host.example:8080", username="user", password="pass"
+        )
 
     def test_bare_host_port_defaults_to_http(self):
         cfg = parse_proxy_config("10.0.0.5:3128")
@@ -28,7 +29,10 @@ class TestParseProxyConfig:
         assert cfg.username is None and cfg.password is None
 
     def test_scheme_preserved(self):
-        assert parse_proxy_config("socks5://1.2.3.4:1080").server == "socks5://1.2.3.4:1080"
+        assert (
+            parse_proxy_config("socks5://1.2.3.4:1080").server
+            == "socks5://1.2.3.4:1080"
+        )
 
     def test_ipv6_host_is_bracketed(self):
         cfg = parse_proxy_config("http://[::1]:8080")

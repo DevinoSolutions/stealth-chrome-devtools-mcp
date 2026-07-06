@@ -21,7 +21,16 @@ import time
 import psutil
 
 # Add the embedded source to path so we can import directly
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "stealth_chrome_devtools_mcp", "embedded"))
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "src",
+        "stealth_chrome_devtools_mcp",
+        "embedded",
+    ),
+)
 
 from browser_manager import BrowserManager
 from network_interceptor import NetworkInterceptor
@@ -47,12 +56,14 @@ def collect_child_pids() -> list[dict]:
     children = []
     for child in PROCESS.children(recursive=True):
         try:
-            children.append({
-                "pid": child.pid,
-                "name": child.name(),
-                "rss_mb": child.memory_info().rss / (1024 * 1024),
-                "status": child.status(),
-            })
+            children.append(
+                {
+                    "pid": child.pid,
+                    "name": child.name(),
+                    "rss_mb": child.memory_info().rss / (1024 * 1024),
+                    "status": child.status(),
+                }
+            )
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     return children
@@ -76,9 +87,9 @@ def snapshot(label: str) -> dict:
 
 
 def print_snapshot(s: dict):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  {s['label']}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  Python RSS:       {s['python_rss_mb']:>8.1f} MB")
     print(f"  Child processes:  {s['child_count']:>8d}")
     print(f"  Child total RSS:  {s['child_total_rss_mb']:>8.1f} MB")
@@ -86,7 +97,9 @@ def print_snapshot(s: dict):
     if s["children"]:
         print(f"  Child PIDs:")
         for c in s["children"]:
-            print(f"    PID {c['pid']:>8d}  {c['name']:<25s}  {c['rss_mb']:>7.1f} MB  [{c['status']}]")
+            print(
+                f"    PID {c['pid']:>8d}  {c['name']:<25s}  {c['rss_mb']:>7.1f} MB  [{c['status']}]"
+            )
 
 
 def print_internal_state():
@@ -108,7 +121,9 @@ def print_internal_state():
 
     # dynamic_hook_system
     print(f"  dynamic_hook_system.hooks:         {len(dynamic_hook_system.hooks)}")
-    print(f"  dynamic_hook_system.instance_hooks: {len(dynamic_hook_system.instance_hooks)}")
+    print(
+        f"  dynamic_hook_system.instance_hooks: {len(dynamic_hook_system.instance_hooks)}"
+    )
 
 
 async def stress_test(num_instances: int = 3, num_rounds: int = 2):
@@ -123,15 +138,15 @@ async def stress_test(num_instances: int = 3, num_rounds: int = 2):
     print_internal_state()
 
     for round_num in range(1, num_rounds + 1):
-        print(f"\n\n{'#'*60}")
+        print(f"\n\n{'#' * 60}")
         print(f"  ROUND {round_num}/{num_rounds}")
-        print(f"{'#'*60}")
+        print(f"{'#' * 60}")
 
         instance_ids = []
 
         # --- SPAWN PHASE ---
         for i in range(num_instances):
-            label = f"R{round_num} spawn instance {i+1}/{num_instances}"
+            label = f"R{round_num} spawn instance {i + 1}/{num_instances}"
             print(f"\n>> {label}...")
             try:
                 options = BrowserOptions(
@@ -196,9 +211,9 @@ async def stress_test(num_instances: int = 3, num_rounds: int = 2):
         print_internal_state()
 
     # --- FINAL ANALYSIS ---
-    print(f"\n\n{'='*60}")
+    print(f"\n\n{'=' * 60}")
     print(f"  LEAK ANALYSIS SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     baseline = all_snapshots[0]
     final = all_snapshots[-1]
@@ -206,7 +221,9 @@ async def stress_test(num_instances: int = 3, num_rounds: int = 2):
     python_delta = final["python_rss_mb"] - baseline["python_rss_mb"]
     child_delta = final["child_count"]  # should be 0
 
-    print(f"\n  Python RSS growth:    {python_delta:>+8.1f} MB  (baseline: {baseline['python_rss_mb']:.1f} MB)")
+    print(
+        f"\n  Python RSS growth:    {python_delta:>+8.1f} MB  (baseline: {baseline['python_rss_mb']:.1f} MB)"
+    )
     print(f"  Orphan child procs:   {child_delta:>8d}    (should be 0)")
 
     # Check for leaked internal state
@@ -219,34 +236,58 @@ async def stress_test(num_instances: int = 3, num_rounds: int = 2):
     leaked_info = len(debug_logger._info)
     leaked_seen = len(debug_logger._seen_errors)
 
-    print(f"  persistent_storage instances:     {leaked_instances}  {'LEAK!' if leaked_instances > 0 else 'OK'}")
-    print(f"  progressive_elements:             {leaked_prog}  {'LEAK!' if leaked_prog > 0 else 'OK'}")
-    print(f"  dynamic_hook_system.instance_hooks: {leaked_hooks}  {'LEAK!' if leaked_hooks > 0 else 'OK'}")
-    print(f"  debug_logger._errors:             {leaked_errors}  {'grows unboundedly' if leaked_errors > 0 else 'OK'}")
-    print(f"  debug_logger._warnings:           {leaked_warnings}  {'grows unboundedly' if leaked_warnings > 0 else 'OK'}")
-    print(f"  debug_logger._info:               {leaked_info}  {'grows unboundedly' if leaked_info > 0 else 'OK'}")
-    print(f"  debug_logger._seen_errors:        {leaked_seen}  {'grows unboundedly' if leaked_seen > 0 else 'OK'}")
+    print(
+        f"  persistent_storage instances:     {leaked_instances}  {'LEAK!' if leaked_instances > 0 else 'OK'}"
+    )
+    print(
+        f"  progressive_elements:             {leaked_prog}  {'LEAK!' if leaked_prog > 0 else 'OK'}"
+    )
+    print(
+        f"  dynamic_hook_system.instance_hooks: {leaked_hooks}  {'LEAK!' if leaked_hooks > 0 else 'OK'}"
+    )
+    print(
+        f"  debug_logger._errors:             {leaked_errors}  {'grows unboundedly' if leaked_errors > 0 else 'OK'}"
+    )
+    print(
+        f"  debug_logger._warnings:           {leaked_warnings}  {'grows unboundedly' if leaked_warnings > 0 else 'OK'}"
+    )
+    print(
+        f"  debug_logger._info:               {leaked_info}  {'grows unboundedly' if leaked_info > 0 else 'OK'}"
+    )
+    print(
+        f"  debug_logger._seen_errors:        {leaked_seen}  {'grows unboundedly' if leaked_seen > 0 else 'OK'}"
+    )
 
     # Check network interceptor filters leak
     filters_leaked = len(interceptor._instance_filters)
-    print(f"  network_interceptor._instance_filters: {filters_leaked}  {'LEAK!' if filters_leaked > 0 else 'OK'}")
+    print(
+        f"  network_interceptor._instance_filters: {filters_leaked}  {'LEAK!' if filters_leaked > 0 else 'OK'}"
+    )
 
     # Memory growth per round
     print(f"\n  --- Memory Growth Timeline ---")
     for s in all_snapshots:
         delta = s["python_rss_mb"] - baseline["python_rss_mb"]
-        print(f"  {s['label']:<50s}  {s['python_rss_mb']:>7.1f} MB  ({delta:>+6.1f} MB)  children={s['child_count']}")
+        print(
+            f"  {s['label']:<50s}  {s['python_rss_mb']:>7.1f} MB  ({delta:>+6.1f} MB)  children={s['child_count']}"
+        )
 
     if python_delta > 20:
-        print(f"\n  *** WARNING: Significant Python RSS growth ({python_delta:.1f} MB) ***")
+        print(
+            f"\n  *** WARNING: Significant Python RSS growth ({python_delta:.1f} MB) ***"
+        )
     if child_delta > 0:
-        print(f"\n  *** WARNING: {child_delta} orphan Chrome processes still running! ***")
+        print(
+            f"\n  *** WARNING: {child_delta} orphan Chrome processes still running! ***"
+        )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Memory leak stress test")
     parser.add_argument("--instances", type=int, default=3, help="Instances per round")
-    parser.add_argument("--rounds", type=int, default=2, help="Number of spawn/close rounds")
+    parser.add_argument(
+        "--rounds", type=int, default=2, help="Number of spawn/close rounds"
+    )
     args = parser.parse_args()
 
     print(f"Memory Leak Stress Test")

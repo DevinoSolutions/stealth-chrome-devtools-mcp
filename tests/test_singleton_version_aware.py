@@ -149,8 +149,17 @@ class TestBackendIdentity:
 
     def test_true_for_http_backend(self, monkeypatch):
         proc = self._proc_with_cmdline(
-            ["python", "-m", "stealth_chrome_devtools_mcp",
-             "--transport", "http", "--port", "19222", "--host", "127.0.0.1"]
+            [
+                "python",
+                "-m",
+                "stealth_chrome_devtools_mcp",
+                "--transport",
+                "http",
+                "--port",
+                "19222",
+                "--host",
+                "127.0.0.1",
+            ]
         )
         monkeypatch.setattr(singleton.psutil, "Process", MagicMock(return_value=proc))
         assert singleton._is_our_backend(4242) is True
@@ -171,7 +180,8 @@ class TestBackendIdentity:
 
     def test_false_when_process_gone(self, monkeypatch):
         monkeypatch.setattr(
-            singleton.psutil, "Process",
+            singleton.psutil,
+            "Process",
             MagicMock(side_effect=singleton.psutil.NoSuchProcess(4242)),
         )
         assert singleton._is_our_backend(4242) is False
@@ -216,7 +226,8 @@ class TestBackendPidOnPort:
 
     def test_returns_none_when_psutil_fails(self, monkeypatch):
         monkeypatch.setattr(
-            singleton.psutil, "net_connections",
+            singleton.psutil,
+            "net_connections",
             MagicMock(side_effect=singleton.psutil.AccessDenied()),
         )
         assert singleton._backend_pid_on_port(19222) is None
@@ -261,10 +272,14 @@ class TestStartBackendHoldingLockEvicts:
         monkeypatch.setattr(singleton, "_exclusive_lock", fake_lock)
         monkeypatch.setattr(singleton, "_find_running_server", lambda: None)
         monkeypatch.setattr(
-            singleton, "_clear_stale_backend", lambda port: calls.append(("clear", port))
+            singleton,
+            "_clear_stale_backend",
+            lambda port: calls.append(("clear", port)),
         )
         monkeypatch.setattr(
-            singleton, "_start_server_process", lambda port: calls.append(("start", port))
+            singleton,
+            "_start_server_process",
+            lambda port: calls.append(("start", port)),
         )
         monkeypatch.setattr(singleton, "_wait_for_server", lambda port: True)
 
@@ -314,10 +329,21 @@ class TestStaleBackendEvictionEndToEnd:
         env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(tmp_path / "sessions")
         env["STEALTH_BROWSER_DEBUG"] = "false"
         backend = subprocess.Popen(
-            [sys.executable, "-m", "stealth_chrome_devtools_mcp",
-             "--transport", "http", "--port", str(port), "--host", "127.0.0.1"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL, env=env,
+            [
+                sys.executable,
+                "-m",
+                "stealth_chrome_devtools_mcp",
+                "--transport",
+                "http",
+                "--port",
+                str(port),
+                "--host",
+                "127.0.0.1",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            env=env,
         )
         try:
             assert singleton._wait_for_server(port), "backend never became healthy"

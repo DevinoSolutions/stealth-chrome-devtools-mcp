@@ -80,3 +80,13 @@ packages = ["src/stealth_chrome_devtools_mcp"]
 # and live inside the package, so `packages` already bundles them; force-including
 # the same path makes hatchling fail the wheel build with a duplicate-file error
 # (which only surfaces when uvx/pip builds the wheel, not under `uv run`).
+
+# ---------------------------------------------------------------------------
+# Code-quality gates (workstream 2.5-gates). The full lint ruleset, banned-API
+# table, ty/vulture config, and per-file owner-tagged ignores are added in the
+# commits that follow this repo-wide `ruff format` baseline.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["src", "tests"]

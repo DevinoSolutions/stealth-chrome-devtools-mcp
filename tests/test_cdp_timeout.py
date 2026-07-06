@@ -30,12 +30,18 @@ if str(EMBEDDED_DIR) not in sys.path:
 
 from models import NavigationOptions
 from pydantic import ValidationError
-from server import _with_cdp_timeout, _clamp_timeout, CDP_OPERATION_TIMEOUT, MAX_TIMEOUT_MS
+from server import (
+    _with_cdp_timeout,
+    _clamp_timeout,
+    CDP_OPERATION_TIMEOUT,
+    MAX_TIMEOUT_MS,
+)
 
 
 # ---------------------------------------------------------------------------
 # Unit tests: _with_cdp_timeout mechanism
 # ---------------------------------------------------------------------------
+
 
 class TestWithCdpTimeoutMechanism:
     """Test the timeout wrapper itself, no browser needed."""
@@ -43,14 +49,17 @@ class TestWithCdpTimeoutMechanism:
     @pytest.mark.asyncio
     async def test_fast_coroutine_succeeds(self):
         """Normal fast operations should return their result."""
+
         async def fast():
             return "hello"
+
         result = await _with_cdp_timeout(fast(), timeout=5)
         assert result == "hello"
 
     @pytest.mark.asyncio
     async def test_slow_coroutine_times_out(self):
         """A hanging coroutine should raise Exception after timeout."""
+
         async def hang_forever():
             await asyncio.sleep(9999)
             return "never"
@@ -64,6 +73,7 @@ class TestWithCdpTimeoutMechanism:
     @pytest.mark.asyncio
     async def test_timeout_includes_instance_id_in_message(self):
         """Error message should include the instance_id for debugging."""
+
         async def hang():
             await asyncio.sleep(9999)
 
@@ -78,6 +88,7 @@ class TestWithCdpTimeoutMechanism:
     @pytest.mark.asyncio
     async def test_exception_propagates_not_timeout(self):
         """Real exceptions should propagate immediately, not wait for timeout."""
+
         async def raise_error():
             raise ValueError("real error")
 
@@ -90,6 +101,7 @@ class TestWithCdpTimeoutMechanism:
     @pytest.mark.asyncio
     async def test_custom_timeout_override(self):
         """Custom timeout should override the default."""
+
         async def slow():
             await asyncio.sleep(5)
             return "done"
@@ -103,6 +115,7 @@ class TestWithCdpTimeoutMechanism:
     @pytest.mark.asyncio
     async def test_zero_timeout_uses_default(self):
         """timeout=0 should fall back to CDP_OPERATION_TIMEOUT."""
+
         async def hang():
             await asyncio.sleep(9999)
 
@@ -117,6 +130,7 @@ class TestWithCdpTimeoutMechanism:
     @pytest.mark.asyncio
     async def test_concurrent_timeouts_independent(self):
         """Multiple concurrent timeout wrappers shouldn't interfere."""
+
         async def slow(n):
             await asyncio.sleep(n)
             return f"done-{n}"
@@ -152,6 +166,7 @@ class TestWithCdpTimeoutMechanism:
 # Error path tests: verify errors propagate, not swallowed
 # ---------------------------------------------------------------------------
 
+
 class TestErrorPathPropagation:
     """Verify that CDP timeouts surface as real errors, not silent swallows.
 
@@ -162,6 +177,7 @@ class TestErrorPathPropagation:
     @pytest.mark.asyncio
     async def test_execute_script_pattern_returns_success_false(self):
         """The execute_script try/except pattern must return success=False on timeout."""
+
         async def hang():
             await asyncio.sleep(9999)
 
@@ -179,6 +195,7 @@ class TestErrorPathPropagation:
     @pytest.mark.asyncio
     async def test_timeout_error_not_swallowed_by_bare_except(self):
         """Timeout exception must propagate through tool handlers that don't catch."""
+
         async def hang():
             await asyncio.sleep(9999)
 
@@ -189,6 +206,7 @@ class TestErrorPathPropagation:
     @pytest.mark.asyncio
     async def test_timeout_error_message_is_actionable(self):
         """Error message should tell the user what to do."""
+
         async def hang():
             await asyncio.sleep(9999)
 
@@ -203,6 +221,7 @@ class TestErrorPathPropagation:
     @pytest.mark.asyncio
     async def test_real_js_error_not_confused_with_timeout(self):
         """A real ValueError should propagate as-is, not become a timeout error."""
+
         async def js_error():
             raise ValueError("SyntaxError: unexpected token")
 
@@ -219,6 +238,7 @@ class TestErrorPathPropagation:
     @pytest.mark.asyncio
     async def test_timeout_fires_before_inner_timeout(self):
         """CDP timeout should fire even if inner operation has its own longer wait."""
+
         async def slow_with_own_timeout():
             # Simulates a tool with its own 60s timeout that's dead
             await asyncio.sleep(60)
@@ -227,12 +247,15 @@ class TestErrorPathPropagation:
         with pytest.raises(Exception, match="timed out"):
             await _with_cdp_timeout(slow_with_own_timeout(), timeout=2)
         elapsed = time.monotonic() - start
-        assert elapsed < 5.0, f"CDP timeout (2s) should fire, not inner (60s). Took {elapsed:.1f}s"
+        assert elapsed < 5.0, (
+            f"CDP timeout (2s) should fire, not inner (60s). Took {elapsed:.1f}s"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Unit tests: _clamp_timeout and MAX_TIMEOUT_MS
 # ---------------------------------------------------------------------------
+
 
 class TestClampTimeout:
     """Verify that user-provided timeouts are capped to MAX_TIMEOUT_MS."""
@@ -302,6 +325,7 @@ class TestNavigationOptionsTimeoutValidation:
 # Unit tests: fast timeout returns failure quickly (no browser needed)
 # ---------------------------------------------------------------------------
 
+
 class TestFastTimeoutFailure:
     """Force very short timeouts on hanging operations to verify they fail
     quickly and cleanly instead of hanging.  Uses 1s timeouts to keep tests
@@ -310,6 +334,7 @@ class TestFastTimeoutFailure:
     @pytest.mark.asyncio
     async def test_1s_timeout_on_hanging_coro_fails_within_3s(self):
         """A 1s timeout must raise within 3s, not hang."""
+
         async def hang():
             await asyncio.sleep(9999)
 
@@ -322,6 +347,7 @@ class TestFastTimeoutFailure:
     @pytest.mark.asyncio
     async def test_1s_timeout_returns_correct_error_type(self):
         """Timeout should raise a plain Exception (not asyncio.TimeoutError)."""
+
         async def hang():
             await asyncio.sleep(9999)
 
@@ -333,6 +359,7 @@ class TestFastTimeoutFailure:
     @pytest.mark.asyncio
     async def test_1s_timeout_error_includes_elapsed_time(self):
         """Error message should report how long it waited."""
+
         async def hang():
             await asyncio.sleep(9999)
 
@@ -342,6 +369,7 @@ class TestFastTimeoutFailure:
     @pytest.mark.asyncio
     async def test_1s_timeout_with_instance_id_in_error(self):
         """Error should include the instance_id for debugging."""
+
         async def hang():
             await asyncio.sleep(9999)
 
@@ -351,6 +379,7 @@ class TestFastTimeoutFailure:
     @pytest.mark.asyncio
     async def test_rapid_sequential_timeouts_all_fail_independently(self):
         """Multiple sequential timeouts should each fail on their own schedule."""
+
         async def hang():
             await asyncio.sleep(9999)
 
@@ -359,11 +388,14 @@ class TestFastTimeoutFailure:
             with pytest.raises(Exception, match="timed out"):
                 await _with_cdp_timeout(hang(), timeout=1, instance_id=f"seq-{i}")
         elapsed = time.monotonic() - start
-        assert elapsed < 6.0, f"3 sequential 1s timeouts should finish in ~3s, took {elapsed:.1f}s"
+        assert elapsed < 6.0, (
+            f"3 sequential 1s timeouts should finish in ~3s, took {elapsed:.1f}s"
+        )
 
     @pytest.mark.asyncio
     async def test_concurrent_timeouts_all_fail_within_budget(self):
         """Multiple concurrent timeouts should all resolve within the single timeout window."""
+
         async def hang():
             await asyncio.sleep(9999)
 
@@ -378,7 +410,9 @@ class TestFastTimeoutFailure:
             timed_hang("concurrent-2"),
         )
         elapsed = time.monotonic() - start
-        assert elapsed < 3.0, f"3 concurrent 1s timeouts should finish in ~1s, took {elapsed:.1f}s"
+        assert elapsed < 3.0, (
+            f"3 concurrent 1s timeouts should finish in ~1s, took {elapsed:.1f}s"
+        )
 
     @pytest.mark.asyncio
     async def test_clamped_timeout_still_fires(self):
@@ -395,6 +429,7 @@ class TestFastTimeoutFailure:
 # Integration test: real browser with killed process
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 class TestRealBrowserDeadConnection:
     """Test timeout with a real browser whose process gets killed."""
@@ -404,6 +439,7 @@ class TestRealBrowserDeadConnection:
         """Spawn a real browser, return (browser_manager, instance_id, tab)."""
         from browser_manager import BrowserManager
         from models import BrowserOptions
+
         bm = BrowserManager()
         opts = BrowserOptions(headless=True)
         instance = await bm.spawn_browser(opts)
@@ -500,6 +536,8 @@ class TestRealBrowserDeadConnection:
                     instance_id=instance_id,
                 )
             elapsed = time.monotonic() - start
-            assert elapsed < 10.0, f"Screenshot should timeout in ~5s, took {elapsed:.1f}s"
+            assert elapsed < 10.0, (
+                f"Screenshot should timeout in ~5s, took {elapsed:.1f}s"
+            )
         finally:
             tmp.unlink(missing_ok=True)
