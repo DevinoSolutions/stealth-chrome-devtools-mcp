@@ -20,11 +20,12 @@ else:
 import psutil
 from debug_logger import debug_logger
 
+from stealth_chrome_devtools_mcp.settings import get_settings
+
 
 class ProcessCleanup:
     """Manage tracked browser process cleanup and orphan profile recovery."""
 
-    DEFAULT_ORPHAN_PROFILE_MAX_AGE_SECONDS = 21600
     PROFILE_SWEEP_PREFIX = "uc_"
 
     def __init__(self):
@@ -37,9 +38,8 @@ class ProcessCleanup:
         self.pid_file = Path(os.path.expanduser("~/.stealth_browser_pids.json"))
         self.tracked_pids: set[int] = set()
         self.browser_processes: dict[str, dict[str, Any]] = {}
-        self.orphan_profile_max_age_seconds = self._parse_nonnegative_int_env(
-            "BROWSER_ORPHAN_PROFILE_MAX_AGE",
-            self.DEFAULT_ORPHAN_PROFILE_MAX_AGE_SECONDS,
+        self.orphan_profile_max_age_seconds = (
+            get_settings().browser_orphan_profile_max_age
         )
         # Record server start time so recovery never kills processes spawned
         # during the current session (create_time >= _init_time).
@@ -48,38 +48,10 @@ class ProcessCleanup:
         # package to reuse profile helpers without taking over process
         # lifecycle. Honor an opt-out so importing never kills the running
         # server's browsers, deletes their profiles, or wipes PID tracking.
-        if os.getenv("STEALTH_MCP_NO_AUTO_RECOVERY", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }:
+        if get_settings().no_auto_recovery:
             return
         self._setup_cleanup_handlers()
         self._recover_orphaned_processes()
-
-    @staticmethod
-    def _parse_nonnegative_int_env(name: str, default: int) -> int:
-        """
-        Parse a non-negative integer environment variable.
-
-        Args:
-            name (str): Environment variable name.
-            default (int): Fallback value if parsing fails.
-
-        Returns:
-            int: Parsed value or fallback default.
-        """
-        value = os.getenv(name)
-        if value is None:
-            return default
-        try:
-            parsed = int(value.strip())
-        except (TypeError, ValueError):
-            return default
-        if parsed < 0:
-            return default
-        return parsed
 
     @staticmethod
     def _normalize_path(path: str | None) -> str | None:

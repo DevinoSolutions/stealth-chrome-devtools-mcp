@@ -6,6 +6,8 @@ import platform
 import shutil
 import sys
 
+from stealth_chrome_devtools_mcp.settings import get_settings
+
 
 def is_running_as_root() -> bool:
     """
@@ -56,8 +58,8 @@ def is_running_in_container() -> bool:
     container_indicators = [
         os.path.exists("/.dockerenv"),
         _check_cgroup_for_docker(),
-        os.environ.get("container") is not None,
-        os.environ.get("KUBERNETES_SERVICE_HOST") is not None,
+        get_settings().container is not None,
+        get_settings().kubernetes_service_host is not None,
     ]
 
     return any(container_indicators)
@@ -218,11 +220,11 @@ def get_platform_info() -> dict:
         "user_id": getattr(os, "getuid", lambda: "N/A")(),
         "effective_user_id": getattr(os, "geteuid", lambda: "N/A")(),
         "environment_vars": {
-            "DISPLAY": os.environ.get("DISPLAY"),
-            "container": os.environ.get("container"),
-            "KUBERNETES_SERVICE_HOST": os.environ.get("KUBERNETES_SERVICE_HOST"),
-            "USER": os.environ.get("USER"),
-            "USERNAME": os.environ.get("USERNAME"),
+            "DISPLAY": get_settings().display,
+            "container": get_settings().container,
+            "KUBERNETES_SERVICE_HOST": get_settings().kubernetes_service_host,
+            "USER": get_settings().user,
+            "USERNAME": get_settings().username,
         },
     }
 
@@ -243,7 +245,7 @@ def check_browser_executable() -> str | None:
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
             r"C:\Users\{}\AppData\Local\Google\Chrome\Application\chrome.exe".format(
-                os.environ.get("USERNAME", "")
+                get_settings().username or ""
             ),
             # Chromium paths
             r"C:\Program Files\Chromium\Application\chromium.exe",
@@ -251,7 +253,7 @@ def check_browser_executable() -> str | None:
             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
             r"C:\Users\{}\AppData\Local\Microsoft\Edge\Application\msedge.exe".format(
-                os.environ.get("USERNAME", "")
+                get_settings().username or ""
             ),
         ]
     elif system == "darwin":

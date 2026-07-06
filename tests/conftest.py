@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
+from stealth_chrome_devtools_mcp.settings import get_settings
+
 # ── Make embedded/ importable the same way the real entrypoint does ──
 EMBEDDED_DIR = (
     Path(__file__).resolve().parent.parent
@@ -34,6 +36,16 @@ os.environ.setdefault(
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_settings_cache():
+    """Every test gets a fresh Settings read. ``get_settings()`` is process-cached
+    (``@lru_cache``), so without this an env mutation via ``monkeypatch`` /
+    ``patch.dict`` would be invisible to any migrated code that reads Settings."""
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture()

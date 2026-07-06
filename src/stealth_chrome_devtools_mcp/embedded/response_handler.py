@@ -1,11 +1,12 @@
 """Response handler for managing large responses and automatic file-based fallbacks."""
 
 import json
-import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from stealth_chrome_devtools_mcp.settings import get_settings
 
 
 def default_clone_output_dir() -> Path:
@@ -19,7 +20,7 @@ def default_clone_output_dir() -> Path:
     project's existing state-dir convention (``~/.stealth-mcp``, overridable via
     a ``STEALTH_MCP_*`` env var). Pure: computes the path, never creates it.
     """
-    configured = os.getenv("STEALTH_MCP_CLONE_OUTPUT_DIR")
+    configured = get_settings().clone_output_dir
     if configured and configured.strip():
         return Path(configured).expanduser()
     return Path.home() / ".stealth-mcp" / "element_clones"

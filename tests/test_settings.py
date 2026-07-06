@@ -32,7 +32,7 @@ def test_defaults_instantiate(monkeypatch):
     assert s.session_storage_cap_gb == 20.0
     assert s.clone_storage_cap_gb == 10.0
     assert s.clone_trash_retention_hours == 24.0
-    assert s.browser_idle_timeout == 600
+    assert s.browser_idle_timeout == 0  # 0 = idle reaping disabled (never auto-close)
     assert s.browser_idle_reaper_interval == 60
     assert s.port == 8000
     assert s.no_auto_recovery is False

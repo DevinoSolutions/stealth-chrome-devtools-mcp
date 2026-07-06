@@ -32,7 +32,9 @@ def _server():
     Forces read-only import semantics: no orphan-process recovery, no atexit
     teardown handlers — so the CLI never disturbs a running backend.
     """
-    os.environ.setdefault("STEALTH_MCP_NO_AUTO_RECOVERY", "1")
+    os.environ.setdefault(  # noqa: TID251  PERMANENT(env write before import)
+        "STEALTH_MCP_NO_AUTO_RECOVERY", "1"
+    )
     _ensure_embedded_on_path()
     import server
 

@@ -56,9 +56,12 @@ class Settings(BaseSettings):
     session_storage_cap_gb: float = 20.0
 
     # -- Legacy unprefixed config (names preserved verbatim via alias) -------
-    browser_idle_timeout: int = Field(
-        600, validation_alias="BROWSER_IDLE_TIMEOUT", ge=0
-    )
+    # 0 = idle reaping disabled (never auto-close): the correct default for a
+    # persistent server. The old server.py forced BROWSER_IDLE_TIMEOUT=0 via an
+    # import-time os.environ.setdefault, so 0 was already the effective runtime
+    # default; encoding it here removes that shadow write and the get_settings()
+    # caching hazard it created.
+    browser_idle_timeout: int = Field(0, validation_alias="BROWSER_IDLE_TIMEOUT", ge=0)
     browser_idle_reaper_interval: int = Field(
         60, validation_alias="BROWSER_IDLE_REAPER_INTERVAL", ge=1
     )
@@ -87,6 +90,9 @@ class Settings(BaseSettings):
     )
     browser_profile_refresh_days: int = Field(
         7, validation_alias="BROWSER_PROFILE_REFRESH_DAYS"
+    )
+    browser_orphan_profile_max_age: int = Field(
+        21600, validation_alias="BROWSER_ORPHAN_PROFILE_MAX_AGE", ge=0
     )
     stealth_chrome_profile_key: str | None = Field(
         None, validation_alias="STEALTH_CHROME_PROFILE_KEY"

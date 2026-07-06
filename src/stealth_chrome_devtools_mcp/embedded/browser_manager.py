@@ -1,7 +1,6 @@
 """Browser instance management with nodriver."""
 
 import asyncio
-import os
 import time
 import uuid
 from collections.abc import Coroutine
@@ -30,56 +29,21 @@ from proxy_utils import (
     redact_launch_arg,
 )
 
-
-def _parse_nonnegative_int_env(
-    name: str,
-    default: int,
-    minimum: int = 0,
-) -> int:
-    """
-    Parse a non-negative integer environment variable with a fallback default.
-
-    Args:
-        name (str): Environment variable name.
-        default (int): Fallback value if parsing fails.
-        minimum (int): Minimum accepted value.
-
-    Returns:
-        int: Parsed integer or the provided default.
-    """
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        parsed = int(value.strip())
-    except (TypeError, ValueError):
-        return default
-    if parsed < minimum:
-        return default
-    return parsed
+from stealth_chrome_devtools_mcp.settings import get_settings
 
 
 class BrowserManager:
     """Manages multiple browser instances."""
 
     NAVIGATION_RECYCLE_THRESHOLD = 25
-    DEFAULT_IDLE_TIMEOUT_SECONDS = 600
-    DEFAULT_IDLE_REAPER_INTERVAL_SECONDS = 60
 
     def __init__(self):
         self._instances: dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self._spawn_diagnostics: dict[str, dict[str, Any]] = {}
         self._proxy_forwarders: dict[str, AuthenticatedProxyForwarder] = {}
-        self._idle_timeout_seconds_default = _parse_nonnegative_int_env(
-            "BROWSER_IDLE_TIMEOUT",
-            self.DEFAULT_IDLE_TIMEOUT_SECONDS,
-        )
-        self._idle_reaper_interval_seconds = _parse_nonnegative_int_env(
-            "BROWSER_IDLE_REAPER_INTERVAL",
-            self.DEFAULT_IDLE_REAPER_INTERVAL_SECONDS,
-            minimum=1,
-        )
+        self._idle_timeout_seconds_default = get_settings().browser_idle_timeout
+        self._idle_reaper_interval_seconds = get_settings().browser_idle_reaper_interval
         self._idle_reaper_task: asyncio.Task | None = None
         # Strong refs to fire-and-forget background tasks so the event loop can't
         # garbage-collect them mid-run; the done-callback discards each entry and

@@ -41,39 +41,24 @@ from process_cleanup import process_cleanup
 from progressive_element_cloner import progressive_element_cloner
 from response_handler import response_handler
 
+from stealth_chrome_devtools_mcp.settings import get_settings
+
 DISABLED_SECTIONS = set()
 SECTION_TOOLS: dict[str, list[str]] = defaultdict(list)
 
 
-def parse_bool_env(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
-
-
-def parse_float_env(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
-
-
-CDP_OPERATION_TIMEOUT = parse_float_env("CDP_OPERATION_TIMEOUT_SECONDS", 30.0)
+CDP_OPERATION_TIMEOUT = get_settings().cdp_operation_timeout_seconds
 MAX_TIMEOUT_MS = 60_000
 
 # User-supplied JS (execute_script) gets a short, dedicated timeout so a blocking
 # script fails fast instead of freezing the tab for the full CDP_OPERATION_TIMEOUT
 # window and stalling every subsequent call.
-EXECUTE_SCRIPT_TIMEOUT = parse_float_env("EXECUTE_SCRIPT_TIMEOUT_SECONDS", 10.0)
+EXECUTE_SCRIPT_TIMEOUT = get_settings().execute_script_timeout_seconds
 
 # Reject user scripts larger than this. Huge inline payloads (e.g. base64-encoded
 # files) overflow the transport and are almost always an upload hack — callers
 # should use the upload_file tool instead.
-MAX_USER_SCRIPT_BYTES = int(parse_float_env("MAX_USER_SCRIPT_BYTES", 100_000))
+MAX_USER_SCRIPT_BYTES = get_settings().max_user_script_bytes
 
 # High-confidence denylist of patterns that block the renderer's main thread or
 # overflow the page. This is NOT a JS sandbox — just a guard against the handful
@@ -210,15 +195,11 @@ def _install_nodriver_cookie_compat() -> None:
     setattr(cdp_network.Cookie, marker, True)
 
 
-DEBUG_LOGGING_ENABLED = parse_bool_env(
-    "STEALTH_BROWSER_DEBUG", default=False
-) or parse_bool_env("DEBUG", default=False)
-
-os.environ.setdefault("BROWSER_IDLE_TIMEOUT", "0")
+DEBUG_LOGGING_ENABLED = get_settings().stealth_browser_debug or get_settings().debug
 
 
 def _default_session_root() -> Path:
-    root = os.getenv("STEALTH_MCP_BROWSER_SESSION_ROOT")
+    root = get_settings().browser_session_root
     if root:
         return Path(root).expanduser()
     if os.name == "nt":
@@ -227,31 +208,28 @@ def _default_session_root() -> Path:
 
 
 def _master_profile_dir() -> Path:
-    configured = os.getenv("BROWSER_MASTER_USER_DATA_DIR")
+    configured = get_settings().browser_master_user_data_dir
     if configured:
         return Path(configured).expanduser()
     return _default_session_root() / "master"
 
 
 def _clone_root_dir() -> Path:
-    configured = os.getenv("BROWSER_PROFILE_CLONE_ROOT")
+    configured = get_settings().browser_profile_clone_root
     if configured:
         return Path(configured).expanduser()
     return _default_session_root() / "sessions"
 
 
 def _master_snapshot_dir() -> Path:
-    configured = os.getenv("BROWSER_MASTER_SNAPSHOT_DIR")
+    configured = get_settings().browser_master_snapshot_dir
     if configured:
         return Path(configured).expanduser()
     return _default_session_root() / "master-snapshot"
 
 
 def _profile_refresh_days() -> int:
-    try:
-        return int(os.getenv("BROWSER_PROFILE_REFRESH_DAYS", "7"))
-    except ValueError:
-        return 7
+    return get_settings().browser_profile_refresh_days
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -332,7 +310,7 @@ def _clone_storage_cap_bytes() -> int:
     <= 0 disables the cap entirely. Only disposable auto-clones count against
     this — user-named/explicit profiles are never measured or reclaimed.
     """
-    gb = parse_float_env("STEALTH_MCP_CLONE_STORAGE_CAP_GB", 10.0)
+    gb = get_settings().clone_storage_cap_gb
     if gb <= 0:
         return 0
     return int(gb * (1024**3))
@@ -440,7 +418,7 @@ def _clone_trash_retention_seconds() -> float:
     value <= 0 purges on the next sweep, restoring the old delete-immediately
     behavior for anyone who wants it.
     """
-    hours = parse_float_env("STEALTH_MCP_CLONE_TRASH_RETENTION_HOURS", 24.0)
+    hours = get_settings().clone_trash_retention_hours
     return max(0.0, hours) * 3600.0
 
 
@@ -585,7 +563,7 @@ def _session_storage_cap_bytes() -> int:
     are trimmed of regenerable data. Default 20 GiB; override with
     ``STEALTH_MCP_SESSION_STORAGE_CAP_GB`` (a value <= 0 disables the trim).
     """
-    gb = parse_float_env("STEALTH_MCP_SESSION_STORAGE_CAP_GB", 20.0)
+    gb = get_settings().session_storage_cap_gb
     if gb <= 0:
         return 0
     return int(gb * (1024**3))
@@ -1003,8 +981,8 @@ def _root_to_path(root: Any) -> str | None:
 
 
 async def _client_session_seed() -> str:
-    configured = os.getenv("STEALTH_CHROME_PROFILE_KEY") or os.getenv(
-        "BROWSER_PROFILE_KEY"
+    configured = (
+        get_settings().stealth_chrome_profile_key or get_settings().browser_profile_key
     )
     if configured:
         return configured
@@ -1025,9 +1003,9 @@ async def _client_session_seed() -> str:
         return "|".join(sorted(roots))
 
     return (
-        os.getenv("CODEX_WORKSPACE")
-        or os.getenv("CLAUDE_PROJECT_DIR")
-        or os.getenv("PWD")
+        get_settings().codex_workspace
+        or get_settings().claude_project_dir
+        or get_settings().pwd
         or os.getcwd()
     )
 
@@ -1558,7 +1536,7 @@ async def get_instance_state(instance_id: str) -> dict[str, Any] | None:
     Returns:
         Optional[Dict[str, Any]]: Complete state information.
     """
-    timeout_seconds = parse_float_env("BROWSER_STATE_TIMEOUT_SECONDS", 10.0)
+    timeout_seconds = get_settings().browser_state_timeout_seconds
     try:
         state = await asyncio.wait_for(
             browser_manager.get_page_state(instance_id),
@@ -4240,7 +4218,7 @@ def validate_hook_function(function_code: str) -> dict[str, Any]:
     return dynamic_hook_ai.validate_hook_function(function_code=function_code)
 
 
-if parse_bool_env("XPOOL_SAFE_MODE", default=False):
+if get_settings().xpool_safe_mode:
     DISABLED_SECTIONS.add("cdp-functions")
     apply_disabled_sections()
 
@@ -4265,7 +4243,7 @@ def build_arg_parser():
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.getenv("PORT", 8000)),
+        default=get_settings().port,
         help="Port for HTTP transport",
     )
     parser.add_argument(
@@ -4350,7 +4328,7 @@ def build_arg_parser():
     parser.add_argument(
         "--xpool-safe",
         action="store_true",
-        default=parse_bool_env("XPOOL_SAFE_MODE", default=False),
+        default=get_settings().xpool_safe_mode,
         help="Enable xpool-safe surface (disables cdp-functions tools that trigger Runtime.enable)",
     )
 
