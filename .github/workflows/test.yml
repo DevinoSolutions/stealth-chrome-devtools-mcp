@@ -38,7 +38,41 @@ jobs:
           uv run pytest -m "not integration" -v --tb=short
           --cov=src/stealth_chrome_devtools_mcp
           --cov-report=term-missing
-          --cov-fail-under=39
+          --cov-fail-under=41
+
+  quality:
+    name: Quality Gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5.4.1
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: ruff format --check
+        run: uv run ruff format --check
+
+      - name: ruff check
+        run: uv run ruff check
+
+      - name: ty check
+        run: uv run ty check --exit-zero-on-warning src/stealth_chrome_devtools_mcp/
+
+      - name: vulture
+        run: uv run vulture src/stealth_chrome_devtools_mcp/ tools/vulture_allowlist.py
+
+      - name: check suppression owners
+        run: uv run python tools/check_suppression_owners.py
+
+      - name: check file budgets
+        run: uv run python tools/check_file_budgets.py
 
   integration-tests:
     name: Integration Tests
