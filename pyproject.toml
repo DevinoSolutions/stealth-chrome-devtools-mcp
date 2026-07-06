@@ -285,3 +285,11 @@ invalid-return-type = "warn"
 unresolved-attribute = "warn"
 invalid-assignment = "warn"
 possibly-unresolved-reference = "warn"
+
+# ---------------------------------------------------------------------------
+# vulture — dead-code detection (2.5-gates §4)
+# ---------------------------------------------------------------------------
+[tool.vulture]
+paths = ["src"]
+min_confidence = 80
+ignore_decorators = ["@mcp.tool", "@section_tool", "@mcp.resource", "@staticmethod", "@classmethod", "@property"]
