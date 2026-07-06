@@ -101,6 +101,7 @@ packages = ["src/stealth_chrome_devtools_mcp"]
 target-version = "py311"
 line-length = 88
 src = ["src", "tests"]
+extend-exclude = ["tools/vulture_allowlist.py"]
 
 [tool.ruff.lint]
 # Curated ruleset - every group maps to a verified audit finding (2.5-gates task
@@ -149,8 +150,9 @@ ban-relative-imports = "all"
 
 [tool.ruff.lint.per-file-ignores]
 # ── PERMANENT exemptions ────────────────────────────────────────────────────
+"tools/**" = ["T20", "INP001"]  # PERMANENT(gate scripts are CLI tools that print)
 "tests/**" = [
-    "S101", "ANN", "PLR2004", "ARG", "S105", "S106", "S107", "INP001",
+    "S101", "ANN", "PLR2004", "ARG", "S105", "S106", "S107", "INP001", "E402", "PLW1510",
     "TID251",   # tests legitimately set os.environ / use subprocess.DEVNULL
     "S603",     # spawn backend / helper subprocesses
     "S104",     # assert 0.0.0.0 bind behaviour

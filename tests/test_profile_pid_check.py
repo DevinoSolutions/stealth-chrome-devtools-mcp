@@ -14,9 +14,7 @@ def test_profile_pid_check_survives_os_error(tmp_path, monkeypatch):
     def _raise(_user_data_dir):
         raise OSError("simulated PID-lookup failure")
 
-    monkeypatch.setattr(
-        server.process_cleanup, "_get_browser_pids_for_profile", _raise
-    )
+    monkeypatch.setattr(server.process_cleanup, "_get_browser_pids_for_profile", _raise)
 
     # tmp_path carries no Chrome singleton markers, so the liveness heuristic must
     # fall back to False without raising.

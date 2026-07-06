@@ -1,0 +1,18 @@
+#!/bin/sh
+# Quality gates — pre-commit (no pytest, too slow)
+
+if [ -f .venv/bin/python ]; then
+  PY=".venv/bin/python"
+elif [ -f .venv/Scripts/python.exe ]; then
+  PY=".venv/Scripts/python.exe"
+else
+  echo "ERROR: no .venv python found — run: uv sync" >&2
+  exit 1
+fi
+
+"$PY" -m ruff format --check || exit 1
+"$PY" -m ruff check || exit 1
+"$PY" -m ty check --exit-zero-on-warning src/stealth_chrome_devtools_mcp/ || exit 1
+"$PY" -m vulture src/stealth_chrome_devtools_mcp/ tools/vulture_allowlist.py || exit 1
+"$PY" tools/check_suppression_owners.py || exit 1
+"$PY" tools/check_file_budgets.py || exit 1

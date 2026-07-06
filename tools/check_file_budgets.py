@@ -31,13 +31,10 @@ def main() -> int:
         if rel in GRANDFATHER:
             cap, owner = GRANDFATHER[rel]
             if loc > cap:
-                violations.append(
-                    f"{rel}: {loc} LOC > grandfathered {cap} ({owner})"
-                )
+                violations.append(f"{rel}: {loc} LOC > grandfathered {cap} ({owner})")
         elif loc > LOC_BUDGET:
             violations.append(
-                f"{rel}: {loc} LOC > budget {LOC_BUDGET} "
-                f"(not grandfathered)"
+                f"{rel}: {loc} LOC > budget {LOC_BUDGET} (not grandfathered)"
             )
 
     if violations:

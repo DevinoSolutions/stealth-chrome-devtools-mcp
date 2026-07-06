@@ -1,0 +1,13 @@
+#!/bin/sh
+# Quality gates — pre-push (includes unit tests)
+
+if [ -f .venv/bin/python ]; then
+  PY=".venv/bin/python"
+elif [ -f .venv/Scripts/python.exe ]; then
+  PY=".venv/Scripts/python.exe"
+else
+  echo "ERROR: no .venv python found — run: uv sync" >&2
+  exit 1
+fi
+
+"$PY" -m pytest -m "not integration" -q || exit 1

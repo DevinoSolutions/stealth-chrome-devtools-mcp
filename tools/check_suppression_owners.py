@@ -33,9 +33,7 @@ def check_inline_noqas() -> list[str]:
         ):
             if NOQA_RE.search(line) and not OWNER_RE.search(line):
                 rel = py.relative_to(SRC_ROOT.parent)
-                violations.append(
-                    f"{rel}:{lineno}: bare noqa without owner tag"
-                )
+                violations.append(f"{rel}:{lineno}: bare noqa without owner tag")
     return violations
 
 
@@ -60,16 +58,13 @@ def check_pyproject_per_file_ignores() -> list[str]:
             comment = line.split("#", 1)[1] if "#" in line else ""
             if not OWNER_RE.search(comment):
                 violations.append(
-                    f"pyproject.toml:{lineno}: "
-                    f"per-file-ignore without owner tag"
+                    f"pyproject.toml:{lineno}: per-file-ignore without owner tag"
                 )
     return violations
 
 
 def main() -> int:
-    violations = (
-        check_inline_noqas() + check_pyproject_per_file_ignores()
-    )
+    violations = check_inline_noqas() + check_pyproject_per_file_ignores()
     if violations:
         print(f"Found {len(violations)} untagged suppression(s):")
         for v in violations:

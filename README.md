@@ -245,6 +245,17 @@ uses the same selectors as the automatic sweep, so the preview matches `--apply`
 - Chrome, Chromium, or Microsoft Edge
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
+## Development setup
+
+```bash
+uv sync --extra dev --extra test   # install linters + test deps
+npm install                        # arm husky pre-commit/pre-push hooks
+```
+
+The six quality gates run automatically on every commit:
+ruff format, ruff check, ty check, vulture, suppression-owner check, file-budget check.
+Unit tests run on pre-push.
+
 ## License
 
 See [LICENSE](LICENSE).
