@@ -17,19 +17,18 @@ def test_sentry_init_is_noop_without_dsn(monkeypatch):
 
 
 def test_sentry_init_initializes_when_dsn_set(monkeypatch):
+    pytest.importorskip("sentry_sdk")
     monkeypatch.setenv("SENTRY_DSN", _FAKE_DSN)
     captured = {}
 
     def _fake_init(**kwargs):
         captured.update(kwargs)
 
-    # Patch only the external SDK boundary so no real client/transport spins up;
-    # assert the wiring (dsn, release, integrations) is correct.
     with patch("sentry_sdk.init", _fake_init):
         assert observability.sentry_init() is True
 
     assert captured["dsn"] == _FAKE_DSN
-    assert captured["release"] is not None  # resolved from the installed package
+    assert captured["release"] is not None
     names = {type(i).__name__ for i in captured["integrations"]}
     assert "LoggingIntegration" in names
     assert "AsyncioIntegration" in names

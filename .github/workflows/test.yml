@@ -27,7 +27,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra test
+        run: uv sync --extra test --extra sentry
 
       - name: Run unit tests
         # Coverage gate: fail the build if unit coverage regresses below the
