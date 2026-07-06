@@ -8,12 +8,9 @@ Verifies that:
 """
 
 import asyncio
-import os
-import signal
 import sys
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
 
 import psutil
 import pytest
@@ -31,12 +28,11 @@ if str(EMBEDDED_DIR) not in sys.path:
 from models import NavigationOptions
 from pydantic import ValidationError
 from server import (
-    _with_cdp_timeout,
-    _clamp_timeout,
     CDP_OPERATION_TIMEOUT,
     MAX_TIMEOUT_MS,
+    _clamp_timeout,
+    _with_cdp_timeout,
 )
-
 
 # ---------------------------------------------------------------------------
 # Unit tests: _with_cdp_timeout mechanism

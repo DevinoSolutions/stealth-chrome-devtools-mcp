@@ -10,23 +10,15 @@ Validates that:
 """
 
 import asyncio
-import os
-import sys
-import threading
-from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import psutil
 import pytest
-
 from debug_logger import DebugLogger
 from dynamic_hook_system import DynamicHookSystem
 from network_interceptor import NetworkInterceptor
 from persistent_storage import InMemoryStorage
-
 
 # ---------------------------------------------------------------------------
 # DebugLogger — bounded growth

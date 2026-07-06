@@ -5,15 +5,15 @@ This system provides examples, documentation, and learning materials for AI
 to understand how to create effective hook functions.
 """
 
-from typing import Dict, List, Any
 import ast
+from typing import Any
 
 
 class HookLearningSystem:
     """System to help AI learn how to create hook functions."""
 
     @staticmethod
-    def get_request_object_documentation() -> Dict[str, Any]:
+    def get_request_object_documentation() -> dict[str, Any]:
         """Get comprehensive documentation of the request object structure."""
         return {
             "request_object": {
@@ -98,7 +98,7 @@ class HookLearningSystem:
         }
 
     @staticmethod
-    def get_hook_examples() -> List[Dict[str, Any]]:
+    def get_hook_examples() -> list[dict[str, Any]]:
         """Get example hook functions for AI learning."""
         return [
             {
@@ -384,7 +384,7 @@ def process_request(request):
         ]
 
     @staticmethod
-    def get_requirements_documentation() -> Dict[str, Any]:
+    def get_requirements_documentation() -> dict[str, Any]:
         """Get documentation on hook requirements/matching criteria."""
         return {
             "requirements": {
@@ -448,7 +448,7 @@ def process_request(request):
         }
 
     @staticmethod
-    def get_common_patterns() -> List[Dict[str, Any]]:
+    def get_common_patterns() -> list[dict[str, Any]]:
         """Get common hook patterns and use cases."""
         return [
             {
@@ -490,7 +490,7 @@ def process_request(request):
         ]
 
     @staticmethod
-    def validate_hook_function(function_code: str) -> Dict[str, Any]:
+    def validate_hook_function(function_code: str) -> dict[str, Any]:
         """Validate hook function code for common issues."""
         issues = []
         warnings = []

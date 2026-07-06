@@ -6,12 +6,11 @@ credentials must never leak into logged/echoed launch args.
 """
 
 import pytest
-
 from proxy_utils import (
     ProxyConfig,
     ProxyConfigError,
-    parse_proxy_config,
     merge_proxy_server_arg,
+    parse_proxy_config,
     redact_launch_arg,
 )
 

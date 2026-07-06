@@ -21,9 +21,8 @@ the env override so they never touch the real home directory.
 from pathlib import Path
 
 import response_handler as rh_mod
-from response_handler import ResponseHandler, default_clone_output_dir
 from file_based_element_cloner import FileBasedElementCloner
-
+from response_handler import ResponseHandler, default_clone_output_dir
 
 # .../src/stealth_chrome_devtools_mcp/embedded
 PACKAGE_EMBEDDED_DIR = Path(rh_mod.__file__).resolve().parent

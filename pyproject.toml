@@ -90,3 +90,45 @@ packages = ["src/stealth_chrome_devtools_mcp"]
 target-version = "py311"
 line-length = 88
 src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Curated ruleset - every group maps to a verified audit finding (2.5-gates task
+# section 2). Loud-error / Sentry-capturability chain: E722 + BLE001, S110/S112,
+# B (incl B904 raise-from), TRY (minus TRY003, incl TRY400 logging.exception),
+# LOG + G (incl G201). ASYNC = blocking calls on the loop. ANN401 = no typing.Any.
+# PGH = anti-hack (no bare noqa / un-coded type:ignore). TID = banned-api below.
+select = [
+    "F", "E", "W", "I", "N", "UP", "C4", "PIE", "SIM", "RET", "RSE", "A",
+    "PTH", "PERF", "FURB", "RUF", "BLE", "S", "B", "TRY", "LOG", "G", "ASYNC",
+    "T10", "T20", "ERA", "DTZ", "ANN", "ARG", "TC", "INP", "PGH", "PL", "C90",
+    "TID",
+]
+# Deliberately NOT enabled (silence must be a decision - 2.5-gates task section 2):
+#   TRY003 + EM101/102/103 - they fight the APPROVED M4-A1 error-envelope idiom
+#     `raise ToolError("<message>")` (~55 sites land exactly that shape; linting
+#     against it would be a rule that lies).
+#   D (docstrings) - M14 owns the doc surface; revisit after it lands.
+#   FBT - semantic-default bugs (F-745) are not lintable; churn without an owner.
+#   COM / Q / ISC - the formatter owns those.
+#   FIX / TD - debt lives in the audit ledger (M14), not in TODO-comment policing.
+# E501/line-length IS enforced (human directive 2026-07-06).
+ignore = ["TRY003"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.flake8-tidy-imports]
+# Matches the approved M4-Ph1 STEP-0 absolute-imports design.
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# Repo-specific bans - each msg cites the finding and the sanctioned alternative.
+"subprocess.DEVNULL".msg = "F-303/F-503: DEVNULL spawn hid every backend crash. Use the M3 logging spawn helper; the current spawn site is owner-tagged plan_M3 until it lands."
+"os.getenv".msg = "F-720/F-763: env access has ONE home - settings.get_settings(). Add a typed field to the Settings model."
+"os.environ".msg = "F-720/F-763: env access has ONE home - settings.get_settings(). Add a typed field to the Settings model."
+"typing.Any".msg = "No typing.Any (ANN401 + the no-Any mandate). Use precise types / object / protocols; ty is the source of truth."
+"asyncio.get_event_loop".msg = "Deprecated; use asyncio.get_running_loop()."
+
+[tool.ruff.lint.per-file-ignores]
+"src/stealth_chrome_devtools_mcp/cli.py" = ["T20"]  # PERMANENT(print is the CLI's UI)
+"tests/**" = ["S101", "ANN", "PLR2004", "ARG", "S105", "S106", "S107", "INP001"]  # PERMANENT(pytest idioms: assert, no annotations, magic values, unused fixtures, fake secrets, non-package dir)

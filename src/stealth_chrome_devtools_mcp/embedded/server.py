@@ -7,7 +7,6 @@ import importlib
 import json
 import os
 import re
-import signal
 import shutil
 import sys
 import tempfile
@@ -16,12 +15,9 @@ import time
 import urllib.parse
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-
-import nodriver as uc
-from fastmcp import FastMCP
+from typing import Any
 
 from browser_manager import BrowserManager
 from cdp_element_cloner import CDPElementCloner
@@ -29,26 +25,23 @@ from cdp_function_executor import CDPFunctionExecutor
 from comprehensive_element_cloner import comprehensive_element_cloner
 from debug_logger import debug_logger
 from dom_handler import DOMHandler
+from dynamic_hook_ai_interface import dynamic_hook_ai
+from dynamic_hook_system import dynamic_hook_system
 from element_cloner import element_cloner
+from fastmcp import FastMCP
 from file_based_element_cloner import file_based_element_cloner
 from models import (
     BrowserOptions,
-    NavigationOptions,
-    ScriptResult,
-    BrowserState,
-    PageState,
 )
 from network_interceptor import NetworkInterceptor
-from dynamic_hook_system import dynamic_hook_system
-from dynamic_hook_ai_interface import dynamic_hook_ai
 from persistent_storage import persistent_storage
+from platform_utils import get_platform_info, validate_browser_environment
+from process_cleanup import process_cleanup
 from progressive_element_cloner import progressive_element_cloner
 from response_handler import response_handler
-from platform_utils import validate_browser_environment, get_platform_info
-from process_cleanup import process_cleanup
 
 DISABLED_SECTIONS = set()
-SECTION_TOOLS: Dict[str, List[str]] = defaultdict(list)
+SECTION_TOOLS: dict[str, list[str]] = defaultdict(list)
 
 
 def parse_bool_env(name: str, default: bool = False) -> bool:
@@ -107,7 +100,7 @@ _BLOCKING_SCRIPT_PATTERNS = [
 ]
 
 
-def _script_rejection_reason(script: str) -> Optional[str]:
+def _script_rejection_reason(script: str) -> str | None:
     """Return a corrective message if a user script is unsafe to run, else None.
 
     Guards against the common foot-guns that freeze the tab or overflow the
@@ -147,7 +140,7 @@ async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
     t = timeout or CDP_OPERATION_TIMEOUT
     try:
         return await asyncio.wait_for(coro, timeout=t)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         tag = f" (instance {instance_id})" if instance_id else ""
         raise Exception(
             f"CDP operation timed out after {t:.0f}s{tag}. "
@@ -169,7 +162,7 @@ def _install_asyncio_close_noise_filter() -> None:
     previous_handler = loop.get_exception_handler()
 
     def exception_handler(
-        loop: asyncio.AbstractEventLoop, context: Dict[str, Any]
+        loop: asyncio.AbstractEventLoop, context: dict[str, Any]
     ) -> None:
         exception = context.get("exception")
         if (
@@ -206,7 +199,7 @@ def _install_nodriver_cookie_compat() -> None:
 
     original_from_json = cdp_network.Cookie.from_json
 
-    def from_json(json_obj: Dict[str, Any]):
+    def from_json(json_obj: dict[str, Any]):
         if isinstance(json_obj, dict) and "sameParty" not in json_obj:
             json_obj = dict(json_obj)
             json_obj["sameParty"] = False
@@ -511,7 +504,7 @@ def _purge_expired_trash(clone_root: Path, max_age_seconds: float) -> int:
     return purged
 
 
-def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> List[Path]:
+def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
     """Oldest-first idle auto-clones whose removal brings total auto-clone
     storage within ``cap_bytes``. Read-only — selection only, no deletion.
 
@@ -544,7 +537,7 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> List[Path]:
     if total <= cap_bytes:
         return []
 
-    victims: List[Path] = []
+    victims: list[Path] = []
     for _mtime, size, entry in sorted(autos, key=lambda item: item[0]):
         if total <= cap_bytes:
             break
@@ -612,13 +605,13 @@ def _clone_is_named(clone_dir: Path) -> bool:
     return str(data.get("source_kind", "")).startswith("explicit")
 
 
-def _regenerable_dirs_in_profile(profile_dir: Path) -> List[Path]:
+def _regenerable_dirs_in_profile(profile_dir: Path) -> list[Path]:
     """Regenerable cache/model directories in a profile — those named in
     ``_REGENERABLE_PROFILE_NAMES``, at the profile root and one level down
     (``Default/``, ``Profile N/``), which is where Chrome keeps its caches and
     on-device model stores. Never recurses deeper, so session-state dirs such as
     ``Local Storage`` and ``IndexedDB`` are never included."""
-    found: List[Path] = []
+    found: list[Path] = []
 
     def _scan(directory: Path) -> None:
         try:
@@ -665,7 +658,7 @@ def _trim_profile_regenerable(profile_dir: Path) -> int:
     return freed
 
 
-def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> List[Path]:
+def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
     """Largest-first idle named profiles whose trim brings total clone-root
     storage within ``cap_bytes``. Read-only — selection only.
 
@@ -698,7 +691,7 @@ def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> List[P
     if total <= cap_bytes:
         return []
 
-    victims: List[Path] = []
+    victims: list[Path] = []
     for _size, entry in sorted(
         sized, key=lambda item: item[0], reverse=True
     ):  # largest first
@@ -799,7 +792,7 @@ def _spawn_background_sweep(reason: str = "") -> None:
     task.add_done_callback(_BACKGROUND_SWEEPS.discard)
 
 
-def _profile_ignore_names(directory: str, names: List[str]) -> set:
+def _profile_ignore_names(directory: str, names: list[str]) -> set:
     ignored = set()
     for name in names:
         lower = name.lower()
@@ -926,7 +919,7 @@ def _copy_profile_tree(
     marker = {
         "source": str(source),
         "source_kind": source_kind,
-        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         # Disposable auto-clones may be reclaimed by the storage-cap sweep;
         # explicit/named profiles (explicit-* source kinds) never are.
         "auto_clean": not str(source_kind).startswith("explicit"),
@@ -950,7 +943,7 @@ def _clone_needs_refresh(target: Path) -> bool:
     return datetime.fromtimestamp(marker.stat().st_mtime) < cutoff
 
 
-def _refresh_master_snapshot_if_safe(reason: str) -> Dict[str, Any]:
+def _refresh_master_snapshot_if_safe(reason: str) -> dict[str, Any]:
     master = _master_profile_dir()
     snapshot = _master_snapshot_dir()
     result = {
@@ -997,7 +990,7 @@ def _snapshot_needs_refresh() -> bool:
     return False
 
 
-def _root_to_path(root: Any) -> Optional[str]:
+def _root_to_path(root: Any) -> str | None:
     value = getattr(root, "uri", None) or root
     value = str(value)
     if value.startswith("file://"):
@@ -1005,7 +998,7 @@ def _root_to_path(root: Any) -> Optional[str]:
         return urllib.parse.unquote(
             parsed.path.lstrip("/") if os.name == "nt" else parsed.path
         )
-    return value if value else None
+    return value or None
 
 
 async def _client_session_seed() -> str:
@@ -1055,7 +1048,7 @@ def _unique_clone_dir(base_clone: Path, suffix: str) -> Path:
     if not _profile_has_running_browser(candidate):
         return candidate
     return base_clone.with_name(
-        f"{base_clone.name}-{os.getpid()}-{safe_suffix}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+        f"{base_clone.name}-{os.getpid()}-{safe_suffix}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
     )
 
 
@@ -1073,7 +1066,7 @@ def _available_clone_dir(base_clone: Path) -> Path:
             return candidate
 
     return base_clone.with_name(
-        f"{base_clone.name}-{os.getpid()}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        f"{base_clone.name}-{os.getpid()}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
     )
 
 
@@ -1089,14 +1082,14 @@ def _next_available_explicit_dir(requested: Path) -> Path:
         if not _profile_has_running_browser(candidate):
             return candidate
     return requested.with_name(
-        f"{requested.name}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        f"{requested.name}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
     )
 
 
 def _copy_clone_from_source(
     source: Path, clone: Path, clone_root: Path, source_kind: str
-) -> Dict[str, Any]:
-    selection: Dict[str, Any] = {
+) -> dict[str, Any]:
+    selection: dict[str, Any] = {
         "user_data_dir": str(clone),
         "profile_role": "clone",
         "clone_source": source_kind,
@@ -1107,18 +1100,18 @@ def _copy_clone_from_source(
     return selection
 
 
-def _public_profile_selection(profile_selection: Dict[str, Any]) -> Dict[str, Any]:
+def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, Any]:
     return dict(profile_selection)
 
 
 async def _resolve_profile_selection(
-    user_data_dir: Optional[str],
+    user_data_dir: str | None,
     *,
     force_clone: bool = False,
-    source_override: Optional[Path] = None,
-    source_kind: Optional[str] = None,
-    clone_suffix: Optional[str] = None,
-) -> Dict[str, Any]:
+    source_override: Path | None = None,
+    source_kind: str | None = None,
+    clone_suffix: str | None = None,
+) -> dict[str, Any]:
     master = _master_profile_dir()
     clone_root = _clone_root_dir()
     snapshot = _master_snapshot_dir()
@@ -1221,9 +1214,9 @@ async def _resolve_profile_selection(
 
 
 async def _fallback_profile_selection(
-    previous_selection: Dict[str, Any],
+    previous_selection: dict[str, Any],
     attempt: int,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     if previous_selection.get("profile_role") != "clone":
         return None
 
@@ -1365,18 +1358,18 @@ if DEBUG_LOGGING_ENABLED:
 @section_tool("browser-management")
 async def spawn_browser(
     headless: bool = False,
-    user_agent: Optional[str] = None,
+    user_agent: str | None = None,
     viewport_width: int = 1920,
     viewport_height: int = 1080,
-    proxy: Optional[str] = None,
-    browser_args: List[str] = None,
-    timezone_id: Optional[str] = None,
-    idle_timeout_seconds: Optional[int] = None,
-    block_resources: List[str] = None,
-    extra_headers: Dict[str, str] = None,
-    user_data_dir: Optional[str] = None,
-    sandbox: Optional[Any] = None,
-) -> Dict[str, Any]:
+    proxy: str | None = None,
+    browser_args: list[str] = None,
+    timezone_id: str | None = None,
+    idle_timeout_seconds: int | None = None,
+    block_resources: list[str] = None,
+    extra_headers: dict[str, str] = None,
+    user_data_dir: str | None = None,
+    sandbox: Any | None = None,
+) -> dict[str, Any]:
     """
     Spawn a new browser instance.
 
@@ -1409,9 +1402,7 @@ async def spawn_browser(
             sandbox = not (is_running_as_root() or is_running_in_container())
         elif isinstance(sandbox, str):
             sandbox = sandbox.lower() in ("true", "1", "yes", "on", "enabled")
-        elif isinstance(sandbox, int):
-            sandbox = bool(sandbox)
-        elif not isinstance(sandbox, bool):
+        elif isinstance(sandbox, int) or not isinstance(sandbox, bool):
             sandbox = bool(sandbox)
 
         profile_selection = await _resolve_profile_selection(user_data_dir)
@@ -1482,11 +1473,11 @@ async def spawn_browser(
             "spawn_diagnostics": spawn_diagnostics or {},
         }
     except Exception as e:
-        raise Exception(f"Failed to spawn browser: {str(e)}")
+        raise Exception(f"Failed to spawn browser: {e!s}")
 
 
 @section_tool("browser-management")
-async def list_instances() -> List[Dict[str, Any]]:
+async def list_instances() -> list[dict[str, Any]]:
     """
     List all active browser instances.
 
@@ -1556,7 +1547,7 @@ async def close_instance(instance_id: str) -> bool:
 
 
 @section_tool("browser-management")
-async def get_instance_state(instance_id: str) -> Optional[Dict[str, Any]]:
+async def get_instance_state(instance_id: str) -> dict[str, Any] | None:
     """
     Get detailed state of a browser instance.
 
@@ -1572,7 +1563,7 @@ async def get_instance_state(instance_id: str) -> Optional[Dict[str, Any]]:
             browser_manager.get_page_state(instance_id),
             timeout=timeout_seconds,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         for instance in await browser_manager.list_instances():
             if instance.instance_id == instance_id:
                 return {
@@ -1621,8 +1612,8 @@ async def navigate(
     url: str,
     wait_until: str = "load",
     timeout: int = 30000,
-    referrer: Optional[str] = None,
-) -> Dict[str, Any]:
+    referrer: str | None = None,
+) -> dict[str, Any]:
     """
     Navigate to a URL.
 
@@ -1710,10 +1701,10 @@ async def reload_page(instance_id: str, ignore_cache: bool = False) -> bool:
 async def query_elements(
     instance_id: str,
     selector: str,
-    text_filter: Optional[str] = None,
+    text_filter: str | None = None,
     visible_only: bool = True,
-    limit: Optional[Any] = None,
-) -> List[Dict[str, Any]]:
+    limit: Any | None = None,
+) -> list[dict[str, Any]]:
     """
     Query DOM elements.
 
@@ -1760,14 +1751,14 @@ async def query_elements(
     debug_logger.log_info(
         "Server", "query_elements", f"Returning {len(result)} results to MCP client"
     )
-    return result if result else []
+    return result or []
 
 
 @section_tool("element-interaction")
 async def click_element(
     instance_id: str,
     selector: str,
-    text_match: Optional[str] = None,
+    text_match: str | None = None,
     timeout: int = 10000,
 ) -> bool:
     """
@@ -1796,9 +1787,9 @@ async def click_element(
 async def upload_file(
     instance_id: str,
     selector: str,
-    file_paths: Union[str, List[str]],
+    file_paths: str | list[str],
     timeout: int = 10000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Upload local file(s) to a file input. USE THIS for file uploads.
 
@@ -1896,9 +1887,9 @@ async def paste_text(
 async def select_option(
     instance_id: str,
     selector: str,
-    value: Optional[str] = None,
-    text: Optional[str] = None,
-    index: Optional[Any] = None,
+    value: str | None = None,
+    text: str | None = None,
+    index: Any | None = None,
 ) -> bool:
     """
     Select an option from a dropdown.
@@ -1931,7 +1922,7 @@ async def select_option(
 
 
 @section_tool("element-interaction")
-async def get_element_state(instance_id: str, selector: str) -> Dict[str, Any]:
+async def get_element_state(instance_id: str, selector: str) -> dict[str, Any]:
     """
     Get complete state of an element.
 
@@ -1956,7 +1947,7 @@ async def wait_for_element(
     selector: str,
     timeout: int = 30000,
     visible: bool = True,
-    text_content: Optional[str] = None,
+    text_content: str | None = None,
 ) -> bool:
     """
     Wait for an element to appear.
@@ -2012,9 +2003,9 @@ async def scroll_page(
 async def execute_script(
     instance_id: str,
     script: str,
-    args: Optional[List[Any]] = None,
-    timeout_ms: Optional[int] = None,
-) -> Dict[str, Any]:
+    args: list[Any] | None = None,
+    timeout_ms: int | None = None,
+) -> dict[str, Any]:
     """
     Execute JavaScript in the page and return its value.
 
@@ -2065,7 +2056,7 @@ async def execute_script(
 @section_tool("element-interaction")
 async def get_page_content(
     instance_id: str, include_frames: bool = False
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Get page HTML and text content.
 
@@ -2095,8 +2086,8 @@ async def take_screenshot(
     instance_id: str,
     full_page: bool = False,
     format: str = "png",
-    file_path: Optional[str] = None,
-) -> Union[str, Dict[str, Any]]:
+    file_path: str | None = None,
+) -> str | dict[str, Any]:
     """
     Take a screenshot of the page.
 
@@ -2109,8 +2100,9 @@ async def take_screenshot(
     Returns:
         Union[str, Dict]: File path if file_path provided, otherwise optimized base64 data or file info dict.
     """
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
@@ -2120,7 +2112,7 @@ async def take_screenshot(
         save_path = Path(file_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         await _with_cdp_timeout(tab.save_screenshot(save_path), instance_id=instance_id)
-        return f"Screenshot saved. AI agents should use the Read tool to view this image: {str(save_path.absolute())}"
+        return f"Screenshot saved. AI agents should use the Read tool to view this image: {save_path.absolute()!s}"
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
         tmp_path = Path(tmp_file.name)
@@ -2167,7 +2159,7 @@ async def take_screenshot(
                     "file_size_kb": round(file_size_kb, 2),
                     "estimated_tokens": estimated_tokens,
                     "reason": "Screenshot too large, automatically saved to file",
-                    "message": f"Screenshot saved. AI agents should use the Read tool to view this image: {str(screenshot_path)}",
+                    "message": f"Screenshot saved. AI agents should use the Read tool to view this image: {screenshot_path!s}",
                 }
 
             return base64.b64encode(compressed_bytes).decode("utf-8")
@@ -2179,8 +2171,8 @@ async def take_screenshot(
 
 @section_tool("network-debugging")
 async def list_network_requests(
-    instance_id: str, filter_type: Optional[str] = None
-) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    instance_id: str, filter_type: str | None = None
+) -> list[dict[str, Any]] | dict[str, Any]:
     """
     List captured network requests.
 
@@ -2207,7 +2199,7 @@ async def list_network_requests(
 
 
 @section_tool("network-debugging")
-async def get_request_details(request_id: str) -> Optional[Dict[str, Any]]:
+async def get_request_details(request_id: str) -> dict[str, Any] | None:
     """
     Get detailed information about a network request.
 
@@ -2224,7 +2216,7 @@ async def get_request_details(request_id: str) -> Optional[Dict[str, Any]]:
 
 
 @section_tool("network-debugging")
-async def get_response_details(request_id: str) -> Optional[Dict[str, Any]]:
+async def get_response_details(request_id: str) -> dict[str, Any] | None:
     """
     Get response details for a network request.
 
@@ -2241,7 +2233,7 @@ async def get_response_details(request_id: str) -> Optional[Dict[str, Any]]:
 
 
 @section_tool("network-debugging")
-async def get_response_content(instance_id: str, request_id: str) -> Optional[str]:
+async def get_response_content(instance_id: str, request_id: str) -> str | None:
     """
     Get response body content.
 
@@ -2271,15 +2263,15 @@ async def get_response_content(instance_id: str, request_id: str) -> Optional[st
 @section_tool("network-debugging")
 async def search_network_requests(
     instance_id: str,
-    url_pattern: Optional[str] = None,
-    method: Optional[str] = None,
-    status_code: Optional[int] = None,
-    response_contains: Optional[str] = None,
-    payload_contains: Optional[str] = None,
-    resource_type: Optional[str] = None,
+    url_pattern: str | None = None,
+    method: str | None = None,
+    status_code: int | None = None,
+    response_contains: str | None = None,
+    payload_contains: str | None = None,
+    resource_type: str | None = None,
     limit: int = 100,
     offset: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Search network requests with advanced filters and pagination.
 
@@ -2343,8 +2335,8 @@ async def import_network_data(instance_id: str, filepath: str) -> bool:
 @section_tool("network-debugging")
 async def set_network_capture_filters(
     instance_id: str,
-    include_types: Optional[List[str]] = None,
-    exclude_types: Optional[List[str]] = None,
+    include_types: list[str] | None = None,
+    exclude_types: list[str] | None = None,
 ) -> bool:
     """
     Set resource type filters for network capture to reduce memory usage.
@@ -2366,7 +2358,7 @@ async def set_network_capture_filters(
 
 
 @section_tool("network-debugging")
-async def get_network_capture_filters(instance_id: str) -> Dict[str, List[str]]:
+async def get_network_capture_filters(instance_id: str) -> dict[str, list[str]]:
     """
     Get current network capture filters.
 
@@ -2380,7 +2372,7 @@ async def get_network_capture_filters(instance_id: str) -> Dict[str, List[str]]:
 
 
 @section_tool("network-debugging")
-async def modify_headers(instance_id: str, headers: Dict[str, str]) -> bool:
+async def modify_headers(instance_id: str, headers: dict[str, str]) -> bool:
     """
     Modify request headers for future requests.
 
@@ -2401,8 +2393,8 @@ async def modify_headers(instance_id: str, headers: Dict[str, str]) -> bool:
 
 @section_tool("cookies-storage")
 async def get_cookies(
-    instance_id: str, urls: Optional[List[str]] = None
-) -> List[Dict[str, Any]]:
+    instance_id: str, urls: list[str] | None = None
+) -> list[dict[str, Any]]:
     """
     Get cookies for current page or specific URLs.
 
@@ -2426,12 +2418,12 @@ async def set_cookie(
     instance_id: str,
     name: str,
     value: str,
-    url: Optional[str] = None,
-    domain: Optional[str] = None,
+    url: str | None = None,
+    domain: str | None = None,
     path: str = "/",
     secure: bool = False,
     http_only: bool = False,
-    same_site: Optional[str] = None,
+    same_site: str | None = None,
 ) -> bool:
     """
     Set a cookie.
@@ -2480,7 +2472,7 @@ async def set_cookie(
 
 
 @section_tool("cookies-storage")
-async def clear_cookies(instance_id: str, url: Optional[str] = None) -> bool:
+async def clear_cookies(instance_id: str, url: str | None = None) -> bool:
     """
     Clear cookies.
 
@@ -2572,7 +2564,7 @@ async def get_debug_view(
     max_warnings: int = 50,
     max_info: int = 50,
     include_all: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Get comprehensive debug view with all logged errors and statistics.
 
@@ -2606,7 +2598,7 @@ async def clear_debug_view() -> bool:
             asyncio.to_thread(debug_logger.clear_debug_view_safe), timeout=10.0
         )
         return True
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return False
 
 
@@ -2650,12 +2642,12 @@ async def export_debug_logs(
             timeout=30.0,
         )
         return filepath
-    except asyncio.TimeoutError:
-        return f"Export timeout - file too large. Try with smaller limits or 'gzip-pickle' format."
+    except TimeoutError:
+        return "Export timeout - file too large. Try with smaller limits or 'gzip-pickle' format."
 
 
 @section_tool("debugging")
-async def get_debug_lock_status() -> Dict[str, Any]:
+async def get_debug_lock_status() -> dict[str, Any]:
     """
     Get current debug logger lock status for debugging hanging exports.
 
@@ -2669,7 +2661,7 @@ async def get_debug_lock_status() -> Dict[str, Any]:
 
 
 @section_tool("tabs")
-async def list_tabs(instance_id: str) -> List[Dict[str, str]]:
+async def list_tabs(instance_id: str) -> list[dict[str, str]]:
     """
     List all tabs for a browser instance.
 
@@ -2719,7 +2711,7 @@ async def close_tab(instance_id: str, tab_id: str) -> bool:
 
 
 @section_tool("tabs")
-async def get_active_tab(instance_id: str) -> Dict[str, Any]:
+async def get_active_tab(instance_id: str) -> dict[str, Any]:
     """
     Get information about the currently active tab.
 
@@ -2744,7 +2736,7 @@ async def get_active_tab(instance_id: str) -> Dict[str, Any]:
 
 
 @section_tool("tabs")
-async def new_tab(instance_id: str, url: str = "about:blank") -> Dict[str, Any]:
+async def new_tab(instance_id: str, url: str = "about:blank") -> dict[str, Any]:
     """
     Open a new tab in the browser instance.
 
@@ -2770,7 +2762,7 @@ async def new_tab(instance_id: str, url: str = "about:blank") -> Dict[str, Any]:
             "type": getattr(new_tab_obj.target, "type_", "page"),
         }
     except Exception as e:
-        raise Exception(f"Failed to create new tab: {str(e)}")
+        raise Exception(f"Failed to create new tab: {e!s}")
 
 
 @section_tool("element-extraction")
@@ -2781,7 +2773,7 @@ async def extract_element_styles(
     include_css_rules: bool = True,
     include_pseudo: bool = True,
     include_inheritance: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract complete styling information from an element.
 
@@ -2820,7 +2812,7 @@ async def extract_element_structure(
     include_attributes: bool = True,
     include_data_attributes: bool = True,
     max_depth: int = 3,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract complete HTML structure and DOM information.
 
@@ -2859,7 +2851,7 @@ async def extract_element_events(
     include_listeners: bool = True,
     include_framework: bool = True,
     analyze_handlers: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract complete event listener and JavaScript handler information.
 
@@ -2898,7 +2890,7 @@ async def extract_element_animations(
     include_transitions: bool = True,
     include_transforms: bool = True,
     analyze_keyframes: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract CSS animations, transitions, and transforms.
 
@@ -2937,7 +2929,7 @@ async def extract_element_assets(
     include_backgrounds: bool = True,
     include_fonts: bool = True,
     fetch_external: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract all assets related to an element (images, fonts, etc.).
 
@@ -2980,7 +2972,7 @@ async def extract_element_styles_cdp(
     include_css_rules: bool = True,
     include_pseudo: bool = True,
     include_inheritance: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract element styles using direct CDP calls (no JavaScript evaluation).
     This prevents hanging issues by using nodriver's native CDP methods.
@@ -3019,7 +3011,7 @@ async def extract_related_files(
     analyze_js: bool = True,
     follow_imports: bool = False,
     max_depth: int = 2,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Discover and analyze related CSS/JS files for context.
 
@@ -3052,8 +3044,8 @@ async def extract_related_files(
 
 @section_tool("element-extraction")
 async def clone_element_complete(
-    instance_id: str, selector: str, extraction_options: Optional[str] = None
-) -> Dict[str, Any]:
+    instance_id: str, selector: str, extraction_options: str | None = None
+) -> dict[str, Any]:
     """
     Master function that extracts ALL element data using specialized functions.
 
@@ -3144,7 +3136,7 @@ async def hot_reload() -> str:
                     from debug_logger import debug_logger
         return f"Hot reload completed. Reloaded modules: {', '.join(reloaded_modules)}"
     except Exception as e:
-        return f"Hot reload failed: {str(e)}"
+        return f"Hot reload failed: {e!s}"
 
 
 @section_tool("debugging")
@@ -3175,11 +3167,11 @@ async def reload_status() -> str:
                 modules_info.append(f"❌ {module_name}: Not loaded")
         return "\n".join(modules_info)
     except Exception as e:
-        return f"Error checking module status: {str(e)}"
+        return f"Error checking module status: {e!s}"
 
 
 @section_tool("debugging")
-async def validate_browser_environment_tool() -> Dict[str, Any]:
+async def validate_browser_environment_tool() -> dict[str, Any]:
     """
     Validate browser environment and diagnose potential issues.
 
@@ -3193,7 +3185,7 @@ async def validate_browser_environment_tool() -> Dict[str, Any]:
             "error": str(e),
             "platform_info": get_platform_info(),
             "is_ready": False,
-            "issues": [f"Validation failed: {str(e)}"],
+            "issues": [f"Validation failed: {e!s}"],
             "warnings": [],
         }
 
@@ -3201,7 +3193,7 @@ async def validate_browser_environment_tool() -> Dict[str, Any]:
 @section_tool("progressive-cloning")
 async def clone_element_progressive(
     instance_id: str, selector: str, include_children: bool = True
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Clone element progressively - returns lightweight base structure with element_id.
 
@@ -3227,9 +3219,9 @@ async def clone_element_progressive(
 @section_tool("progressive-cloning")
 async def expand_styles(
     element_id: str,
-    categories: Optional[List[str]] = None,
-    properties: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    categories: list[str] | None = None,
+    properties: list[str] | None = None,
+) -> dict[str, Any]:
     """
     Expand styles data for a stored element.
 
@@ -3246,8 +3238,8 @@ async def expand_styles(
 
 @section_tool("progressive-cloning")
 async def expand_events(
-    element_id: str, event_types: Optional[List[str]] = None
-) -> Dict[str, Any]:
+    element_id: str, event_types: list[str] | None = None
+) -> dict[str, Any]:
     """
     Expand event listeners data for a stored element.
 
@@ -3263,8 +3255,8 @@ async def expand_events(
 
 @section_tool("progressive-cloning")
 async def expand_children(
-    element_id: str, depth_range: Optional[List] = None, max_count: Optional[Any] = None
-) -> Dict[str, Any]:
+    element_id: str, depth_range: list | None = None, max_count: Any | None = None
+) -> dict[str, Any]:
     """
     Expand children data for a stored element.
 
@@ -3298,8 +3290,8 @@ async def expand_children(
 
 @section_tool("progressive-cloning")
 async def expand_css_rules(
-    element_id: str, source_types: Optional[List[str]] = None
-) -> Dict[str, Any]:
+    element_id: str, source_types: list[str] | None = None
+) -> dict[str, Any]:
     """
     Expand CSS rules data for a stored element.
 
@@ -3314,7 +3306,7 @@ async def expand_css_rules(
 
 
 @section_tool("progressive-cloning")
-async def expand_pseudo_elements(element_id: str) -> Dict[str, Any]:
+async def expand_pseudo_elements(element_id: str) -> dict[str, Any]:
     """
     Expand pseudo-elements data for a stored element.
 
@@ -3328,7 +3320,7 @@ async def expand_pseudo_elements(element_id: str) -> Dict[str, Any]:
 
 
 @section_tool("progressive-cloning")
-async def expand_animations(element_id: str) -> Dict[str, Any]:
+async def expand_animations(element_id: str) -> dict[str, Any]:
     """
     Expand animations and fonts data for a stored element.
 
@@ -3342,7 +3334,7 @@ async def expand_animations(element_id: str) -> Dict[str, Any]:
 
 
 @section_tool("progressive-cloning")
-async def list_stored_elements() -> Dict[str, Any]:
+async def list_stored_elements() -> dict[str, Any]:
     """
     List all stored elements with their basic info.
 
@@ -3353,7 +3345,7 @@ async def list_stored_elements() -> Dict[str, Any]:
 
 
 @section_tool("progressive-cloning")
-async def clear_stored_element(element_id: str) -> Dict[str, Any]:
+async def clear_stored_element(element_id: str) -> dict[str, Any]:
     """
     Clear a specific stored element.
 
@@ -3367,7 +3359,7 @@ async def clear_stored_element(element_id: str) -> Dict[str, Any]:
 
 
 @section_tool("progressive-cloning")
-async def clear_all_elements() -> Dict[str, Any]:
+async def clear_all_elements() -> dict[str, Any]:
     """
     Clear all stored elements.
 
@@ -3379,8 +3371,8 @@ async def clear_all_elements() -> Dict[str, Any]:
 
 @section_tool("file-extraction")
 async def clone_element_to_file(
-    instance_id: str, selector: str, extraction_options: Optional[str] = None
-) -> Dict[str, Any]:
+    instance_id: str, selector: str, extraction_options: str | None = None
+) -> dict[str, Any]:
     """
     Clone element completely and save to file, returning file path instead of full data.
 
@@ -3416,7 +3408,7 @@ async def clone_element_to_file(
 @section_tool("file-extraction")
 async def extract_complete_element_to_file(
     instance_id: str, selector: str, include_children: bool = True
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract complete element using working comprehensive cloner and save to file.
 
@@ -3445,7 +3437,7 @@ async def extract_complete_element_to_file(
 @section_tool("element-extraction")
 async def extract_complete_element_cdp(
     instance_id: str, selector: str, include_children: bool = True
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract complete element using native CDP methods for 100% accuracy.
 
@@ -3484,7 +3476,7 @@ async def extract_element_styles_to_file(
     include_css_rules: bool = True,
     include_pseudo: bool = True,
     include_inheritance: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract element styles and save to file, returning file path.
 
@@ -3523,7 +3515,7 @@ async def extract_element_structure_to_file(
     include_attributes: bool = True,
     include_data_attributes: bool = True,
     max_depth: int = 3,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract element structure and save to file, returning file path.
 
@@ -3562,7 +3554,7 @@ async def extract_element_events_to_file(
     include_listeners: bool = True,
     include_framework: bool = True,
     analyze_handlers: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract element events and save to file, returning file path.
 
@@ -3601,7 +3593,7 @@ async def extract_element_animations_to_file(
     include_transitions: bool = True,
     include_transforms: bool = True,
     analyze_keyframes: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract element animations and save to file, returning file path.
 
@@ -3640,7 +3632,7 @@ async def extract_element_assets_to_file(
     include_backgrounds: bool = True,
     include_fonts: bool = True,
     fetch_external: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract element assets and save to file, returning file path.
 
@@ -3672,7 +3664,7 @@ async def extract_element_assets_to_file(
 
 
 @section_tool("file-extraction")
-async def list_clone_files() -> List[Dict[str, Any]]:
+async def list_clone_files() -> list[dict[str, Any]]:
     """
     List all element clone files saved to disk.
 
@@ -3683,7 +3675,7 @@ async def list_clone_files() -> List[Dict[str, Any]]:
 
 
 @section_tool("file-extraction")
-async def cleanup_clone_files(max_age_hours: int = 24) -> Dict[str, int]:
+async def cleanup_clone_files(max_age_hours: int = 24) -> dict[str, int]:
     """
     Clean up old clone files to save disk space.
 
@@ -3698,7 +3690,7 @@ async def cleanup_clone_files(max_age_hours: int = 24) -> Dict[str, int]:
 
 
 @section_tool("cdp-functions")
-async def list_cdp_commands() -> List[str]:
+async def list_cdp_commands() -> list[str]:
     """
     List all available CDP Runtime commands for function execution.
 
@@ -3710,8 +3702,8 @@ async def list_cdp_commands() -> List[str]:
 
 @section_tool("cdp-functions")
 async def execute_cdp_command(
-    instance_id: str, command: str, params: Dict[str, Any] = None
-) -> Dict[str, Any]:
+    instance_id: str, command: str, params: dict[str, Any] = None
+) -> dict[str, Any]:
     """
     Execute any CDP Runtime command with given parameters.
 
@@ -3742,7 +3734,7 @@ async def execute_cdp_command(
 
 
 @section_tool("cdp-functions")
-async def get_execution_contexts(instance_id: str) -> List[Dict[str, Any]]:
+async def get_execution_contexts(instance_id: str) -> list[dict[str, Any]]:
     """
     Get all available JavaScript execution contexts.
 
@@ -3773,7 +3765,7 @@ async def get_execution_contexts(instance_id: str) -> List[Dict[str, Any]]:
 @section_tool("cdp-functions")
 async def discover_global_functions(
     instance_id: str, context_id: str = None
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Discover all global JavaScript functions available in the page.
 
@@ -3827,7 +3819,7 @@ async def discover_global_functions(
 @section_tool("cdp-functions")
 async def discover_object_methods(
     instance_id: str, object_path: str
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Discover methods of a specific JavaScript object.
 
@@ -3863,8 +3855,8 @@ async def discover_object_methods(
 
 @section_tool("cdp-functions")
 async def call_javascript_function(
-    instance_id: str, function_path: str, args: List[Any] = None
-) -> Dict[str, Any]:
+    instance_id: str, function_path: str, args: list[Any] = None
+) -> dict[str, Any]:
     """
     Call a JavaScript function with arguments.
 
@@ -3888,7 +3880,7 @@ async def call_javascript_function(
 @section_tool("cdp-functions")
 async def inspect_function_signature(
     instance_id: str, function_path: str
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Inspect a JavaScript function's signature and details.
 
@@ -3911,7 +3903,7 @@ async def inspect_function_signature(
 @section_tool("cdp-functions")
 async def inject_and_execute_script(
     instance_id: str, script_code: str, context_id: str = None
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Inject and execute custom JavaScript code.
 
@@ -3935,7 +3927,7 @@ async def inject_and_execute_script(
 @section_tool("cdp-functions")
 async def create_persistent_function(
     instance_id: str, function_name: str, function_code: str
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Create a persistent JavaScript function that survives page reloads.
 
@@ -3960,8 +3952,8 @@ async def create_persistent_function(
 
 @section_tool("cdp-functions")
 async def execute_function_sequence(
-    instance_id: str, function_calls: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
+    instance_id: str, function_calls: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     """
     Execute a sequence of JavaScript function calls.
 
@@ -3995,7 +3987,7 @@ async def execute_function_sequence(
 @section_tool("cdp-functions")
 async def create_python_binding(
     instance_id: str, binding_name: str, python_code: str
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Create a binding that allows JavaScript to call Python functions.
 
@@ -4029,14 +4021,14 @@ async def create_python_binding(
     except Exception as e:
         return {
             "success": False,
-            "error": f"Failed to create Python function: {str(e)}",
+            "error": f"Failed to create Python function: {e!s}",
         }
 
 
 @section_tool("cdp-functions")
 async def execute_python_in_browser(
     instance_id: str, python_code: str
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Execute Python code by translating it to JavaScript.
 
@@ -4057,7 +4049,7 @@ async def execute_python_in_browser(
 
 
 @section_tool("cdp-functions")
-async def get_function_executor_info(instance_id: str = None) -> Dict[str, Any]:
+async def get_function_executor_info(instance_id: str = None) -> dict[str, Any]:
     """
     Get information about the CDP function executor state.
 
@@ -4076,11 +4068,11 @@ async def get_function_executor_info(instance_id: str = None) -> Dict[str, Any]:
 @section_tool("dynamic-hooks")
 async def create_dynamic_hook(
     name: str,
-    requirements: Dict[str, Any],
+    requirements: dict[str, Any],
     function_code: str,
-    instance_ids: Optional[List[str]] = None,
+    instance_ids: list[str] | None = None,
     priority: int = 100,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Create a new dynamic hook with AI-generated Python function.
 
@@ -4119,10 +4111,10 @@ async def create_simple_dynamic_hook(
     name: str,
     url_pattern: str,
     action: str,
-    target_url: Optional[str] = None,
-    custom_headers: Optional[Dict[str, str]] = None,
-    instance_ids: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    target_url: str | None = None,
+    custom_headers: dict[str, str] | None = None,
+    instance_ids: list[str] | None = None,
+) -> dict[str, Any]:
     """
     Create a simple dynamic hook using predefined templates (easier for AI).
 
@@ -4148,7 +4140,7 @@ async def create_simple_dynamic_hook(
 
 
 @section_tool("dynamic-hooks")
-async def list_dynamic_hooks(instance_id: Optional[str] = None) -> Dict[str, Any]:
+async def list_dynamic_hooks(instance_id: str | None = None) -> dict[str, Any]:
     """
     List all dynamic hooks.
 
@@ -4162,7 +4154,7 @@ async def list_dynamic_hooks(instance_id: Optional[str] = None) -> Dict[str, Any
 
 
 @section_tool("dynamic-hooks")
-async def get_dynamic_hook_details(hook_id: str) -> Dict[str, Any]:
+async def get_dynamic_hook_details(hook_id: str) -> dict[str, Any]:
     """
     Get detailed information about a specific dynamic hook.
 
@@ -4176,7 +4168,7 @@ async def get_dynamic_hook_details(hook_id: str) -> Dict[str, Any]:
 
 
 @section_tool("dynamic-hooks")
-async def remove_dynamic_hook(hook_id: str) -> Dict[str, Any]:
+async def remove_dynamic_hook(hook_id: str) -> dict[str, Any]:
     """
     Remove a dynamic hook.
 
@@ -4190,7 +4182,7 @@ async def remove_dynamic_hook(hook_id: str) -> Dict[str, Any]:
 
 
 @section_tool("dynamic-hooks")
-def get_hook_documentation() -> Dict[str, Any]:
+def get_hook_documentation() -> dict[str, Any]:
     """
     Get comprehensive documentation for creating hook functions (AI learning).
 
@@ -4201,7 +4193,7 @@ def get_hook_documentation() -> Dict[str, Any]:
 
 
 @section_tool("dynamic-hooks")
-def get_hook_examples() -> Dict[str, Any]:
+def get_hook_examples() -> dict[str, Any]:
     """
     Get example hook functions for AI learning.
 
@@ -4212,7 +4204,7 @@ def get_hook_examples() -> Dict[str, Any]:
 
 
 @section_tool("dynamic-hooks")
-def get_hook_requirements_documentation() -> Dict[str, Any]:
+def get_hook_requirements_documentation() -> dict[str, Any]:
     """
     Get documentation on hook requirements and matching criteria.
 
@@ -4223,7 +4215,7 @@ def get_hook_requirements_documentation() -> Dict[str, Any]:
 
 
 @section_tool("dynamic-hooks")
-def get_hook_common_patterns() -> Dict[str, Any]:
+def get_hook_common_patterns() -> dict[str, Any]:
     """
     Get common hook patterns and use cases.
 
@@ -4234,7 +4226,7 @@ def get_hook_common_patterns() -> Dict[str, Any]:
 
 
 @section_tool("dynamic-hooks")
-def validate_hook_function(function_code: str) -> Dict[str, Any]:
+def validate_hook_function(function_code: str) -> dict[str, Any]:
     """
     Validate hook function code for common issues before creating.
 

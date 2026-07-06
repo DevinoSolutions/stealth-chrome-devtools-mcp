@@ -15,10 +15,9 @@ Key features:
 - Child element extraction with depth tracking
 """
 
-import os
 import sys
-from typing import Dict, Any, Optional
 from pathlib import Path
+from typing import Any
 
 project_root = Path(__file__).parent
 sys.path.append(str(project_root))
@@ -34,11 +33,10 @@ class ComprehensiveElementCloner:
 
     def __init__(self):
         """Initialize the comprehensive element cloner."""
-        pass
 
     async def extract_complete_element(
         self, tab, selector: str, include_children: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Extract complete element data matching CopyIt-CDP v3 functionality.
 
@@ -394,10 +392,10 @@ class ComprehensiveElementCloner:
             debug_logger.log_error(
                 "element_cloner",
                 "extract_complete",
-                f"Error during extraction: {str(e)}",
+                f"Error during extraction: {e!s}",
             )
             return {
-                "error": f"Extraction failed: {str(e)}",
+                "error": f"Extraction failed: {e!s}",
                 "selector": selector,
                 "url": getattr(tab, "url", "unknown"),
                 "timestamp": "now",

@@ -15,10 +15,8 @@ This provides 100% accurate element cloning by using CDP's native capabilities
 instead of limited JavaScript-based extraction.
 """
 
-import asyncio
-import json
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Any
 
 import nodriver as uc
 from debug_logger import debug_logger
@@ -32,7 +30,7 @@ class CDPElementCloner:
 
     async def extract_complete_element_cdp(
         self, tab, selector: str, include_children: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Extract complete element data using proper CDP methods.
 
@@ -90,16 +88,16 @@ class CDPElementCloner:
             debug_logger.log_info(
                 "cdp_cloner",
                 "extract_complete",
-                f"CDP extraction completed successfully",
+                "CDP extraction completed successfully",
             )
             return result
         except Exception as e:
             debug_logger.log_error(
-                "cdp_cloner", "extract_complete", f"CDP extraction failed: {str(e)}"
+                "cdp_cloner", "extract_complete", f"CDP extraction failed: {e!s}"
             )
-            return {"error": f"CDP extraction failed: {str(e)}"}
+            return {"error": f"CDP extraction failed: {e!s}"}
 
-    async def _get_element_html(self, tab, node_id) -> Dict[str, Any]:
+    async def _get_element_html(self, tab, node_id) -> dict[str, Any]:
         """
         Get element's HTML structure and attributes.
 
@@ -131,12 +129,10 @@ class CDPElementCloner:
                 else [],
             }
         except Exception as e:
-            debug_logger.log_error(
-                "cdp_cloner", "_get_element_html", f"Failed: {str(e)}"
-            )
+            debug_logger.log_error("cdp_cloner", "_get_element_html", f"Failed: {e!s}")
             return {"error": str(e)}
 
-    async def _get_computed_styles_cdp(self, tab, node_id) -> Dict[str, str]:
+    async def _get_computed_styles_cdp(self, tab, node_id) -> dict[str, str]:
         """
         Get complete computed styles using CDP CSS.getComputedStyleForNode.
 
@@ -162,11 +158,11 @@ class CDPElementCloner:
             return styles
         except Exception as e:
             debug_logger.log_error(
-                "cdp_cloner", "_get_computed_styles", f"Failed: {str(e)}"
+                "cdp_cloner", "_get_computed_styles", f"Failed: {e!s}"
             )
             return {}
 
-    async def _get_matched_styles_cdp(self, tab, node_id) -> Dict[str, Any]:
+    async def _get_matched_styles_cdp(self, tab, node_id) -> dict[str, Any]:
         """
         Get matched CSS rules using CDP CSS.getMatchedStylesForNode.
 
@@ -213,11 +209,11 @@ class CDPElementCloner:
             return result
         except Exception as e:
             debug_logger.log_error(
-                "cdp_cloner", "_get_matched_styles", f"Failed: {str(e)}"
+                "cdp_cloner", "_get_matched_styles", f"Failed: {e!s}"
             )
             return {}
 
-    async def _get_event_listeners_cdp(self, tab, node_id) -> List[Dict[str, Any]]:
+    async def _get_event_listeners_cdp(self, tab, node_id) -> list[dict[str, Any]]:
         """
         Get event listeners using CDP DOMDebugger.getEventListeners.
 
@@ -261,11 +257,11 @@ class CDPElementCloner:
             return result
         except Exception as e:
             debug_logger.log_error(
-                "cdp_cloner", "_get_event_listeners", f"Failed: {str(e)}"
+                "cdp_cloner", "_get_event_listeners", f"Failed: {e!s}"
             )
             return []
 
-    async def _get_children_cdp(self, tab, node_id) -> List[Dict[str, Any]]:
+    async def _get_children_cdp(self, tab, node_id) -> list[dict[str, Any]]:
         """
         Get child elements using CDP.
 
@@ -298,10 +294,10 @@ class CDPElementCloner:
                         )
             return children
         except Exception as e:
-            debug_logger.log_error("cdp_cloner", "_get_children", f"Failed: {str(e)}")
+            debug_logger.log_error("cdp_cloner", "_get_children", f"Failed: {e!s}")
             return []
 
-    def _css_style_to_dict(self, css_style) -> Dict[str, Any]:
+    def _css_style_to_dict(self, css_style) -> dict[str, Any]:
         """
         Convert CDP CSSStyle to dictionary.
 
@@ -329,7 +325,7 @@ class CDPElementCloner:
             ],
         }
 
-    def _rule_match_to_dict(self, rule_match) -> Dict[str, Any]:
+    def _rule_match_to_dict(self, rule_match) -> dict[str, Any]:
         """
         Convert CDP RuleMatch to dictionary.
 
@@ -353,7 +349,7 @@ class CDPElementCloner:
             },
         }
 
-    def _pseudo_element_to_dict(self, pseudo_element) -> Dict[str, Any]:
+    def _pseudo_element_to_dict(self, pseudo_element) -> dict[str, Any]:
         """
         Convert CDP PseudoElementMatches to dictionary.
 
@@ -371,7 +367,7 @@ class CDPElementCloner:
             ],
         }
 
-    def _inherited_style_to_dict(self, inherited_style) -> Dict[str, Any]:
+    def _inherited_style_to_dict(self, inherited_style) -> dict[str, Any]:
         """
         Convert CDP InheritedStyleEntry to dictionary.
 

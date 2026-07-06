@@ -20,7 +20,6 @@ from server import (
     _trim_profile_regenerable,
 )
 
-
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
 

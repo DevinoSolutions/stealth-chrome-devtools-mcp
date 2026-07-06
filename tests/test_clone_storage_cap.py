@@ -22,7 +22,6 @@ import os
 import server
 from server import _clone_is_auto, _enforce_clone_storage_cap_in
 
-
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
 

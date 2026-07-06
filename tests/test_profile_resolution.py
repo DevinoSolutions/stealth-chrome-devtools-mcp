@@ -12,25 +12,19 @@ import os
 import shutil
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 # These are module-level functions in server.py (bare imports via sys.path)
 from server import (
-    _is_relative_to,
-    _profile_ignore_names,
     _copy_profile_delta,
     _copy_profile_tree,
-    _snapshot_needs_refresh,
+    _is_relative_to,
     _next_available_explicit_dir,
+    _profile_ignore_names,
     _resolve_profile_selection,
-    _default_session_root,
-    _master_profile_dir,
-    _clone_root_dir,
-    _master_snapshot_dir,
+    _snapshot_needs_refresh,
 )
-
 
 # ---------------------------------------------------------------------------
 # _is_relative_to

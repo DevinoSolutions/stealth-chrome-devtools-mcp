@@ -7,17 +7,15 @@ that can modify, block, redirect, or fulfill requests dynamically.
 """
 
 import asyncio
-import uuid
 import fnmatch
+import uuid
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Dict, List, Any, Callable, Optional, Union
-from dataclasses import dataclass, asdict
+from typing import Any
+
 import nodriver as uc
 from debug_logger import debug_logger
-import ast
-import sys
-from io import StringIO
-import contextlib
 
 
 @dataclass
@@ -28,12 +26,12 @@ class RequestInfo:
     instance_id: str
     url: str
     method: str
-    headers: Dict[str, str]
-    post_data: Optional[str] = None
-    resource_type: Optional[str] = None
+    headers: dict[str, str]
+    post_data: str | None = None
+    resource_type: str | None = None
     stage: str = "request"  # "request" or "response"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for AI function processing."""
         return asdict(self)
 
@@ -43,12 +41,12 @@ class HookAction:
     """Action returned by hook functions."""
 
     action: str  # "continue", "block", "redirect", "fulfill", "modify"
-    url: Optional[str] = None  # For redirect/modify
-    method: Optional[str] = None  # For modify
-    headers: Optional[Dict[str, str]] = None  # For modify/fulfill
-    body: Optional[str] = None  # For fulfill
-    status_code: Optional[int] = None  # For fulfill
-    post_data: Optional[str] = None  # For modify
+    url: str | None = None  # For redirect/modify
+    method: str | None = None  # For modify
+    headers: dict[str, str] | None = None  # For modify/fulfill
+    body: str | None = None  # For fulfill
+    status_code: int | None = None  # For fulfill
+    post_data: str | None = None  # For modify
 
 
 class DynamicHook:
@@ -58,7 +56,7 @@ class DynamicHook:
         self,
         hook_id: str,
         name: str,
-        requirements: Dict[str, Any],
+        requirements: dict[str, Any],
         function_code: str,
         priority: int = 100,
     ):
@@ -69,7 +67,7 @@ class DynamicHook:
         self.priority = priority  # Lower number = higher priority
         self.created_at = datetime.now()
         self.trigger_count = 0
-        self.last_triggered: Optional[datetime] = None
+        self.last_triggered: datetime | None = None
         self.status = "active"
         self.request_stage = requirements.get(
             "stage", "request"
@@ -206,9 +204,9 @@ class DynamicHookSystem:
     """Real-time dynamic hook processing system."""
 
     def __init__(self):
-        self.hooks: Dict[str, DynamicHook] = {}
-        self.instance_hooks: Dict[
-            str, List[str]
+        self.hooks: dict[str, DynamicHook] = {}
+        self.instance_hooks: dict[
+            str, list[str]
         ] = {}  # instance_id -> list of hook_ids
         self._lock = asyncio.Lock()
 
@@ -497,9 +495,9 @@ class DynamicHookSystem:
     async def create_hook(
         self,
         name: str,
-        requirements: Dict[str, Any],
+        requirements: dict[str, Any],
         function_code: str,
-        instance_ids: Optional[List[str]] = None,
+        instance_ids: list[str] | None = None,
         priority: int = 100,
     ) -> str:
         """Create a new dynamic hook."""
@@ -534,7 +532,7 @@ class DynamicHookSystem:
             )
             raise
 
-    def list_hooks(self) -> List[Dict[str, Any]]:
+    def list_hooks(self) -> list[dict[str, Any]]:
         """List all hooks."""
         return [
             {
@@ -552,7 +550,7 @@ class DynamicHookSystem:
             for hook in self.hooks.values()
         ]
 
-    def get_hook_details(self, hook_id: str) -> Optional[Dict[str, Any]]:
+    def get_hook_details(self, hook_id: str) -> dict[str, Any] | None:
         """Get detailed hook information."""
         hook = self.hooks.get(hook_id)
         if not hook:
@@ -675,9 +673,7 @@ class DynamicHookSystem:
                         uc.cdp.fetch.continue_response(
                             request_id=request_id,
                             response_code=action.status_code,
-                            response_headers=response_headers
-                            if response_headers
-                            else None,
+                            response_headers=response_headers or None,
                         )
                     )
                     debug_logger.log_info(
@@ -698,7 +694,7 @@ class DynamicHookSystem:
                             request_id=request_id,
                             url=action.url or request.url,
                             method=action.method or request.method,
-                            headers=headers if headers else None,
+                            headers=headers or None,
                             post_data=action.post_data,
                         )
                     )
@@ -708,23 +704,20 @@ class DynamicHookSystem:
                         f"Modified request {request.url}",
                     )
 
+            elif request.stage == "response":
+                await tab.send(uc.cdp.fetch.continue_response(request_id=request_id))
+                debug_logger.log_info(
+                    "dynamic_hook_system",
+                    "_execute_hook_action",
+                    f"Continued response {request.url}",
+                )
             else:
-                if request.stage == "response":
-                    await tab.send(
-                        uc.cdp.fetch.continue_response(request_id=request_id)
-                    )
-                    debug_logger.log_info(
-                        "dynamic_hook_system",
-                        "_execute_hook_action",
-                        f"Continued response {request.url}",
-                    )
-                else:
-                    await tab.send(uc.cdp.fetch.continue_request(request_id=request_id))
-                    debug_logger.log_info(
-                        "dynamic_hook_system",
-                        "_execute_hook_action",
-                        f"Continued request {request.url}",
-                    )
+                await tab.send(uc.cdp.fetch.continue_request(request_id=request_id))
+                debug_logger.log_info(
+                    "dynamic_hook_system",
+                    "_execute_hook_action",
+                    f"Continued request {request.url}",
+                )
 
         except Exception as e:
             debug_logger.log_error(

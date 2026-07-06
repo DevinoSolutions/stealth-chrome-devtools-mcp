@@ -1,15 +1,13 @@
-import json
-import sys
-import traceback
-from datetime import datetime
-from typing import Dict, List, Any, Optional
-from collections import defaultdict
-import threading
-import pickle
 import gzip
+import json
 import os
-import asyncio
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import pickle
+import sys
+import threading
+import traceback
+from collections import defaultdict
+from datetime import datetime
+from typing import Any
 
 
 class DebugLogger:
@@ -33,14 +31,13 @@ class DebugLogger:
             self._enabled (bool): Indicates if logging is enabled.
             self._seen_errors (set): Track error signatures to prevent duplicates (capped at MAX_SEEN_ERRORS).
         """
-        self._errors: List[Dict[str, Any]] = []
-        self._warnings: List[Dict[str, Any]] = []
-        self._info: List[Dict[str, Any]] = []
-        self._stats: Dict[str, int] = defaultdict(int)
+        self._errors: list[dict[str, Any]] = []
+        self._warnings: list[dict[str, Any]] = []
+        self._info: list[dict[str, Any]] = []
+        self._stats: dict[str, int] = defaultdict(int)
         self._lock = threading.Lock()
         self._enabled = False
         self._lock_owner = "none"
-        import time
 
         self._lock_acquired_time = 0
         self._seen_errors: set = set()
@@ -65,7 +62,7 @@ class DebugLogger:
         component: str,
         method: str,
         error: Exception,
-        context: Optional[Dict[str, Any]] = None,
+        context: dict[str, Any] | None = None,
     ):
         """
         Log an error with full context.
@@ -80,9 +77,7 @@ class DebugLogger:
             return
 
         with self._lock:
-            error_signature = (
-                f"{component}.{method}.{type(error).__name__}.{str(error)}"
-            )
+            error_signature = f"{component}.{method}.{type(error).__name__}.{error!s}"
 
             if error_signature in self._seen_errors:
                 self._stats[f"{component}.{method}.errors"] += 1
@@ -112,7 +107,7 @@ class DebugLogger:
         component: str,
         method: str,
         message: str,
-        context: Optional[Dict[str, Any]] = None,
+        context: dict[str, Any] | None = None,
     ):
         """
         Log a warning.
@@ -141,7 +136,7 @@ class DebugLogger:
             self._emit_stderr(f"[DEBUG WARN] {component}.{method}: {message}")
 
     def log_info(
-        self, component: str, method: str, message: str, data: Optional[Any] = None
+        self, component: str, method: str, message: str, data: Any | None = None
     ):
         """
         Log information for debugging.
@@ -171,7 +166,7 @@ class DebugLogger:
             if data:
                 self._emit_stderr(f"  Data: {data}")
 
-    def get_debug_view(self) -> Dict[str, Any]:
+    def get_debug_view(self) -> dict[str, Any]:
         """
         Get comprehensive debug view of all logged data.
 
@@ -182,10 +177,10 @@ class DebugLogger:
 
     def get_debug_view_paginated(
         self,
-        max_errors: Optional[int] = None,
-        max_warnings: Optional[int] = None,
-        max_info: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        max_errors: int | None = None,
+        max_warnings: int | None = None,
+        max_info: int | None = None,
+    ) -> dict[str, Any]:
         """
         Get paginated debug view of logged data with size limits.
 
@@ -241,7 +236,7 @@ class DebugLogger:
                 "component_breakdown": self._get_component_breakdown(),
             }
 
-    def _get_error_summary(self) -> Dict[str, int]:
+    def _get_error_summary(self) -> dict[str, int]:
         """
         Get summary of error types.
 
@@ -253,7 +248,7 @@ class DebugLogger:
             error_types[error["error_type"]] += 1
         return dict(error_types)
 
-    def _get_component_breakdown(self) -> Dict[str, Dict[str, int]]:
+    def _get_component_breakdown(self) -> dict[str, dict[str, int]]:
         """
         Get breakdown by component.
 
@@ -333,7 +328,7 @@ class DebugLogger:
         self._emit_stderr("[DEBUG] Debug logging disabled")
         self._enabled = False
 
-    def get_lock_status(self) -> Dict[str, Any]:
+    def get_lock_status(self) -> dict[str, Any]:
         """Get current lock status for debugging."""
         import time
 
@@ -362,9 +357,9 @@ class DebugLogger:
     def export_to_file_paginated(
         self,
         filepath: str = "debug_log.json",
-        max_errors: Optional[int] = None,
-        max_warnings: Optional[int] = None,
-        max_info: Optional[int] = None,
+        max_errors: int | None = None,
+        max_warnings: int | None = None,
+        max_info: int | None = None,
         format: str = "auto",
     ):
         """
@@ -432,17 +427,16 @@ class DebugLogger:
 
         if format == "gzip-pickle":
             return self._export_gzip_pickle(debug_data, filepath)
-        elif format == "pickle":
+        if format == "pickle":
             return self._export_pickle(debug_data, filepath)
-        else:
-            return self._export_json(debug_data, filepath)
+        return self._export_json(debug_data, filepath)
 
     def _export_lockfree(
         self,
         filepath: str,
-        max_errors: Optional[int],
-        max_warnings: Optional[int],
-        max_info: Optional[int],
+        max_errors: int | None,
+        max_warnings: int | None,
+        max_info: int | None,
         format: str,
     ) -> str:
         """
@@ -486,12 +480,11 @@ class DebugLogger:
 
         if format == "gzip-pickle":
             return self._export_gzip_pickle(debug_data, filepath)
-        elif format == "pickle":
+        if format == "pickle":
             return self._export_pickle(debug_data, filepath)
-        else:
-            return self._export_json(debug_data, filepath)
+        return self._export_json(debug_data, filepath)
 
-    def _export_gzip_pickle(self, debug_data: Dict[str, Any], filepath: str) -> str:
+    def _export_gzip_pickle(self, debug_data: dict[str, Any], filepath: str) -> str:
         if not filepath.endswith(".pkl.gz"):
             filepath = filepath.replace(".json", ".pkl.gz")
 
@@ -507,7 +500,7 @@ class DebugLogger:
         )
         return filepath
 
-    def _export_pickle(self, debug_data: Dict[str, Any], filepath: str) -> str:
+    def _export_pickle(self, debug_data: dict[str, Any], filepath: str) -> str:
         """Export using pickle (fast for medium data)."""
         if not filepath.endswith(".pkl"):
             filepath = filepath.replace(".json", ".pkl")
@@ -524,7 +517,7 @@ class DebugLogger:
         )
         return filepath
 
-    def _export_json(self, debug_data: Dict[str, Any], filepath: str) -> str:
+    def _export_json(self, debug_data: dict[str, Any], filepath: str) -> str:
         """Export using JSON (human readable but slower)."""
         with open(filepath, "w") as f:
             json.dump(debug_data, f, separators=(",", ":"), default=str)

@@ -34,7 +34,7 @@ def _server():
     """
     os.environ.setdefault("STEALTH_MCP_NO_AUTO_RECOVERY", "1")
     _ensure_embedded_on_path()
-    import server  # noqa: E402  (path set up just above)
+    import server
 
     return server
 

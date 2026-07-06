@@ -7,15 +7,15 @@ Skip in CI without Chrome: pytest -m "not integration"
 """
 
 import asyncio
+
+# Embedded modules via conftest sys.path setup
+import importlib.util
 import os
 import sys
 import time
 from pathlib import Path
 
 import pytest
-
-# Embedded modules via conftest sys.path setup
-import importlib.util
 
 # We need to import server.py as a module (it uses bare imports internally)
 _spec = importlib.util.spec_from_file_location(
@@ -237,8 +237,8 @@ class TestCloseKillsProcessTree:
 
     @pytest.mark.asyncio
     async def test_close_kills_entire_chrome_tree(self):
-        import psutil
         import process_cleanup as pc_mod
+        import psutil
 
         spawn = _get_fn("spawn_browser")
         navigate = _get_fn("navigate")

@@ -5,11 +5,11 @@ This module provides AI-friendly functions for creating, managing, and learning
 about dynamic hook functions.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Any
+
+from debug_logger import debug_logger
 from dynamic_hook_system import dynamic_hook_system
 from hook_learning_system import hook_learning_system
-from debug_logger import debug_logger
-import json
 
 
 class DynamicHookAIInterface:
@@ -22,11 +22,11 @@ class DynamicHookAIInterface:
     async def create_dynamic_hook(
         self,
         name: str,
-        requirements: Dict[str, Any],
+        requirements: dict[str, Any],
         function_code: str,
-        instance_ids: Optional[List[str]] = None,
+        instance_ids: list[str] | None = None,
         priority: int = 100,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Create a new dynamic hook with AI-generated function.
 
@@ -78,8 +78,8 @@ class DynamicHookAIInterface:
             return {"success": False, "error": str(e)}
 
     async def list_dynamic_hooks(
-        self, instance_id: Optional[str] = None
-    ) -> Dict[str, Any]:
+        self, instance_id: str | None = None
+    ) -> dict[str, Any]:
         """
         List all dynamic hooks.
 
@@ -109,7 +109,7 @@ class DynamicHookAIInterface:
             )
             return {"success": False, "error": str(e)}
 
-    async def get_hook_details(self, hook_id: str) -> Dict[str, Any]:
+    async def get_hook_details(self, hook_id: str) -> dict[str, Any]:
         """
         Get detailed information about a specific hook.
 
@@ -135,7 +135,7 @@ class DynamicHookAIInterface:
             )
             return {"success": False, "error": str(e)}
 
-    async def remove_dynamic_hook(self, hook_id: str) -> Dict[str, Any]:
+    async def remove_dynamic_hook(self, hook_id: str) -> dict[str, Any]:
         """
         Remove a dynamic hook.
 
@@ -150,8 +150,7 @@ class DynamicHookAIInterface:
 
             if success:
                 return {"success": True, "message": f"Removed hook {hook_id}"}
-            else:
-                return {"success": False, "error": f"Hook {hook_id} not found"}
+            return {"success": False, "error": f"Hook {hook_id} not found"}
 
         except Exception as e:
             debug_logger.log_error(
@@ -159,7 +158,7 @@ class DynamicHookAIInterface:
             )
             return {"success": False, "error": str(e)}
 
-    def get_request_documentation(self) -> Dict[str, Any]:
+    def get_request_documentation(self) -> dict[str, Any]:
         """
         Get comprehensive documentation of the request object for AI learning.
 
@@ -180,7 +179,7 @@ class DynamicHookAIInterface:
             )
             return {"success": False, "error": str(e)}
 
-    def get_hook_examples(self) -> Dict[str, Any]:
+    def get_hook_examples(self) -> dict[str, Any]:
         """
         Get example hook functions for AI learning.
 
@@ -199,7 +198,7 @@ class DynamicHookAIInterface:
             )
             return {"success": False, "error": str(e)}
 
-    def get_requirements_documentation(self) -> Dict[str, Any]:
+    def get_requirements_documentation(self) -> dict[str, Any]:
         """
         Get documentation on hook requirements and matching criteria.
 
@@ -220,7 +219,7 @@ class DynamicHookAIInterface:
             )
             return {"success": False, "error": str(e)}
 
-    def get_common_patterns(self) -> Dict[str, Any]:
+    def get_common_patterns(self) -> dict[str, Any]:
         """
         Get common hook patterns and use cases.
 
@@ -239,7 +238,7 @@ class DynamicHookAIInterface:
             )
             return {"success": False, "error": str(e)}
 
-    def validate_hook_function(self, function_code: str) -> Dict[str, Any]:
+    def validate_hook_function(self, function_code: str) -> dict[str, Any]:
         """
         Validate hook function code for issues.
 
@@ -266,10 +265,10 @@ class DynamicHookAIInterface:
         name: str,
         url_pattern: str,
         action: str,
-        target_url: Optional[str] = None,
-        custom_headers: Optional[Dict[str, str]] = None,
-        instance_ids: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        target_url: str | None = None,
+        custom_headers: dict[str, str] | None = None,
+        instance_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Create a simple hook using predefined templates (easier for AI).
 

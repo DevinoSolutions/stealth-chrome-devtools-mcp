@@ -6,8 +6,6 @@ to the existing dynamic hook system. It allows AI-generated functions to
 modify response content, headers, and status codes.
 """
 
-import asyncio
-from typing import Dict, Any, Optional
 import nodriver as uc
 from debug_logger import debug_logger
 from dynamic_hook_system import HookAction, RequestInfo
@@ -74,7 +72,7 @@ class ResponseStageProcessor:
                     uc.cdp.fetch.continue_response(
                         request_id=request_id,
                         response_code=action.status_code,
-                        response_headers=response_headers if response_headers else None,
+                        response_headers=response_headers or None,
                     )
                 )
                 debug_logger.log_info(
@@ -177,7 +175,7 @@ class ResponseStageProcessor:
                         request_id=request_id,
                         url=action.url or request.url,
                         method=action.method or request.method,
-                        headers=headers if headers else None,
+                        headers=headers or None,
                         post_data=action.post_data,
                     )
                 )

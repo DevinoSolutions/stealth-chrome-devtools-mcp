@@ -10,15 +10,12 @@ This module provides comprehensive function execution capabilities using nodrive
 
 import asyncio
 import json
-import uuid
-import inspect
-from typing import Dict, List, Any, Optional, Callable, Union
-from datetime import datetime
+from collections.abc import Callable
+from typing import Any
 
 import nodriver as uc
-from nodriver import Tab
-
 from debug_logger import debug_logger
+from nodriver import Tab
 
 
 class ExecutionContext:
@@ -65,7 +62,7 @@ class FunctionCall:
     """Represents a function call to be executed."""
 
     def __init__(
-        self, function_path: str, args: List[Any] = None, context_id: str = None
+        self, function_path: str, args: list[Any] = None, context_id: str = None
     ):
         """
         Args:
@@ -85,8 +82,8 @@ class CDPFunctionExecutor:
         """
         Initializes the CDPFunctionExecutor instance.
         """
-        self._python_bindings: Dict[str, Callable] = {}
-        self._persistent_functions: Dict[str, Dict[str, str]] = {}
+        self._python_bindings: dict[str, Callable] = {}
+        self._persistent_functions: dict[str, dict[str, str]] = {}
 
     async def enable_runtime(self, tab: Tab) -> bool:
         """
@@ -101,14 +98,14 @@ class CDPFunctionExecutor:
         try:
             await tab.send(uc.cdp.runtime.enable())
             debug_logger.log_info(
-                "cdp_function_executor", "enable_runtime", f"Runtime enabled for tab"
+                "cdp_function_executor", "enable_runtime", "Runtime enabled for tab"
             )
             return True
         except Exception as e:
             debug_logger.log_error("cdp_function_executor", "enable_runtime", e)
             return False
 
-    async def list_cdp_commands(self) -> List[str]:
+    async def list_cdp_commands(self) -> list[str]:
         """
         Lists all available CDP Runtime commands.
 
@@ -141,8 +138,8 @@ class CDPFunctionExecutor:
         return commands
 
     async def execute_cdp_command(
-        self, tab: Tab, command: str, params: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, tab: Tab, command: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
         """
         Executes any CDP Runtime command with given parameters.
 
@@ -180,7 +177,7 @@ class CDPFunctionExecutor:
                 "params": params,
             }
 
-    async def get_execution_contexts(self, tab: Tab) -> List[ExecutionContext]:
+    async def get_execution_contexts(self, tab: Tab) -> list[ExecutionContext]:
         """
         Gets all available execution contexts.
 
@@ -231,7 +228,7 @@ class CDPFunctionExecutor:
 
     async def discover_global_functions(
         self, tab: Tab, context_id: str = None
-    ) -> List[FunctionInfo]:
+    ) -> list[FunctionInfo]:
         """
         Discovers all global JavaScript functions.
 
@@ -321,7 +318,7 @@ class CDPFunctionExecutor:
 
     async def discover_object_methods(
         self, tab: Tab, object_path: str
-    ) -> List[FunctionInfo]:
+    ) -> list[FunctionInfo]:
         """
         Discovers methods of a specific JavaScript object.
 
@@ -405,8 +402,8 @@ class CDPFunctionExecutor:
             return []
 
     async def call_discovered_function(
-        self, tab: Tab, function_path: str, args: List[Any]
-    ) -> Dict[str, Any]:
+        self, tab: Tab, function_path: str, args: list[Any]
+    ) -> dict[str, Any]:
         """
         Calls a discovered JavaScript function with arguments.
 
@@ -466,7 +463,7 @@ class CDPFunctionExecutor:
             )
             if result and result[0] and result[0].value:
                 return result[0].value
-            elif result and result[1]:
+            if result and result[1]:
                 return {
                     "success": False,
                     "error": f"Runtime exception: {result[1].text}",
@@ -492,7 +489,7 @@ class CDPFunctionExecutor:
 
     async def inspect_function_signature(
         self, tab: Tab, function_path: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Inspects a function's signature and details.
 
@@ -548,7 +545,7 @@ class CDPFunctionExecutor:
 
     async def inject_and_execute_script(
         self, tab: Tab, script_code: str, context_id: str = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Injects and executes custom JavaScript code.
 
@@ -593,7 +590,7 @@ class CDPFunctionExecutor:
             )
             if result and result[0] and result[0].value:
                 return result[0].value
-            elif result and result[1]:
+            if result and result[1]:
                 return {
                     "success": False,
                     "error": f"Runtime exception: {result[1].text}",
@@ -609,7 +606,7 @@ class CDPFunctionExecutor:
 
     async def create_persistent_function(
         self, tab: Tab, function_name: str, function_code: str, instance_id: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Creates a persistent JavaScript function that survives page reloads.
 
@@ -661,8 +658,8 @@ class CDPFunctionExecutor:
             return {"success": False, "error": str(e)}
 
     async def execute_function_sequence(
-        self, tab: Tab, function_calls: List[FunctionCall]
-    ) -> List[Dict[str, Any]]:
+        self, tab: Tab, function_calls: list[FunctionCall]
+    ) -> list[dict[str, Any]]:
         """
         Executes a sequence of function calls.
 
@@ -714,7 +711,7 @@ class CDPFunctionExecutor:
 
     async def create_python_binding(
         self, tab: Tab, binding_name: str, python_function: Callable
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Creates a binding that allows JavaScript to call Python functions.
 
@@ -772,7 +769,7 @@ class CDPFunctionExecutor:
 
     async def execute_python_in_browser(
         self, tab: Tab, python_code: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Executes Python code by translating it to JavaScript with timeout protection.
 
@@ -797,7 +794,7 @@ class CDPFunctionExecutor:
                 self.inject_and_execute_script(tab, js_code), timeout=10.0
             )
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {
                 "success": False,
                 "error": "Python execution timeout - code may have infinite loop or syntax error",
@@ -850,8 +847,7 @@ class CDPFunctionExecutor:
             ):
                 wrapped_code = f"(() => {{ {js_code}; return {last_line}; }})()"
                 return wrapped_code
-            else:
-                return f"(() => {{ {js_code}; }})()"
+            return f"(() => {{ {js_code}; }})()"
 
         except ImportError:
             debug_logger.log_warning(
@@ -917,8 +913,8 @@ class CDPFunctionExecutor:
         return wrapped_code
 
     async def call_python_from_js(
-        self, binding_name: str, args: List[Any]
-    ) -> Dict[str, Any]:
+        self, binding_name: str, args: list[Any]
+    ) -> dict[str, Any]:
         """
         Handles JavaScript calls to Python functions.
 
@@ -954,7 +950,7 @@ class CDPFunctionExecutor:
 
     async def get_function_executor_info(
         self, instance_id: str = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Gets information about the function executor state.
 

@@ -16,7 +16,6 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
-
 import singleton
 
 

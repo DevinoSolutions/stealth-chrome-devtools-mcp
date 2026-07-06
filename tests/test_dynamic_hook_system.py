@@ -10,15 +10,12 @@ Safety focus: a malformed or malicious hook function must NEVER crash request
 processing — every bad path must degrade to HookAction("continue").
 """
 
-import pytest
-
 from dynamic_hook_system import (
-    RequestInfo,
-    HookAction,
     DynamicHook,
     DynamicHookSystem,
+    HookAction,
+    RequestInfo,
 )
-
 
 CONTINUE = "def process_request(request):\n    return HookAction(action='continue')\n"
 

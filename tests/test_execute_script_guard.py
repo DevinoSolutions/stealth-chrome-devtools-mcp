@@ -24,9 +24,9 @@ if str(EMBEDDED_DIR) not in sys.path:
 
 import server  # noqa: E402
 from server import (  # noqa: E402
-    _script_rejection_reason,
     EXECUTE_SCRIPT_TIMEOUT,
     MAX_USER_SCRIPT_BYTES,
+    _script_rejection_reason,
 )
 
 

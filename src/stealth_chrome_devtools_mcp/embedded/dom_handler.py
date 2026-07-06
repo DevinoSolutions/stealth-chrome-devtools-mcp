@@ -4,11 +4,11 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import Any
 
-from nodriver import Tab, Element
-from models import ElementInfo, ElementAction
 from debug_logger import debug_logger
+from models import ElementInfo
+from nodriver import Tab
 
 
 class DOMHandler:
@@ -18,10 +18,10 @@ class DOMHandler:
     async def query_elements(
         tab: Tab,
         selector: str,
-        text_filter: Optional[str] = None,
+        text_filter: str | None = None,
         visible_only: bool = True,
-        limit: Optional[Any] = None,
-    ) -> List[ElementInfo]:
+        limit: Any | None = None,
+    ) -> list[ElementInfo]:
         """
         Query elements with advanced filtering.
 
@@ -203,7 +203,7 @@ class DOMHandler:
 
     @staticmethod
     async def click_element(
-        tab: Tab, selector: str, text_match: Optional[str] = None, timeout: int = 10000
+        tab: Tab, selector: str, text_match: str | None = None, timeout: int = 10000
     ) -> bool:
         """
         Click an element with smart retry logic.
@@ -239,12 +239,12 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to click element: {str(e)}")
+            raise Exception(f"Failed to click element: {e!s}")
 
     @staticmethod
     async def upload_file(
-        tab: Tab, selector: str, file_paths: List[str], timeout: int = 10000
-    ) -> Dict[str, Any]:
+        tab: Tab, selector: str, file_paths: list[str], timeout: int = 10000
+    ) -> dict[str, Any]:
         """
         Attach local file(s) to a file input via CDP (DOM.setFileInputFiles).
 
@@ -266,7 +266,7 @@ class DOMHandler:
             if not file_paths:
                 raise Exception("No file paths provided")
 
-            resolved: List[str] = []
+            resolved: list[str] = []
             for raw_path in file_paths:
                 path = Path(str(raw_path)).expanduser()
                 if not path.is_file():
@@ -296,7 +296,7 @@ class DOMHandler:
             return {"uploaded": resolved, "count": len(resolved)}
 
         except Exception as e:
-            raise Exception(f"Failed to upload file: {str(e)}")
+            raise Exception(f"Failed to upload file: {e!s}")
 
     @staticmethod
     async def type_text(
@@ -340,8 +340,6 @@ class DOMHandler:
                 await asyncio.sleep(0.1)
 
             if parse_newlines:
-                from nodriver import cdp
-
                 lines = text.split("\n")
                 for i, line in enumerate(lines):
                     for char in line:
@@ -389,7 +387,7 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to type text: {str(e)}")
+            raise Exception(f"Failed to type text: {e!s}")
 
     @staticmethod
     async def paste_text(
@@ -463,15 +461,15 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to paste text: {str(e)}")
+            raise Exception(f"Failed to paste text: {e!s}")
 
     @staticmethod
     async def select_option(
         tab: Tab,
         selector: str,
-        value: Optional[str] = None,
-        text: Optional[str] = None,
-        index: Optional[int] = None,
+        value: str | None = None,
+        text: str | None = None,
+        index: int | None = None,
     ) -> bool:
         """
         Select option from dropdown using nodriver's native methods.
@@ -507,7 +505,7 @@ class DOMHandler:
                 """)
                 return True
 
-            elif index is not None:
+            if index is not None:
                 safe_selector = json.dumps(selector)
                 safe_index = int(index)
                 await tab.evaluate(f"""
@@ -522,10 +520,10 @@ class DOMHandler:
             raise Exception("No selection criteria provided (value, text, or index)")
 
         except Exception as e:
-            raise Exception(f"Failed to select option: {str(e)}")
+            raise Exception(f"Failed to select option: {e!s}")
 
     @staticmethod
-    async def get_element_state(tab: Tab, selector: str) -> Dict[str, Any]:
+    async def get_element_state(tab: Tab, selector: str) -> dict[str, Any]:
         """
         Get complete state of an element.
 
@@ -578,7 +576,7 @@ class DOMHandler:
             return state
 
         except Exception as e:
-            raise Exception(f"Failed to get element state: {str(e)}")
+            raise Exception(f"Failed to get element state: {e!s}")
 
     @staticmethod
     async def wait_for_element(
@@ -586,7 +584,7 @@ class DOMHandler:
         selector: str,
         timeout: int = 30000,
         visible: bool = True,
-        text_content: Optional[str] = None,
+        text_content: str | None = None,
     ) -> bool:
         """
         Wait for element to appear and match conditions.
@@ -647,7 +645,7 @@ class DOMHandler:
 
     @staticmethod
     async def execute_script(
-        tab: Tab, script: str, args: Optional[List[Any]] = None
+        tab: Tab, script: str, args: list[Any] | None = None
     ) -> Any:
         """
         Execute JavaScript in page context.
@@ -672,12 +670,12 @@ class DOMHandler:
             return result
 
         except Exception as e:
-            raise Exception(f"Failed to execute script: {str(e)}")
+            raise Exception(f"Failed to execute script: {e!s}")
 
     @staticmethod
     async def get_page_content(
         tab: Tab, include_frames: bool = False
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """
         Get page HTML and text content.
 
@@ -731,7 +729,7 @@ class DOMHandler:
             return content
 
         except Exception as e:
-            raise Exception(f"Failed to get page content: {str(e)}")
+            raise Exception(f"Failed to get page content: {e!s}")
 
     @staticmethod
     async def scroll_page(
@@ -777,4 +775,4 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to scroll page: {str(e)}")
+            raise Exception(f"Failed to scroll page: {e!s}")

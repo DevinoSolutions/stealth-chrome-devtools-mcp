@@ -7,8 +7,8 @@ import base64
 import socket
 import ssl
 from ssl import SSLContext
-from struct import calcsize, error as struct_error, pack, unpack
-from typing import Optional
+from struct import calcsize, pack, unpack
+from struct import error as struct_error
 from urllib.parse import urlparse
 
 from debug_logger import debug_logger
@@ -30,7 +30,7 @@ class AuthenticatedProxyForwarder:
     def __init__(
         self,
         proxy_server: str,
-        ssl_context: Optional[SSLContext] = None,
+        ssl_context: SSLContext | None = None,
     ) -> None:
         """
         Initialize an authenticated proxy forwarder.
@@ -52,7 +52,7 @@ class AuthenticatedProxyForwarder:
         if parsed.username is None or parsed.password is None:
             raise ValueError("Proxy URL must include both username and password")
 
-        self.server: Optional[asyncio.AbstractServer] = None
+        self.server: asyncio.AbstractServer | None = None
         self.ssl_context = ssl_context
         self.scheme = parsed.scheme
         self.use_ssl = parsed.scheme == "https"
@@ -151,7 +151,7 @@ class AuthenticatedProxyForwarder:
         max_line_length = 8192
         request_timeout = 5.0
         upstream_connect_timeout = 30.0
-        remote_writer: Optional[asyncio.StreamWriter] = None
+        remote_writer: asyncio.StreamWriter | None = None
         pipe_tasks: list[asyncio.Task] = []
         header_lines: list[bytes] = []
 
@@ -276,7 +276,7 @@ class AuthenticatedProxyForwarder:
                 asyncio.create_task(self.pipe(reader, remote_writer, event)),
             ]
             await asyncio.gather(*pipe_tasks)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await self._write_and_close(writer, b"HTTP/1.1 504 Gateway Timeout\r\n\r\n")
         except Exception:
             raise
@@ -305,7 +305,7 @@ class AuthenticatedProxyForwarder:
         atyp_ipv4 = 0x01
         atyp_dns = 0x03
         atyp_ipv6 = 0x04
-        remote_writer: Optional[asyncio.StreamWriter] = None
+        remote_writer: asyncio.StreamWriter | None = None
 
         async def read_struct(
             stream: asyncio.StreamReader,
@@ -402,7 +402,7 @@ class AuthenticatedProxyForwarder:
                     break
                 writer.write(data)
                 await writer.drain()
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except Exception:
                 break

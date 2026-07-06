@@ -19,7 +19,6 @@ import time
 import server
 from process_cleanup import ProcessCleanup
 
-
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 GIB = 1024**3
 

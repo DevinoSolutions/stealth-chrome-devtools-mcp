@@ -26,7 +26,6 @@ import time
 
 import server
 
-
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
 

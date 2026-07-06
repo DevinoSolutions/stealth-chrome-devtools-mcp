@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -16,8 +15,8 @@ class ProxyConfig:
     """Parsed proxy configuration."""
 
     server: str
-    username: Optional[str] = None
-    password: Optional[str] = None
+    username: str | None = None
+    password: str | None = None
 
 
 def _format_host(hostname: str) -> str:
@@ -70,7 +69,7 @@ def parse_proxy_config(proxy_url: str) -> ProxyConfig:
     )
 
 
-def merge_proxy_server_arg(args: List[str], proxy_server: Optional[str]) -> List[str]:
+def merge_proxy_server_arg(args: list[str], proxy_server: str | None) -> list[str]:
     """Ensure args contain exactly one --proxy-server=... entry."""
 
     if not proxy_server:

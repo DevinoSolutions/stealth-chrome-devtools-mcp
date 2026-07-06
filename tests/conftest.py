@@ -1,9 +1,9 @@
 """Shared fixtures for stealth-chrome-devtools-mcp test suite."""
 
-import os
-import sys
-import shutil
 import json
+import os
+import shutil
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch

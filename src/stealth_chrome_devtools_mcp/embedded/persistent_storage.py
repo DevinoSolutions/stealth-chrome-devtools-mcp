@@ -1,5 +1,5 @@
 import threading
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 class InMemoryStorage:
@@ -12,9 +12,9 @@ class InMemoryStorage:
         self: InMemoryStorage - The storage instance.
         """
         self._lock = threading.RLock()
-        self._data: Dict[str, Any] = {"instances": {}}
+        self._data: dict[str, Any] = {"instances": {}}
 
-    def store_instance(self, instance_id: str, data: Dict[str, Any]):
+    def store_instance(self, instance_id: str, data: dict[str, Any]):
         """
         Store browser instance data.
 
@@ -44,7 +44,7 @@ class InMemoryStorage:
             if "instances" in self._data and instance_id in self._data["instances"]:
                 del self._data["instances"][instance_id]
 
-    def get_instance(self, instance_id: str) -> Optional[Dict[str, Any]]:
+    def get_instance(self, instance_id: str) -> dict[str, Any] | None:
         """
         Get browser instance data.
 
@@ -54,7 +54,7 @@ class InMemoryStorage:
         with self._lock:
             return self._data.get("instances", {}).get(instance_id)
 
-    def list_instances(self) -> Dict[str, Any]:
+    def list_instances(self) -> dict[str, Any]:
         """
         List all stored instances.
 

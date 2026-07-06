@@ -9,8 +9,7 @@ every profile helper at a tmp dir); no browser.
 
 import json
 
-import stealth_chrome_devtools_mcp.cli as cli
-
+from stealth_chrome_devtools_mcp import cli
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 

@@ -3,9 +3,10 @@
 import asyncio
 import json
 import re
-from typing import Dict, List, Any, Optional, Set, Union
-from urllib.parse import urljoin, urlparse
 from pathlib import Path
+from typing import Any
+from urllib.parse import urljoin
+
 import requests
 
 try:
@@ -35,7 +36,7 @@ class ElementCloner:
         include_css_rules: bool = True,
         include_pseudo: bool = True,
         include_inheritance: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Extract complete styling information from an element.
 
@@ -73,7 +74,7 @@ class ElementCloner:
         if not js_file.exists():
             raise FileNotFoundError(f"JavaScript file not found: {js_file}")
 
-        with open(js_file, "r", encoding="utf-8") as f:
+        with open(js_file, encoding="utf-8") as f:
             js_code = f.read()
 
         js_code = js_code.replace("$SELECTOR$", selector)
@@ -125,7 +126,7 @@ class ElementCloner:
         include_attributes: bool = True,
         include_data_attributes: bool = True,
         max_depth: int = 3,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Extract complete HTML structure and DOM information.
 
@@ -159,14 +160,14 @@ class ElementCloner:
                 return {
                     "error": f"JavaScript error: {structure_data.exception_details}"
                 }
-            elif isinstance(structure_data, dict):
+            if isinstance(structure_data, dict):
                 debug_logger.log_info(
                     "element_cloner",
                     "extract_structure",
                     f"Extracted structure for {structure_data.get('tag_name', 'unknown')} element",
                 )
                 return structure_data
-            elif isinstance(structure_data, list):
+            if isinstance(structure_data, list):
                 result = self._convert_nodriver_result(structure_data)
                 debug_logger.log_info(
                     "element_cloner",
@@ -174,16 +175,15 @@ class ElementCloner:
                     f"Extracted structure for {result.get('tag_name', 'unknown')} element",
                 )
                 return result
-            else:
-                debug_logger.log_warning(
-                    "element_cloner",
-                    "extract_structure",
-                    f"Got unexpected type: {type(structure_data)}",
-                )
-                return {
-                    "error": f"Unexpected return type: {type(structure_data)}",
-                    "raw_data": str(structure_data),
-                }
+            debug_logger.log_warning(
+                "element_cloner",
+                "extract_structure",
+                f"Got unexpected type: {type(structure_data)}",
+            )
+            return {
+                "error": f"Unexpected return type: {type(structure_data)}",
+                "raw_data": str(structure_data),
+            }
         except Exception as e:
             debug_logger.log_error("element_cloner", "extract_structure", e)
             return {"error": str(e)}
@@ -197,7 +197,7 @@ class ElementCloner:
         include_listeners: bool = True,
         include_framework: bool = True,
         analyze_handlers: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Extract complete event listener and JavaScript handler information.
 
@@ -229,27 +229,26 @@ class ElementCloner:
 
             if hasattr(event_data, "exception_details"):
                 return {"error": f"JavaScript error: {event_data.exception_details}"}
-            elif isinstance(event_data, dict):
+            if isinstance(event_data, dict):
                 debug_logger.log_info(
-                    "element_cloner", "extract_events", f"Extracted events for element"
+                    "element_cloner", "extract_events", "Extracted events for element"
                 )
                 return event_data
-            elif isinstance(event_data, list):
+            if isinstance(event_data, list):
                 result = self._convert_nodriver_result(event_data)
                 debug_logger.log_info(
-                    "element_cloner", "extract_events", f"Extracted events for element"
+                    "element_cloner", "extract_events", "Extracted events for element"
                 )
                 return result
-            else:
-                debug_logger.log_warning(
-                    "element_cloner",
-                    "extract_events",
-                    f"Got unexpected type: {type(event_data)}",
-                )
-                return {
-                    "error": f"Unexpected return type: {type(event_data)}",
-                    "raw_data": str(event_data),
-                }
+            debug_logger.log_warning(
+                "element_cloner",
+                "extract_events",
+                f"Got unexpected type: {type(event_data)}",
+            )
+            return {
+                "error": f"Unexpected return type: {type(event_data)}",
+                "raw_data": str(event_data),
+            }
         except Exception as e:
             debug_logger.log_error("element_cloner", "extract_events", e)
             return {"error": str(e)}
@@ -263,7 +262,7 @@ class ElementCloner:
         include_transitions: bool = True,
         include_transforms: bool = True,
         analyze_keyframes: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Extract CSS animations, transitions, and transforms.
 
@@ -297,31 +296,30 @@ class ElementCloner:
                 return {
                     "error": f"JavaScript error: {animation_data.exception_details}"
                 }
-            elif isinstance(animation_data, dict):
+            if isinstance(animation_data, dict):
                 debug_logger.log_info(
                     "element_cloner",
                     "extract_animations",
-                    f"Extracted animations for element",
+                    "Extracted animations for element",
                 )
                 return animation_data
-            elif isinstance(animation_data, list):
+            if isinstance(animation_data, list):
                 result = self._convert_nodriver_result(animation_data)
                 debug_logger.log_info(
                     "element_cloner",
                     "extract_animations",
-                    f"Extracted animations for element",
+                    "Extracted animations for element",
                 )
                 return result
-            else:
-                debug_logger.log_warning(
-                    "element_cloner",
-                    "extract_animations",
-                    f"Got unexpected type: {type(animation_data)}",
-                )
-                return {
-                    "error": f"Unexpected return type: {type(animation_data)}",
-                    "raw_data": str(animation_data),
-                }
+            debug_logger.log_warning(
+                "element_cloner",
+                "extract_animations",
+                f"Got unexpected type: {type(animation_data)}",
+            )
+            return {
+                "error": f"Unexpected return type: {type(animation_data)}",
+                "raw_data": str(animation_data),
+            }
         except Exception as e:
             debug_logger.log_error("element_cloner", "extract_animations", e)
             return {"error": str(e)}
@@ -335,7 +333,7 @@ class ElementCloner:
         include_backgrounds: bool = True,
         include_fonts: bool = True,
         fetch_external: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Extract all assets related to an element (images, fonts, etc.).
 
@@ -361,7 +359,7 @@ class ElementCloner:
             if not js_file.exists():
                 return {"error": f"JavaScript file not found: {js_file}"}
 
-            with open(js_file, "r", encoding="utf-8") as f:
+            with open(js_file, encoding="utf-8") as f:
                 js_code = f.read()
 
             js_code = js_code.replace("$SELECTOR", selector)
@@ -381,7 +379,7 @@ class ElementCloner:
             asset_data = await tab.evaluate(js_code)
             if hasattr(asset_data, "exception_details"):
                 return {"error": f"JavaScript error: {asset_data.exception_details}"}
-            elif isinstance(asset_data, dict):
+            if isinstance(asset_data, dict):
                 pass
             elif isinstance(asset_data, list):
                 # Convert nodriver's array format back to dict
@@ -417,7 +415,7 @@ class ElementCloner:
                         )
 
             debug_logger.log_info(
-                "element_cloner", "extract_assets", f"Extracted assets for element"
+                "element_cloner", "extract_assets", "Extracted assets for element"
             )
             return asset_data
         except Exception as e:
@@ -433,7 +431,7 @@ class ElementCloner:
         analyze_js: bool = True,
         follow_imports: bool = False,
         max_depth: int = 2,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Discover and analyze related CSS/JS files for context.
 
@@ -456,7 +454,7 @@ class ElementCloner:
             if not js_file.exists():
                 return {"error": f"JavaScript file not found: {js_file}"}
 
-            with open(js_file, "r", encoding="utf-8") as f:
+            with open(js_file, encoding="utf-8") as f:
                 js_code = f.read()
 
             js_code = js_code.replace(
@@ -471,7 +469,7 @@ class ElementCloner:
             file_data = await tab.evaluate(js_code)
             if hasattr(file_data, "exception_details"):
                 return {"error": f"JavaScript error: {file_data.exception_details}"}
-            elif isinstance(file_data, dict):
+            if isinstance(file_data, dict):
                 pass
             elif isinstance(file_data, list):
                 file_data = self._convert_nodriver_result(file_data)
@@ -490,7 +488,7 @@ class ElementCloner:
                 await self._fetch_and_analyze_files(file_data, tab.url, max_depth)
 
             debug_logger.log_info(
-                "element_cloner", "extract_related_files", f"Found related files"
+                "element_cloner", "extract_related_files", "Found related files"
             )
             return file_data
         except Exception as e:
@@ -498,7 +496,7 @@ class ElementCloner:
             return {"error": str(e)}
 
     async def _fetch_and_analyze_files(
-        self, file_data: Dict, base_url: str, max_depth: int
+        self, file_data: dict, base_url: str, max_depth: int
     ) -> None:
         """
         Fetch and analyze external CSS/JS files for additional context.
@@ -563,8 +561,8 @@ class ElementCloner:
         tab,
         element=None,
         selector: str = None,
-        extraction_options: Dict[str, Any] = None,
-    ) -> Dict[str, Any]:
+        extraction_options: dict[str, Any] = None,
+    ) -> dict[str, Any]:
         """
         Master function that extracts all element data using specialized functions.
 
@@ -696,7 +694,7 @@ class ElementCloner:
         include_css_rules: bool = True,
         include_pseudo: bool = True,
         include_inheritance: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Extract complete styling information using direct CDP calls (no JavaScript evaluation).
         This prevents hanging issues by using nodriver's native CDP methods.
@@ -714,7 +712,7 @@ class ElementCloner:
             Dict[str, Any]: Dict with styling data
         """
         try:
-            import nodriver.cdp as cdp
+            from nodriver import cdp
 
             await tab.send(cdp.dom.enable())
             await tab.send(cdp.css.enable())
@@ -831,7 +829,7 @@ class ElementCloner:
 
         except Exception as e:
             debug_logger.log_error("element_cloner", "extract_styles_cdp", e)
-            return {"error": f"CDP extraction failed: {str(e)}"}
+            return {"error": f"CDP extraction failed: {e!s}"}
 
 
 element_cloner = ElementCloner()

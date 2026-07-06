@@ -13,9 +13,7 @@ Race condition handling:
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import socket
 import subprocess
 import sys
@@ -63,7 +61,7 @@ def _exclusive_lock():
         else:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         got = True
-    except (OSError, IOError):
+    except OSError:
         pass
     try:
         yield got
@@ -75,7 +73,7 @@ def _exclusive_lock():
                     msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
                     fcntl.flock(fd, fcntl.LOCK_UN)
-            except (OSError, IOError):
+            except OSError:
                 pass
         fd.close()
 
@@ -85,7 +83,7 @@ def _server_is_healthy(port: int) -> bool:
         sock = socket.create_connection(("127.0.0.1", port), timeout=2)
         sock.close()
         return True
-    except (socket.error, OSError):
+    except OSError:
         return False
 
 

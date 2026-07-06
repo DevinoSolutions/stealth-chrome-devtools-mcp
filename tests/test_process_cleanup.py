@@ -10,17 +10,13 @@ Validates that:
 No browser required — pure logic tests with mocked psutil.
 """
 
-import json
 import os
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import psutil
 import pytest
-
 from process_cleanup import ProcessCleanup
-
 
 # ---------------------------------------------------------------------------
 # ProcessCleanup init
@@ -37,22 +33,20 @@ class TestProcessCleanupInit:
         def patched_recover(self_obj):
             call_order.append(("recover", hasattr(self_obj, "_init_time")))
 
-        with patch.object(
-            ProcessCleanup, "_recover_orphaned_processes", patched_recover
+        with (
+            patch.object(
+                ProcessCleanup, "_recover_orphaned_processes", patched_recover
+            ),
+            patch.object(ProcessCleanup, "_setup_cleanup_handlers", lambda self: None),
         ):
-            with patch.object(
-                ProcessCleanup, "_setup_cleanup_handlers", lambda self: None
-            ):
-                pc = ProcessCleanup.__new__(ProcessCleanup)
-                pc.pid_file = Path(
-                    os.path.expanduser("~/.stealth_browser_pids_test.json")
-                )
-                pc.tracked_pids = set()
-                pc.browser_processes = {}
-                pc.orphan_profile_max_age_seconds = 21600
-                pc._init_time = time.time()
-                pc._setup_cleanup_handlers()
-                pc._recover_orphaned_processes()
+            pc = ProcessCleanup.__new__(ProcessCleanup)
+            pc.pid_file = Path(os.path.expanduser("~/.stealth_browser_pids_test.json"))
+            pc.tracked_pids = set()
+            pc.browser_processes = {}
+            pc.orphan_profile_max_age_seconds = 21600
+            pc._init_time = time.time()
+            pc._setup_cleanup_handlers()
+            pc._recover_orphaned_processes()
 
         assert call_order == [("recover", True)]
 

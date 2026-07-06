@@ -5,7 +5,6 @@ import os
 import platform
 import shutil
 import sys
-from typing import List, Optional
 
 
 def is_running_as_root() -> bool:
@@ -49,7 +48,7 @@ def is_running_in_container() -> bool:
         try:
             if not os.path.exists("/proc/1/cgroup"):
                 return False
-            with open("/proc/1/cgroup", "r") as f:
+            with open("/proc/1/cgroup") as f:
                 return "docker" in f.read()
         except (OSError, PermissionError):
             return False
@@ -64,7 +63,7 @@ def is_running_in_container() -> bool:
     return any(container_indicators)
 
 
-def get_required_sandbox_args() -> List[str]:
+def get_required_sandbox_args() -> list[str]:
     """
     Get the required browser arguments for sandbox handling based on current environment.
 
@@ -148,7 +147,7 @@ def _stealth_blocked_args() -> dict:
     }
 
 
-def filter_stealth_args(user_args: List[str]) -> tuple:
+def filter_stealth_args(user_args: list[str]) -> tuple:
     """
     Strip browser args that would compromise stealth and return
     (clean_args, stripped_warnings).
@@ -157,8 +156,8 @@ def filter_stealth_args(user_args: List[str]) -> tuple:
         ``"--no-sandbox stripped: missing sandbox detectable via process topology"``
     """
     blocked = _stealth_blocked_args()
-    clean: List[str] = []
-    warnings: List[str] = []
+    clean: list[str] = []
+    warnings: list[str] = []
 
     for arg in user_args:
         lower = arg.lower().strip()
@@ -174,7 +173,7 @@ def filter_stealth_args(user_args: List[str]) -> tuple:
     return clean, warnings
 
 
-def merge_browser_args(user_args: Optional[List[str]] = None) -> tuple:
+def merge_browser_args(user_args: list[str] | None = None) -> tuple:
     """
     Merge user-provided browser arguments with platform-specific required arguments.
     Strips any args that would compromise stealth detection.
@@ -228,7 +227,7 @@ def get_platform_info() -> dict:
     }
 
 
-def check_browser_executable() -> Optional[str]:
+def check_browser_executable() -> str | None:
     """
     Find a compatible browser executable on the system.
     Searches for Chrome, Chromium, and Microsoft Edge in order of preference.

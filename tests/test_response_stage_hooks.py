@@ -7,9 +7,8 @@ continue so the intercepted request/response is never left hanging.
 """
 
 import pytest
-
-from response_stage_hooks import ResponseStageProcessor
 from dynamic_hook_system import HookAction, RequestInfo
+from response_stage_hooks import ResponseStageProcessor
 
 
 class FakeTab:
@@ -22,7 +21,6 @@ class FakeTab:
             self.sent.append(command)
             raise RuntimeError("cdp send failed")
         self.sent.append(command)
-        return None
 
 
 def _req(stage="response"):

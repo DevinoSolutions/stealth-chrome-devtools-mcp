@@ -1,11 +1,9 @@
-import asyncio
 import json
-import os
 import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any
 
 try:
     from .debug_logger import debug_logger
@@ -27,7 +25,7 @@ except ImportError:
 class FileBasedElementCloner:
     """Element cloner that saves data to files and returns file paths."""
 
-    def __init__(self, output_dir: Optional[str] = None):
+    def __init__(self, output_dir: str | None = None):
         """
         Initialize with output directory for clone files.
 
@@ -55,10 +53,9 @@ class FileBasedElementCloner:
                 k: len(v) if isinstance(v, list) else str(v)
                 for k, v in framework_handlers.items()
             }
-        elif isinstance(framework_handlers, list):
+        if isinstance(framework_handlers, list):
             return {"handlers": len(framework_handlers)}
-        else:
-            return {"value": str(framework_handlers)}
+        return {"value": str(framework_handlers)}
 
     def _generate_filename(self, prefix: str, extension: str = "json") -> str:
         """
@@ -83,7 +80,7 @@ class FileBasedElementCloner:
         include_css_rules: bool = True,
         include_pseudo: bool = True,
         include_inheritance: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Extract element styles and save to file, returning file path.
 
@@ -146,7 +143,7 @@ class FileBasedElementCloner:
             debug_logger.log_error("file_element_cloner", "extract_styles_to_file", e)
             return {"error": str(e)}
 
-    def _save_to_file(self, data: Dict[str, Any], filename: str) -> str:
+    def _save_to_file(self, data: dict[str, Any], filename: str) -> str:
         """
         Save data to file and return absolute path.
 
@@ -164,7 +161,7 @@ class FileBasedElementCloner:
 
     async def extract_complete_element_to_file(
         self, tab, selector: str, include_children: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Extract complete element using working comprehensive cloner and save to file.
 
@@ -230,7 +227,7 @@ class FileBasedElementCloner:
         include_attributes: bool = True,
         include_data_attributes: bool = True,
         max_depth: int = 3,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """
         Extract structure and save to file, return file path.
 
@@ -303,7 +300,7 @@ class FileBasedElementCloner:
         include_listeners: bool = True,
         include_framework: bool = True,
         analyze_handlers: bool = True,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """
         Extract events and save to file, return file path.
 
@@ -373,7 +370,7 @@ class FileBasedElementCloner:
         include_transitions: bool = True,
         include_transforms: bool = True,
         analyze_keyframes: bool = True,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """
         Extract animations and save to file, return file path.
 
@@ -452,7 +449,7 @@ class FileBasedElementCloner:
         include_backgrounds: bool = True,
         include_fonts: bool = True,
         fetch_external: bool = False,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """
         Extract assets and save to file, return file path.
 
@@ -527,7 +524,7 @@ class FileBasedElementCloner:
         analyze_js: bool = True,
         follow_imports: bool = False,
         max_depth: int = 2,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """
         Extract related files and save to file, return file path.
 
@@ -593,8 +590,8 @@ class FileBasedElementCloner:
         tab,
         element=None,
         selector: str = None,
-        extraction_options: Dict[str, Any] = None,
-    ) -> Dict[str, Any]:
+        extraction_options: dict[str, Any] = None,
+    ) -> dict[str, Any]:
         """
         Master function that extracts all element data and saves to file.
         Returns file path instead of full data.
@@ -680,7 +677,7 @@ class FileBasedElementCloner:
             debug_logger.log_error("file_element_cloner", "clone_complete_to_file", e)
             return {"error": str(e)}
 
-    def list_clone_files(self) -> List[Dict[str, Any]]:
+    def list_clone_files(self) -> list[dict[str, Any]]:
         """
         List all clone files in the output directory.
 
@@ -702,7 +699,7 @@ class FileBasedElementCloner:
                     ).isoformat(),
                 }
                 try:
-                    with open(file_path, "r", encoding="utf-8") as f:
+                    with open(file_path, encoding="utf-8") as f:
                         data = json.load(f)
                         if "_metadata" in data:
                             file_info["metadata"] = data["_metadata"]

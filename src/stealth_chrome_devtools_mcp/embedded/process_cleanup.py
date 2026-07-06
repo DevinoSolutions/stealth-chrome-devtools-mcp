@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any
 
 if sys.platform == "win32":
     import msvcrt
@@ -18,7 +18,6 @@ else:
     import fcntl
 
 import psutil
-
 from debug_logger import debug_logger
 
 
@@ -36,8 +35,8 @@ class ProcessCleanup:
             None
         """
         self.pid_file = Path(os.path.expanduser("~/.stealth_browser_pids.json"))
-        self.tracked_pids: Set[int] = set()
-        self.browser_processes: Dict[str, Dict[str, Any]] = {}
+        self.tracked_pids: set[int] = set()
+        self.browser_processes: dict[str, dict[str, Any]] = {}
         self.orphan_profile_max_age_seconds = self._parse_nonnegative_int_env(
             "BROWSER_ORPHAN_PROFILE_MAX_AGE",
             self.DEFAULT_ORPHAN_PROFILE_MAX_AGE_SECONDS,
@@ -83,7 +82,7 @@ class ProcessCleanup:
         return parsed
 
     @staticmethod
-    def _normalize_path(path: Optional[str]) -> Optional[str]:
+    def _normalize_path(path: str | None) -> str | None:
         """
         Normalize a filesystem path for safe comparison.
 
@@ -118,7 +117,7 @@ class ProcessCleanup:
     def _extract_profile_dir_from_cmdline(
         cls,
         cmdline: list[str],
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Extract the user-data-dir argument from a browser command line.
 
@@ -138,8 +137,8 @@ class ProcessCleanup:
     @classmethod
     def _normalize_process_metadata(
         cls,
-        raw_processes: Dict[str, Any],
-    ) -> Dict[str, Dict[str, Any]]:
+        raw_processes: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
         """
         Normalize old and new PID-file formats into the current metadata shape.
 
@@ -149,7 +148,7 @@ class ProcessCleanup:
         Returns:
             Dict[str, Dict[str, Any]]: Normalized process metadata keyed by instance id.
         """
-        normalized: Dict[str, Dict[str, Any]] = {}
+        normalized: dict[str, dict[str, Any]] = {}
         for instance_id, raw_value in raw_processes.items():
             if isinstance(raw_value, int):
                 metadata = {
@@ -226,7 +225,7 @@ class ProcessCleanup:
             else:
                 fcntl.flock(file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             yield
-        except (OSError, IOError):
+        except OSError:
             yield
         finally:
             try:
@@ -235,10 +234,10 @@ class ProcessCleanup:
                     msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
                     fcntl.flock(file_handle, fcntl.LOCK_UN)
-            except (OSError, IOError):
+            except OSError:
                 pass
 
-    def _load_tracked_pids(self) -> Dict[str, Dict[str, Any]]:
+    def _load_tracked_pids(self) -> dict[str, dict[str, Any]]:
         """
         Load tracked browser metadata from disk with file locking.
 
@@ -248,7 +247,7 @@ class ProcessCleanup:
         try:
             if not self.pid_file.exists():
                 return {}
-            with open(self.pid_file, "r") as file_handle:
+            with open(self.pid_file) as file_handle:
                 with self._file_lock(file_handle):
                     data = json.load(file_handle)
             return self._normalize_process_metadata(data.get("browser_processes", {}))
@@ -282,14 +281,14 @@ class ProcessCleanup:
                 f"Failed to save PID file: {error}",
             )
 
-    def _get_active_browser_profile_dirs(self) -> Set[str]:
+    def _get_active_browser_profile_dirs(self) -> set[str]:
         """
         Collect browser profile directories used by currently running browser processes.
 
         Returns:
             Set[str]: Normalized active browser profile directories.
         """
-        active_profile_dirs: Set[str] = set()
+        active_profile_dirs: set[str] = set()
         # Enumerate only the cheap `name` field for every process; reading
         # `cmdline` for the whole process table is the dominant cost on Windows
         # (one PEB read per process). Pull cmdline lazily for the handful of
@@ -313,7 +312,7 @@ class ProcessCleanup:
                 )
         return active_profile_dirs
 
-    def _get_browser_pids_for_profile(self, user_data_dir: Optional[str]) -> Set[int]:
+    def _get_browser_pids_for_profile(self, user_data_dir: str | None) -> set[int]:
         """
         Collect all live browser PIDs currently using a specific profile directory.
 
@@ -327,7 +326,7 @@ class ProcessCleanup:
         if normalized_profile_dir is None:
             return set()
 
-        matching_pids: Set[int] = set()
+        matching_pids: set[int] = set()
         # See _get_active_browser_profile_dirs: enumerate cheap `name`/`pid`
         # only and read the expensive `cmdline` lazily for browser processes.
         for process in psutil.process_iter(["pid", "name"]):
@@ -353,7 +352,7 @@ class ProcessCleanup:
     def _kill_processes_for_metadata(
         self,
         instance_id: str,
-        metadata: Dict[str, Any],
+        metadata: dict[str, Any],
         recovery: bool = False,
     ) -> bool:
         """
@@ -376,7 +375,7 @@ class ProcessCleanup:
         if recovery:
             # Safety net: never kill processes that started after this server
             # session began — they belong to the current run, not a previous one.
-            safe_pids: Set[int] = set()
+            safe_pids: set[int] = set()
             for pid in pids_to_kill:
                 try:
                     pid_create_time = psutil.Process(pid).create_time()
@@ -413,9 +412,8 @@ class ProcessCleanup:
                         )
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass  # gone or inaccessible — skip conservatively
-        else:
-            if not pids_to_kill and isinstance(fallback_pid, int):
-                pids_to_kill = {fallback_pid}
+        elif not pids_to_kill and isinstance(fallback_pid, int):
+            pids_to_kill = {fallback_pid}
 
         if not pids_to_kill:
             return True
@@ -430,7 +428,7 @@ class ProcessCleanup:
         self,
         profile_dir: str,
         instance_id: str,
-        active_profile_dirs: Optional[Set[str]] = None,
+        active_profile_dirs: set[str] | None = None,
     ) -> bool:
         """
         Remove a browser temp profile directory when it is safe to do so.
@@ -492,8 +490,8 @@ class ProcessCleanup:
     def _cleanup_profile_for_metadata(
         self,
         instance_id: str,
-        metadata: Dict[str, Any],
-        active_profile_dirs: Optional[Set[str]] = None,
+        metadata: dict[str, Any],
+        active_profile_dirs: set[str] | None = None,
     ) -> bool:
         """
         Remove an auto-generated profile directory described by tracked metadata.
@@ -518,7 +516,7 @@ class ProcessCleanup:
         return self._cleanup_profile_dir(profile_dir, instance_id, active_profile_dirs)
 
     @staticmethod
-    def _should_untrack_after_cleanup(metadata: Dict[str, Any], cleaned: bool) -> bool:
+    def _should_untrack_after_cleanup(metadata: dict[str, Any], cleaned: bool) -> bool:
         """Decide whether a tracked entry can be dropped after a cleanup attempt.
 
         Auto-clones stay tracked until their directory is actually removed, so a
@@ -643,8 +641,8 @@ class ProcessCleanup:
         self,
         instance_id: str,
         browser_process,
-        user_data_dir: Optional[str] = None,
-        uses_custom_data_dir: Optional[bool] = None,
+        user_data_dir: str | None = None,
+        uses_custom_data_dir: bool | None = None,
         auto_clone: bool = False,
     ) -> bool:
         """
@@ -1002,7 +1000,7 @@ class ProcessCleanup:
                 f"Failed to clear PID file: {error}",
             )
 
-    def get_tracked_processes(self) -> Dict[str, int]:
+    def get_tracked_processes(self) -> dict[str, int]:
         """
         Return currently tracked browser PIDs keyed by instance id.
 

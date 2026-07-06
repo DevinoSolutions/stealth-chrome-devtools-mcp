@@ -5,7 +5,7 @@ import os
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any
 
 
 def default_clone_output_dir() -> Path:
@@ -57,17 +57,16 @@ class ResponseHandler:
             # Convert to JSON string and estimate ~4 chars per token
             json_str = json.dumps(data, ensure_ascii=False)
             return len(json_str) // 4
-        elif isinstance(data, str):
+        if isinstance(data, str):
             return len(data) // 4
-        else:
-            return len(str(data)) // 4
+        return len(str(data)) // 4
 
     def handle_response(
         self,
         data: Any,
         fallback_filename_prefix: str = "large_response",
-        metadata: Dict[str, Any] = None,
-    ) -> Dict[str, Any]:
+        metadata: dict[str, Any] = None,
+    ) -> dict[str, Any]:
         """
         Handle response data, automatically falling back to file storage if too large.
 

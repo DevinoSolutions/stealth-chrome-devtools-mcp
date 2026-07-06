@@ -7,10 +7,8 @@ filter logic that the MCP network tools call. These are the filters an agent
 relies on to find the one request that matters among thousands.
 """
 
-import pytest
-
-from network_interceptor import NetworkInterceptor
 from models import NetworkRequest, NetworkResponse
+from network_interceptor import NetworkInterceptor
 
 
 def _req(rid, url, method="GET", post_data=None, resource_type="XHR", iid="i1"):

@@ -18,8 +18,8 @@ backend). `TestProxyExitsOnBackendDeath` reproduces the real hang end-to-end.
 import socket
 
 import anyio
+import anyio.lowlevel
 import pytest
-
 import singleton
 
 
@@ -76,7 +76,7 @@ class TestWatchBackendLiveness:
             return False  # backend is gone on every check
 
         async def tiny_sleep(_):
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
 
         with anyio.fail_after(2):
             await singleton._watch_backend_liveness(
@@ -102,7 +102,7 @@ class TestWatchBackendLiveness:
             return v
 
         async def tiny_sleep(_):
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
 
         with anyio.fail_after(2):
             await singleton._watch_backend_liveness(
@@ -118,7 +118,7 @@ class TestWatchBackendLiveness:
     @pytest.mark.asyncio
     async def test_does_not_return_while_healthy(self):
         async def tiny_sleep(_):
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
 
         done = anyio.Event()
 

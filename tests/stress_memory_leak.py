@@ -33,11 +33,11 @@ sys.path.insert(
 )
 
 from browser_manager import BrowserManager
-from network_interceptor import NetworkInterceptor
-from dynamic_hook_system import dynamic_hook_system
-from persistent_storage import persistent_storage
 from debug_logger import debug_logger
+from dynamic_hook_system import dynamic_hook_system
 from models import BrowserOptions
+from network_interceptor import NetworkInterceptor
+from persistent_storage import persistent_storage
 
 # Enable debug logging so the DebugLogger lists accumulate (leak vector)
 debug_logger.enable()
@@ -95,7 +95,7 @@ def print_snapshot(s: dict):
     print(f"  Child total RSS:  {s['child_total_rss_mb']:>8.1f} MB")
     print(f"  Combined RSS:     {s['combined_rss_mb']:>8.1f} MB")
     if s["children"]:
-        print(f"  Child PIDs:")
+        print("  Child PIDs:")
         for c in s["children"]:
             print(
                 f"    PID {c['pid']:>8d}  {c['name']:<25s}  {c['rss_mb']:>7.1f} MB  [{c['status']}]"
@@ -104,7 +104,7 @@ def print_snapshot(s: dict):
 
 def print_internal_state():
     """Print sizes of all singleton state dicts to detect accumulation."""
-    print(f"\n--- Internal State Sizes ---")
+    print("\n--- Internal State Sizes ---")
     # persistent_storage
     data = persistent_storage._data
     print(f"  persistent_storage._data keys:    {len(data)}")
@@ -212,7 +212,7 @@ async def stress_test(num_instances: int = 3, num_rounds: int = 2):
 
     # --- FINAL ANALYSIS ---
     print(f"\n\n{'=' * 60}")
-    print(f"  LEAK ANALYSIS SUMMARY")
+    print("  LEAK ANALYSIS SUMMARY")
     print(f"{'=' * 60}")
 
     baseline = all_snapshots[0]
@@ -227,7 +227,7 @@ async def stress_test(num_instances: int = 3, num_rounds: int = 2):
     print(f"  Orphan child procs:   {child_delta:>8d}    (should be 0)")
 
     # Check for leaked internal state
-    print(f"\n  --- Leaked Internal State ---")
+    print("\n  --- Leaked Internal State ---")
     leaked_instances = len(persistent_storage._data.get("instances", {}))
     leaked_prog = len(persistent_storage.get("progressive_elements", {}))
     leaked_hooks = len(dynamic_hook_system.instance_hooks)
@@ -265,7 +265,7 @@ async def stress_test(num_instances: int = 3, num_rounds: int = 2):
     )
 
     # Memory growth per round
-    print(f"\n  --- Memory Growth Timeline ---")
+    print("\n  --- Memory Growth Timeline ---")
     for s in all_snapshots:
         delta = s["python_rss_mb"] - baseline["python_rss_mb"]
         print(
@@ -290,7 +290,7 @@ def main():
     )
     args = parser.parse_args()
 
-    print(f"Memory Leak Stress Test")
+    print("Memory Leak Stress Test")
     print(f"  Instances per round: {args.instances}")
     print(f"  Rounds: {args.rounds}")
     print(f"  Python PID: {os.getpid()}")

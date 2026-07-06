@@ -6,9 +6,7 @@ before they reach the browser, preserving stealth.
 No browser or network required — pure function tests.
 """
 
-import pytest
 from platform_utils import filter_stealth_args, merge_browser_args
-
 
 # ---------------------------------------------------------------------------
 # filter_stealth_args

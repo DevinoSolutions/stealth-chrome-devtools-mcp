@@ -8,11 +8,11 @@ Stores comprehensive element clone data in memory and returns a compact handle
 
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
+from comprehensive_element_cloner import comprehensive_element_cloner
 from debug_logger import debug_logger
 from persistent_storage import persistent_storage
-from comprehensive_element_cloner import comprehensive_element_cloner
 
 
 class ProgressiveElementCloner:
@@ -21,10 +21,10 @@ class ProgressiveElementCloner:
     def __init__(self):
         self.STORAGE_KEY = "progressive_elements"
 
-    def _get_store(self) -> Dict[str, Dict[str, Any]]:
+    def _get_store(self) -> dict[str, dict[str, Any]]:
         return persistent_storage.get(self.STORAGE_KEY, {})
 
-    def _save_store(self, data: Dict[str, Dict[str, Any]]) -> None:
+    def _save_store(self, data: dict[str, dict[str, Any]]) -> None:
         persistent_storage.set(self.STORAGE_KEY, data)
 
     async def clone_element_progressive(
@@ -32,7 +32,7 @@ class ProgressiveElementCloner:
         tab,
         selector: str,
         include_children: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         try:
             element_id = f"elem_{uuid.uuid4().hex[:12]}"
             debug_logger.log_info(
@@ -112,9 +112,9 @@ class ProgressiveElementCloner:
     def expand_styles(
         self,
         element_id: str,
-        categories: Optional[List[str]] = None,
-        properties: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        categories: list[str] | None = None,
+        properties: list[str] | None = None,
+    ) -> dict[str, Any]:
         store = self._get_store()
         if element_id not in store:
             return {"error": f"Element {element_id} not found"}
@@ -161,8 +161,8 @@ class ProgressiveElementCloner:
         }
 
     def expand_events(
-        self, element_id: str, event_types: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
+        self, element_id: str, event_types: list[str] | None = None
+    ) -> dict[str, Any]:
         store = self._get_store()
         if element_id not in store:
             return {"error": f"Element {element_id} not found"}
@@ -187,9 +187,9 @@ class ProgressiveElementCloner:
     def expand_children(
         self,
         element_id: str,
-        depth_range: Optional[Tuple[int, int]] = None,
-        max_count: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        depth_range: tuple[int, int] | None = None,
+        max_count: int | None = None,
+    ) -> dict[str, Any]:
         store = self._get_store()
         if element_id not in store:
             return {"error": f"Element {element_id} not found"}
@@ -227,8 +227,8 @@ class ProgressiveElementCloner:
         }
 
     def expand_css_rules(
-        self, element_id: str, source_types: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
+        self, element_id: str, source_types: list[str] | None = None
+    ) -> dict[str, Any]:
         store = self._get_store()
         if element_id not in store:
             return {"error": f"Element {element_id} not found"}
@@ -246,7 +246,7 @@ class ProgressiveElementCloner:
             "returned_count": len(rules),
         }
 
-    def expand_pseudo_elements(self, element_id: str) -> Dict[str, Any]:
+    def expand_pseudo_elements(self, element_id: str) -> dict[str, Any]:
         store = self._get_store()
         if element_id not in store:
             return {"error": f"Element {element_id} not found"}
@@ -259,7 +259,7 @@ class ProgressiveElementCloner:
             "available_pseudos": list(pseudos.keys()),
         }
 
-    def expand_animations(self, element_id: str) -> Dict[str, Any]:
+    def expand_animations(self, element_id: str) -> dict[str, Any]:
         store = self._get_store()
         if element_id not in store:
             return {"error": f"Element {element_id} not found"}
@@ -273,7 +273,7 @@ class ProgressiveElementCloner:
             "fonts": fonts,
         }
 
-    def list_stored_elements(self) -> Dict[str, Any]:
+    def list_stored_elements(self) -> dict[str, Any]:
         store = self._get_store()
         items = []
         for element_id, meta in store.items():
@@ -293,7 +293,7 @@ class ProgressiveElementCloner:
             )
         return {"stored_elements": items, "total_count": len(items)}
 
-    def clear_stored_element(self, element_id: str) -> Dict[str, Any]:
+    def clear_stored_element(self, element_id: str) -> dict[str, Any]:
         store = self._get_store()
         if element_id in store:
             del store[element_id]
@@ -301,7 +301,7 @@ class ProgressiveElementCloner:
             return {"success": True, "message": f"Element {element_id} cleared"}
         return {"error": f"Element {element_id} not found"}
 
-    def clear_all_elements(self) -> Dict[str, Any]:
+    def clear_all_elements(self) -> dict[str, Any]:
         self._save_store({})
         return {"success": True, "message": "All stored elements cleared"}
 

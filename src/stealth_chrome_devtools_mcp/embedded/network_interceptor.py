@@ -5,27 +5,26 @@ import base64
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import nodriver as uc
-from nodriver import Tab
-
 from debug_logger import debug_logger
 from models import NetworkRequest, NetworkResponse
+from nodriver import Tab
 
 
 class NetworkInterceptor:
     """Intercepts and manages network traffic for browser instances."""
 
     def __init__(self):
-        self._requests: Dict[str, NetworkRequest] = {}
-        self._responses: Dict[str, NetworkResponse] = {}
-        self._instance_requests: Dict[str, List[str]] = {}
-        self._instance_filters: Dict[str, Dict[str, List[str]]] = {}
+        self._requests: dict[str, NetworkRequest] = {}
+        self._responses: dict[str, NetworkResponse] = {}
+        self._instance_requests: dict[str, list[str]] = {}
+        self._instance_filters: dict[str, dict[str, list[str]]] = {}
         self._lock = asyncio.Lock()
 
     async def setup_interception(
-        self, tab: Tab, instance_id: str, block_resources: List[str] = None
+        self, tab: Tab, instance_id: str, block_resources: list[str] = None
     ):
         """
         Set up network interception for a tab.
@@ -103,7 +102,7 @@ class NetworkInterceptor:
                     self._instance_requests[instance_id] = []
         except Exception as e:
             debug_logger.log_error("network_interceptor", "setup_interception", e)
-            raise Exception(f"Failed to setup network interception: {str(e)}")
+            raise Exception(f"Failed to setup network interception: {e!s}")
 
     async def _on_request(self, event, instance_id: str):
         """
@@ -217,8 +216,8 @@ class NetworkInterceptor:
     async def set_capture_filters(
         self,
         instance_id: str,
-        include_types: Optional[List[str]] = None,
-        exclude_types: Optional[List[str]] = None,
+        include_types: list[str] | None = None,
+        exclude_types: list[str] | None = None,
     ):
         """
         Set resource type filters for network capture.
@@ -233,7 +232,7 @@ class NetworkInterceptor:
                 "exclude": exclude_types or [],
             }
 
-    async def get_capture_filters(self, instance_id: str) -> Dict[str, List[str]]:
+    async def get_capture_filters(self, instance_id: str) -> dict[str, list[str]]:
         """
         Get current capture filters.
 
@@ -248,15 +247,15 @@ class NetworkInterceptor:
     async def search_requests(
         self,
         instance_id: str,
-        url_pattern: Optional[str] = None,
-        method: Optional[str] = None,
-        status_code: Optional[int] = None,
-        response_contains: Optional[str] = None,
-        payload_contains: Optional[str] = None,
-        resource_type: Optional[str] = None,
+        url_pattern: str | None = None,
+        method: str | None = None,
+        status_code: int | None = None,
+        response_contains: str | None = None,
+        payload_contains: str | None = None,
+        resource_type: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Search requests with advanced filters and pagination.
 
@@ -328,8 +327,8 @@ class NetworkInterceptor:
             }
 
     async def list_requests(
-        self, instance_id: str, filter_type: Optional[str] = None
-    ) -> List[NetworkRequest]:
+        self, instance_id: str, filter_type: str | None = None
+    ) -> list[NetworkRequest]:
         """
         List all requests for an instance.
 
@@ -353,7 +352,7 @@ class NetworkInterceptor:
                         requests.append(request)
             return requests
 
-    async def get_request(self, request_id: str) -> Optional[NetworkRequest]:
+    async def get_request(self, request_id: str) -> NetworkRequest | None:
         """
         Get specific request by ID.
 
@@ -363,7 +362,7 @@ class NetworkInterceptor:
         async with self._lock:
             return self._requests.get(request_id)
 
-    async def get_response(self, request_id: str) -> Optional[NetworkResponse]:
+    async def get_response(self, request_id: str) -> NetworkResponse | None:
         """
         Get response for a request.
 
@@ -373,7 +372,7 @@ class NetworkInterceptor:
         async with self._lock:
             return self._responses.get(request_id)
 
-    async def get_response_body(self, tab: Tab, request_id: str) -> Optional[bytes]:
+    async def get_response_body(self, tab: Tab, request_id: str) -> bytes | None:
         """
         Get response body content.
 
@@ -391,8 +390,7 @@ class NetworkInterceptor:
                 body, base64_encoded = result  # Result is a tuple (body, base64Encoded)
                 if base64_encoded:
                     return base64.b64decode(body)
-                else:
-                    return body.encode("utf-8")
+                return body.encode("utf-8")
         except (ConnectionError, RuntimeError) as e:
             debug_logger.log_warning(
                 "network_interceptor",
@@ -403,7 +401,7 @@ class NetworkInterceptor:
             pass  # body unavailable for streaming/redirect/preflight responses (expected)
         return None
 
-    async def modify_headers(self, tab: Tab, headers: Dict[str, str]):
+    async def modify_headers(self, tab: Tab, headers: dict[str, str]):
         """
         Modify request headers for future requests.
 
@@ -417,7 +415,7 @@ class NetworkInterceptor:
             await tab.send(uc.cdp.network.set_extra_http_headers(headers=headers_obj))
             return True
         except Exception as e:
-            raise Exception(f"Failed to modify headers: {str(e)}")
+            raise Exception(f"Failed to modify headers: {e!s}")
 
     async def set_user_agent(self, tab: Tab, user_agent: str):
         """
@@ -433,7 +431,7 @@ class NetworkInterceptor:
             )
             return True
         except Exception as e:
-            raise Exception(f"Failed to set user agent: {str(e)}")
+            raise Exception(f"Failed to set user agent: {e!s}")
 
     async def export_to_json(self, instance_id: str, filepath: str) -> bool:
         """
@@ -540,7 +538,7 @@ class NetworkInterceptor:
             )
             return True
         except Exception as e:
-            raise Exception(f"Failed to set cache state: {str(e)}")
+            raise Exception(f"Failed to set cache state: {e!s}")
 
     async def clear_browser_cache(self, tab: Tab):
         """
@@ -553,9 +551,9 @@ class NetworkInterceptor:
             await tab.send(uc.cdp.network.clear_browser_cache())
             return True
         except Exception as e:
-            raise Exception(f"Failed to clear cache: {str(e)}")
+            raise Exception(f"Failed to clear cache: {e!s}")
 
-    async def clear_cookies(self, tab: Tab, url: Optional[str] = None):
+    async def clear_cookies(self, tab: Tab, url: str | None = None):
         """
         Clear cookies.
 
@@ -576,9 +574,9 @@ class NetworkInterceptor:
                 await tab.send(uc.cdp.network.clear_browser_cookies())
             return True
         except Exception as e:
-            raise Exception(f"Failed to clear cookies: {str(e)}")
+            raise Exception(f"Failed to clear cookies: {e!s}")
 
-    async def set_cookie(self, tab: Tab, cookie: Dict[str, Any]):
+    async def set_cookie(self, tab: Tab, cookie: dict[str, Any]):
         """
         Set a cookie.
 
@@ -590,11 +588,11 @@ class NetworkInterceptor:
             await tab.send(uc.cdp.network.set_cookie(**cookie))
             return True
         except Exception as e:
-            raise Exception(f"Failed to set cookie: {str(e)}")
+            raise Exception(f"Failed to set cookie: {e!s}")
 
     async def get_cookies(
-        self, tab: Tab, urls: Optional[List[str]] = None
-    ) -> List[Dict[str, Any]]:
+        self, tab: Tab, urls: list[str] | None = None
+    ) -> list[dict[str, Any]]:
         """
         Get cookies.
 
@@ -609,12 +607,11 @@ class NetworkInterceptor:
                 result = await tab.send(uc.cdp.network.get_all_cookies())
             if isinstance(result, dict):
                 return result.get("cookies", [])
-            elif isinstance(result, list):
+            if isinstance(result, list):
                 return result
-            else:
-                return []
+            return []
         except Exception as e:
-            raise Exception(f"Failed to get cookies: {str(e)}")
+            raise Exception(f"Failed to get cookies: {e!s}")
 
     async def emulate_network_conditions(
         self,
@@ -645,7 +642,7 @@ class NetworkInterceptor:
             )
             return True
         except Exception as e:
-            raise Exception(f"Failed to emulate network conditions: {str(e)}")
+            raise Exception(f"Failed to emulate network conditions: {e!s}")
 
     async def clear_instance_data(self, instance_id: str):
         """
