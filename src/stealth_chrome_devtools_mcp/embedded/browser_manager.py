@@ -4,6 +4,7 @@ import asyncio
 import os
 import time
 import uuid
+from collections.abc import Coroutine
 from datetime import datetime
 from typing import Any
 
@@ -80,6 +81,29 @@ class BrowserManager:
             minimum=1,
         )
         self._idle_reaper_task: asyncio.Task | None = None
+        # Strong refs to fire-and-forget background tasks so the event loop can't
+        # garbage-collect them mid-run; the done-callback discards each entry and
+        # surfaces any failure instead of letting it vanish (RUF006).
+        self._background_tasks: set[asyncio.Task] = set()
+
+    def _run_in_background(
+        self, coro: Coroutine[object, object, object], label: str
+    ) -> asyncio.Task:
+        """Schedule a fire-and-forget coroutine while holding a strong reference to
+        its task (RUF006) and surfacing any exception via the debug logger instead
+        of silently dropping it."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+
+        def _on_done(finished: asyncio.Task) -> None:
+            self._background_tasks.discard(finished)
+            if not finished.cancelled():
+                error = finished.exception()
+                if error is not None:
+                    debug_logger.log_error("browser_manager", label, error)
+
+        task.add_done_callback(_on_done)
+        return task
 
     @staticmethod
     def _append_user_agent_arg(args: list[str], user_agent: str | None) -> list[str]:
@@ -173,7 +197,9 @@ class BrowserManager:
         self._spawn_diagnostics.pop(instance_id, None)
         proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
         if proxy_forwarder is not None:
-            asyncio.create_task(proxy_forwarder.close())
+            self._run_in_background(
+                proxy_forwarder.close(), "discard_instance_proxy_close"
+            )
         try:
             process_cleanup.finalize_browser_process(instance_id)
             process_cleanup.cleanup_deferred_profiles()
@@ -848,7 +874,9 @@ class BrowserManager:
                         self._spawn_diagnostics.pop(instance_id, None)
                         proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
                         if proxy_forwarder is not None:
-                            asyncio.create_task(proxy_forwarder.close())
+                            self._run_in_background(
+                                proxy_forwarder.close(), "close_instance_proxy_close"
+                            )
                         persistent_storage.remove_instance(instance_id)
             except Exception as force_err:
                 debug_logger.log_error(
