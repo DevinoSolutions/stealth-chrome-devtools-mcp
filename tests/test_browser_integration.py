@@ -199,6 +199,70 @@ class TestClosePerformance:
         assert elapsed < 3.0, f"close took {elapsed:.2f}s — teardown hang regressed"
 
 
+class TestCloseKillsProcessTree:
+    """close_instance must kill the WHOLE Chrome process tree, not just root.
+
+    The shipped bug: Chrome's renderer/GPU/utility/crashpad children do not
+    carry ``--user-data-dir`` on Windows, so the profile-cmdline match that
+    close relied on never enumerated them. Only the root ``chrome.exe`` was
+    killed; the ~15 children orphaned — one leaked tree per spawn. The old
+    "fast teardown" test passed precisely *because* close didn't wait for or
+    ensure the children's death.
+
+    This captures the live descendant PIDs before close and asserts every one
+    is gone after. On Linux the children die with the parent regardless (which
+    is why CI never caught it); on Windows this fails on the old root-only kill.
+    """
+
+    DATA_URL = "data:text/html,<h1 id='t'>tree</h1>"
+
+    @pytest.mark.asyncio
+    async def test_close_kills_entire_chrome_tree(self):
+        import psutil
+        import process_cleanup as pc_mod
+
+        spawn = _get_fn("spawn_browser")
+        navigate = _get_fn("navigate")
+        close = _get_fn("close_instance")
+
+        result = await spawn(headless=True, user_data_dir="tree-kill-test", **_sandbox_kwargs())
+        iid = result["instance_id"]
+        # Navigate so a renderer child definitely exists.
+        await navigate(instance_id=iid, url=self.DATA_URL)
+
+        metadata = pc_mod.process_cleanup.browser_processes.get(iid) or {}
+        root_pid = metadata.get("pid")
+        if not isinstance(root_pid, int) or not psutil.pid_exists(root_pid):
+            pytest.skip("no tracked root pid to inspect")
+
+        try:
+            descendants = psutil.Process(root_pid).children(recursive=True)
+        except psutil.NoSuchProcess:
+            descendants = []
+        tree = [root_pid, *[p.pid for p in descendants]]
+
+        try:
+            await close(instance_id=iid)
+
+            # Give the OS a beat to reap the tree.
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline and any(psutil.pid_exists(p) for p in tree):
+                await asyncio.sleep(0.2)
+
+            survivors = [p for p in tree if psutil.pid_exists(p)]
+            assert survivors == [], (
+                f"close leaked {len(survivors)}/{len(tree)} chrome process(es): "
+                f"{survivors} (root={root_pid}, {len(descendants)} children captured)"
+            )
+        finally:
+            # Safety net: never let a failed assertion leak a real Chrome tree.
+            for p in tree:
+                try:
+                    psutil.Process(p).kill()
+                except psutil.Error:
+                    pass
+
+
 class TestNavigateAndScreenshot:
     """Navigate to a data: URL and take a screenshot."""
 

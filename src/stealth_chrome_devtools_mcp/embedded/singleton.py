@@ -339,8 +339,14 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                 tg.start_soon(from_backend)
 
     async with anyio.create_task_group() as tg:
-        tg.start_soon(pump_client)
         tg.start_soon(run_backend)
+        # Drive the client pump in the main task. When the client (Claude Code)
+        # disconnects, stdin hits EOF and pump_client returns — at which point we
+        # cancel everything. Otherwise run_backend's from_backend loop stays
+        # parked on the still-open backend stream forever and the proxy process
+        # never exits, leaking one stranded process per disconnect.
+        await pump_client()
+        tg.cancel_scope.cancel()
 
 
 async def _bridge(port: int):
@@ -348,7 +354,17 @@ async def _bridge(port: int):
     from mcp.server.stdio import stdio_server
 
     async with stdio_server() as (client_read, client_write):
-        await _proxy_streams(client_read, client_write, port)
+        try:
+            await _proxy_streams(client_read, client_write, port)
+        finally:
+            # The client disconnected. mcp's stdio_server holds its __aexit__
+            # open until its stdout-writer task finishes, and that task only
+            # ends when the write stream is closed. Without this the process
+            # hangs after every disconnect instead of exiting — one stranded
+            # entrypoint per disconnect. Closing both streams lets stdio_server
+            # tear down so the entrypoint returns and the process exits.
+            await client_write.aclose()
+            await client_read.aclose()
 
 
 def run_stdio_proxy(port: int):
