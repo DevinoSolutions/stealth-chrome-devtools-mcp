@@ -7,7 +7,6 @@ import runpy
 import sys
 from pathlib import Path
 
-
 EMBEDDED_DIR = Path(__file__).with_name("embedded")
 
 

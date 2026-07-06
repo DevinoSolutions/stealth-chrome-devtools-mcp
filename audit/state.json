@@ -1,0 +1,389 @@
+{
+  "pipeline": "foundational-audit",
+  "version": 1,
+  "created": "2026-07-02",
+  "branch": "fix/singleton-version-aware-backend",
+  "pinned_sha": "2267b83d3efda03f93936db2c34ded33aaa0d701",
+  "pre_audit_note": "Uncommitted WIP (await-fix + test_server_call_conventions.py) committed as the pinned SHA with human approval before audit start.",
+  "priorities": ["maintainability", "operability", "performance (order-of-magnitude wins only)"],
+  "exclusions": [
+    ".venv/", ".git/", "__pycache__/", "*.egg-info/", "dist/", "build/",
+    ".pytest_cache/", ".coverage", "htmlcov/", "element_clones/",
+    "root-level *.png artifacts", "uv.lock", "audit/"
+  ],
+  "stage": "2.5-gates DONE — 3-fix DEFERRED (resume via audit/STAGE3_RESUME_PROMPT.md)",
+  "status": "STAGE 2 COMPLETE 2026-07-04 — ALL 12 executable plans APPROVED (M3+A1, M1, M8+A1, M2, M7, M11a_M15, M9, M6, M12a, M4ph1+A1, M5b, M14+A1); M5a folded into M5b. NEW 2026-07-06 (human directive): 2.5-gates QUALITY-GATES INTERLUDE inserted BEFORE Stage 3 — ruff (curated) + ty strict (no Any/Unknown) + vulture + husky + CI quality job + pydantic-settings .env schema + Sentry-ready error posture; execute in a FRESH Opus chat by pasting audit/GATES_TASK_OPUS.md. Stage 3 FIX starts only AFTER gates land — then paste audit/STAGE3_RESUME_PROMPT.md in a fresh session.",
+  "addendum_2026_07_02": {
+    "doc": "audit/ADDENDUM_LENSES.md",
+    "summary": "Four maintainability lenses weight within priority 1: modularity (modules understandable in isolation), deduplication (one canonical home per concept), clarity (self-describing names; renames legitimate), conventions (one way per thing; a fix introducing a second way is a defect). Finding schema += categories modularity|duplication|clarity (+lens tag). Security scope-reduced: no re-audit/re-architecture; only concrete quote-backed regressions. Re-scan covered areas through the new lenses only.",
+    "binds": "all remaining planners (preamble), all new findings (schema), Stage 3 fixers (no second-way-of-doing-things), Stage 4 codify",
+    "approved_plans_rechecked": "plan_M3 passes; plan_M1 passes with one tracked dedup debt (probe-body copy, future finding already recorded)"
+  },
+  "resume_anchor": "STAGE 2 COMPLETE (2026-07-04): all 12 executable plans approved — M3+A1(M10a), M1, M8+A1, M2, M7, M11a+M15, M9, M6, M12a, M4-Ph1+A1(M13), M5b, M14+A1 (M5a folded into M5b as binding input). NEXT = 2.5-gates QUALITY-GATES INTERLUDE (human directive 2026-07-06) in a fresh Opus chat: paste audit/GATES_TASK_OPUS.md; Stage 3 FIX only AFTER gates land: paste audit/STAGE3_RESUME_PROMPT.md (it reads the post-gates baseline from stages['2.5-gates'].landed). Stage-3 serial execution order = M3+A1(M10a PR-B) → M1 → M8+A1 → M2 → M7 → M11a+M15 → M9 → M6 → M12a → M4-Ph1+A1 → M5b → M14+A1. Authoritative: each audit/stage2/plan_*.md header carries its approval stamp + folded [GATE RULING] blocks; state.json stages.2-plan (resolved_decisions + cross_review_notes = binding directives); audit/ADDENDUM_LENSES.md (4 lenses, BINDING on fixers — a fix introducing a second way is a defect). Baseline: venv python only (uv run BROKEN in this checkout), 402 passed at pinned SHA 2267b83d.",
+  "triage_lens_update": "Re-evaluated under 0-users/breaking-free lens: M4 full split and M5b cloner consolidation upgraded from DEFER to FIX-gated-on-M6. M2 simplified to always-fresh-dev + delete hot_reload. Only hard REJECT is M12b (exec sandboxing).",
+  "stages": {
+    "0-preconditions": {
+      "status": "done",
+      "steps": {
+        "clean_tree": "done (WIP committed as pinned SHA)",
+        "sha_pinned": "done",
+        "test_suite_twice": "done GREEN x2 (402 passed, 0 flaky, cov 40.86%/40.89% vs gate 39; uv-run broken in checkout, venv python used; artifacts audit/stage0/test_baseline.json)",
+        "tooling_inventory": "done (audit/stage0/tooling.json + metrics.md; no linter/typechecker configured; 34 dep vulns; server.py=4207 LOC god-file)",
+        "exclusion_list": "final (provisional + root scratch scripts perf_*/probe_*/preview_*/smoke_*/test_server_direct.py + screenshots + CODEBASE_AUDIT.md)",
+        "prior_audit_summary": "done (27 claims: 1 Critical, 7 High, 13 Medium, 6 Low; P-001 likely already fixed at pinned SHA)"
+      }
+    },
+    "1-audit": {
+      "status": "done",
+      "steps": {
+        "hotspots_dual": "done (A=15, B=14, high concordance; agreement -> audit/stage1/hotspot_agreement.md)",
+        "deep_dives": "done (5 sonnet, F-101..F-184; artifacts audit/stage1/deepdive_*.md + findings_dd*.json)",
+        "empirical_all": "done (change F-201..208, incident F-301..308, onboard F-401..407, premortem F-501..509)",
+        "prior_claims_verify": "done (27 verdicted: 13 confirmed F-601..613, 7 already_fixed, 5 refuted, 2 unverifiable; audit/prior/claims_verdicts.json)",
+        "merge": "done (79 findings, 0 dup ids, 0 empty quotes, schema-complete; audit/stage1/findings_all.json; sev C5/H36/M32/L6)",
+        "empirical_change_trace": "running (sonnet, F-2xx -> audit/stage1/findings_change_trace.json)",
+        "empirical_incident": "running (sonnet, F-3xx -> audit/stage1/findings_incident.json)",
+        "empirical_onboarding": "running (sonnet, F-4xx -> audit/stage1/findings_onboarding.json)",
+        "premortem": "running (opus, F-5xx -> audit/stage1/findings_premortem.json)",
+        "prior_claims_verify": "running (sonnet, F-6xx -> audit/prior/claims_verdicts.json + audit/stage1/findings_prior.json)",
+        "verification_gate": "DONE. 79/79 verdicted, DELETION COUNTER=0 (zero hallucinated quotes), 75 verbatim + 4 paraphrased-but-true (F-404,F-507,F-508,F-611), 0 behavior doubts. findings_verified.json.",
+        "adversarial_review": "DONE. adv-ops 12 survive/8 downgrade, adv-arch 11 survive/10 downgrade, 0 kills, 0 standoffs. Final sev: 2 Critical, 23 High, 40 Medium, 14 Low. audit/stage1/adversarial/.",
+        "synthesis": "DONE. 79 findings collapsed to 15 root-cause mains + ranked appendix. Report: audit/REPORT.md. Ledger: audit/findings.json. Overall grade 4/10 Fragile."
+      },
+      "id_prefixes": { "deep_dives": "F-1xx", "change_trace": "F-2xx", "incident": "F-3xx", "onboarding": "F-4xx", "premortem": "F-5xx", "prior_confirmed": "F-6xx" }
+    },
+    "gate-triage": { "status": "DONE — human delegated to orchestrator; decision recorded in audit/TRIAGE.md. 15 FIX (some staged/gated), 3 DEFER (M10b,M11b,M4-Ph2), 1 REJECT (M12b)." },
+    "1b-lens-rescan": {
+      "status": "DONE — 20 findings (mod 4 / dup 3 / clar 7 / conv 6), all quote-verified (0 problems), F-764 orchestrator-verified conf 1.0. Delta ACCEPTED IN FULL by human 2026-07-02 (audit/stage1/LENS_DELTA.md); all 20 MERGED into audit/findings.json with dispositions (79->99). Plan-of-record unchanged; M4-Ph1 batch grows by 6; plan_M3 amended (A1: RLock); 3 known-debt defers for DESIGN.md at M14",
+      "id_ranges": { "modularity": "F-700-719", "duplication": "F-720-739", "clarity": "F-740-759", "conventions": "F-760-779" },
+      "outputs": "audit/stage1/findings_lens_<lens>.json -> quote-verify -> merged delta presented to human at next plan gate",
+      "rule": "plan-of-record is NOT re-litigated; lens findings enter as a proposed delta only with human approval"
+    },
+    "2-plan": {
+      "status": "DONE 2026-07-04 — 12/12 executable plans APPROVED (M14+A1 last); planning artifacts: audit/stage2/plan_*.md (12 approved plans + plan_M5a.md retained as folded analysis-of-record)",
+      "procedure": "one Opus plan per FIX item (batch trivially-related), test-first, human approves EACH plan; write to audit/stage2/plan_<item>.md",
+      "fix_order": ["M3+A1 (incl. M10a as stacked PR-B)","M1","M8+A1","M2","M7","M11a+M15","M9","M6","M12a","M4-Ph1+A1 (incl. M13)","M5b","M14+A1"],
+      "batches": [["M3","M10a"],["M11a","M15"],["M4-Ph1","M13"]],
+      "deferred": ["M10b","M11b","M4-Ph2"],
+      "rejected": ["M12b"],
+      "preconditions_reverified": "2026-07-02: HEAD==2267b83d, tree clean (untracked audit/ + CODEBASE_AUDIT.md only, both excluded), 402 passed in 90s via venv python",
+      "plans": {
+        "M3": {
+          "file": "audit/stage2/plan_M3.md",
+          "batch": ["M3", "M10a"],
+          "closes": ["F-303", "F-503", "F-304", "F-183", "F-182", "F-308", "F-204", "F-181"],
+          "status": "APPROVED_by_human_2026-07-02 (approve as-is) + AMENDMENT A1 approved at lens-delta gate (F-764: RLock + re-entrancy pinning test inside step M3-4)",
+          "planner": "opus (planner-m3)",
+          "anchors_verified_at_head": true,
+          "notes": "21 truly-silent excepts found vs F-181's 22; delta = debug_logger.py:288 which calls _emit_stderr (reconciliation recorded in plan §1.1). 17 handlers owned by M10a steps 7a-7d; 4 singleton handlers owned by M3 step 6 (F-183).",
+          "resolved_decisions": [
+            "PR shape: TWO STACKED PRs (PR-A = M3 steps 1-6, PR-B = M10a steps 7-8 stacked on PR-A)",
+            "log_info->file default level: INFO (STEALTH_MCP_LOG_LEVEL is the runtime override)"
+          ]
+        },
+        "M1": {
+          "file": "audit/stage2/plan_M1.md",
+          "batch": ["M1"],
+          "base_tree": "post-plan_M3 (serial Stage-3 order; anchors verified at pinned SHA, M3-shifted regions tabled in plan §1.3, re-anchor by symbol)",
+          "closes": ["F-301", "F-501"],
+          "explicitly_out": ["F-611 (per-instance CDP liveness — re-homed to M6/M7)"],
+          "status": "APPROVED_by_human_2026-07-02 (approve as-is)",
+          "planner": "opus (planner-m1)",
+          "anchors_verified_at_head": true,
+          "notes": "No new kill/respawn code — fixes the signal that jams the EXISTING eviction+respawn+orphan-reap machine. Probe = single-shot sync copy of _await_backend_http's initialize->200 (copy not share, to stay disjoint from M3-owned code). Teardown != kill (2nd independent probe failure required). Only existing-test churn: mechanical migration of test_singleton_version_aware.py (stub _backend_http_ready in 'reusable' cases).",
+          "resolved_decisions": [
+            "Detection window: KEEP ~12s (LIVENESS_PROBE_TIMEOUT=2.0, interval=2.0, failures_before_teardown=3)",
+            "PR shape: ONE PR of 4 commits (M1-1..M1-4)"
+          ]
+        },
+        "M8": {
+          "file": "audit/stage2/plan_M8.md",
+          "batch": ["M8"],
+          "base_tree": "post-plan_M3 + post-plan_M1 (serial; anchors verified at pinned SHA, predecessor-shifted regions tabled in plan §1.3)",
+          "closes": ["F-302", "F-305", "F-503 (log-path half)", "F-509 (detection half)"],
+          "explicitly_out": ["F-509 auto-port-fallback (deferred follow-up, reuse proxy_forwarder._free_port, sequence with/after M2)", "F-607 (re-homed to M11a)", "F-608 (re-homed to M7)"],
+          "status": "APPROVED_by_human_2026-07-02 (approve as-is) + Amendment A1 (F-509 auto-port-fallback, human-ordered) drafted by planner-m8a1 and cross-review-APPROVED by orchestrator (within pre-approved envelope): _select_backend_port + _port_is_foreign_held helpers, one line in ensure_server_running (synchronous selection at the boundary), restart routes through it; steps M8-7/M8-8; 20-site port-consumer enumeration in §A1.2 (only 2 edits needed, ~14 sites inherit via argument/server.json, 2 literals left to M15). Reaper seam = direct call (M11a adds public seam)",
+          "planner": "opus (planner-m8)",
+          "anchors_verified_at_head": true,
+          "notes": "No new kill/respawn/matching logic. _terminate_backend EXTRACTED from _clear_stale_backend (one canonical terminate); restart = terminate + existing cold-start spawn under _exclusive_lock; kill-orphans thin-triggers process_cleanup._recover_orphaned_processes gated on _probe_backend_status (refuses live backend, --force overrides); env-scrub in _start_server_process so restart-spawned backends reap. Anchor corrections: DEFAULT_PORT:41 (no BACKEND_PORT symbol); _recover_orphaned_processes DEFINED :599, called :55.",
+          "resolved_decisions": [
+            "F-509: human OVERTURNED — auto-port-fallback IN via Amendment A1 (approved)",
+            "kill-orphans reaper seam: direct private call; M11a adds public seam"
+          ]
+        },
+        "M2": {
+          "file": "audit/stage2/plan_M2.md",
+          "batch": ["M2"],
+          "base_tree": "post-M3(+A1) + M1 + M8(+A1) (serial 4th; predecessor shifts tabled in plan §1.3, re-anchor by symbol)",
+          "closes": ["F-206", "F-504", "F-102", "F-121", "F-610", "F-120"],
+          "explicitly_out": ["F-765 (condition not met — no poll loops touched; stays open for whoever rewrites those loops)"],
+          "status": "APPROVED_by_human_2026-07-02 (as amended — incl. both orchestrator touch-ups)",
+          "planner": "opus (planner-m2)",
+          "anchors_verified_at_head": true,
+          "notes": "SHA-256 _source_fingerprint over installed package *.py (content-hash beats mtime: no false-fresh on git checkout, no OneDrive churn) recorded as 4th server.json field, gated in _find_running_server between version gate and M1 app-probe -> existing eviction respawns; DELETE hot_reload (:2974-3009) + reload_status (:3012-3038) + orphaned importlib import; eviction-reason INFO via stealth.proxy. Editable install verified (F-120) so checkout==running tree. Deletion inventory exhaustive: no module, no manual registry entries, no existing tests; deletion-assertion test added. Coverage RISES (deleted lines were uncovered). 3 steps/3 commits.",
+          "resolved_decisions": [
+            "Fingerprint scope: WHOLE PACKAGE (src/stealth_chrome_devtools_mcp/**/*.py)",
+            "Eviction logging: SOURCE-ONLY (version-change eviction stays issue-#14 behavior)"
+          ]
+        },
+        "M7": {
+          "file": "audit/stage2/plan_M7.md",
+          "batch": ["M7 (F-180 core, F-164 split)", "F-745 (clarity, re-homed)", "F-608 (re-homed from M8)"],
+          "base_tree": "post-M3(+A1)+M1+M8(+A1)+M2 (serial 5th)",
+          "closes": ["F-180", "F-164 (partial — cfe half; server.py half re-homed to M4)", "F-745", "F-608"],
+          "explicitly_out": ["F-611 (ruled OUT — re-homed to M6 + standalone follow-up; unverified, feature-add not freeze-fix, needs M7's off-loop discipline first)", "F-164 server.py _with_cdp_timeout half (re-homed to M4)"],
+          "status": "APPROVED_by_human_2026-07-03 (approve as-is; F-745 Option A; F-164 split)",
+          "planner": "opus (planner-m7)",
+          "anchors_verified_at_head": true,
+          "orchestrator_verified": "3 load-bearing claims checked in source: (1) TimeoutError fallback re-runs sync kill unwrapped at :761-782 CONFIRMED; (2) navigate touches independently at :986 CONFIRMED (F-745 flip safe); (3) F-608 non-recovery branch :411-413 has zero identity check vs recovery :390-410 CONFIRMED.",
+          "resolved_decisions": [
+            "F-745: Option A (flip touch_activity default to False; tunable; M4 may add per-interaction precision)",
+            "F-164: split (cfe tab-in-hand half in M7; server.py _with_cdp_timeout half -> M4)"
+          ]
+        },
+        "M11a_M15": {
+          "file": "audit/stage2/plan_M11a_M15.md",
+          "batch": ["M11a (F-124/F-125-partial/F-103-partial)", "M15 (F-207, F-122)", "routed: F-607, F-720, F-763 (M11a) + F-722, F-762 (M15)"],
+          "base_tree": "post-M3(+A1)+M1+M8(+A1)+M2+M7 (serial 6th; disjoint files, each half independently revertible)",
+          "closes": ["F-124", "F-103(partial)", "F-607", "F-720", "F-763", "F-207", "F-122", "F-722"],
+          "partial_or_deferred": ["F-125(partial — acute slice; full DI seam = M11b DEFERRED)", "F-762(partial — response_handler+pid-file nested; _default_session_root relocation DEFERRED, migration harm)"],
+          "status": "APPROVED_by_human_2026-07-03 (as-is; F-122 rename; pid-file relocate)",
+          "planner": "opus (planner-m11a-m15)",
+          "anchors_verified_at_head": true,
+          "resolved_decisions": [
+            "F-122: RENAME persistent_storage -> in_memory_storage (durability rejected)",
+            "pid-file: RELOCATE to STATE_DIR/browser_pids.json now (M11a-3)",
+            "cosmetic names (env_utils.py, in_memory_storage): accepted planner defaults"
+          ],
+          "orchestrator_verified": "CRITICAL invariant CONFIRMED in source: app_lifespan exists (server.py:1231) and IS wired as HTTP lifespan (:1294) -> M11a's activate() there means fresh backend STILL reaps; import-time reap removed without disabling production recovery. Also confirmed: __init__:52-55 import-time reap + F-763 truthy set omits 'enabled'; store_instance:26-33 hardcodes 6 fields (F-207).",
+          "notes": "M11a: side-effect-free __init__ + explicit activate() at serve boundary (NOT env-guard-only, per maintainer universal-fix pref); NEW embedded/env_utils.py canonical parse home (F-720/F-763); _file_lock bounded-acquire-or-raise (F-607); public recover_orphans() seam repoints M8 kill-orphans. M15: model_dump(mode=json) serialize-whole (F-207); RENAME persistent_storage->in_memory_storage (F-122, durability rejected — would resurrect stale instances); export DEFAULT_PORT/STATE_DIR from singleton (F-722). Env var STEALTH_MCP_NO_AUTO_RECOVERY preserved (disables the explicit boundary call, not the import->kill path).",
+          "open_questions": [
+            "pid-file relocation (~/.stealth_browser_pids.json -> STATE_DIR/browser_pids.json): recommended relocate (one-time cutover, only on-disk-footprint change) vs leave+follow-up",
+            "F-122: RENAME to in_memory_storage (recommended) vs make actually durable (brief left open)",
+            "cosmetic (orchestrator-decidable): env_utils.py module name; in_memory_storage rename target"
+          ]
+        },
+        "M9": {
+          "file": "audit/stage2/plan_M9.md",
+          "batch": ["M9"],
+          "base_tree": "post-M3(+A1)+M1+M8(+A1)+M2+M7+M11a_M15 (serial 8th, plan-of-record #8)",
+          "closes": ["F-605"],
+          "explicitly_out": ["F-606 (eval compile cache — dynamic_hook_system.py, M12a's file)", "F-609 (buffer-outside-lock — debug_logger.py, M3 already reworks)"],
+          "status": "APPROVED_by_human_2026-07-03 (as-is; capture OFF-by-default; caps 128MiB/5MiB)",
+          "planner": "opus (planner-m9)",
+          "anchors_verified_at_head": true,
+          "orchestrator_verified": "2 load-bearing claims CONFIRMED in source: (1) get_response_content (server.py:2143-2146) live-refetches body via CDP independent of the store -> capture-off-by-default keeps the primary body tool working; (2) self._responses[request_id]=network_response at :182 holds full bodies unbounded (F-605), and the M10a-7b silent-except at :171-172 is inside _on_response as claimed.",
+          "resolved_decisions": [
+            "Capture: OFF-by-default (STEALTH_MCP_NETWORK_CAPTURE_BODIES=False)",
+            "Caps: 128 MiB total store / 5 MiB per-body (env-tunable)"
+          ]
+        },
+        "M6": {
+          "file": "audit/stage2/plan_M6.md",
+          "batch": ["M6"],
+          "base_tree": "post-M3(+A1)+M1+M8(+A1)+M2+M7+M11a_M15+M9 (serial 9th, plan-of-record #9)",
+          "closes": ["F-105 (scoped — full closure is widen-as-touched)", "F-145 (cloner extraction net)"],
+          "gates": ["M5a (10th)", "M4-Ph1 (13th)", "M5b (14th)", "M4-Ph2 (15th)"],
+          "dispositions": ["F-106 (reference existing test_profile_resolution, gap-fill)", "F-611 (IN as scoped characterization — pin current OS-liveness-only list_instances behavior quirk-marked; CDP-probe = standalone follow-up, consistent with M1/M7 rulings)", "F-108 (tool count 94 tripwire)"],
+          "status": "APPROVED_by_human_2026-07-03 (as-is; two-tier schema freeze; first-net scope as planned)",
+          "planner": "opus (planner-m6)",
+          "anchors_verified_at_head": true,
+          "orchestrator_verified": "The load-bearing claim CONFIRMED in source: the .fn unwrap seam (getattr(fn,'fn',fn) recovering a tool's coroutine from the FastMCP FunctionTool) is exactly what the repo's own scratch harness test_server_direct.py:27-29 already does — so M6's in-process hermetic tool invocation needs NO production seam.",
+          "resolved_decisions": [
+            "Cloner schema freeze: TWO-TIER (hard invariant keys + soft per-engine goldens M5b updates deliberately)",
+            "First-net scope: AS PLANNED (dispatch+cloners+spawn/resolve/list_instances+F-202; exec surface -> M4-Ph2 era)",
+            "F-611: characterize-current + standalone follow-up (consistent w/ M1, M7)"
+          ],
+          "notes": "TESTS-ONLY, no production change. Canonical harness home tests/fakes.py (FakeTab/Browser/BrowserManager + one call_tool invoker) + conftest fixtures — one home per dedup lens. 3 test modules: test_tool_dispatch (registry contract, .fn seam, tool count, F-202 runtime archetype), test_cloner_schemas + goldens (two-tier: hard invariant keys + soft per-engine goldens M5b updates deliberately), test_bug_prone_tools (spawn_browser via seam, _resolve_profile_selection gap-fill, list_instances/F-611). Scope boundary: IN = dispatch+cloners+spawn/resolve/list_instances+F-202; WIDEN-LATER = other ~80 tool bodies as M4-Ph2 splits sections; NEVER = deleted tools, M9-netted network tools, predecessor-owned areas. Hermetic/non-flaky (fakes return instantly, _with_cdp_timeout never fires).",
+          "open_questions": [
+            "Q1 (real): cloner-schema freeze rigidity — two-tier (hard invariant keys + soft per-engine goldens M5b updates deliberately) vs inline structural assertions only",
+            "Q2 (real): first-net scope — dispatch+cloners+spawn/resolve/list_instances+F-202 as planned, vs also cover the exec surface (execute_script/create_python_binding/python-in-browser) now",
+            "orchestrator-decidable (accepted): harness = fakes.py+conftest; goldens committed under tests/goldens/; F-611 = characterize-current + follow-up (consistent w/ M1,M7)"
+          ]
+        },
+        "M5a": {
+          "file": "audit/stage2/plan_M5a.md",
+          "batch": ["M5a"],
+          "base_tree": "post-M3(+A1)+M1+M8(+A1)+M2+M7+M11a_M15+M9+M6 (serial 9th)",
+          "closes": ["F-142 (partial or deferred — depends on scope decision below)"],
+          "status": "FOLDED_INTO_M5B by human decision 2026-07-03 — NOT a standalone Stage-3 plan. F-142 rides with M5b (bounded severity removed the standalone-bug rationale). plan_M5a.md retained as the analysis-of-record + M5b input.",
+          "planner": "opus (planner-m5a)",
+          "anchors_verified_at_head": true,
+          "orchestrator_verified": "2 load-bearing reframes CONFIRMED in source: (1) extract_element_styles (element_cloner.py:53-65) is a thin try/except delegator to extract_element_styles_cdp — the exact propagation template; (2) _with_cdp_timeout (server.py:139-156) wraps every cloner call in asyncio.wait_for(30s) — so F-142's 'hang' is BOUNDED degrade-then-error on a stale connection, NOT an infinite freeze. This reframes severity downward and makes fold-into-M5b viable.",
+          "notes": "Planner found the brief's uniform premise infeasible: only styles has clean CDP parity. structure = CDP-portable subset (camelCase, loses dimensions/scroll/text); events = CAPABILITY REGRESSION (CDP getEventListeners can't see inline on* or framework/React handlers the JS path sees); animations+assets = NO CDP path in the repo at all. M6 goldens (structure/events characterization entries, already M5a-marked) are the gate; styles + other goldens are the green tripwire. clone_element_complete TOOL uses comprehensive_element_cloner NOT ElementCloner.clone_element_complete (gather blast radius only via clone_element_complete_to_file). _to_file twins inherit the fix transitively (0 direct .evaluate/.send). Dedup: converge onto CDPElementCloner (M5b's canonical engine), not a 3rd copy.",
+          "open_questions": [
+            "SCOPE (the decision): (A) narrow structure+events now [events = accepted capability loss] | (A') structure-only now [one clean non-regressing win] | (B) full incl. hand-written animations/assets CDP [M5b redoes, animations parity likely unreachable — not recommended] | (C) fold entire convergence into M5b [bounded severity removes urgency; cleanest dedup; cost = <=30s bounded degradation on stale-connection pathological pages until M5b, which is plan 12/13]",
+            "Sub-decision if A/B: accept extract_element_events losing inline/framework-handler detection (CDP cannot provide it)"
+          ]
+        },
+        "M12a": {
+          "file": "audit/stage2/plan_M12a.md",
+          "batch": ["M12a (F-163 hook chain/doc reconcile)", "routed lens: F-721 + F-742 (delete dead ResponseStageProcessor)"],
+          "base_tree": "post-M3(+A1)+M1+M8(+A1)+M2+M7+M11a_M15+M9+M6 (serial 10th in Stage-3 order)",
+          "closes": ["F-163", "F-721", "F-742"],
+          "explicitly_out": ["F-606 (eval compile cache in matches() — same file, different concern (perf), unrouted, stays OPEN)", "M12b exec sandboxing (REJECTED at triage)", "response_handler.py rename (deleting the sibling resolves F-742 with no rename)", "server.py edits (hook tool descriptions verified truthful)"],
+          "status": "APPROVED_by_human_2026-07-03 (approve as-is)",
+          "planner": "opus (planner-m12a)",
+          "anchors_verified_at_head": true,
+          "orchestrator_verified": "4 load-bearing claims checked in source: (1) INDEPENDENT doc sweep (different regex set, incl. *.md) found EXACTLY the two lying surfaces the plan names (dynamic_hook_system.py:270 docstring, hook_learning_system.py:465) — sweep-completeness CONFIRMED; (2) every _execute_hook_action branch (:435-519, incl. error path) issues exactly one unpausing CDP Fetch call — 'every HookAction is terminal' CONFIRMED, first-match-wins is platform-enforced not a bug; (3) pytest --collect-only = 11 tests in test_response_stage_hooks.py; test_hook_learning_system pins only shape/non-emptiness (doc rewording test-safe); (4) log_warning(component, method, message) at debug_logger.py:101 with in-file usage :127-130; M10a :318 WARNING confirmed in plan_M3 §1.1 row 10 + step 7b — all M12a edits above :307, no collision.",
+          "resolved_decisions": [
+            "F-163 truth: (b) HONEST-FIRST-MATCH — code keeps first-match-by-priority (CDP permits exactly one terminal disposition per paused request; verified all _execute_hook_action branches terminal); both lying doc surfaces rewritten; chaining rejected as a second execution model (conventions-lens defect)",
+            "Shadow surfacing: RUNTIME WARNING (fires only when >=2 hooks match, names winner + shadowed); static is_shadowed_by field rejected (overlap heuristic false-negatives = a field that lies)"
+          ]
+        },
+        "M4ph1": {
+          "file": "audit/stage2/plan_M4ph1.md",
+          "batch": ["M4-Ph1 (F-101/F-505/F-612/F-201)", "M13 (F-208, F-106)", "STEP 0: F-701 (+F-604/F-613)", "registry/envelope lens: F-700, F-743, F-746, F-760, F-761", "re-homed: F-164 server half (from M7), M10b Ph1 slice"],
+          "base_tree": "post-M3(+A1)+M1+M8(+A1)+M2+M7+M11a_M15+M9+M6+M12a (serial 11th)",
+          "closes": ["F-701", "F-604", "F-613", "F-201", "F-761", "F-746", "F-164 (server half — completes the M7 split)", "F-208"],
+          "partially_closed": ["F-101/F-505/F-612 (registry formalized + −982 LOC; body split = Ph2)", "F-104 (4 archetypes + instance-not-found cluster; rest = Ph2/M10b)", "F-106 (moved to clone_storage with M6 pins; deeper decomposition = Ph2 debt)"],
+          "not_closed_as_designed": ["F-760 (taxonomy documented now, renames = Ph2)", "F-743 (docstrings sharpened, renames = Ph2)", "F-700/F-109 (two-surfaces story documented, handed to M14)", "F-108 (M14's)", "F-603 (server.py half collapsed; cross-module = debt)"],
+          "status": "APPROVED_by_human_2026-07-03 (approve as-is) + AMENDMENT A1 (human-ordered full sweep) drafted by planner-m4ph1 and cross-review-APPROVED by orchestrator within the pre-approved envelope, with ONE touch-up folded (A1.5: G5 result-envelope pair execute_script/create_python_binding moved KEEP→CONVERT — restores the approved base plan's archetype-(a) commitment, fixes A1's intra-tool convention mix, conventions lens)",
+          "planner": "opus (planner-m4ph1)",
+          "anchors_verified_at_head": true,
+          "orchestrator_verified": "5 load-bearing claims checked in source: (1) runpy mechanism CONFIRMED — top-level server.py shim does sys.path.insert(embedded)+runpy.run_path(embedded/server.py, run_name='__main__'), so relative imports WOULD break and STEP 0's absolute-import+one-shim design is grounded; pyproject [project.scripts] = server:main + cli:main exactly as claimed (no edit needed); (2) C1 move-set CONFIRMED — exactly 50 defs in :225-:1205 (47 helpers + 3 profile-selection fns), boundary symbols verified (_default_session_root@225, _copy_clone_from_source@1064, _resolve_profile_selection@1080, section_tool@1212); (3) cli.py reaches into server._* storage internals at 12+ sites CONFIRMED (the C1 repoint list is real); (4) M7 disjointness CONFIRMED — spawn_browser@311/_setup_dynamic_hooks@548 vs close_instance@605/get_tab@1060/get_browser@1082; (5) instance-not-found counts ~confirmed (49 total: 38 raise + 11 dict/json vs plan's ~40+10) and NO embedded module imports server (no runpy-__main__ double-load hazard; must stay that way). Erratum folded: 4 raw asyncio.wait_for call sites, not 5 (5th grep hit = docstring).",
+          "resolved_decisions": [
+            "C3 envelope depth: human OVERTURNED the disciplined-depth recommendation — FULL 22-site except-block sweep lands in Ph1 (Amendment A1); pinning tests per shape-group BEFORE conversion neutralize the D1 risk; M10b is thereby DELIVERED via A1, not deferred",
+            "F-760/F-743 rename timing: CAVEAT-NOW/RENAME-AT-PH2 (as recommended) — one verb-taxonomy rule documented in tool_registry.py docstring + M14; renames happen once, at the Ph2 section move",
+            "Exec-family docstring sharpening (6 tools): IN, at C2 (folded cosmetic default accepted)",
+            "A1 enumeration (orchestrator-verified): 57 excepts in server.py; authoritative sweep set = 18 post-M2 tool-body handlers + 3 @mcp.resource endpoints = 21 sites (F-104's '22' reconciled plan_M3-style, scope defined by behavior not the integer); ~55 call-sites CONVERT incl. the A1.5 touch-up pair; KEEP = 6 justified tool handlers (validate_browser_environment diagnostic, query_elements loop-resilience, get_response_content base64-alt, clear_debug_view bool, export_debug_logs guidance-str, get_instance_state F-746-blessed partial) + 3 input-validation value-returns + non-tool mechanism handlers; 7 shape-group pins G1-G7 in test_tool_errors.py BEFORE conversion (G5 = success-dict-verbatim + error-raise); C3 split C3a/C3b, C3b independently revertible; M9's 4 network tools verified except-free at HEAD"
+          ]
+        },
+        "M5b": {
+          "file": "audit/stage2/plan_M5b.md",
+          "batch": ["M5b (F-140/F-203/F-601 five-cloner root)", "F-142 (folded from M5a)", "F-744 (routed naming)", "satellites: F-141, F-143, F-144"],
+          "base_tree": "post-M3(+A1)+M1+M8(+A1)+M2+M7+M11a_M15+M9+M6+M12a+M4ph1(+A1) (serial 12th)",
+          "closes": ["F-140", "F-203", "F-601", "F-142", "F-141", "F-143", "F-144"],
+          "partially_closed": ["F-744 (internal renames + 4 docstrings sharpened now; clone_*->extract_* MCP tool renames deferred to M4-Ph2 per the rename-once ruling)"],
+          "explicitly_out": ["clone_storage.py (M4-C1 disk quota/GC — boundary kept crisp)", "cdp_function_executor.py (M7's)", "F-165 (dup header loop, dynamic_hook_system — stays open)", "real-Chrome value-fidelity (integration follow-up per M6 §1.4)"],
+          "status": "APPROVED_by_human_2026-07-03 (approve as-is)",
+          "planner": "opus (planner-m5b)",
+          "anchors_verified_at_head": true,
+          "orchestrator_verified": "5 load-bearing claims checked in source: (1) delete-safety inventory COMPLETE — dying modules imported only by server.py(:29,:32), progressive(comprehensive), file_based(element_cloner + private ComprehensiveElementCloner), every importer covered by a re-point step; test_element_cloner_output_dir.py pins FileBasedElementCloner (misleading filename — NOT element_cloner.py), so both output_dir tripwires survive the deletes; (2) F-144 CONFIRMED — server.py:3337 constructs CDPElementCloner() per call, no module singleton exists in cdp_element_cloner.py; (3) tool mapping spot CONFIRMED — clone_element_complete → comprehensive_element_cloner.extract_complete_element under _with_cdp_timeout; (4) F-143 CONFIRMED — progressive calls comprehensive (flat) but reads nested-first .get('element',{}) → nested branch dead; (5) file_based thinness CONFIRMED (0 evaluate/send; 18 filename/save refs = 8 sites × 2 + 2 defs) and progressive imports persistent_storage at HEAD (M15 shift row accurate).",
+          "resolved_decisions": [
+            "Events transport: KEEP JS-eval (human-confirmed the conscious tradeoff) — per-aspect best-transport inside the ONE canonical engine (CDP: styles+structure; JS: events/animations/assets/related_files); ZERO capability loss; transport pinned by a path-assertion test so a future all-CDP purification cannot silently regress inline/framework handler detection",
+            "F-744 tool renames: DEFER to M4-Ph2 (+ sharpen the 4 docstrings now) — rename-once ruling honored, M6 count-94 tripwire names stable through the pipeline",
+            "FileBasedElementCloner class name: KEPT (protects the 2 output_dir tripwire tests)"
+          ]
+        },
+        "M14": {
+          "file": "audit/stage2/plan_M14.md",
+          "batch": ["M14 Stage-4 CODIFY (F-401..407, F-306)", "F-108 (tool-count 90/96/99 → 94, derive)", "F-741 (glossary)", "debt ledger records: F-740, F-702, F-703 + accumulated defers"],
+          "base_tree": "post-ALL 11 code plans (executes LAST, Stage 4)",
+          "closes": ["F-401", "F-402", "F-403", "F-404", "F-405", "F-406", "F-407", "F-306", "F-108", "F-741"],
+          "debt_recorded": ["F-740", "F-702", "F-703", "F-603 cross-module", "F-106 deeper", "M4-Ph2 (split + renames F-760/F-743/F-744-remainder + styles-twin merge)", "F-606", "F-765", "M1 probe-body dedup", "M11b DI seam"],
+          "explicitly_not_in_ledger": ["M10b/F-104 — DELIVERED via M4-Ph1 A1 (recording it would be a false claim)"],
+          "status": "APPROVED_by_human_2026-07-03 (approve as-is; +1 orchestrator touch-up folded: §2.6 --list-sections erratum) + AMENDMENT A1 (F-741 CLI renames, human-ordered at gate) drafted by planner-m14 and cross-review-APPROVED by orchestrator 2026-07-04; A1's §A1.3 sub-decision RULED by human 2026-07-04: Option X-HARD — env var + CLI flag renamed outright, NO back-compat alias (folded into plan §A1.3 as [GATE RULING 2026-07-04]). M14+A1 FULLY APPROVED — Stage-2 planning closed.",
+          "planner": "opus (planner-m14)",
+          "anchors_verified_at_head": true,
+          "orchestrator_verified": "3 load-bearing claims checked in source: (1) stale docs EXACT — MCP_TOOL_TEST_RESULTS.md :159-160 lists hot_reload/reload_status, :6 'Total Tools: 97', dated bug log; HIGH_VALUE_CHANGES.md exists (8.2KB roadmap) — retire decision grounded; (2) F-108 triple fully explained — '90 tools' in ArgumentParser description :4085; --list-sections hardcoded per-section numbers sum to 99 (verified arithmetic); 96 = actual @section_tool registrations pre-M2 → the finding's 90/96/99; NOTE this corrects planner-m4ph1's earlier 'sums to 96' note (it summed the wrong thing); (3) §2.6 erratum found+folded — --list-sections prints hardcoded strings, does NOT iterate SECTION_TOOLS (that is what option (a) fixes). A1 ADDENDUM (2026-07-04, 4 more checks): cli.py ambiguous labels REAL at :103 'session root:' (status), :105 'session cap :' (status), :137 'caps : clone … | session …' (cleanup), :172 'session root:' (doctor) + 3 argparse help strings (:236/:242/:254) + flag :246 --session-cap-gb (dest session_cap_gb, consumer args.session_cap_gb :128); the helper is _session_storage_cap_bytes DEFINED embedded/server.py:583 with env read parse_float_env('STEALTH_MCP_SESSION_STORAGE_CAP_GB', 20.0) at :588 (X-hard rename target); test_cli.py:57-59 asserts 'session root' lowercase = the ONE existing consumer pin A1 updates in-commit; README env rows :110/:207 = migration-note landing sites.",
+          "resolved_decisions": [
+            "F-108: option (a) — derive the CLI-description count AND the --list-sections per-section counts from SECTION_TOOLS at runtime (~6 lines in __main__, own revertible commit); count-assertion test guards 94",
+            "Stale docs: RETIRE MCP_TOOL_TEST_RESULTS.md + HIGH_VALUE_CHANGES.md to audit/history/ (repair rejected — would resurrect a competing hand-maintained tool inventory, the F-108 disease)",
+            "F-741: human OVERTURNED doc-only closure — the CLI status code-field renames land IN M14 (Amendment A1): glossary-conformant unambiguous field/label names ('session root' vs 'browser sessions'), consumer sweep + output pins; M14 now has TWO fenced code touches (F-108 derive + F-741 rename), each its own revertible commit",
+            "A1 (cross-review-APPROVED 2026-07-04): rename table complete — 'session root:' → 'browser-session root:' (_cmd_status + _cmd_doctor), 'session cap :' → 'browser-session cap :', cleanup 'caps' line session→browser-session, 3 help strings, helper _session_storage_cap_bytes → _browser_session_storage_cap_bytes; consumer sweep: ONE existing pin (test_cli.py:57-59) updated in-commit, tmp_session_root fixture + STEALTH_MCP_BROWSER_SESSION_ROOT deliberately KEPT, frozen Stage-1 evidence NOT edited; A1.5 adds output-shape pin test_status_labels_are_glossary_conformant (regex forbids bare '^\\s*session (root|cap)\\b'); A1.6 proxy-overload stays glossary-only",
+            "A1 §A1.3 env-var sub-decision (human RULED 2026-07-04): Option X-HARD — STEALTH_MCP_SESSION_STORAGE_CAP_GB → STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB and --session-cap-gb → --browser-session-cap-gb (dest browser_session_cap_gb), NO fallback read, NO alias; mandatory mitigations: README+RUNBOOK one-line migration note, §A1.5 pin EXTENDED to assert the new env name in the status cap line, S6 README edit lands in the same checkpoint window; rationale: family consistency with STEALTH_MCP_BROWSER_SESSION_ROOT, zero second-way spelling (conventions lens); supersedes Option-Y phrasing in §A1.2/§A1.5/§A1.7/§A1.8 per the plan's [GATE RULING 2026-07-04] block"
+          ]
+        }
+      },
+      "cross_review_notes": [
+        "M1 planner: rebase on plan_M3; REUSE embedded/logging_setup.py; M3 logs are the verification medium for the liveness fix. singleton.py regions mostly disjoint (M1=_server_is_healthy/watchdog; M3=start/cold-start/proxy paths).",
+        "M2 planner: singleton.py same-file rebase after M3 (M3 adds a :268 DEBUG log inside _server_version, which M2 rewrites for the reuse key).",
+        "M9 planner: M10a-7b adds DEBUG logs at network_interceptor.py:171/271/357 — the exact regions M9 rewrites for the body cap/opt-in. M9 rebases on them and carries the log lines through its rewrite.",
+        "M7 planner: browser_manager.py low-conflict (M10a-7a logs switch_to_tab/close_tab :1165/:1207; M7 edits close_instance).",
+        "M8 planner: consume dependency — doctor/stop/restart should surface logging_setup.resolve_log_dir(), backend-<pid>.log, and the server.json pid (delivers the second half of F-503).",
+        "M4-Ph1 planner: MUST carry forward the section_tool correlation wrapper when formalizing the registry, and preserve configure_logging('backend') in the __main__ block.",
+        "M12a planner: dynamic_hook_system.py:318 gains an M10a WARNING log; minor rebase.",
+        "Stage-3 nit (non-blocking): plan §2.1-B assumes fastmcp/uvicorn records reach backend-<pid>.log once the stealth logger is configured; with propagate=False they may instead land in backend-boot.log via the stderr redirect. Step-2's pinning test resolves the wiring either way.",
+        "M8 planner (from plan_M1): build stop/restart/doctor on singleton._probe_backend_status (responsive/wedged/down) — do NOT re-add a health check; 'wedged' is the restart trigger. F-509 fixed-port fallback becomes REACHABLE once M1 un-jams eviction — M8 owns it.",
+        "M2 planner (from plan_M1): _find_running_server:132 version key sits adjacent to M1's :134 probe rewire (same function). After M2's key change, M1's new reuse tests AND the migrated test_singleton_version_aware.py must stay green.",
+        "M6/M7 planners: F-611 (list_instances trusts bookkeeping, no per-instance CDP round-trip) ruled OUT of M1 — its natural home is M6 characterization or M7's browser_manager work (Runtime.evaluate-style probe). Consider folding it in; else file as follow-up finding.",
+        "Future finding (from plan_M1 rejected-alt 4): _backend_http_ready deliberately COPIES ~10 lines of _await_backend_http's initialize body to stay disjoint from M3-owned code — consolidation is a future cleanup finding, not Stage-3 scope.",
+        "M11a planner (from plan_M8): F-607 (_file_lock silently yields on lock failure, process_cleanup.py:216-225) re-homed to M11a — its harm is concurrent contention on the live tracking path, which M11a's file refactor owns. ALSO: add a public recover_orphans() seam on ProcessCleanup and repoint cli kill-orphans from the private _recover_orphaned_processes call to it.",
+        "M7 planner (from plan_M8): F-608 (recovery=False fallback_pid killed WITHOUT create_time check, process_cleanup.py:411-422) re-homed to M7 — that branch is exercised by close_instance/finalize, M7's territory. Consider hardening it there (reuse the recovery=True branch's create_time idiom).",
+        "M2 planner (from plan_M8): M8 runs BEFORE M2 — M2 rebases over the _terminate_backend extraction (in _clear_stale_backend) and the _start_server_process env-scrub; M2's own edits (_find_running_server:132 key, _server_version:263) stay disjoint. Re-anchor by symbol.",
+        "Stage-3 merge coordination: M3's boot-log redirect and M8's env-scrub edit the SAME kwargs dict in _start_server_process (:228-232 at HEAD) — M3 sets stdout/stderr, M8 adds env=. Re-anchor by 'subprocess.Popen(cmd, **kwargs)'.",
+        "Anchor corrections for future briefings (from planner-m8): the port constant is DEFAULT_PORT (singleton.py:41) — no BACKEND_PORT symbol exists; process_cleanup._recover_orphaned_processes is DEFINED at :599 (the :55 in older notes is its call site inside __init__).",
+        "LENS DIRECTIVES (delta accepted 2026-07-02; details audit/stage1/LENS_DELTA.md + dispositions in findings.json): M7 += F-745 (get_tab/get_browser touch_activity flip/rename). M11a += F-720+F-763 (one env-parsing home; process_cleanup inline bool-parse truthy-set divergence). M15 += F-722+F-762 (export DEFAULT_PORT/STATE_DIR, one state-root convention). M12a += F-721+F-742 (DELETE dead response_stage_hooks.py + its test). M2 += F-765 (poll_until ONLY if touching those loops). M5b += F-744 (extract_* naming). M4-Ph1 += F-701 (STEP 0: make embedded/ a real package) + F-700 + F-743 + F-746 + F-760 + F-761. M14 += F-741 (glossary) + known-debt records for F-740 (singleton split, wave 4), F-702 (BrowserManager split), F-703 (DebugLogger serialization engine).",
+        "M2 planner NOTICE (from M8-A1 F-509 overturn): the backend port is no longer guaranteed 19222 — the reuse key / discovery MUST read the recorded port from server.json, never assume DEFAULT_PORT. M2 also rebases over A1's ensure_server_running selection line (step M8-7) in addition to _terminate_backend extraction + env-scrub.",
+        "M5b planner (BINDING, from M5a fold 2026-07-03): F-142 is now M5b's to close (M5a folded in — its 'hang' is bounded by _with_cdp_timeout's 30s wait_for, not a live freeze, so no standalone urgency). audit/stage2/plan_M5a.md is a BINDING INPUT: reuse its per-aspect CDP-feasibility table (styles+structure = clean CDP parity; events = CAPABILITY REGRESSION, CDP getEventListeners misses inline on*/framework handlers; animations+assets = NO CDP path exists). M5b's 5->1 consolidation must consciously decide the events tradeoff IN FULL CONTEXT (keep JS path for events? accept the loss?) and NOT silently regress it. Dedup ruling: converge onto CDPElementCloner as the canonical engine, not a 3rd copy. The clone_element_complete TOOL uses comprehensive_element_cloner (not ElementCloner.clone_element_complete). M6's cloner goldens (structure/events already M5a-marked as 'will change') are the gate; styles + others are the green tripwire.",
+        "M12a planner (NEXT, plan 10/13): reconcile _process_request_hooks running only matching_hooks[0] vs docs promising a priority chain (F-163) — code<->doc reconcile, pick one truth. ALSO folds routed lens F-721+F-742: DELETE the dead 148-line ResponseStageProcessor in response_stage_hooks.py (never imported anywhere; carries a latent base64 bug) + its dedicated test — resolves both the duplication (F-721) and the misleading-filename clarity (F-742) findings at once. Minor rebase: M10a already added a WARNING log at dynamic_hook_system.py:318.",
+        "Stage-3 integrator NOTICE (from M8-A1): the watchdog/probe port INVARIANT is now 'the CHOSEN port, possibly != 19222' — it flows by argument from ensure_server_running's return (proxy subtree) and via server.json (state readers). Never re-hardcode 19222 in watchdog/probe/CLI code. A backend that fell back to port P stays on P across restarts; 'stop' clears server.json = the reset path to DEFAULT_PORT.",
+        "M8 Stage-3 executor note (from A1.1): OPTIONAL 1-line dedup inside M8-3 — repoint doctor's foreign-occupant detection to the shared _port_is_foreign_held() predicate once A1 lands.",
+        "M15 planner (from plan_M2): server.json is now a 4-field record {port, version, pid, source_fingerprint} — M15's storage/model refactor MUST carry the 4th field forward. M2 adds SOURCE_ROOT as a NEW constant beside STATE_DIR (does not relocate existing ones — F-722 export still M15's).",
+        "M6 planner (from plan_M2): do NOT write characterization tests for hot_reload/reload_status — deleted by M2. Tool surface is 94 post-M2 (was 96 by the brief's count; absolute number reconciled by M14/F-108).",
+        "M4-Ph1 planner (from plan_M2): the 'debugging' section no longer contains hot_reload/reload_status; section_tool registry mechanics untouched by M2 (M3 owns the correlation wrapper, M4 owns formalization).",
+        "M14 (from plan_M2): MCP_TOOL_TEST_RESULTS.md still references hot_reload/reload_status (README does not); tool-count reconciliation (90/96/99->94) is M14/F-108.",
+        "M12a cross-review rulings (2026-07-03): M4-Ph1 planner — M12a makes NO server.py edits (hook tool descriptions verified truthful at HEAD), no new shift for the registry formalization. M14 — hook semantics are now FIRST-MATCH-BY-PRIORITY, NOT a chain; DESIGN.md/glossary must state this truth; M12a adds/removes no tools (count stays 94). Stage-3 integrator — post-M12a expected non-integration test count = (post-M6 count) − 11 + 4 (executor records actuals); M12a's shadow-WARNING insert sits immediately after 'hook = matching_hooks[0]' (above M10a's :318 header-parse WARNING) — same file as M10a-7b, both re-anchor by SYMBOL; F-606 (matches() eval re-parse) remains OPEN and unrouted after M12a.",
+        "M4-Ph1 cross-review rulings (2026-07-03): STAGE-3 EXECUTOR (STEP 0 invariants) — embedded/server.py stays loaded via runpy.run_path(run_name='__main__') from the top-level server.py shim; absolute package imports work ONLY because the package is installed editable (M2/F-120 verified); verified NO embedded module imports server — a new embedded module must NEVER import server (double-registration under runpy __main__); the one sanctioned sys.path shim is the compatibility bridge, all module-to-module imports use the absolute form. M5b planner — STEP 0 rewrites cloner IMPORT LINES only (bodies untouched, M5b owns them); file_based_element_cloner.py:21-24 try/except dual-import is collapsed by STEP 0 (do not re-add); re-anchor cloner imports by symbol post-STEP-0; clone_storage.py is server.py-side storage, NOT a cloner engine — M5b must not converge into it. M14 — tool_registry.py docstring will hold the canonical verb taxonomy (F-760) for CONTRIBUTING; the 'two surfaces, one backend' story (F-700/F-109) is handed to M14; known debt to record: F-104 remainder [SUPERSEDED by A1: F-104 CLOSED, M10b DELIVERED — debt line removed], F-603 cross-module, F-106 deeper decomposition, M4-Ph2 renames. Stage-3 integrator — M4-Ph1 expected test count = (post-M12a count) + ~20-35 across 4 new files + 2 extensions; cli.py server._* storage reaches (12+ sites) repoint to clone_storage.* in C1; app_lifespan's _spawn_background_sweep('startup') call becomes clone_storage.spawn_background_sweep — preserve M11a's process_cleanup.activate() beside it.",
+        "M5b cross-review rulings (2026-07-03): M14 — the per-aspect transport table (styles/structure=CDP, events/animations/assets/related_files=JS, with the WHY per aspect) is load-bearing design knowledge and MUST land in DESIGN.md; the events-capability rationale (CDP getEventListeners misses inline on*/framework handlers) goes in the glossary/design doc so a future 'purify to all-CDP' PR can't silently regress it. M4-Ph2 ledger — post-M5b the extract_element_styles and extract_element_styles_cdp TOOLS both route to the same engine CDP method (redundant twin pair): natural Ph2 merge/rename candidate alongside the deferred clone_*->extract_* renames (F-744 remainder). Stage-3 integrator — M5b runs LAST of the code plans (12th); its golden updates are the review surface (structure + complete-3->1 + progressive + possibly file_based summary = deliberate diffs; styles/events/animations/assets goldens + the 2 output_dir tripwires + count-94 MUST stay green); test_element_cloner_output_dir.py pins FileBasedElementCloner NOT element_cloner.py (misleading filename — do not 'clean it up' when element_cloner.py is deleted).",
+        "M14-A1 cross-review rulings (2026-07-04): Stage-3 executor — the F-741 rename commit is CLI-surface-only (cli.py labels/help/flag + helper rename + test_cli.py:57-59 pin + new A1.5 shape-pin test); the X-HARD env rename edits the parse_float_env key at embedded/server.py:588 and MUST land with the README/RUNBOOK migration note in the same checkpoint window; after it lands, grep for STEALTH_MCP_SESSION_STORAGE_CAP_GB must hit only frozen audit/ evidence. M14 doc steps — glossary term is 'browser-session' (hyphenated) for per-browser disk sessions vs the MCP protocol 'session'; DESIGN.md/README document ONLY the new env name (no alias exists to document). Stage-3 integrator — A1 adds exactly one new test (test_status_labels_are_glossary_conformant) and edits one pin; count-94 tripwire unaffected (M14 renames no tools).",
+        "GATES INTERLUDE (human directive 2026-07-06) — ALL Stage-3 executors: workstream 2.5-gates (ruff + ty strict + vulture + husky + CI + pydantic-settings + Sentry posture; task audit/GATES_TASK_OPUS.md) lands BEFORE plan 1 and is PREDECESSOR ZERO for every plan: a repo-wide ruff-format commit + the mechanical env-read migration to settings.py shift line numbers everywhere, so §1.3 shift tables are now approximate — re-anchor by SYMBOL (already mandatory). Every plan's definition-of-done gains: delete the plan_M<N>-tagged lint/type/vulture/budget suppressions your plan resolves (RUF100 + tools/check_suppression_owners.py enforce this); husky gates must pass at every checkpoint commit; --no-verify is BANNED.",
+        "SETTINGS SUPERSESSION (human-approved 2026-07-06): pydantic-settings Settings (src/stealth_chrome_devtools_mcp/settings.py) is THE canonical env home from gates-landing onward. plan_M11a_M15's 'NEW embedded/env_utils.py canonical parse home (F-720/F-763)' step is SUPERSEDED — env_utils.py must NOT be created (a second env home is a conventions-lens defect); F-720/F-763 close via Settings at the gates workstream. All other M11a/M15 steps unchanged (activate() at serve boundary, bounded file-lock, serialize-whole, in_memory_storage rename, DEFAULT_PORT/STATE_DIR exports, pid-file relocate).",
+        "NEW ENV VARS in Stage-3 plans (M3 STEALTH_MCP_LOG_LEVEL, M9 STEALTH_MCP_NETWORK_CAPTURE_BODIES + cap tunables, and any other plan-introduced env var): implement as Settings fields, NOT raw os.getenv/os.environ/parse_*_env — TID251 bans those outside settings.py. The plans predate Settings; this adaptation is PRE-AUTHORIZED, not a deviation.",
+        "M14+A1 X-HARD executor note (post-gates): the env read parse_float_env('STEALTH_MCP_SESSION_STORAGE_CAP_GB', 20.0) formerly at embedded/server.py:588 has MOVED into the Settings model (the gates workstream keeps the OLD env name — it does NOT pre-rename). The X-HARD rename therefore edits the Settings field/env name (+ .env.example) in addition to the approved helper/CLI-flag/docs edits; the post-land grep rule is unchanged (old name may hit only frozen audit/ evidence)."
+      ]
+    },
+    "gate-plan-approval": { "status": "DONE 2026-07-04 — ALL 12 executable plans APPROVED: plan_M3(+A1), plan_M1, plan_M8(+A1), plan_M2, plan_M7, plan_M11a_M15, plan_M9, plan_M6, plan_M12a, plan_M4ph1(+A1), plan_M5b, plan_M14(+A1 incl. X-hard env ruling); M5a FOLDED INTO M5b; lens delta ACCEPTED. Every plan file carries its approval stamp + folded [GATE RULING] blocks in-file." },
+    "2.5-gates": {
+      "status": "DONE 2026-07-06",
+      "landed": {
+        "date": "2026-07-06",
+        "head_sha": "75825bb",
+        "branch": "fix/singleton-version-aware-backend",
+        "test_count": 415,
+        "coverage": 42,
+        "cov_gate": 41,
+        "suppression_counts": {
+          "ruff_per_file_ignores": 21,
+          "ruff_inline_noqa": 56,
+          "ty_warnings": 39,
+          "ty_excluded_files": 8,
+          "vulture_allowlist": 5
+        },
+        "deleted_dead_code": [],
+        "real_bugs_fixed": [
+          "F821: _KILL_RETRIES referenced without self. prefix in browser_manager.py"
+        ],
+        "notes": "14 themed commits on fix/singleton-version-aware-backend. Ruff: 0 violations (full src/). ty: 0 errors, 39 warnings (pre-typing modules). Vulture: 0 findings at 80%. All 6 gates green. Husky armed in final commit."
+      },
+      "rules": "Approved plans + audit/stage2/* READ-ONLY. Tool surface unchanged (96 at HEAD; 94 only after M2). Suite green at every commit via venv python. No --no-verify ever (husky armed in the FINAL commit). On completion 'landed' gets {date, head_sha, branch, test_count, coverage, cov_gate, suppression_counts, deleted_dead_code, real_bugs_fixed, notes} — Stage 3 reads its baseline FROM HERE, not from the pinned SHA."
+    },
+    "3-fix": { "status": "DEFERRED until 2.5-gates lands (human directive 2026-07-06) — baseline (head_sha/test_count/coverage) then comes from stages['2.5-gates'].landed, NOT pinned SHA 2267b83d. Then: start in a fresh session by pasting audit/STAGE3_RESUME_PROMPT.md. Branch audit/fixes-2026-07-02 off the post-gates HEAD; serial order M3+A1(M10a) → M1 → M8+A1 → M2 → M7 → M11a+M15 → M9 → M6 → M12a → M4-Ph1+A1 → M5b → M14+A1; pinning tests FIRST, suite green at every checkpoint, gates (husky) green at every checkpoint, each plan deletes its plan_M<N>-tagged suppressions, one PR per plan, venv python only; deviation from an approved plan → STOP and ask the human" },
+    "4-codify": { "status": "pending" }
+  },
+  "artifacts": {
+    "test_baseline": "audit/stage0/test_baseline.json",
+    "tooling": "audit/stage0/tooling.json",
+    "metrics": "audit/stage0/metrics.md",
+    "prior_claims": "audit/prior/claims.json",
+    "prior_summary": "audit/prior/summary.md"
+  },
+  "deletion_counter": 0,
+  "history": [
+    { "date": "2026-07-02", "event": "Stage 0 started. Dirty tree resolved by committing WIP (human-approved). SHA pinned: 2267b83d." },
+    { "date": "2026-07-02", "event": "Stage 2 started. Preconditions re-verified (HEAD 2267b83d, tree clean, 402 passed). Plan 1/13 drafted by Opus planner: audit/stage2/plan_M3.md (batch {M3,M10a}, closes 8 findings; 21-vs-22 silent-except reconciliation recorded). Fable cross-reviewed for file overlaps, rulings recorded in cross_review_notes. HARD GATE: awaiting human approval before planning M1." },
+    { "date": "2026-07-02", "event": "GATE PASSED: human APPROVED plan_M3 as-is. Decisions: two stacked PRs; log_info->INFO default. Plan file + state updated. Proceeding to plan 2/13: M1 app-level liveness." },
+    { "date": "2026-07-02", "event": "Plan 2/13 drafted by Opus planner: audit/stage2/plan_M1.md (closes F-301+F-501, the two Criticals; F-611 ruled out and re-homed to M6/M7; no new kill/respawn code — un-jams the existing recovery machine). Fable cross-reviewed: honors M1/M3 disjointness ruling, M8/M2 boundaries respected; 4 new rulings appended to cross_review_notes. HARD GATE: awaiting human approval before planning M8." },
+    { "date": "2026-07-02", "event": "GATE PASSED: human APPROVED plan_M1 as-is. Decisions: keep ~12s detection window; one PR of 4 commits. Plan file + state updated." },
+    { "date": "2026-07-02", "event": "HUMAN ADDENDUM received mid-Stage-2: 4 maintainability lenses (modularity/dedup/clarity/conventions) weighting within priority 1; finding schema += modularity|duplication|clarity; security scope-reduced to quote-backed regressions only. Persisted to audit/ADDENDUM_LENSES.md; pointers added to RESUME.md + STAGE2_BRIEF.md; approved plans re-checked (both pass; M1 probe-body copy stays as tracked dedup debt). Stage 1b lens re-scan launched (4 sonnet agents, F-7xx); M8 planner launched with lens-aware preamble." },
+    { "date": "2026-07-02", "event": "Lens re-scan partial: clarity DONE (7 findings F-740-746), duplication DONE (3 findings F-720-722; F-721 dead ResponseStageProcessor duplicate converges with clarity F-742 on same file). Plan 3/13 drafted: audit/stage2/plan_M8.md (closes F-302/F-305/F-503-half/F-509-detection; F-509-fallback deferred, F-607->M11a, F-608->M7). Fable cross-reviewed; 6 new rulings in cross_review_notes. HARD GATE: awaiting human approval of plan_M8; lens delta presented after modularity+conventions land." },
+    { "date": "2026-07-02", "event": "Lens scan complete 4/4 (20 findings), all quote-verified programmatically (0 problems). Orchestrator re-verified F-764 in source: CONFIRMED conf 1.0 unconditional self-deadlock (export path re-enters non-reentrant lock); approved-M3-4 would widen it. Delta written: audit/stage1/LENS_DELTA.md." },
+    { "date": "2026-07-02", "event": "COMBINED GATE PASSED: (1) plan_M8 APPROVED as-is; (2) F-509 ruling OVERTURNED by human — auto-port-fallback IN, planner-m8 drafting Amendment A1; (3) reaper seam = direct call (M11a adds public seam later); (4) LENS DELTA ACCEPTED IN FULL incl. plan_M3 Amendment A1 (F-764 RLock). Executed: plan_M3.md amended (A1 in step M3-4 + §8 entry), plan_M8.md status+appendix updated, LENS_DELTA.md marked accepted (+F-741->M14 line restored after orchestrator caught its omission), 20 findings merged into findings.json (79->99), lens directives recorded in cross_review_notes. Next: cross-review M8-A1, then plan M2." },
+    { "date": "2026-07-02", "event": "M8 Amendment A1 drafted (fresh planner-m8a1 — original teammates lost to session reset, re-read disk state as designed) and cross-review-APPROVED: synchronous port selection at the ensure_server_running boundary via _select_backend_port/_port_is_foreign_held reusing _free_port(); server.json canonical; steps M8-7/M8-8; 20-site consumer enumeration (only 2 edits); existing 19222 tests stay green; rollback restores detect-only posture. Blast radius SMALLER than the overruled OUT-ruling feared. New invariants recorded (watchdog port != guaranteed 19222; stop = reset path to DEFAULT_PORT). Proceeding to plan 4/13: M2 always-fresh dev backend + delete hot_reload." },
+    { "date": "2026-07-03", "event": "Plan 4/13 drafted (planner-m2), cross-reviewed with 2 orchestrator touch-ups folded (corrected two-amendments base note; empty-fingerprint-never-matches hardening + test case). GATE PASSED: human APPROVED plan_M2 as amended. Decisions: whole-package fingerprint scope; source-only eviction logging. M8-A1 re-presented, no objection. New directives: M15 carries 4-field server.json; M6 skips deleted tools; M14 owns doc/tool-count. Proceeding to plan 5/13: M7 teardown executor." },
+    { "date": "2026-07-03", "event": "Plan 5/13 drafted (planner-m7): F-180 4-phase off-loop close_instance + F-608 identity check + F-745 touch default flip + partial F-164. Orchestrator VERIFIED 3 load-bearing claims directly in source (fallback re-runs sync kill :761-782; navigate touches at :986; F-608 gap :411-413). GATE PASSED: human APPROVED as-is; F-745 Option A; F-164 split (cfe now, server.py half -> M4). Proceeding to plan 6/13: {M11a, M15} batch." },
+    { "date": "2026-07-03", "event": "Plan 6/13 {M11a,M15} drafted (planner-m11a-m15; planner went idle before delivering its summary msg but the 35.3K plan file was complete on disk — cross-reviewed directly). Orchestrator VERIFIED the make-or-break invariant in source: app_lifespan:1231 IS wired as HTTP lifespan :1294, so activate() keeps fresh-backend reap alive while import-time kill is removed; also confirmed import-time reap __init__:52-55 (+F-763 'enabled' omission) and store_instance:26-33 6-field drop. Session model switched to Fable mid-flight; re-login. GATE PASSED: human APPROVED as-is; F-122 rename; pid-file relocate. Proceeding to plan 7/13: M9 body-store cap (plan-of-record #8; M6 is #9, next)." },
+    { "date": "2026-07-03", "event": "Plan 7/13 (M9) drafted (planner-m9): byte-cap the response-body store (F-605) + capture opt-in/off-by-default, both extending the existing _instance_filters home. Orchestrator VERIFIED 2 load-bearing claims in source (get_response_content:2143-2146 live-refetches independent of store; self._responses:182 unbounded; M10a-7b :171 log carried through, :271/:357 untouched). GATE PASSED: human APPROVED as-is; capture OFF-by-default; caps 128MiB/5MiB. F-606/F-609 ruled OUT (other files). Proceeding to plan 8/13: M6 characterization tests (the gate for M4-Ph1/M5b)." },
+    { "date": "2026-07-03", "event": "Plan 8/13 (M6) drafted (planner-m6): hermetic characterization net (tests-only, no production change) gating M5a/M4-Ph1/M5b/M4-Ph2. Orchestrator VERIFIED the load-bearing .fn unwrap seam against the repo's own test_server_direct.py:27-29 — in-process tool invocation needs no production seam. GATE PASSED: human APPROVED as-is; two-tier cloner schema freeze; first-net scope as planned. Canonical harness tests/fakes.py; F-611 characterize-current + follow-up. Proceeding to plan 9/13: M5a propagate cloner hang-fix (its gate M6 now exists)." },
+    { "date": "2026-07-03", "event": "Plan 9/13 (M5a) drafted (planner-m5a) and it ESCALATED a scope decision: HEAD contradicts the brief's uniform 'propagate to all 4' premise. Orchestrator VERIFIED in source: (1) extract_element_styles is a thin delegator to extract_element_styles_cdp (the propagation template); (2) _with_cdp_timeout wraps every cloner call in asyncio.wait_for(30s) so F-142's 'hang' is BOUNDED degrade-then-error, NOT a freeze. Only styles+structure have clean CDP parity; events = capability regression (CDP misses inline/framework handlers); animations+assets = no CDP path. DECISION: human chose FOLD INTO M5b — the bounded severity removes the standalone-bug rationale; M5b converges all 5 aspects holistically. M5a NOT a standalone Stage-3 plan; plan_M5a.md retained as analysis + binding M5b input; F-142 rides with M5b. Binding M5b directive recorded. NEXT plan = M12a. Handoff regenerated (STAGE2_RESUME_PROMPT.md). Session offloading to a fresh chat." },
+    { "date": "2026-07-03", "event": "FRESH SESSION (Fable orchestrator) resumed mid-Stage-2 from disk. Preconditions re-verified: HEAD==2267b83d, tree clean (untracked audit/ + CODEBASE_AUDIT.md only), 402 passed in 64s via venv python. Plan 10-of-13-file / 9-of-12-executable (M12a) drafted (planner-m12a, opus): F-163 honest-first-match + runtime shadow WARNING; DELETE dead ResponseStageProcessor + its 11-test file (F-721/F-742). Orchestrator VERIFIED 4 load-bearing claims (independent doc sweep = exactly 2 lying surfaces; all _execute_hook_action branches terminal → first-match is platform-enforced; 11 tests collected; log_warning signature + M10a :318 rebase point). GATE PASSED: human APPROVED plan_M12a as-is (runtime WARNING chosen over docs-only/static field). Cross-review rulings recorded (M4-Ph1: no server.py shift from M12a; M14: document first-match truth; integrator: test count −11+4, F-606 stays open). Proceeding to plan M4-Ph1(+M13) — the god-file extraction, gated on M6." },
+    { "date": "2026-07-03", "event": "Plan M4-Ph1(+M13) drafted (planner-m4ph1, opus): 6 units — STEP 0 packageize embedded/ (absolute imports + one sanctioned shim, server.py NOT relocated), C1 extract 50-def clone_storage.py (−982 LOC), C2 tool_registry.py carrying M3's correlation wrapper, C3 tool_errors.py + _require_tab (raise-convention), C4 spawn_browser 5-method pipeline, C5 _with_cdp_timeout canonical. Orchestrator VERIFIED 5 load-bearing claims (runpy.run_path __main__ mechanism grounds STEP 0; C1 move-set exactly 50 defs :225-:1205; cli.py 12+ server._* reaches; M7 disjointness spawn@311-546 vs close@605; no embedded module imports server) + folded 1 erratum (4 not 5 raw wait_for). GATE PASSED: APPROVED as-is; renames caveat-now/rename-at-Ph2; C3 depth OVERTURNED by human → FULL 22-site sweep in Ph1 (M10b delivered, not deferred). Amendment A1 ordered from planner-m4ph1 (site enumeration + shape-group pinning tests + C3a/C3b split); orchestrator cross-review of A1 pending." },
+    { "date": "2026-07-03", "event": "M4-Ph1 Amendment A1 drafted (planner-m4ph1, after one idle-nudge) and cross-review-APPROVED with ONE orchestrator touch-up folded (A1.5). A1: 57 excepts enumerated; sweep set = 18 post-M2 tool-body + 3 resource endpoints = 21 sites (F-104's 22 reconciled plan_M3-style); 7 shape-group pins G1-G7 BEFORE conversion (neutralizes the D1 rejection reason); C3 split C3a/C3b. Orchestrator spot-verified: 57 excepts exact; validate_browser_environment diagnostic-dict KEEP correct; get_response_content base64-alt KEEP correct; M9's 4 network tools except-free. TOUCH-UP A1.5: A1 had regressed execute_script:1944 + create_python_binding:3857 (F-104 archetype a) from the approved base plan's CONVERT list back to KEEP, and A1's own C3a not-found conversion made create_python_binding internally two-convention — overruled: error paths CONVERT to raise ToolError (messages preserved), success dicts pinned VERBATIM. Final: ~55 call-sites convert, 6 justified tool-body KEEPs + 3 input-validation value-returns + mechanism handlers. plan_M4ph1(+A1) now fully approved. Proceeding to plan M5b (cloner consolidation, plan_M5a.md binding input)." },
+    { "date": "2026-07-03", "event": "Plan M5b drafted (planner-m5b, opus): 5 cloners (2,228 LOC verified) → CDPElementCloner as the ONE canonical engine (per-aspect best-transport INSIDE it); element_cloner.py + comprehensive_element_cloner.py DELETED whole; file_based + progressive survive as thin adapters (8× _to_file boilerplate → one _extract_and_save, F-141; dead dual-schema fallback deleted, F-143; module singleton added, F-144); 3 complete-schemas → 1 (F-140); −700..850 LOC; 5 green checkpoint commits, golden diffs = the review surface. Orchestrator VERIFIED 5 load-bearing claims (delete-safety importer inventory complete — incl. that test_element_cloner_output_dir.py actually pins FileBasedElementCloner despite its filename; F-144 per-call construction at server.py:3337; clone_element_complete → comprehensive confirmed; F-143 nested branch dead; file_based 0 evaluate/send). GATE PASSED: APPROVED as-is; Q1 events = KEEP JS (zero capability loss, transport pinned by path-assertion test); Q2 F-744 renames = DEFER to Ph2 + docstrings now; Q3 class name kept. Cross-review rulings: M14 must land the per-aspect transport table + events rationale in DESIGN.md; styles/styles_cdp twin-tool redundancy noted for the Ph2 ledger. 11/12 plans approved. Proceeding to the FINAL plan: M14 Stage-4 CODIFY." },
+    { "date": "2026-07-03", "event": "FINAL plan M14 (Stage-4 CODIFY) drafted (planner-m14, opus): 4 audience-scoped root docs (CLAUDE/DESIGN/RUNBOOK/CONTRIBUTING) + surgical README repair + stale-doc retire + F-108 derive-counts code touch + 4-part validation protocol (cold-agent 6/6 unaided, name-only-navigation ≥4/5 with deleted-module hard-fail, doc-claim smoke incl. asserting uv-run fails, committed count assertion); debt ledger records F-740/F-702/F-703 + all accumulated defers and explicitly EXCLUDES M10b/F-104 (delivered via M4-A1). Orchestrator VERIFIED 3 load-bearing claims (MCP_TOOL_TEST_RESULTS.md :159-160 stale tools + 'Total: 97'; F-108 triple fully explained: 90 @ :4085 description / 99 = hardcoded --list-sections sum (verified arithmetic; corrects planner-m4ph1's 'sums to 96' misnote) / 96 = pre-M2 registrations → 94; §2.6 erratum folded: --list-sections does NOT iterate SECTION_TOOLS today). GATE PASSED: APPROVED as-is; F-108 = derive (a); stale docs = RETIRE to audit/history/; F-741 OVERTURNED — CLI status field renames pulled INTO M14. Amendment A1 ordered from planner-m14 (rename table + consumer sweep + output pins + M8-shape re-anchoring); cross-review pending. 12/12 plans approved pending A1 fold." },
+    { "date": "2026-07-04", "event": "M14 Amendment A1 delivered (planner-m14; OneDrive sync lag masked the write a second time — resolved per the recorded lesson by asking the agent instead of re-tasking) and cross-review-APPROVED: rename table (status/doctor 'session root:'→'browser-session root:', 'session cap :'→'browser-session cap :', cleanup caps line, 3 help strings, helper _session_storage_cap_bytes→_browser_session_storage_cap_bytes), consumer sweep (ONE pin test_cli.py:57-59 updated in-commit; STEALTH_MCP_BROWSER_SESSION_ROOT + tmp_session_root fixture kept; frozen Stage-1 evidence untouched), A1.5 glossary-conformance shape pin. Human RULED the §A1.3 sub-decision: Option X-HARD — STEALTH_MCP_SESSION_STORAGE_CAP_GB→STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB, --session-cap-gb→--browser-session-cap-gb, NO alias/fallback; mitigations (README+RUNBOOK migration note, extended A1.5 pin, same-checkpoint S6 README edit) folded into plan §A1.3 as [GATE RULING 2026-07-04]. STAGE 2 COMPLETE: 12/12 executable plans approved through the human gate. Handoff written: audit/STAGE3_RESUME_PROMPT.md (paste-ready fresh-session Stage-3 FIX prompt); audit/RESUME.md refreshed. Stage 3 NOT started." },
+    { "date": "2026-07-06", "event": "2.5-gates LANDED: 14 commits (ruff format baseline, F821+RUF006 bug fixes, ruff curated ruleset+banned-API, pydantic-settings Settings model, env migration, Sentry-ready observability, mechanical ruff fixes x2, owner-tagged suppressions, ty strict, vulture, gate scripts, CI quality job, husky+README). 415 tests, 42% coverage (gate 41). Ruff 0 violations, ty 0 errors/39 warnings, vulture 0 findings. 56 inline noqa + 21 per-file-ignores, all owner-tagged. Stage 3 resumes via audit/STAGE3_RESUME_PROMPT.md reading baseline from stages['2.5-gates'].landed." },
+    { "date": "2026-07-06", "event": "PIVOT (human directive): 2.5-gates QUALITY-GATES INTERLUDE inserted BEFORE Stage 3. Scope: ruff curated ruleset (+TID251 banned-APIs subprocess.DEVNULL / os.getenv+os.environ outside settings.py / typing.Any / asyncio.get_event_loop; PGH bans blanket suppressions; TRY003+EM deliberately OFF to protect the approved M4-A1 raise-ToolError idiom), ty strict (no Any/Unknown), vulture (ignore_decorators for the dynamic tool registry + owner-tagged allowlist), husky pre-commit/pre-push + quality job extending test.yml, pydantic-settings Settings = canonical .env/env schema (zod-equivalent; extra=forbid; loud fail-fast; .env.example + completeness test), optional Sentry (SENTRY_DSN-gated default-OFF, LoggingIntegration ERROR+; error-shipping only, M3 keeps log-writing), custom gates check_suppression_owners.py + check_file_budgets.py (1000-LOC cap, no-grow grandfather list). Owner-tag suppression system (plan_M<N> | PERMANENT | FALSE-POSITIVE | DEBT) bridges gates↔plans; each Stage-3 plan deletes its tags on landing. 4 binding cross_review_notes added (gates = predecessor zero, symbol re-anchoring; env_utils.py SUPERSEDED by Settings — F-720/F-763 close at gates; new plan env vars become Settings fields, pre-authorized; M14 X-HARD edit site moved into settings.py). Task written: audit/GATES_TASK_OPUS.md (fresh Opus chat). STAGE3_RESUME_PROMPT.md rewritten to read its baseline from stages['2.5-gates'].landed and to carry the gates-era rules. RESUME.md refreshed with an honest not-done inventory. Zero production code changed this session." }
+  ]
+}

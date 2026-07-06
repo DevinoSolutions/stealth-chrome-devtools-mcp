@@ -10,27 +10,20 @@ Validates that:
 """
 
 import asyncio
-import os
-import sys
-import threading
-from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import psutil
 import pytest
-
 from debug_logger import DebugLogger
 from dynamic_hook_system import DynamicHookSystem
 from network_interceptor import NetworkInterceptor
 from persistent_storage import InMemoryStorage
 
-
 # ---------------------------------------------------------------------------
 # DebugLogger — bounded growth
 # ---------------------------------------------------------------------------
+
 
 class TestDebugLoggerCaps:
     def test_info_capped_at_max(self):
@@ -112,6 +105,7 @@ class TestDebugLoggerCaps:
 # DynamicHookSystem — instance lifecycle
 # ---------------------------------------------------------------------------
 
+
 class TestDynamicHookSystemInstanceLifecycle:
     def test_add_and_remove_instance(self):
         """Adding then removing an instance should leave no trace."""
@@ -148,6 +142,7 @@ class TestDynamicHookSystemInstanceLifecycle:
 # NetworkInterceptor — filter cleanup on close
 # ---------------------------------------------------------------------------
 
+
 class TestNetworkInterceptorFilterCleanup:
     @pytest.fixture
     def interceptor(self):
@@ -164,7 +159,9 @@ class TestNetworkInterceptorFilterCleanup:
         assert iid not in interceptor._instance_filters
 
     @pytest.mark.asyncio
-    async def test_clear_instance_data_removes_requests_and_responses(self, interceptor):
+    async def test_clear_instance_data_removes_requests_and_responses(
+        self, interceptor
+    ):
         """clear_instance_data should remove all requests/responses for instance."""
         iid = "test-instance"
         async with interceptor._lock:
@@ -201,6 +198,7 @@ class TestNetworkInterceptorFilterCleanup:
 # PersistentStorage — instance cleanup
 # ---------------------------------------------------------------------------
 
+
 class TestPersistentStorageCleanup:
     def test_remove_instance_cleans_up(self):
         storage = InMemoryStorage()
@@ -233,6 +231,7 @@ class TestPersistentStorageCleanup:
 # Exception type specificity — verify unexpected errors propagate
 # ---------------------------------------------------------------------------
 
+
 class TestExceptionSpecificity:
     """Verify that narrowed except clauses don't accidentally catch
     unexpected exception types that should bubble up as bugs."""
@@ -242,7 +241,9 @@ class TestExceptionSpecificity:
         from process_cleanup import ProcessCleanup
 
         with patch.object(ProcessCleanup, "_setup_cleanup_handlers", lambda self: None):
-            with patch.object(ProcessCleanup, "_recover_orphaned_processes", lambda self: None):
+            with patch.object(
+                ProcessCleanup, "_recover_orphaned_processes", lambda self: None
+            ):
                 pc = ProcessCleanup.__new__(ProcessCleanup)
                 pc.pid_file = Path("/tmp/test_pids.json")
                 pc.tracked_pids = set()
@@ -294,6 +295,7 @@ class TestExceptionSpecificity:
 # BrowserManager — _browser_process_is_alive exception specificity
 # ---------------------------------------------------------------------------
 
+
 class TestBrowserProcessIsAlive:
     def test_oserror_on_poll_returns_fallback(self):
         """OSError during poll() should be caught, falling through to returncode check."""
@@ -333,6 +335,7 @@ class TestBrowserProcessIsAlive:
 # BrowserManager — discard_instance_unlocked cleanup
 # ---------------------------------------------------------------------------
 
+
 class TestDiscardInstanceCleanup:
     def test_keyerror_on_storage_remove_is_safe(self):
         """If persistent_storage.remove_instance raises KeyError, it should be caught."""
@@ -369,6 +372,7 @@ class TestDiscardInstanceCleanup:
 # ---------------------------------------------------------------------------
 # Integration: spawn/close cycle leaves no leaked state
 # ---------------------------------------------------------------------------
+
 
 class TestLeakPrevention:
     def test_dynamic_hooks_no_leak_after_many_cycles(self):

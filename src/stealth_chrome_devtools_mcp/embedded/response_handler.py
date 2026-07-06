@@ -1,38 +1,56 @@
 """Response handler for managing large responses and automatic file-based fallbacks."""
 
 import json
-import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any
+
+from stealth_chrome_devtools_mcp.settings import get_settings
+
+
+def default_clone_output_dir() -> Path:
+    """Per-user directory for clone / large-response artifacts.
+
+    Must never resolve inside the installed package: on a real (non-editable)
+    install that path lives in ``site-packages`` — often read-only (system
+    Python, containers, ``pip install --user``), where the first screenshot or
+    large-response spill would raise ``PermissionError``; and where it *is*
+    writable, artifacts silently accumulate in the install. This mirrors the
+    project's existing state-dir convention (``~/.stealth-mcp``, overridable via
+    a ``STEALTH_MCP_*`` env var). Pure: computes the path, never creates it.
+    """
+    configured = get_settings().clone_output_dir
+    if configured and configured.strip():
+        return Path(configured).expanduser()
+    return Path.home() / ".stealth-mcp" / "element_clones"
 
 
 class ResponseHandler:
     """Handle large responses by automatically falling back to file-based storage."""
-    
-    def __init__(self, max_tokens: int = 20000, clone_dir: str = None):
+
+    def __init__(self, max_tokens: int = 20000, clone_dir: str | None = None):
         """
         Initialize the response handler.
-        
+
         Args:
             max_tokens: Maximum tokens before falling back to file storage
             clone_dir: Directory to store large response files
         """
         self.max_tokens = max_tokens
         if clone_dir is None:
-            self.clone_dir = Path(__file__).parent.parent / "element_clones"
+            self.clone_dir = default_clone_output_dir()
         else:
             self.clone_dir = Path(clone_dir)
-        self.clone_dir.mkdir(exist_ok=True)
-    
+        self.clone_dir.mkdir(parents=True, exist_ok=True)
+
     def estimate_tokens(self, data: Any) -> int:
         """
         Estimate token count for data (rough approximation).
-        
+
         Args:
             data: The data to estimate tokens for
-            
+
         Returns:
             Estimated token count
         """
@@ -40,65 +58,64 @@ class ResponseHandler:
             # Convert to JSON string and estimate ~4 chars per token
             json_str = json.dumps(data, ensure_ascii=False)
             return len(json_str) // 4
-        elif isinstance(data, str):
+        if isinstance(data, str):
             return len(data) // 4
-        else:
-            return len(str(data)) // 4
-    
+        return len(str(data)) // 4
+
     def handle_response(
-        self, 
-        data: Any, 
+        self,
+        data: Any,
         fallback_filename_prefix: str = "large_response",
-        metadata: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """
         Handle response data, automatically falling back to file storage if too large.
-        
+
         Args:
             data: The response data
             fallback_filename_prefix: Prefix for filename if file storage is needed
             metadata: Additional metadata to include in file response
-            
+
         Returns:
             Either the original data or file storage info if data was too large
         """
         estimated_tokens = self.estimate_tokens(data)
-        
+
         if estimated_tokens <= self.max_tokens:
             # Data is small enough, return as-is
             return data
-        
+
         # Data is too large, save to file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
         unique_id = str(uuid.uuid4())[:8]
         filename = f"{fallback_filename_prefix}_{timestamp}_{unique_id}.json"
         file_path = self.clone_dir / filename
-        
+
         # Prepare file content with metadata
         file_content = {
             "metadata": {
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.now(tz=timezone.utc).isoformat(),
                 "estimated_tokens": estimated_tokens,
                 "auto_saved_due_to_size": True,
-                **(metadata or {})
+                **(metadata or {}),
             },
-            "data": data
+            "data": data,
         }
-        
+
         # Save to file
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with Path(file_path).open("w", encoding="utf-8") as f:
             json.dump(file_content, f, indent=2, ensure_ascii=False)
-        
+
         # Return file info instead of data
         file_size_kb = file_path.stat().st_size / 1024
-        
+
         return {
             "file_path": str(file_path),
             "filename": filename,
             "file_size_kb": round(file_size_kb, 2),
             "estimated_tokens": estimated_tokens,
             "reason": "Response too large, automatically saved to file",
-            "metadata": metadata or {}
+            "metadata": metadata or {},
         }
 
 

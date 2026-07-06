@@ -13,8 +13,7 @@ Race condition handling:
 
 from __future__ import annotations
 
-import asyncio
-import os
+import json
 import socket
 import subprocess
 import sys
@@ -22,6 +21,8 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+
+import psutil
 
 if sys.platform == "win32":
     import msvcrt
@@ -31,6 +32,10 @@ else:
 STATE_DIR = Path.home() / ".stealth-mcp"
 LOCK_FILE = STATE_DIR / "singleton.lock"
 PORT_FILE = STATE_DIR / "server.port"
+# Records {port, version, pid} for the backend we started, so discovery can
+# confirm a running backend is the SAME version before reusing it. Without this
+# an upgraded session silently reuses a stale old-version backend (issue #14).
+SERVER_STATE_FILE = STATE_DIR / "server.json"
 DEFAULT_PORT = 19222
 STARTUP_TIMEOUT = 30
 SERVER_NAME = "stealth-chrome-devtools-mcp"
@@ -56,7 +61,7 @@ def _exclusive_lock():
         else:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         got = True
-    except (OSError, IOError):
+    except OSError:
         pass
     try:
         yield got
@@ -68,7 +73,7 @@ def _exclusive_lock():
                     msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
                     fcntl.flock(fd, fcntl.LOCK_UN)
-            except (OSError, IOError):
+            except OSError:
                 pass
         fd.close()
 
@@ -78,19 +83,134 @@ def _server_is_healthy(port: int) -> bool:
         sock = socket.create_connection(("127.0.0.1", port), timeout=2)
         sock.close()
         return True
-    except (socket.error, OSError):
+    except OSError:
         return False
 
 
-def _find_running_server() -> int | None:
+def _read_server_state() -> dict | None:
+    """Return the recorded ``{port, version, pid}`` for the backend we started.
+
+    None if there is no state file or it is missing/corrupt. This is the record
+    written by :func:`_write_server_state`; a backend started by an older release
+    (<= 1.2.0) has no such file and is therefore treated as version-unknown.
+    """
     try:
-        if PORT_FILE.exists():
-            port = int(PORT_FILE.read_text().strip())
-            if _server_is_healthy(port):
-                return port
-    except (ValueError, OSError):
-        pass
+        state = json.loads(SERVER_STATE_FILE.read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _write_server_state(port: int, version: str, pid: int) -> None:
+    """Record the running backend's identity: its port, the package version that
+    started it, and its pid. Discovery uses the version to confirm reuse is safe,
+    and the pid to evict the backend if it is a stale (mismatched) version.
+    """
+    _ensure_state_dir()
+    SERVER_STATE_FILE.write_text(
+        json.dumps({"port": port, "version": version, "pid": pid})
+    )
+
+
+def _find_running_server() -> int | None:
+    """Return the port of a *reusable* backend, or None.
+
+    A backend is reusable only when we can confirm it is the SAME version as the
+    running package: its recorded version must match and its port must be
+    socket-healthy. A stale (older-version) or legacy (version-unknown) backend
+    is deliberately NOT reused, so an upgrade actually takes effect instead of
+    silently proxying to old backend code (issue #14).
+    """
+    state = _read_server_state()
+    if state is None:
+        return None
+    port = state.get("port")
+    if not isinstance(port, int):
+        return None
+    if state.get("version") != _server_version():
+        return None
+    if not _server_is_healthy(port):
+        return None
+    return port
+
+
+def _is_our_backend(pid) -> bool:
+    """True only if ``pid`` is a process running OUR HTTP backend.
+
+    Identity is the module name **plus** ``--transport`` in the command line, so
+    this positively excludes the stdio proxy (same module, no ``--transport``),
+    unrelated processes, and recycled pids. Eviction relies on this to never
+    terminate the wrong process.
+    """
+    if not isinstance(pid, int):
+        return False
+    try:
+        cmdline = psutil.Process(pid).cmdline()
+    except (psutil.Error, OSError):
+        return False
+    joined = " ".join(cmdline)
+    return "stealth_chrome_devtools_mcp" in joined and "--transport" in joined
+
+
+def _backend_pid_on_port(port: int) -> int | None:
+    """Return the pid of OUR backend listening on ``port``, or None.
+
+    A foreign process holding the port is deliberately ignored (never returned
+    for termination).
+    """
+    try:
+        conns = psutil.net_connections(kind="inet")
+    except (psutil.Error, OSError):
+        return None
+    for conn in conns:
+        laddr = getattr(conn, "laddr", None)
+        if (
+            laddr
+            and getattr(laddr, "port", None) == port
+            and conn.status == psutil.CONN_LISTEN
+            and conn.pid
+            and _is_our_backend(conn.pid)
+        ):
+            return conn.pid
     return None
+
+
+def _clear_stale_backend(port: int) -> None:
+    """Terminate a stale/legacy backend of ours squatting ``port`` so a
+    correctly-versioned backend can bind on it.
+
+    No-op when the port already holds a reusable same-version backend. Targets
+    only a process positively identified as our backend (by open port, then by
+    recorded pid as a fallback). Best-effort and bounded — never raises.
+    """
+    if _find_running_server() == port:
+        return  # a reusable same-version backend is already there
+
+    pid = _backend_pid_on_port(port)
+    if pid is None:
+        state = _read_server_state()
+        recorded = state.get("pid") if state else None
+        if _is_our_backend(recorded):
+            pid = recorded
+    if pid is None:
+        return
+
+    try:
+        proc = psutil.Process(pid)
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except psutil.TimeoutExpired:
+            proc.kill()
+    except (psutil.Error, OSError):
+        pass
+
+    # Give the OS a moment to release the port so the fresh backend can bind.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _server_is_healthy(port):
+            return
+        time.sleep(0.1)
 
 
 def _start_server_process(port: int):
@@ -98,9 +218,12 @@ def _start_server_process(port: int):
         sys.executable,
         "-m",
         "stealth_chrome_devtools_mcp",
-        "--transport", "http",
-        "--port", str(port),
-        "--host", "127.0.0.1",
+        "--transport",
+        "http",
+        "--port",
+        str(port),
+        "--host",
+        "127.0.0.1",
     ]
 
     kwargs: dict = {
@@ -116,10 +239,11 @@ def _start_server_process(port: int):
     else:
         kwargs["start_new_session"] = True
 
-    subprocess.Popen(cmd, **kwargs)
+    proc = subprocess.Popen(cmd, **kwargs)
 
     _ensure_state_dir()
     PORT_FILE.write_text(str(port))
+    _write_server_state(port, _server_version(), proc.pid)
 
 
 def _wait_for_server(port: int, timeout: int = STARTUP_TIMEOUT) -> bool:
@@ -159,7 +283,12 @@ def _start_backend_holding_lock(port: int) -> None:
             if not got_lock:
                 return  # another session owns startup; just proxy to it
             if _find_running_server() is not None:
-                return  # already up
+                return  # already up (same version)
+            # A stale/legacy backend (different or unknown version) may still be
+            # holding the port; evict it under the lock so our fresh, correctly
+            # versioned backend can bind — otherwise the proxy would fall back to
+            # the old backend and the upgrade would silently not take effect.
+            _clear_stale_backend(port)
             _start_server_process(port)
             _wait_for_server(port)  # keep the lock until the socket is bound
     except Exception:
@@ -185,7 +314,9 @@ def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:
     return port
 
 
-async def _await_backend_http(url: str, deadline_seconds: float = BACKEND_READY_TIMEOUT) -> bool:
+async def _await_backend_http(
+    url: str, deadline_seconds: float = BACKEND_READY_TIMEOUT
+) -> bool:
     """Poll the backend with a real ``initialize`` until it returns HTTP 200.
 
     Stronger than a socket probe *and* than "any HTTP response": a freshly bound
@@ -237,6 +368,39 @@ async def _await_backend_http(url: str, deadline_seconds: float = BACKEND_READY_
     return False
 
 
+async def _watch_backend_liveness(
+    port: int,
+    *,
+    interval: float = 2.0,
+    failures_before_teardown: int = 3,
+    is_healthy=None,
+    sleep=None,
+) -> None:
+    """Return once the backend on ``port`` has been unreachable for
+    ``failures_before_teardown`` consecutive checks.
+
+    Armed only after the backend was confirmed up; the caller tears the proxy
+    down when this returns. That converts a backend death mid-session into a
+    clean client reconnect (which respawns a fresh backend) instead of an
+    unbounded hang on requests a dead backend can never answer. A single healthy
+    check resets the failure run, so a transient blip never tears down a live
+    backend. ``is_healthy``/``sleep`` are injectable for testing.
+    """
+    import anyio
+
+    check = is_healthy if is_healthy is not None else (lambda: _server_is_healthy(port))
+    nap = sleep if sleep is not None else anyio.sleep
+    consecutive = 0
+    while True:
+        await nap(interval)
+        if check():
+            consecutive = 0
+            continue
+        consecutive += 1
+        if consecutive >= failures_before_teardown:
+            return
+
+
 async def _proxy_streams(client_read, client_write, port: int) -> None:
     """Answer ``initialize`` locally and instantly, then transparently proxy
     every other message to/from the singleton HTTP backend once it is ready.
@@ -261,6 +425,10 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
     init_request_id = {"value": None}
     init_swallowed = {"done": False}
     backend_initialized = anyio.Event()
+    # Set once the backend has answered a real initialize (it is genuinely up).
+    # The liveness monitor stays disarmed until then so it never tears the proxy
+    # down during the backend's normal cold start.
+    backend_ready = anyio.Event()
 
     async def pump_client():
         try:
@@ -279,7 +447,9 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                             "version": _server_version(),
                         },
                     }
-                    response = JSONRPCResponse(jsonrpc="2.0", id=inner.id, result=result)
+                    response = JSONRPCResponse(
+                        jsonrpc="2.0", id=inner.id, result=result
+                    )
                     await client_write.send(
                         SessionMessage(message=JSONRPCMessage(response))
                     )
@@ -294,6 +464,7 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
     async def run_backend():
         if not await _await_backend_http(url):
             return  # backend never came up; later requests simply won't answer
+        backend_ready.set()  # arm the liveness monitor now that it is genuinely up
         async with streamablehttp_client(url) as (backend_read, backend_write, _):
 
             async def to_backend():
@@ -338,8 +509,39 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                 tg.start_soon(to_backend)
                 tg.start_soon(from_backend)
 
+    async def run_backend_guarded():
+        # A backend that dies mid-session surfaces as a read/connection error out
+        # of run_backend. Don't let it crash (or hang) the proxy — swallow it and
+        # tear down so the client sees a clean disconnect and reconnects to a
+        # freshly spawned backend instead of blocking forever on a request the
+        # dead backend can never answer.
+        try:
+            await run_backend()
+        except Exception as exc:
+            print(
+                f"[stealth-mcp proxy] backend connection lost: {exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+        finally:
+            tg.cancel_scope.cancel()
+
+    async def monitor_backend():
+        # Armed only after the backend is confirmed up. Covers the case where the
+        # backend vanishes while run_backend is parked forwarding (no error is
+        # raised, so run_backend_guarded alone would never fire).
+        await backend_ready.wait()
+        await _watch_backend_liveness(port)
+        print(
+            "[stealth-mcp proxy] backend became unreachable; tearing down for reconnect",
+            file=sys.stderr,
+            flush=True,
+        )
+        tg.cancel_scope.cancel()
+
     async with anyio.create_task_group() as tg:
-        tg.start_soon(run_backend)
+        tg.start_soon(run_backend_guarded)
+        tg.start_soon(monitor_backend)
         # Drive the client pump in the main task. When the client (Claude Code)
         # disconnects, stdin hits EOF and pump_client returns — at which point we
         # cancel everything. Otherwise run_backend's from_backend loop stays

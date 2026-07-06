@@ -99,7 +99,10 @@ C:\stealth-mcp-browser-sessions\
 Clones exclude regenerable Chrome caches, so each is a few MB rather than
 multiple GB. Disposable auto-clones are deleted on close, and a storage cap
 (`STEALTH_MCP_CLONE_STORAGE_CAP_GB`, default 10 GB) reclaims the oldest **idle**
-clones if any ever leak — so `sessions/` stays bounded.
+clones if any ever leak — so `sessions/` stays bounded. Cap eviction is
+**recoverable**: an evicted clone is moved into `sessions/.trash/` and only
+purged after a retention window (`STEALTH_MCP_CLONE_TRASH_RETENTION_HOURS`,
+default 24 h), so a mistaken eviction can be restored rather than lost.
 
 Named profiles you create explicitly (e.g. `github-session`) persist and are
 never deleted. But even a "persistent" profile is ~98% regenerable (caches plus
@@ -108,6 +111,13 @@ Chrome's multi-GB on-device AI model). So when `sessions/` exceeds
 profiles are trimmed of those regenerable dirs while **every login is
 preserved** — Chrome rebuilds them on next launch. In-use profiles are never
 touched.
+
+> **Shared-machine note:** the session root defaults to `C:\stealth-mcp-browser-sessions`
+> (drive root), which holds your logged-in cookies and session data. On a
+> single-user machine this is fine. On a **shared multi-user** Windows box, other
+> local users may be able to read it — point `STEALTH_MCP_BROWSER_SESSION_ROOT`
+> at a location inside your user profile (e.g. `%LOCALAPPDATA%\stealth-mcp`) so
+> the OS user ACLs protect it.
 
 ### Stealth Arg Filtering
 
@@ -195,6 +205,8 @@ All optional. Defaults work for normal use.
 | `BROWSER_PROFILE_REFRESH_DAYS` | `7` | Refresh copies after N days (`0` = disable) |
 | `STEALTH_MCP_CLONE_STORAGE_CAP_GB` | `10` | Cap on total auto-clone storage; oldest **idle** clones are reclaimed when exceeded (`0` = disable). Named profiles and in-use clones are never touched. |
 | `STEALTH_MCP_SESSION_STORAGE_CAP_GB` | `20` | Cap on total `sessions/` storage; when exceeded, the largest **idle** named profiles are trimmed of regenerable cache/model dirs — logins kept (`0` = disable). |
+| `STEALTH_MCP_CLONE_TRASH_RETENTION_HOURS` | `24` | How long a cap-evicted clone stays recoverable in `sessions/.trash/` before purge (`0` = purge on next sweep). |
+| `STEALTH_MCP_CLONE_OUTPUT_DIR` | `~/.stealth-mcp/element_clones` | Where screenshots, large-response spills, and element-clone files are written. Kept in a per-user dir (never inside the installed package) so a read-only `site-packages` can't break captures. |
 | `BROWSER_IDLE_TIMEOUT` | `0` | Idle cleanup timeout (`0` = disabled) |
 | `STEALTH_CHROME_PROFILE_KEY` | unset | Force a stable clone key |
 | `STEALTH_BROWSER_DEBUG` | `false` | Enable debug logging |
@@ -232,6 +244,33 @@ uses the same selectors as the automatic sweep, so the preview matches `--apply`
 - Python 3.11+
 - Chrome, Chromium, or Microsoft Edge
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
+
+## Error Reporting (opt-in)
+
+Error reporting via [Sentry](https://sentry.io) is available but **off by default**.
+No data is collected unless you explicitly enable it.
+
+To opt in (helps us diagnose issues when you need support):
+
+```bash
+pip install stealth-chrome-devtools-mcp[sentry]
+
+# Add to your .env or export in your shell:
+SENTRY_DSN=https://3206541bdab9246f00d7099e692e2ee2@sentry.devino.ca/34
+```
+
+To disable, simply unset `SENTRY_DSN` or remove it from your `.env`.
+
+## Development setup
+
+```bash
+uv sync --extra dev --extra test   # install linters + test deps
+npm install                        # arm husky pre-commit/pre-push hooks
+```
+
+The six quality gates run automatically on every commit:
+ruff format, ruff check, ty check, vulture, suppression-owner check, file-budget check.
+Unit tests run on pre-push.
 
 ## License
 

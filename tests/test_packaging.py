@@ -6,6 +6,7 @@ already covered by `packages`, breaking `build_wheel` with a duplicate-file
 error. That made `uvx --from git+...` fail to start the server (JSON-RPC -32000)
 even though every source-run test still passed.
 """
+
 import shutil
 import subprocess
 import zipfile

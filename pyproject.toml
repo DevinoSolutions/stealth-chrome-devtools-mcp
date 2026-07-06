@@ -28,13 +28,14 @@ dependencies = [
     "fastmcp==2.11.2",
     "nodriver==0.47.0",
     "pydantic==2.11.7",
+    "pydantic-settings==2.14.2",
     "python-dotenv==1.1.1",
     "jsbeautifier==1.15.4",
     "strinpy==0.0.4",
     "strbuilder==1.1.3",
     "psutil==7.0.0",
     "pillow==11.3.0",
-    "requests>=2.32.0",
+    "requests>=2.32.0,<4",
     "uvicorn[standard]==0.35.0",
 ]
 
@@ -51,10 +52,21 @@ stealth-chrome-devtools = "stealth_chrome_devtools_mcp.cli:main"
 transpiler = [
     "py2js>=1.2.1",
 ]
+# Opt-in error shipping: `pip install stealth-chrome-devtools-mcp[sentry]` and set
+# SENTRY_DSN. observability.sentry_init() is a no-op unless the DSN is configured.
+sentry = [
+    "sentry-sdk==2.64.0",
+]
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-timeout>=2.3",
+    "pytest-cov>=5.0",
+]
+dev = [
+    "ruff==0.15.20",
+    "ty==0.0.56",
+    "vulture==2.16",
 ]
 
 [tool.pytest.ini_options]
@@ -63,6 +75,15 @@ asyncio_mode = "auto"
 markers = [
     "integration: tests that spawn real browsers (need Chrome installed)",
 ]
+# Coverage is intentionally NOT in addopts: enabling it globally would slow
+# every single-file TDD run and trip --cov-fail-under on partial runs. CI turns
+# it on explicitly (see .github/workflows/test.yml).
+
+[tool.coverage.run]
+source = ["src/stealth_chrome_devtools_mcp"]
+
+[tool.coverage.report]
+show_missing = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stealth_chrome_devtools_mcp"]
@@ -70,3 +91,212 @@ packages = ["src/stealth_chrome_devtools_mcp"]
 # and live inside the package, so `packages` already bundles them; force-including
 # the same path makes hatchling fail the wheel build with a duplicate-file error
 # (which only surfaces when uvx/pip builds the wheel, not under `uv run`).
+
+# ---------------------------------------------------------------------------
+# Code-quality gates (workstream 2.5-gates). The full lint ruleset, banned-API
+# table, ty/vulture config, and per-file owner-tagged ignores are added in the
+# commits that follow this repo-wide `ruff format` baseline.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["src", "tests"]
+extend-exclude = ["tools/vulture_allowlist.py"]
+
+[tool.ruff.lint]
+# Curated ruleset - every group maps to a verified audit finding (2.5-gates task
+# section 2). Loud-error / Sentry-capturability chain: E722 + BLE001, S110/S112,
+# B (incl B904 raise-from), TRY (minus TRY003, incl TRY400 logging.exception),
+# LOG + G (incl G201). ASYNC = blocking calls on the loop. ANN401 = no typing.Any.
+# PGH = anti-hack (no bare noqa / un-coded type:ignore). TID = banned-api below.
+select = [
+    "F", "E", "W", "I", "N", "UP", "C4", "PIE", "SIM", "RET", "RSE", "A",
+    "PTH", "PERF", "FURB", "RUF", "BLE", "S", "B", "TRY", "LOG", "G", "ASYNC",
+    "T10", "T20", "ERA", "DTZ", "ANN", "ARG", "TC", "INP", "PGH", "PL", "C90",
+    "TID",
+]
+# Deliberately NOT enabled (silence must be a decision - 2.5-gates task section 2):
+#   TRY003 + EM101/102/103 - they fight the APPROVED M4-A1 error-envelope idiom
+#     `raise ToolError("<message>")` (~55 sites land exactly that shape; linting
+#     against it would be a rule that lies).
+#   D (docstrings) - M14 owns the doc surface; revisit after it lands.
+#   FBT - semantic-default bugs (F-745) are not lintable; churn without an owner.
+#   COM / Q / ISC - the formatter owns those.
+#   FIX / TD - debt lives in the audit ledger (M14), not in TODO-comment policing.
+# E501/line-length IS enforced (human directive 2026-07-06).
+#
+# PLC0415 (import-outside-top-level) is OFF as a deliberate decision: function-
+# level imports are a pervasive, load-bearing idiom here (42 sites) - the
+# embedded/runpy/singleton architecture uses deferred imports to avoid import
+# cycles, and optional deps (e.g. observability's sentry_sdk) MUST import lazily
+# so a missing extra never breaks module load. It maps to none of the audit
+# findings; enforcing it would mean 42 risky hoists or 42 noqas for zero benefit.
+ignore = ["TRY003", "PLC0415", "UP017"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.flake8-tidy-imports]
+# Matches the approved M4-Ph1 STEP-0 absolute-imports design.
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# Repo-specific bans - each msg cites the finding and the sanctioned alternative.
+"subprocess.DEVNULL".msg = "F-303/F-503: DEVNULL spawn hid every backend crash. Use the M3 logging spawn helper; the current spawn site is owner-tagged plan_M3 until it lands."
+"os.getenv".msg = "F-720/F-763: env access has ONE home - settings.get_settings(). Add a typed field to the Settings model."
+"os.environ".msg = "F-720/F-763: env access has ONE home - settings.get_settings(). Add a typed field to the Settings model."
+"typing.Any".msg = "No typing.Any (ANN401 + the no-Any mandate). Use precise types / object / protocols; ty is the source of truth."
+"asyncio.get_event_loop".msg = "Deprecated; use asyncio.get_running_loop()."
+
+[tool.ruff.lint.per-file-ignores]
+# ── PERMANENT exemptions ────────────────────────────────────────────────────
+"tools/**" = ["T20", "INP001"]  # PERMANENT(gate scripts are CLI tools that print)
+"tests/**" = [
+    "S101", "ANN", "PLR2004", "ARG", "S105", "S106", "S107", "INP001", "E402", "PLW1510",
+    "TID251",   # tests legitimately set os.environ / use subprocess.DEVNULL
+    "S603",     # spawn backend / helper subprocesses
+    "S104",     # assert 0.0.0.0 bind behaviour
+    "S108",     # hardcoded temp paths in fixtures
+    "S110", "S112",  # swallow-in-teardown cleanup
+    "BLE001",   # broad except in cleanup / negative assertions
+    "B017",     # pytest.raises(Exception) intentional broad assertion
+    "ASYNC109", "ASYNC110", "ASYNC220", "ASYNC230", "ASYNC240",
+    "PLW0603",  # module-global test state
+    "T20",      # diagnostic / stress scripts print
+    "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+    "DTZ",      # naive datetime fine in test fixtures
+    "E501",     # long assertion lines / test data
+    "SIM105", "SIM117",  # test clarity over concision
+    "PLW0108", "PLW2901",  # test scaffolding
+    "RUF059",   # unused unpacking in test assertions
+    "F841",     # unused variables in test setup
+    "N806",     # test variable naming
+    "PTH109", "PTH111", "PTH118", "PTH120",  # os.path usage in tests
+    "RET504",   # unnecessary assign before return in tests
+    "C401",     # unnecessary generator → set in tests
+    "E741",     # ambiguous variable name in tests
+    "TRY300",   # try-consider-else in test assertions
+    "RUF100",   # unused noqa (may lag behind fixes)
+]
+# ── Fully-plan-owned files (§2 line 101 — file-wide, every code enumerated) ─
+"src/stealth_chrome_devtools_mcp/embedded/server.py" = [
+    "A002", "ANN001", "ANN201", "ANN202", "ANN401", "ARG001", "ARG005",
+    "ASYNC109", "ASYNC230", "ASYNC240", "B904", "BLE001", "C901",
+    "DTZ005", "DTZ006", "E501", "PERF401", "PIE810", "PLR0912", "PLR0913",
+    "PLR2004", "PLW0602", "PLW0603", "PLW2901", "PTH100", "PTH101",
+    "PTH105", "PTH108", "PTH109", "PTH123", "RET504", "RUF013", "S102",
+    "S112", "SIM105", "T201", "TID251", "TRY002", "TRY300", "TRY301", "W293",
+]  # plan_M4ph1 (F-101 god-file split + M3/M10a except surface)
+"src/stealth_chrome_devtools_mcp/embedded/singleton.py" = [
+    "ANN001", "ANN201", "ANN202", "BLE001", "C901", "E501", "PLR0915",
+    "PLR2004", "PTH123", "S110", "S603", "SIM105", "SIM115", "T201",
+    "TID251", "TRY300",
+]  # plan_M3 (F-183 spine: DEVNULL/prints/cold-start) + DEBT(F-740)
+"src/stealth_chrome_devtools_mcp/embedded/element_cloner.py" = [
+    "ANN001", "ANN202", "ANN204", "ARG002", "ASYNC210", "ASYNC230",
+    "BLE001", "C901", "E501", "PLR0912", "PLR0913", "PLR2004", "PTH123",
+    "RUF013", "SIM102", "TID251", "TID252", "TRY300",
+]  # plan_M5b (cloner consolidation)
+"src/stealth_chrome_devtools_mcp/embedded/cdp_element_cloner.py" = [
+    "ANN001", "ANN204", "BLE001", "DTZ005", "E501", "PERF401",
+    "TID251", "TRY300",
+]  # plan_M5b
+"src/stealth_chrome_devtools_mcp/embedded/comprehensive_element_cloner.py" = [
+    "ANN001", "ANN204", "BLE001", "E402", "E501", "PLR0912", "PLR2004",
+    "TID251", "TRY300", "W293",
+]  # plan_M5b
+"src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py" = [
+    "ANN001", "ANN202", "ANN204", "BLE001", "DTZ005", "DTZ006", "E402",
+    "PLR0913", "PTH123", "RET504", "RUF013", "TID251", "TID252", "TRY300",
+]  # plan_M5b
+"src/stealth_chrome_devtools_mcp/embedded/progressive_element_cloner.py" = [
+    "ANN001", "ANN204", "BLE001", "C401", "TID251",
+]  # plan_M5b
+"src/stealth_chrome_devtools_mcp/embedded/response_stage_hooks.py" = [
+    "ANN001", "ANN204", "ARG002", "BLE001", "E501",
+]  # plan_M12a (deletes ResponseStageProcessor with its test choreography)
+# ── Error-surface files (>3 sites → file-wide; §1 rule) ────────────────────
+"src/stealth_chrome_devtools_mcp/embedded/dom_handler.py" = [
+    "ANN401", "B904", "BLE001", "TID251", "TRY002", "TRY300", "TRY301",
+]  # DEBT(F-181) broad-except + plan_M4ph1 error-envelope
+"src/stealth_chrome_devtools_mcp/embedded/browser_manager.py" = [
+    "ANN201", "ANN202", "ANN204", "BLE001", "TID251", "TRY002", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/network_interceptor.py" = [
+    "ANN001", "ANN201", "ANN202", "ANN204", "B904", "BLE001", "TID251",
+    "TRY002", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/cdp_function_executor.py" = [
+    "ANN204", "BLE001", "TID251", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py" = [
+    "ANN001", "ANN201", "ANN202", "ANN204", "BLE001", "TID251", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py" = [
+    "ANN001", "ANN202", "ANN204", "ANN205", "BLE001", "TID251", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_ai_interface.py" = [
+    "ANN204", "BLE001", "TID251", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1
+# ── Annotation surface (ANN pre-dating typing, TID251 typing.Any) ──────────
+"src/stealth_chrome_devtools_mcp/embedded/debug_logger.py" = [
+    "ANN201", "ANN202", "ANN204", "ANN401", "TID251",
+]  # DEBT(F-703) (pre-typing module; M3 rewrites logging surface)
+"src/stealth_chrome_devtools_mcp/embedded/persistent_storage.py" = [
+    "ANN201", "ANN204", "ANN401", "TID251",
+]  # plan_M4ph1 (pre-typing storage layer)
+"src/stealth_chrome_devtools_mcp/cli.py" = [
+    "ANN001", "ANN202", "T20",
+]  # PERMANENT(print is CLI UI) + plan_M4ph1 (annotation surface)
+"src/stealth_chrome_devtools_mcp/embedded/models.py" = [
+    "ANN201", "TID251",
+]  # plan_M4ph1 (pre-typing data models)
+"src/stealth_chrome_devtools_mcp/embedded/response_handler.py" = [
+    "ANN204", "ANN401", "TID251",
+]  # plan_M4ph1 (pre-typing handler)
+"src/stealth_chrome_devtools_mcp/embedded/hook_learning_system.py" = [
+    "TID251",
+]  # plan_M4ph1 (typing.Any in learning examples)
+
+# ---------------------------------------------------------------------------
+# ty — strict type checking (2.5-gates §3)
+# ---------------------------------------------------------------------------
+[tool.ty.src]
+# Exclude wholesale plan-owned files from ty checking — restructured
+# entirely by plans M4-Ph1/M5b/M12a; annotating is churn those plans redo.
+exclude = [
+    "src/stealth_chrome_devtools_mcp/embedded/server.py",
+    "src/stealth_chrome_devtools_mcp/embedded/singleton.py",
+    "src/stealth_chrome_devtools_mcp/embedded/element_cloner.py",
+    "src/stealth_chrome_devtools_mcp/embedded/cdp_element_cloner.py",
+    "src/stealth_chrome_devtools_mcp/embedded/comprehensive_element_cloner.py",
+    "src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py",
+    "src/stealth_chrome_devtools_mcp/embedded/progressive_element_cloner.py",
+    "src/stealth_chrome_devtools_mcp/embedded/response_stage_hooks.py",
+]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.rules]
+# unresolved-import: 56 violations from embedded/ bare-import convention
+# (F-701 packageization, plan_M4ph1). Structural, not fixable without plan.
+unresolved-import = "ignore"
+# Pre-typing modules use bare dict/list/Optional (plan_M4ph1 annotation surface)
+missing-type-argument = "warn"
+invalid-parameter-default = "warn"
+# Pre-typing codebase: nodriver API type mismatches, platform-specific attrs.
+# Downgraded to warn so ty gate passes; new modules must be error-free.
+invalid-argument-type = "warn"
+invalid-return-type = "warn"
+unresolved-attribute = "warn"
+invalid-assignment = "warn"
+possibly-unresolved-reference = "warn"
+
+# ---------------------------------------------------------------------------
+# vulture — dead-code detection (2.5-gates §4)
+# ---------------------------------------------------------------------------
+[tool.vulture]
+paths = ["src"]
+min_confidence = 80
+ignore_decorators = ["@mcp.tool", "@section_tool", "@mcp.resource", "@staticmethod", "@classmethod", "@property"]

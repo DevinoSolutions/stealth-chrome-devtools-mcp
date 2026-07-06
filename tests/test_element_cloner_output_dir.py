@@ -1,10 +1,15 @@
 """Regression tests for FileBasedElementCloner output directory resolution.
 
-Covers the fix for GitHub issue #5: when the server is launched by an MCP
-client (e.g. Claude Desktop), CWD may be a non-writable system path.  The
-cloner must anchor its default relative ``element_clones`` directory to the
-package root, not to the working directory.
+Covers GitHub issue #5: when the server is launched by an MCP client (e.g.
+Claude Desktop), CWD may be a non-writable system path, so the default output
+dir must not resolve to CWD. The original fix anchored it to the *package root*
+— but that is itself unsafe on a real install (``site-packages`` is frequently
+read-only). The default now resolves to a stable, writable, per-user location
+(``~/.stealth-mcp/element_clones``, overridable via ``STEALTH_MCP_CLONE_OUTPUT_DIR``),
+which is independent of both CWD and the install location. An explicit relative
+path is still anchored to the package for backward compatibility.
 """
+
 import os
 import sys
 from pathlib import Path
@@ -36,22 +41,30 @@ def _import_cloner_class():
     if str(EMBEDDED_DIR) not in sys.path:
         sys.path.insert(0, str(EMBEDDED_DIR))
     from file_based_element_cloner import FileBasedElementCloner
+
     return FileBasedElementCloner
 
 
 class TestOutputDirResolution:
-    """Ensure the cloner resolves its output dir relative to the package."""
+    """Ensure the cloner resolves its output dir to a safe, writable location."""
 
-    def test_default_relative_dir_anchors_to_package_root(self, tmp_path):
-        """Default 'element_clones' must resolve under the package, not CWD."""
+    def test_default_dir_is_per_user_not_package_or_cwd(self, tmp_path):
+        """Issue #5, correctly resolved: the default output dir must be a
+        stable, writable, per-user location — never CWD (may be a read-only
+        system path) and never inside the installed package (``site-packages``
+        is frequently read-only on real installs)."""
         FileBasedElementCloner = _import_cloner_class()
+        from response_handler import default_clone_output_dir
 
         with patch.object(Path, "mkdir"):
             cloner = FileBasedElementCloner()
 
         package_root = Path(EMBEDDED_DIR).resolve().parent
-        expected = package_root / "element_clones"
-        assert cloner.output_dir == expected
+        assert cloner.output_dir == default_clone_output_dir()
+        assert package_root not in cloner.output_dir.resolve().parents
+        assert (
+            cloner.output_dir.resolve() != (package_root / "element_clones").resolve()
+        )
 
     def test_relative_dir_does_not_use_cwd(self, tmp_path):
         """Even from a weird CWD the output dir must NOT land there."""

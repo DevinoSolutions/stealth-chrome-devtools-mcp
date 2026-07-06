@@ -12,29 +12,24 @@ import os
 import shutil
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 # These are module-level functions in server.py (bare imports via sys.path)
 from server import (
-    _is_relative_to,
-    _profile_ignore_names,
     _copy_profile_delta,
     _copy_profile_tree,
-    _snapshot_needs_refresh,
+    _is_relative_to,
     _next_available_explicit_dir,
+    _profile_ignore_names,
     _resolve_profile_selection,
-    _default_session_root,
-    _master_profile_dir,
-    _clone_root_dir,
-    _master_snapshot_dir,
+    _snapshot_needs_refresh,
 )
-
 
 # ---------------------------------------------------------------------------
 # _is_relative_to
 # ---------------------------------------------------------------------------
+
 
 class TestIsRelativeTo:
     def test_child_is_relative(self, tmp_path):
@@ -66,6 +61,7 @@ class TestIsRelativeTo:
 # ---------------------------------------------------------------------------
 # _profile_ignore_names
 # ---------------------------------------------------------------------------
+
 
 class TestProfileIgnoreNames:
     def test_volatile_dirs_ignored(self):
@@ -100,6 +96,7 @@ class TestProfileIgnoreNames:
 # ---------------------------------------------------------------------------
 # _copy_profile_delta
 # ---------------------------------------------------------------------------
+
 
 class TestCopyProfileDelta:
     def test_copies_files(self, tmp_path):
@@ -163,6 +160,7 @@ class TestCopyProfileDelta:
 # _copy_profile_tree
 # ---------------------------------------------------------------------------
 
+
 class TestCopyProfileTree:
     def test_creates_target_and_copies(self, tmp_session_root):
         dirs = tmp_session_root
@@ -176,6 +174,25 @@ class TestCopyProfileTree:
         assert marker.exists()
         data = json.loads(marker.read_text(encoding="utf-8"))
         assert data["source_kind"] == "test"
+
+    def test_marker_created_at_is_utc_z_seconds(self, tmp_session_root):
+        # Guards the datetime.utcnow() -> datetime.now(timezone.utc) migration:
+        # the marker timestamp must stay a naive-looking UTC instant with a 'Z'
+        # suffix and second precision (e.g. 2026-07-01T12:34:56Z). A naive
+        # now(timezone.utc).isoformat()+"Z" would corrupt it to '...+00:00Z'.
+        import re
+
+        dirs = tmp_session_root
+        target = dirs["sessions"] / "ts-clone"
+        _copy_profile_tree(dirs["snapshot"], target, dirs["sessions"], "test")
+        created_at = json.loads(
+            (target / ".stealth_chrome_devtools_mcp_clone.json").read_text(
+                encoding="utf-8"
+            )
+        )["created_at"]
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", created_at), (
+            created_at
+        )
 
     def test_refuses_target_outside_clone_root(self, tmp_session_root):
         dirs = tmp_session_root
@@ -199,17 +216,24 @@ class TestCopyProfileTree:
         _copy_profile_tree(source, target, dirs["sessions"], "test")
         # All source files present in target
         marker_name = ".stealth_chrome_devtools_mcp_clone.json"
-        src_files = set(f.name for f in source.rglob("*") if f.is_file()
-                        and "Singleton" not in f.name and "Crashpad" not in str(f)
-                        and f.name != marker_name)
-        dst_files = set(f.name for f in target.rglob("*") if f.is_file()
-                        and f.name != marker_name)
+        src_files = set(
+            f.name
+            for f in source.rglob("*")
+            if f.is_file()
+            and "Singleton" not in f.name
+            and "Crashpad" not in str(f)
+            and f.name != marker_name
+        )
+        dst_files = set(
+            f.name for f in target.rglob("*") if f.is_file() and f.name != marker_name
+        )
         assert src_files.issubset(dst_files)
 
 
 # ---------------------------------------------------------------------------
 # _snapshot_needs_refresh
 # ---------------------------------------------------------------------------
+
 
 class TestSnapshotNeedsRefresh:
     def test_no_snapshot_returns_false(self, tmp_session_root):
@@ -249,6 +273,7 @@ class TestSnapshotNeedsRefresh:
 # _next_available_explicit_dir
 # ---------------------------------------------------------------------------
 
+
 class TestNextAvailableExplicitDir:
     def test_returns_dash_2_first(self, tmp_session_root):
         dirs = tmp_session_root
@@ -273,6 +298,7 @@ class TestNextAvailableExplicitDir:
 # ---------------------------------------------------------------------------
 # _resolve_profile_selection (async)
 # ---------------------------------------------------------------------------
+
 
 class TestResolveProfileSelection:
     @pytest.mark.asyncio
@@ -345,6 +371,4 @@ class TestResolveProfileSelection:
         # Actually master dir doesn't exist, so it'll try to create it.
         # Let's simulate: master doesn't exist + force_clone
         with pytest.raises(RuntimeError, match="No master profile"):
-            await _resolve_profile_selection(
-                None, force_clone=True
-            )
+            await _resolve_profile_selection(None, force_clone=True)
