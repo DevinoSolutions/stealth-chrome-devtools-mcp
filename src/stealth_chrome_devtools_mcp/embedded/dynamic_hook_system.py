@@ -461,7 +461,12 @@ class DynamicHookSystem:
                                     response_headers[header.name] = header.value
                         else:
                             response_headers = {}
-                    except Exception:
+                    except Exception as e:
+                        debug_logger.log_warning(
+                            "dynamic_hook_system",
+                            "_process_request_hooks",
+                            f"Response header normalization failed: {e}",
+                        )
                         response_headers = {}
                 request_data["response_headers"] = response_headers
 

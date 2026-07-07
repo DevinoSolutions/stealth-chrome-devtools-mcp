@@ -237,7 +237,8 @@ class DOMHandler:
 
             try:
                 await element.mouse_click()
-            except Exception:
+            except Exception as e:
+                debug_logger.log_debug("dom_handler", "click_element", str(e))
                 await element.click()
 
             return True
@@ -344,7 +345,8 @@ class DOMHandler:
             if clear_first:
                 try:
                     await element.apply("(elem) => { elem.value = ''; }")
-                except Exception:
+                except Exception as e:
+                    debug_logger.log_debug("dom_handler", "type_text", str(e))
                     await element.send_keys("\ue009" + "a")  # Ctrl+A fallback
                     await element.send_keys("\ue017")
                 await asyncio.sleep(0.1)
@@ -433,7 +435,8 @@ class DOMHandler:
             if clear_first:
                 try:
                     await element.apply("(elem) => { elem.value = ''; }")
-                except Exception:
+                except Exception as e:
+                    debug_logger.log_debug("dom_handler", "paste_text", str(e))
                     await tab.send(
                         cdp.input_.dispatch_key_event(  # Ctrl+A fallback
                             "rawKeyDown",
@@ -736,7 +739,10 @@ class DOMHandler:
                                     else None,
                                 }
                             )
-                    except Exception:  # noqa: S112  plan_M10a
+                    except Exception as e:
+                        debug_logger.log_debug(
+                            "dom_handler", "get_page_content", str(e)
+                        )
                         continue
 
                 content["frames"] = frames

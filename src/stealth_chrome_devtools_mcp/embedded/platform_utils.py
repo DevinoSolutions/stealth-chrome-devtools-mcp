@@ -7,6 +7,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from debug_logger import debug_logger
+
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 
@@ -320,7 +322,8 @@ def check_browser_executable() -> str | None:
                 and os.access(found_path, os.X_OK)
             ):
                 return found_path
-        except Exception:  # noqa: S112,BLE001  plan_M10a,DEBT(F-181)
+        except Exception as e:  # noqa: BLE001  plan_M10a (F-181 row 14)
+            debug_logger.log_debug("platform_utils", "check_browser_executable", str(e))
             continue
 
     return None

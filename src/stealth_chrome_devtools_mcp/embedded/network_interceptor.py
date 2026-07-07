@@ -193,10 +193,11 @@ class NetworkInterceptor:
                         "_on_response",
                         f"Connection lost while capturing response body: {e}",
                     )
-                except Exception:  # noqa: S110  plan_M10a
-                    # body unavailable for streaming/redirect
-                    # /preflight (expected)
-                    pass
+                except Exception as e:
+                    # body unavailable for streaming/redirect/preflight (expected)
+                    debug_logger.log_debug(
+                        "network_interceptor", "_on_response", str(e)
+                    )
 
             network_response = NetworkResponse(
                 request_id=request_id,
@@ -306,8 +307,12 @@ class NetworkInterceptor:
                         body_str = response.body.decode("utf-8", errors="ignore")
                         if response_contains.lower() not in body_str.lower():
                             continue
-                    except Exception:  # noqa: S112  plan_M10a
-                        continue  # skip if body can't be decoded for search
+                    except Exception as e:
+                        # skip if body can't be decoded for search
+                        debug_logger.log_debug(
+                            "network_interceptor", "search_requests", str(e)
+                        )
+                        continue
 
                 matches.append(
                     {
@@ -401,10 +406,9 @@ class NetworkInterceptor:
                 "get_response_body",
                 f"Connection lost while fetching body for {request_id}: {e}",
             )
-        except Exception:  # noqa: S110  plan_M10a
-            # body unavailable for streaming/redirect/preflight responses
-            # (expected)  # noqa: ERA001  PERMANENT(expected body-unavailable sentinel)
-            pass
+        except Exception as e:
+            # body unavailable for streaming/redirect/preflight responses (expected)
+            debug_logger.log_debug("network_interceptor", "get_response_body", str(e))
         return None
 
     async def modify_headers(self, tab: Tab, headers: dict[str, str]):

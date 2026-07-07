@@ -191,6 +191,35 @@ class DebugLogger:
             if data:
                 self._emit_stderr(f"  Data: {data}")
 
+    def log_debug(
+        self,
+        component: str,
+        method: str,
+        message: str,
+        context: dict[str, Any] | None = None,
+    ):
+        """
+        Log a debug-level message. M10a: unlike error/warning/info, this level
+        keeps NO in-memory ring and never appears in get_debug_view/export - the
+        file (via _backend_logger) is its only sink, and the stdlib logger's own
+        level check drops it for free at the default level. This is deliberate:
+        a ring here would (a) change get_debug_view's return shape, a tool
+        contract that must stay byte-stable, and (b) pay lock+append on hot
+        per-event paths even when the record is dropped - exactly what the
+        droppable-by-default DEBUG sites (network/hook handlers) must not do.
+        No lock is taken: no shared state is mutated, only a stdlib call is made.
+
+        Args:
+            component (str): Name of the component logging the message.
+            method (str): Name of the method logging the message.
+            message (str): Debug message.
+            context (Optional[Dict[str, Any]]): Unused; accepted for call-site
+                symmetry with log_warning/log_error.
+        """
+        del context
+        _backend_logger.debug("%s.%s: %s", component, method, message)
+        self._emit_stderr(f"[DEBUG] {component}.{method}: {message}")
+
     def get_debug_view(self) -> dict[str, Any]:
         """
         Get comprehensive debug view of all logged data.
