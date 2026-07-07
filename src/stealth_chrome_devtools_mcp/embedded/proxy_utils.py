@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
+from debug_logger import debug_logger
+
 
 class ProxyConfigError(ValueError):
     """Raised when a proxy URL cannot be parsed safely."""
@@ -101,7 +103,15 @@ def redact_launch_arg(arg: str) -> str:
                     (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
                 )
                 return f"{prefix}{sanitized}"
-        except Exception:  # noqa: BLE001  DEBT(F-181)
+        except Exception as e:  # noqa: BLE001  plan_M10a (F-181 row 11)
+            # SECURITY: log only the exception TYPE, never
+            # str(e) or `value` - the un-redacted value may embed real proxy
+            # credentials, which is exactly what this function exists to
+            # protect, and urlsplit's message format is not contractually
+            # guaranteed to never echo fragments of its malformed input.
+            debug_logger.log_warning(
+                "proxy_utils", "redact_launch_arg", type(e).__name__
+            )
             return prefix + "<redacted>"
 
     if "://" in arg and "@" in arg:
@@ -116,7 +126,11 @@ def redact_launch_arg(arg: str) -> str:
                 return urlunsplit(
                     (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
                 )
-        except Exception:  # noqa: BLE001  DEBT(F-181)
+        except Exception as e:  # noqa: BLE001  plan_M10a (F-181 row 12)
+            # SECURITY: same constraint as above - type only, see row 11.
+            debug_logger.log_warning(
+                "proxy_utils", "redact_launch_arg", type(e).__name__
+            )
             return "<redacted>"
 
     return arg

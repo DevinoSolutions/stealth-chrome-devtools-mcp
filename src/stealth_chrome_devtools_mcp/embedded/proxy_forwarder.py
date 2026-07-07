@@ -410,7 +410,8 @@ class AuthenticatedProxyForwarder:
                 await writer.drain()
             except TimeoutError:
                 continue
-            except Exception:  # noqa: BLE001  DEBT(F-181)
+            except Exception as e:  # noqa: BLE001  DEBT(F-181)
+                debug_logger.log_debug("proxy_forwarder", "pipe", str(e))
                 break
         event.set()
 
