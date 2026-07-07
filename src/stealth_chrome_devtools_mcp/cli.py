@@ -130,12 +130,55 @@ def _format_backend_status() -> str:
     return f"running (responsive) on port {port}"
 
 
+def _recorded_backend_pid() -> int | None:
+    """The pid singleton last recorded for the backend (server.json), or None
+    if there is no record. Independent of liveness — status/doctor combine
+    this with `_format_backend_status()`'s liveness read separately (F-305)."""
+    import singleton
+
+    state = singleton._read_server_state()
+    return state.get("pid") if state else None
+
+
+def _backend_log_location(pid: int | None) -> str:
+    """Where to look for backend logs (F-503's log-path half: M3 delivered
+    "there is now a log"; this delivers "here is where"). Names the exact
+    per-pid file when a pid is recorded, else the shared boot log."""
+    from logging_setup import resolve_log_dir
+
+    filename = f"backend-{pid}.log" if pid is not None else "backend-boot.log"
+    return str(resolve_log_dir() / filename)
+
+
+def _doctor_port_occupant_line() -> str:
+    """F-509 visibility: is the target port free, ours, or a NON-stealth
+    process squatting it (which would otherwise silently block a backend
+    from binding)? Uses only existing helpers — no new port logic."""
+    import singleton
+
+    state = singleton._read_server_state()
+    port = (
+        state.get("port")
+        if state and isinstance(state.get("port"), int)
+        else (singleton.DEFAULT_PORT)
+    )
+    our_pid = singleton._backend_pid_on_port(port)
+    if our_pid is not None:
+        return f"port {port} held by our backend (pid {our_pid})"
+    if singleton._server_is_healthy(port):
+        return f"port {port} held by a NON-stealth process — a backend cannot bind here"
+    return f"port {port} free"
+
+
 def _cmd_status(_args) -> int:
     server = _server()
     import singleton
 
     root = server._default_session_root()
+    pid = _recorded_backend_pid()
     print(f"backend     : {_format_backend_status()}")
+    print(f"pid         : {pid if pid is not None else '-'}")
+    print(f"log         : {_backend_log_location(pid)}")
     print(f"version     : {singleton._server_version()}")
     print(f"session root: {root}  (exists: {root.exists()})")
     print(
@@ -226,7 +269,11 @@ def _cmd_doctor(_args) -> int:
     print(f"platform    : {platform.platform()}")
     root = server._default_session_root()
     print(f"session root: {root}  (exists: {root.exists()})")
+    pid = _recorded_backend_pid()
     print(f"backend     : {_format_backend_status()}")
+    print(f"pid         : {pid if pid is not None else '-'}")
+    print(f"log         : {_backend_log_location(pid)}")
+    print(f"port        : {_doctor_port_occupant_line()}")
 
     chrome = _find_chrome()
     print(f"chrome      : {chrome or 'NOT FOUND — install Google Chrome'}")

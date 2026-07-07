@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import singleton
 
 from stealth_chrome_devtools_mcp import cli
 
@@ -86,3 +87,96 @@ class TestCliDoctorBackendState:
                     cli._cmd_doctor(None)
         out = capsys.readouterr().out
         assert "not running" in out
+
+
+class TestCliStatusPidAndLog:
+    """M8-3 (F-305/F-503-half): status/doctor must surface the recorded pid
+    and the exact log file to check - stacked on top of M1's responsive/
+    wedged/down vocabulary, not replacing it."""
+
+    def test_status_prints_pid_and_log_location(self, fake_server, tmp_path, capsys):
+        with (
+            patch.object(cli, "_server", return_value=fake_server),
+            patch(
+                "singleton._probe_backend_status", return_value=("responsive", 19222)
+            ),
+            patch(
+                "singleton._read_server_state",
+                return_value={"port": 19222, "version": "1.2.1", "pid": 4242},
+            ),
+            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
+        ):
+            cli._cmd_status(None)
+        out = capsys.readouterr().out
+        assert "4242" in out
+        assert str(tmp_path) in out
+        assert "backend-4242.log" in out
+
+    def test_status_prints_boot_log_when_no_record(self, fake_server, tmp_path, capsys):
+        with (
+            patch.object(cli, "_server", return_value=fake_server),
+            patch("singleton._probe_backend_status", return_value=("none", None)),
+            patch("singleton._read_server_state", return_value=None),
+            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
+        ):
+            cli._cmd_status(None)
+        out = capsys.readouterr().out
+        assert "backend-boot.log" in out
+
+
+class TestCliDoctorPortOccupant:
+    """M8-3 (F-509 visibility half): doctor names a squatter on the target
+    port so a bind collision is diagnosable, distinct from our own backend
+    or a genuinely free port."""
+
+    def test_doctor_reports_foreign_occupant(self, fake_server, tmp_path, capsys):
+        with (
+            patch.object(cli, "_server", return_value=fake_server),
+            patch("singleton._probe_backend_status", return_value=("down", None)),
+            patch("singleton._read_server_state", return_value=None),
+            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
+            patch("singleton._backend_pid_on_port", return_value=None),
+            patch("singleton._server_is_healthy", return_value=True),
+            patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"),
+        ):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+        assert "NON-stealth" in out
+        assert str(singleton.DEFAULT_PORT) in out
+
+    def test_doctor_reports_our_backend_occupant(self, fake_server, tmp_path, capsys):
+        with (
+            patch.object(cli, "_server", return_value=fake_server),
+            patch(
+                "singleton._probe_backend_status", return_value=("responsive", 19222)
+            ),
+            patch(
+                "singleton._read_server_state",
+                return_value={"port": 19222, "version": "1.2.1", "pid": 4242},
+            ),
+            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
+            patch("singleton._backend_pid_on_port", return_value=4242),
+            patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"),
+        ):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+        assert "held by our backend" in out
+        assert "4242" in out
+
+    def test_doctor_reports_free_port(self, fake_server, tmp_path, capsys):
+        with (
+            patch.object(cli, "_server", return_value=fake_server),
+            patch("singleton._probe_backend_status", return_value=("none", None)),
+            patch("singleton._read_server_state", return_value=None),
+            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
+            patch("singleton._backend_pid_on_port", return_value=None),
+            patch("singleton._server_is_healthy", return_value=False),
+            patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"),
+        ):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+        # Exact phrase, not a bare "free" substring - tmp_path's own generated
+        # directory name can coincidentally contain "free" (e.g. when it is
+        # derived from this test's name), which would false-pass a weaker
+        # assertion.
+        assert f"port {singleton.DEFAULT_PORT} free" in out
