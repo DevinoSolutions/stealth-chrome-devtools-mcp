@@ -213,8 +213,8 @@ def _clear_stale_backend(port: int) -> None:
         time.sleep(0.1)
 
 
-def _start_server_process(port: int):
-    cmd = [
+def _server_process_cmd(port: int) -> list[str]:
+    return [
         sys.executable,
         "-m",
         "stealth_chrome_devtools_mcp",
@@ -226,20 +226,35 @@ def _start_server_process(port: int):
         "127.0.0.1",
     ]
 
-    kwargs: dict = {
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-        "stdin": subprocess.DEVNULL,
-    }
 
-    if sys.platform == "win32":
-        kwargs["creationflags"] = (
-            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-    else:
-        kwargs["start_new_session"] = True
+def _start_server_process(port: int):
+    cmd = _server_process_cmd(port)
 
-    proc = subprocess.Popen(cmd, **kwargs)
+    # F-303/F-503: stdout/stderr used to be DEVNULL, hiding every backend
+    # crash. An embedded/server.py import-time crash dies before any
+    # in-process logging (configure_logging) can install itself, so only a
+    # raw stream redirect at Popen can capture it. stdin stays DEVNULL - the
+    # backend never reads stdin, and it remains the legitimately-allowed use.
+    from logging_setup import resolve_log_dir
+
+    log_dir = resolve_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(log_dir / "backend-boot.log", "a", encoding="utf-8") as boot_log:
+        kwargs: dict = {
+            "stdout": boot_log,
+            "stderr": boot_log,
+            "stdin": subprocess.DEVNULL,
+        }
+
+        if sys.platform == "win32":
+            kwargs["creationflags"] = (
+                subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        else:
+            kwargs["start_new_session"] = True
+
+        proc = subprocess.Popen(cmd, **kwargs)
 
     _ensure_state_dir()
     PORT_FILE.write_text(str(port))
