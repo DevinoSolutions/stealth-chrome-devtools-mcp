@@ -220,17 +220,15 @@ def _backend_pid_on_port(port: int) -> int | None:
     return None
 
 
-def _clear_stale_backend(port: int) -> None:
-    """Terminate a stale/legacy backend of ours squatting ``port`` so a
-    correctly-versioned backend can bind on it.
+def _terminate_backend(port: int) -> bool:
+    """Terminate OUR backend associated with ``port``, if one is identifiable.
 
-    No-op when the port already holds a reusable same-version backend. Targets
-    only a process positively identified as our backend (by open port, then by
-    recorded pid as a fallback). Best-effort and bounded — never raises.
+    Resolves the pid by open port first, then falls back to the recorded pid
+    in ``server.json`` (guarded by ``_is_our_backend`` either way) — a pid
+    that is not positively identified as our backend (e.g. a recycled pid now
+    running an unrelated process) is never touched. Best-effort and bounded —
+    never raises. Returns whether a backend of ours was found and terminated.
     """
-    if _find_running_server() == port:
-        return  # a reusable same-version backend is already there
-
     pid = _backend_pid_on_port(port)
     if pid is None:
         state = _read_server_state()
@@ -238,7 +236,7 @@ def _clear_stale_backend(port: int) -> None:
         if _is_our_backend(recorded):
             pid = recorded
     if pid is None:
-        return
+        return False
 
     try:
         proc = psutil.Process(pid)
@@ -250,12 +248,24 @@ def _clear_stale_backend(port: int) -> None:
     except (psutil.Error, OSError):
         pass
 
-    # Give the OS a moment to release the port so the fresh backend can bind.
+    # Give the OS a moment to release the port so a fresh backend can bind.
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if not _server_is_healthy(port):
-            return
+            return True
         time.sleep(0.1)
+    return True
+
+
+def _clear_stale_backend(port: int) -> None:
+    """Terminate a stale/legacy backend of ours squatting ``port`` so a
+    correctly-versioned backend can bind on it.
+
+    No-op when the port already holds a reusable same-version backend.
+    """
+    if _find_running_server() == port:
+        return  # a reusable same-version backend is already there
+    _terminate_backend(port)
 
 
 def _server_process_cmd(port: int) -> list[str]:
