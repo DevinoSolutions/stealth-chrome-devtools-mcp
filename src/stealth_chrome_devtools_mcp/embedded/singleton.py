@@ -548,6 +548,36 @@ def restart_backend() -> tuple[str, int | None]:
     return (status, new_pid)
 
 
+def _port_is_foreign_held(port: int) -> bool:
+    """True iff ``port``'s socket is open but NOT held by our backend.
+
+    The canonical "foreign occupant" predicate (F-509, plan_M8 Amendment
+    A1): the one definition of "foreign," consumed both by the cold-start
+    port fallback below and by doctor's foreign-occupant diagnostic
+    (cli.py's ``_doctor_port_occupant_line``) — a single home instead of two
+    places re-deriving the same condition.
+    """
+    return _server_is_healthy(port) and _backend_pid_on_port(port) is None
+
+
+def _select_backend_port(preferred: int = DEFAULT_PORT) -> int:
+    """Port to spawn the backend on (F-509 auto-fallback, plan_M8 Amendment
+    A1). Prefers the port recorded in ``server.json`` (so eviction/restart
+    land where a prior backend ran), else ``preferred``. Keeps that target
+    when it is free or held by OUR OWN backend (eviction rebinds it there);
+    only a FOREIGN occupant forces an OS-assigned fallback via
+    ``proxy_forwarder._free_port()`` (the one existing port-picker — no new
+    convention), so a port collision is recoverable instead of a silent
+    120s outage.
+    """
+    from proxy_forwarder import _free_port  # lazy; no module-top cycle
+
+    state = _read_server_state()
+    recorded = state.get("port") if state else None
+    target = recorded if isinstance(recorded, int) else preferred
+    return _free_port() if _port_is_foreign_held(target) else target
+
+
 def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:
     """Ensure the singleton backend is up or coming up, WITHOUT blocking.
 
@@ -560,6 +590,13 @@ def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:
     existing = _find_running_server()
     if existing is not None:
         return existing
+
+    # F-509 (Amendment A1): choose the port SYNCHRONOUSLY here, before the
+    # daemon thread starts, so the one chosen value reaches both the spawn
+    # arg below AND the return value (the proxy's connect target) in
+    # lock-step — no polling server.json for a value the thread hasn't
+    # written yet (SSA1.3 rejected alternative #2).
+    port = _select_backend_port(port)
 
     threading.Thread(
         target=_start_backend_holding_lock, args=(port,), daemon=True

@@ -165,7 +165,7 @@ def _doctor_port_occupant_line() -> str:
     our_pid = singleton._backend_pid_on_port(port)
     if our_pid is not None:
         return f"port {port} held by our backend (pid {our_pid})"
-    if singleton._server_is_healthy(port):
+    if singleton._port_is_foreign_held(port):
         return f"port {port} held by a NON-stealth process — a backend cannot bind here"
     return f"port {port} free"
 

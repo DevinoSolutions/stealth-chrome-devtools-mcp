@@ -180,3 +180,25 @@ class TestCliDoctorPortOccupant:
         # derived from this test's name), which would false-pass a weaker
         # assertion.
         assert f"port {singleton.DEFAULT_PORT} free" in out
+
+    def test_doctor_foreign_line_delegates_to_port_is_foreign_held(
+        self, fake_server, tmp_path, capsys
+    ):
+        """M8-7/A1 repoint pin: the foreign-occupant branch is now driven by
+        the one shared predicate (singleton._port_is_foreign_held), not a
+        re-derived _server_is_healthy check - so patching the predicate
+        directly (rather than its two underlying probes) is sufficient to
+        flip the branch, proving doctor delegates to it instead of
+        recomputing "foreign" inline."""
+        with (
+            patch.object(cli, "_server", return_value=fake_server),
+            patch("singleton._probe_backend_status", return_value=("down", None)),
+            patch("singleton._read_server_state", return_value=None),
+            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
+            patch("singleton._backend_pid_on_port", return_value=None),
+            patch("singleton._port_is_foreign_held", return_value=True),
+            patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"),
+        ):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+        assert "NON-stealth" in out
