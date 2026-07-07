@@ -13,6 +13,14 @@
 2. **Optional pre-Stage-3 cleanups** (recommended, small): fix **G-1** (owner-tag gate is inert — governance currently fake) + **G-2** (src-only noqa scan) + **G-4** (pin husky exact); enable **branch protection on `main`** (CI runs but nothing blocks a red merge).
 3. **Stage 3 FIX**: fresh session, paste `audit/STAGE3_RESUME_PROMPT.md`. Baseline from `stages['2.5-gates'].landed` (`head_sha` e39be31 = ancestor-of-HEAD check, NOT equality). Branch `audit/fixes-2026-07-02` off main.
 
+## PARKED ITEMS — deferred on purpose, NOT hidden (human ruling 2026-07-07: "leave them for later but don't hide them")
+- **34 known dependency vulnerabilities** (stage-0 scan) — owned by NO plan, out of gates scope. Needs a pip-audit pass + pin bumps eventually.
+- **G-3 (Low)**: stdio-proxy shim entrypoint inits no Sentry — client-side proxy failures unreported. Natural home: fold into M3-era observability or a follow-up.
+- **G-5 (Low)**: venv-python resolver duplicated verbatim in `.husky/pre-commit` + `.husky/pre-push`.
+- **G-6 (Low)**: settings.py loud-rejection guards only the `STEALTH_MCP_` prefix; typo'd legacy unprefixed env var is silently ignored (.env-file typos ARE caught).
+- **ty warning-floor ratchet**: 39 in-scope warnings, no floor — warnings can grow silently until a shrink-only gate is added (same pattern as the coverage gate).
+- **F-762 residue**: STATE_DIR duplication half of the finding (idiom half fixed by gates).
+
 ## HONEST STATUS — what is NOT done / NOT tested (do not let summaries imply otherwise)
 - **Zero of the 12 approved plans is executed.** Every fix exists only as a plan. The two Critical findings (wedged-but-alive backend jams eviction forever, F-301/F-501) are **live bugs today**.
 - **The characterization net (M6) does not exist yet** — there are currently NO behavior pins over the 96-tool dispatch surface; the structural refactors (M4-Ph1, M5b) are unprotected until M6 lands (that ordering is designed-in: M6 is plan 8 of 12).

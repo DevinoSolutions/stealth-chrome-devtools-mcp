@@ -1,33 +1,57 @@
 """Behavioral tests for DebugLogger (no browser, fresh instances).
 
-The load-bearing guarantees: logging is a no-op until enabled (so a production
-run never accumulates state unless asked), the three buffers are hard-capped so
-they cannot grow without bound, and identical errors are de-duplicated while
-still being counted. These are the memory-safety properties the server relies on
-during long-lived sessions.
+The load-bearing guarantees: recording is unconditional (plan_M3/F-182 —
+enable()/disable() gate only the legacy stderr echo, not whether data is
+captured), the three buffers are hard-capped so they cannot grow without
+bound, and identical errors are de-duplicated while still being counted.
+These are the memory-safety properties the server relies on during
+long-lived sessions.
 """
 
 from debug_logger import DebugLogger
 
 
 class TestEnableGating:
-    def test_logging_is_noop_until_enabled(self):
+    """F-182: recording is unconditional (not gated behind enable()) so the
+    default install is never a silent black box. enable()/disable() now
+    govern ONLY the legacy stderr echo — see TestStderrEchoGating below."""
+
+    def test_recording_is_unconditional_even_without_enable(self):
         log = DebugLogger()
         log.log_info("comp", "meth", "hello")
         log.log_warning("comp", "meth", "warn")
         log.log_error("comp", "meth", ValueError("x"))
         view = log.get_debug_view()
-        assert view["summary"]["total_info"] == 0
-        assert view["summary"]["total_warnings"] == 0
-        assert view["summary"]["total_errors"] == 0
+        assert view["summary"]["total_info"] == 1
+        assert view["summary"]["total_warnings"] == 1
+        assert view["summary"]["total_errors"] == 1
 
-    def test_disable_stops_further_logging(self):
+    def test_disable_does_not_stop_recording(self):
         log = DebugLogger()
         log.enable()
         log.log_info("comp", "meth", "one")
         log.disable()
         log.log_info("comp", "meth", "two")
-        assert log.get_debug_view()["summary"]["total_info"] == 1
+        assert log.get_debug_view()["summary"]["total_info"] == 2
+
+
+class TestStderrEchoGating:
+    """enable()/disable() now govern ONLY the legacy stderr echo (recording
+    itself is unconditional — see TestEnableGating above)."""
+
+    def test_stderr_echo_silent_until_enabled(self, capsys):
+        log = DebugLogger()
+        log.log_info("comp", "meth", "quiet")
+        assert "quiet" not in capsys.readouterr().err
+
+    def test_stderr_echo_stops_after_disable(self, capsys):
+        log = DebugLogger()
+        log.enable()
+        log.log_info("comp", "meth", "one")
+        capsys.readouterr()  # discard the "one" echo + the enable() banner
+        log.disable()
+        log.log_info("comp", "meth", "two")
+        assert "two" not in capsys.readouterr().err
 
 
 class TestBufferCaps:
@@ -69,16 +93,39 @@ class TestErrorDedup:
         log.log_error("comp", "meth", ValueError("b"))
         assert log.get_debug_view()["summary"]["total_errors"] == 2
 
-    def test_seen_error_set_clears_at_cap(self):
+    def test_seen_error_set_bounded_by_eviction_not_wipe(self):
+        """F-204: hitting the cap evicts the single OLDEST signature (LRU via
+        OrderedDict move_to_end + popitem(last=False)), not a full clear() -
+        so a still-recent signature stays deduped instead of every prior
+        signature re-logging at once."""
         log = DebugLogger()
         log.MAX_SEEN_ERRORS = 2
         log.enable()
-        log.log_error("comp", "meth", ValueError("a"))
-        log.log_error("comp", "meth", ValueError("b"))
-        # seen set now at cap (2); the next distinct error triggers a clear
-        # before insert, so the set never exceeds the cap.
-        log.log_error("comp", "meth", ValueError("c"))
+
+        log.log_error("comp", "meth", ValueError("a"))  # seen: {a}
+        log.log_error("comp", "meth", ValueError("b"))  # seen: {a, b}
+        log.log_error("comp", "meth", ValueError("c"))  # at cap -> evicts "a"
         assert len(log._seen_errors) <= log.MAX_SEEN_ERRORS
+
+        total_before = log.get_debug_view()["summary"]["total_errors"]
+        log.log_error("comp", "meth", ValueError("c"))  # "c" still tracked
+        assert log.get_debug_view()["summary"]["total_errors"] == total_before
+
+        log.log_error("comp", "meth", ValueError("a"))  # "a" was evicted
+        assert log.get_debug_view()["summary"]["total_errors"] == total_before + 1
+
+    def test_error_entry_stamped_with_correlation_id(self):
+        from logging_setup import correlation_id_var
+
+        log = DebugLogger()
+        log.enable()
+        token = correlation_id_var.set("test-corr-id")
+        try:
+            log.log_error("comp", "meth", ValueError("x"))
+        finally:
+            correlation_id_var.reset(token)
+        entry = log.get_debug_view()["all_errors"][-1]
+        assert entry["correlation_id"] == "test-corr-id"
 
 
 class TestViewAndClear:

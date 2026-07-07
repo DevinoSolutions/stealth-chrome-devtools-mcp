@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     # Do NOT rename: plan M14+A1 (X-HARD) renames this to
     # STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB later, inside this model.
     session_storage_cap_gb: float = 20.0
+    # Directory for the M3 observability file logs (default: the state-dir
+    # convention, ``~/.stealth-mcp/logs`` — same idiom as ``clone_output_dir``).
+    log_dir: str | None = None
+    # Minimum level recorded by the M3 file logger. An unrecognized value
+    # degrades to INFO at the point of use rather than failing startup —
+    # logging setup must never be the reason the server won't boot.
+    log_level: str = "INFO"
 
     # -- Legacy unprefixed config (names preserved verbatim via alias) -------
     # 0 = idle reaping disabled (never auto-close): the correct default for a

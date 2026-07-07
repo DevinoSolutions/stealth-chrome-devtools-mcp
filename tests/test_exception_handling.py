@@ -70,17 +70,18 @@ class TestDebugLoggerCaps:
         first_msg = logger._info[0]["message"]
         assert first_msg != "msg-0"  # oldest should have been evicted
 
-    def test_disabled_logger_does_not_accumulate(self):
-        """When disabled, nothing should be stored."""
+    def test_caps_apply_even_without_enable(self):
+        """plan_M3/F-182: recording is unconditional now (no longer gated
+        behind enable()); this pins that the bounded-growth caps — the
+        load-bearing memory-safety property this class is about — still
+        apply when enable() was never called."""
         logger = DebugLogger()
+        logger.MAX_INFO = 5
         # not calling enable()
-        for i in range(100):
+        for i in range(20):
             logger.log_info("test", "method", f"msg {i}")
-            logger.log_warning("test", "method", f"warn {i}")
-            logger.log_error("test", "method", Exception(f"err {i}"))
-        assert len(logger._info) == 0
-        assert len(logger._warnings) == 0
-        assert len(logger._errors) == 0
+        assert len(logger._info) == 5
+        assert logger._info[-1]["message"] == "msg 19"
 
     def test_stderr_catches_only_os_and_value_errors(self):
         """_emit_stderr should catch OSError/ValueError but not other types."""

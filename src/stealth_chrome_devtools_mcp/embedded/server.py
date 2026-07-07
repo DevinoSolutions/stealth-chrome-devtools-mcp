@@ -31,6 +31,7 @@ from dynamic_hook_system import dynamic_hook_system
 from element_cloner import element_cloner
 from fastmcp import FastMCP
 from file_based_element_cloner import file_based_element_cloner
+from logging_setup import bootstrap_backend_process_logging, with_correlation_id
 from models import (
     BrowserOptions,
 )
@@ -1234,7 +1235,7 @@ def section_tool(section: str):
 
     def decorator(func):
         SECTION_TOOLS[section].append(func.__name__)
-        return mcp.tool(func)
+        return mcp.tool(with_correlation_id(func))
 
     return decorator
 
@@ -4337,6 +4338,7 @@ def build_arg_parser():
 
 
 if __name__ == "__main__":
+    bootstrap_backend_process_logging()
     args = build_arg_parser().parse_args()
 
     if args.debug and not debug_logger._enabled:
