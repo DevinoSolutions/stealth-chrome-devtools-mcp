@@ -13,6 +13,7 @@ Race condition handling:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import socket
@@ -513,18 +514,41 @@ async def _watch_backend_liveness(
     unbounded hang on requests a dead backend can never answer. A single healthy
     check resets the failure run, so a transient blip never tears down a live
     backend. ``is_healthy``/``sleep`` are injectable for testing.
+
+    F-501: the default check used to be a bare socket connect
+    (``_server_is_healthy``), which a wedged backend (dispatch loop dead,
+    socket still open) always passes - so the sole auto-recovery watchdog
+    never armed against the exact failure it exists for. The default now runs
+    the app-level probe (``_backend_http_ready``) off-thread via
+    ``anyio.to_thread.run_sync`` (plan_M1 SS2.2 rejected alternative #3: a
+    blocking httpx call run inline would freeze the stdio pump for up to
+    ``LIVENESS_PROBE_TIMEOUT`` every ``interval``). The loop is await-aware
+    (``inspect.isawaitable``) so this async default and every existing
+    injected SYNC ``is_healthy`` callable both drive it unchanged.
     """
     import anyio
 
-    check = is_healthy if is_healthy is not None else (lambda: _server_is_healthy(port))
+    def _default_check():
+        return anyio.to_thread.run_sync(_backend_http_ready, port)
+
+    check = is_healthy if is_healthy is not None else _default_check
     nap = sleep if sleep is not None else anyio.sleep
     consecutive = 0
     while True:
         await nap(interval)
-        if check():
+        res = check()
+        if inspect.isawaitable(res):
+            res = await res
+        if res:
             consecutive = 0
             continue
         consecutive += 1
+        _logger.warning(
+            "liveness probe failed for backend on port %d (%d/%d)",
+            port,
+            consecutive,
+            failures_before_teardown,
+        )
         if consecutive >= failures_before_teardown:
             return
 
