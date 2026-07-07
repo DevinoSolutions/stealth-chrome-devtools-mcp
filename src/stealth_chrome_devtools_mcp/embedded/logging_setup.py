@@ -25,15 +25,22 @@ PLC0415 rationale) is a deferred, function-local import — used below.
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import logging
 import os
+import sys
+import threading
 import time
 import uuid
 from contextvars import ContextVar
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from stealth_chrome_devtools_mcp.settings import get_settings
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 LOG_FORMAT = (
     "%(asctime)s %(levelname)s %(process)d [%(correlation_id)s] %(name)s: %(message)s"
@@ -105,6 +112,65 @@ def configure_logging(role: str) -> Path:
         return log_path
 
     prune_old_logs(log_dir)
+    return log_path
+
+
+_bootstrapped_roles: set[str] = set()
+
+
+def bootstrap_backend_process_logging() -> Path:
+    """Backend boot-time wiring — the single call ``embedded/server.py``'s
+    ``__main__`` makes before anything else, including ``sentry_init()``
+    (F-303's in-process half). Installs the ``stealth.backend`` file handler,
+    then a ``sys.excepthook``/``threading.excepthook`` pair that record a
+    fatal exception before the process dies, plus ``faulthandler`` for
+    hard/C-level faults that never reach Python's exception machinery at
+    all. Idempotent (safe if ``embedded/server.py`` loads twice via
+    ``runpy``). Returns the ``stealth.backend`` log path.
+    """
+    log_path = configure_logging("backend")
+    logger = logging.getLogger("stealth.backend")
+
+    if "backend" in _bootstrapped_roles:
+        return log_path  # already wired in this process
+
+    def _log_excepthook(
+        exc_type: type[BaseException],
+        exc_value: BaseException,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        logger.critical(
+            "Fatal unhandled exception", exc_info=(exc_type, exc_value, exc_tb)
+        )
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    def _log_thread_excepthook(args: threading.ExceptHookArgs) -> None:
+        thread = args.thread
+        thread_name = thread.name if thread is not None else "unknown"
+        exc_value = args.exc_value
+        if exc_value is None:
+            threading.__excepthook__(args)
+            return
+        logger.critical(
+            "Fatal unhandled exception in thread %r",
+            thread_name,
+            exc_info=(args.exc_type, exc_value, args.exc_traceback),
+        )
+        threading.__excepthook__(args)
+
+    sys.excepthook = _log_excepthook
+    threading.excepthook = _log_thread_excepthook
+    _bootstrapped_roles.add("backend")
+
+    # A dedicated, never-rotated file: faulthandler writes at the C level on a
+    # hard crash, so sharing the RotatingFileHandler's file would add a second
+    # open handle across the SAME path it may later os.rename() during
+    # rotation (Windows WinError 32 risk, plan_M3 risk #1).
+    fault_log_path = log_path.with_name(f"{log_path.stem}-fault.log")
+    with contextlib.suppress(OSError):
+        fault_log = fault_log_path.open("a", encoding="utf-8")
+        faulthandler.enable(file=fault_log)
+
     return log_path
 
 

@@ -14,7 +14,10 @@ SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
 LOC_BUDGET = 1000
 
 GRANDFATHER: dict[str, tuple[int, str]] = {
-    "embedded/server.py": (4420, "plan_M4ph1"),
+    # 4420 (plan_M4ph1) + 2 (plan_M3 step 2: single bootstrap_backend_process_
+    # logging() import + call in __main__ — the M3/M10a except-surface work
+    # plan_M4ph1's own tag already anticipated).
+    "embedded/server.py": (4422, "plan_M4ph1 + plan_M3"),
     "embedded/browser_manager.py": (1447, "DEBT(F-702)"),
     "embedded/process_cleanup.py": (1022, "plan_M11a"),
 }
