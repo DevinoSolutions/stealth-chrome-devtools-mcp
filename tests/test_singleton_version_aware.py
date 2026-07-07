@@ -5,8 +5,13 @@ version as the running package. A stale backend left over from a previous (now
 upgraded) version must never be silently reused — otherwise an upgraded user
 keeps running old backend code while the handshake reports the new version.
 
-Pure in-memory tests: a real listening socket stands in for a live backend, so
-`_server_is_healthy` passes without any HTTP/browser/backend process.
+Pure in-memory tests: a real listening socket stands in for a live backend.
+Since M1-2, `_find_running_server` gates reuse on `_backend_http_ready` (a
+real MCP `initialize`->200), not the bare socket check a listening socket
+alone can satisfy — the two "reusable" cases below stub `_backend_http_ready`
+directly so this suite keeps pinning the VERSION-matching semantics it was
+written for (issue #14), not the liveness signal itself (that migration is
+`test_find_running_server_app_probe.py`'s job, plan_M1).
 """
 
 import json
@@ -52,6 +57,16 @@ class TestVersionAwareReuse:
         sock, port = _listening_socket()
         try:
             monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+            # M1-2: _find_running_server now gates reuse on _backend_http_ready
+            # (a real initialize->200), not the bare socket check this module's
+            # _listening_socket() stands in for. Stub it True so this test keeps
+            # pinning the VERSION-matching semantics it was written for, not the
+            # liveness signal (that is test_find_running_server_app_probe.py's
+            # job). See test_ignores_unhealthy_matching_version below for the
+            # unhealthy-path pin, which is unaffected by this stub.
+            monkeypatch.setattr(
+                singleton, "_backend_http_ready", lambda port, **kw: True
+            )
             (isolated_state / "server.json").write_text(
                 json.dumps({"port": port, "version": "1.2.1", "pid": os.getpid()})
             )
@@ -112,6 +127,11 @@ class TestServerStatePersistence:
         sock, port = _listening_socket()
         try:
             monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+            # M1-2: see the matching comment in test_reuses_backend_with_
+            # matching_version above - same stub, same reason.
+            monkeypatch.setattr(
+                singleton, "_backend_http_ready", lambda port, **kw: True
+            )
             singleton._write_server_state(port=port, version="1.2.1", pid=os.getpid())
             assert singleton._find_running_server() == port
         finally:

@@ -127,11 +127,17 @@ def _write_server_state(port: int, version: str, pid: int) -> None:
 def _find_running_server() -> int | None:
     """Return the port of a *reusable* backend, or None.
 
-    A backend is reusable only when we can confirm it is the SAME version as the
-    running package: its recorded version must match and its port must be
-    socket-healthy. A stale (older-version) or legacy (version-unknown) backend
-    is deliberately NOT reused, so an upgrade actually takes effect instead of
-    silently proxying to old backend code (issue #14).
+    A backend is reusable only when we can confirm it is the SAME version as
+    the running package AND it answers a real MCP `initialize` (F-301/F-501:
+    a bare socket connect cannot tell a wedged backend - dispatch loop dead,
+    port still open - from a healthy one, so a wedged same-version backend
+    used to be "reusable" forever). A stale (older-version), legacy
+    (version-unknown), or wedged backend is deliberately NOT reused: the
+    former so an upgrade actually takes effect instead of silently proxying to
+    old backend code (issue #14); the latter so this same guard - which
+    `_clear_stale_backend`'s eviction and both cold-start callers all route
+    through - un-blocks the existing eviction+respawn machine on a wedge
+    instead of gating it shut.
     """
     state = _read_server_state()
     if state is None:
@@ -141,7 +147,7 @@ def _find_running_server() -> int | None:
         return None
     if state.get("version") != _server_version():
         return None
-    if not _server_is_healthy(port):
+    if not _backend_http_ready(port):
         return None
     return port
 
