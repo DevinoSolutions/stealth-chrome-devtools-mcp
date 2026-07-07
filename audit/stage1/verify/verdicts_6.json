@@ -1,0 +1,92 @@
+[
+  {
+    "id": "F-401",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  {
+    "id": "F-402",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  {
+    "id": "F-403",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  {
+    "id": "F-404",
+    "quote_status": "paraphrased",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": false,
+    "confidence": 0.7,
+    "note": "README.md: paraphrased"
+  },
+  {
+    "id": "F-405",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  {
+    "id": "F-406",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  {
+    "id": "F-407",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  {
+    "id": "F-501",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton.py: verbatim"
+  },
+  {
+    "id": "F-502",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton.py: verbatim"
+  },
+  {
+    "id": "F-503",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton.py: verbatim"
+  }
+]

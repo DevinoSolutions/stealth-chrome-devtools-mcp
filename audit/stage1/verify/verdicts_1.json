@@ -1,0 +1,92 @@
+[
+  {
+    "id": "F-101",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote exact at line 1212-1217; section_tool decorator confirmed, SECTION_TOOLS usage verified"
+  },
+  {
+    "id": "F-102",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.92,
+    "note": "Quote exact 2991-2999; 'global BrowserManager' declared but NOT reassigned (no 'BrowserManager = ' line), confirming the bug claim"
+  },
+  {
+    "id": "F-103",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.93,
+    "note": "Quote exact 201-213; module-scope singletons at 1297-1300 confirmed (browser_manager, network_interceptor, dom_handler, cdp_function_executor)"
+  },
+  {
+    "id": "F-104",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.94,
+    "note": "Quote exact 1939-1949; 22 except Exception blocks verified; multiple incompatible error shapes confirmed"
+  },
+  {
+    "id": "F-105",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.92,
+    "note": "Quote exact 1-13; test file docstring confirmed; extract_element_assets, discover_object_methods, extract_related_files mentioned"
+  },
+  {
+    "id": "F-106",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.93,
+    "note": "Quote exact 1080-1091; function signature confirmed; all collaborator calls and branching logic present"
+  },
+  {
+    "id": "F-107",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.92,
+    "note": "Quote exact 3846-3855; bare exec() with empty globals confirmed; __builtins__ auto-injected vulnerability claim is valid"
+  },
+  {
+    "id": "F-108",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.98,
+    "note": "Quote exact 4085 '90 tools'; actual @section_tool count is 96 (verified), CLI says 90, inconsistency confirmed"
+  },
+  {
+    "id": "F-109",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.94,
+    "note": "Quote exact 1260-1264; process_cleanup._cleanup_all_tracked() confirmed at line 1261; private member access confirmed"
+  },
+  {
+    "id": "F-120",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.96,
+    "note": "Quote exact 263-269 in singleton.py; pyproject.toml version 1.2.0 confirmed; _server_version() uses importlib.metadata (frozen version)"
+  }
+]

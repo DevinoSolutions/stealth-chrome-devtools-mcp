@@ -1,0 +1,142 @@
+[
+  {
+    "id": "F-102",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Confirmed: server.py:26 binds `BrowserManager` via `from browser_manager import`, and hot_reload line 2997 calls the bare `BrowserManager()`, so importlib.reload (2993) re-executes the module but cannot rebind server.py's own global name — it instantiates the stale, pre-reload class. Reload list (2983-2989) also excludes server.py itself. My best refutation (that it re-imports the class the way it re-imports debug_logger at 3006) fails: only debug_logger is re-imported; BrowserManager/NetworkInterceptor/DOMHandler are not (2996-3003).",
+    "attack_tried": "Checked whether hot_reload re-imports the reloaded class name (as it does for debug_logger at 3006) so the stale binding would be refreshed — it does not for the three manager classes, so the Python re-binding gotcha stands."
+  },
+  {
+    "id": "F-121",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Verified: the reload list (server.py:2983-2989) excludes both 'server' and 'cdp_function_executor' (the 4th singleton, declared alongside the others at 1300); line 2997 replaces browser_manager with an empty BrowserManager(), discarding _instances/_spawn_diagnostics; and `grep -rn hot_reload tests/` returns NO_MATCHES (untested). BROWSER_IDLE_TIMEOUT defaults to '0' (server.py:222), so the abandoned old idle reaper won't auto-close the orphaned browsers either.",
+    "attack_tried": "Searched tests/ for any hot_reload exercise and the code for a path migrating live _instances into the new singleton — neither exists."
+  },
+  {
+    "id": "F-164",
+    "verdict": "downgrade",
+    "new_severity": "Medium",
+    "rebuttal": "Mechanism confirmed: _with_cdp_timeout (server.py:139-156) and execute_python_in_browser's wait_for(10.0) (cdp_function_executor.py:696-698) only raise on timeout; terminateExecution appears solely in the list_cdp_commands catalog (114), never invoked. But High is over-severe: the wrapper bounds the wait and its error message explicitly tells the caller to close_instance + respawn (155), the finding itself concedes the un-cancellable JS loop is an intrinsic CDP fact, and Runtime.terminateExecution is not a reliable interrupt for a synchronous loop anyway. Scoped to one recoverable tab.",
+    "attack_tried": "Grepped the whole tree for any automatic terminateExecution call, and weighed whether invoking it would even recover a synchronous infinite loop; the gap is real but bounded and self-documented."
+  },
+  {
+    "id": "F-180",
+    "verdict": "downgrade",
+    "new_severity": "High",
+    "rebuttal": "The core claim survives exactly as the scrutiny predicted: kill_browser_process (browser_manager.py:682), _stop_browser->browser.stop() (688->134-136) and finalize/cleanup (743-744) are synchronous under wait_for(5.0) at 760 — NOT offloaded to a thread — so the 5s timer cannot preempt them, and the fallback (768-770) re-runs them unwrapped. But 'unbounded total server hang' is contradicted by the code: _kill_process_by_pid's waits are explicitly bounded (process_cleanup.py:880 wait(timeout=3), 902 wait(timeout=2)), and on Windows terminate()==kill()==TerminateProcess is immediate, so the typical freeze is sub-second and the worst case is bounded ~5s x N-pids, not infinite. Real event-loop-blocking bug, over-severe framing.",
+    "attack_tried": "First confirmed the kill path is sync (no to_thread/run_in_executor) — that attack failed. Then attacked the 'unbounded' magnitude via psutil's bounded waits and Windows TerminateProcess semantics, which caps the freeze."
+  },
+  {
+    "id": "F-182",
+    "verdict": "downgrade",
+    "new_severity": "Medium",
+    "rebuttal": "Facts are exact: _enabled=False by default (debug_logger.py:41); log_error/warning/info return at 72/111/138 BEFORE the buffer append; force=True occurs only at 303 (enable's self-announcement); no automatic file write. But 'off by default' is a standard, defensible logging design, the toggle is documented (README:212 / --debug), and once enabled the in-memory buffers ARE retrievable via get_debug_view — so this is a Medium observability default for a single-user tool, not a High defect.",
+    "attack_tried": "Confirmed the early return also skips buffering (it does, so buffers are empty when off) and checked whether the toggle is discoverable/documented (README:212) — the gap is real but standard and operator-controllable."
+  },
+  {
+    "id": "F-183",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Confirmed silent cold-start: ensure_server_running returns immediately (singleton.py:297-313); _start_backend_holding_lock swallows everything via `except Exception: pass` (293-294) in a daemon thread; and on the proxy side run_backend returns silently after _await_backend_http's 120s timeout (460-461), so run_backend_guarded's only print (515-520) never fires — just the unconditional finally cancel (521-522). One nuance: a server.py syntax error won't raise inside Popen; it dies as a subprocess and is hidden by the ignored _wait_for_server return (292) instead — but the net 'silent failure' claim holds via multiple paths.",
+    "attack_tried": "Traced all three failure surfaces (thread exception, subprocess death, HTTP-readiness timeout) for any diagnostic emission; none emit anything."
+  },
+  {
+    "id": "F-206",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Confirmed: _find_running_server (singleton.py:117-136) reuses when `state.get('version') == _server_version()` (132), and _server_version (263-269) reads importlib.metadata — there is no source hash/mtime. The special-scrutiny question 'does anything invalidate on source change?' is answered no: this branch's version-aware work targets CROSS-version reuse (issue #14), not in-place same-version edits, and 14 test files import server in-process (bypassing the proxy). Matches the project's own saved memory note.",
+    "attack_tried": "Searched singleton.py for any mtime/hash/etag invalidation and tests/ for a test that spawns the real backend after an edit — neither exists; reuse is version-string only."
+  },
+  {
+    "id": "F-301",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "The hardest attack (is there ANY application-level liveness probe?) fails: _await_backend_http (singleton.py:316) DOES perform a real initialize->200, but it is called only at startup (460), never for liveness; _watch_backend_liveness (388) and _find_running_server (134) both use the raw-TCP _server_is_healthy (83-89). A wedged event loop still completes the kernel TCP handshake, so all three consumers read 'healthy'. test_proxy_backend_death.py only covers hard kill (191,205) and injected-unhealthy checks, never wedged-but-listening. Critical stands.",
+    "attack_tried": "Grepped the watchdog, discovery, and eviction paths for any use of the stronger _await_backend_http probe during a session — it is startup-only on every path."
+  },
+  {
+    "id": "F-302",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Confirmed: _DISPATCH (cli.py:219-225) exposes only status/profiles/cleanup/doctor/serve; _clear_stale_backend is never called from the CLI (only mid-startup in _start_backend_holding_lock, singleton.py:290), and _recover_orphaned_processes runs only in ProcessCleanup.__init__ (process_cleanup.py:55). No stop/restart/kill-orphans verb exists. The enterprise 'on-call/MTTR' framing is inflated for a single-user local tool where the operator has OS-level process control, but the capability gap itself is real and correctly described.",
+    "attack_tried": "Searched cli.py for any eviction/stop entrypoint and any standalone orphan-killer trigger — neither is wired to a command."
+  },
+  {
+    "id": "F-303",
+    "verdict": "downgrade",
+    "new_severity": "High",
+    "rebuttal": "Facts airtight: _start_server_process wires stdout/stderr/stdin to DEVNULL unconditionally (singleton.py:229-231) on the sole detached-backend spawn path, and a repo-wide grep finds zero FileHandler/RotatingFileHandler/basicConfig/getLogger — no file logging exists (can't be killed). But the IDENTICAL fact is rated High as F-503, so the finding-set contradicts itself; 'no persistent backend logs' is an observability gap (the tool still works after restart), not a functional defect, and Critical rests on a production-outage narrative overstated for a single-user local tool. Reconcile to High to match F-503.",
+    "attack_tried": "Grepped for any FileHandler/RotatingFileHandler/basicConfig or an env-gated stream redirect, and for a second non-DEVNULL spawn path — none exist, so severity-correction is the only available move."
+  },
+  {
+    "id": "F-304",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Confirmed: get_debug_view (server.py:2459), export_debug_logs (2504) and get_debug_lock_status (2548) are all @section_tool('debugging'), i.e. dispatched through the same MCP request path as spawn_browser/navigate; there is no signal handler, side HTTP endpoint, or periodic disk flush anywhere. So when tool calls hang against a wedged backend (F-301), these diagnostic tools hang with them. Correct.",
+    "attack_tried": "Searched for any out-of-band diagnostic transport (SIGUSR1/SIGBREAK handler, standalone endpoint, background flush task) — none exists."
+  },
+  {
+    "id": "F-305",
+    "verdict": "downgrade",
+    "new_severity": "Medium",
+    "rebuttal": "Confirmed: _cmd_status (cli.py:95-106) and _cmd_doctor (162-180) print only port+version via _find_running_server, never state['pid'], though _write_server_state records it (singleton.py:106-114). Real gap, but severity is inflated: the PID is trivially available via `netstat -ano | findstr :19222`, Task Manager, or ~/.stealth-mcp/server.json, and surfacing it is a one-line change. A convenience omission during recovery, not a High operability failure.",
+    "attack_tried": "Checked whether the PID is obtainable without repo tooling (netstat/Task Manager/server.json) — it is, so the 'no supported way to learn the PID' framing overstates a one-field cosmetic fix."
+  },
+  {
+    "id": "F-306",
+    "verdict": "downgrade",
+    "new_severity": "Low",
+    "rebuttal": "Confirmed by glob: no docs/ dir, no RUNBOOK/TROUBLESHOOTING/OPERATIONS file, and the README CLI section (214-233) is the entire ops doc. But absence of an enterprise runbook is normal and defensible for a small single-user local dev tool; the recurring '3am on-call engineer' framing is a production-SRE lens the stated context explicitly disclaims. Real docs-completeness gap, low impact.",
+    "attack_tried": "Verified the absence claim (accurate) but reweighted severity against the explicit single-user, local-tool context and the project's actual size."
+  },
+  {
+    "id": "F-402",
+    "verdict": "downgrade",
+    "new_severity": "Low",
+    "rebuttal": "The reproduced PowerShell failure is real but misattributed: README:66-78 is a JSON MCP-config snippet where the path is a quoted JSON string, and pasting it as intended works fine. The failure requires (a) hand-translating that JSON into an unquoted shell command — a step the README never directs — and (b) a checkout whose `&`/spaces come from the operator's own parent folder ('CUSTOM MCPs & PRODUCTIVITY'), not the project; the placeholder itself is a clean slash path with no special chars. A minor 'add a quoting caveat' nit, not a High maximally-misleading doc defect.",
+    "attack_tried": "Checked whether the README ever instructs running the directory value as a shell command (it does not) and whether the offending `&`/spaces originate from the project (they originate from the reviewer's own folder naming)."
+  },
+  {
+    "id": "F-407",
+    "verdict": "downgrade",
+    "new_severity": "Low",
+    "rebuttal": "Confirmed: no CONTRIBUTING/RELEASING files (glob), and the README ends at License (248-250). But for a small tool published by a single vendor, the absence of a documented contribution/release workflow is normal and low-impact; the 'ship a one-line change' onboarding framing is inflated for a single-maintainer, single-user context. Real gap, Low severity.",
+    "attack_tried": "Verified the absence (accurate) and reweighted against the single-maintainer/single-user context rather than an open-source-with-external-contributors assumption."
+  },
+  {
+    "id": "F-501",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Same mechanism as F-301, verified independently: _watch_backend_liveness (singleton.py:368-398) defaults to the TCP _server_is_healthy (388) and only tears down after 3 consecutive CONNECT failures, while the real-initialize probe _await_backend_http (316) is used once at startup (460) and never for liveness — its own docstring even warns a bound socket can answer before MCP is ready. A wedged uvicorn loop still accepts the socket, so the monitor never arms. No test covers wedged-but-listening (test_proxy_backend_death.py uses backend.kill). Critical stands.",
+    "attack_tried": "Confirmed on every liveness/discovery path that the stronger initialize->200 probe is never substituted for the raw socket check during a session."
+  },
+  {
+    "id": "F-503",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Confirmed: _start_server_process (singleton.py:218-241) spawns with DETACHED_PROCESS/CREATE_NEW_PROCESS_GROUP (or start_new_session) and DEVNULL on all three streams; no supervisor exists, and no file log is written (grep: zero FileHandler/basicConfig). One nuance worth recording: on backend DEATH there IS a de-facto restart (the liveness watchdog tears down -> client reconnects -> fresh backend spawns), so 'no auto-restart' strictly holds only for the wedge case; but the detached/DEVNULL/no-log pillar and manual wedge-recovery are all correct.",
+    "attack_tried": "Looked for a supervisor/auto-restart and any log sink; found only the reconnect-driven respawn on socket death, which neither covers the wedge case nor produces diagnostics."
+  },
+  {
+    "id": "F-504",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Same as F-206, confirmed at HEAD: _find_running_server reuses on the version STRING (singleton.py:132) from importlib.metadata (263-269); an in-place edit to embedded/server.py leaves '1.2.0' unchanged, so ensure_server_running proxies to the old-code backend. The branch's version-aware work fixes CROSS-version reuse, not this same-version-edit case, and the project's own saved memory documents this exact burn. Nothing invalidates on source change.",
+    "attack_tried": "Same as F-206 — searched for any source-change (hash/mtime) invalidation that would force a fresh backend after an edit; none exists."
+  },
+  {
+    "id": "F-605",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Confirmed and strengthened: _responses is a plain dict (network_interceptor.py:22); _on_response fetches the full body (159) and stores it unconditionally (182) with no per-body or total cap, cleared only on instance close. Crucially _on_response applies NO include/exclude filter (only _on_request does, 108-115), so even set_capture_filters (advertised 'to reduce memory usage', server.py:2241) cannot bound response-body memory. Interception is set up unconditionally on every spawn_browser (server.py:1396-1399) — default-on — and unbounded body accumulation matches the tool's own heavy-scraping workload.",
+    "attack_tried": "Checked whether capture is opt-in (it is default-on) and whether the documented memory-reducing filters actually bound response bodies (they do not — _on_response skips the filter path entirely)."
+  },
+  {
+    "id": "F-610",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Confirmed: hot_reload executes `browser_manager = BrowserManager()` (server.py:2997), a fresh empty instance whose _instances dict does not carry the old singleton's tracked browsers, so any open instance is orphaned (get_instance/navigate/close_instance all miss it). With BROWSER_IDLE_TIMEOUT defaulting to '0' (server.py:222), the abandoned old idle reaper won't auto-close them either, so the real Chrome processes leak — exactly the failure mode for a tool whose stated purpose is 'reload without restarting'.",
+    "attack_tried": "Looked for state migration into the new singleton or an idle-reaper fallback that would reclaim the orphans — neither exists, and the idle reaper is disabled by default."
+  }
+]

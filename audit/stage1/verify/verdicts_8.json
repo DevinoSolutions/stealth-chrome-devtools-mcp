@@ -1,0 +1,83 @@
+[
+  {
+    "id": "F-605",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  {
+    "id": "F-606",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  {
+    "id": "F-607",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  {
+    "id": "F-608",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  {
+    "id": "F-609",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  {
+    "id": "F-610",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  {
+    "id": "F-611",
+    "quote_status": "paraphrased",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": false,
+    "confidence": 0.85,
+    "note": "file OK"
+  },
+  {
+    "id": "F-612",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  {
+    "id": "F-613",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  }
+]

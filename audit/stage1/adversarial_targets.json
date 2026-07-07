@@ -1,0 +1,576 @@
+[
+  {
+    "id": "F-101",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1212-1217",
+    "what": "server.py is 4207 lines with 162 top-level function/async-def definitions, of which 96 are MCP tools registered via this single @section_tool() decorator across 11 'sections' (browser-management, element-interaction, element-extraction, file-extraction, network-debugging, cdp-functions, progressive-cloning, cookies-storage, tabs, debugging, dynamic-hooks). The decorator is the only indirection layer that exists — every tool's full implementation (signature, docstring, business logic, error handling) is written inline in this one file. There is no per-domain module split (no tabs.py, no cookies.py, etc.); DOMHandler/NetworkInterceptor/ResponseHandler are the only pieces factored out, and even those are consumed via bare module-level singletons imported at the top of this same file. Adding one tool means editing server.py regardless of which of the 11 sections it belongs to. Because the whole file is one Python module, a single import-time failure anywhere (a bad decorator argument, a broken helper, a bad top-level statement) prevents ALL 96 tools across all 11 sections from registering — the SECTION_TOOLS/DISABLED_SECTIONS mechanism (server.py:50-51, 1220-1227) only prunes tools AFTER a successful full-file import via apply_disabled_sections(), so it provides zero fault isolation between sections at load time despite looking like a section boundary.",
+    "why_it_matters": "This is the single highest-leverage maintainability problem in the codebase: every contributor touches the same 4207-line file for any tool-level change, inflating review diffs and merge-conflict risk, and the file's apparent section boundaries are cosmetic for reliability purposes — the 11 'sections' share one failure domain despite being independently toggle-able at runtime via --disable-<section> flags.",
+    "_source": "findings_dd1.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-102",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:2991-2999",
+    "what": "hot_reload() (server.py:2975) calls importlib.reload(sys.modules['browser_manager']) then does browser_manager = BrowserManager(). But the name BrowserManager in server.py's own namespace was bound once, at import time, via 'from browser_manager import BrowserManager' (server.py:26); importlib.reload() re-executes browser_manager.py's code inside its own existing module object, updating sys.modules['browser_manager'].BrowserManager, but it cannot reach back into server.py's namespace to update the separately-copied name BrowserManager that the 'from...import' statement created. The 'global browser_manager, BrowserManager' statement only grants permission to assign; the function body never actually reassigns BrowserManager itself. So every hot_reload() call instantiates the original, pre-reload BrowserManager class, silently. The identical pattern repeats for NetworkInterceptor and DOMHandler a few lines later. The function unconditionally returns \"Hot reload completed. Reloaded modules: ...\" (server.py:3009), reporting success while not actually picking up any class-level code changes. Separately, hot_reload's module list ('browser_manager', 'network_interceptor', 'dom_handler', 'debug_logger', 'models') never includes server.py itself, so none of the 162 functions / 96 tools defined in server.py — the vast majority of the code — can be hot-reloaded by this mechanism under any circumstance.",
+    "why_it_matters": "This directly explains a known operability pain point: applying server.py edits live requires killing and restarting the backend process rather than trusting hot_reload or a client reconnect. The tool exists, looks like it should work, and actively reports success, but structurally cannot refresh the class definitions it claims to reload. A developer trusting its 'completed' message is silently exercising stale code — worse than having no hot-reload at all, because it hides the need to restart.",
+    "_source": "findings_dd1.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.92,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-104",
+    "severity": "High",
+    "category": "code_health",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1939-1949",
+    "what": "22 separate except-Exception/bare-except blocks in server.py (verified count) each hand-roll their own error shape; at least 4 distinct, mutually incompatible contracts coexist. (a) execute_script (quoted above, ~1939-1949) returns {\"success\": bool, \"result\": ..., \"error\": ...}. (b) get_debug_lock_status (server.py:2549, except at 2558) returns a bare {\"error\": str(e)} with no \"success\" key at all. (c) new_tab (server.py:2636, except at 2662) does 'raise Exception(f\"Failed to create new tab: {str(e)}\")' — a second, generic, re-wrapped exception that discards the original exception type. (d) hot_reload (server.py:2975) and reload_status (server.py:3013) both declare '-> str' and return a plain string on EITHER success or failure (\"Hot reload completed...\" vs \"Hot reload failed: ...\") — callers cannot distinguish success from failure by type at all, only by string-matching the text. The one shared helper, _with_cdp_timeout (server.py:139), also just does 'raise Exception(...)' on timeout rather than a typed/structured error.",
+    "why_it_matters": "With 96 tools and no shared error envelope or exception hierarchy, every caller (including the AI agent driving this MCP server) must special-case each tool's failure shape individually, and there is no single place to fix or extend error reporting (error codes, retryability hints, etc.) without touching all 96 call sites. No test in the suite checks error-shape consistency, so nothing stops this from getting worse as new tools are added.",
+    "_source": "findings_dd1.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.94,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-105",
+    "severity": "High",
+    "category": "testing",
+    "location": "tests/test_server_call_conventions.py:1-13",
+    "what": "None of the 96 @section_tool-decorated coroutine bodies in server.py have direct unit tests. The only coverage is (a) tests/test_browser_integration.py, marked pytest.mark.integration, which requires a real installed Chrome and is skippable/skipped in CI without Chrome, or (b) narrow AST-level static conventions like the quoted file. This gap already caused a real, silent production bug fixed on the current commit (2267b83, \"fix: don't await synchronous handle_response at 3 extraction call sites\", touching server.py:2845-2963 area) — three tools raised TypeError on every single call, undetected until runtime, because nothing exercised those handler bodies directly. Pure-logic helpers that don't touch a browser (e.g. _resolve_profile_selection and friends) DO get fast unit tests (tests/test_profile_resolution.py) by being extracted to module scope as plain functions — but that pattern doesn't extend to the 96 tool bodies themselves, which mix request handling, delegation, and response shaping inline inside the @section_tool coroutines.",
+    "why_it_matters": "The new AST-based regression test is a good reactive guard for the one specific mistake it checks, but it's a symptom patch, not a fix for the underlying gap: any other tool-body mistake (wrong argument order, wrong handler call, wrong response shape) has the same blind spot until either a human runs the affected tool by hand or the skippable integration suite happens to cover it.",
+    "_source": "findings_dd1.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.92,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-107",
+    "severity": "High",
+    "category": "security",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:3846-3855",
+    "what": "create_python_binding (server.py:3808) executes caller-supplied python_code via bare exec(python_code, exec_globals) with an empty globals dict — which still has full access to __builtins__ (Python auto-injects it), so there is no restriction on imports, file access, or process control. exec_globals is then scanned for the first non-underscore callable and wired up as a live Python<->JS binding. This is one of two tools that can run arbitrary Python in the server process; the sibling execute_python_in_browser (server.py:3827) delegates to cdp_function_executor.execute_python_in_browser (a Python-to-JS translator, not audited here per the coupling-only scope for that module) rather than exec'ing directly, so create_python_binding is the more direct instance of the pattern.",
+    "why_it_matters": "Any caller of this MCP tool — including a compromised or confused upstream AI agent, or any process able to reach this server's transport — gets unrestricted code execution with the server process's full privileges (filesystem, network, environment variables, other browser instances' profile data). This is presumably intentional given the product's purpose (AI-driven browser automation with a Python-JS bridge), but it maximizes blast radius: nothing else in server.py needs to fail for this single tool to be a full process-compromise vector if it is ever reachable by untrusted input.",
+    "_source": "findings_dd1.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.92,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-120",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:263-269",
+    "what": "_find_running_server() refuses to reuse a backend whose recorded version differs from _server_version(), which is importlib.metadata.version(\"stealth-chrome-devtools-mcp\") — the installed distribution's frozen METADATA, not a hash or mtime of the source. pyproject.toml:7 pins a static `version = \"1.2.0\"` (no `dynamic = [...]`, no setuptools_scm/hatch-vcs). Verified against the live checkout: `pip show` reports this exact repo as an editable install at 1.2.0, `.venv/Lib/site-packages/stealth_chrome_devtools_mcp-1.2.0.dist-info/METADATA` says `Version: 1.2.0`, and `~/.stealth-mcp/server.json` right now records a live backend (pid 104504) at version \"1.2.0\" — while `git status` shows `M src/stealth_chrome_devtools_mcp/embedded/server.py` uncommitted in this same checkout. That edit is invisible to _server_version(); a client reconnect after the edit would still see version \"1.2.0\" match and proxy straight to the pre-edit process.",
+    "why_it_matters": "This is the exact scenario the branch is named for and the exact friction already reported from real use: editing server.py and reconnecting does not get you fresh code, because the version check can only ever detect a bumped-and-reinstalled package version, never a source edit. tests/test_singleton_version_aware.py thoroughly proves the eviction LOGIC is correct (15+ tests), but every one of them monkeypatches _server_version() directly — none exercises whether the real function reflects a source change, because it structurally cannot. The only escapes are killing the backend process by hand or bump+reinstall; neither is automated or documented as required.",
+    "_source": "findings_dd2.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.96,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-121",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:2975-3009",
+    "what": "The `hot_reload` MCP tool (docstring: \"Hot reload all modules without restarting the server\") is the codebase's own purpose-built answer to F-120's gap, and it does not work. It never reloads server.py itself (where the actual tool implementations live) or cdp_function_executor.py — the fourth singleton declared in the identical server.py:1297-1300 block as browser_manager, silently excluded with no comment. For the modules it does reload, `browser_manager = BrowserManager()` (line 2997) constructs a fresh instance with an empty _instances dict, discarding every live browser session, _spawn_diagnostics entry, and _proxy_forwarder, and abandoning the running _idle_reaper_task uncancelled (it keeps running, closed over the now-orphaned old self). `grep -rn hot_reload tests/` returns zero matches — no test exercises this tool at all.",
+    "why_it_matters": "A tool named exactly for \"apply my edit without a restart\", surfaced in the debugging section, will be reached for by anyone hitting F-120's friction. It silently fails to load the one file (server.py) that contains almost all real tool logic, silently skips a sibling singleton, and — if any browser instance is active when it's called — silently breaks that session (get_instance/navigate/close_instance all report \"not found\" afterward) while leaving the real Chrome process and idle-reaper task running headless, all while returning a success-looking string. Untested, so this has no regression protection at all.",
+    "_source": "findings_dd2.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-124",
+    "severity": "High",
+    "category": "testing",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py:48-55",
+    "what": "ProcessCleanup.__init__ runs `_recover_orphaned_processes()` by default, which loads `~/.stealth_browser_pids.json` (a real file in the developer's home directory, not test-isolated) and calls `_kill_processes_for_metadata(..., recovery=True)` — genuine psutil-based process termination and profile-directory cleanup — for any tracked entry that predates this process's `_init_time`. The module-level singleton `process_cleanup = ProcessCleanup()` (process_cleanup.py:1023) means this runs for real on the mere act of importing the module (directly, or transitively via `import browser_manager`). The comment quoted here is the code's own admission of the hazard. The only mitigation is `STEALTH_MCP_NO_AUTO_RECOVERY=1`: cli.py:35 sets it proactively for the CLI's `doctor` command, and exactly one test (test_singleton_fast_handshake.py:298) sets it — but only in a subprocess env dict, for a child process it spawns. tests/conftest.py, shared by all ~30 test files including test_process_cleanup.py which imports the class directly, never sets it for the pytest process itself.",
+    "why_it_matters": "Any test run (or REPL session, or unrelated script) that imports browser_manager or process_cleanup in-process, on a developer machine that has ever left stale entries in ~/.stealth_browser_pids.json (e.g. after a crash or a force-killed terminal), triggers real process kills and profile deletions as a side effect of collection/import — not of any test actually calling the recovery code under test. It is silent and conditional (a no-op when the pid file doesn't exist, e.g. fresh CI checkouts), which is exactly the shape of hazard that never shows up in CI and only bites a specific developer's machine at an unpredictable time.",
+    "_source": "findings_dd2.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-140",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/cdp_element_cloner.py:2-16",
+    "what": "Three independently-implemented engines all answer 'extract complete data about this element': ElementCloner.clone_element_complete (asyncio.gather over 6 JS-file evaluations, element_cloner.py:464-539), ComprehensiveElementCloner.extract_complete_element (one 216-line monolithic inline JS string, comprehensive_element_cloner.py:62-278), and CDPElementCloner.extract_complete_element_cdp (raw CDP domain calls, cdp_element_cloner.py:33-93). All three are live, each wired to its own MCP tool, and each returns a structurally different result schema (flat multi-key vs. flat camelCase vs. nested snake_case under an 'element' key). CDPElementCloner's own module docstring explicitly claims it supersedes the JS-based approaches ('100% accurate ... instead of limited JavaScript-based extraction'), yet the other two were never removed or rerouted to call it.",
+    "why_it_matters": "Any bug fix, new field, or behavior change to 'how we extract element data' must be manually triplicated across 3 unrelated code paths using 3 different browser-automation techniques (JS-file injection, monolithic inline JS, raw CDP). This has already happened partially (see F-142): a hang-avoidance rewrite reached only 1 of the 5 sibling primitives. Consumers also get inconsistent response shapes depending on which of the near-synonymous tool names they picked, with no indication which is canonical.",
+    "_source": "findings_dd3.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-142",
+    "severity": "High",
+    "category": "code_health",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/element_cloner.py:552-565",
+    "what": "extract_element_styles_cdp's docstring states its CDP-native rewrite exists specifically to prevent hangs, and extract_element_styles (element_cloner.py:28-65) now does nothing but delegate to it. But the other 4 extraction primitives in the same ElementCloner class - extract_element_structure, extract_element_events, extract_element_animations, extract_element_assets - still call self._load_js_file(...) followed by await tab.evaluate(js_code) (e.g. element_cloner.py:152-153), the exact JS-evaluation pattern the CDP rewrite was built to replace.",
+    "why_it_matters": "This is a fix that landed in 1 of 5 sibling methods and was never propagated to the other 4. If the underlying hang bug is real (the docstring states it as fact, not hypothesis), 4 of 5 extraction tools in ElementCloner - extract_element_structure, extract_element_events, extract_element_animations, extract_element_assets - remain exposed to it, with no tracking issue or TODO marking the gap.",
+    "_source": "findings_dd3.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-145",
+    "severity": "High",
+    "category": "testing",
+    "location": "tests/test_clone_storage_cap.py:19-23",
+    "what": "No test in the repository exercises the extraction logic of any of the 5 cloner classes (ElementCloner.extract_*, ComprehensiveElementCloner.extract_complete_element, ProgressiveElementCloner.clone_element_progressive/expand_*, CDPElementCloner.extract_complete_element_cdp, or any FileBasedElementCloner method's actual extraction path). Only 3 files reference these classes/instances by name (test_element_cloner_output_dir.py, test_clone_output_dir.py, conftest.py) and all 3 test only FileBasedElementCloner's output-directory path resolution. The other 5 clone-named test files (test_clone_storage_cap.py, test_clone_sweep_race.py, test_clone_trash_recovery.py, test_clone_legacy_marker_classification.py, test_profile_clone_excludes_cache.py) import disk-hygiene helpers directly from server (_clone_is_auto, _enforce_clone_storage_cap_in, _profile_ignore_names, _copy_profile_delta) - a storage-eviction subsystem layered on top of the clone output directory, unrelated to whether extraction itself is correct.",
+    "why_it_matters": "The consolidation this deep-dive recommends (F-140/F-141/F-142) would be executed with zero automated signal on whether the unified extractor still returns equivalent data to the 3 engines it replaces. Given the priority order for this audit is maintainability first, the highest-leverage fix here (collapsing 3 extraction engines into 1) is also the riskiest to do blind.",
+    "_source": "findings_dd3.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.92,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-161",
+    "severity": "High",
+    "category": "security",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:3846-3856",
+    "what": "The create_python_binding MCP tool execs the caller-supplied python_code string with `exec_globals = {}`. Since that dict has no '__builtins__' key, CPython auto-populates it with a reference to the real builtins module before execution (documented exec() behavior) — meaning this code runs with completely unrestricted builtins: open, __import__, eval, exec, everything. There is no restricted-namespace attempt, no AST validation, nothing — in contrast to the sibling exec/eval sites in dynamic_hook_system.py (F-160), which at least attempt a restricted __builtins__ dict and route through an AST denylist.",
+    "why_it_matters": "Same trust boundary as F-160 (python_code is always an MCP tool-call argument, i.e. AI/operator-authored, never page-controlled), but the blast radius is materially larger: this runs in the MCP server's own long-lived Python process with the operator's full OS-user privileges (filesystem, environment variables, ability to spawn subprocesses), not inside a purpose-built hook namespace. It's also a silent capability gap — nothing about the tool's docstring ('Python function code (as string)') signals that it carries zero sandboxing, while a maintainer skimming the codebase could reasonably assume the restricted-builtins pattern used elsewhere for hook code is the house style. That inconsistency is itself a maintainability smell: two modules solving the same problem (let AI-written Python run) with wildly different (and both broken) postures.",
+    "_source": "findings_dd4.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-164",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:139-153",
+    "what": "_with_cdp_timeout (used by nearly every CDP-calling tool, including call_javascript_function, inject_and_execute_script, create_persistent_function) and cdp_function_executor.execute_python_in_browser's own local `asyncio.wait_for(..., timeout=10.0)` both give up waiting on the Python side when a CDP call takes too long, but neither issues Runtime.terminateExecution (or any other command) to actually stop the browser-side script. cdp_function_executor.list_cdp_commands() (line 117) even enumerates terminateExecution as a known Runtime command — it's cataloged for the AI to call manually, never invoked automatically on this path.",
+    "why_it_matters": "Cancelling the Python-side await does not stop a synchronous, blocking script (e.g. an infinite loop) running on the tab's JS main thread — that's a browser/CDP fact independent of this codebase. The docstring's framing ('prevent infinite hangs,' 'timeout protection') implies the operation is recovered on timeout; in reality the caller gets an error back but the tab itself stays wedged. Every subsequent CDP call targeting that same tab (screenshots, clicks, further evaluates, hook interception setup) will also hang and eventually time out the same way, until the whole browser instance is closed and respawned — a real operability trap for a tool whose core use case is iterative, interactive browser automation. Scoped to the one wedged tab, not the whole server, since other instances/tabs proceed independently.",
+    "_source": "findings_dd4.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-180",
+    "severity": "Critical",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py:759-773",
+    "what": "close_instance() wraps its whole teardown (_do_close, browser_manager.py:617-757) in asyncio.wait_for(timeout=5.0), which reads as a hard bound. It is not one, because the calls that actually do the work are synchronous and never yield to the event loop, so asyncio's cooperative cancellation can never preempt them. Inside _do_close: process_cleanup.kill_browser_process(instance_id) (line 682) and process_cleanup.finalize_browser_process/cleanup_deferred_profiles (lines 743-744) are called directly, not via asyncio.to_thread/run_in_executor (confirmed by grep: the only to_thread usage anywhere in embedded/ is in server.py for unrelated storage sweeps and snapshot refresh -- browser_manager.py and process_cleanup.py use it nowhere). kill_browser_process -> _kill_processes_for_metadata loops sequentially over every PID sharing the instance's --user-data-dir (routinely more than one: Chrome's GPU/renderer/utility children inherit the same --user-data-dir flag), and _kill_process_by_pid does psutil terminate()+wait(timeout=3) then kill()+wait(timeout=2) per PID -- individually bounded, but purely synchronous, so N unresponsive processes block the single-threaded event loop for up to 5*N seconds with no way for the 5.0s wait_for timer to fire in between (the timer callback cannot run while the loop is stuck inside a synchronous call). browser.stop() (_stop_browser, line 688) is similarly unguarded, in contrast to the CDP send/disconnect calls just above it (lines 654-657, 668-670) which the same function DOES wrap in their own asyncio.wait_for(timeout=2.0) -- showing the authors knew to bound awaitable CDP ops but missed that the synchronous process-kill/profile-cleanup path needed the same treatment. The quoted fallback (triggered when wait_for actually does fire, e.g. if the hang occurred at an awaitable point) makes it worse: it re-invokes the exact same unbounded synchronous calls (kill_browser_process, finalize_browser_process, cleanup_deferred_profiles) a second time, now with no timeout wrapper at all.",
+    "why_it_matters": "close_instance is not a shutdown-only helper -- it is registered as a live MCP tool (server.py:1453, calling browser_manager.close_instance at line 1469) that any connected client can invoke at any time. Because this codebase now runs as a singleton backend shared by every concurrent Claude Code session (singleton.py), one client calling close_instance against an unresponsive/wedged Chrome process freezes the entire event loop -- and therefore every other session's tool calls, every other browser instance, and the idle reaper -- for as long as the synchronous kill sequence takes, which is unbounded in the worst case (multiple hung child processes, or a nodriver browser.stop() that blocks on a dead subprocess handle). This is precisely the 3am scenario: an operator sees the whole server stop responding, not just one instance failing to close, and the advertised 'timeout=5.0' gives false confidence that this cannot happen.",
+    "_source": "findings_dd5.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-182",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py:62-73",
+    "what": "DebugLogger.__init__ sets self._enabled = False (debug_logger.py:41), and log_error/log_warning/log_info (lines 72-73, 111-112, 138-139) each open with `if not self._enabled: return` -- before anything is appended to the in-memory buffers, not just before the stderr print. self._enabled only flips True via server.py:1303 (`if DEBUG_LOGGING_ENABLED: debug_logger.enable()`), where DEBUG_LOGGING_ENABLED (server.py:217-220) is itself `parse_bool_env(\"STEALTH_BROWSER_DEBUG\", False) or parse_bool_env(\"DEBUG\", False)` -- opt-in via environment variable (or the equivalent --debug CLI flag at server.py:4123-4128), off by default. Grepping the whole embedded/ package for `force=True` (the one parameter that bypasses the gate, on _emit_stderr) turns up exactly one call site: the logger announcing to itself that it was just enabled (debug_logger.py:303). No error/warning/info call anywhere uses it. Separately, even when enabled, storage is purely in-process Python lists capped at MAX_ERRORS=500/MAX_WARNINGS=1000/MAX_INFO=2000 (a trimming ring buffer, debug_logger.py:18-20, 96-97) -- there is no log file written automatically; persistence only happens if something explicitly calls export_to_file/export_to_file_paginated.",
+    "why_it_matters": "Every one of the 176 except-Exception handlers audited in F-181, all of close_instance's teardown diagnostics (F-180), and process_cleanup's kill/recovery logging all funnel through this gate. In the out-of-the-box configuration (no STEALTH_BROWSER_DEBUG/DEBUG env var, no --debug flag -- the default a user or an MCP host config would run with), none of it produces any output: not to stderr, not to the in-memory buffers that export_debug_logs/get_debug_view read from. A 3am hang or crash investigation on a default install finds the debug view completely empty, regardless of how carefully instrumented the surrounding code is -- and since nothing is ever flushed to disk on its own, a hard crash or force-kill loses whatever *would* have been buffered even if logging had been on.",
+    "_source": "findings_dd5.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-183",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:280-294",
+    "what": "singleton.py never imports debug_logger; its only diagnostic output in 571 lines is two raw print(..., file=sys.stderr) calls (lines 516-520, 530-534), both inside monitor_backend/run_backend_guarded for a backend that WAS healthy and later died. The cold-start path has no equivalent. ensure_server_running (line 297) fires _start_backend_holding_lock in a daemon thread and returns immediately without waiting on it (by design, so the stdio handshake never blocks). If anything in that thread throws -- _start_server_process failing to launch (bad interpreter path, a syntax error in a freshly-edited server.py causing the subprocess to exit immediately), _clear_stale_backend failing to evict a stale port-holder, or any other exception -- the quoted except swallows it completely: no log, no print, no re-raise, and since it's a daemon thread wrapped in its own try/except, Python's default unhandled-thread-exception traceback (which would otherwise print to stderr) never fires either. Meanwhile run_backend() (singleton.py:459-461) does `if not await _await_backend_http(url): return` -- and _await_backend_http polls for the full BACKEND_READY_TIMEOUT (120.0s, line 47), with each individual probe's own exception also silently caught (lines 358, 361). When it finally gives up, run_backend returns normally (no exception), so run_backend_guarded's `except Exception` (which is the only branch that prints anything, line 515-520) never triggers -- only its unconditional `finally: tg.cancel_scope.cancel()` (line 521-522) runs, tearing the proxy down with zero explanation.",
+    "why_it_matters": "This is the exact failure mode the fix/singleton-version-aware-backend branch's own feature depends on: when server.py is edited, the singleton is supposed to detect the version mismatch and start a fresh backend. If that fresh start fails for any reason, the operator sees the client hang for up to 120 seconds and then silently disconnect -- with absolutely nothing in stderr, no debug_logger entry (there is no integration to have one), and no way to tell 'the new backend crashed on startup' apart from 'the old backend is slow to answer' apart from any other cause. This is a foundational blind spot in precisely the workflow (edit server.py, expect a fresh backend process) already known to be a pain point.",
+    "_source": "findings_dd5.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-201",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:449-463",
+    "what": "server.py (4207 lines, docstring 'Main MCP server for browser automation') embeds a full filesystem trash/quota/eviction subsystem directly alongside all 96 @mcp.tool registrations: _trash_clone, _purge_expired_trash, _idle_autoclones_over_cap, _enforce_clone_storage_cap_in, _session_storage_cap_bytes, _named_profiles_over_session_cap, _enforce_named_profile_trim_in, _enforce_session_storage, _run_storage_sweep, _copy_profile_tree, _rmtree_robust and further helpers spanning roughly lines 330-1080 — over 700 lines of clone-storage business logic living in what is nominally the tool-routing file.",
+    "why_it_matters": "Any trace that touches an existing tool or adds a new one (2 of the 3 traced requests) means reading past hundreds of lines of unrelated clone-eviction filesystem logic to find the right MCP-tool code. It also means the 14 test files that `import server` directly (verified) exercise storage-sweep behavior, tool behavior, and profile-selection logic through the same single module import, so a change anywhere in the file risks rippling into unrelated test failures, and the storage-quota/trash system hardened across several recent commits (e5ced24, 83c7993, af4225b) sits one accidental edit away from any tool change.",
+    "_source": "findings_change_trace.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-202",
+    "severity": "High",
+    "category": "code_health",
+    "location": "tests/test_server_call_conventions.py:3-8",
+    "what": "response_handler.handle_response() (response_handler.py:65) is a synchronous method, but it is called from inside async def MCP tool wrappers in server.py that otherwise await almost everything around them. Three call sites (extract_element_assets, extract_related_files, discover_object_methods) were written as `return await response_handler.handle_response(...)`, which raises TypeError on every invocation, and shipped that way until fixed in commit 2267b83 (the commit this audit is pinned at).",
+    "why_it_matters": "This is exactly the class of bug the codebase's own tests cannot catch cheaply: server.py registers 96 tools and, per the fix commit's own test docstring, 'a live-browser test can't cover all 96 tools cheaply' — so the bug shipped silently, running real CDP work and then throwing on the return statement, on every call, for three shipped tools. The fix is a bespoke AST-walking static test (assert no ast.Await ever wraps a .handle_response attribute call) rather than a change that makes the mistake structurally impossible, so any other synchronous helper added to this heavily-async file in the future gets no equivalent protection unless someone remembers to write another bespoke AST guard for it.",
+    "_source": "findings_change_trace.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-203",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py:18-27",
+    "what": "Five separate modules implement overlapping 'extract data from a DOM element' functionality with largely mirrored method sets: element_cloner.py (ElementCloner.extract_element_styles/_structure/_events/_animations/_assets, extract_related_files, clone_element_complete — verified via grep), file_based_element_cloner.py (the same seven operations, each suffixed _to_file), plus cdp_element_cloner.py, comprehensive_element_cloner.py, and progressive_element_cloner.py as further independent implementations — 2,223 lines total across the 5 files (verified via wc -l). file_based_element_cloner.py does not even fully delegate: it imports and wraps both ComprehensiveElementCloner and the element_cloner singleton directly, per the quoted import block, rather than one implementation being layered cleanly on another.",
+    "why_it_matters": "Any change to what 'extracting an element' means (a new field to capture, a new fallback strategy, a bug fix in the querying logic) is a judgment call about which of 5 files need the same fix, with no compiler or test to catch a forgotten sibling. The MEDIUM trace in this audit shows the concrete cost: a new extraction-adjacent tool has 3 non-agreeing precedents to choose from for something as basic as 'where do I write the output file' (see F-205), because the cloner layer was never consolidated to one core.",
+    "_source": "findings_change_trace.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-204",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py:75-84",
+    "what": "DebugLogger is one global, module-level singleton (`debug_logger = DebugLogger()`, debug_logger.py:498) shared by every browser instance/session the singleton backend process is currently serving. log_error's de-duplication key is `component.method.exception_type.message` — component/method are fixed string tags like \"browser_manager\"/\"spawn_browser\", not the calling instance_id — so the first session to hit a given error shape suppresses every later occurrence from any other concurrent session for the rest of the process's life (bounded only by MAX_SEEN_ERRORS=1000 eventually clearing the whole set). All 287 verified debug_logger.* call sites across 15 files share this same no-instance-dimension shape.",
+    "why_it_matters": "This directly blocks the traced cross-cutting request (per-session log correlation) at the root: there is no instance/session concept anywhere in the logging layer to build on, so adding one means touching the class plus, in the worst case, all 287 call sites. It is also a live operability gap today, independent of any new feature: an operator investigating one session's failure cannot filter to it, and a second session's genuinely-recurring error can be silently and permanently dropped because a different session already logged 'the same shaped' error first.",
+    "_source": "findings_change_trace.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-206",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:263-269",
+    "what": "The singleton backend's decision to reuse a running backend process vs. start a fresh one is keyed on _server_version(), which reads the installed package's version metadata (importlib.metadata.version(SERVER_NAME)) — not a hash or mtime of the actual embedded/*.py source files. _start_backend_holding_lock (singleton.py:284) treats `_find_running_server() is not None` as '# already up (same version)' and returns without starting a new process.",
+    "why_it_matters": "Every one of the 3 traced feature requests edits files inside embedded/ (server.py, browser_manager.py, debug_logger.py, etc.) without necessarily bumping pyproject.toml's version (currently 1.2.0). Because reuse is gated on that version string, a developer iterating locally — editing server.py, then manually invoking a tool to check the change — keeps talking to the pre-edit backend process indefinitely, with zero error or warning; only a manual backend kill or a version bump forces a fresh process. None of the 34 test files catch this because they `import server` in-process (verified), bypassing the singleton/proxy entirely, so the test suite gives no signal this failure mode exists. This is a recurring, previously-observed source of 'I fixed it but it's still broken' confusion during manual verification on this exact branch.",
+    "_source": "findings_change_trace.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-301",
+    "severity": "Critical",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:83",
+    "what": "The ONLY liveness signal in the whole system is a raw TCP connect/close. It is used in three places: _find_running_server() (which status/doctor and every session's ensure_server_running() call to decide whether to reuse the existing backend), _watch_backend_liveness() (the sole automatic-recovery watchdog, which tears the proxy down after 3 consecutive failures so the client reconnects to a fresh backend), and _clear_stale_backend()'s early-return guard (the only eviction path). None of the three ever verifies the backend's asyncio event loop, its MCP dispatch loop, or FastMCP session manager is actually servicing requests -- only that something is willing to accept a socket connection. A backend whose event loop is deadlocked (e.g. blocked in a synchronous call, or genuinely stuck waiting on a CDP/Chrome response with no path to yield) can still complete a bare TCP handshake, so all three consumers of this function report 'healthy'/'running' throughout the entire incident.",
+    "why_it_matters": "This is the root cause of the whole incident being invisible: `stealth-chrome-devtools status`/`doctor` will print 'backend: running on port 19222' even while every tool call through it hangs forever, the automatic liveness watchdog (the only self-healing mechanism in the codebase) never arms because it polls this same weak signal, and the eviction logic that would let a fresh, correctly-versioned backend take over is gated behind '_find_running_server() == port' returning non-None -- which it will, for a wedged-but-socket-open backend. The one integration test that exercises recovery (tests/test_proxy_backend_death.py) proves this gap by its own design: its docstring and test body explicitly cover the backend being killed (hard death, socket goes unhealthy), never a backend that stays alive but stops answering -- the exact incident scenario given.",
+    "_source": "findings_incident.json",
+    "verify": {
+      "quote_status": null,
+      "confidence": null,
+      "verified": null
+    }
+  },
+  {
+    "id": "F-302",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/cli.py:219",
+    "what": "The entire ops CLI surface is these 5 verbs: two pure read-only inspectors (status, profiles), one disk-reclaim mutator (cleanup), one environment checker (doctor), and one that only ever starts a server (serve). There is no stop, restart, or kill-orphans verb. The one function that can actually evict a running backend, singleton._clear_stale_backend(), is never called from the CLI at all -- it only runs internally, mid-startup, inside _start_backend_holding_lock() when a NEW backend is already being spawned. Likewise, ProcessCleanup._recover_orphaned_processes() (the well-implemented, command-line-scoped, create_time-gated orphan-Chrome killer) only runs inside ProcessCleanup.__init__(), i.e. only as a side effect of a fresh backend process starting -- there is no way to invoke it standalone.",
+    "why_it_matters": "Combined with F-301 (a wedged same-version backend is reported 'reusable' forever), this means an on-call engineer who has correctly diagnosed a hung backend still has NO supported command to fix it. The only path is: manually discover the PID (see F-305 -- also unsupported), manually taskkill/terminate it outside any tooling the repo provides, and only THEN does the next session's ensure_server_running() spawn a fresh backend, whose ProcessCleanup.__init__() will (safely, by user-data-dir + create_time matching) clean up the orphaned Chrome as a side effect. Every step of actual recovery is manual and undocumented; the repo automates the safe-matching logic but not the trigger.",
+    "_source": "findings_incident.json",
+    "verify": {
+      "quote_status": null,
+      "confidence": null,
+      "verified": null
+    }
+  },
+  {
+    "id": "F-303",
+    "severity": "Critical",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:228",
+    "what": "The detached HTTP backend -- the single process that does all the real work once more than one Claude Code session is active (per singleton.py's own module docstring, this is the normal/expected mode, not an edge case) -- has stdout and stderr wired to os.devnull at the moment it is spawned. Every print(), every uncaught-exception traceback, every uvicorn access/error log line, and every debug_logger._emit_stderr() call (even when STEALTH_BROWSER_DEBUG=true) from that process is silently discarded. Grepping the entire tracked source tree confirms there is no FileHandler, RotatingFileHandler, or logging.basicConfig anywhere -- the only logger in the codebase (embedded/debug_logger.py) is an in-memory Python object (plain lists on a DebugLogger instance), disabled by default (self._enabled = False), with no disk persistence unless a caller explicitly invokes export_to_file / export_to_file_paginated.",
+    "why_it_matters": "There is no log file to open at 3am. Not 'hard to find' -- it structurally cannot exist for the process that matters, because its output streams are wired to the null device before a single line is ever written. If the wedged/crashed backend is killed (per F-302's manual recovery) or crashes on its own, every diagnostic signal that existed only in that process's memory (errors, warnings, info, the stack trace of whatever actually deadlocked it) is gone forever, unrecoverable by any means -- not rotated-and-archived-elsewhere, just never captured.",
+    "_source": "findings_incident.json",
+    "verify": {
+      "quote_status": null,
+      "confidence": null,
+      "verified": null
+    }
+  },
+  {
+    "id": "F-304",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:2459",
+    "what": "get_debug_view, export_debug_logs (server.py:2505), and get_debug_lock_status (server.py:2549) -- the only interfaces for reading the in-memory DebugLogger state described in F-303 -- are ordinary MCP tool functions, dispatched through the exact same request path as spawn_browser, navigate, click_element, etc. There is no separate diagnostic transport: no standalone HTTP debug endpoint outside the MCP session protocol, no OS signal handler that dumps state (e.g. SIGUSR1/SIGBREAK), no periodic background task that flushes the in-memory buffers to disk on its own schedule.",
+    "why_it_matters": "'Tool calls hang indefinitely' in the incident description means get_debug_view and export_debug_logs hang too -- they are tool calls. The one moment this data would matter (diagnosing why the backend is unresponsive) is the one moment it is guaranteed unreachable through any documented interface. An operator's only recourse is external OS-level inspection (py-spy, Process Explorer thread dump) which the repo neither documents nor bundles.",
+    "_source": "findings_incident.json",
+    "verify": {
+      "quote_status": null,
+      "confidence": null,
+      "verified": null
+    }
+  },
+  {
+    "id": "F-305",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/cli.py:95",
+    "what": "Verified live on the audited machine: `uv run stealth-chrome-devtools status` printed only `backend : running on port 19222` / `version : 1.2.0` -- no PID. But singleton._write_server_state() (singleton.py:106) records the PID on every backend start, and reading ~/.stealth-mcp/server.json directly on this machine returned `{\"port\": 19222, \"version\": \"1.2.0\", \"pid\": 104504}` -- confirmed against Get-CimInstance Win32_Process, which showed PID 104504 as the exact `python.exe -m stealth_chrome_devtools_mcp --transport http --port 19222` process. The data exists and is one field away from being printed, but neither _cmd_status nor _cmd_doctor reads state['pid']; both only ever consult _find_running_server()'s return value (the port).",
+    "why_it_matters": "Manual recovery (F-302's workaround, in the absence of a stop command) requires the PID to terminate the right process. Neither documented command exposes it, and the state file's existence/location (~/.stealth-mcp/server.json) is not mentioned anywhere in README.md or in --help output. An on-call engineer with zero tribal knowledge has no supported way to learn the PID; they would have to read singleton.py's source to discover this file exists at all.",
+    "_source": "findings_incident.json",
+    "verify": {
+      "quote_status": null,
+      "confidence": null,
+      "verified": null
+    }
+  },
+  {
+    "id": "F-306",
+    "severity": "High",
+    "category": "docs",
+    "location": "README.md:214",
+    "what": "A full inventory of every tracked file in the repository (git ls-files, 83 files) turned up zero docs/ directory, zero RUNBOOK/TROUBLESHOOTING/OPERATIONS file of any kind. This 15-line CLI section is the entire operational documentation for the project. It lists the 5 commands and one line of what each prints; it never discusses failure modes, what 'backend not running' vs 'backend running but unresponsive' means, where any state lives on disk, or what to do when something is stuck.",
+    "why_it_matters": "This is the direct, verifiable answer to 'do the docs tell you where to look first': no. Every other finding in this report (F-301 through F-305, F-307, F-308) is a gap that written operator documentation could partially compensate for even without a code fix -- and none of that documentation exists. A 3am on-call engineer's only source of truth is the source code itself, read cold, under time pressure.",
+    "_source": "findings_incident.json",
+    "verify": {
+      "quote_status": null,
+      "confidence": null,
+      "verified": null
+    }
+  },
+  {
+    "id": "F-307",
+    "severity": "High",
+    "category": "code_health",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py:47",
+    "what": "log_error/log_warning/log_info (debug_logger.py:62-153) each do `with self._lock:` (an untimed threading.Lock acquire) and call this _emit_stderr from inside that lock scope. print() to a pipe is a blocking syscall when the consumer isn't draining it -- it does not raise; it just blocks. The except clause here only catches (OSError, ValueError), which covers a closed/broken pipe, not a slow/full one. If any thread ever blocks inside this print while holding self._lock, every other thread's next log_error/log_warning/log_info call hangs forever on the untimed `with self._lock:` -- with no asyncio.wait_for or timeout anywhere in the codebase able to rescue it, since it is a synchronous blocking primitive, not an awaitable.",
+    "why_it_matters": "This is a code-level hang with no possible timeout backstop -- directly answering 'what would have surfaced this hang' with 'nothing could have, by construction.' It requires STEALTH_BROWSER_DEBUG=true (or DEBUG=true) and a real, undrained stderr pipe to trigger -- true for a manually-run `serve` in a terminal/script but not for the singleton-spawned production path, which DEVNULLs stderr (F-303) and therefore can't backpressure. Note clear_debug_view() (line 257) and export_to_file_paginated() (line 336) already use the safer `self._lock.acquire(timeout=5.0)` pattern with a lock-free fallback -- the three logging methods are the odd ones out.",
+    "_source": "findings_incident.json",
+    "verify": {
+      "quote_status": null,
+      "confidence": null,
+      "verified": null
+    }
+  },
+  {
+    "id": "F-402",
+    "severity": "High",
+    "category": "docs",
+    "location": "README.md:70-74",
+    "what": "The only way to sanity-check this MCP-config snippet is to hand-translate it into an equivalent terminal command (README gives no other verification method). Doing exactly that on this checkout's real, unmodified path (which contains a bare `&` and spaces) and typing it unquoted -- as the bare placeholder `/path/to/stealth-chrome-devtools-mcp` gives no reason not to -- reproduced a real failure: PowerShell 7 parsed the trailing `&` as its background-job operator, silently launched a stray job against the truncated path '...CUSTOM MCPs', then threw a completely unrelated error: \"The module 'PRODUCTIVITY' could not be loaded. For more information, run 'Import-Module PRODUCTIVITY'.\" Reproduced live; see audit/stage1/onboarding_trace.md step 1.3.",
+    "why_it_matters": "This is a real, reproduced failure on the literal checkout path handed to a new engineer, with a maximally misleading error message (a bogus PowerShell module name) that sends them chasing entirely the wrong lead instead of a quoting problem. The doc gives zero warning that the directory value needs quoting when typed manually.",
+    "_source": "findings_onboarding.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-403",
+    "severity": "Critical",
+    "category": "testing",
+    "location": "README.md:183-190",
+    "what": "Running the exact first documented command, `uv run pytest -m \"not integration\"`, on this checkout fails immediately with `Failed to canonicalize script path` (exit code 1) -- no test collection, no stack trace, nothing else actionable. Reproduced identically three ways (piped output, unpiped, `uv run pytest --version`, and with an explicit quoted `--directory` flag). Bypassing uv entirely and invoking pytest directly through the checked-out venv (`.venv\\Scripts\\python.exe -m pytest -m \"not integration\" -q`) passes cleanly: 402 passed, 24 deselected, 1 warning in 61.91s. `uv run stealth-chrome-devtools-mcp` and `uv run stealth-chrome-devtools status`/`doctor` do NOT hit this error on the same path, so the break is specific to how `uv run` resolves the pytest console-script shim, not a blanket problem with this directory.",
+    "why_it_matters": "This is THE documented test command -- the primary way any engineer, new or otherwise, is told to validate a change on this project. It is completely non-functional on this checkout as written, and the failure message has no discoverable connection to the real cause (a uv path-canonicalization limitation triggered by '&'/spaces in the folder name). There is no workaround, note, or warning anywhere in the docs. This blocks the single most important onboarding validation step on the exact checkout being audited.",
+    "_source": "findings_onboarding.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-407",
+    "severity": "High",
+    "category": "docs",
+    "location": "README.md:248-254",
+    "what": "The README ends immediately after License with no Contributing or development-workflow section. There is no branch-naming convention, no PR checklist, no CI-gate description beyond a passing-tests badge image, and no release/versioning/publish process documented anywhere -- despite the package clearly being published to PyPI (Quick Start's `pip install stealth-chrome-devtools-mcp` plus the PyPI badge at the top of the file). No CONTRIBUTING.md or RELEASING.md exists in the repo (confirmed via the same recursive *.md search as F-406).",
+    "why_it_matters": "For 'ship a one-line change', every step beyond running tests -- branch name, commit format, where/how to open a PR, who reviews it, how a merge becomes a PyPI release -- is pure guesswork drawn from outside convention rather than this project's actual practice, risking a rejected or reworked contribution.",
+    "_source": "findings_onboarding.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-501",
+    "severity": "Critical",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:83",
+    "what": "Ongoing backend liveness is judged solely by opening a TCP connection to the port. `_watch_backend_liveness` (line 368/388) defaults to this probe, resets its failure counter on any successful connect, and only tears the proxy down after 3 consecutive *connection* failures. A backend whose event loop / FastMCP session manager is wedged (but whose uvicorn listen socket is still open in the kernel) passes this probe forever. The stronger real-`initialize`->HTTP-200 probe (`_await_backend_http`, line 316) — whose own docstring warns 'a freshly bound uvicorn socket can answer (4xx) while FastMCP's MCP session manager is still starting' — is used ONLY once at startup, never for liveness.",
+    "why_it_matters": "Every session is a thin stdio proxy to ONE shared backend, so a single wedged backend hangs all sessions at once. Because the liveness signal cannot distinguish 'listening' from 'able to serve MCP', the proxy never tears down, the client never reconnects, and tool calls hang until the 120s BACKEND_READY_TIMEOUT and then indefinitely on later calls. This is the exact mechanism that turns one stuck request into a total, self-perpetuating outage that no automatic recovery clears.",
+    "_source": "findings_premortem.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-502",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:3",
+    "what": "The whole design centres on a single per-user backend process (STATE_DIR = ~/.stealth-mcp, one server.json, one port). When any new session sees a version mismatch, `_start_backend_holding_lock` calls `_clear_stale_backend`, which terminates/kills the backend process squatting the port (singleton.py:200-208: `proc.terminate()` ... `proc.kill()`) so its own fresh backend can bind.",
+    "why_it_matters": "One shared backend is a single point of failure for every concurrent session, and the eviction path makes it worse: a routine `uvx`/`pip` upgrade (or two projects pinned to different versions) means a newly-started session terminates the backend that other, still-running sessions are actively proxying to. Their in-flight browser automation — including browser subprocesses parented by that backend — dies mid-operation. A per-session action (starting a new client) thus causes a cross-session outage.",
+    "_source": "findings_premortem.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-503",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:228",
+    "what": "The singleton backend — the process that runs ALL browser automation for ALL sessions — is spawned fully detached with stdout, stderr and stdin routed to DEVNULL. There is no log file, no supervisor, no auto-restart, and (DETACHED_PROCESS / start_new_session) it is not a child of any session that could observe it.",
+    "why_it_matters": "When the backend wedges (F-501) or dies (F-502) there is zero diagnostic output to explain why, and nothing restarts it. Recovery is entirely manual and blind: an operator must know a hidden backend exists, discover port 19222, identify the orphaned PID, and kill it by hand — while every session stays down. This is the pillar that turns any backend incident into a long, high-MTTR outage.",
+    "_source": "findings_premortem.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-504",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:263",
+    "what": "Backend reuse identity is the installed package version STRING. `_find_running_server` (line 132) reuses a running backend whenever `state.get(\"version\") == _server_version()`. The version string does not change when the source in `embedded/server.py` is edited in place (editable/dev install stays '1.2.0'), so after editing code and reconnecting the client, `ensure_server_running` finds the still-running same-version backend and transparently proxies to the OLD code.",
+    "why_it_matters": "Edits silently do not take effect. A developer changes a tool, reconnects, observes the old behaviour, and concludes the fix is wrong — chasing a phantom. The project's own saved memory ('server.py edits need a fresh backend process, not just a reconnect') exists because this already burns people. Combined with F-503 (the backend is an invisible detached process) and F-506 (hot_reload can't reload server.py), every change requires manually hunting and killing an orphaned process that nothing tells you about. This is the primary velocity sink behind the missed deadline.",
+    "_source": "findings_premortem.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-505",
+    "severity": "High",
+    "category": "maintainability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1212",
+    "what": "`embedded/server.py` is a 4207-line god module holding 96 `@section_tool` tool bodies plus profile-clone, storage-sweep, and lifecycle logic, all behind a custom section_tool/DISABLED_SECTIONS indirection layer over FastMCP. Nearly every behavioural change lands in this one file.",
+    "why_it_matters": "A 4000+ line single-file surface makes any change slow to locate, hard to review, and wide in blast radius; the custom registration/disable layer adds a second thing to reason about. It is the structural reason estimates for 'small' tool changes balloon, and the reason regressions are easy to introduce and hard to isolate.",
+    "_source": "findings_premortem.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-507",
+    "severity": "High",
+    "category": "testing",
+    "location": ".github/workflows/publish.yml:0",
+    "what": "The PyPI publish job (`publish` needs `test`) runs ONLY `pytest -m \"not integration\"` before shipping. The real-browser integration suite is never a release gate. The coverage floor in test.yml is likewise computed with `-m \"not integration\" ... --cov-fail-under=39`, so the entire live-automation surface (browser spawn, CDP, navigation, cloning — most of the 4207-line god file) is excluded from the measured coverage by construction.",
+    "why_it_matters": "A release can be green and still be broken in every real browser path, because the code that actually drives Chrome is never exercised before publish and contributes nothing to the 39% floor. Nothing protects the highest-risk, hardest-to-test surface; regressions ship to users and are discovered only in the field.",
+    "_source": "findings_premortem.json",
+    "verify": {
+      "quote_status": "paraphrased",
+      "confidence": 0.8,
+      "verified": false
+    }
+  },
+  {
+    "id": "F-601",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/comprehensive_element_cloner.py:18-29",
+    "what": "5 cloner modules exist (element_cloner.py 648 LOC, file_based_element_cloner.py 647 LOC, comprehensive_element_cloner.py 343 LOC, cdp_element_cloner.py 320 LOC, progressive_element_cloner.py 265 LOC; 2223 LOC total). file_based_element_cloner.py's *_to_file methods cleanly delegate to element_cloner.py (e.g. `style_data = await element_cloner.extract_element_styles(...)`), but comprehensive_element_cloner.py imports only debug_logger (no element_cloner import, shown above) and independently reimplements 'extract complete element' extraction; cdp_element_cloner.py does the same again with its own extract_complete_element_cdp, importing only asyncio/json/nodriver/debug_logger.",
+    "why_it_matters": "A bug fix or CDP/DOM API change to element-extraction logic (styles, events, animations, CSS rules) has to be manually replicated across up to 3 independently-implemented extractors; nothing enforces they stay in sync, so tool behavior silently drifts depending on which cloner module backs a given MCP tool.",
+    "_source": "findings_prior.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-605",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/network_interceptor.py:174-182",
+    "what": "NetworkInterceptor.__init__ declares `self._requests`/`self._responses` as plain dicts (network_interceptor.py:21-22, no maxlen/LRU). `_on_response` fetches the *full* response body via CDP `get_response_body` (line 159) and stores it unconditionally on every captured response, with no per-body size cap and no total-store size cap; entries only disappear when `clear_instance_data` runs the pop/del cleanup for that instance_id (lines 601-605), i.e. on instance close.",
+    "why_it_matters": "A long-running browser session that loads many pages or makes heavy XHR/fetch traffic accumulates every response body in memory for the life of the instance; on network-heavy workloads this is a realistic path to hundreds of MB of resident memory and eventual OOM of the whole MCP server process, taking down every other active instance with it.",
+    "_source": "findings_prior.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-610",
+    "severity": "High",
+    "category": "operability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:2991-3003",
+    "what": "The `hot_reload` tool reloads browser_manager/network_interceptor/dom_handler modules and then replaces the module-global singleton instances with brand-new, empty instances (`browser_manager = BrowserManager()`, etc.) rather than migrating or preserving the existing tracked instance/session state.",
+    "why_it_matters": "Calling hot_reload while any browser instance is open orphans it: the new BrowserManager() has no record of instances the old one was tracking, so those browsers become unreachable through the API even though the underlying Chrome processes keep running — a direct resource leak and a surprising, easily-triggered operability failure for a tool whose whole purpose is 'reload without restarting'.",
+    "_source": "findings_prior.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-612",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1-12",
+    "what": "server.py is a single 4207-line module (verified via `wc -l`) containing nearly all 96 MCP tool definitions, config resolution, timeout/validation helpers, session/profile management, and orchestration logic for every other embedded/ subsystem.",
+    "why_it_matters": "A single 4000+ line file with 96 tool functions is hard to navigate, review, or safely change in isolation — every PR touching server.py risks unrelated merge conflicts and every reviewer has to hold the whole file's context to reason about a single tool's correctness; this is the file every other cross-cutting finding in this audit (F-602, F-603, F-605 area, etc.) lives inside.",
+    "_source": "findings_prior.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  }
+]

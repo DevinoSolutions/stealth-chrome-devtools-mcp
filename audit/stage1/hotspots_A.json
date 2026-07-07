@@ -1,0 +1,92 @@
+[
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/embedded/server.py",
+    "signal": "God object: 4207 lines, 38 imports, hosts browser_manager + network_interceptor + dom_handler + cdp_function_executor singletons. All 5 element cloner variants imported; unclear which one is actually used. Direct coupling to every subsystem.",
+    "severity_guess": "Critical",
+    "evidence_pointer": "server.py:1-100 (imports), 1297-1300 (singleton instantiation)"
+  },
+  {
+    "hotspot": "Global singleton instances (15 total)",
+    "signal": "15 module-level singletons (comprehensive_element_cloner, debug_logger, dynamic_hook_ai, dynamic_hook_system, element_cloner, file_based_element_cloner, hook_learning_system, persistent_storage, process_cleanup, progressive_element_cloner, response_handler + 4 in server.py) instantiated at import time. No initialization control, version awareness bypass, untestable design.",
+    "severity_guess": "Critical",
+    "evidence_pointer": "comprehensive_element_cloner.py:344, debug_logger.py:498, dynamic_hook_ai_interface.py:343, dynamic_hook_system.py:522, element_cloner.py:648, file_based_element_cloner.py:648, hook_learning_system.py:566, persistent_storage.py:95, process_cleanup.py:1023, progressive_element_cloner.py:263, response_handler.py:123, server.py:1297-1300"
+  },
+  {
+    "hotspot": "Element cloner subsystem (5 competing implementations)",
+    "signal": "Five overlapping implementations (element_cloner 31K, comprehensive_element_cloner 18K, file_based_element_cloner 28K, progressive_element_cloner 11K, cdp_element_cloner 14K) with unclear semantics and cross-imports. High maintenance burden, tests must mock all variants, no enforced interface.",
+    "severity_guess": "High",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/*cloner*.py (5 files)"
+  },
+  {
+    "hotspot": "Dynamic hook system + AI interface + hook learning (3 modules, 60K LOC)",
+    "signal": "Complex system for AI-generated Python code execution with custom sandboxing (dynamic_hook_system 25K, dynamic_hook_ai_interface 12K, hook_learning_system 23K). AST-based compilation, namespace injection, no access control per-hook. Security risk: malicious/buggy hooks can corrupt shared state.",
+    "severity_guess": "High",
+    "evidence_pointer": "dynamic_hook_system.py:1-80 (_compile_function), dynamic_hook_ai_interface.py, hook_learning_system.py"
+  },
+  {
+    "hotspot": "Process cleanup (1023 lines)",
+    "signal": "Oversized cleanup module suggests complex resource lifecycle, likely reactive cleanup patterns (kill on error) rather than proactive. If cleanup fails silently, leaves zombie processes.",
+    "severity_guess": "High",
+    "evidence_pointer": "process_cleanup.py (entire module), server.py uses it from line 47 import"
+  },
+  {
+    "hotspot": "Singleton version-awareness mechanism vs. 15 global instances",
+    "signal": "singleton.py implements port/version/pid discovery to prevent stale backend reuse (fix/singleton-version-aware-backend branch), but all 15 module-level singletons bypass this: they instantiate at import time regardless of version match. New backend can load old stale instances.",
+    "severity_guess": "High",
+    "evidence_pointer": "singleton.py:30-80 (version tracking), server.py:1297-1300, conftest for initialization flow"
+  },
+  {
+    "hotspot": "Broad exception handling (OSError/Exception/bare except)",
+    "signal": "Multiple OSError catches (server.py lines 349, 463, 472, 479) without specific recovery paths. Bare except potential. Exceptions swallowed without logging in error paths = operability blind spot.",
+    "severity_guess": "Medium",
+    "evidence_pointer": "server.py:198 (broad Exception), 349 (OSError), 463, 472, 479"
+  },
+  {
+    "hotspot": "Proxy layer orchestration (proxy_forwarder 16K + proxy_utils + response_handler)",
+    "signal": "Multiple layers (proxy_forwarder, proxy_utils, response_handler, response_stage_hooks) for protocol/response/staging. Unclear state ordering: which layer runs first? Hooks applied before/after proxy? Untestable without full stack.",
+    "severity_guess": "Medium",
+    "evidence_pointer": "proxy_forwarder.py (16K), proxy_utils.py (4.2K), response_handler.py (4.5K), response_stage_hooks.py (7.3K)"
+  },
+  {
+    "hotspot": "Network interceptor (25K) + DOM handler (28K) tightly coupled to server",
+    "signal": "Both live as singletons in server.py and imported from their own modules. No clear interface layer. Changes to CDP behavior or request interception require server.py modification.",
+    "severity_guess": "Medium",
+    "evidence_pointer": "network_interceptor.py (25K), dom_handler.py (28K), server.py lines 1298-1299"
+  },
+  {
+    "hotspot": "Persistent storage thread-safety (in-memory only, no durability)",
+    "signal": "InMemoryStorage uses RLock for thread safety but loses all browser instance metadata on backend restart. No recovery mechanism, no durability layer. Observability blind spot: can't audit past sessions.",
+    "severity_guess": "Medium",
+    "evidence_pointer": "persistent_storage.py (entire module), no persistence layer"
+  },
+  {
+    "hotspot": "Response handler file fallback (4.5K + 122 lines)",
+    "signal": "Default output dir is ~/.stealth-mcp/element_clones with STEALTH_MCP_CLONE_OUTPUT_DIR override. No quota, no cleanup, no monitoring of disk usage. Large responses silently spill to disk; no telemetry on fallback frequency.",
+    "severity_guess": "Medium",
+    "evidence_pointer": "response_handler.py:10-24 (default_clone_output_dir), line 40-50 (mkdir without cleanup)"
+  },
+  {
+    "hotspot": "Debug logger singleton (498 lines)",
+    "signal": "Debug logger is a global singleton initialized at module import time. No ability to change log levels per-session or per-instance. Log output goes to stderr without structured format. Can't mute logs in tests without shutting down logger.",
+    "severity_guess": "Low",
+    "evidence_pointer": "debug_logger.py (entire module), instantiated at line 498"
+  },
+  {
+    "hotspot": "Test coverage gaps (coverage 40.9%)",
+    "signal": "~59% of code untested. High-risk modules (dynamic_hook_system, process_cleanup, singleton version logic, proxy_forwarder) likely under-tested due to global state and async complexity.",
+    "severity_guess": "Medium",
+    "evidence_pointer": ".github/workflows/*, pyproject.toml (coverage gate at 39%)"
+  },
+  {
+    "hotspot": "Browser manager lifecycle (no timeout for close/cleanup)",
+    "signal": "BrowserManager handles spawn/close/state but no enforced timeout on cleanup. Hangs on close block server shutdown. No observable state for 'is browser closing?'",
+    "severity_guess": "Medium",
+    "evidence_pointer": "browser_manager.py (lifecycle handling)"
+  },
+  {
+    "hotspot": "CDPFunctionExecutor (executor of user JS with timeout)",
+    "signal": "Single executor handles all JS execution with max_timeout_ms = 60s default. No per-call timeout override, no queue/backpressure. Long-running JS blocks subsequent calls.",
+    "severity_guess": "Low",
+    "evidence_pointer": "cdp_function_executor.py, server.py (timeout constants)"
+  }
+]

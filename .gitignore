@@ -26,3 +26,7 @@ element_clones/
 /test_server_direct.py
 /pypi_*.png
 /test_screenshot.png
+
+# graphify knowledge-graph artifacts (local navigation aid)
+graphify-out/
+.graphify_*

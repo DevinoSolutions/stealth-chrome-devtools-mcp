@@ -1,0 +1,50 @@
+[
+  {
+    "id": "F-720",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py:47-56",
+    "quote": "    value = os.getenv(name)\n    if value is None:\n        return default\n    try:\n        parsed = int(value.strip())\n    except (TypeError, ValueError):\n        return default\n    if parsed < minimum:\n        return default\n    return parsed",
+    "what": "The exact same env-parsing body is independently defined twice under the identical name _parse_nonnegative_int_env: as a module-level function in browser_manager.py:31-56 (3-arg signature with a `minimum` parameter) and again as a @staticmethod inside ProcessCleanup in process_cleanup.py:57-78 (2-arg signature, minimum hardcoded to the literal 0 at line 76's `if parsed < 0:`). Neither file imports the other's copy. Separately, server.py:54-67 defines two more siblings of the same 'typed env var with fallback' family, parse_bool_env and parse_float_env, which browser_manager.py and process_cleanup.py also never import despite both files reading several of their own env vars with the same getenv-or-fallback shape.",
+    "why_it_matters": "Four independent implementations of one concept ('parse a typed environment variable with a safe fallback') exist across 3 files with no shared home. The two _parse_nonnegative_int_env copies already show the earliest sign of drift: browser_manager.py's version accepts a caller-supplied minimum, process_cleanup.py's silently assumes 0, so a future call site in process_cleanup.py that needs a different floor has no way to express it without copy-pasting a third time or reaching into browser_manager.py's private helper.",
+    "severity": "Low",
+    "confidence": 0.95,
+    "verified": false,
+    "survived_adversarial_review": null,
+    "fix_direction": "Move parse_bool_env/parse_float_env (server.py) and _parse_nonnegative_int_env (browser_manager.py's more general 3-arg version) into one small shared module (e.g. embedded/env_utils.py) and have all three call sites import from it; delete process_cleanup.py's private copy entirely.",
+    "effort": "S",
+    "category": "duplication",
+    "lens": "deduplication",
+    "extends": null
+  },
+  {
+    "id": "F-721",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py:435-449",
+    "quote": "    async def _execute_hook_action(self, tab, request: RequestInfo, action: HookAction, event=None):\n        \"\"\"Execute a hook action for either request or response stage.\"\"\"\n        try:\n            request_id = uc.cdp.fetch.RequestId(request.request_id)\n            \n            if action.action == \"block\":\n                await tab.send(uc.cdp.fetch.fail_request(\n                    request_id=request_id,\n                    error_reason=uc.cdp.network.ErrorReason.BLOCKED_BY_CLIENT\n                ))\n                debug_logger.log_info(\"dynamic_hook_system\", \"_execute_hook_action\", f\"Blocked {request.stage} {request.url}\")\n            \n            elif action.action == \"fulfill\":\n                headers = []\n                if action.headers:",
+    "what": "response_stage_hooks.py's ResponseStageProcessor class (execute_response_action, lines 22-78; execute_request_action, lines 80-144) independently re-implements the entire block/fulfill/redirect/modify CDP Fetch-domain dispatch that DynamicHookSystem._execute_hook_action (dynamic_hook_system.py:435-519) already performs for both request and response stages via its own request.stage branching. response_stage_hooks.py:148 builds `response_stage_processor = ResponseStageProcessor(None)  # Will be set by dynamic_hook_system`, but dynamic_hook_system.py never imports ResponseStageProcessor, response_stage_processor, or the response_stage_hooks module at all -- the wiring the comment promises never happened, so this second 148-line implementation is dead code, reachable only from its own dedicated test file (tests/test_response_stage_hooks.py).",
+    "why_it_matters": "This duplication has already rotted, which is the concrete cost of not sharing one implementation: dynamic_hook_system.py's fulfill branch base64-encodes the response body before calling fulfill_request (dynamic_hook_system.py:453-455/461, `body_base64 = base64.b64encode(body_bytes).decode('ascii')` ... `body=body_base64`) because CDP's Fetch.fulfillRequest requires a base64 body, but response_stage_hooks.py's copy of the same branch (response_stage_hooks.py:42-47) skips that step and passes `body=action.body or \"\"` raw. If this dead class were ever wired in as its own comment promises, it would emit malformed response bodies. This is a materially bigger and different-shaped instance than the existing header-loop finding against dynamic_hook_system.py: a second, currently-unreachable file-and-class-level copy of the whole dispatch method (of which the repeated header-to-HeaderEntry loop at response_stage_hooks.py:38-40/53-55/101-104/117-119 is only one ingredient), not one more repetition of a 4-line loop inside the same method.",
+    "severity": "Medium",
+    "confidence": 0.85,
+    "verified": false,
+    "survived_adversarial_review": null,
+    "fix_direction": "Delete response_stage_hooks.py and tests/test_response_stage_hooks.py. If response-stage-specific dispatch is genuinely still wanted, express it as a parameter/branch on the one live _execute_hook_action instead of a hand-maintained parallel class, so there is exactly one place that knows how to turn a HookAction into CDP Fetch-domain calls.",
+    "effort": "S",
+    "category": "duplication",
+    "lens": "deduplication",
+    "extends": null
+  },
+  {
+    "id": "F-722",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:34-43",
+    "quote": "STATE_DIR = Path.home() / \".stealth-mcp\"\nLOCK_FILE = STATE_DIR / \"singleton.lock\"\nPORT_FILE = STATE_DIR / \"server.port\"\n# Records {port, version, pid} for the backend we started, so discovery can\n# confirm a running backend is the SAME version before reusing it. Without this\n# an upgraded session silently reuses a stale old-version backend (issue #14).\nSERVER_STATE_FILE = STATE_DIR / \"server.json\"\nDEFAULT_PORT = 19222\nSTARTUP_TIMEOUT = 30\nSERVER_NAME = \"stealth-chrome-devtools-mcp\"",
+    "what": "singleton.py owns the only importable definitions of DEFAULT_PORT (=19222) and STATE_DIR (Path.home()/'.stealth-mcp'), but neither is imported anywhere else in src/. The port literal 19222 is re-typed independently in src/stealth_chrome_devtools_mcp/server.py:23 (`parser.add_argument(\"--singleton-port\", type=int, default=19222)`) and in cli.py:258 (`serve.add_argument(\"--port\", type=int, default=19222, help=\"HTTP port (default 19222)\")`, where the literal appears twice on the one line). The state-dir root is re-typed in response_handler.py:25 (`return Path.home() / \".stealth-mcp\" / \"element_clones\"`, whose own docstring at lines 18-20 says it deliberately 'mirrors the project's existing state-dir convention' rather than importing it) and, divergently, in embedded/server.py's _default_session_root (embedded/server.py:225-231), which uses a same-level sibling name `\".stealth-mcp-browser-sessions\"` on POSIX and an entirely different, non-home-relative root `C:\\stealth-mcp-browser-sessions` on Windows instead of nesting under STATE_DIR.",
+    "why_it_matters": "Two 'define once, consume everywhere' constants instead ended up with 2-3 independently re-typed copies apiece, and the directory one has already visibly drifted: response_handler.py at least kept the same `.stealth-mcp` root by hand-copying the string, but embedded/server.py's session root broke off into a same-purpose but differently-named and differently-rooted directory. Any future change to the port default or the state-dir root (e.g. a per-OS relocation) silently misses whichever of these sites the editor doesn't know to check, and on Windows two of this server's own data directories (`~/.stealth-mcp` and `C:\\stealth-mcp-browser-sessions`) don't even share a common parent to discover or clean up together.",
+    "severity": "Low",
+    "confidence": 0.9,
+    "verified": false,
+    "survived_adversarial_review": null,
+    "fix_direction": "Export DEFAULT_PORT and STATE_DIR from singleton.py as the single source of truth; have cli.py's and server.py's argparse defaults import DEFAULT_PORT, and have response_handler.py and embedded/server.py's _default_session_root build their paths as a subdirectory of the imported STATE_DIR (e.g. STATE_DIR / \"browser-sessions\") instead of re-typing the root.",
+    "effort": "S",
+    "category": "duplication",
+    "lens": "deduplication",
+    "extends": null
+  }
+]

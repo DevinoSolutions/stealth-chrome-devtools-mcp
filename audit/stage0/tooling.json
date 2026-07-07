@@ -1,0 +1,166 @@
+{
+  "pinned_sha": "2267b83d3efda03f93936db2c34ded33aaa0d701",
+  "sha_verified": true,
+  "verification_note": "git rev-parse HEAD matches pinned_sha exactly; working tree porcelain shows only ?? CODEBASE_AUDIT.md and ?? audit/ (both expected, pre-existing/self-generated), no drift.",
+  "configured": {
+    "test_framework": "pytest>=8.0 + pytest-asyncio>=0.23 + pytest-timeout>=2.3 + pytest-cov>=5.0 (all in [project.optional-dependencies].test)",
+    "pytest_config": "[tool.pytest.ini_options]: testpaths=[\"tests\"], asyncio_mode=\"auto\", markers=[\"integration: tests that spawn real browsers\"]",
+    "coverage_config": "[tool.coverage.run] source=[\"src/stealth_chrome_devtools_mcp\"]; [tool.coverage.report] show_missing=true. NOTE: no fail_under key in pyproject.toml.",
+    "build_backend": "hatchling ([build-system] + [tool.hatch.build.targets.wheel] packages=[\"src/stealth_chrome_devtools_mcp\"])",
+    "linter": "none (no [tool.ruff]/[tool.flake8]/[tool.pylint] section, no config file)",
+    "type_checker": "none (no [tool.mypy]/pyright config)",
+    "formatter": "none (no [tool.black]/[tool.ruff.format])",
+    "dependency_audit": "none (no pip-audit/safety config, no .github/dependabot.yml)",
+    "pre_commit": "none (no .pre-commit-config.yaml)",
+    "dependency_pinning": "uv.lock tracked; direct deps in pyproject.toml are mostly exact-pinned (==), one range (requests>=2.32.0,<4)",
+    "gitignore_tool_hints": ".gitignore lists .ruff_cache/ and .mypy_cache/ even though neither tool is configured anywhere"
+  },
+  "enforced_in_ci": {
+    "test.yml/unit-tests": "matrix py3.11/3.12/3.13; `uv sync --extra test` then `uv run pytest -m \"not integration\" -v --tb=short --cov=src/stealth_chrome_devtools_mcp --cov-report=term-missing --cov-fail-under=39`",
+    "test.yml/integration-tests": "py3.12 only, needs unit-tests; installs real Chrome+Xvfb; `uv run pytest -m integration -v --tb=short --timeout=120` (no coverage flag)",
+    "publish.yml/test": "matrix py3.11/3.12/3.13; `uv run pytest -m \"not integration\" -v --tb=short` (no coverage flag) as a gate before build+publish",
+    "publish.yml/publish": "`uv build` + pypa/gh-action-pypi-publish (pinned SHA) + changelog/GH-release generation; all third-party actions are SHA-pinned (not tag-pinned)",
+    "lint_step": "NONE in any workflow",
+    "type_check_step": "NONE in any workflow",
+    "dependency_audit_step": "NONE in any workflow",
+    "formatter_check_step": "NONE in any workflow"
+  },
+  "gaps": [
+    "coverage --cov-fail-under=39 exists only as a CI CLI flag (test.yml); pyproject.toml [tool.coverage.report] has no fail_under, so local `pytest --cov` runs never enforce the gate (enforced-in-ci, not-configured-in-pyproject)",
+    ".gitignore pre-declares .ruff_cache/ and .mypy_cache/ but neither ruff nor mypy has any config in pyproject.toml and neither runs in any workflow (anticipated-but-never-wired-up)",
+    "no linter configured or enforced anywhere; unconfigured `ruff check` probe found 99 violations (67 unused-import, 15 f-string-missing-placeholders, 7 unused-variable, 6 module-import-not-at-top, 3 ambiguous-variable-name, 1 undefined-name/F821 -- correctness-adjacent, not just style)",
+    "no type-checker (mypy/pyright) configured or enforced anywhere",
+    "no formatter (black / ruff format) configured or enforced anywhere",
+    "no dependency-audit / vulnerability scanning configured or enforced anywhere (no CI step, no dependabot.yml); ad-hoc pip-audit run for this stage found 34 known vulnerabilities across 9 packages",
+    "publish.yml's pre-publish test gate omits --cov-fail-under entirely, so a release can ship on a build that push/PR CI would have blocked on coverage",
+    "integration tests run on a single Python version (3.12) while unit tests run the full 3.11/3.12/3.13 matrix -- asymmetric version coverage"
+  ],
+  "final_exclusions": [
+    {"path": ".venv/", "reason": "vendored"},
+    {"path": ".git/", "reason": "vcs"},
+    {"path": "__pycache__/", "reason": "bytecode"},
+    {"path": "*.egg-info/", "reason": "build-meta"},
+    {"path": "dist/", "reason": "build-output"},
+    {"path": "build/", "reason": "build-output"},
+    {"path": ".pytest_cache/", "reason": "test-cache"},
+    {"path": ".coverage", "reason": "coverage-data"},
+    {"path": "htmlcov/", "reason": "coverage-report"},
+    {"path": "element_clones/", "reason": "runtime-output"},
+    {"path": "pypi_filled.png, pypi_form.png, pypi_login.png, pypi_publishing.png, pypi_result.png, test_screenshot.png", "reason": "screenshots"},
+    {"path": "uv.lock", "reason": "lockfile"},
+    {"path": "audit/", "reason": "self-output"},
+    {"path": "perf_clone_check.py, perf_close_check.py, perf_timing.py, preview_clone_sweep.py, probe_graceful_close.py, smoke_mcp.py, test_server_direct.py", "reason": "scratch-scripts"},
+    {"path": "CODEBASE_AUDIT.md", "reason": "prior-audit-doc"}
+  ],
+  "final_exclusions_delta_from_provisional": [
+    "added: root-level scratch-scripts bucket (perf_*.py, probe_*.py, preview_*.py, smoke_*.py, test_server_direct.py) -- gitignored, physically present, would leak into a naive filesystem glob (git-ls-files-based scans already skip them)",
+    "added: CODEBASE_AUDIT.md -- untracked prior-audit doc at root, feeds a different pipeline stage (prior_claims/prior_summary), not source",
+    "clarified: provisional 'root *.png' confirmed as 5 pypi_*.png + test_screenshot.png, all present and all gitignored",
+    "confirmed present as-is: .venv/, .git/, __pycache__ (implied), *.egg-info/ (implied, not currently materialized), dist/ build/ (implied, not currently materialized), .pytest_cache/ (present), .coverage (present), htmlcov/ (implied, not currently materialized), element_clones/ (present), uv.lock (present), audit/ (present, self)"
+  ],
+  "metrics": {
+    "loc": {
+      "src/stealth_chrome_devtools_mcp": 15264,
+      "tests": 6187,
+      "total_py_tracked": 21451,
+      "py_file_count_tracked": 62,
+      "note": "tracked .py files only (git ls-files), src concentration: server.py alone is 4207 LOC = 27.6% of src/ and 19.6% of all tracked .py in the repo"
+    },
+    "largest_files": [
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/server.py", "loc": 4207},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py", "loc": 1335},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py", "loc": 1023},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/cdp_function_executor.py", "loc": 842},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/dom_handler.py", "loc": 714},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/element_cloner.py", "loc": 648},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py", "loc": 648},
+      {"file": "tests/test_browser_integration.py", "loc": 625},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/network_interceptor.py", "loc": 606},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/singleton.py", "loc": 571},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/hook_learning_system.py", "loc": 566},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py", "loc": 522},
+      {"file": "tests/test_cdp_timeout.py", "loc": 505},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py", "loc": 498},
+      {"file": "tests/test_process_cleanup.py", "loc": 452}
+    ],
+    "churn_top": {
+      "total_commits_in_history": 68,
+      "method": "git log --format= --name-only, counted per tracked filename occurrence, deleted/renamed-away files excluded",
+      "files": [
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/server.py", "commits": 25},
+        {"file": "README.md", "commits": 19},
+        {"file": "tests/test_browser_integration.py", "commits": 14},
+        {"file": "pyproject.toml", "commits": 12},
+        {"file": ".github/workflows/test.yml", "commits": 10},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py", "commits": 8},
+        {"file": "uv.lock", "commits": 7},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py", "commits": 7},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/singleton.py", "commits": 5},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py", "commits": 4},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/dom_handler.py", "commits": 4},
+        {"file": "tests/test_cdp_timeout.py", "commits": 4},
+        {"file": ".gitignore", "commits": 3},
+        {"file": "HIGH_VALUE_CHANGES.md", "commits": 3},
+        {"file": "tests/test_singleton_fast_handshake.py", "commits": 3}
+      ]
+    },
+    "churn_x_size": [
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/server.py", "commits": 25, "loc": 4207},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py", "commits": 8, "loc": 1023},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py", "commits": 7, "loc": 1335},
+      {"file": "tests/test_browser_integration.py", "commits": 14, "loc": 625},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/singleton.py", "commits": 5, "loc": 571},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/dom_handler.py", "commits": 4, "loc": 714},
+      {"file": "src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py", "commits": 4, "loc": 648},
+      {"file": "tests/test_cdp_timeout.py", "commits": 4, "loc": 505}
+    ],
+    "complexity_worst": {
+      "tool": "radon cc -s -n D src/ (via uvx, grade D-or-worse only)",
+      "blocks": [
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/element_cloner.py", "block": "ElementCloner.extract_element_styles_cdp", "line": 541, "grade": "E", "score": 36},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py", "block": "BrowserManager.spawn_browser", "line": 311, "grade": "E", "score": 32},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/proxy_forwarder.py", "block": "AuthenticatedProxyForwarder._handle_http_request", "line": 141, "grade": "E", "score": 31},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/dom_handler.py", "block": "DOMHandler.query_elements", "line": 19, "grade": "D", "score": 30},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py", "block": "DynamicHookSystem._process_request_hooks", "line": 269, "grade": "D", "score": 25},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py", "block": "DynamicHookSystem._execute_hook_action", "line": 435, "grade": "D", "score": 23},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/server.py", "block": "_resolve_profile_selection", "line": 1080, "grade": "D", "score": 23},
+        {"file": "src/stealth_chrome_devtools_mcp/embedded/network_interceptor.py", "block": "NetworkInterceptor.search_requests", "line": 219, "grade": "D", "score": 22}
+      ],
+      "note": "proxy_forwarder.py and dynamic_hook_system.py are complexity hotspots absent from both the largest-files and churn-top lists -- stable-but-complex, a different risk shape than server.py."
+    },
+    "dep_audit": {
+      "tool": "uv run --with pip-audit pip-audit (ephemeral overlay in the project's real resolved environment; a bare `uvx pip-audit` would only audit its own isolated env, not the project, so it was rejected)",
+      "return_code": 1,
+      "vulnerabilities_found": 34,
+      "packages_affected": 9,
+      "direct_deps_affected": [
+        {"package": "fastmcp", "installed": "2.11.2", "advisories": 6, "fix_versions_seen": ["2.13.0", "2.14.0", "2.14.2", "3.2.0"], "note": "pinned version is 2 major releases behind the nearest fixes"},
+        {"package": "pillow", "installed": "11.3.0", "advisories": 6, "fix_versions_seen": ["12.1.1", "12.2.0"], "note": "fix requires a major version bump (11.x -> 12.x)"},
+        {"package": "python-dotenv", "installed": "1.1.1", "advisories": 1, "fix_versions_seen": ["1.2.2"]}
+      ],
+      "transitive_deps_affected": [
+        {"package": "starlette", "installed": "1.0.0", "advisories": 5, "fix_versions_seen": ["1.0.1", "1.1.0", "1.3.0", "1.3.1"]},
+        {"package": "pyjwt", "installed": "2.12.1", "advisories": 5, "fix_versions_seen": ["2.13.0"]},
+        {"package": "python-multipart", "installed": "0.0.28", "advisories": 3, "fix_versions_seen": ["0.0.30", "0.0.31"]},
+        {"package": "cryptography", "installed": "48.0.0", "advisories": 1, "fix_versions_seen": ["48.0.1"]},
+        {"package": "joserfc", "installed": "1.6.5", "advisories": 1, "fix_versions_seen": ["1.6.7"]},
+        {"package": "pydantic-settings", "installed": "2.14.1", "advisories": 1, "fix_versions_seen": ["2.14.2"]}
+      ],
+      "unauditable": ["stealth-chrome-devtools-mcp (1.2.0) -- project's own package, not found on PyPI, skipped by pip-audit"]
+    },
+    "lint": {
+      "tool": "uvx ruff check src/ tests/ --statistics",
+      "configured_status": "UNCONFIGURED PROBE -- no ruff/lint config exists anywhere in the repo; run to establish a baseline only",
+      "total_violations": 99,
+      "auto_fixable": 82,
+      "top_rules": [
+        {"rule": "F401", "desc": "unused-import", "count": 67},
+        {"rule": "F541", "desc": "f-string-missing-placeholders", "count": 15},
+        {"rule": "F841", "desc": "unused-variable", "count": 7},
+        {"rule": "E402", "desc": "module-import-not-at-top-of-file", "count": 6},
+        {"rule": "E741", "desc": "ambiguous-variable-name", "count": 3},
+        {"rule": "F821", "desc": "undefined-name", "count": 1, "note": "correctness-adjacent, not auto-fixable, only non-cosmetic rule in the set"}
+      ]
+    }
+  }
+}

@@ -1,0 +1,92 @@
+[
+  {
+    "id": "F-504",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton.py line 263: _server_version() definition matches exactly; finding correctly identifies version string immutability as root cause of backend reuse issue."
+  },
+  {
+    "id": "F-505",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "server.py line 1212: section_tool decorator present; 4207-line god module claim supported by file size."
+  },
+  {
+    "id": "F-506",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "server.py line 2983: modules_to_reload list omits server.py; hot_reload advertises full reload but excludes tool-code. Verified."
+  },
+  {
+    "id": "F-507",
+    "quote_status": "paraphrased",
+    "location_ok": false,
+    "behavior_ok": true,
+    "verified": false,
+    "confidence": 0.8,
+    "note": "publish.yml line 31-32 has exact quote but location specifies line:0 (invalid). Test runs only non-integration suite before PyPI publish - finding correct, location wrong."
+  },
+  {
+    "id": "F-508",
+    "quote_status": "paraphrased",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.9,
+    "note": "Multi-file pattern quote format. All 5 cloner classes verified: ElementCloner (16), FileBasedElementCloner (26), ComprehensiveElementCloner (29), CDPElementCloner (27), ProgressiveElementCloner (18). Duplication pattern confirmed."
+  },
+  {
+    "id": "F-509",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton.py line 218: _start_server_process uses fixed DEFAULT_PORT 19222 with no fallback logic. Finding correctly identifies port binding brittleness."
+  },
+  {
+    "id": "F-601",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "comprehensive_element_cloner.py line 18: imports and no element_cloner dependency verified. Finding correctly notes independent reimplementation vs. delegation pattern."
+  },
+  {
+    "id": "F-602",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "server.py line 234: _master_profile_dir and _clone_root_dir functions with ad-hoc getenv() calls confirmed. ~12 scattered env var resolutions verified; no centralized config schema."
+  },
+  {
+    "id": "F-603",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "server.py line 1861: wait_for_element uses _with_cdp_timeout wrapper and browser_manager.get_tab boilerplate. Finding correctly identifies 49 repetitions of identical instance-lookup pattern across 96 tools."
+  },
+  {
+    "id": "F-604",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file_based_element_cloner.py line 15: anchors sys.path at .parent.parent; comprehensive_element_cloner.py line 23 anchors at .parent. Inconsistent sys.path setup verified."
+  }
+]

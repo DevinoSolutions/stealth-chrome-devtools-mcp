@@ -1,0 +1,149 @@
+[
+  {
+    "id": "F-101",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Verified exact: server.py is 4208 lines, 162 top-level defs, 96 @section_tool decorators across 11 distinct sections, SECTION_TOOLS@51 / DISABLED_SECTIONS@50, apply_disabled_sections@1220 - every cited number matches. The 'one import unit = shared failure domain' claim is structurally true: any import-time error aborts all 96 registrations before apply_disabled_sections can prune, so sections give zero load-time isolation. No factual error; it is the genuine top maintainability issue. Note: F-505 and F-612 are duplicates of this same root cause.",
+    "attack_tried": "Independently recounted lines/defs/tools/sections and checked whether SECTION_TOOLS/DISABLED_SECTIONS provides load-time fault isolation (it does not - it prunes post-import)."
+  },
+  {
+    "id": "F-104",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Confirmed all four incompatible shapes at the cited lines: execute_script returns {success,error} (L1939-1948), get_debug_lock_status returns bare {'error':str(e)} with no success key (L2559), new_tab re-raises a generic Exception (L2663), hot_reload/reload_status are '-> str' on both success and failure (L2975/L3013), and _with_cdp_timeout raises a plain Exception (L139). The 22-block / 4-contract inconsistency holds and is a real maintainability burden for the AI caller. Cannot refute.",
+    "attack_tried": "Opened each cited site to confirm the error contracts are genuinely incompatible rather than cosmetically different."
+  },
+  {
+    "id": "F-105",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Accurate: the 96 @section_tool coroutine bodies have no direct unit tests; only skippable integration tests (need Chrome) and the AST convention test touch them. The gap is partly inherent to browser-driving code, but it is real and the F-202 TypeError bug is the proof it bites. Could not find any non-integration test that imports and calls a tool body.",
+    "attack_tried": "Searched for any unit test that invokes a tool coroutine directly; found only AST/static tests and extracted-helper tests (test_profile_resolution)."
+  },
+  {
+    "id": "F-107",
+    "verdict": "downgrade",
+    "new_severity": "Low",
+    "rebuttal": "The code is real: exec_globals={} then exec(python_code, exec_globals) at server.py:3847-3848, with __builtins__ auto-injected. But python_code is strictly the MCP tool-call parameter (signature L3830) - always operator/AI-authored, never page- or network-derived - so in this LOCAL single-user tool it is self-inflicted, not RCE. The finding itself concedes it is 'presumably intentional given the product's purpose.' Downgrade the security framing; residual is a minor robustness note.",
+    "attack_tried": "Traced python_code's provenance end-to-end and searched for any page/network data path into the exec text - none exists."
+  },
+  {
+    "id": "F-120",
+    "verdict": "downgrade",
+    "new_severity": "Medium",
+    "rebuttal": "The fact is airtight: _server_version() returns importlib.metadata.version (singleton.py:263-267), compared at L132, so a source edit at the frozen 1.2.0 is invisible on reconnect. But requiring a daemon restart to pick up source edits is normal persistent-process behavior, not a High defect; version-aware eviction correctly does its actual job (version bumps), and manual escapes exist. The branch name 'fix/singleton-version-aware-backend' shows it is already being worked. Severity inflated.",
+    "attack_tried": "Checked whether any mtime/hash/source-change signal feeds the reuse decision (none) and whether an escape hatch exists (manual kill or bump+reinstall)."
+  },
+  {
+    "id": "F-124",
+    "verdict": "downgrade",
+    "new_severity": "Medium",
+    "rebuttal": "Real: ProcessCleanup.__init__ calls _recover_orphaned_processes() (process_cleanup.py:55) via the module singleton at L1023, and conftest.py does NOT set STEALTH_MCP_NO_AUTO_RECOVERY (verified absent). But it is triple-guarded - env-var opt-out at L52, _init_time so it never kills current-session processes (L45-47), and a no-op when the pid file is absent (so never on CI) - and it only reaps this tool's own tracked orphans. A genuine import-time side-effect smell, but High overstates a guarded, CI-invisible, self-scoped cleanup.",
+    "attack_tried": "Looked specifically for the guard the brief flagged: found env-var + _init_time + pid-file-existence gating, and confirmed conftest never sets the env var for the pytest process."
+  },
+  {
+    "id": "F-140",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Verified three live, tool-wired 'extract complete element' engines with different schemas: ElementCloner.clone_element_complete, ComprehensiveElementCloner.extract_complete_element, and CDPElementCloner.extract_complete_element_cdp - whose own docstring claims it supersedes the others, yet the other two remain wired to tools. Real triplication. Overlaps F-203/F-601 (5-module framing) but is a distinct sub-claim about the 3 complete-extract engines.",
+    "attack_tried": "Confirmed all three engines still exist and are independently tool-wired rather than one delegating to another."
+  },
+  {
+    "id": "F-142",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Confirmed at HEAD: only extract_element_styles is CDP-native (delegates to extract_element_styles_cdp, element_cloner.py L28), while extract_element_structure/_events/_animations still do _load_js_file + tab.evaluate (L116/L171/L226) and extract_element_assets still uses tab.evaluate (L281) - the exact JS-eval pattern the CDP rewrite was built to replace. The '1 of 5 fixed, 4 exposed' claim is true; the only imprecision is that assets inlines JS rather than calling _load_js_file, but the hang exposure is identical.",
+    "attack_tried": "Statically classified each of the 5 primitives by _load_js_file / tab.evaluate / CDP usage to test whether the hang fix was actually propagated - it was not."
+  },
+  {
+    "id": "F-145",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Accurate: the only cloner tests cover FileBasedElementCloner output-dir resolution and server-level storage-hygiene helpers; nothing exercises any extraction path of the 5 cloner classes. That makes the F-140/F-203 consolidation genuinely blind. Cannot refute.",
+    "attack_tried": "Searched all clone-named test files for calls into extract_* / extract_complete_element* bodies; found only output-dir and storage-cap coverage."
+  },
+  {
+    "id": "F-161",
+    "verdict": "downgrade",
+    "new_severity": "Low",
+    "rebuttal": "Same code as F-107 (exec_globals={}; exec at server.py:3847-3848) and the same operator-authored trust boundary - the finding itself states python_code is 'never page-controlled,' so RCE severity is self-inflicted in this local tool. Its factual sub-claim checks out: dynamic_hook_system.py does use a restricted __builtins__ (L77, L121) and imports ast, so the cross-module inconsistency smell is real but minor. Downgrade the security framing; keep as a low maintainability note.",
+    "attack_tried": "Verified the sibling-module claim (restricted builtins / AST in dynamic_hook_system) and re-traced the page-data path into the exec (none)."
+  },
+  {
+    "id": "F-201",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Verified all 11 named storage/trash/eviction helpers are defined inside server.py, spanning L449-L888 (_trash_clone@449 ... _copy_profile_tree@888), confirming ~700 lines of clone-storage business logic embedded in the nominal tool-routing file. This is a distinct maintainability point (domain mixing / blast radius into the 14 import-server test files) from the god-object size finding. Holds.",
+    "attack_tried": "Located each named helper to confirm they are actually defined in server.py rather than imported from a separate storage module."
+  },
+  {
+    "id": "F-202",
+    "verdict": "downgrade",
+    "new_severity": "Low",
+    "rebuttal": "The bug is already fixed at HEAD: zero `await response_handler.handle_response` calls remain, all sites now synchronous with explicit guard comments (L2844/L2916/L3700). The finding concedes it was fixed in the pinned commit; its only live substance is a critique of the AST guard - which actually IS a structural CI check that blocks that exact mistake repo-wide (it merely doesn't generalize to other sync helpers). A fixed defect plus a partly-wrong 'not structural' critique does not warrant High.",
+    "attack_tried": "Grepped for any surviving awaited handle_response at HEAD (none) and evaluated whether the AST test is truly non-structural (it is a structural CI gate for this method)."
+  },
+  {
+    "id": "F-203",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Verified 5 cloner modules with LOC 649/648/344/321/266 = 2228 (finding's 2223 differs only by trailing-newline counting), and file_based_element_cloner does wrap both ComprehensiveElementCloner and the element_cloner singleton rather than layering cleanly. Real duplication with no enforced sync. Note it is near-identical to F-601 and overlaps F-140; recommend main merge F-203/F-601.",
+    "attack_tried": "Recounted module LOC and inspected the import/delegation structure to confirm overlapping-not-layered implementations."
+  },
+  {
+    "id": "F-204",
+    "verdict": "downgrade",
+    "new_severity": "Medium",
+    "rebuttal": "Fact confirmed: one global debug_logger singleton (L498); the dedup key is f'{component}.{method}.{type(error).__name__}.{str(error)}' (L76) with NO instance_id anywhere in the module (verified absent), so the first session suppresses a same-shaped error for every other session until the set clears at 1000 (L82-83). But in a LOCAL single-user tool, cross-session log suppression is a low-impact operability gap, not High; the real weight is the 287-call-site refactor cost, which is a maintainability concern rather than a live High-severity defect.",
+    "attack_tried": "Confirmed the exact signature string and grepped the entire module for any instance/session dimension - there is none."
+  },
+  {
+    "id": "F-307",
+    "verdict": "downgrade",
+    "new_severity": "Medium",
+    "rebuttal": "Code confirmed: log_error/_warning/_info hold an untimed `with self._lock:` and call _emit_stderr inside it (lock-before-emit ordering verified), whose print(...,stderr) only excepts (OSError, ValueError) at L57-59 - a full/undrained pipe blocks without raising, deadlocking all logging. But it requires STEALTH_BROWSER_DEBUG=true AND a real undrained stderr pipe; the production singleton path DEVNULLs stderr and cannot backpressure, so it is largely unreachable. Real latent hang plus a real inconsistency with the timed-lock siblings (clear_debug_view L257), but the narrow reachability caps it below High.",
+    "attack_tried": "Verified emit-inside-lock ordering, the except clause, and the reachability precondition (debug flag + undrained pipe vs the devnulled production path)."
+  },
+  {
+    "id": "F-403",
+    "verdict": "downgrade",
+    "new_severity": "Low",
+    "rebuttal": "The failure reproduces, but its trigger is the operator's local checkout path containing ' & ' and spaces ('CUSTOM MCPs & PRODUCTIVITY') - a uv path-canonicalization limitation the finding itself names - not a repo defect; the README command (L184) is standard and correct and tests pass via the venv (402 passed). A normal checkout path works, and `uv run stealth-*` works on this same path. Machine-specific onboarding friction, not Critical; the only repo action is an optional docs caveat (currently absent, verified).",
+    "attack_tried": "Confirmed the path really contains &/spaces, that README documents the plain command with no caveat, and that the break is uv-shim-specific rather than a blanket directory problem."
+  },
+  {
+    "id": "F-502",
+    "verdict": "downgrade",
+    "new_severity": "Medium",
+    "rebuttal": "Real: one per-user backend, and _clear_stale_backend terminates/kills it (L202/L206) from _start_backend_holding_lock (L290). But eviction fires ONLY on a version mismatch (L132), so a same-version new session does NOT evict a peer - the 'starting a new client causes a cross-session outage' phrasing overstates it. The single-backend SPOF is an intentional, reasonable tradeoff for a local single-user tool, and the cross-session kill needs concurrent sessions at divergent versions (an upgrade race), which is occasional rather than routine. Severity inflated.",
+    "attack_tried": "Checked the eviction trigger condition (version mismatch only) to test whether an ordinary new session evicts a running peer - it does not unless versions differ."
+  },
+  {
+    "id": "F-505",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Factually correct - same 4208-line / 96-tool god module as F-101 (verified), with the section_tool/DISABLED_SECTIONS indirection layer over FastMCP. It holds as a maintainability finding, but it is a DUPLICATE of F-101 (and F-612): three High findings for one root cause. Recommend main merge them so the issue is counted once.",
+    "attack_tried": "Confirmed the numbers, then cross-checked against F-101/F-612 to establish it adds no distinct fact."
+  },
+  {
+    "id": "F-507",
+    "verdict": "downgrade",
+    "new_severity": "Low",
+    "rebuttal": "Two facts are true - publish.yml's only gate is a non-integration `test` job (needs: test L37; run L32) and the coverage floor is computed on non-integration at --cov-fail-under=39. But the central impact claim ('nothing protects the browser surface; regressions ship, found only in the field') is wrong: test.yml has a dedicated integration-tests job that installs real Chrome + Xvfb (L57-62) and runs `pytest -m integration` on every branch/PR (L74), per its own comment that feature branches must get 'full unit + integration CI.' Browser paths ARE gated pre-tag, so publish not re-running them is redundant, not a hole. Impact exaggerated (and the finding was self-marked unverified: paraphrased, 0.8, verified=false).",
+    "attack_tried": "Read both workflow job graphs to check whether the integration suite is truly ungated anywhere - it is fully gated with real Chrome in test.yml."
+  },
+  {
+    "id": "F-601",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Verified: 5 cloner modules with LOC 649/648/344/321/266 (finding's counts off by <=1 each, trailing-newline). comprehensive_element_cloner imports only debug_logger and independently reimplements complete-element extraction; cdp_element_cloner does the same again. Real duplication - but essentially a DUPLICATE of F-203 (and overlaps F-140); recommend main merge F-203/F-601 into one.",
+    "attack_tried": "Recounted LOC and confirmed the independent-reimplementation import structure, then compared scope against F-203 to establish the overlap."
+  },
+  {
+    "id": "F-612",
+    "verdict": "survive",
+    "new_severity": null,
+    "rebuttal": "Factually correct (4208 lines, ~96 tool definitions, verified) and holds as a maintainability finding. But it is a DUPLICATE of F-101 and F-505 - the same god-object root cause stated a third time, adding no distinct claim. Recommend main collapse F-101/F-505/F-612 into a single finding.",
+    "attack_tried": "Confirmed line/tool counts and cross-checked that it contributes no fact beyond F-101/F-505."
+  }
+]

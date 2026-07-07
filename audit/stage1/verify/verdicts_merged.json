@@ -1,0 +1,713 @@
+{
+  "F-101": {
+    "id": "F-101",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote exact at line 1212-1217; section_tool decorator confirmed, SECTION_TOOLS usage verified"
+  },
+  "F-102": {
+    "id": "F-102",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.92,
+    "note": "Quote exact 2991-2999; 'global BrowserManager' declared but NOT reassigned (no 'BrowserManager = ' line), confirming the bug claim"
+  },
+  "F-103": {
+    "id": "F-103",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.93,
+    "note": "Quote exact 201-213; module-scope singletons at 1297-1300 confirmed (browser_manager, network_interceptor, dom_handler, cdp_function_executor)"
+  },
+  "F-104": {
+    "id": "F-104",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.94,
+    "note": "Quote exact 1939-1949; 22 except Exception blocks verified; multiple incompatible error shapes confirmed"
+  },
+  "F-105": {
+    "id": "F-105",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.92,
+    "note": "Quote exact 1-13; test file docstring confirmed; extract_element_assets, discover_object_methods, extract_related_files mentioned"
+  },
+  "F-106": {
+    "id": "F-106",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.93,
+    "note": "Quote exact 1080-1091; function signature confirmed; all collaborator calls and branching logic present"
+  },
+  "F-107": {
+    "id": "F-107",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.92,
+    "note": "Quote exact 3846-3855; bare exec() with empty globals confirmed; __builtins__ auto-injected vulnerability claim is valid"
+  },
+  "F-108": {
+    "id": "F-108",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.98,
+    "note": "Quote exact 4085 '90 tools'; actual @section_tool count is 96 (verified), CLI says 90, inconsistency confirmed"
+  },
+  "F-109": {
+    "id": "F-109",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.94,
+    "note": "Quote exact 1260-1264; process_cleanup._cleanup_all_tracked() confirmed at line 1261; private member access confirmed"
+  },
+  "F-120": {
+    "id": "F-120",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.96,
+    "note": "Quote exact 263-269 in singleton.py; pyproject.toml version 1.2.0 confirmed; _server_version() uses importlib.metadata (frozen version)"
+  },
+  "F-121": {
+    "id": "F-121",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-122": {
+    "id": "F-122",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-123": {
+    "id": "F-123",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-124": {
+    "id": "F-124",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-125": {
+    "id": "F-125",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-126": {
+    "id": "F-126",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-140": {
+    "id": "F-140",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-141": {
+    "id": "F-141",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-142": {
+    "id": "F-142",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-143": {
+    "id": "F-143",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-144": {
+    "id": "F-144",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.92,
+    "note": ""
+  },
+  "F-145": {
+    "id": "F-145",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.92,
+    "note": ""
+  },
+  "F-160": {
+    "id": "F-160",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-161": {
+    "id": "F-161",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-162": {
+    "id": "F-162",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-163": {
+    "id": "F-163",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-164": {
+    "id": "F-164",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-165": {
+    "id": "F-165",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-166": {
+    "id": "F-166",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-180": {
+    "id": "F-180",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  "F-181": {
+    "id": "F-181",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "browser_manager.py switch_to_tab except handler exact match"
+  },
+  "F-182": {
+    "id": "F-182",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "debug_logger log_error signature & early return if not enabled exact match"
+  },
+  "F-183": {
+    "id": "F-183",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton _start_backend_holding_lock cold-start except handler exact match"
+  },
+  "F-184": {
+    "id": "F-184",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "response_handler handle_response token-based spillover logic exact match"
+  },
+  "F-201": {
+    "id": "F-201",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "_trash_clone function def + docstring + OSError except exact match"
+  },
+  "F-202": {
+    "id": "F-202",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "test_server_call_conventions.py module docstring lines 3-8 exact match"
+  },
+  "F-203": {
+    "id": "F-203",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file_based_element_cloner imports & class def exact match"
+  },
+  "F-204": {
+    "id": "F-204",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "debug_logger error dedup logic in lock exact match"
+  },
+  "F-205": {
+    "id": "F-205",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "server take_screenshot file_path branch exact match"
+  },
+  "F-206": {
+    "id": "F-206",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "_server_version function with importlib.metadata fallback exact match"
+  },
+  "F-207": {
+    "id": "F-207",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  "F-208": {
+    "id": "F-208",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.9,
+    "note": "Multi-line quote verified; exact whitespace may vary slightly"
+  },
+  "F-301": {
+    "id": "F-301",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Function definition verified"
+  },
+  "F-302": {
+    "id": "F-302",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  "F-303": {
+    "id": "F-303",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  "F-304": {
+    "id": "F-304",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.92,
+    "note": "Decorator found; get_debug_view starts at 2459"
+  },
+  "F-305": {
+    "id": "F-305",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  "F-306": {
+    "id": "F-306",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  "F-307": {
+    "id": "F-307",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  "F-308": {
+    "id": "F-308",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  "F-401": {
+    "id": "F-401",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  "F-402": {
+    "id": "F-402",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  "F-403": {
+    "id": "F-403",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  "F-404": {
+    "id": "F-404",
+    "quote_status": "paraphrased",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": false,
+    "confidence": 0.7,
+    "note": "README.md: paraphrased"
+  },
+  "F-405": {
+    "id": "F-405",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  "F-406": {
+    "id": "F-406",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  "F-407": {
+    "id": "F-407",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "README.md: verbatim"
+  },
+  "F-501": {
+    "id": "F-501",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton.py: verbatim"
+  },
+  "F-502": {
+    "id": "F-502",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton.py: verbatim"
+  },
+  "F-503": {
+    "id": "F-503",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton.py: verbatim"
+  },
+  "F-504": {
+    "id": "F-504",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton.py line 263: _server_version() definition matches exactly; finding correctly identifies version string immutability as root cause of backend reuse issue."
+  },
+  "F-505": {
+    "id": "F-505",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "server.py line 1212: section_tool decorator present; 4207-line god module claim supported by file size."
+  },
+  "F-506": {
+    "id": "F-506",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "server.py line 2983: modules_to_reload list omits server.py; hot_reload advertises full reload but excludes tool-code. Verified."
+  },
+  "F-507": {
+    "id": "F-507",
+    "quote_status": "paraphrased",
+    "location_ok": false,
+    "behavior_ok": true,
+    "verified": false,
+    "confidence": 0.8,
+    "note": "publish.yml line 31-32 has exact quote but location specifies line:0 (invalid). Test runs only non-integration suite before PyPI publish - finding correct, location wrong."
+  },
+  "F-508": {
+    "id": "F-508",
+    "quote_status": "paraphrased",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.9,
+    "note": "Multi-file pattern quote format. All 5 cloner classes verified: ElementCloner (16), FileBasedElementCloner (26), ComprehensiveElementCloner (29), CDPElementCloner (27), ProgressiveElementCloner (18). Duplication pattern confirmed."
+  },
+  "F-509": {
+    "id": "F-509",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton.py line 218: _start_server_process uses fixed DEFAULT_PORT 19222 with no fallback logic. Finding correctly identifies port binding brittleness."
+  },
+  "F-601": {
+    "id": "F-601",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "comprehensive_element_cloner.py line 18: imports and no element_cloner dependency verified. Finding correctly notes independent reimplementation vs. delegation pattern."
+  },
+  "F-602": {
+    "id": "F-602",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "server.py line 234: _master_profile_dir and _clone_root_dir functions with ad-hoc getenv() calls confirmed. ~12 scattered env var resolutions verified; no centralized config schema."
+  },
+  "F-603": {
+    "id": "F-603",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "server.py line 1861: wait_for_element uses _with_cdp_timeout wrapper and browser_manager.get_tab boilerplate. Finding correctly identifies 49 repetitions of identical instance-lookup pattern across 96 tools."
+  },
+  "F-604": {
+    "id": "F-604",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file_based_element_cloner.py line 15: anchors sys.path at .parent.parent; comprehensive_element_cloner.py line 23 anchors at .parent. Inconsistent sys.path setup verified."
+  },
+  "F-605": {
+    "id": "F-605",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  "F-606": {
+    "id": "F-606",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  "F-607": {
+    "id": "F-607",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  "F-608": {
+    "id": "F-608",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  "F-609": {
+    "id": "F-609",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  "F-610": {
+    "id": "F-610",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  "F-611": {
+    "id": "F-611",
+    "quote_status": "paraphrased",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": false,
+    "confidence": 0.85,
+    "note": "file OK"
+  },
+  "F-612": {
+    "id": "F-612",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  },
+  "F-613": {
+    "id": "F-613",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file OK"
+  }
+}

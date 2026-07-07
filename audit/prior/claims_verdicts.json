@@ -1,0 +1,164 @@
+[
+  {
+    "claim_id": "P-001",
+    "verdict": "already_fixed",
+    "evidence": "Pinned commit 2267b83 (HEAD itself) changed all 3 sites in server.py from `return await response_handler.handle_response(...)` to `return response_handler.handle_response(...)` since handle_response is synchronous. Commit message: \"fix: don't await synchronous handle_response at 3 extraction call sites\".",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-002",
+    "verdict": "confirmed",
+    "evidence": "5 cloner files exist (element_cloner.py 648 LOC, file_based_element_cloner.py 647 LOC, comprehensive_element_cloner.py 343 LOC, cdp_element_cloner.py 320 LOC, progressive_element_cloner.py 265 LOC). comprehensive_element_cloner.py and cdp_element_cloner.py each independently reimplement 'extract complete element' without importing element_cloner.py, while file_based_element_cloner.py's *_to_file methods do cleanly delegate to element_cloner.py.",
+    "finding_id": "F-601"
+  },
+  {
+    "claim_id": "P-003",
+    "verdict": "confirmed",
+    "evidence": "server.py has ~12 os.getenv() call sites (lines 55,62,226,235,242,249,257,984,1004-1006,4088); only 2 route through shared parse_bool_env/parse_float_env helpers, the rest (state-dir/profile-dir resolution) are ad hoc with inline per-site defaults and no central config object.",
+    "finding_id": "F-602"
+  },
+  {
+    "claim_id": "P-004",
+    "verdict": "confirmed",
+    "evidence": "grep confirms 59 occurrences of `_with_cdp_timeout` and 49 occurrences of the identical `if not tab: ... Instance not found` preamble in server.py, matching the claim's '~59 call sites' almost exactly.",
+    "finding_id": "F-603"
+  },
+  {
+    "claim_id": "P-005",
+    "verdict": "refuted",
+    "evidence": "The two cited sites are not import-time: singleton.py:51's STATE_DIR.mkdir() is inside _ensure_state_dir(), only invoked when _exclusive_lock()/_write_server_state() run; cli.py:35's os.environ.setdefault() is inside _server(), invoked lazily per CLI subcommand. A narrower real instance exists (server.py:222 module-level os.environ.setdefault, and browser_manager/network_interceptor/dom_handler singletons at server.py:1297-1299 do run at import) but that is not what the claim's cited locations point to.",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-006",
+    "verdict": "confirmed",
+    "evidence": "Exact line match: comprehensive_element_cloner.py:23 uses `Path(__file__).parent`, file_based_element_cloner.py:15 uses `Path(__file__).parent.parent` — different anchors for conceptually the same 'make embedded/ importable' operation.",
+    "finding_id": "F-604"
+  },
+  {
+    "claim_id": "P-007",
+    "verdict": "confirmed",
+    "evidence": "network_interceptor.py:21-22 declares `self._requests`/`self._responses` as plain unbounded dicts; line 159 fetches the full response body via CDP `get_response_body` and stores it unconditionally with no size cap or eviction until the owning instance closes.",
+    "finding_id": "F-605"
+  },
+  {
+    "claim_id": "P-008",
+    "verdict": "confirmed",
+    "evidence": "dynamic_hook_system.py:123 calls `eval(condition_code, namespace)` inside `matches()`, which runs per network event for every hook with a custom_condition; no compiled-code caching exists anywhere in the file.",
+    "finding_id": "F-606"
+  },
+  {
+    "claim_id": "P-009",
+    "verdict": "confirmed",
+    "evidence": "process_cleanup.py:216-225 `_file_lock` catches `(OSError, IOError)` from a non-blocking `LOCK_NB`/`LK_NBLCK` acquisition attempt and still `yield`s — the caller proceeds into the critical section even when the lock was NOT acquired. `_load_tracked_pids`/`_save_tracked_pids` are separate calls, so load-modify-save is not atomic across processes.",
+    "finding_id": "F-607"
+  },
+  {
+    "claim_id": "P-010",
+    "verdict": "confirmed",
+    "evidence": "process_cleanup.py:411-413, the non-recovery `else` branch of `_kill_processes_for_metadata`, uses the stored `fallback_pid` directly with no create_time/identity check, unlike the `if recovery:` branch above it (lines 371-410) which verifies `psutil.Process(pid).create_time()` before trusting a PID.",
+    "finding_id": "F-608"
+  },
+  {
+    "claim_id": "P-011",
+    "verdict": "confirmed",
+    "evidence": "debug_logger.py:289-292, inside `clear_debug_view_safe`'s except branch, reassigns `self._errors`/`self._warnings`/`self._info`/`self._stats` without holding `self._lock` (contrast with `clear_debug_view`, which always mutates under `with self._lock:`); line number matches the claim exactly.",
+    "finding_id": "F-609"
+  },
+  {
+    "claim_id": "P-012",
+    "verdict": "refuted",
+    "evidence": "get_instance_state (server.py:1482-1538) wraps the state fetch in `asyncio.wait_for` and catches both `asyncio.TimeoutError` and `Exception`, returning a structured `{'partial': True, 'detail_error': ...}` dict in every observed path rather than crashing. git blame dates this handling to 2026-05-14 (commit 0291d43).",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-013",
+    "verdict": "refuted",
+    "evidence": "cdp_function_executor.py:121-153 `execute_cdp_command` wraps unknown-command lookup in try/except — `raise ValueError(f'Unknown CDP command: {command}')` is caught by the same function and converted to a structured `{'success': False, 'error': ...}` dict, not an unhandled crash. server.py's tool docstring also explicitly documents the snake_case-vs-camelCase gotcha.",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-014",
+    "verdict": "already_fixed",
+    "evidence": "server.py:132-136 `_clamp_timeout` explicitly handles `isinstance(timeout_ms, str)` by converting with `int(timeout_ms)` before clamping; introduced by commit 231c580 'Cap user-provided timeouts to 60s...', predating the pinned SHA.",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-015",
+    "verdict": "confirmed",
+    "evidence": "hot_reload (server.py:2975-3009) does `global browser_manager, BrowserManager; browser_manager = BrowserManager()` (and the same for network_interceptor/dom_handler), replacing the module-global manager with a fresh empty instance — any browser instances tracked by the old manager become unreachable through it.",
+    "finding_id": "F-610"
+  },
+  {
+    "claim_id": "P-016",
+    "verdict": "already_fixed",
+    "evidence": "`_with_cdp_timeout` (server.py:139-157) wraps CDP coroutines in `asyncio.wait_for`, applied at 59 call sites; introduced by commit 64a822a 'Add CDP operation timeout to prevent infinite hangs on dead connections' and extended to full coverage by commit 7b58062, both predating the pinned SHA.",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-017",
+    "verdict": "confirmed",
+    "evidence": "browser_manager.list_instances() (browser_manager.py:588-603) prunes instances via `_browser_process_is_alive`, but that helper (lines 141-160) only checks OS-process liveness (poll()/psutil), never a CDP protocol round-trip — a process that is alive but whose CDP/websocket connection is dead would still be reported as alive. The claim's 'no CDP health-check' holds; 'reports stale as alive' unconditionally is overstated since dead-process pruning does exist.",
+    "finding_id": "F-611"
+  },
+  {
+    "claim_id": "P-018",
+    "verdict": "refuted",
+    "evidence": "browser_manager.py:802-820 `_is_recoverable_navigation_error` plus the surrounding stale-tab recovery/retry path ('one automatic tab-recovery retry') explicitly detects and retries on connection-dropped/closed/lost, websocket, target-closed/crashed, and session-closed errors during navigation.",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-019",
+    "verdict": "unverifiable",
+    "evidence": "No MCP-level client-cancellation-notification handling exists in this repo (only internal asyncio task cancellation for background reapers, e.g. browser_manager.py:261,307,487). Whether an MCP client's Escape actually reaches the server as an abort signal depends on the underlying FastMCP/MCP SDK transport, which is outside this repo and not something static code reading can confirm.",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-020",
+    "verdict": "unverifiable",
+    "evidence": "Current tool count (96 `@section_tool(...)` decorators in server.py) is roughly consistent with the claimed 97, but the specific historical manual-QA pass/fail tally (43/97, dated 2026-05-20) is a point-in-time result that can't be reproduced from static code, and its source doc is outside this audit's reading scope.",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-021",
+    "verdict": "already_fixed",
+    "evidence": "Commit 9778218 'fix: write clone/screenshot output to a per-user dir, not inside the package' introduced default_clone_output_dir() pointing at ~/.stealth-mcp/element_clones, overridable via STEALTH_MCP_CLONE_OUTPUT_DIR; this predates the pinned SHA and the claim itself notes it as already shipped (PR #19).",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-022",
+    "verdict": "already_fixed",
+    "evidence": ".github/workflows/test.yml:41 currently runs with --cov-fail-under=39; introduced at 38 by commit b7fbefc and ratcheted to 39 by commit 3f08a0c, both predating the pinned SHA.",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-023",
+    "verdict": "already_fixed",
+    "evidence": "All 4 named subsystems now have dedicated test files: tests/test_proxy_utils.py, tests/test_platform_utils.py, tests/test_hook_learning_system.py, tests/test_response_stage_hooks.py, added by commits 2ab0b69 and 3f08a0c. Current baseline coverage is ~40.9% (audit/stage0 baseline) vs. the claimed 35-41% bottleneck.",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-024",
+    "verdict": "confirmed",
+    "evidence": "wc -l confirms server.py is currently 4207 lines (state.json corroborates), still a single unsplit module. The claim's 4096 figure is close (file has grown slightly since), and no split has happened at the pinned SHA.",
+    "finding_id": "F-612"
+  },
+  {
+    "claim_id": "P-025",
+    "verdict": "already_fixed",
+    "evidence": "pyproject.toml:37 currently pins requests>=2.32.0,<4, exactly the claim's suggested fix; introduced by commit b7fbefc, which the claim's own source doc (HIGH_VALUE_CHANGES.md) documents as done.",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-026",
+    "verdict": "refuted",
+    "evidence": "grep -rn utcnow src/ returns zero matches anywhere in src/, and there is no datetime.now(timezone.utc) either — the deprecated call the claim describes does not exist in the current codebase (timestamps use time.time() instead).",
+    "finding_id": null
+  },
+  {
+    "claim_id": "P-027",
+    "verdict": "confirmed",
+    "evidence": "Same sys.path.append pattern as P-006 in comprehensive_element_cloner.py and file_based_element_cloner.py. file_based_element_cloner.py hedges with a try/except relative-import fallback (lines 10-13) that comprehensive_element_cloner.py lacks entirely, showing inconsistent, fragile import handling across embedded/ modules.",
+    "finding_id": "F-613"
+  }
+]

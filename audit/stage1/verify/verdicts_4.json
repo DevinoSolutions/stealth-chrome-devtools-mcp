@@ -1,0 +1,92 @@
+[
+  {
+    "id": "F-181",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "browser_manager.py switch_to_tab except handler exact match"
+  },
+  {
+    "id": "F-182",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "debug_logger log_error signature & early return if not enabled exact match"
+  },
+  {
+    "id": "F-183",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "singleton _start_backend_holding_lock cold-start except handler exact match"
+  },
+  {
+    "id": "F-184",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "response_handler handle_response token-based spillover logic exact match"
+  },
+  {
+    "id": "F-201",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "_trash_clone function def + docstring + OSError except exact match"
+  },
+  {
+    "id": "F-202",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "test_server_call_conventions.py module docstring lines 3-8 exact match"
+  },
+  {
+    "id": "F-203",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "file_based_element_cloner imports & class def exact match"
+  },
+  {
+    "id": "F-204",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "debug_logger error dedup logic in lock exact match"
+  },
+  {
+    "id": "F-205",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "server take_screenshot file_path branch exact match"
+  },
+  {
+    "id": "F-206",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "_server_version function with importlib.metadata fallback exact match"
+  }
+]

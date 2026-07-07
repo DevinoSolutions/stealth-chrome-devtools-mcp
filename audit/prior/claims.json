@@ -1,0 +1,245 @@
+[
+  {
+    "claim_id": "P-001",
+    "area": "code_health",
+    "claim": "Bogus await in response_handler.handle_response() at 3 return sites in server.py.",
+    "locations_mentioned": ["server.py"],
+    "severity_claimed": "High",
+    "sources": ["CODEBASE_AUDIT.md#uncommitted-work-in-progress"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-002",
+    "area": "maintainability",
+    "claim": "Four overlapping cloner modules with ~850–1300 LOC removable: duplicated extract_* methods and JS templates.",
+    "locations_mentioned": ["element_cloner.py", "comprehensive_element_cloner.py", "file_based_element_cloner.py", "progressive_element_cloner.py"],
+    "severity_claimed": "High",
+    "sources": ["CODEBASE_AUDIT.md#D1-cloner-sprawl"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-003",
+    "area": "code_health",
+    "claim": "Config scattered across 13 getenv sites with defaults set at each parse site; duplicated state-dir resolution.",
+    "locations_mentioned": ["server.py:55-257"],
+    "severity_claimed": "Medium",
+    "sources": ["CODEBASE_AUDIT.md#D2-config-scattered"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-004",
+    "area": "maintainability",
+    "claim": "_with_cdp_timeout(...) repeated at ~59 call sites; most tools repeat same instance-lookup/validation preamble.",
+    "locations_mentioned": ["server.py"],
+    "severity_claimed": "Medium",
+    "sources": ["CODEBASE_AUDIT.md#D3-96-tool-boilerplate"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-005",
+    "area": "operability",
+    "claim": "Import-time side effects: STATE_DIR.mkdir(), os.environ.setdefault(), sys.path.insert(), module-global singletons.",
+    "locations_mentioned": ["singleton.py:51", "cli.py:35", "server.py"],
+    "severity_claimed": "Medium",
+    "sources": ["CODEBASE_AUDIT.md#D4-import-time-side-effects"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-006",
+    "area": "code_health",
+    "claim": "sys.path anchor inconsistency: comprehensive_element_cloner appends parent, file_based appends parent.parent.",
+    "locations_mentioned": ["comprehensive_element_cloner.py:23", "file_based_element_cloner.py:15"],
+    "severity_claimed": "Medium",
+    "sources": ["CODEBASE_AUDIT.md#D5-sys.path-anchor-inconsistency"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-007",
+    "area": "performance",
+    "claim": "Unbounded body store in network_interceptor._responses/_requests stores every captured request/response body for session life (100s MB risk).",
+    "locations_mentioned": ["network_interceptor.py:20-23", "network_interceptor.py:159"],
+    "severity_claimed": "High",
+    "sources": ["CODEBASE_AUDIT.md#C1-unbounded-body-store"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-008",
+    "area": "performance",
+    "claim": "eval() per network event for custom hook conditions without pre-compilation.",
+    "locations_mentioned": ["dynamic_hook_system.py:123"],
+    "severity_claimed": "Medium",
+    "sources": ["CODEBASE_AUDIT.md#C2-eval-per-network-event"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-009",
+    "area": "operability",
+    "claim": "pid-file lock is non-blocking and proceeds unlocked on contention; load–modify–save sequence not atomic across processes.",
+    "locations_mentioned": ["process_cleanup.py:214"],
+    "severity_claimed": "Medium",
+    "sources": ["CODEBASE_AUDIT.md#C3-pid-file-lock-non-blocking"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-010",
+    "area": "operability",
+    "claim": "_kill_processes_for_metadata non-recovery path kills bare stored PID without create_time/identity re-check.",
+    "locations_mentioned": ["process_cleanup.py:412", "process_cleanup.py:390"],
+    "severity_claimed": "Low",
+    "sources": ["CODEBASE_AUDIT.md#C4-thinnest-spot-kill-safety"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-011",
+    "area": "code_health",
+    "claim": "debug_logger buffer reassignment possibly outside lock in clear/exception path.",
+    "locations_mentioned": ["debug_logger.py:289"],
+    "severity_claimed": "Low",
+    "sources": ["CODEBASE_AUDIT.md#B8-debug-logger-buffer"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-012",
+    "area": "code_health",
+    "claim": "get_instance_state returns partial data and crashes.",
+    "locations_mentioned": ["server.py"],
+    "severity_claimed": "Medium",
+    "sources": ["MCP_TOOL_TEST_RESULTS.md#B1-get-instance-state"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-013",
+    "area": "code_health",
+    "claim": "execute_cdp_command fails with unknown command format.",
+    "locations_mentioned": ["server.py"],
+    "severity_claimed": "Medium",
+    "sources": ["MCP_TOOL_TEST_RESULTS.md#B2-execute-cdp-command"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-014",
+    "area": "code_health",
+    "claim": "wait_for_element has type validation issue on timeout parameter.",
+    "locations_mentioned": ["server.py"],
+    "severity_claimed": "Low",
+    "sources": ["MCP_TOOL_TEST_RESULTS.md#B3-wait-for-element"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-015",
+    "area": "operability",
+    "claim": "hot_reload disconnects active browser instances.",
+    "locations_mentioned": ["server.py"],
+    "severity_claimed": "High",
+    "sources": ["MCP_TOOL_TEST_RESULTS.md#B4-hot-reload"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-016",
+    "area": "operability",
+    "claim": "No asyncio timeout on CDP operations; hangs forever on dead connections.",
+    "locations_mentioned": ["server.py"],
+    "severity_claimed": "Critical",
+    "sources": ["MCP_TOOL_TEST_RESULTS.md#B5-no-asyncio-timeout"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-017",
+    "area": "operability",
+    "claim": "list_instances reports stale instances as alive; no CDP health-check.",
+    "locations_mentioned": ["server.py"],
+    "severity_claimed": "High",
+    "sources": ["MCP_TOOL_TEST_RESULTS.md#B6-list-instances-stale"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-018",
+    "area": "operability",
+    "claim": "No connection recovery; dead CDP connections never retried or cleaned up.",
+    "locations_mentioned": ["server.py"],
+    "severity_claimed": "Medium",
+    "sources": ["MCP_TOOL_TEST_RESULTS.md#B7-no-connection-recovery"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-019",
+    "area": "operability",
+    "claim": "Interrupted tool calls do not signal server to abort; escape+retry loop.",
+    "locations_mentioned": ["server.py"],
+    "severity_claimed": "Low",
+    "sources": ["MCP_TOOL_TEST_RESULTS.md#B8-escape-retry-loop"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-020",
+    "area": "testing",
+    "claim": "43/97 tools passed initial test round (2026-05-20); ~54 tools not yet tested.",
+    "locations_mentioned": ["server.py (tool suite)"],
+    "severity_claimed": "unstated",
+    "sources": ["MCP_TOOL_TEST_RESULTS.md#test-results-round-1"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-021",
+    "area": "code_health",
+    "claim": "Clone output written inside installed package instead of per-user directory (noted as fixed in PR #19).",
+    "locations_mentioned": ["file_based_element_cloner.py"],
+    "severity_claimed": "High",
+    "sources": ["HIGH_VALUE_CHANGES.md#already-shipped", "CODEBASE_AUDIT.md#0-uncommitted-work"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-022",
+    "area": "testing",
+    "claim": "No fail_under coverage gate in CI; no automated threshold enforcement.",
+    "locations_mentioned": ["CI config"],
+    "severity_claimed": "High",
+    "sources": ["HIGH_VALUE_CHANGES.md#ranked-changes-2-coverage-gate"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-023",
+    "area": "testing",
+    "claim": "8 zero-coverage subsystems lack test suites; coverage bottleneck at 35–41%.",
+    "locations_mentioned": ["proxy_utils.py", "platform_utils.py", "hook_learning_system.py", "response_stage_hooks.py"],
+    "severity_claimed": "Medium",
+    "sources": ["HIGH_VALUE_CHANGES.md#ranked-changes-3-test-suites"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-024",
+    "area": "maintainability",
+    "claim": "embedded/server.py is 4,096-line god-module requiring split; deferred pending coverage safety net.",
+    "locations_mentioned": ["src/stealth_chrome_devtools_mcp/embedded/server.py"],
+    "severity_claimed": "High",
+    "sources": ["HIGH_VALUE_CHANGES.md#ranked-changes-4-split-god-module"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-025",
+    "area": "dependencies",
+    "claim": "requests dependency unbounded; should pin >=2.32.0,<4.",
+    "locations_mentioned": ["pyproject.toml"],
+    "severity_claimed": "Low",
+    "sources": ["HIGH_VALUE_CHANGES.md#ranked-changes-5-hygiene"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-026",
+    "area": "code_health",
+    "claim": "datetime.utcnow() deprecated; should use datetime.now(timezone.utc).",
+    "locations_mentioned": ["server.py", "other modules"],
+    "severity_claimed": "Low",
+    "sources": ["HIGH_VALUE_CHANGES.md#ranked-changes-5-hygiene"],
+    "status": "unverified"
+  },
+  {
+    "claim_id": "P-027",
+    "area": "operability",
+    "claim": "Bare imports in embedded/ not package-relative; sys.path munging fragile (deferred to pair with god-module split).",
+    "locations_mentioned": ["embedded/ modules"],
+    "severity_claimed": "Medium",
+    "sources": ["HIGH_VALUE_CHANGES.md#ranked-changes-5-hygiene"],
+    "status": "unverified"
+  }
+]

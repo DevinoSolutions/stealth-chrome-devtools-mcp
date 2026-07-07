@@ -1,0 +1,3 @@
+EXIT1=0
+EXIT2=0
+DONE

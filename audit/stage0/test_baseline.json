@@ -1,0 +1,15 @@
+{
+  "invocation": ".venv/Scripts/python.exe -m pytest -m \"not integration\" -v --tb=short --cov=src/stealth_chrome_devtools_mcp --cov-report=term-missing --cov-fail-under=39",
+  "ci_source": ".github/workflows/test.yml unit-tests job (CI uses `uv run pytest` with identical flags; matrix py3.11/3.12/3.13; local baseline run on the project venv)",
+  "invocation_deviation": "CI's `uv run pytest` fails in this checkout: 'Failed to canonicalize script path' — working-directory path contains '&' and spaces (OneDrive path). Fell back to venv python -m pytest, flag-identical.",
+  "runs": [
+    { "exit_code": 0, "passed": 402, "failed": 0, "errors": 0, "skipped": 0, "deselected": 24, "duration_s": 65.13, "failing_tests": [] },
+    { "exit_code": 0, "passed": 402, "failed": 0, "errors": 0, "skipped": 0, "deselected": 24, "duration_s": 65.66, "failing_tests": [] }
+  ],
+  "flaky_tests": [],
+  "coverage_percent": 40.86,
+  "coverage_run2_percent": 40.89,
+  "coverage_gate": 39,
+  "baseline_verdict": "green",
+  "logs": ["audit/stage0/run1.log", "audit/stage0/run2.log"]
+}

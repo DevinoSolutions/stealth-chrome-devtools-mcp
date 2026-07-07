@@ -1,0 +1,92 @@
+[
+  {
+    "id": "F-121",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  {
+    "id": "F-122",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  {
+    "id": "F-123",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  {
+    "id": "F-124",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  {
+    "id": "F-125",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  {
+    "id": "F-126",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  {
+    "id": "F-140",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  {
+    "id": "F-141",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  {
+    "id": "F-142",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  },
+  {
+    "id": "F-143",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": "uncertain",
+    "verified": true,
+    "confidence": 0.95,
+    "note": ""
+  }
+]

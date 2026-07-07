@@ -1,0 +1,296 @@
+[
+  {
+    "id": "F-101",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1212-1217",
+    "what": "server.py is 4207 lines with 162 top-level function/async-def definitions, of which 96 are MCP tools registered via this single @section_tool() decorator across 11 'sections' (browser-management, element-interaction, element-extraction, file-extraction, network-debugging, cdp-functions, progressive-cloning, cookies-storage, tabs, debugging, dynamic-hooks). The decorator is the only indirection layer that exists — every tool's full implementation (signature, docstring, business logic, error handling) is written inline in this one file. There is no per-domain module split (no tabs.py, no cookies.py, etc.); DOMHandler/NetworkInterceptor/ResponseHandler are the only pieces factored out, and even those are consumed via bare module-level singletons imported at the top of this same file. Adding one tool means editing server.py regardless of which of the 11 sections it belongs to. Because the whole file is one Python module, a single import-time failure anywhere (a bad decorator argument, a broken helper, a bad top-level statement) prevents ALL 96 tools across all 11 sections from registering — the SECTION_TOOLS/DISABLED_SECTIONS mechanism (server.py:50-51, 1220-1227) only prunes tools AFTER a successful full-file import via apply_disabled_sections(), so it provides zero fault isolation between sections at load time despite looking like a section boundary.",
+    "why_it_matters": "This is the single highest-leverage maintainability problem in the codebase: every contributor touches the same 4207-line file for any tool-level change, inflating review diffs and merge-conflict risk, and the file's apparent section boundaries are cosmetic for reliability purposes — the 11 'sections' share one failure domain despite being independently toggle-able at runtime via --disable-<section> flags.",
+    "_source": "findings_dd1.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-104",
+    "severity": "High",
+    "category": "code_health",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1939-1949",
+    "what": "22 separate except-Exception/bare-except blocks in server.py (verified count) each hand-roll their own error shape; at least 4 distinct, mutually incompatible contracts coexist. (a) execute_script (quoted above, ~1939-1949) returns {\"success\": bool, \"result\": ..., \"error\": ...}. (b) get_debug_lock_status (server.py:2549, except at 2558) returns a bare {\"error\": str(e)} with no \"success\" key at all. (c) new_tab (server.py:2636, except at 2662) does 'raise Exception(f\"Failed to create new tab: {str(e)}\")' — a second, generic, re-wrapped exception that discards the original exception type. (d) hot_reload (server.py:2975) and reload_status (server.py:3013) both declare '-> str' and return a plain string on EITHER success or failure (\"Hot reload completed...\" vs \"Hot reload failed: ...\") — callers cannot distinguish success from failure by type at all, only by string-matching the text. The one shared helper, _with_cdp_timeout (server.py:139), also just does 'raise Exception(...)' on timeout rather than a typed/structured error.",
+    "why_it_matters": "With 96 tools and no shared error envelope or exception hierarchy, every caller (including the AI agent driving this MCP server) must special-case each tool's failure shape individually, and there is no single place to fix or extend error reporting (error codes, retryability hints, etc.) without touching all 96 call sites. No test in the suite checks error-shape consistency, so nothing stops this from getting worse as new tools are added.",
+    "_source": "findings_dd1.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.94,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-105",
+    "severity": "High",
+    "category": "testing",
+    "location": "tests/test_server_call_conventions.py:1-13",
+    "what": "None of the 96 @section_tool-decorated coroutine bodies in server.py have direct unit tests. The only coverage is (a) tests/test_browser_integration.py, marked pytest.mark.integration, which requires a real installed Chrome and is skippable/skipped in CI without Chrome, or (b) narrow AST-level static conventions like the quoted file. This gap already caused a real, silent production bug fixed on the current commit (2267b83, \"fix: don't await synchronous handle_response at 3 extraction call sites\", touching server.py:2845-2963 area) — three tools raised TypeError on every single call, undetected until runtime, because nothing exercised those handler bodies directly. Pure-logic helpers that don't touch a browser (e.g. _resolve_profile_selection and friends) DO get fast unit tests (tests/test_profile_resolution.py) by being extracted to module scope as plain functions — but that pattern doesn't extend to the 96 tool bodies themselves, which mix request handling, delegation, and response shaping inline inside the @section_tool coroutines.",
+    "why_it_matters": "The new AST-based regression test is a good reactive guard for the one specific mistake it checks, but it's a symptom patch, not a fix for the underlying gap: any other tool-body mistake (wrong argument order, wrong handler call, wrong response shape) has the same blind spot until either a human runs the affected tool by hand or the skippable integration suite happens to cover it.",
+    "_source": "findings_dd1.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.92,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-107",
+    "severity": "High",
+    "category": "security",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:3846-3855",
+    "what": "create_python_binding (server.py:3808) executes caller-supplied python_code via bare exec(python_code, exec_globals) with an empty globals dict — which still has full access to __builtins__ (Python auto-injects it), so there is no restriction on imports, file access, or process control. exec_globals is then scanned for the first non-underscore callable and wired up as a live Python<->JS binding. This is one of two tools that can run arbitrary Python in the server process; the sibling execute_python_in_browser (server.py:3827) delegates to cdp_function_executor.execute_python_in_browser (a Python-to-JS translator, not audited here per the coupling-only scope for that module) rather than exec'ing directly, so create_python_binding is the more direct instance of the pattern.",
+    "why_it_matters": "Any caller of this MCP tool — including a compromised or confused upstream AI agent, or any process able to reach this server's transport — gets unrestricted code execution with the server process's full privileges (filesystem, network, environment variables, other browser instances' profile data). This is presumably intentional given the product's purpose (AI-driven browser automation with a Python-JS bridge), but it maximizes blast radius: nothing else in server.py needs to fail for this single tool to be a full process-compromise vector if it is ever reachable by untrusted input.",
+    "_source": "findings_dd1.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.92,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-120",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:263-269",
+    "what": "_find_running_server() refuses to reuse a backend whose recorded version differs from _server_version(), which is importlib.metadata.version(\"stealth-chrome-devtools-mcp\") — the installed distribution's frozen METADATA, not a hash or mtime of the source. pyproject.toml:7 pins a static `version = \"1.2.0\"` (no `dynamic = [...]`, no setuptools_scm/hatch-vcs). Verified against the live checkout: `pip show` reports this exact repo as an editable install at 1.2.0, `.venv/Lib/site-packages/stealth_chrome_devtools_mcp-1.2.0.dist-info/METADATA` says `Version: 1.2.0`, and `~/.stealth-mcp/server.json` right now records a live backend (pid 104504) at version \"1.2.0\" — while `git status` shows `M src/stealth_chrome_devtools_mcp/embedded/server.py` uncommitted in this same checkout. That edit is invisible to _server_version(); a client reconnect after the edit would still see version \"1.2.0\" match and proxy straight to the pre-edit process.",
+    "why_it_matters": "This is the exact scenario the branch is named for and the exact friction already reported from real use: editing server.py and reconnecting does not get you fresh code, because the version check can only ever detect a bumped-and-reinstalled package version, never a source edit. tests/test_singleton_version_aware.py thoroughly proves the eviction LOGIC is correct (15+ tests), but every one of them monkeypatches _server_version() directly — none exercises whether the real function reflects a source change, because it structurally cannot. The only escapes are killing the backend process by hand or bump+reinstall; neither is automated or documented as required.",
+    "_source": "findings_dd2.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.96,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-124",
+    "severity": "High",
+    "category": "testing",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py:48-55",
+    "what": "ProcessCleanup.__init__ runs `_recover_orphaned_processes()` by default, which loads `~/.stealth_browser_pids.json` (a real file in the developer's home directory, not test-isolated) and calls `_kill_processes_for_metadata(..., recovery=True)` — genuine psutil-based process termination and profile-directory cleanup — for any tracked entry that predates this process's `_init_time`. The module-level singleton `process_cleanup = ProcessCleanup()` (process_cleanup.py:1023) means this runs for real on the mere act of importing the module (directly, or transitively via `import browser_manager`). The comment quoted here is the code's own admission of the hazard. The only mitigation is `STEALTH_MCP_NO_AUTO_RECOVERY=1`: cli.py:35 sets it proactively for the CLI's `doctor` command, and exactly one test (test_singleton_fast_handshake.py:298) sets it — but only in a subprocess env dict, for a child process it spawns. tests/conftest.py, shared by all ~30 test files including test_process_cleanup.py which imports the class directly, never sets it for the pytest process itself.",
+    "why_it_matters": "Any test run (or REPL session, or unrelated script) that imports browser_manager or process_cleanup in-process, on a developer machine that has ever left stale entries in ~/.stealth_browser_pids.json (e.g. after a crash or a force-killed terminal), triggers real process kills and profile deletions as a side effect of collection/import — not of any test actually calling the recovery code under test. It is silent and conditional (a no-op when the pid file doesn't exist, e.g. fresh CI checkouts), which is exactly the shape of hazard that never shows up in CI and only bites a specific developer's machine at an unpredictable time.",
+    "_source": "findings_dd2.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-140",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/cdp_element_cloner.py:2-16",
+    "what": "Three independently-implemented engines all answer 'extract complete data about this element': ElementCloner.clone_element_complete (asyncio.gather over 6 JS-file evaluations, element_cloner.py:464-539), ComprehensiveElementCloner.extract_complete_element (one 216-line monolithic inline JS string, comprehensive_element_cloner.py:62-278), and CDPElementCloner.extract_complete_element_cdp (raw CDP domain calls, cdp_element_cloner.py:33-93). All three are live, each wired to its own MCP tool, and each returns a structurally different result schema (flat multi-key vs. flat camelCase vs. nested snake_case under an 'element' key). CDPElementCloner's own module docstring explicitly claims it supersedes the JS-based approaches ('100% accurate ... instead of limited JavaScript-based extraction'), yet the other two were never removed or rerouted to call it.",
+    "why_it_matters": "Any bug fix, new field, or behavior change to 'how we extract element data' must be manually triplicated across 3 unrelated code paths using 3 different browser-automation techniques (JS-file injection, monolithic inline JS, raw CDP). This has already happened partially (see F-142): a hang-avoidance rewrite reached only 1 of the 5 sibling primitives. Consumers also get inconsistent response shapes depending on which of the near-synonymous tool names they picked, with no indication which is canonical.",
+    "_source": "findings_dd3.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-142",
+    "severity": "High",
+    "category": "code_health",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/element_cloner.py:552-565",
+    "what": "extract_element_styles_cdp's docstring states its CDP-native rewrite exists specifically to prevent hangs, and extract_element_styles (element_cloner.py:28-65) now does nothing but delegate to it. But the other 4 extraction primitives in the same ElementCloner class - extract_element_structure, extract_element_events, extract_element_animations, extract_element_assets - still call self._load_js_file(...) followed by await tab.evaluate(js_code) (e.g. element_cloner.py:152-153), the exact JS-evaluation pattern the CDP rewrite was built to replace.",
+    "why_it_matters": "This is a fix that landed in 1 of 5 sibling methods and was never propagated to the other 4. If the underlying hang bug is real (the docstring states it as fact, not hypothesis), 4 of 5 extraction tools in ElementCloner - extract_element_structure, extract_element_events, extract_element_animations, extract_element_assets - remain exposed to it, with no tracking issue or TODO marking the gap.",
+    "_source": "findings_dd3.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-145",
+    "severity": "High",
+    "category": "testing",
+    "location": "tests/test_clone_storage_cap.py:19-23",
+    "what": "No test in the repository exercises the extraction logic of any of the 5 cloner classes (ElementCloner.extract_*, ComprehensiveElementCloner.extract_complete_element, ProgressiveElementCloner.clone_element_progressive/expand_*, CDPElementCloner.extract_complete_element_cdp, or any FileBasedElementCloner method's actual extraction path). Only 3 files reference these classes/instances by name (test_element_cloner_output_dir.py, test_clone_output_dir.py, conftest.py) and all 3 test only FileBasedElementCloner's output-directory path resolution. The other 5 clone-named test files (test_clone_storage_cap.py, test_clone_sweep_race.py, test_clone_trash_recovery.py, test_clone_legacy_marker_classification.py, test_profile_clone_excludes_cache.py) import disk-hygiene helpers directly from server (_clone_is_auto, _enforce_clone_storage_cap_in, _profile_ignore_names, _copy_profile_delta) - a storage-eviction subsystem layered on top of the clone output directory, unrelated to whether extraction itself is correct.",
+    "why_it_matters": "The consolidation this deep-dive recommends (F-140/F-141/F-142) would be executed with zero automated signal on whether the unified extractor still returns equivalent data to the 3 engines it replaces. Given the priority order for this audit is maintainability first, the highest-leverage fix here (collapsing 3 extraction engines into 1) is also the riskiest to do blind.",
+    "_source": "findings_dd3.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.92,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-161",
+    "severity": "High",
+    "category": "security",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:3846-3856",
+    "what": "The create_python_binding MCP tool execs the caller-supplied python_code string with `exec_globals = {}`. Since that dict has no '__builtins__' key, CPython auto-populates it with a reference to the real builtins module before execution (documented exec() behavior) — meaning this code runs with completely unrestricted builtins: open, __import__, eval, exec, everything. There is no restricted-namespace attempt, no AST validation, nothing — in contrast to the sibling exec/eval sites in dynamic_hook_system.py (F-160), which at least attempt a restricted __builtins__ dict and route through an AST denylist.",
+    "why_it_matters": "Same trust boundary as F-160 (python_code is always an MCP tool-call argument, i.e. AI/operator-authored, never page-controlled), but the blast radius is materially larger: this runs in the MCP server's own long-lived Python process with the operator's full OS-user privileges (filesystem, environment variables, ability to spawn subprocesses), not inside a purpose-built hook namespace. It's also a silent capability gap — nothing about the tool's docstring ('Python function code (as string)') signals that it carries zero sandboxing, while a maintainer skimming the codebase could reasonably assume the restricted-builtins pattern used elsewhere for hook code is the house style. That inconsistency is itself a maintainability smell: two modules solving the same problem (let AI-written Python run) with wildly different (and both broken) postures.",
+    "_source": "findings_dd4.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-201",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:449-463",
+    "what": "server.py (4207 lines, docstring 'Main MCP server for browser automation') embeds a full filesystem trash/quota/eviction subsystem directly alongside all 96 @mcp.tool registrations: _trash_clone, _purge_expired_trash, _idle_autoclones_over_cap, _enforce_clone_storage_cap_in, _session_storage_cap_bytes, _named_profiles_over_session_cap, _enforce_named_profile_trim_in, _enforce_session_storage, _run_storage_sweep, _copy_profile_tree, _rmtree_robust and further helpers spanning roughly lines 330-1080 — over 700 lines of clone-storage business logic living in what is nominally the tool-routing file.",
+    "why_it_matters": "Any trace that touches an existing tool or adds a new one (2 of the 3 traced requests) means reading past hundreds of lines of unrelated clone-eviction filesystem logic to find the right MCP-tool code. It also means the 14 test files that `import server` directly (verified) exercise storage-sweep behavior, tool behavior, and profile-selection logic through the same single module import, so a change anywhere in the file risks rippling into unrelated test failures, and the storage-quota/trash system hardened across several recent commits (e5ced24, 83c7993, af4225b) sits one accidental edit away from any tool change.",
+    "_source": "findings_change_trace.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-202",
+    "severity": "High",
+    "category": "code_health",
+    "location": "tests/test_server_call_conventions.py:3-8",
+    "what": "response_handler.handle_response() (response_handler.py:65) is a synchronous method, but it is called from inside async def MCP tool wrappers in server.py that otherwise await almost everything around them. Three call sites (extract_element_assets, extract_related_files, discover_object_methods) were written as `return await response_handler.handle_response(...)`, which raises TypeError on every invocation, and shipped that way until fixed in commit 2267b83 (the commit this audit is pinned at).",
+    "why_it_matters": "This is exactly the class of bug the codebase's own tests cannot catch cheaply: server.py registers 96 tools and, per the fix commit's own test docstring, 'a live-browser test can't cover all 96 tools cheaply' — so the bug shipped silently, running real CDP work and then throwing on the return statement, on every call, for three shipped tools. The fix is a bespoke AST-walking static test (assert no ast.Await ever wraps a .handle_response attribute call) rather than a change that makes the mistake structurally impossible, so any other synchronous helper added to this heavily-async file in the future gets no equivalent protection unless someone remembers to write another bespoke AST guard for it.",
+    "_source": "findings_change_trace.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-203",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py:18-27",
+    "what": "Five separate modules implement overlapping 'extract data from a DOM element' functionality with largely mirrored method sets: element_cloner.py (ElementCloner.extract_element_styles/_structure/_events/_animations/_assets, extract_related_files, clone_element_complete — verified via grep), file_based_element_cloner.py (the same seven operations, each suffixed _to_file), plus cdp_element_cloner.py, comprehensive_element_cloner.py, and progressive_element_cloner.py as further independent implementations — 2,223 lines total across the 5 files (verified via wc -l). file_based_element_cloner.py does not even fully delegate: it imports and wraps both ComprehensiveElementCloner and the element_cloner singleton directly, per the quoted import block, rather than one implementation being layered cleanly on another.",
+    "why_it_matters": "Any change to what 'extracting an element' means (a new field to capture, a new fallback strategy, a bug fix in the querying logic) is a judgment call about which of 5 files need the same fix, with no compiler or test to catch a forgotten sibling. The MEDIUM trace in this audit shows the concrete cost: a new extraction-adjacent tool has 3 non-agreeing precedents to choose from for something as basic as 'where do I write the output file' (see F-205), because the cloner layer was never consolidated to one core.",
+    "_source": "findings_change_trace.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-204",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py:75-84",
+    "what": "DebugLogger is one global, module-level singleton (`debug_logger = DebugLogger()`, debug_logger.py:498) shared by every browser instance/session the singleton backend process is currently serving. log_error's de-duplication key is `component.method.exception_type.message` — component/method are fixed string tags like \"browser_manager\"/\"spawn_browser\", not the calling instance_id — so the first session to hit a given error shape suppresses every later occurrence from any other concurrent session for the rest of the process's life (bounded only by MAX_SEEN_ERRORS=1000 eventually clearing the whole set). All 287 verified debug_logger.* call sites across 15 files share this same no-instance-dimension shape.",
+    "why_it_matters": "This directly blocks the traced cross-cutting request (per-session log correlation) at the root: there is no instance/session concept anywhere in the logging layer to build on, so adding one means touching the class plus, in the worst case, all 287 call sites. It is also a live operability gap today, independent of any new feature: an operator investigating one session's failure cannot filter to it, and a second session's genuinely-recurring error can be silently and permanently dropped because a different session already logged 'the same shaped' error first.",
+    "_source": "findings_change_trace.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-307",
+    "severity": "High",
+    "category": "code_health",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py:47",
+    "what": "log_error/log_warning/log_info (debug_logger.py:62-153) each do `with self._lock:` (an untimed threading.Lock acquire) and call this _emit_stderr from inside that lock scope. print() to a pipe is a blocking syscall when the consumer isn't draining it -- it does not raise; it just blocks. The except clause here only catches (OSError, ValueError), which covers a closed/broken pipe, not a slow/full one. If any thread ever blocks inside this print while holding self._lock, every other thread's next log_error/log_warning/log_info call hangs forever on the untimed `with self._lock:` -- with no asyncio.wait_for or timeout anywhere in the codebase able to rescue it, since it is a synchronous blocking primitive, not an awaitable.",
+    "why_it_matters": "This is a code-level hang with no possible timeout backstop -- directly answering 'what would have surfaced this hang' with 'nothing could have, by construction.' It requires STEALTH_BROWSER_DEBUG=true (or DEBUG=true) and a real, undrained stderr pipe to trigger -- true for a manually-run `serve` in a terminal/script but not for the singleton-spawned production path, which DEVNULLs stderr (F-303) and therefore can't backpressure. Note clear_debug_view() (line 257) and export_to_file_paginated() (line 336) already use the safer `self._lock.acquire(timeout=5.0)` pattern with a lock-free fallback -- the three logging methods are the odd ones out.",
+    "_source": "findings_incident.json",
+    "verify": {
+      "quote_status": null,
+      "confidence": null,
+      "verified": null
+    }
+  },
+  {
+    "id": "F-403",
+    "severity": "Critical",
+    "category": "testing",
+    "location": "README.md:183-190",
+    "what": "Running the exact first documented command, `uv run pytest -m \"not integration\"`, on this checkout fails immediately with `Failed to canonicalize script path` (exit code 1) -- no test collection, no stack trace, nothing else actionable. Reproduced identically three ways (piped output, unpiped, `uv run pytest --version`, and with an explicit quoted `--directory` flag). Bypassing uv entirely and invoking pytest directly through the checked-out venv (`.venv\\Scripts\\python.exe -m pytest -m \"not integration\" -q`) passes cleanly: 402 passed, 24 deselected, 1 warning in 61.91s. `uv run stealth-chrome-devtools-mcp` and `uv run stealth-chrome-devtools status`/`doctor` do NOT hit this error on the same path, so the break is specific to how `uv run` resolves the pytest console-script shim, not a blanket problem with this directory.",
+    "why_it_matters": "This is THE documented test command -- the primary way any engineer, new or otherwise, is told to validate a change on this project. It is completely non-functional on this checkout as written, and the failure message has no discoverable connection to the real cause (a uv path-canonicalization limitation triggered by '&'/spaces in the folder name). There is no workaround, note, or warning anywhere in the docs. This blocks the single most important onboarding validation step on the exact checkout being audited.",
+    "_source": "findings_onboarding.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-502",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:3",
+    "what": "The whole design centres on a single per-user backend process (STATE_DIR = ~/.stealth-mcp, one server.json, one port). When any new session sees a version mismatch, `_start_backend_holding_lock` calls `_clear_stale_backend`, which terminates/kills the backend process squatting the port (singleton.py:200-208: `proc.terminate()` ... `proc.kill()`) so its own fresh backend can bind.",
+    "why_it_matters": "One shared backend is a single point of failure for every concurrent session, and the eviction path makes it worse: a routine `uvx`/`pip` upgrade (or two projects pinned to different versions) means a newly-started session terminates the backend that other, still-running sessions are actively proxying to. Their in-flight browser automation — including browser subprocesses parented by that backend — dies mid-operation. A per-session action (starting a new client) thus causes a cross-session outage.",
+    "_source": "findings_premortem.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-505",
+    "severity": "High",
+    "category": "maintainability",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1212",
+    "what": "`embedded/server.py` is a 4207-line god module holding 96 `@section_tool` tool bodies plus profile-clone, storage-sweep, and lifecycle logic, all behind a custom section_tool/DISABLED_SECTIONS indirection layer over FastMCP. Nearly every behavioural change lands in this one file.",
+    "why_it_matters": "A 4000+ line single-file surface makes any change slow to locate, hard to review, and wide in blast radius; the custom registration/disable layer adds a second thing to reason about. It is the structural reason estimates for 'small' tool changes balloon, and the reason regressions are easy to introduce and hard to isolate.",
+    "_source": "findings_premortem.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-507",
+    "severity": "High",
+    "category": "testing",
+    "location": ".github/workflows/publish.yml:0",
+    "what": "The PyPI publish job (`publish` needs `test`) runs ONLY `pytest -m \"not integration\"` before shipping. The real-browser integration suite is never a release gate. The coverage floor in test.yml is likewise computed with `-m \"not integration\" ... --cov-fail-under=39`, so the entire live-automation surface (browser spawn, CDP, navigation, cloning — most of the 4207-line god file) is excluded from the measured coverage by construction.",
+    "why_it_matters": "A release can be green and still be broken in every real browser path, because the code that actually drives Chrome is never exercised before publish and contributes nothing to the 39% floor. Nothing protects the highest-risk, hardest-to-test surface; regressions ship to users and are discovered only in the field.",
+    "_source": "findings_premortem.json",
+    "verify": {
+      "quote_status": "paraphrased",
+      "confidence": 0.8,
+      "verified": false
+    }
+  },
+  {
+    "id": "F-601",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/comprehensive_element_cloner.py:18-29",
+    "what": "5 cloner modules exist (element_cloner.py 648 LOC, file_based_element_cloner.py 647 LOC, comprehensive_element_cloner.py 343 LOC, cdp_element_cloner.py 320 LOC, progressive_element_cloner.py 265 LOC; 2223 LOC total). file_based_element_cloner.py's *_to_file methods cleanly delegate to element_cloner.py (e.g. `style_data = await element_cloner.extract_element_styles(...)`), but comprehensive_element_cloner.py imports only debug_logger (no element_cloner import, shown above) and independently reimplements 'extract complete element' extraction; cdp_element_cloner.py does the same again with its own extract_complete_element_cdp, importing only asyncio/json/nodriver/debug_logger.",
+    "why_it_matters": "A bug fix or CDP/DOM API change to element-extraction logic (styles, events, animations, CSS rules) has to be manually replicated across up to 3 independently-implemented extractors; nothing enforces they stay in sync, so tool behavior silently drifts depending on which cloner module backs a given MCP tool.",
+    "_source": "findings_prior.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  },
+  {
+    "id": "F-612",
+    "severity": "High",
+    "category": "architecture",
+    "location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1-12",
+    "what": "server.py is a single 4207-line module (verified via `wc -l`) containing nearly all 96 MCP tool definitions, config resolution, timeout/validation helpers, session/profile management, and orchestration logic for every other embedded/ subsystem.",
+    "why_it_matters": "A single 4000+ line file with 96 tool functions is hard to navigate, review, or safely change in isolation — every PR touching server.py risks unrelated merge conflicts and every reviewer has to hold the whole file's context to reason about a single tool's correctness; this is the file every other cross-cutting finding in this audit (F-602, F-603, F-605 area, etc.) lives inside.",
+    "_source": "findings_prior.json",
+    "verify": {
+      "quote_status": "verbatim",
+      "confidence": 0.95,
+      "verified": true
+    }
+  }
+]

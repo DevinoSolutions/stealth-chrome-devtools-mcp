@@ -1,0 +1,92 @@
+[
+  {
+    "id": "F-207",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  {
+    "id": "F-208",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.9,
+    "note": "Multi-line quote verified; exact whitespace may vary slightly"
+  },
+  {
+    "id": "F-301",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Function definition verified"
+  },
+  {
+    "id": "F-302",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  {
+    "id": "F-303",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  {
+    "id": "F-304",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.92,
+    "note": "Decorator found; get_debug_view starts at 2459"
+  },
+  {
+    "id": "F-305",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  {
+    "id": "F-306",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  {
+    "id": "F-307",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  },
+  {
+    "id": "F-308",
+    "quote_status": "verbatim",
+    "location_ok": true,
+    "behavior_ok": true,
+    "verified": true,
+    "confidence": 0.95,
+    "note": "Quote verified at cited line"
+  }
+]

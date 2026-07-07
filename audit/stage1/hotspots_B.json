@@ -1,0 +1,86 @@
+[
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/embedded/server.py",
+    "signal": "Monolithic 4207-line module with 66 functions, 10 global variables, eval() usage, and 22 generic Exception handlers—lacks modularity, untestable subsystems, error semantics unclear.",
+    "severity_guess": "Critical",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/server.py:1-100"
+  },
+  {
+    "hotspot": "Element Cloner Subsystem (5 parallel implementations)",
+    "signal": "Five separate cloner classes (element_cloner, file_based_element_cloner, cdp_element_cloner, comprehensive_element_cloner, progressive_element_cloner) with overlapping semantics—duplicated logic, maintenance burden, inconsistent behavior.",
+    "severity_guess": "High",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/element_cloner*.py (5 files, ~3KB combined)"
+  },
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py",
+    "signal": "1335-line resource manager with 28 async methods, 90 process/PID references, but only 1 error-handling pattern in lifecycle and no context manager support—resource leak risks, hard to guarantee cleanup.",
+    "severity_guess": "High",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py:1-100"
+  },
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/embedded/singleton.py",
+    "signal": "Version-aware singleton with 8 global variables and async/concurrency patterns but no thread-safety synchronization—multi-version backend state collision risk under concurrent access.",
+    "severity_guess": "High",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:1-60"
+  },
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/embedded/hook_learning_system.py",
+    "signal": "get_hook_examples() function spans 309 lines in monolithic implementation—massive single function with unclear flow, hard to unit test or modify.",
+    "severity_guess": "High",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/hook_learning_system.py:80-390"
+  },
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/embedded/cdp_function_executor.py",
+    "signal": "841-line script execution engine with getattr() patterns and dynamic code paths—potential injection attack surface, requires security audit.",
+    "severity_guess": "High",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/cdp_function_executor.py:1-80"
+  },
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py",
+    "signal": "4 classes, dynamic code execution via exec/eval patterns, 15 try/15 except pairs—security audit gaps, runtime injection risks, error handling unclear.",
+    "severity_guess": "High",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py:1-60"
+  },
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py",
+    "signal": "1023-line process manager with 29 functions, 30 exception handlers, and 2 large functions (94 and 74 lines)—error handling patterns unclear, hard to diagnose cleanup failures.",
+    "severity_guess": "Medium",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py:1-100"
+  },
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/embedded/dom_handler.py",
+    "signal": "DOM operations with 9 hardcoded timeouts/sleeps and 3 silent except-pass patterns—flaky integration tests, hidden failures on slow systems or network latency.",
+    "severity_guess": "Medium",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/dom_handler.py"
+  },
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/embedded/network_interceptor.py",
+    "signal": "606-line single class with monolithic function, 14 try/16 except blocks—unclear error recovery semantics, network failure handling fragile.",
+    "severity_guess": "Medium",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/network_interceptor.py:1-80"
+  },
+  {
+    "hotspot": "Test Coverage Gaps",
+    "signal": "32 test files across 30+ embedded modules (most modules have only 1 test file)—critical subsystems under-tested; server.py, process_cleanup, browser_manager lack comprehensive test suites.",
+    "severity_guess": "Medium",
+    "evidence_pointer": "tests/ directory; coverage = 40.9%"
+  },
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/cli.py",
+    "signal": "CLI argument handling has 11 help strings across 0 subcommands with no error recovery try/except—poor user experience on malformed args or failures.",
+    "severity_guess": "Medium",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/cli.py:1-50"
+  },
+  {
+    "hotspot": "src/stealth_chrome_devtools_mcp/embedded/persistent_storage.py",
+    "signal": "State persistence module lacks version isolation boundaries—multi-version backend may read/write incompatible state formats.",
+    "severity_guess": "Medium",
+    "evidence_pointer": "src/stealth_chrome_devtools_mcp/embedded/persistent_storage.py"
+  },
+  {
+    "hotspot": "CI/CD Pipeline (.github/workflows/)",
+    "signal": "Only 2 workflow files (test.yml, publish.yml)—limited platform/environment coverage, no per-PR code quality gates beyond basic test pass.",
+    "severity_guess": "Low",
+    "evidence_pointer": ".github/workflows/"
+  }
+]
