@@ -16,6 +16,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
 import socket
 import subprocess
 import sys
@@ -307,10 +308,16 @@ def _start_server_process(port: int):
         boot_log = None
 
     stdout_target = boot_log if boot_log is not None else subprocess.DEVNULL
+    # A spawned backend must always own its lifecycle (reap its own orphaned
+    # browsers on init) even when the CLI-invoking parent set this to skip
+    # its own recovery-on-import (cli.py's os.environ.setdefault).
+    child_env = dict(os.environ)
+    child_env.pop("STEALTH_MCP_NO_AUTO_RECOVERY", None)
     kwargs: dict = {
         "stdout": stdout_target,
         "stderr": stdout_target,
         "stdin": subprocess.DEVNULL,
+        "env": child_env,
     }
 
     if sys.platform == "win32":

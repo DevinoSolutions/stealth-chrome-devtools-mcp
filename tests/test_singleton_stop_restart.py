@@ -24,6 +24,7 @@ import json
 import socket
 import subprocess
 import sys
+from unittest.mock import MagicMock
 
 import pytest
 import singleton
@@ -114,3 +115,46 @@ class TestTerminateBackendIdentity:
         port = _free_closed_port()
         # No server.json at all.
         assert singleton._terminate_backend(port) is False
+
+
+class TestSpawnEnvScrub:
+    """M8-2: a backend spawned via _start_server_process must always reap its
+    own orphaned browsers, even when the CLI-invoking parent process has
+    STEALTH_MCP_NO_AUTO_RECOVERY set (cli.py's os.environ.setdefault, so a CLI
+    subcommand's own import of the server module doesn't trigger recovery).
+    Without this scrub, a `restart`-spawned backend would silently inherit the
+    flag and skip ProcessCleanup's recovery-on-init."""
+
+    def test_scrubs_no_auto_recovery_from_child_env(self, isolated_state, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NO_AUTO_RECOVERY", "1")
+        monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+        fake_proc = MagicMock()
+        fake_proc.pid = 4242
+        captured = MagicMock(return_value=fake_proc)
+        monkeypatch.setattr(singleton.subprocess, "Popen", captured)
+
+        singleton._start_server_process(4321)
+
+        _, kwargs = captured.call_args
+        assert "env" in kwargs
+        assert "STEALTH_MCP_NO_AUTO_RECOVERY" not in kwargs["env"]
+
+    def test_child_env_otherwise_matches_parent(self, isolated_state, monkeypatch):
+        """The scrub removes exactly one key - it must not silently drop the
+        rest of the parent's environment (e.g. PATH), which would break the
+        child's ability to locate its own interpreter/DLLs."""
+        # Deliberately NOT STEALTH_MCP_*-prefixed: settings.py loudly rejects
+        # any unrecognized STEALTH_MCP_* key, which would fail this test for
+        # an unrelated reason if the canary used that prefix.
+        monkeypatch.setenv("STEALTH_MCP_NO_AUTO_RECOVERY", "1")
+        monkeypatch.setenv("SINGLETON_TEST_CANARY", "canary-value")
+        monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+        fake_proc = MagicMock()
+        fake_proc.pid = 4242
+        captured = MagicMock(return_value=fake_proc)
+        monkeypatch.setattr(singleton.subprocess, "Popen", captured)
+
+        singleton._start_server_process(4321)
+
+        _, kwargs = captured.call_args
+        assert kwargs["env"]["SINGLETON_TEST_CANARY"] == "canary-value"
