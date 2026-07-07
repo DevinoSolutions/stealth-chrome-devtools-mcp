@@ -125,6 +125,32 @@ def _write_server_state(port: int, version: str, pid: int) -> None:
     )
 
 
+def _probe_backend_status() -> tuple[str, int | None]:
+    """Report the recorded backend's actual state for display (CLI status/
+    doctor), distinguishing the three states `_find_running_server`'s
+    binary reuse-or-not answer collapses: not running at all, running but
+    socket-dead, and running-but-wedged (the F-301 state a bare socket check
+    cannot see). Read-only: never evicts, never spawns.
+
+    Returns one of:
+        ("none", None)        - no recorded backend
+        ("down", port)         - recorded but the socket itself is closed
+        ("wedged", port)       - socket open, but no real MCP initialize answer
+        ("responsive", port)  - socket open AND initialize answers 200
+    """
+    state = _read_server_state()
+    if state is None:
+        return "none", None
+    port = state.get("port")
+    if not isinstance(port, int):
+        return "none", None
+    if not _server_is_healthy(port):
+        return "down", port
+    if not _backend_http_ready(port):
+        return "wedged", port
+    return "responsive", port
+
+
 def _find_running_server() -> int | None:
     """Return the port of a *reusable* backend, or None.
 
