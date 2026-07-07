@@ -50,6 +50,11 @@ SERVER_NAME = "stealth-chrome-devtools-mcp"
 # (tools/list, tool calls) start failing. The `initialize` handshake itself is
 # answered locally and never waits on this.
 BACKEND_READY_TIMEOUT = 120.0
+# Human-resolved (plan_M1 appendix, 2026-07-02): keep the ~12s watchdog
+# detection window (LIVENESS_PROBE_TIMEOUT=2.0, interval=2.0 x
+# failures_before_teardown=3) - preserves the existing watchdog hysteresis
+# tests. Not a decision to re-open in a later plan.
+LIVENESS_PROBE_TIMEOUT = 2.0
 
 
 def _ensure_state_dir():
@@ -296,6 +301,73 @@ def _wait_for_server(port: int, timeout: int = STARTUP_TIMEOUT) -> bool:
 
 def _backend_http_url(port: int) -> str:
     return f"http://127.0.0.1:{port}/mcp/"
+
+
+def _backend_http_ready(port: int, *, timeout: float = LIVENESS_PROBE_TIMEOUT) -> bool:
+    """Single-shot, synchronous app-level liveness probe: True iff the backend
+    on ``port`` answers a real ``initialize`` with HTTP 200.
+
+    This is the promoted, reusable form of the mechanism `_await_backend_http`
+    already proves at startup (initialize->200), turned into ONE attempt
+    instead of a poll loop, so sync callers (discovery, CLI) can call it
+    directly and the watchdog can drive it off-thread. Never raises: any
+    failure (connection refused, timeout, malformed response) resolves to
+    False, matching `_server_is_healthy`'s fail-closed contract - a probe
+    error must always read as "not ready," never propagate.
+
+    NOTE: this intentionally duplicates ~10 lines of `_await_backend_http`'s
+    `initialize` request shape rather than sharing a helper (plan_M1 SS2.2
+    rejected-alternative #4, cross-review ruling: M1/M3 singleton regions stay
+    disjoint - `_await_backend_http` is M3's). `grep '"initialize"'` finds
+    both twins; consolidating them is a future finding, not this plan's scope.
+    """
+    import httpx
+    from mcp.types import DEFAULT_NEGOTIATED_VERSION
+
+    probe = {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": DEFAULT_NEGOTIATED_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "liveness-probe", "version": "0"},
+        },
+    }
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    url = _backend_http_url(port)
+    try:
+        with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
+            resp = client.post(url, json=probe, headers=headers)
+            if resp.status_code != 200:
+                return False
+            session_id = resp.headers.get("mcp-session-id")
+            if session_id:
+                try:
+                    client.delete(
+                        url, headers={**headers, "mcp-session-id": session_id}
+                    )
+                except Exception:
+                    # Best-effort cleanup of the throwaway liveness session;
+                    # the probe itself already succeeded.
+                    _logger.debug(
+                        "liveness-probe session cleanup failed", exc_info=True
+                    )
+            return True
+    except Exception as e:
+        # Fail-closed: connection refused (down), a hung/wedged backend that
+        # never answers (timeout), or any other transport error all read as
+        # "not ready" - matching _server_is_healthy's contract. DEBUG, not
+        # WARNING (M10a convention, cf. _await_backend_http's identical
+        # catch): this fires routinely during a normal cold start and on
+        # every watchdog tick while a backend is briefly busy - the caller
+        # (the watchdog) is the one that decides when repeated failures are
+        # WARNING-worthy, not this single-attempt probe.
+        _logger.debug("liveness probe attempt failed", exc_info=e)
+        return False
 
 
 def _server_version() -> str:
