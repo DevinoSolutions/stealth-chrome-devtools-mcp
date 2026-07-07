@@ -1266,7 +1266,8 @@ class BrowserManager:
                     self._instances[instance_id]["tab"] = target_tab
 
             return True
-        except Exception:
+        except Exception as e:
+            debug_logger.log_warning("browser_manager", "switch_to_tab", str(e))
             return False
 
     async def get_active_tab(self, instance_id: str) -> Tab | None:
@@ -1308,7 +1309,8 @@ class BrowserManager:
         try:
             await target_tab.close()
             return True
-        except Exception:
+        except Exception as e:
+            debug_logger.log_warning("browser_manager", "close_tab", str(e))
             return False
 
     async def update_instance_state(

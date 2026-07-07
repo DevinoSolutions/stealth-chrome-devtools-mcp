@@ -18,7 +18,11 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # logging() import + call in __main__ — the M3/M10a except-surface work
     # plan_M4ph1's own tag already anticipated).
     "embedded/server.py": (4422, "plan_M4ph1 + plan_M3"),
-    "embedded/browser_manager.py": (1447, "DEBT(F-702)"),
+    # 1447 (DEBT(F-702)) + 2 (plan_M10a step 7a: switch_to_tab/close_tab's two
+    # truly-silent `except Exception: return False` handlers now each add one
+    # debug_logger.log_warning(...) line closing F-181 rows 1-2; same minimal-
+    # bump rationale as server.py above, cross-review-confirmed there).
+    "embedded/browser_manager.py": (1449, "DEBT(F-702) + plan_M10a"),
     "embedded/process_cleanup.py": (1022, "plan_M11a"),
 }
 
