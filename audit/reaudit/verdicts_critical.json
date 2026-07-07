@@ -1,0 +1,61 @@
+{
+  "agent": "critical",
+  "verdicts": [
+    {
+      "id": "F-180",
+      "verdict": "STILL_VALID",
+      "new_quote": "try:\n            return await asyncio.wait_for(_do_close(), timeout=5.0)\n        except TimeoutError:\n            debug_logger.log_warning(\n                \"browser_manager\",\n                \"close_instance\",\n                f\"Close timeout for {instance_id}, forcing cleanup\",\n            )\n            try:\n                async with self._lock:\n                    if instance_id in self._instances:\n                        data = self._instances[instance_id]\n                        data[\"instance\"].state = BrowserState.CLOSED\n                        process_cleanup.kill_browser_process(instance_id)\n                        process_cleanup.finalize_browser_process(instance_id)\n                        process_cleanup.cleanup_deferred_profiles()",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py:837-852",
+      "evidence": "_do_close() is still wrapped in asyncio.wait_for(timeout=5.0) (line 838), while the work it awaits stays synchronous: process_cleanup.kill_browser_process (line 722), self._stop_browser (731), and the TimeoutError fallback's kill/finalize/cleanup_deferred trio (850-852) are all called directly with zero asyncio.to_thread anywhere in the file (grep for to_thread returns nothing), so wait_for still cannot preempt a hung kill and the fallback re-runs the same unbounded synchronous calls. Only cosmetic drift from gates: asyncio.TimeoutError -> TimeoutError alias and ruff double-quotes.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-301",
+      "verdict": "STILL_VALID",
+      "new_quote": "def _server_is_healthy(port: int) -> bool:\n    try:\n        sock = socket.create_connection((\"127.0.0.1\", port), timeout=2)\n        sock.close()\n        return True\n    except OSError:\n        return False",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:81-87",
+      "evidence": "The sole liveness signal is unchanged: _server_is_healthy still only does socket.create_connection/close. It remains the signal for every consumer named in the finding - reuse/status decisions at lines 132 and 211, the _clear_stale_backend eviction guard at 253, and the _watch_backend_liveness watchdog default at 391 - none of which verify the event loop / FastMCP dispatch is servicing requests. The application-level probe _await_backend_http exists but is called only once (line 465, startup). A wedged-but-listening backend still reports healthy on all three paths. Only gates change: except (socket.error, OSError) -> except OSError (socket.error is an OSError alias).",
+      "confidence": 0.97
+    },
+    {
+      "id": "F-304",
+      "verdict": "STILL_VALID",
+      "new_quote": "@section_tool(\"debugging\")\nasync def get_debug_view(\n    max_errors: int = 50,\n    max_warnings: int = 50,\n    max_info: int = 50,\n    include_all: bool = False,",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/server.py:2541-2546 (also export_debug_logs:2586, get_debug_lock_status:2630)",
+      "evidence": "All three diagnostic readers are still ordinary @section_tool(\"debugging\") MCP tool functions dispatched through the same request path as spawn_browser/navigate. No out-of-band transport was added: grep across server.py finds no flush, no SIGUSR/SIGBREAK handler, no healthz endpoint, and no periodic background task that drains DebugLogger buffers to disk. The F-303/F-304 fix (independent background flush task or secondary control port) has not executed, so when tool calls hang, the debug view hangs with them.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-501",
+      "verdict": "STILL_VALID",
+      "new_quote": "check = is_healthy if is_healthy is not None else (lambda: _server_is_healthy(port))\n    nap = sleep if sleep is not None else anyio.sleep\n    consecutive = 0\n    while True:\n        await nap(interval)\n        if check():\n            consecutive = 0\n            continue\n        consecutive += 1\n        if consecutive >= failures_before_teardown:\n            return",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:391-401 (probe defined at 81-87)",
+      "evidence": "_watch_backend_liveness still defaults its check to the bare-TCP _server_is_healthy(port) (line 391), resets the failure counter on any successful connect (397), and only returns after 3 consecutive CONNECTION failures (400). The stronger real-initialize->HTTP-200 probe _await_backend_http (line 317, whose docstring still warns a freshly bound uvicorn socket answers before the MCP session manager is ready) is invoked only at startup (line 465), never in the watchdog. A wedged-but-listening backend passes forever and the proxy never tears down - the exact liveness gap. No Stage-3 liveness fix executed.",
+      "confidence": 0.97
+    },
+    {
+      "id": "F-601",
+      "verdict": "STILL_VALID",
+      "new_quote": "import sys\nfrom pathlib import Path\nfrom typing import Any\n\nproject_root = Path(__file__).parent\nsys.path.append(str(project_root))\n\nfrom debug_logger import debug_logger\n\n\nclass ComprehensiveElementCloner:",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/comprehensive_element_cloner.py:18-28",
+      "evidence": "All 5 cloner modules still exist (element_cloner 836, file_based_element_cloner 750, comprehensive_element_cloner 406, cdp_element_cloner 389, progressive_element_cloner 310 LOC). comprehensive_element_cloner.py and cdp_element_cloner.py still import only debug_logger (no element_cloner import in either) and independently reimplement extraction, while file_based_element_cloner still cleanly delegates. No consolidation and no deletion happened. Only gates change: ruff dropped the unused 'import os' and collapsed 'from typing import Dict, Any, Optional' to 'from typing import Any'.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-612",
+      "verdict": "STILL_VALID",
+      "new_quote": "\"\"\"Main MCP server for browser automation.\"\"\"\n\nimport asyncio\nimport base64\nimport hashlib\nimport importlib\nimport json\nimport os\nimport re\nimport shutil\nimport sys",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1-11",
+      "evidence": "server.py is still one monolithic module and has grown to 4421 lines (up from 4207 at baseline), still containing the debugging tools verified above plus config resolution and orchestration for every embedded/ subsystem. No section-based split occurred. Only gates change: isort reordered the header block (the baseline quote's 'import signal' moved out of the first eleven lines; 'import tempfile' now follows 'import sys').",
+      "confidence": 0.98
+    },
+    {
+      "id": "F-764",
+      "verdict": "STILL_VALID",
+      "new_quote": "acquired = self._lock.acquire(timeout=5.0)\n            if not acquired:\n                self._emit_stderr(\n                    \"[DEBUG] Lock timeout - falling back to lock-free export\"\n                )\n                return self._export_lockfree(\n                    filepath, max_errors, max_warnings, max_info, fmt\n                )\n\n            self._lock_owner = \"export_debug_logs\"\n            self._lock_acquired_time = time.time()\n            self._emit_stderr(\"[DEBUG] Lock acquired by export_debug_logs\")\n\n            try:\n                debug_data = self.get_debug_view_paginated(\n                    max_errors=max_errors, max_warnings=max_warnings, max_info=max_info\n                )",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py:391-407 (re-entrant inner acquire at :198; lock defined :41)",
+      "evidence": "self._lock is still a plain threading.Lock() (line 41), not RLock. export_to_file_paginated still acquires it via style (b) acquire(timeout=5.0) at 391 and then, while holding it, calls self.get_debug_view_paginated (405), whose body re-enters the same non-reentrant lock via bare 'with self._lock:' at 198. The inner acquire has no timeout, so same-thread reentrancy deadlocks on every call - the finding's exact mechanism, intact. Neither Stage-3 fix (single lock discipline or switch to RLock) executed; only the 'format' param was renamed 'fmt'.",
+      "confidence": 0.9
+    }
+  ]
+}

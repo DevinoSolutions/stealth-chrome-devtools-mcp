@@ -1,0 +1,77 @@
+{
+  "agent": "procstore",
+  "verdicts": [
+    {
+      "id": "F-122",
+      "verdict": "STILL_VALID",
+      "new_quote": "persistent_storage.py:5-15: class InMemoryStorage:\n    \"\"\"Thread-safe in-memory storage for browser instance data.\"\"\"\n\n    def __init__(self):\n        \"\"\"\n        Initialize the in-memory storage.\n\n        self: InMemoryStorage - The storage instance.\n        \"\"\"\n        self._lock = threading.RLock()\n        self._data: dict[str, Any] = {\"instances\": {}}\n... persistent_storage.py:98: persistent_storage = InMemoryStorage()",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/persistent_storage.py:5-15,98 (was 4-14,95)",
+      "evidence": "Read the full file at HEAD (c7a2952b, 98 lines). The class is still named InMemoryStorage, still backed by nothing but threading.RLock() + a plain dict, still zero disk I/O anywhere in the file (no open()/Path.write*/sqlite3 calls at all), and the module-level singleton `persistent_storage = InMemoryStorage()` is unchanged in effect at line 98. The only diff from the original quote is ruff's type-hint modernization (`Dict[str, Any]` -> `dict[str, Any]`) and the line numbers shifting by 1 (module docstring/imports reformatted). The misleading module name vs. actual in-memory-only behavior is completely untouched by the gates wave.",
+      "confidence": 0.97
+    },
+    {
+      "id": "F-207",
+      "verdict": "STILL_VALID",
+      "new_quote": "persistent_storage.py:27-34: serializable_data = {\n                \"instance_id\": instance_id,\n                \"state\": data.get(\"state\", \"unknown\"),\n                \"created_at\": data.get(\"created_at\", \"\"),\n                \"current_url\": data.get(\"current_url\", \"\"),\n                \"title\": data.get(\"title\", \"\"),\n                \"tabs\": [],\n            }",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/persistent_storage.py:27-34 (was 26-33)",
+      "evidence": "store_instance still hand-builds this exact 6-key hardcoded subset dict (instance_id/state/created_at/current_url/title/tabs) and still silently drops every other field (headless, user_agent, viewport, etc.). It does not call .model_dump() on a pydantic BrowserInstance model as the fix direction proposed. Only cosmetic change: ruff reformatted single-quotes to double-quotes. Confirmed by reading the full current file; no other code path touches this dict.",
+      "confidence": 0.96
+    },
+    {
+      "id": "F-124",
+      "verdict": "STILL_VALID",
+      "new_quote": "process_cleanup.py:48-55 (identical line range to original): # Read-only tooling (the `stealth-chrome-devtools` CLI) imports this\n        # package to reuse profile helpers without taking over process\n        # lifecycle. Honor an opt-out so importing never kills the running\n        # server's browsers, deletes their profiles, or wipes PID tracking.\n        if get_settings().no_auto_recovery:\n            return\n        self._setup_cleanup_handlers()\n        self._recover_orphaned_processes()",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py:48-55 (init tail), module singleton still at line 1022 (process_cleanup = ProcessCleanup())",
+      "evidence": "The import-time hazard is structurally identical: __init__ still unconditionally calls _recover_orphaned_processes() (real psutil kills + shutil.rmtree profile deletion) unless the opt-out is set, and the module-level singleton still instantiates ProcessCleanup() at import time (line 1022, was 1023 -- file is 1 line shorter overall). The only change is the opt-out check itself moved from inline os.getenv(...).strip().lower() in {...} to get_settings().no_auto_recovery (settings.py's pydantic field), which is an orthogonal mechanism change, not a fix to this hazard. Verified tests/conftest.py does NOT set STEALTH_MCP_NO_AUTO_RECOVERY anywhere (grepped the whole tests/ directory: the only hit is test_singleton_fast_handshake.py:320 `env[\"STEALTH_MCP_NO_AUTO_RECOVERY\"] = \"1\"`, which sets it only in a subprocess env dict for a child process it spawns -- same gap the original finding described, just shifted from line 298 to 320). cli.py still sets the opt-out proactively for its own process (cli.py:38, was :35), confirming the CLI-only mitigation is unchanged. So any test file that imports process_cleanup/browser_manager directly in the pytest process itself still triggers real recovery as an import side effect.",
+      "confidence": 0.94
+    },
+    {
+      "id": "F-607",
+      "verdict": "STILL_VALID",
+      "new_quote": "process_cleanup.py:191-202: @staticmethod\n    @contextlib.contextmanager\n    def _file_lock(file_handle):\n        \"\"\"Acquire an exclusive file lock, released on exit.\"\"\"\n        try:\n            if sys.platform == \"win32\":\n                msvcrt.locking(file_handle.fileno(), msvcrt.LK_NBLCK, 1)\n            else:\n                fcntl.flock(file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)\n            yield\n        except OSError:\n            yield",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py:191-202 (was 216-225)",
+      "evidence": "The defect is unchanged: on lock-acquisition failure the except branch still unconditionally `yield`s, so _load_tracked_pids/_save_tracked_pids proceed to read/write the PID file exactly as if the lock had been acquired, with no signal to the caller that it wasn't. The only textual diff is `except (OSError, IOError):` collapsed to `except OSError:` -- a mechanical ruff fix (IOError is a plain alias of OSError in Python 3), not a behavior change. _load_tracked_pids and _save_tracked_pids (read at lines 213-232, 234-253) remain two independently-locked top-level calls; there is still no single locked load-modify-save critical section anywhere in the class. Confirmed by reading the full current file.",
+      "confidence": 0.96
+    },
+    {
+      "id": "F-608",
+      "verdict": "STILL_VALID",
+      "new_quote": "process_cleanup.py:390-400: elif not pids_to_kill and isinstance(fallback_pid, int):\n            pids_to_kill = {fallback_pid}\n\n        if not pids_to_kill:\n            return True\n\n        success = True\n        for pid in sorted(pids_to_kill):\n            if not self._kill_process_by_pid(pid, instance_id):\n                success = False\n        return success",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py:390-400 (was 411-422); recovery branch with the create_time check remains directly above at lines 349-389",
+      "evidence": "The non-recovery branch still uses the stored fallback_pid with zero identity verification when the profile-dir PID lookup is empty -- no psutil.Process(pid).create_time() check, unlike the recovery branch immediately above (lines 372-389) which explicitly compares create_time against both self._init_time and the stored create_time before trusting a PID. The only change is mechanical: the original `else: if not pids_to_kill and isinstance(fallback_pid, int):` nesting was collapsed to `elif not pids_to_kill and isinstance(fallback_pid, int):` (ruff SIM-style simplification), logic identical. A recycled PID in the non-recovery (explicit close) path would still be killed with no check.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-762",
+      "verdict": "PARTIALLY_FIXED",
+      "new_quote": "process_cleanup.py:39: self.pid_file = Path(\"~/.stealth_browser_pids.json\").expanduser()  ||  singleton.py:32-38: STATE_DIR = Path.home() / \".stealth-mcp\"\\nLOCK_FILE = STATE_DIR / \"singleton.lock\"\\nPORT_FILE = STATE_DIR / \"server.port\" ... SERVER_STATE_FILE = STATE_DIR / \"server.json\"  ||  response_handler.py:26: return Path.home() / \".stealth-mcp\" / \"element_clones\"",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py:39 (was 38); singleton.py:32 defines STATE_DIR; response_handler.py:26 (default_clone_output_dir)",
+      "evidence": "The narrow idiom angle this finding added beyond F-722 IS fixed: process_cleanup.py now writes `Path(\"~/.stealth_browser_pids.json\").expanduser()` instead of `Path(os.path.expanduser(\"~/.stealth_browser_pids.json\"))` -- exactly the canonical-idiom fix the fix_direction asked for, and `os` is in fact no longer used for path expansion anywhere in this file. However the primary defect -- the pid file living at a bare, underscore-named $HOME-root dotfile instead of nested under an app directory -- is NOT fixed: it is still `~/.stealth_browser_pids.json`, still a completely separate root from singleton.py's actual exported `STATE_DIR = Path.home() / \".stealth-mcp\"` constant (confirmed present at singleton.py:32, with LOCK_FILE/PORT_FILE/SERVER_STATE_FILE all correctly deriving from it there). process_cleanup.py does not import STATE_DIR from singleton.py at all (grepped the whole src tree for STATE_DIR: only singleton.py defines/uses it; zero other embedded/*.py files import it). response_handler.py independently still hardcodes the literal `Path.home() / \".stealth-mcp\" / \"element_clones\"` (line 26) rather than composing off the shared constant either. So 3+ divergent state roots still coexist exactly as described; only the expansion-mechanics sub-issue is resolved, not the location-consolidation this finding (and F-722) call for.",
+      "confidence": 0.9
+    },
+    {
+      "id": "F-763",
+      "verdict": "FIXED_BY_GATES",
+      "new_quote": "process_cleanup.py:52-53: if get_settings().no_auto_recovery:\n            return  ||  settings.py:49: no_auto_recovery: bool = False",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py:52-53; src/stealth_chrome_devtools_mcp/settings.py:38-56 (Settings class), :49 (field)",
+      "evidence": "Verified specifically as instructed. process_cleanup.py's hand-rolled `os.getenv(\"STEALTH_MCP_NO_AUTO_RECOVERY\", \"\").strip().lower() in {\"1\",\"true\",\"yes\",\"on\"}` is gone; the flag now reads `get_settings().no_auto_recovery`, a plain pydantic-settings bool field (settings.py:49). Confirmed `parse_bool_env` (the sibling helper this finding says had already drifted to include \"enabled\") no longer exists anywhere in source: grepping the whole repo for parse_bool_env/parse_float_env/_parse_nonnegative_int_env only hits audit/*.json and *.md historical documents, never a .py file -- the ad-hoc helper was deleted outright, not merely reused, exactly matching the mission brief's 'ad-hoc inline env parsing DELETED from consumers, one canonical truthy convention now.' Directly tested the specific drift scenario against the installed pydantic 2.12.5 in this repo: coercing the string \"enabled\" into a pydantic BaseModel bool field (same coercion Settings.no_auto_recovery uses) raises `ValidationError: Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value='enabled', ...]` rather than silently resolving to False. So the exact live hazard this finding flagged -- an operator setting STEALTH_MCP_NO_AUTO_RECOVERY=enabled gets the opt-out silently ignored with no error or log line -- no longer reproduces: get_settings() now fails loudly at Settings construction instead, consistent with settings.py's own documented 'loud failure' design principle (settings.py:1-27 module docstring, which explicitly names F-763 as one of the findings motivating this module). The fix mechanism differs from the suggested fix_direction (deletion + single pydantic convention, rather than importing parse_bool_env), but it resolves the underlying defect: there is now exactly one truthy-parsing convention for this flag instead of two silently-diverging ones.",
+      "confidence": 0.93
+    },
+    {
+      "id": "F-184",
+      "verdict": "STILL_VALID",
+      "new_quote": "response_handler.py:82-92: estimated_tokens = self.estimate_tokens(data)\n\n        if estimated_tokens <= self.max_tokens:\n            # Data is small enough, return as-is\n            return data\n\n        # Data is too large, save to file\n        timestamp = datetime.now(tz=timezone.utc).strftime(\"%Y%m%d_%H%M%S\")\n        unique_id = str(uuid.uuid4())[:8]\n        filename = f\"{fallback_filename_prefix}_{timestamp}_{unique_id}.json\"\n        file_path = self.clone_dir / filename",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/response_handler.py:82-92 (unchanged line range); clone_dir default at response_handler.py:26; server.py's unrelated sweep at server.py:531,726",
+      "evidence": "handle_response is behaviorally identical to the original quote (only diff: datetime.now() -> datetime.now(tz=timezone.utc), a timezone-awareness mechanical fix). No size/count/age check exists anywhere in this file before writing a new file, and nothing ever deletes files from clone_dir -- confirmed by reading the entire 124-line file at HEAD, including __init__ (only does mkdir, no cap enforcement). Grepped server.py for `_run_storage_sweep`, `_enforce_clone_storage_cap_in`, and `element_clones`: the sweep functions (server.py:531,726) only ever operate on `clone_root` (the sessions/ clone root, a structurally distinct directory keyed on a .stealth_chrome_devtools_mcp_clone.json marker) -- zero references to element_clones or response_handler.clone_dir anywhere in server.py. This directly confirms the mission brief's own note that storage-serialization/cleanup fixes have not executed. The directory still accumulates unbounded for the lifetime of the singleton backend process with no automatic or manual reclaim path.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-742",
+      "verdict": "STILL_VALID",
+      "new_quote": "response_handler.py:1: \"\"\"Response handler for managing large responses and automatic file-based fallbacks.\"\"\"  ||  response_stage_hooks.py:1-7: \"\"\"\nResponse Stage Hook Processing - Extension for Dynamic Hook System\n\nThis module adds response-stage interception and modification capabilities\nto the existing dynamic hook system. It allows AI-generated functions to\nmodify response content, headers, and status codes.\n\"\"\"",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/response_handler.py:1 + src/stealth_chrome_devtools_mcp/embedded/response_stage_hooks.py:1-7 (unchanged)",
+      "evidence": "Both docstrings are byte-for-byte identical to the original quote -- ruff format does not touch string/docstring content, and no rename occurred. Neither file imports or calls the other (response_stage_hooks.py imports nodriver and debug_logger only; response_handler.py imports settings.get_settings, json, uuid, datetime, pathlib). The naming collision between the MCP tool-response formatter and the HTTP network-response hook processor is completely untouched by the gates wave, which only did formatting/settings/noqa/mechanical work -- no file renames anywhere in embedded/.",
+      "confidence": 0.96
+    }
+  ]
+}

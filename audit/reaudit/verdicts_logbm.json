@@ -1,0 +1,69 @@
+{
+  "agent": "logbm",
+  "verdicts": [
+    {
+      "id": "F-182",
+      "verdict": "STILL_VALID",
+      "new_quote": "def log_error(\n        self,\n        component: str,\n        method: str,\n        error: Exception,\n        context: dict[str, Any] | None = None,\n    ):\n        \"\"\"\n        Log an error with full context.\n        ...\n        \"\"\"\n        if not self._enabled:\n            return",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py:42 (self._enabled=False), 61-78 (log_error), 106-123 (log_warning), 139-152 (log_info)",
+      "evidence": "self._enabled still defaults to False in __init__ (line 42), and log_error/log_warning/log_info still open with `if not self._enabled: return` before the `with self._lock:` block that appends to _errors/_warnings/_info. The only change is cosmetic (multi-line signature, Optional[Dict]->dict|None modernization from the ruff/gates pass); the buffer-gating behavior the finding describes is byte-for-byte the same logic. No always-record-to-buffer fix and no default-on flip have landed.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-204",
+      "verdict": "STILL_VALID",
+      "new_quote": "with self._lock:\n            error_signature = f\"{component}.{method}.{type(error).__name__}.{error!s}\"\n\n            if error_signature in self._seen_errors:\n                self._stats[f\"{component}.{method}.errors\"] += 1\n                return\n\n            if len(self._seen_errors) >= self.MAX_SEEN_ERRORS:\n                self._seen_errors.clear()\n            self._seen_errors.add(error_signature)",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py:80-89 (dedup key), 539 (module-level singleton `debug_logger = DebugLogger()`)",
+      "evidence": "Dedup key is still component.method.exception_type.message with zero instance/session dimension; only str(error) was swapped for the equivalent {error!s} conversion flag (ruff style pass), no semantic change. debug_logger.py:539 still instantiates one module-level DebugLogger() singleton shared by every concurrent browser instance/session. No instance_id threading or contextvars was added anywhere in the file.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-307",
+      "verdict": "STILL_VALID",
+      "new_quote": "def _emit_stderr(self, message: str, force: bool = False):\n        ...\n        if not force and not self._enabled:\n            return\n        with contextlib.suppress(OSError, ValueError):\n            print(message, file=sys.stderr)  # noqa: T201  plan_M3",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py:48-59 (_emit_stderr), 80/104 and 125/137 and 154/166-168 (log_error/log_warning/log_info still call it from inside `with self._lock:`)",
+      "evidence": "_emit_stderr's try/except was mechanically rewritten to `with contextlib.suppress(OSError, ValueError):` (SIM105-style cleanup) but still only swallows those two exception types and still just calls the blocking print(). log_error (line 104), log_warning (line 137) and log_info (lines 166/168) still invoke self._emit_stderr(...) from inside their untimed `with self._lock:` blocks, so a blocked stderr pipe still hangs every other thread's next log call forever. clear_debug_view (line 286) remains the only method using the `self._lock.acquire(timeout=5.0)` pattern -- the three logging methods are still the odd ones out, exactly as the finding says.",
+      "confidence": 0.9
+    },
+    {
+      "id": "F-703",
+      "verdict": "STILL_VALID",
+      "new_quote": "def export_to_file_paginated(\n        self,\n        filepath: str = \"debug_log.json\",\n        max_errors: int | None = None,\n        max_warnings: int | None = None,\n        max_info: int | None = None,\n        fmt: str = \"auto\",\n    ):",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py:349 (export_to_file), 361-436 (export_to_file_paginated), 438-489 (_export_lockfree), 491-536 (_export_gzip_pickle/_export_pickle/_export_json) -- all still inside class DebugLogger",
+      "evidence": "All four export/serialization code paths (lockfree snapshot, gzip-pickle, pickle, json) are still defined as methods on DebugLogger in debug_logger.py; the only change is the `format` parameter was renamed to `fmt` (builtin-shadow lint fix, A002) and type hints modernized. No debug_log_exporter.py or equivalent split exists anywhere in the repo. The 16-importer/287-call-site cost of dragging in gzip/pickle to get a logger is unchanged.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-208",
+      "verdict": "STILL_VALID",
+      "new_quote": "async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)\n        ...\n        browser: Browser | None = None\n        proxy_forwarder: AuthenticatedProxyForwarder | None = None\n        try:\n            platform_info = get_platform_info()\n            proxy_config: ProxyConfig | None = None\n            launch_proxy_server: str | None = None\n            idle_timeout_seconds = self._resolve_idle_timeout_seconds(\n                options.idle_timeout_seconds,\n            )",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py:307-336 (spawn_browser header + preamble); next method _setup_dynamic_hooks now starts at line 577 (method is ~270 lines, up from ~236)",
+      "evidence": "spawn_browser is structurally unchanged: still one method interleaving proxy config, platform detection, idle-timeout resolution, launch-arg merging, uc.start(), CDP timezone override, and diagnostics under one try/except, now slightly longer (270 vs ~236 lines). The gates wave added `# noqa: C901,PLR0912,PLR0915  DEBT(F-702)` to the signature -- i.e. it silenced the complexity linter and explicitly tagged the method as acknowledged debt rather than performing the pipeline split the fix_direction calls for. No orchestrating-method refactor happened.",
+      "confidence": 0.9
+    },
+    {
+      "id": "F-702",
+      "verdict": "STILL_VALID",
+      "new_quote": "def __init__(self):\n        self._instances: dict[str, dict] = {}\n        self._lock = asyncio.Lock()\n        self._spawn_diagnostics: dict[str, dict[str, Any]] = {}\n        self._proxy_forwarders: dict[str, AuthenticatedProxyForwarder] = {}\n        self._idle_timeout_seconds_default = get_settings().browser_idle_timeout\n        self._idle_reaper_interval_seconds = get_settings().browser_idle_reaper_interval\n        self._idle_reaper_task: asyncio.Task | None = None\n        self._background_tasks: set[asyncio.Task] = set()",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py:36-72 (class + __init__ + new _run_in_background helper); DEBT(F-702) noqa tags now also present at lines 307 (spawn_browser), 636 (close_instance), 648 (_do_close)",
+      "evidence": "BrowserManager grew from 1336 to 1447 lines and its constructor still wires together instance registry, proxy-forwarder tracking, and idle-reaper state in one place, now with a 7th concern added (a `_background_tasks` set + `_run_in_background` helper for the new RUF006 fire-and-forget-task fix) rather than any concern being extracted out. Three separate methods (spawn_browser, close_instance, and its nested _do_close) now carry an explicit `DEBT(F-702)` noqa tag added by the gates wave -- the team's own annotations confirm this finding is acknowledged as live debt, not resolved. No IdleReaper/Navigator collaborator extraction exists anywhere in the file.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-720",
+      "verdict": "FIXED_BY_GATES",
+      "new_quote": "\"\"\"Canonical environment/settings home for stealth-chrome-devtools-mcp.\n\nThis module is the ONE place the whole codebase reads environment configuration\n(findings F-720/F-763: env access was previously scattered across ad-hoc\n``parse_bool_env`` / ``parse_float_env`` / ``_parse_nonnegative_int_env`` helpers\nwith divergent truthy-set parsing).\n\"\"\"\n...\nbrowser_idle_timeout: int = Field(0, validation_alias=\"BROWSER_IDLE_TIMEOUT\", ge=0)\nbrowser_idle_reaper_interval: int = Field(60, validation_alias=\"BROWSER_IDLE_REAPER_INTERVAL\", ge=1)",
+      "current_location": "src/stealth_chrome_devtools_mcp/settings.py:1-160 (new canonical pydantic Settings model, get_settings()); browser_manager.py:47-48 now reads `get_settings().browser_idle_timeout` / `get_settings().browser_idle_reaper_interval`",
+      "evidence": "A brand-new settings.py (pydantic BaseSettings, lru_cache'd get_settings()) is now the single canonical home for every env-var read in the codebase, and its module docstring explicitly names F-720 as one of the findings it fixes. Grepping all of src/ for `_parse_nonnegative_int_env` finds zero remaining definitions (only that docstring mention) -- browser_manager.py's own former copy is gone (constructor now calls get_settings() instead), and process_cleanup.py's duplicate copy (with its hardcoded minimum=0) is gone too (grep for _parse_nonneg/minimum in that file returns nothing). This is a genuine architectural consolidation matching the requested fix_direction (one shared module all call sites import from), not a cosmetic rename.",
+      "confidence": 0.9
+    },
+    {
+      "id": "F-745",
+      "verdict": "STILL_VALID",
+      "new_quote": "async def get_tab(\n        self,\n        instance_id: str,\n        touch_activity: bool = True,\n    ) -> Tab | None:\n        ...\n        data = await self.get_instance(instance_id)\n        if data:\n            if touch_activity:\n                await self.touch_instance(instance_id)\n            return data[\"tab\"]",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/browser_manager.py:1160-1180 (get_tab), 1183-1203 (get_browser)",
+      "evidence": "Both get_tab and get_browser still default touch_activity to True and still call touch_instance(instance_id) as a side effect when it's left at that default, unchanged from the original finding. Grepping server.py for `touch_activity` returns zero matches, confirming no call site anywhere in server.py passes it explicitly (still invisible from every tool call site) and no docstring surfaces the idle-timer-refresh side effect to a caller reading only the tool layer.",
+      "confidence": 0.95
+    }
+  ]
+}

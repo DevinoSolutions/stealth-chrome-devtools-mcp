@@ -1,0 +1,70 @@
+{
+  "agent": "sweep",
+  "f720_f763_closure": {
+    "closed": true,
+    "evidence": "settings.py is the sole env-read home. `grep -rn 'os.getenv|os.environ' src/ --include=*.py` returns only two lines, both owner-tagged: settings.py:141 `for key in os.environ  # noqa: TID251  PERMANENT(canonical env home)` (the strictness-check read) and cli.py:37 `os.environ.setdefault(  # noqa: TID251  PERMANENT(env write before import)` (a WRITE, not a read, forcing read-only import). embedded/*.py source has ZERO os.getenv/os.environ (grep EXIT=1). The old ad-hoc helpers are gone: `grep 'parse_bool_env|parse_float_env|_parse_nonnegative_int_env' src/` matches only settings.py:5 — the docstring line naming them as the removed predecessors, with no surviving function definitions. ruff banned-api enforces the closure repo-wide: pyproject.toml lines 146-147 ban both `os.getenv` and `os.environ` with msg 'F-720/F-763: env access has ONE home - settings.get_settings()'. All embedded consumers now read via `get_settings().<field>` (browser_manager, platform_utils, process_cleanup, response_handler, embedded/server.py).",
+    "stragglers": []
+  },
+  "new_findings": [
+    {
+      "id": "G-1",
+      "severity": "High",
+      "file": "tools/check_suppression_owners.py",
+      "quote": "if in_section and \"=\" in line and not stripped.startswith(\"#\"):\n    if not stripped.endswith(\"]\"):\n        continue\n    comment = line.split(\"#\", 1)[1] if \"#\" in line else \"\"\n    if not OWNER_RE.search(comment):",
+      "what": "The per-file-ignore owner-tag check is logically inert for every entry the repo actually has: the validation branch only runs when the stripped line ends with ']', but an owner tag is always a trailing '# ...' comment (line ends with ')') and multi-line arrays' opening lines end with '[', so no owner-tagged or multi-line entry is ever reached.",
+      "why_it_matters": "The entire point of this gate is 'every per-file-ignore must carry an owner tag', yet it validates zero entries in pyproject.toml as written. Concretely, the `\"tests/**\" = [` block (27 rule codes, lines 154-180) has NO owner tag on its closing `]` and passes unflagged; `\"tools/**\" = [...]  # PERMANENT(...)` (line 153) and every `src/.../embedded/*.py = [...]  # plan_M...` entry are skipped too, so their tags are unenforced. A future untagged suppression block sails through — the governance guarantee is illusory.",
+      "fix_direction": "Parse the [tool.ruff.lint.per-file-ignores] table structurally (tomllib) or accumulate multi-line entries until the array closes, then require an owner tag on the entry's key line or closing-bracket comment. Add a self-test entry (an untagged fixture) that the gate must flag, so an inert check fails its own suite.",
+      "lens": "operability"
+    },
+    {
+      "id": "G-2",
+      "severity": "Medium",
+      "file": "tools/check_suppression_owners.py",
+      "quote": "SRC_ROOT = Path(__file__).resolve().parent.parent / \"src\"\n...\n    for py in sorted(SRC_ROOT.rglob(\"*.py\")):",
+      "what": "check_inline_noqas walks only src/, so inline noqas in tests/ and tools/ escape the owner-tag requirement the script's own docstring claims to enforce ('every ruff noqa ... must carry an owner tag').",
+      "why_it_matters": "Untagged noqas already exist outside src/ and are silently accepted: tests/test_settings.py:45 `# noqa: PT011 - ValidationError text asserted` (a reason, but not a valid owner tag — matches none of plan_M*/PERMANENT/FALSE-POSITIVE/DEBT), plus `# noqa: E402` in tests/test_close_noise_filter.py:26 and tests/test_execute_script_guard.py:25-26. ruff accepts coded noqas, so nothing else enforces owner tags there; the discipline is src-only in practice while presenting as repo-wide.",
+      "fix_direction": "Scan tests/ and tools/ too (rooted at the repo, not src/), or explicitly document that the owner-tag discipline is src-only and exempt tests/tools in the docstring so the contract stops overstating coverage.",
+      "lens": "operability"
+    },
+    {
+      "id": "G-3",
+      "severity": "Low",
+      "file": "src/stealth_chrome_devtools_mcp/server.py",
+      "quote": "if known.transport == \"stdio\" and not known.standalone:\n    from singleton import ensure_server_running, run_stdio_proxy\n    port = ensure_server_running(port=known.singleton_port)\n    if port is not None:\n        run_stdio_proxy(port)\n        return",
+      "what": "The shim main()'s stdio-proxy early-return path calls neither get_settings() (env validation) nor sentry_init(); it forwards stdio to an already-running backend and returns. This shim is the [project.scripts] backend entrypoint (server:main) and the `python -m` target via __main__.py.",
+      "why_it_matters": "The workstream's goal is 'fail loudly at every entrypoint' and ship errors to Sentry. Env strictness IS enforced where env is consumed (embedded/server.py calls get_settings() at import line 51 and sentry_init() at line 4415 inside `if __name__ == \"__main__\"`; cli.py:322 calls sentry_init()), so a bad STEALTH_MCP_* key is still rejected at backend boot. But the proxy-client process reads no settings and inits no Sentry, so its own failures (singleton handshake, stdio-proxy I/O) are never reported — a narrow but real observability hole in the 'every entrypoint' claim.",
+      "fix_direction": "Call sentry_init() at the top of the shim main() (before the proxy branch) so client-side proxy failures are captured; env validation can stay backend-owned since the client does no config-dependent work.",
+      "lens": "operability"
+    },
+    {
+      "id": "G-4",
+      "severity": "Low",
+      "file": "package.json",
+      "quote": "\"devDependencies\": {\n    \"husky\": \"^9\"\n  }",
+      "what": "husky is pinned with a floating caret range (^9 = any 9.x), inconsistent with the exact '==' pins the same workstream uses for every Python quality tool (ruff==0.15.20, ty==0.0.56, vulture==2.16, sentry-sdk==2.64.0).",
+      "why_it_matters": "husky installs the git hooks that run the local gates; a 9.x minor/patch bump could change hook-install behavior un-reviewed, and the reproducibility discipline applied to the lint/type toolchain is silently dropped for the JS hook installer. GitHub Actions in the same repo are SHA-pinned, making the caret the odd one out.",
+      "fix_direction": "Pin husky to an exact version (e.g. \"husky\": \"9.1.7\") to match the repo's exact-pin convention for tooling.",
+      "lens": "conventions"
+    },
+    {
+      "id": "G-5",
+      "severity": "Low",
+      "file": ".husky/pre-commit",
+      "quote": "if [ -f .venv/bin/python ]; then\n  PY=\".venv/bin/python\"\nelif [ -f .venv/Scripts/python.exe ]; then\n  PY=\".venv/Scripts/python.exe\"\nelse\n  echo \"ERROR: no .venv python found — run: uv sync\" >&2\n  exit 1\nfi",
+      "what": "The 8-line venv-python resolution block is duplicated verbatim in both .husky/pre-commit and .husky/pre-push — two homes for one concept.",
+      "why_it_matters": "Any change to interpreter resolution (new venv layout, an extra fallback, a different error message) must be made in two places and will drift if one is forgotten. The 'one canonical home per concept' lens is violated by shell copy-paste.",
+      "fix_direction": "Extract the resolver to a shared snippet (e.g. .husky/_resolve-py.sh) and `. \"$(dirname \"$0\")/_resolve-py.sh\"` from both hooks. (Note: both hooks correctly fail CLOSED on a missing venv — exit 1 blocks the commit/push — and correctly use a relative `.venv/...` path so the repo's absolute path containing '&' never reaches the shell unquoted.)",
+      "lens": "duplication"
+    },
+    {
+      "id": "G-6",
+      "severity": "Low",
+      "file": "src/stealth_chrome_devtools_mcp/settings.py",
+      "quote": "unknown = sorted(\n    key\n    for key in os.environ  # noqa: TID251  PERMANENT(canonical env home)\n    if key.upper().startswith(_ENV_PREFIX) and key.upper() not in known\n)",
+      "what": "The loud-rejection strictness check only guards the STEALTH_MCP_ prefix. A typo in a legacy-named variable set as a real environment variable (e.g. CDP_OPERATION_TIMEOUT_SECOND missing the trailing S, or a misspelled BROWSER_IDLE_TIMEOUT) maps to no field, is silently ignored, and the field default is used — no loud failure, unlike the app namespace.",
+      "why_it_matters": ".env.example documents ~20 legacy unprefixed names (BROWSER_*, CDP_*, PORT, DEBUG, ...) users are invited to override, so half the documented config surface lacks the 'fail loudly on typo' guarantee when set via the real environment. (Mitigation: the same typo placed in the .env FILE is caught by extra=\"forbid\"; the gap is env-var-only, and forbidding arbitrary unprefixed env vars is impossible since DISPLAY/USER/PORT are legitimately not ours — so this is partially inherent, but worth surfacing since the loud-failure promise is asymmetric.)",
+      "fix_direction": "Either document the asymmetry explicitly (loud for STEALTH_MCP_*, best-effort for legacy names via .env only), or add a curated known-legacy-name close-match check (Levenshtein against the alias set) that warns on a near-miss unprefixed env var.",
+      "lens": "operability"
+    }
+  ]
+}

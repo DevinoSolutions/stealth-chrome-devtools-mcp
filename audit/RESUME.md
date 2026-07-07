@@ -9,8 +9,9 @@
 - Four approved amendments ride their plans in-file: M3-A1 (F-764 RLock), M8-A1 (F-509 auto-port-fallback), M4Ph1-A1+A1.5 (full 21-site error-envelope sweep with G1–G7 pins), M14-A1 (F-741 CLI renames + **X-HARD** env rename). `plan_M5a.md` is NOT executable — folded into M5b.
 
 ## NEXT ACTIONS (in order)
-1. **Phase-2 targeted re-audit** (human-approved 2026-07-06, may be in flight): re-verdict findings whose files the gates materially changed + fresh sweep of `settings.py`/`observability.py`/`tools/` + verify F-720/F-763 closures. Opus judges, Sonnet/Haiku mechanical checks, Fable second-pass.
-2. **Stage 3 FIX**: fresh session, paste `audit/STAGE3_RESUME_PROMPT.md`. Baseline from `stages['2.5-gates'].landed` (`head_sha` e39be31 = ancestor-of-HEAD check, NOT equality). Branch `audit/fixes-2026-07-02` off main.
+1. **Phase-2 targeted re-audit — DONE 2026-07-06** (stage `2.7-reaudit`; full detail in `audit/reaudit/REPORT.md`). 39 re-verdicted: 35 STILL_VALID (incl. both Criticals), 3 FIXED_BY_GATES (F-602/F-720/F-763), 1 PARTIALLY_FIXED (F-762); **no regressions from the gates**; 6 NEW findings G-1..G-6. Fable re-verified 5 load-bearing claims in source.
+2. **Optional pre-Stage-3 cleanups** (recommended, small): fix **G-1** (owner-tag gate is inert — governance currently fake) + **G-2** (src-only noqa scan) + **G-4** (pin husky exact); enable **branch protection on `main`** (CI runs but nothing blocks a red merge).
+3. **Stage 3 FIX**: fresh session, paste `audit/STAGE3_RESUME_PROMPT.md`. Baseline from `stages['2.5-gates'].landed` (`head_sha` e39be31 = ancestor-of-HEAD check, NOT equality). Branch `audit/fixes-2026-07-02` off main.
 
 ## HONEST STATUS — what is NOT done / NOT tested (do not let summaries imply otherwise)
 - **Zero of the 12 approved plans is executed.** Every fix exists only as a plan. The two Critical findings (wedged-but-alive backend jams eviction forever, F-301/F-501) are **live bugs today**.

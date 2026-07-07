@@ -1,0 +1,77 @@
+{
+  "agent": "server",
+  "verdicts": [
+    {
+      "id": "F-103",
+      "verdict": "STILL_VALID",
+      "new_quote": "browser_manager = BrowserManager()\nnetwork_interceptor = NetworkInterceptor()\ndom_handler = DOMHandler()\ncdp_function_executor = CDPFunctionExecutor()\n\n...\n\nif get_settings().xpool_safe_mode:\n    DISABLED_SECTIONS.add(\"cdp-functions\")\n    apply_disabled_sections()",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1329-1332 (singletons), :4222-4224 (safe-mode gate), :177-196 (_install_nodriver_cookie_compat)",
+      "evidence": "All three module-scope side effects described in the finding are unchanged: the four singletons are still constructed at bare module scope (was 1297-1300, now 1329-1332), and the safe-mode tool-section gate still runs at module scope, only its env read changed from parse_bool_env(\"XPOOL_SAFE_MODE\") to get_settings().xpool_safe_mode. _install_nodriver_cookie_compat still monkey-patches nodriver's cdp_network.Cookie.from_json in place guarded only by a marker attribute (body is byte-identical apart from Dict->dict); it is called from app_lifespan in both baseline and HEAD, so only the two bare-module-scope instances (singletons, safe-mode gate) carry the 'side effect of import' defect, unchanged.",
+      "confidence": 0.92
+    },
+    {
+      "id": "F-106",
+      "verdict": "STILL_VALID",
+      "new_quote": "async def _resolve_profile_selection(\n    user_data_dir: str | None,\n    *,\n    force_clone: bool = False,\n    source_override: Path | None = None,\n    source_kind: str | None = None,\n    clone_suffix: str | None = None,\n) -> dict[str, Any]:\n    master = _master_profile_dir()\n    clone_root = _clone_root_dir()\n    snapshot = _master_snapshot_dir()",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1087-1193",
+      "evidence": "Read the full function body (now 1087-1193, was ~1080-1160): the same 4-way source_override/snapshot.exists()/master.exists()/else-raise branch, the same ~14 collaborator calls (_master_profile_dir, _clone_root_dir, _master_snapshot_dir, _is_relative_to, _profile_has_running_browser, _next_available_explicit_dir, _snapshot_needs_refresh, _refresh_master_snapshot_if_safe, _clone_profile_dir_for_session, _unique_clone_dir, _available_clone_dir, _spawn_background_sweep, _protect_clone_dir, _copy_clone_from_source), and the same loosely-typed dict[str, Any] role coordination with sibling _fallback_profile_selection (line 1196) are all present verbatim. Only mechanical ruff/pyupgrade typing changes occurred (Optional[X] -> X | None, Dict -> dict); no god-file split or decomposition happened, matching the stated expectation that none of the Stage-3 fix plans executed.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-164",
+      "verdict": "STILL_VALID",
+      "new_quote": "async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = \"\"):\n    ...\n    t = timeout or CDP_OPERATION_TIMEOUT\n    try:\n        return await asyncio.wait_for(coro, timeout=t)\n    except TimeoutError:\n        tag = f\" (instance {instance_id})\" if instance_id else \"\"\n        raise Exception(\n            f\"CDP operation timed out after {t:.0f}s{tag}. \"",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/server.py:119-136; sibling timeout at src/stealth_chrome_devtools_mcp/embedded/cdp_function_executor.py:818",
+      "evidence": "_with_cdp_timeout is unchanged in substance: it still only wraps the coroutine in asyncio.wait_for and raises a client-facing Exception on timeout, with no call to Runtime.terminateExecution or any other command to actually stop browser-side execution (only asyncio.TimeoutError -> bare TimeoutError is a mechanical Python 3.11 change). Confirmed cdp_function_executor.py:818 still has its own separate 'asyncio.wait_for(self.inject_and_execute_script(tab, js_code), timeout=10.0)', and terminateExecution is still only referenced once in the whole package, at cdp_function_executor.py:143 inside the list_cdp_commands catalog, never invoked automatically on any timeout path.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-205",
+      "verdict": "STILL_VALID",
+      "new_quote": "    if file_path:\n        save_path = Path(file_path)\n        save_path.parent.mkdir(parents=True, exist_ok=True)\n        await _with_cdp_timeout(tab.save_screenshot(save_path), instance_id=instance_id)\n        return f\"Screenshot saved. AI agents should use the Read tool to view this image: {save_path.absolute()!s}\"",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/server.py:2091-2095 (take_screenshot, full function 2065-2149)",
+      "evidence": "take_screenshot's explicit-file_path branch is unchanged: it writes to whatever path the caller supplies with zero validation against the shared per-user output root, while its own no-file_path branch (line ~2130) falls back to response_handler.clone_dir for oversized screenshots -- the same three-implementations disagreement the finding describes is still present verbatim (only str(...) -> !s formatting changed).",
+      "confidence": 0.9
+    },
+    {
+      "id": "F-602",
+      "verdict": "FIXED_BY_GATES",
+      "new_quote": "def _master_profile_dir() -> Path:\n    configured = get_settings().browser_master_user_data_dir\n    if configured:\n        return Path(configured).expanduser()\n\n... (settings.py) ...\nclass Settings(BaseSettings):\n    \"\"\"Typed, validated view of every environment variable the tool reads.\"\"\"\n    model_config = SettingsConfigDict(env_prefix=_ENV_PREFIX, env_file=\".env\", extra=\"forbid\", case_sensitive=False)",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/server.py (all former os.getenv sites, e.g. :211-233, :51-62, :199, :4222); centralizing schema at src/stealth_chrome_devtools_mcp/settings.py:38-80",
+      "evidence": "Grepped server.py for os.getenv(/os.environ and got zero matches -- every previously ad-hoc getenv call (12+ sites) now reads get_settings().<field>. Read settings.py:1-80: it is a genuine single pydantic-settings BaseSettings model with typed fields, Field(validation_alias=...) for legacy unprefixed names, extra=\"forbid\" to reject unknown keys, and an lru_cache'd get_settings() -- exactly the 'central config schema/single source of truth' the finding said was missing. This is a real architectural fix, not a relocation: the module's own docstring states it replaces scattered ad-hoc env-parsing helpers.",
+      "confidence": 0.9
+    },
+    {
+      "id": "F-743",
+      "verdict": "STILL_VALID",
+      "new_quote": "async def execute_script(...):\n    \"\"\"\n    Execute JavaScript in the page and return its value.\n...\nasync def inject_and_execute_script(...):\n    \"\"\"\n    Inject and execute custom JavaScript code.\n...\nasync def execute_python_in_browser(...):\n    \"\"\"\n    Execute Python code by translating it to JavaScript.\n...\nasync def call_javascript_function(...):\n    \"\"\"\n    Call a JavaScript function with arguments.",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1983 (execute_script), :3884 (inject_and_execute_script), :4009 (execute_python_in_browser), :3837 (call_javascript_function), :3684 (execute_cdp_command), :3934 (execute_function_sequence)",
+      "evidence": "inject_and_execute_script, call_javascript_function, execute_python_in_browser and execute_cdp_command have docstrings byte-identical to the original quote -- the naming/purpose ambiguity across this cluster is unchanged. execute_script's docstring did gain a large new async-safety warning block (sync XHR, blocking loops, alert/confirm/prompt, upload_file redirection) not present at baseline, but that addition is about runtime safety, not about differentiating it from inject_and_execute_script -- both still read as paraphrases ('Execute JavaScript...' vs 'Inject and execute custom JavaScript code') with no naming taxonomy distinguishing the six 'run code in the page' tools.",
+      "confidence": 0.85
+    },
+    {
+      "id": "F-744",
+      "verdict": "STILL_VALID",
+      "new_quote": "async def clone_element_complete(...):\n    \"\"\"\n    Master function that extracts ALL element data using specialized functions.\n...\nasync def clone_element_to_file(...):\n    \"\"\"\n    Clone element completely and save to file, returning file path instead of full data.\n...\nasync def extract_complete_element_to_file(...):\n    \"\"\"\n    Extract complete element using working comprehensive cloner and save to file.\n...\nasync def extract_complete_element_cdp(...):\n    \"\"\"\n    Extract complete element using native CDP methods for 100% accuracy.",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/server.py:3026 (clone_element_complete), :3353 (clone_element_to_file), :3389 (extract_complete_element_to_file), :3418 (extract_complete_element_cdp)",
+      "evidence": "Read all four functions verbatim; every docstring quoted in the original finding is unchanged, including clone_element_complete's own docstring using 'extracts ALL element data' to describe a 'clone_'-named function, clone_element_to_file still delegating to file_based_element_cloner.clone_element_complete_to_file while extract_complete_element_to_file delegates to the differently-named file_based_element_cloner.extract_complete_element_to_file, and extract_complete_element_cdp's 'most accurate' ranking still living only in docstring prose, not the name. No renaming or consolidation occurred.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-746",
+      "verdict": "STILL_VALID",
+      "new_quote": "async def get_instance_state(instance_id: str) -> dict[str, Any] | None:\n    \"\"\"\n    Get detailed state of a browser instance.\n    ...\n    Returns:\n        Optional[Dict[str, Any]]: Complete state information.\n    \"\"\"\n    ...\n    except TimeoutError:\n        for instance in await browser_manager.list_instances():\n            if instance.instance_id == instance_id:\n                return {\n                    ...\n                    \"partial\": True,\n                    \"detail_error\": f\"Timed out after {timeout_seconds:g}s while collecting full page state.\",\n                }",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/server.py:1530-1586",
+      "evidence": "The docstring's Returns contract is still just 'Optional[Dict[str, Any]]: Complete state information' with no mention of partial or detail_error, while both the TimeoutError branch and the generic Exception branch still return {'partial': True, 'detail_error': ...} degraded records (and an even thinner 'state: unknown' variant when the instance isn't in the fallback list). Only the timeout source (get_settings().browser_state_timeout_seconds instead of a raw env read) and except asyncio.TimeoutError -> except TimeoutError changed; the doc/contract mismatch itself is untouched.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-760",
+      "verdict": "STILL_VALID",
+      "new_quote": "async def new_tab(instance_id: str, url: str = \"about:blank\") -> dict[str, Any]:\n    \"\"\"\n    Open a new tab in the browser instance.",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/server.py:2719 (new_tab); list_ sites: :1460,:2153,:2644,:3317,:3647,:3673,:4123; get_ sites returning lists: :2375 (get_cookies), :3717 (get_execution_contexts); create_ sites: :3908,:3968,:4049,:4090; :3154 (validate_browser_environment_tool) vs :4209 (validate_hook_function)",
+      "evidence": "Re-listed every top-level function in server.py at HEAD: all 7 list_ tools, both get_ tools returning List[...] shapes, all 4 create_ tools, new_tab, and both validate_ tools carry the exact same names as at baseline with no taxonomy document introduced. new_tab's own docstring ('Open a new tab') still uses 'new' the same way create_dynamic_hook's docstring uses 'Create a new dynamic hook', and validate_browser_environment_tool (line 3154) still carries the redundant _tool suffix that its sibling validate_hook_function (line 4209) does not. No renaming occurred anywhere in this cluster.",
+      "confidence": 0.93
+    }
+  ]
+}

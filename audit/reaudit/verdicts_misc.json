@@ -1,0 +1,53 @@
+{
+  "agent": "misc",
+  "verdicts": [
+    {
+      "id": "F-741",
+      "verdict": "STILL_VALID",
+      "new_quote": "singleton.py:1-5 (unchanged verbatim): \"\"\"Singleton server management for multi-session environments.\n\nWhen multiple Claude Code sessions start simultaneously, this module ensures\nonly ONE HTTP server process is spawned. All sessions connect to it as\nlightweight stdio proxies. || cli.py:110-121: root = server._default_session_root() ... print(f\"session root: {root}  (exists: {root.exists()})\") ... print(f\"session cap : {_human(server._session_storage_cap_bytes())}  [STEALTH_MCP_SESSION_STORAGE_CAP_GB]\") || proxy_forwarder.py:1: \"\"\"Authenticated proxy forwarding for browser launch proxies.\"\"\" || proxy_utils.py:1: \"\"\"Proxy parsing and Chrome launch-arg helpers.\"\"\"",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/singleton.py:1-5 + cli.py:110-121 (also: cli.py:202 _cmd_doctor's own \"session root\" print, embedded/process_cleanup.py:350-370, embedded/proxy_forwarder.py:1, embedded/proxy_utils.py:1)",
+      "evidence": "Read all five files at HEAD (c7a2952b). singleton.py's docstring is byte-for-byte unchanged (\"multi-session environments\" / \"lightweight stdio proxies\"). cli.py's _cmd_status (now lines 105-122, was ~95) and _cmd_doctor (lines 192-210) both still print 'session root' and 'session cap' referring purely to the profile-clone disk-cap bookkeeping, with zero cue distinguishing this from an MCP session. process_cleanup.py still overloads 'session' for process-lifecycle scoping (line 370: 'predates this session', mildly reworded from the original quoted 'pre-date this server session' but semantically identical). proxy_forwarder.py and proxy_utils.py docstrings are unchanged, so the unrelated 'proxy' (egress HTTP/SOCKS) vs 'proxy' (stdio-to-HTTP bridge in singleton.py) collision persists. This is a naming/glossary issue; none of the quality-gates changes (ruff format, settings.py, noqa tags, README additions) touch terminology, so nothing here was addressed.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-163",
+      "verdict": "STILL_VALID",
+      "new_quote": "dynamic_hook_system.py:378-380: async def _process_request_hooks(self, tab, request: RequestInfo, event=None):  # noqa: C901,PLR0912,PLR0915  DEBT(F-165)\n        \"\"\"Process hooks for a request/response in real-time with priority chain\n        processing.\"\"\" ... line 395: matching_hooks.sort(key=lambda h: h.priority) ... line 445: hook = matching_hooks[0]",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py:378-380 (docstring), 395 (sort), 445 (matching_hooks[0]); also embedded/hook_learning_system.py:512 (\"Use priority (lower = higher priority) to control [execution order]\")",
+      "evidence": "Function moved from ~line 269 to line 378 (earlier code inserted upstream) and gained a ruff-wrapped docstring plus a `# noqa: C901,PLR0912,PLR0915  DEBT(F-165)` complexity-debt tag, but the logic is identical: matching_hooks is sorted by priority then only `matching_hooks[0]` is ever passed to _execute_hook_action — every lower-priority hook on an overlapping pattern still silently never fires. The misleading 'priority chain processing' docstring and hook_learning_system.py's 'controls execution order' claim (moved from line 465 to 512) are both still present verbatim, so the doc/behavior mismatch the finding describes is untouched. The added noqa tag acknowledges cyclomatic complexity, not this semantic issue, and Stage-3 fix plans for this were confirmed not yet executed.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-606",
+      "verdict": "STILL_VALID",
+      "new_quote": "dynamic_hook_system.py:146-155: if \"custom_condition\" in self.requirements:\n                condition_code = self.requirements[\"custom_condition\"]\n                namespace = {\n                    \"request\": request,\n                    \"__builtins__\": {\"len\": len, \"str\": str},\n                }\n                try:\n                    result = eval(condition_code, namespace)  # noqa: S307  PERMANENT(eval hook matching by design)\n                    if not result:\n                        return False",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py:146-163 (matches() method, was 119-131)",
+      "evidence": "matches() moved from line 119 to line 115-165 (ruff re-wrapped the dict literal and eval call across more lines) and the eval() call now carries `# noqa: S307  PERMANENT(eval hook matching by design)`, an owner-tagged acknowledgment that eval() itself is intentional. But that tag only silences the Bandit/ruff security lint about eval-on-arbitrary-string; it does nothing about the finding's actual complaint, which is the missing compile()-once caching. The condition source string is still re-parsed and re-evaluated from scratch via bare eval() on every single matching request, with no compiled-code-object cache anywhere in the class. Behaviorally and architecturally unchanged.",
+      "confidence": 0.95
+    },
+    {
+      "id": "F-508",
+      "verdict": "STILL_VALID",
+      "new_quote": "element_cloner.py:18:class ElementCloner:\nfile_based_element_cloner.py:25:class FileBasedElementCloner:\ncomprehensive_element_cloner.py:28:class ComprehensiveElementCloner:\ncdp_element_cloner.py:25:class CDPElementCloner:\nprogressive_element_cloner.py:18:class ProgressiveElementCloner:",
+      "current_location": "src/stealth_chrome_devtools_mcp/embedded/element_cloner.py:18 (class defs shifted a couple lines each from ruff formatting; combined size now ~2686 lines, up from ~2223, purely from reformatting/wrapping, not new functionality)",
+      "evidence": "All five cloner classes still exist as fully separate implementations; none were consolidated. Directly confirmed the mirrored method-family pattern still holds: ElementCloner defines extract_element_styles/_structure/_events/_animations/_assets/clone_element_complete, while FileBasedElementCloner independently re-defines extract_element_styles_to_file/_structure_to_file/..._to_file/clone_element_complete_to_file — the exact parallel duplication the finding describes. This is an architectural/structural finding; the quality-gates wave (formatting, settings.py, noqa tags) does not touch design-level duplication, and the cloner-duplication fix plan was confirmed not executed.",
+      "confidence": 0.97
+    },
+    {
+      "id": "F-305",
+      "verdict": "STILL_VALID",
+      "new_quote": "def _cmd_status(_args) -> int:\n    server = _server()\n    import singleton\n\n    port = singleton._find_running_server()\n    root = server._default_session_root()\n    print(f\"backend     : {'running on port ' + str(port) if port else 'not running'}\")\n    print(f\"version     : {singleton._server_version()}\")\n    print(f\"session root: {root}  (exists: {root.exists()})\")",
+      "current_location": "src/stealth_chrome_devtools_mcp/cli.py:105-122 (_cmd_status, was line 95) and cli.py:192-210 (_cmd_doctor)",
+      "evidence": "Both _cmd_status and _cmd_doctor were reformatted by ruff (blank-line spacing, multi-line f-strings for the _human() calls) and shifted down ~10 lines, but the logic is identical: both call singleton._find_running_server(), which returns only the port, and neither ever reads or prints state['pid'] from ~/.stealth-mcp/server.json. No PID is exposed in either command's output. The settings.py/pydantic-settings migration and observability.py addition did not touch this code path.",
+      "confidence": 0.97
+    },
+    {
+      "id": "F-404",
+      "verdict": "STILL_VALID",
+      "new_quote": "## CLI\n\nInstalls a `stealth-chrome-devtools` ops command for managing the server and its\ndisk usage. (This is for *ops* — to drive a browser, use the MCP server or its\nHTTP backend.)\n\n```bash\nstealth-chrome-devtools status       # backend running? session root + caps\nstealth-chrome-devtools profiles     # list profiles with size / role / in-use\nstealth-chrome-devtools cleanup      # preview reclaimable disk (DRY RUN)\nstealth-chrome-devtools cleanup --apply               # actually reclaim\nstealth-chrome-devtools cleanup --session-cap-gb 12   # preview at a tighter cap\nstealth-chrome-devtools doctor       # check Chrome / environment\nstealth-chrome-devtools serve --http --port 19222     # start the server\n```",
+      "current_location": "README.md:214-228 (identical line range and byte-for-byte identical text to the original finding)",
+      "evidence": "The '## CLI' section sits at the exact same lines (214-228) with content unchanged verbatim from the original quote — no `uv run` prefix was added to any example, and no clarifying note was inserted. The '### Local Development' section (line 64) still sets up the uv-driven mental model (mcpServers config invoking `uv --directory ... run stealth-chrome-devtools-mcp`), and `uv run` still appears only in the unrelated Testing section (lines 184-190, pytest commands). The gates wave added a new '## Development setup' section near the bottom of the file (line 264) and an '## Error Reporting (opt-in)' section (line 248) for Sentry, but neither touches or cross-references the CLI section, so the exact same-file inconsistency the finding describes is fully intact.",
+      "confidence": 0.98
+    }
+  ]
+}
