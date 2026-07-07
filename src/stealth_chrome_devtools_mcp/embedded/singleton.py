@@ -22,7 +22,7 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import psutil
@@ -124,6 +124,17 @@ def _write_server_state(port: int, version: str, pid: int) -> None:
     SERVER_STATE_FILE.write_text(
         json.dumps({"port": port, "version": version, "pid": pid})
     )
+
+
+def _clear_server_state() -> None:
+    """Remove the recorded backend identity (server.json) and the legacy
+    write-only port file, best-effort. Used by `stop_backend()` so a stale
+    record can never make a later `_find_running_server` believe a stopped
+    backend is still there to reuse.
+    """
+    for path in (SERVER_STATE_FILE, PORT_FILE):
+        with suppress(OSError):
+            path.unlink(missing_ok=True)
 
 
 def _probe_backend_status() -> tuple[str, int | None]:
@@ -457,6 +468,38 @@ def _start_backend_holding_lock(port: int) -> None:
         # left no trace anywhere. Now it's on disk even though control flow
         # is unchanged (M10a's rule: add a log line, leave the sentinel).
         _logger.exception("backend cold start failed")
+
+
+def stop_backend() -> tuple[str, int | None]:
+    """Stop the shared backend (CLI `stop` verb): an operator-initiated action
+    that terminates every live browser session on it — that is the verb's
+    purpose, not a side effect to guard against.
+
+    Consumes M1's `_probe_backend_status()` for the state read (binding
+    ruling: no new liveness check anywhere) — only a responsive/wedged
+    backend is actually targeted for termination; a stale `down` record is
+    cleared without anything left to kill; `none` is reported as-is. Lock
+    contention (a concurrent cold start/stop/restart already holding it)
+    reports "busy" so the operator can retry instead of racing it.
+
+    Returns ``(result, pid)``: ``result`` is one of "stopped" |
+    "already stopped" | "not running" | "busy". ``pid`` is the terminated
+    pid when ``result == "stopped"``, else None.
+    """
+    status, port = _probe_backend_status()
+    if status == "none":
+        return ("not running", None)
+
+    with _exclusive_lock() as got:
+        if not got:
+            return ("busy", None)
+        state = _read_server_state()
+        recorded_pid = state.get("pid") if state else None
+        terminated = _terminate_backend(port) if port is not None else False
+        _clear_server_state()
+        if terminated:
+            return ("stopped", recorded_pid)
+        return ("already stopped", None)
 
 
 def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:

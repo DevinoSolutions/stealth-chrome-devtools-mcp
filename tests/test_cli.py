@@ -8,6 +8,7 @@ every profile helper at a tmp dir); no browser.
 """
 
 import json
+from unittest.mock import patch
 
 from stealth_chrome_devtools_mcp import cli
 
@@ -52,6 +53,39 @@ class TestParser:
     def test_serve_args_parse(self):
         args = cli.build_parser().parse_args(["serve", "--http", "--port", "20001"])
         assert args.command == "serve" and args.http and args.port == 20001
+
+    def test_stop_args_parse(self):
+        args = cli.build_parser().parse_args(["stop"])
+        assert args.command == "stop"
+
+
+class TestStopVerb:
+    """M8-4: `stop` is a thin front-end over singleton.stop_backend() - no
+    matching/kill logic of its own in cli.py."""
+
+    def test_stop_dispatches_and_prints_result(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with patch("singleton.stop_backend", return_value=("stopped", 4242)):
+            assert cli.main(["stop"]) == 0
+        assert "4242" in capsys.readouterr().out
+
+    def test_stop_busy_returns_nonzero(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with patch("singleton.stop_backend", return_value=("busy", None)):
+            assert cli.main(["stop"]) == 1
+        assert "busy" in capsys.readouterr().out.lower()
+
+    def test_stop_not_running(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with patch("singleton.stop_backend", return_value=("not running", None)):
+            assert cli.main(["stop"]) == 0
+        assert "not running" in capsys.readouterr().out.lower()
+
+    def test_stop_already_stopped(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with patch("singleton.stop_backend", return_value=("already stopped", None)):
+            assert cli.main(["stop"]) == 0
+        assert "already stopped" in capsys.readouterr().out.lower()
 
 
 class TestStatusProfiles:

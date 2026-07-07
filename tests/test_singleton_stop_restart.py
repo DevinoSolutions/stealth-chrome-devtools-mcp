@@ -24,6 +24,7 @@ import json
 import socket
 import subprocess
 import sys
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -158,3 +159,120 @@ class TestSpawnEnvScrub:
 
         _, kwargs = captured.call_args
         assert kwargs["env"]["SINGLETON_TEST_CANARY"] == "canary-value"
+
+
+class TestStopBackend:
+    """M8-4: stop_backend() = _exclusive_lock -> _terminate_backend(port) ->
+    clear server.json/PORT_FILE -> (result, pid). The verb x state matrix
+    (plan SS5.2), driven by stubbing _probe_backend_status (M1's one shared
+    liveness vocabulary - binding ruling (a): no new health check anywhere)
+    plus a real marked/plain sleeper standing in for "our identifiable
+    backend", so the identity-safety property (recycled-pid refusal) is
+    exercised end-to-end here too, not just at the _terminate_backend layer
+    (M8-1)."""
+
+    def test_responsive_backend_is_stopped_and_state_cleared(
+        self, isolated_state, monkeypatch
+    ):
+        proc = _spawn_marked_sleeper()
+        try:
+            port = _free_closed_port()
+            singleton.PORT_FILE.write_text(str(port))
+            singleton._write_server_state(port=port, version="1.2.1", pid=proc.pid)
+            monkeypatch.setattr(
+                singleton, "_probe_backend_status", lambda: ("responsive", port)
+            )
+
+            result, pid = singleton.stop_backend()
+
+            proc.wait(timeout=10)
+            assert result == "stopped"
+            assert pid == proc.pid
+            assert proc.poll() is not None
+            assert singleton._read_server_state() is None
+            assert not singleton.PORT_FILE.exists()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+    def test_wedged_backend_is_stopped(self, isolated_state, monkeypatch):
+        proc = _spawn_marked_sleeper()
+        try:
+            port = _free_closed_port()
+            singleton._write_server_state(port=port, version="1.2.1", pid=proc.pid)
+            monkeypatch.setattr(
+                singleton, "_probe_backend_status", lambda: ("wedged", port)
+            )
+
+            result, pid = singleton.stop_backend()
+
+            proc.wait(timeout=10)
+            assert result == "stopped"
+            assert proc.poll() is not None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+    def test_down_backend_reports_already_stopped(self, isolated_state, monkeypatch):
+        port = _free_closed_port()
+        singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+        monkeypatch.setattr(singleton, "_probe_backend_status", lambda: ("down", port))
+        # Deterministic "the recorded pid no longer exists" - avoids relying
+        # on a magic pid number that happens not to be in use.
+        monkeypatch.setattr(
+            singleton.psutil,
+            "Process",
+            MagicMock(side_effect=singleton.psutil.NoSuchProcess(4242)),
+        )
+
+        result, pid = singleton.stop_backend()
+
+        assert result == "already stopped"
+        assert pid is None
+        assert singleton._read_server_state() is None
+
+    def test_none_reports_not_running(self, isolated_state, monkeypatch):
+        monkeypatch.setattr(singleton, "_probe_backend_status", lambda: ("none", None))
+
+        result, pid = singleton.stop_backend()
+
+        assert result == "not running"
+        assert pid is None
+
+    def test_lock_contended_reports_busy(self, isolated_state, monkeypatch):
+        monkeypatch.setattr(
+            singleton, "_probe_backend_status", lambda: ("responsive", 19222)
+        )
+
+        @contextmanager
+        def _fake_contended_lock():
+            yield False
+
+        monkeypatch.setattr(singleton, "_exclusive_lock", _fake_contended_lock)
+
+        result, pid = singleton.stop_backend()
+
+        assert result == "busy"
+        assert pid is None
+
+    def test_recycled_foreign_pid_is_not_killed(self, isolated_state, monkeypatch):
+        proc = _spawn_plain_sleeper()
+        try:
+            port = _free_closed_port()
+            singleton._write_server_state(port=port, version="1.2.1", pid=proc.pid)
+            monkeypatch.setattr(
+                singleton, "_probe_backend_status", lambda: ("responsive", port)
+            )
+
+            result, pid = singleton.stop_backend()
+
+            assert result == "already stopped"
+            # The recycled-pid nightmare: an unrelated process recorded under
+            # a stale pid must survive untouched, even via the full stop
+            # verb's orchestration (not just _terminate_backend directly).
+            assert proc.poll() is None
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)

@@ -306,6 +306,26 @@ def _find_chrome() -> str | None:
     return None
 
 
+def _cmd_stop(_args) -> int:
+    """Thin front-end over `singleton.stop_backend()` — no matching/kill
+    logic of its own (that lives in singleton.py, reused from eviction)."""
+    _server()
+    import singleton
+
+    result, pid = singleton.stop_backend()
+    if result == "stopped":
+        print(f"stopped backend (pid {pid}).")
+        return 0
+    if result == "already stopped":
+        print("backend already stopped (stale state cleared).")
+        return 0
+    if result == "not running":
+        print("backend not running.")
+        return 0
+    print("busy: another session is starting/stopping the backend right now — retry.")
+    return 1
+
+
 def _cmd_serve(args) -> int:
     # Delegate to the same entrypoint as `stealth-chrome-devtools-mcp` so server
     # lifecycle (incl. orphan recovery) behaves exactly as normal.
@@ -332,6 +352,7 @@ _DISPATCH = {
     "profiles": _cmd_profiles,
     "cleanup": _cmd_cleanup,
     "doctor": _cmd_doctor,
+    "stop": _cmd_stop,
     "serve": _cmd_serve,
 }
 
@@ -372,6 +393,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser(
         "doctor", help="check Python, platform, session root, backend, and Chrome"
+    )
+
+    sub.add_parser(
+        "stop", help="terminate the shared backend (kills all live browser sessions)"
     )
 
     serve = sub.add_parser(
