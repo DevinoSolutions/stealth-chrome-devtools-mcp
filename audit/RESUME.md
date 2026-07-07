@@ -2,13 +2,15 @@
 
 **What this is:** a foundational-audit pipeline (AUDIT → triage → PLAN → approve → **[quality-gates interlude]** → FIX → CODIFY) for `stealth-chrome-devtools-mcp`. Conversation memory is gone after compaction; **everything authoritative is on disk under `audit/`.** Read this file, then `audit/state.json`.
 
-## Where we are (updated 2026-07-06, post-gates)
-- **Stages 0, 1, 1b, triage, 2 (PLAN), and 2.5-gates are COMPLETE.**
-- **2.5-gates LANDED** (14 commits): ruff 0 violations, ty 0 errors/39 warnings, vulture 0 findings, all 6 gates green, husky armed, CI quality job added. 415 tests, 42% coverage (gate 41). 56 inline noqa + 21 per-file-ignores, all owner-tagged.
+## Where we are (updated 2026-07-06, post-convergence)
+- **Stages 0, 1, 1b, triage, 2 (PLAN), 2.5-gates, and branch CONVERGENCE are COMPLETE.**
+- **2.5-gates LANDED** (14 commits): ruff 0 violations, ty 0 errors/39 warnings (src/ gated scope; 64 diagnostics repo-wide, no floor yet — open finding N-2), vulture 0 findings (WITH the allowlist arg), all 6 gates green, husky armed, CI quality job added. 415 tests, 42% coverage (gate 41). 56 inline noqa + 21 per-file-ignores, all owner-tagged.
+- **CONVERGED on `main`** (e39be31 + bookkeeping commits): PR #20→#21 verified lossless (empty diff vs fix-branch tip); six stale branches deleted local+remote; tags `audit-baseline`@2267b83, `gates-final`@3edac20, `archive/perf-spawn-and-timeouts`@2bc7504; the whole `audit/` corpus is git-tracked; `CODEBASE_AUDIT.md` lives at `audit/prior/`. **perf/spawn-and-timeouts was SUPERSEDED-BY-REWORK — never merge it** (its content evolved on main; it overlaps M2/M7/M9 territory).
 - Four approved amendments ride their plans in-file: M3-A1 (F-764 RLock), M8-A1 (F-509 auto-port-fallback), M4Ph1-A1+A1.5 (full 21-site error-envelope sweep with G1–G7 pins), M14-A1 (F-741 CLI renames + **X-HARD** env rename). `plan_M5a.md` is NOT executable — folded into M5b.
 
-## NEXT ACTION
-**Stage 3 FIX**: fresh session, paste `audit/STAGE3_RESUME_PROMPT.md`. It reads its baseline from `stages['2.5-gates'].landed` in state.json.
+## NEXT ACTIONS (in order)
+1. **Phase-2 targeted re-audit** (human-approved 2026-07-06, may be in flight): re-verdict findings whose files the gates materially changed + fresh sweep of `settings.py`/`observability.py`/`tools/` + verify F-720/F-763 closures. Opus judges, Sonnet/Haiku mechanical checks, Fable second-pass.
+2. **Stage 3 FIX**: fresh session, paste `audit/STAGE3_RESUME_PROMPT.md`. Baseline from `stages['2.5-gates'].landed` (`head_sha` e39be31 = ancestor-of-HEAD check, NOT equality). Branch `audit/fixes-2026-07-02` off main.
 
 ## HONEST STATUS — what is NOT done / NOT tested (do not let summaries imply otherwise)
 - **Zero of the 12 approved plans is executed.** Every fix exists only as a plan. The two Critical findings (wedged-but-alive backend jams eviction forever, F-301/F-501) are **live bugs today**.
@@ -27,7 +29,7 @@
 - The 4 lenses (`audit/ADDENDUM_LENSES.md`) bind fixes — a fix introducing a second way of doing something is a defect. **Deviation from an approved plan → STOP and ask the human.** Update + JSON-validate `audit/state.json` after each plan lands.
 
 ## Pinned facts (post-gates baseline — read from `stages['2.5-gates'].landed`)
-- Branch `fix/singleton-version-aware-backend`. **Gates ACTIVE** — husky pre-commit runs 6 checks, pre-push runs unit tests.
+- Branch `main` (the only branch — converged). **Gates ACTIVE** — husky pre-commit runs 6 checks, pre-push runs unit tests.
 - Baseline: **415 passed**, 42% coverage, gate 41. **`uv run` is BROKEN in this checkout** (path has `&`+spaces) — always use `.venv\Scripts\python.exe` directly; `uv` works in CI.
 - Context: LOCAL single-user tool, 0 external users — breaking changes are FREE. Priorities: (1) maintainability (2) operability (3) performance (order-of-magnitude only).
 - Tool count: **96 at HEAD** (gates changed nothing); **94 post-M2**, pinned by M6, unchanged through M14.
