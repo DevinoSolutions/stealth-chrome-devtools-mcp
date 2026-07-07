@@ -14,6 +14,7 @@ Race condition handling:
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import subprocess
 import sys
@@ -28,6 +29,12 @@ if sys.platform == "win32":
     import msvcrt
 else:
     import fcntl
+
+# F-183: the proxy's cold-start orchestration used to swallow every failure
+# silently. configure_logging("proxy") (in run_stdio_proxy) attaches the file
+# handler to this same logger name; until then this is a normal Logger with
+# no handlers - a safe no-op, same fail-open contract as logging_setup itself.
+_logger = logging.getLogger("stealth.proxy")
 
 STATE_DIR = Path.home() / ".stealth-mcp"
 LOCK_FILE = STATE_DIR / "singleton.lock"
@@ -282,6 +289,7 @@ def _server_version() -> str:
 
         return version(SERVER_NAME)
     except Exception:
+        _logger.debug("could not resolve installed package version", exc_info=True)
         return "0.0.0"
 
 
@@ -307,7 +315,11 @@ def _start_backend_holding_lock(port: int) -> None:
             _start_server_process(port)
             _wait_for_server(port)  # keep the lock until the socket is bound
     except Exception:
-        pass  # best-effort; the proxy still answers initialize and retries
+        # Best-effort; the proxy still answers initialize and retries. Before
+        # M3 this was silent (F-183's primary handler) - a cold-start failure
+        # left no trace anywhere. Now it's on disk even though control flow
+        # is unchanged (M10a's rule: add a log line, leave the sentinel).
+        _logger.exception("backend cold start failed")
 
 
 def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:
@@ -374,10 +386,18 @@ async def _await_backend_http(
                                 url, headers={**headers, "mcp-session-id": session_id}
                             )
                         except Exception:
-                            pass
+                            # Best-effort cleanup of the throwaway readiness
+                            # session; the probe itself already succeeded.
+                            _logger.debug(
+                                "readiness-probe session cleanup failed",
+                                exc_info=True,
+                            )
                     return True
             except Exception:
-                pass
+                # Expected during cold start (connection refused before the
+                # backend's socket is bound) - DEBUG, not a real problem
+                # unless it persists until the deadline (see run_backend).
+                _logger.debug("backend readiness probe attempt failed", exc_info=True)
             await anyio.sleep(interval)
             interval = min(interval * 1.5, 1.0)
     return False
@@ -478,7 +498,14 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
 
     async def run_backend():
         if not await _await_backend_http(url):
-            return  # backend never came up; later requests simply won't answer
+            # Before M3 this returned silently (F-183): a 120s cold-start
+            # failure gave the teardown no cause on disk. Later requests
+            # simply won't answer; the sentinel behavior is unchanged.
+            _logger.error(
+                "backend did not become ready within %.0fs", BACKEND_READY_TIMEOUT
+            )
+            return
+
         backend_ready.set()  # arm the liveness monitor now that it is genuinely up
         async with streamablehttp_client(url) as (backend_read, backend_write, _):
 
@@ -532,12 +559,8 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
         # dead backend can never answer.
         try:
             await run_backend()
-        except Exception as exc:
-            print(
-                f"[stealth-mcp proxy] backend connection lost: {exc!r}",
-                file=sys.stderr,
-                flush=True,
-            )
+        except Exception:
+            _logger.warning("backend connection lost", exc_info=True)
         finally:
             tg.cancel_scope.cancel()
 
@@ -547,11 +570,7 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
         # raised, so run_backend_guarded alone would never fire).
         await backend_ready.wait()
         await _watch_backend_liveness(port)
-        print(
-            "[stealth-mcp proxy] backend became unreachable; tearing down for reconnect",
-            file=sys.stderr,
-            flush=True,
-        )
+        _logger.warning("backend became unreachable; tearing down for reconnect")
         tg.cancel_scope.cancel()
 
     async with anyio.create_task_group() as tg:
@@ -587,5 +606,7 @@ async def _bridge(port: int):
 def run_stdio_proxy(port: int):
     """Run the stdio-to-HTTP proxy (blocking)."""
     import anyio
+    from logging_setup import configure_logging  # deferred: breaks the cycle
 
+    configure_logging("proxy")
     anyio.run(_bridge, port)

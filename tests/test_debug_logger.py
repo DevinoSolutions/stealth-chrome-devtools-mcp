@@ -93,16 +93,39 @@ class TestErrorDedup:
         log.log_error("comp", "meth", ValueError("b"))
         assert log.get_debug_view()["summary"]["total_errors"] == 2
 
-    def test_seen_error_set_clears_at_cap(self):
+    def test_seen_error_set_bounded_by_eviction_not_wipe(self):
+        """F-204: hitting the cap evicts the single OLDEST signature (LRU via
+        OrderedDict move_to_end + popitem(last=False)), not a full clear() -
+        so a still-recent signature stays deduped instead of every prior
+        signature re-logging at once."""
         log = DebugLogger()
         log.MAX_SEEN_ERRORS = 2
         log.enable()
-        log.log_error("comp", "meth", ValueError("a"))
-        log.log_error("comp", "meth", ValueError("b"))
-        # seen set now at cap (2); the next distinct error triggers a clear
-        # before insert, so the set never exceeds the cap.
-        log.log_error("comp", "meth", ValueError("c"))
+
+        log.log_error("comp", "meth", ValueError("a"))  # seen: {a}
+        log.log_error("comp", "meth", ValueError("b"))  # seen: {a, b}
+        log.log_error("comp", "meth", ValueError("c"))  # at cap -> evicts "a"
         assert len(log._seen_errors) <= log.MAX_SEEN_ERRORS
+
+        total_before = log.get_debug_view()["summary"]["total_errors"]
+        log.log_error("comp", "meth", ValueError("c"))  # "c" still tracked
+        assert log.get_debug_view()["summary"]["total_errors"] == total_before
+
+        log.log_error("comp", "meth", ValueError("a"))  # "a" was evicted
+        assert log.get_debug_view()["summary"]["total_errors"] == total_before + 1
+
+    def test_error_entry_stamped_with_correlation_id(self):
+        from logging_setup import correlation_id_var
+
+        log = DebugLogger()
+        log.enable()
+        token = correlation_id_var.set("test-corr-id")
+        try:
+            log.log_error("comp", "meth", ValueError("x"))
+        finally:
+            correlation_id_var.reset(token)
+        entry = log.get_debug_view()["all_errors"][-1]
+        assert entry["correlation_id"] == "test-corr-id"
 
 
 class TestViewAndClear:

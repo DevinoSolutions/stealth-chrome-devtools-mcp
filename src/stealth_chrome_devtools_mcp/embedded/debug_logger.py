@@ -6,10 +6,12 @@ import pickle
 import sys
 import threading
 import traceback
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from logging_setup import correlation_id_var
 
 # The durable half of F-182/F-304: every log_error/log_warning/log_info call
 # also emits here (unconditionally - see the gate removed in each method
@@ -57,7 +59,10 @@ class DebugLogger:
         self._lock_owner = "none"
 
         self._lock_acquired_time = 0
-        self._seen_errors: set = set()
+        # OrderedDict (values unused) rather than set: F-204's LRU eviction
+        # needs move_to_end()/popitem(last=False), which plain dict/set don't
+        # expose even though both are already insertion-ordered.
+        self._seen_errors: OrderedDict[str, None] = OrderedDict()
 
     def _emit_stderr(self, message: str, force: bool = False):
         """
@@ -97,12 +102,16 @@ class DebugLogger:
             error_signature = f"{component}.{method}.{type(error).__name__}.{error!s}"
 
             if error_signature in self._seen_errors:
+                self._seen_errors.move_to_end(error_signature)
                 self._stats[f"{component}.{method}.errors"] += 1
                 return
 
             if len(self._seen_errors) >= self.MAX_SEEN_ERRORS:
-                self._seen_errors.clear()
-            self._seen_errors.add(error_signature)
+                # F-204: evict the single oldest signature (LRU), not every
+                # tracked signature - clearing the whole set used to make
+                # hitting the cap re-log every still-recent error at once.
+                self._seen_errors.popitem(last=False)
+            self._seen_errors[error_signature] = None
 
             error_entry = {
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
@@ -110,6 +119,7 @@ class DebugLogger:
                 "method": method,
                 "error_type": type(error).__name__,
                 "error_message": str(error),
+                "correlation_id": correlation_id_var.get(),
                 "traceback": traceback.format_exc(),
                 "context": context or {},
             }

@@ -188,10 +188,12 @@ ban-relative-imports = "all"
     "S112", "SIM105", "T201", "TID251", "TRY002", "TRY300", "TRY301", "W293",
 ]  # plan_M4ph1 (F-101 god-file split + M3/M10a except surface)
 "src/stealth_chrome_devtools_mcp/embedded/singleton.py" = [
-    "ANN001", "ANN201", "ANN202", "BLE001", "C901", "E501", "PLR0915",
-    "PLR2004", "PTH123", "S110", "S603", "SIM105", "SIM115", "T201",
-    "TID251", "TRY300",
-]  # plan_M3 (F-183 spine: DEVNULL/prints/cold-start) + DEBT(F-740)
+    "ANN001", "ANN201", "ANN202", "BLE001", "C901", "PLR0915",
+    "PLR2004", "PTH123", "S603", "SIM115", "TID251", "TRY300",
+]  # plan_M3 (F-183 spine: cold-start tracing) + DEBT(F-740)
+# Suppression-shrink (2026-07-07, post M3-3+M3-6): E501/S110/SIM105/T201
+# removed - the prints are now stealth.proxy logs and the except: pass
+# blocks now log before the sentinel, so none of those codes fire anymore.
 "src/stealth_chrome_devtools_mcp/embedded/element_cloner.py" = [
     "ANN001", "ANN202", "ANN204", "ARG002", "ASYNC210", "ASYNC230",
     "BLE001", "C901", "E501", "PLR0912", "PLR0913", "PLR2004", "PTH123",
