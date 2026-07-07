@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import contextlib
 import faulthandler
+import functools
+import inspect
 import logging
 import os
 import sys
@@ -40,6 +42,7 @@ from typing import TYPE_CHECKING
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import TracebackType
 
 LOG_FORMAT = (
@@ -63,6 +66,58 @@ class CorrelationIdFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.correlation_id = correlation_id_var.get()
         return True
+
+
+_tool_call_logger = logging.getLogger("stealth.backend")
+
+
+def with_correlation_id(func: Callable[..., object]) -> Callable[..., object]:
+    """Wrap a registered tool function (the ``section_tool`` chokepoint, F-308)
+    so every call gets a fresh correlation id — stamped by
+    :class:`CorrelationIdFilter` onto every log line emitted during the call,
+    backend file and ``debug_logger`` entries alike — and one INFO start/end
+    pair. ``functools.wraps`` preserves the schema FastMCP introspects
+    (name/signature/docstring); a ``tools/list`` schema-snapshot test pins
+    that this holds for a representative tool per section.
+
+    91 of the 96 registered tools are ``async def`` and 5 are plain ``def``;
+    Python has no single syntax that both ``await``s and doesn't, so this
+    branches once on ``iscoroutinefunction`` to produce a matching wrapper.
+    """
+    # Not every Callable is guaranteed a __name__ (e.g. a callable class
+    # instance); all 96 real registrations are plain def/async def, but this
+    # keeps the wrapper honest for its declared, more general parameter type.
+    tool_name = getattr(func, "__name__", repr(func))
+
+    if inspect.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def async_wrapper(*args: object, **kwargs: object) -> object:
+            token = correlation_id_var.set(new_correlation_id())
+            start = time.monotonic()
+            _tool_call_logger.info("tool %s start", tool_name)
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                elapsed_ms = (time.monotonic() - start) * 1000
+                _tool_call_logger.info("tool %s end (%.1fms)", tool_name, elapsed_ms)
+                correlation_id_var.reset(token)
+
+        return async_wrapper
+
+    @functools.wraps(func)
+    def sync_wrapper(*args: object, **kwargs: object) -> object:
+        token = correlation_id_var.set(new_correlation_id())
+        start = time.monotonic()
+        _tool_call_logger.info("tool %s start", tool_name)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            _tool_call_logger.info("tool %s end (%.1fms)", tool_name, elapsed_ms)
+            correlation_id_var.reset(token)
+
+    return sync_wrapper
 
 
 def resolve_log_dir() -> Path:
