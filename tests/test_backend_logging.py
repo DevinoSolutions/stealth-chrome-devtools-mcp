@@ -59,6 +59,18 @@ class TestBootstrapBackendProcessLogging:
         log_path = bootstrap_backend_process_logging()
         assert log_path == tmp_path / f"backend-{os.getpid()}.log"
 
+    def test_writes_affirmative_startup_line(self, tmp_path, monkeypatch):
+        # Without this, the structured log stays EMPTY until the first
+        # error/warning/info call - "did the backend boot" was answerable
+        # only from backend-boot.log (plan_M3 §3 step-2 verify).
+        monkeypatch.setenv("STEALTH_MCP_LOG_DIR", str(tmp_path))
+        log_path = bootstrap_backend_process_logging()
+        for handler in logging.getLogger("stealth.backend").handlers:
+            handler.flush()
+        text = log_path.read_text(encoding="utf-8")
+        assert "backend process starting" in text
+        assert f"pid={os.getpid()}" in text
+
     def test_installs_sys_excepthook(self, tmp_path, monkeypatch):
         monkeypatch.setenv("STEALTH_MCP_LOG_DIR", str(tmp_path))
         bootstrap_backend_process_logging()

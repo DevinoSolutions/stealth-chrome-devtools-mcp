@@ -226,6 +226,13 @@ def bootstrap_backend_process_logging() -> Path:
         fault_log = fault_log_path.open("a", encoding="utf-8")
         faulthandler.enable(file=fault_log)
 
+    # Affirmative proof of boot, independent of any error occurring: without
+    # this the structured log stays EMPTY until the first error/warning/info
+    # call, so "did the backend boot at all" was answerable only from
+    # backend-boot.log (plan_M3 §3 step-2 verify: "a backend-<pid>.log with
+    # the ... startup line").
+    logger.info("backend process starting (pid=%d, log=%s)", os.getpid(), log_path)
+
     return log_path
 
 

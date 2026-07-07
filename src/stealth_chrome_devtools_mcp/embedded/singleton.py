@@ -244,24 +244,39 @@ def _start_server_process(port: int):
     # backend never reads stdin, and it remains the legitimately-allowed use.
     from logging_setup import resolve_log_dir
 
-    log_dir = resolve_log_dir()
-    log_dir.mkdir(parents=True, exist_ok=True)
+    boot_log = None
+    try:
+        log_dir = resolve_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        boot_log = open(log_dir / "backend-boot.log", "a", encoding="utf-8")
+    except OSError:
+        # Fail-open (plan_M3 §7: "M3's file setup is fail-open"): a log dir
+        # that can't be created/opened must never block the backend from
+        # spawning - fall back to the pre-M3 DEVNULL redirect instead.
+        _logger.warning(
+            "backend-boot.log unavailable; falling back to DEVNULL", exc_info=True
+        )
+        boot_log = None
 
-    with open(log_dir / "backend-boot.log", "a", encoding="utf-8") as boot_log:
-        kwargs: dict = {
-            "stdout": boot_log,
-            "stderr": boot_log,
-            "stdin": subprocess.DEVNULL,
-        }
+    stdout_target = boot_log if boot_log is not None else subprocess.DEVNULL
+    kwargs: dict = {
+        "stdout": stdout_target,
+        "stderr": stdout_target,
+        "stdin": subprocess.DEVNULL,
+    }
 
-        if sys.platform == "win32":
-            kwargs["creationflags"] = (
-                subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-            )
-        else:
-            kwargs["start_new_session"] = True
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        kwargs["start_new_session"] = True
 
+    try:
         proc = subprocess.Popen(cmd, **kwargs)
+    finally:
+        if boot_log is not None:
+            boot_log.close()
 
     _ensure_state_dir()
     PORT_FILE.write_text(str(port))
