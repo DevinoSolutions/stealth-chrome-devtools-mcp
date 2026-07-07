@@ -502,6 +502,52 @@ def stop_backend() -> tuple[str, int | None]:
         return ("already stopped", None)
 
 
+def restart_backend() -> tuple[str, int | None]:
+    """Restart the shared backend (CLI `restart` verb): the manual escape
+    hatch for a `wedged` backend (M1's diagnosis) or a stale same-version
+    backend (M2's still-open pain) that works today — terminate whatever is
+    on the target port, then run the exact cold-start spawn sequence under
+    the same lock cold start uses.
+
+    Mirrors `_start_backend_holding_lock`'s discipline (terminate -> spawn ->
+    wait) using the SAME primitives (plan_M8 SS2.1-B) — no second spawn path,
+    no new kill logic. Unlike `stop_backend`, this does not consult
+    `_probe_backend_status()` up front to short-circuit: restart's job is
+    unconditional — evict whatever is on the target port (nothing, if it is
+    already down) and bring a fresh backend up, so a "down"/"none" backend
+    also ends up running, not merely evicted. The target port is the one
+    recorded in `server.json`, else `DEFAULT_PORT` (no `_select_backend_port`
+    fallback yet — that lands in a later step). Lock contention (a
+    concurrent cold start/stop/restart already holding it) reports "busy" so
+    the operator can retry instead of racing it.
+
+    After the spawn, reports the TRUE post-restart state via M1's
+    `_probe_backend_status()` (binding ruling: one liveness vocabulary, no
+    new health check anywhere) — a restart that comes back wedged or down
+    must be visible, not assumed "responsive".
+
+    Returns ``(status, pid)``: ``status`` is one of `_probe_backend_status`'s
+    "responsive" | "wedged" | "down" | "none", or "busy" on lock contention.
+    ``pid`` is the freshly recorded pid (``server.json``, rewritten by the
+    spawn) once the lock is acquired, else None.
+    """
+    state = _read_server_state()
+    recorded_port = state.get("port") if state else None
+    port = recorded_port if isinstance(recorded_port, int) else DEFAULT_PORT
+
+    with _exclusive_lock() as got:
+        if not got:
+            return ("busy", None)
+        _terminate_backend(port)
+        _start_server_process(port)
+        _wait_for_server(port)
+
+    status, _ = _probe_backend_status()
+    new_state = _read_server_state()
+    new_pid = new_state.get("pid") if new_state else None
+    return (status, new_pid)
+
+
 def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:
     """Ensure the singleton backend is up or coming up, WITHOUT blocking.
 

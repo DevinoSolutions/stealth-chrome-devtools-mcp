@@ -73,6 +73,19 @@ def _spawn_plain_sleeper():
     return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
 
 
+@contextmanager
+def _tracking_lock(calls: list, got: bool):
+    """Stand-in for _exclusive_lock() that records entry/exit into `calls`
+    instead of taking a real file lock, so restart's ordering test can assert
+    the lock is held for the whole terminate->spawn->wait sequence without a
+    real LOCK_FILE."""
+    calls.append("lock-enter")
+    try:
+        yield got
+    finally:
+        calls.append("lock-exit")
+
+
 class TestTerminateBackendIdentity:
     def test_terminates_marked_sleeper_via_recorded_pid(self, isolated_state):
         proc = _spawn_marked_sleeper()
@@ -276,3 +289,93 @@ class TestStopBackend:
         finally:
             proc.kill()
             proc.wait(timeout=5)
+
+
+class TestRestartBackend:
+    """M8-5: restart_backend() = _exclusive_lock -> _terminate_backend(port)
+    -> _start_server_process(port) -> _wait_for_server(port), all under the
+    SAME lock cold start uses (plan_M8 SS2.1-B) - no second spawn path, no
+    new kill logic. Unlike stop_backend, restart does not consult
+    _probe_backend_status() up front to short-circuit: its job is
+    unconditional - evict whatever is on the target port (nothing, if
+    already down) and bring a fresh backend up. The target port is the one
+    recorded in server.json, else DEFAULT_PORT (no _select_backend_port yet
+    - that is a later step).
+
+    The final state reported is _probe_backend_status()'s, read AFTER the
+    lock releases (M1's one liveness vocabulary - binding ruling: no new
+    health check anywhere) - a restart that comes back wedged/down must be
+    visible, not assumed "responsive". Pinned by the third test below.
+    """
+
+    def test_terminate_then_spawn_ordering_under_the_lock(
+        self, isolated_state, monkeypatch
+    ):
+        calls: list = []
+        monkeypatch.setattr(
+            singleton, "_exclusive_lock", lambda: _tracking_lock(calls, True)
+        )
+        monkeypatch.setattr(
+            singleton, "_terminate_backend", lambda port: calls.append("terminate")
+        )
+
+        def _fake_spawn(port):
+            calls.append("spawn")
+            # Mimics the real _start_server_process's contract: the spawn
+            # itself is what rewrites server.json with the fresh pid.
+            singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+
+        monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
+        monkeypatch.setattr(
+            singleton, "_wait_for_server", lambda port: calls.append("wait")
+        )
+        monkeypatch.setattr(
+            singleton, "_probe_backend_status", lambda: ("responsive", 19222)
+        )
+
+        result = singleton.restart_backend()
+
+        assert calls == ["lock-enter", "terminate", "spawn", "wait", "lock-exit"]
+        assert result == ("responsive", 4242)
+
+    def test_busy_on_lock_contention(self, isolated_state, monkeypatch):
+        terminate_called = []
+        spawn_called = []
+        monkeypatch.setattr(
+            singleton, "_exclusive_lock", lambda: _tracking_lock([], False)
+        )
+        monkeypatch.setattr(
+            singleton, "_terminate_backend", lambda port: terminate_called.append(port)
+        )
+        monkeypatch.setattr(
+            singleton, "_start_server_process", lambda port: spawn_called.append(port)
+        )
+
+        result = singleton.restart_backend()
+
+        assert result == ("busy", None)
+        assert terminate_called == []
+        assert spawn_called == []
+
+    def test_final_state_is_the_reporters_not_assumed_responsive(
+        self, isolated_state, monkeypatch
+    ):
+        monkeypatch.setattr(
+            singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
+        )
+        monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
+
+        def _fake_spawn(port):
+            singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+
+        monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
+        # The backend comes back wedged - restart_backend must report that,
+        # not the "responsive" the ordering test above pinned.
+        monkeypatch.setattr(
+            singleton, "_probe_backend_status", lambda: ("wedged", 19222)
+        )
+
+        result = singleton.restart_backend()
+
+        assert result == ("wedged", 4242)

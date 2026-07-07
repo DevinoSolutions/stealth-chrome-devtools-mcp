@@ -326,6 +326,36 @@ def _cmd_stop(_args) -> int:
     return 1
 
 
+def _cmd_restart(_args) -> int:
+    """Thin front-end over `singleton.restart_backend()` — terminate then a
+    fresh cold-start spawn under the same lock cold start uses; no lifecycle
+    logic of its own (that lives in singleton.py)."""
+    _server()
+    import singleton
+
+    status, pid = singleton.restart_backend()
+    if status == "busy":
+        print(
+            "busy: another session is starting/stopping the backend right now — retry."
+        )
+        return 1
+    if status == "responsive":
+        print(f"backend restarted (responsive) (pid {pid}).")
+        return 0
+    if status == "wedged":
+        print(
+            f"backend restarted but is UNRESPONSIVE (wedged) (pid {pid}) — "
+            "it came up but is not answering; a new session will evict and "
+            "respawn it, or try `restart` again."
+        )
+        return 1
+    # "down" (spawned but the socket never came up) or "none" (no state at
+    # all afterward) - both mean the restart did not produce a running
+    # backend. Report honestly rather than implying success.
+    print(f"backend restart did not bring the backend up (state: {status}, pid {pid}).")
+    return 1
+
+
 def _cmd_serve(args) -> int:
     # Delegate to the same entrypoint as `stealth-chrome-devtools-mcp` so server
     # lifecycle (incl. orphan recovery) behaves exactly as normal.
@@ -353,6 +383,7 @@ _DISPATCH = {
     "cleanup": _cmd_cleanup,
     "doctor": _cmd_doctor,
     "stop": _cmd_stop,
+    "restart": _cmd_restart,
     "serve": _cmd_serve,
 }
 
@@ -397,6 +428,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser(
         "stop", help="terminate the shared backend (kills all live browser sessions)"
+    )
+
+    sub.add_parser(
+        "restart",
+        help="restart the shared backend (kills all live browser sessions)",
     )
 
     serve = sub.add_parser(

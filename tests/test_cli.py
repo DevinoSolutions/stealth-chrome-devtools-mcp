@@ -58,6 +58,10 @@ class TestParser:
         args = cli.build_parser().parse_args(["stop"])
         assert args.command == "stop"
 
+    def test_restart_args_parse(self):
+        args = cli.build_parser().parse_args(["restart"])
+        assert args.command == "restart"
+
 
 class TestStopVerb:
     """M8-4: `stop` is a thin front-end over singleton.stop_backend() - no
@@ -86,6 +90,32 @@ class TestStopVerb:
         with patch("singleton.stop_backend", return_value=("already stopped", None)):
             assert cli.main(["stop"]) == 0
         assert "already stopped" in capsys.readouterr().out.lower()
+
+
+class TestRestartVerb:
+    """M8-5: `restart` is a thin front-end over singleton.restart_backend() -
+    no lifecycle logic of its own in cli.py. Exit code is 0 iff the final
+    state is "responsive"; busy and any degraded post-restart state (wedged/
+    down/none) are both non-zero, and the printed message must say so
+    honestly rather than implying success."""
+
+    def test_restart_responsive_returns_zero_with_pid(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with patch("singleton.restart_backend", return_value=("responsive", 4242)):
+            assert cli.main(["restart"]) == 0
+        assert "4242" in capsys.readouterr().out
+
+    def test_restart_busy_returns_nonzero(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with patch("singleton.restart_backend", return_value=("busy", None)):
+            assert cli.main(["restart"]) == 1
+        assert "busy" in capsys.readouterr().out.lower()
+
+    def test_restart_down_returns_nonzero_with_honest_output(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with patch("singleton.restart_backend", return_value=("down", None)):
+            assert cli.main(["restart"]) == 1
+        assert "down" in capsys.readouterr().out.lower()
 
 
 class TestStatusProfiles:
