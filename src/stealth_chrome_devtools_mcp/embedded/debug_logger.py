@@ -1,6 +1,7 @@
 import contextlib
 import gzip
 import json
+import logging
 import pickle
 import sys
 import threading
@@ -9,6 +10,14 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# The durable half of F-182/F-304: every log_error/log_warning/log_info call
+# also emits here (unconditionally - see the gate removed in each method
+# below), so the file has every record regardless of enable()/disable() or
+# whether any debug tool is ever called. logging_setup.configure_logging
+# installs the handler on this same logger name; if it hasn't run yet (e.g.
+# under test), this is a normal Logger with no handlers - a safe no-op.
+_backend_logger = logging.getLogger("stealth.backend")
 
 
 class DebugLogger:
@@ -38,7 +47,12 @@ class DebugLogger:
         self._warnings: list[dict[str, Any]] = []
         self._info: list[dict[str, Any]] = []
         self._stats: dict[str, int] = defaultdict(int)
-        self._lock = threading.Lock()
+        # RLock, not Lock (Amendment A1 / F-764): export_to_file_paginated
+        # acquires this lock and then calls get_debug_view_paginated, which
+        # re-enters `with self._lock:` on the same thread. A plain Lock
+        # self-deadlocks there unconditionally; only the lock TYPE changes
+        # here (_lock_owner bookkeeping and export internals are unchanged).
+        self._lock = threading.RLock()
         self._enabled = False
         self._lock_owner = "none"
 
@@ -74,10 +88,12 @@ class DebugLogger:
             error (Exception): The exception instance.
             context (Optional[Dict[str, Any]]): Additional context for the error.
         """
-        if not self._enabled:
-            return
-
         with self._lock:
+            # Unconditional and NOT deduped (F-182/F-204): every call reaches
+            # the durable file regardless of enable() or in-memory dedup, so
+            # a suppressed-in-memory repeat still has every occurrence on disk.
+            _backend_logger.error("%s.%s: %s", component, method, error, exc_info=error)
+
             error_signature = f"{component}.{method}.{type(error).__name__}.{error!s}"
 
             if error_signature in self._seen_errors:
@@ -119,10 +135,9 @@ class DebugLogger:
             message (str): Warning message.
             context (Optional[Dict[str, Any]]): Additional context for the warning.
         """
-        if not self._enabled:
-            return
-
         with self._lock:
+            _backend_logger.warning("%s.%s: %s", component, method, message)
+
             warning_entry = {
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "component": component,
@@ -148,10 +163,9 @@ class DebugLogger:
             message (str): Info message.
             data (Optional[Any]): Additional data for the info log.
         """
-        if not self._enabled:
-            return
-
         with self._lock:
+            _backend_logger.info("%s.%s: %s", component, method, message)
+
             info_entry = {
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "component": component,
