@@ -178,7 +178,8 @@ def _install_asyncio_close_noise_filter() -> None:
 def _install_nodriver_cookie_compat() -> None:
     try:
         import nodriver.cdp.network as cdp_network
-    except Exception:
+    except Exception as e:
+        debug_logger.log_warning("server", "_install_nodriver_cookie_compat", str(e))
         return
 
     marker = "_stealth_chrome_devtools_cookie_compat"
@@ -998,7 +999,8 @@ async def _client_session_seed() -> str:
             path = _root_to_path(root)
             if path:
                 roots.append(path)
-    except Exception:
+    except Exception as e:
+        debug_logger.log_warning("server", "_client_session_seed", str(e))
         roots = []
 
     if roots:
@@ -1246,8 +1248,9 @@ def apply_disabled_sections() -> None:
         for tool_name in SECTION_TOOLS.get(section, []):
             try:
                 mcp.remove_tool(tool_name)
-            except Exception:
+            except Exception as e:
                 # Tool may already be removed by another section policy.
+                debug_logger.log_debug("server", "apply_disabled_sections", str(e))
                 continue
 
 

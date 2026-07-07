@@ -16,8 +16,12 @@ LOC_BUDGET = 1000
 GRANDFATHER: dict[str, tuple[int, str]] = {
     # 4420 (plan_M4ph1) + 2 (plan_M3 step 2: single bootstrap_backend_process_
     # logging() import + call in __main__ — the M3/M10a except-surface work
-    # plan_M4ph1's own tag already anticipated).
-    "embedded/server.py": (4422, "plan_M4ph1 + plan_M3"),
+    # plan_M4ph1's own tag already anticipated) + 3 (plan_M10a step 7d: the
+    # final 3 of the 17 truly-silent excepts - _install_nodriver_cookie_compat,
+    # _client_session_seed, apply_disabled_sections - each add one
+    # debug_logger.log_warning/log_debug(...) line closing F-181 rows 15-17;
+    # same minimal-bump rationale as browser_manager.py below.
+    "embedded/server.py": (4425, "plan_M4ph1 + plan_M3 + plan_M10a"),
     # 1447 (DEBT(F-702)) + 2 (plan_M10a step 7a: switch_to_tab/close_tab's two
     # truly-silent `except Exception: return False` handlers now each add one
     # debug_logger.log_warning(...) line closing F-181 rows 1-2; same minimal-
