@@ -62,6 +62,15 @@ class TestParser:
         args = cli.build_parser().parse_args(["restart"])
         assert args.command == "restart"
 
+    def test_kill_orphans_args_parse_defaults_force_false(self):
+        args = cli.build_parser().parse_args(["kill-orphans"])
+        assert args.command == "kill-orphans"
+        assert args.force is False
+
+    def test_kill_orphans_force_flag_parses_true(self):
+        args = cli.build_parser().parse_args(["kill-orphans", "--force"])
+        assert args.force is True
+
 
 class TestStopVerb:
     """M8-4: `stop` is a thin front-end over singleton.stop_backend() - no
@@ -116,6 +125,96 @@ class TestRestartVerb:
         with patch("singleton.restart_backend", return_value=("down", None)):
             assert cli.main(["restart"]) == 1
         assert "down" in capsys.readouterr().out.lower()
+
+
+class TestKillOrphansVerb:
+    """M8-6: `kill-orphans` is a thin, gated trigger over
+    process_cleanup.process_cleanup._recover_orphaned_processes() - no
+    matching logic of its own in cli.py. Gated off a live backend (reaping
+    would kill a live backend's own browsers and wipe its pid tracking):
+    responsive/wedged refuse unless --force; down/none proceed."""
+
+    def test_responsive_refuses_and_does_not_call_reaper(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with (
+            patch(
+                "singleton._probe_backend_status", return_value=("responsive", 19222)
+            ),
+            patch(
+                "singleton._read_server_state",
+                return_value={"pid": 4242, "port": 19222, "version": "1.2.1"},
+            ),
+            patch(
+                "process_cleanup.process_cleanup._recover_orphaned_processes"
+            ) as reaper,
+        ):
+            rc = cli.main(["kill-orphans"])
+
+        assert rc == 1
+        reaper.assert_not_called()
+        out = capsys.readouterr().out.lower()
+        assert "restart" in out
+        assert "--force" in out
+        assert "4242" in out
+
+    def test_wedged_refuses_and_does_not_call_reaper(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with (
+            patch("singleton._probe_backend_status", return_value=("wedged", 19222)),
+            patch(
+                "singleton._read_server_state",
+                return_value={"pid": 4242, "port": 19222, "version": "1.2.1"},
+            ),
+            patch(
+                "process_cleanup.process_cleanup._recover_orphaned_processes"
+            ) as reaper,
+        ):
+            rc = cli.main(["kill-orphans"])
+
+        assert rc == 1
+        reaper.assert_not_called()
+        assert "restart" in capsys.readouterr().out.lower()
+
+    def test_responsive_with_force_calls_reaper(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with (
+            patch(
+                "singleton._probe_backend_status", return_value=("responsive", 19222)
+            ),
+            patch(
+                "process_cleanup.process_cleanup._recover_orphaned_processes"
+            ) as reaper,
+        ):
+            rc = cli.main(["kill-orphans", "--force"])
+
+        assert rc == 0
+        reaper.assert_called_once()
+
+    def test_down_calls_reaper(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with (
+            patch("singleton._probe_backend_status", return_value=("down", 19222)),
+            patch(
+                "process_cleanup.process_cleanup._recover_orphaned_processes"
+            ) as reaper,
+        ):
+            rc = cli.main(["kill-orphans"])
+
+        assert rc == 0
+        reaper.assert_called_once()
+
+    def test_none_calls_reaper(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_server", lambda: None)
+        with (
+            patch("singleton._probe_backend_status", return_value=("none", None)),
+            patch(
+                "process_cleanup.process_cleanup._recover_orphaned_processes"
+            ) as reaper,
+        ):
+            rc = cli.main(["kill-orphans"])
+
+        assert rc == 0
+        reaper.assert_called_once()
 
 
 class TestStatusProfiles:

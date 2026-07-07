@@ -356,6 +356,42 @@ def _cmd_restart(_args) -> int:
     return 1
 
 
+def _cmd_kill_orphans(args) -> int:
+    """Thin, gated trigger of the existing orphan reaper — a direct call on
+    the already-constructed `process_cleanup` module singleton (import-time
+    recovery was skipped because `_server()` sets
+    `STEALTH_MCP_NO_AUTO_RECOVERY=1` before the import). No new matching
+    logic; the canonical create_time+user-data-dir matcher stays in
+    process_cleanup.py (plan_M8 SS2.1-C; M11a adds a public seam later, per
+    state.json's recorded decision).
+
+    Guarded off a LIVE backend: `_recover_orphaned_processes` both reaps
+    tracked browsers and clears the pid-tracking file, so running it against
+    a responsive/wedged backend would kill that backend's own browsers and
+    corrupt its bookkeeping. `restart` is the verb for "backend alive but
+    bad"; this verb is for "backend gone, browsers orphaned" — a clean
+    behavioral partition. `--force` overrides the guard.
+    """
+    _server()
+    import process_cleanup
+    import singleton
+
+    status, _ = singleton._probe_backend_status()
+    if status in ("responsive", "wedged") and not args.force:
+        pid = _recorded_backend_pid()
+        print(
+            f"a backend is running (pid {pid if pid is not None else '-'}); "
+            "use restart to recover it, or pass --force."
+        )
+        return 1
+
+    process_cleanup.process_cleanup._recover_orphaned_processes()
+    print(
+        "orphan recovery triggered: reaped any browsers left over from a dead backend."
+    )
+    return 0
+
+
 def _cmd_serve(args) -> int:
     # Delegate to the same entrypoint as `stealth-chrome-devtools-mcp` so server
     # lifecycle (incl. orphan recovery) behaves exactly as normal.
@@ -384,6 +420,7 @@ _DISPATCH = {
     "doctor": _cmd_doctor,
     "stop": _cmd_stop,
     "restart": _cmd_restart,
+    "kill-orphans": _cmd_kill_orphans,
     "serve": _cmd_serve,
 }
 
@@ -433,6 +470,17 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "restart",
         help="restart the shared backend (kills all live browser sessions)",
+    )
+
+    kill_orphans = sub.add_parser(
+        "kill-orphans",
+        help="reap orphaned browser processes left behind by a dead backend "
+        "(refuses against a live backend unless --force)",
+    )
+    kill_orphans.add_argument(
+        "--force",
+        action="store_true",
+        help="override the live-backend guard and reap anyway",
     )
 
     serve = sub.add_parser(
