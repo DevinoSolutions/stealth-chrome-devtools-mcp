@@ -13,6 +13,7 @@ Race condition handling:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import socket
@@ -50,6 +51,11 @@ SERVER_NAME = "stealth-chrome-devtools-mcp"
 # (tools/list, tool calls) start failing. The `initialize` handshake itself is
 # answered locally and never waits on this.
 BACKEND_READY_TIMEOUT = 120.0
+# Human-resolved (plan_M1 appendix, 2026-07-02): keep the ~12s watchdog
+# detection window (LIVENESS_PROBE_TIMEOUT=2.0, interval=2.0 x
+# failures_before_teardown=3) - preserves the existing watchdog hysteresis
+# tests. Not a decision to re-open in a later plan.
+LIVENESS_PROBE_TIMEOUT = 2.0
 
 
 def _ensure_state_dir():
@@ -119,14 +125,46 @@ def _write_server_state(port: int, version: str, pid: int) -> None:
     )
 
 
+def _probe_backend_status() -> tuple[str, int | None]:
+    """Report the recorded backend's actual state for display (CLI status/
+    doctor), distinguishing the three states `_find_running_server`'s
+    binary reuse-or-not answer collapses: not running at all, running but
+    socket-dead, and running-but-wedged (the F-301 state a bare socket check
+    cannot see). Read-only: never evicts, never spawns.
+
+    Returns one of:
+        ("none", None)        - no recorded backend
+        ("down", port)         - recorded but the socket itself is closed
+        ("wedged", port)       - socket open, but no real MCP initialize answer
+        ("responsive", port)  - socket open AND initialize answers 200
+    """
+    state = _read_server_state()
+    if state is None:
+        return "none", None
+    port = state.get("port")
+    if not isinstance(port, int):
+        return "none", None
+    if not _server_is_healthy(port):
+        return "down", port
+    if not _backend_http_ready(port):
+        return "wedged", port
+    return "responsive", port
+
+
 def _find_running_server() -> int | None:
     """Return the port of a *reusable* backend, or None.
 
-    A backend is reusable only when we can confirm it is the SAME version as the
-    running package: its recorded version must match and its port must be
-    socket-healthy. A stale (older-version) or legacy (version-unknown) backend
-    is deliberately NOT reused, so an upgrade actually takes effect instead of
-    silently proxying to old backend code (issue #14).
+    A backend is reusable only when we can confirm it is the SAME version as
+    the running package AND it answers a real MCP `initialize` (F-301/F-501:
+    a bare socket connect cannot tell a wedged backend - dispatch loop dead,
+    port still open - from a healthy one, so a wedged same-version backend
+    used to be "reusable" forever). A stale (older-version), legacy
+    (version-unknown), or wedged backend is deliberately NOT reused: the
+    former so an upgrade actually takes effect instead of silently proxying to
+    old backend code (issue #14); the latter so this same guard - which
+    `_clear_stale_backend`'s eviction and both cold-start callers all route
+    through - un-blocks the existing eviction+respawn machine on a wedge
+    instead of gating it shut.
     """
     state = _read_server_state()
     if state is None:
@@ -136,7 +174,7 @@ def _find_running_server() -> int | None:
         return None
     if state.get("version") != _server_version():
         return None
-    if not _server_is_healthy(port):
+    if not _backend_http_ready(port):
         return None
     return port
 
@@ -298,6 +336,73 @@ def _backend_http_url(port: int) -> str:
     return f"http://127.0.0.1:{port}/mcp/"
 
 
+def _backend_http_ready(port: int, *, timeout: float = LIVENESS_PROBE_TIMEOUT) -> bool:
+    """Single-shot, synchronous app-level liveness probe: True iff the backend
+    on ``port`` answers a real ``initialize`` with HTTP 200.
+
+    This is the promoted, reusable form of the mechanism `_await_backend_http`
+    already proves at startup (initialize->200), turned into ONE attempt
+    instead of a poll loop, so sync callers (discovery, CLI) can call it
+    directly and the watchdog can drive it off-thread. Never raises: any
+    failure (connection refused, timeout, malformed response) resolves to
+    False, matching `_server_is_healthy`'s fail-closed contract - a probe
+    error must always read as "not ready," never propagate.
+
+    NOTE: this intentionally duplicates ~10 lines of `_await_backend_http`'s
+    `initialize` request shape rather than sharing a helper (plan_M1 SS2.2
+    rejected-alternative #4, cross-review ruling: M1/M3 singleton regions stay
+    disjoint - `_await_backend_http` is M3's). `grep '"initialize"'` finds
+    both twins; consolidating them is a future finding, not this plan's scope.
+    """
+    import httpx
+    from mcp.types import DEFAULT_NEGOTIATED_VERSION
+
+    probe = {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": DEFAULT_NEGOTIATED_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "liveness-probe", "version": "0"},
+        },
+    }
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    url = _backend_http_url(port)
+    try:
+        with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
+            resp = client.post(url, json=probe, headers=headers)
+            if resp.status_code != 200:
+                return False
+            session_id = resp.headers.get("mcp-session-id")
+            if session_id:
+                try:
+                    client.delete(
+                        url, headers={**headers, "mcp-session-id": session_id}
+                    )
+                except Exception:
+                    # Best-effort cleanup of the throwaway liveness session;
+                    # the probe itself already succeeded.
+                    _logger.debug(
+                        "liveness-probe session cleanup failed", exc_info=True
+                    )
+            return True
+    except Exception as e:
+        # Fail-closed: connection refused (down), a hung/wedged backend that
+        # never answers (timeout), or any other transport error all read as
+        # "not ready" - matching _server_is_healthy's contract. DEBUG, not
+        # WARNING (M10a convention, cf. _await_backend_http's identical
+        # catch): this fires routinely during a normal cold start and on
+        # every watchdog tick while a backend is briefly busy - the caller
+        # (the watchdog) is the one that decides when repeated failures are
+        # WARNING-worthy, not this single-attempt probe.
+        _logger.debug("liveness probe attempt failed", exc_info=e)
+        return False
+
+
 def _server_version() -> str:
     try:
         from importlib.metadata import version
@@ -435,18 +540,41 @@ async def _watch_backend_liveness(
     unbounded hang on requests a dead backend can never answer. A single healthy
     check resets the failure run, so a transient blip never tears down a live
     backend. ``is_healthy``/``sleep`` are injectable for testing.
+
+    F-501: the default check used to be a bare socket connect
+    (``_server_is_healthy``), which a wedged backend (dispatch loop dead,
+    socket still open) always passes - so the sole auto-recovery watchdog
+    never armed against the exact failure it exists for. The default now runs
+    the app-level probe (``_backend_http_ready``) off-thread via
+    ``anyio.to_thread.run_sync`` (plan_M1 SS2.2 rejected alternative #3: a
+    blocking httpx call run inline would freeze the stdio pump for up to
+    ``LIVENESS_PROBE_TIMEOUT`` every ``interval``). The loop is await-aware
+    (``inspect.isawaitable``) so this async default and every existing
+    injected SYNC ``is_healthy`` callable both drive it unchanged.
     """
     import anyio
 
-    check = is_healthy if is_healthy is not None else (lambda: _server_is_healthy(port))
+    def _default_check():
+        return anyio.to_thread.run_sync(_backend_http_ready, port)
+
+    check = is_healthy if is_healthy is not None else _default_check
     nap = sleep if sleep is not None else anyio.sleep
     consecutive = 0
     while True:
         await nap(interval)
-        if check():
+        res = check()
+        if inspect.isawaitable(res):
+            res = await res
+        if res:
             consecutive = 0
             continue
         consecutive += 1
+        _logger.warning(
+            "liveness probe failed for backend on port %d (%d/%d)",
+            port,
+            consecutive,
+            failures_before_teardown,
+        )
         if consecutive >= failures_before_teardown:
             return
 

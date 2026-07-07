@@ -102,13 +102,40 @@ def _gb_to_bytes(gb: float | None, fallback: int) -> int:
 # ── commands ────────────────────────────────────────────────────────────────
 
 
+def _format_backend_status() -> str:
+    """Human-readable backend status for status/doctor, driven by
+    `_probe_backend_status` (plan_M1 SS2.1-D) instead of `_find_running_
+    server`'s binary reuse-or-not answer. Closes F-301's "status prints
+    *running* through the whole outage" half: a wedged backend (socket open,
+    dispatch loop dead) now reports UNRESPONSIVE instead of a plain
+    "running" indistinguishable from a genuinely healthy one. Read-only -
+    this performs a single initialize+DELETE probe, self-cleaning, same as
+    every other consumer of `_backend_http_ready` (never evicts or spawns).
+    """
+    import singleton
+
+    status, port = singleton._probe_backend_status()
+    # "down" (a stale record but nothing actually listening) and "none" (no
+    # record at all) both read as "not running" to an operator - there is no
+    # live process to reconnect to either way; plan_M1 SS2.1-D's three
+    # display strings map 1:1 to what matters operationally: not running /
+    # responsive / wedged.
+    if status in ("none", "down"):
+        return "not running"
+    if status == "wedged":
+        return (
+            f"running but UNRESPONSIVE on port {port} — wedged; "
+            "a new session will evict and respawn it"
+        )
+    return f"running (responsive) on port {port}"
+
+
 def _cmd_status(_args) -> int:
     server = _server()
     import singleton
 
-    port = singleton._find_running_server()
     root = server._default_session_root()
-    print(f"backend     : {'running on port ' + str(port) if port else 'not running'}")
+    print(f"backend     : {_format_backend_status()}")
     print(f"version     : {singleton._server_version()}")
     print(f"session root: {root}  (exists: {root.exists()})")
     print(
@@ -193,15 +220,13 @@ def _cmd_doctor(_args) -> int:
     import platform
 
     server = _server()
-    import singleton
 
     ok = True
     print(f"python      : {platform.python_version()}")
     print(f"platform    : {platform.platform()}")
     root = server._default_session_root()
     print(f"session root: {root}  (exists: {root.exists()})")
-    port = singleton._find_running_server()
-    print(f"backend     : {'running on port ' + str(port) if port else 'not running'}")
+    print(f"backend     : {_format_backend_status()}")
 
     chrome = _find_chrome()
     print(f"chrome      : {chrome or 'NOT FOUND — install Google Chrome'}")
