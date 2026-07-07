@@ -177,7 +177,7 @@ ban-relative-imports = "all"
     "E741",     # ambiguous variable name in tests
     "TRY300",   # try-consider-else in test assertions
     "RUF100",   # unused noqa (may lag behind fixes)
-]
+]  # PERMANENT(pytest idioms: asserts, broad excepts, prints, test-only lint relaxations)
 # ── Fully-plan-owned files (§2 line 101 — file-wide, every code enumerated) ─
 "src/stealth_chrome_devtools_mcp/embedded/server.py" = [
     "A002", "ANN001", "ANN201", "ANN202", "ANN401", "ARG001", "ARG005",

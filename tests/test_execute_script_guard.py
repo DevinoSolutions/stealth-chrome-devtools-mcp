@@ -22,8 +22,8 @@ EMBEDDED_DIR = (
 if str(EMBEDDED_DIR) not in sys.path:
     sys.path.insert(0, str(EMBEDDED_DIR))
 
-import server  # noqa: E402
-from server import (  # noqa: E402
+import server
+from server import (
     EXECUTE_SCRIPT_TIMEOUT,
     MAX_USER_SCRIPT_BYTES,
     _script_rejection_reason,

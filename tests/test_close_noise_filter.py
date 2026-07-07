@@ -23,7 +23,7 @@ EMBEDDED_DIR = (
 if str(EMBEDDED_DIR) not in sys.path:
     sys.path.insert(0, str(EMBEDDED_DIR))
 
-import server  # noqa: E402
+import server
 
 
 def _make_exc(name, module):

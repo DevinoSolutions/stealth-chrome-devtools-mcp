@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from stealth_chrome_devtools_mcp.settings import Settings, get_settings
 
@@ -42,7 +43,7 @@ def test_defaults_instantiate(monkeypatch):
 
 def test_bad_value_names_the_field(monkeypatch):
     monkeypatch.setenv("STEALTH_MCP_SESSION_STORAGE_CAP_GB", "not-a-number")
-    with pytest.raises(Exception) as excinfo:  # noqa: PT011 - ValidationError text asserted
+    with pytest.raises(ValidationError) as excinfo:
         Settings(_env_file=None)
     assert "session_storage_cap_gb" in str(excinfo.value)
 
