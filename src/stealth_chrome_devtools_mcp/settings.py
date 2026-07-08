@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     # import-time os.environ.setdefault, so 0 was already the effective runtime
     # default; encoding it here removes that shadow write and the get_settings()
     # caching hazard it created.
+    close_kill_timeout: float = Field(5.0, validation_alias="CLOSE_KILL_TIMEOUT", gt=0)
     browser_idle_timeout: int = Field(0, validation_alias="BROWSER_IDLE_TIMEOUT", ge=0)
     browser_idle_reaper_interval: int = Field(
         60, validation_alias="BROWSER_IDLE_REAPER_INTERVAL", ge=1

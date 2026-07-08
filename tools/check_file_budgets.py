@@ -26,7 +26,9 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # truly-silent `except Exception: return False` handlers now each add one
     # debug_logger.log_warning(...) line closing F-181 rows 1-2; same minimal-
     # bump rationale as server.py above, cross-review-confirmed there).
-    "embedded/browser_manager.py": (1449, "DEBT(F-702) + plan_M10a"),
+    # + 3 (plan_M7 step M7-1: close_instance restructured into 4 phases with
+    # _blocking_teardown extracted + _close_proxy_forwarder_ref helper).
+    "embedded/browser_manager.py": (1452, "DEBT(F-702) + plan_M10a + plan_M7"),
     "embedded/process_cleanup.py": (1022, "plan_M11a"),
 }
 
