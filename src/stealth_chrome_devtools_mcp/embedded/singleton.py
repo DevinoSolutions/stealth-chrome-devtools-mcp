@@ -16,12 +16,13 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
 import socket
 import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import psutil
@@ -125,6 +126,17 @@ def _write_server_state(port: int, version: str, pid: int) -> None:
     )
 
 
+def _clear_server_state() -> None:
+    """Remove the recorded backend identity (server.json) and the legacy
+    write-only port file, best-effort. Used by `stop_backend()` so a stale
+    record can never make a later `_find_running_server` believe a stopped
+    backend is still there to reuse.
+    """
+    for path in (SERVER_STATE_FILE, PORT_FILE):
+        with suppress(OSError):
+            path.unlink(missing_ok=True)
+
+
 def _probe_backend_status() -> tuple[str, int | None]:
     """Report the recorded backend's actual state for display (CLI status/
     doctor), distinguishing the three states `_find_running_server`'s
@@ -220,17 +232,15 @@ def _backend_pid_on_port(port: int) -> int | None:
     return None
 
 
-def _clear_stale_backend(port: int) -> None:
-    """Terminate a stale/legacy backend of ours squatting ``port`` so a
-    correctly-versioned backend can bind on it.
+def _terminate_backend(port: int) -> bool:
+    """Terminate OUR backend associated with ``port``, if one is identifiable.
 
-    No-op when the port already holds a reusable same-version backend. Targets
-    only a process positively identified as our backend (by open port, then by
-    recorded pid as a fallback). Best-effort and bounded — never raises.
+    Resolves the pid by open port first, then falls back to the recorded pid
+    in ``server.json`` (guarded by ``_is_our_backend`` either way) — a pid
+    that is not positively identified as our backend (e.g. a recycled pid now
+    running an unrelated process) is never touched. Best-effort and bounded —
+    never raises. Returns whether a backend of ours was found and terminated.
     """
-    if _find_running_server() == port:
-        return  # a reusable same-version backend is already there
-
     pid = _backend_pid_on_port(port)
     if pid is None:
         state = _read_server_state()
@@ -238,7 +248,7 @@ def _clear_stale_backend(port: int) -> None:
         if _is_our_backend(recorded):
             pid = recorded
     if pid is None:
-        return
+        return False
 
     try:
         proc = psutil.Process(pid)
@@ -250,12 +260,24 @@ def _clear_stale_backend(port: int) -> None:
     except (psutil.Error, OSError):
         pass
 
-    # Give the OS a moment to release the port so the fresh backend can bind.
+    # Give the OS a moment to release the port so a fresh backend can bind.
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if not _server_is_healthy(port):
-            return
+            return True
         time.sleep(0.1)
+    return True
+
+
+def _clear_stale_backend(port: int) -> None:
+    """Terminate a stale/legacy backend of ours squatting ``port`` so a
+    correctly-versioned backend can bind on it.
+
+    No-op when the port already holds a reusable same-version backend.
+    """
+    if _find_running_server() == port:
+        return  # a reusable same-version backend is already there
+    _terminate_backend(port)
 
 
 def _server_process_cmd(port: int) -> list[str]:
@@ -297,10 +319,16 @@ def _start_server_process(port: int):
         boot_log = None
 
     stdout_target = boot_log if boot_log is not None else subprocess.DEVNULL
+    # A spawned backend must always own its lifecycle (reap its own orphaned
+    # browsers on init) even when the CLI-invoking parent set this to skip
+    # its own recovery-on-import (cli.py's os.environ.setdefault).
+    child_env = dict(os.environ)
+    child_env.pop("STEALTH_MCP_NO_AUTO_RECOVERY", None)
     kwargs: dict = {
         "stdout": stdout_target,
         "stderr": stdout_target,
         "stdin": subprocess.DEVNULL,
+        "env": child_env,
     }
 
     if sys.platform == "win32":
@@ -442,6 +470,123 @@ def _start_backend_holding_lock(port: int) -> None:
         _logger.exception("backend cold start failed")
 
 
+def stop_backend() -> tuple[str, int | None]:
+    """Stop the shared backend (CLI `stop` verb): an operator-initiated action
+    that terminates every live browser session on it — that is the verb's
+    purpose, not a side effect to guard against.
+
+    Consumes M1's `_probe_backend_status()` for the state read (binding
+    ruling: no new liveness check anywhere) — only a responsive/wedged
+    backend is actually targeted for termination; a stale `down` record is
+    cleared without anything left to kill; `none` is reported as-is. Lock
+    contention (a concurrent cold start/stop/restart already holding it)
+    reports "busy" so the operator can retry instead of racing it.
+
+    Returns ``(result, pid)``: ``result`` is one of "stopped" |
+    "already stopped" | "not running" | "busy". ``pid`` is the terminated
+    pid when ``result == "stopped"``, else None.
+    """
+    status, port = _probe_backend_status()
+    if status == "none":
+        return ("not running", None)
+
+    with _exclusive_lock() as got:
+        if not got:
+            return ("busy", None)
+        state = _read_server_state()
+        recorded_pid = state.get("pid") if state else None
+        terminated = _terminate_backend(port) if port is not None else False
+        _clear_server_state()
+        if terminated:
+            return ("stopped", recorded_pid)
+        return ("already stopped", None)
+
+
+def restart_backend() -> tuple[str, int | None]:
+    """Restart the shared backend (CLI `restart` verb): the manual escape
+    hatch for a `wedged` backend (M1's diagnosis) or a stale same-version
+    backend (M2's still-open pain) that works today — terminate whatever is
+    on the target port, then run the exact cold-start spawn sequence under
+    the same lock cold start uses.
+
+    Mirrors `_start_backend_holding_lock`'s discipline (terminate -> spawn ->
+    wait) using the SAME primitives (plan_M8 SS2.1-B) — no second spawn path,
+    no new kill logic. Unlike `stop_backend`, this does not consult
+    `_probe_backend_status()` up front to short-circuit: restart's job is
+    unconditional — evict whatever is on the target port (nothing, if it is
+    already down) and bring a fresh backend up, so a "down"/"none" backend
+    also ends up running, not merely evicted. The TERMINATE target is the
+    port recorded in `server.json`, else `DEFAULT_PORT`. After the terminate,
+    the SPAWN port routes through `_select_backend_port()` (F-509 Amendment
+    A1, squatter-survival symmetry with cold start): the common case
+    (recorded port is ours) is unchanged — once `_terminate_backend` frees
+    it, selection returns that same port and rebinds it — but a squatter
+    that moved onto the now-dead backend's port during the outage forces a
+    fresh `_free_port()` pick instead of a repeat 120s outage. A restart
+    that falls back stays on the new port across further restarts (recorded-
+    port stability, SSA1.5); `stop` clears `server.json`, which is the reset
+    path back to `DEFAULT_PORT`. Lock contention (a concurrent cold start/
+    stop/restart already holding it) reports "busy" so the operator can
+    retry instead of racing it.
+
+    After the spawn, reports the TRUE post-restart state via M1's
+    `_probe_backend_status()` (binding ruling: one liveness vocabulary, no
+    new health check anywhere) — a restart that comes back wedged or down
+    must be visible, not assumed "responsive".
+
+    Returns ``(status, pid)``: ``status`` is one of `_probe_backend_status`'s
+    "responsive" | "wedged" | "down" | "none", or "busy" on lock contention.
+    ``pid`` is the freshly recorded pid (``server.json``, rewritten by the
+    spawn) once the lock is acquired, else None.
+    """
+    state = _read_server_state()
+    recorded_port = state.get("port") if state else None
+    port = recorded_port if isinstance(recorded_port, int) else DEFAULT_PORT
+
+    with _exclusive_lock() as got:
+        if not got:
+            return ("busy", None)
+        _terminate_backend(port)
+        port = _select_backend_port(port)
+        _start_server_process(port)
+        _wait_for_server(port)
+
+    status, _ = _probe_backend_status()
+    new_state = _read_server_state()
+    new_pid = new_state.get("pid") if new_state else None
+    return (status, new_pid)
+
+
+def _port_is_foreign_held(port: int) -> bool:
+    """True iff ``port``'s socket is open but NOT held by our backend.
+
+    The canonical "foreign occupant" predicate (F-509, plan_M8 Amendment
+    A1): the one definition of "foreign," consumed both by the cold-start
+    port fallback below and by doctor's foreign-occupant diagnostic
+    (cli.py's ``_doctor_port_occupant_line``) — a single home instead of two
+    places re-deriving the same condition.
+    """
+    return _server_is_healthy(port) and _backend_pid_on_port(port) is None
+
+
+def _select_backend_port(preferred: int = DEFAULT_PORT) -> int:
+    """Port to spawn the backend on (F-509 auto-fallback, plan_M8 Amendment
+    A1). Prefers the port recorded in ``server.json`` (so eviction/restart
+    land where a prior backend ran), else ``preferred``. Keeps that target
+    when it is free or held by OUR OWN backend (eviction rebinds it there);
+    only a FOREIGN occupant forces an OS-assigned fallback via
+    ``proxy_forwarder._free_port()`` (the one existing port-picker — no new
+    convention), so a port collision is recoverable instead of a silent
+    120s outage.
+    """
+    from proxy_forwarder import _free_port  # lazy; no module-top cycle
+
+    state = _read_server_state()
+    recorded = state.get("port") if state else None
+    target = recorded if isinstance(recorded, int) else preferred
+    return _free_port() if _port_is_foreign_held(target) else target
+
+
 def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:
     """Ensure the singleton backend is up or coming up, WITHOUT blocking.
 
@@ -454,6 +599,13 @@ def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:
     existing = _find_running_server()
     if existing is not None:
         return existing
+
+    # F-509 (Amendment A1): choose the port SYNCHRONOUSLY here, before the
+    # daemon thread starts, so the one chosen value reaches both the spawn
+    # arg below AND the return value (the proxy's connect target) in
+    # lock-step — no polling server.json for a value the thread hasn't
+    # written yet (SSA1.3 rejected alternative #2).
+    port = _select_backend_port(port)
 
     threading.Thread(
         target=_start_backend_holding_lock, args=(port,), daemon=True

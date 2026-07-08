@@ -130,12 +130,55 @@ def _format_backend_status() -> str:
     return f"running (responsive) on port {port}"
 
 
+def _recorded_backend_pid() -> int | None:
+    """The pid singleton last recorded for the backend (server.json), or None
+    if there is no record. Independent of liveness — status/doctor combine
+    this with `_format_backend_status()`'s liveness read separately (F-305)."""
+    import singleton
+
+    state = singleton._read_server_state()
+    return state.get("pid") if state else None
+
+
+def _backend_log_location(pid: int | None) -> str:
+    """Where to look for backend logs (F-503's log-path half: M3 delivered
+    "there is now a log"; this delivers "here is where"). Names the exact
+    per-pid file when a pid is recorded, else the shared boot log."""
+    from logging_setup import resolve_log_dir
+
+    filename = f"backend-{pid}.log" if pid is not None else "backend-boot.log"
+    return str(resolve_log_dir() / filename)
+
+
+def _doctor_port_occupant_line() -> str:
+    """F-509 visibility: is the target port free, ours, or a NON-stealth
+    process squatting it (which would otherwise silently block a backend
+    from binding)? Uses only existing helpers — no new port logic."""
+    import singleton
+
+    state = singleton._read_server_state()
+    port = (
+        state.get("port")
+        if state and isinstance(state.get("port"), int)
+        else (singleton.DEFAULT_PORT)
+    )
+    our_pid = singleton._backend_pid_on_port(port)
+    if our_pid is not None:
+        return f"port {port} held by our backend (pid {our_pid})"
+    if singleton._port_is_foreign_held(port):
+        return f"port {port} held by a NON-stealth process — a backend cannot bind here"
+    return f"port {port} free"
+
+
 def _cmd_status(_args) -> int:
     server = _server()
     import singleton
 
     root = server._default_session_root()
+    pid = _recorded_backend_pid()
     print(f"backend     : {_format_backend_status()}")
+    print(f"pid         : {pid if pid is not None else '-'}")
+    print(f"log         : {_backend_log_location(pid)}")
     print(f"version     : {singleton._server_version()}")
     print(f"session root: {root}  (exists: {root.exists()})")
     print(
@@ -226,7 +269,11 @@ def _cmd_doctor(_args) -> int:
     print(f"platform    : {platform.platform()}")
     root = server._default_session_root()
     print(f"session root: {root}  (exists: {root.exists()})")
+    pid = _recorded_backend_pid()
     print(f"backend     : {_format_backend_status()}")
+    print(f"pid         : {pid if pid is not None else '-'}")
+    print(f"log         : {_backend_log_location(pid)}")
+    print(f"port        : {_doctor_port_occupant_line()}")
 
     chrome = _find_chrome()
     print(f"chrome      : {chrome or 'NOT FOUND — install Google Chrome'}")
@@ -259,6 +306,92 @@ def _find_chrome() -> str | None:
     return None
 
 
+def _cmd_stop(_args) -> int:
+    """Thin front-end over `singleton.stop_backend()` — no matching/kill
+    logic of its own (that lives in singleton.py, reused from eviction)."""
+    _server()
+    import singleton
+
+    result, pid = singleton.stop_backend()
+    if result == "stopped":
+        print(f"stopped backend (pid {pid}).")
+        return 0
+    if result == "already stopped":
+        print("backend already stopped (stale state cleared).")
+        return 0
+    if result == "not running":
+        print("backend not running.")
+        return 0
+    print("busy: another session is starting/stopping the backend right now — retry.")
+    return 1
+
+
+def _cmd_restart(_args) -> int:
+    """Thin front-end over `singleton.restart_backend()` — terminate then a
+    fresh cold-start spawn under the same lock cold start uses; no lifecycle
+    logic of its own (that lives in singleton.py)."""
+    _server()
+    import singleton
+
+    status, pid = singleton.restart_backend()
+    if status == "busy":
+        print(
+            "busy: another session is starting/stopping the backend right now — retry."
+        )
+        return 1
+    if status == "responsive":
+        print(f"backend restarted (responsive) (pid {pid}).")
+        return 0
+    if status == "wedged":
+        print(
+            f"backend restarted but is UNRESPONSIVE (wedged) (pid {pid}) — "
+            "it came up but is not answering; a new session will evict and "
+            "respawn it, or try `restart` again."
+        )
+        return 1
+    # "down" (spawned but the socket never came up) or "none" (no state at
+    # all afterward) - both mean the restart did not produce a running
+    # backend. Report honestly rather than implying success.
+    print(f"backend restart did not bring the backend up (state: {status}, pid {pid}).")
+    return 1
+
+
+def _cmd_kill_orphans(args) -> int:
+    """Thin, gated trigger of the existing orphan reaper — a direct call on
+    the already-constructed `process_cleanup` module singleton (import-time
+    recovery was skipped because `_server()` sets
+    `STEALTH_MCP_NO_AUTO_RECOVERY=1` before the import). No new matching
+    logic; the canonical create_time+user-data-dir matcher stays in
+    process_cleanup.py (plan_M8 SS2.1-C; M11a adds a public seam later, per
+    state.json's recorded decision).
+
+    Guarded off a LIVE backend: `_recover_orphaned_processes` both reaps
+    tracked browsers and clears the pid-tracking file, so running it against
+    a responsive/wedged backend would kill that backend's own browsers and
+    corrupt its bookkeeping. `restart` is the verb for "backend alive but
+    bad"; this verb is for "backend gone, browsers orphaned" — a clean
+    behavioral partition. `--force` overrides the guard.
+    """
+    _server()
+    import process_cleanup
+    import singleton
+
+    status, _ = singleton._probe_backend_status()
+    if status in ("responsive", "wedged") and not args.force:
+        pid = _recorded_backend_pid()
+        print(
+            f"a backend is running (pid {pid if pid is not None else '-'}); "
+            "use restart to recover it, or pass --force."
+        )
+        return 1
+
+    process_cleanup.process_cleanup._recover_orphaned_processes()
+    print(
+        "orphan recovery triggered: reaped any browsers left over from a dead backend."
+    )
+    return 0
+
+
 def _cmd_serve(args) -> int:
     # Delegate to the same entrypoint as `stealth-chrome-devtools-mcp` so server
     # lifecycle (incl. orphan recovery) behaves exactly as normal.
@@ -285,6 +418,9 @@ _DISPATCH = {
     "profiles": _cmd_profiles,
     "cleanup": _cmd_cleanup,
     "doctor": _cmd_doctor,
+    "stop": _cmd_stop,
+    "restart": _cmd_restart,
+    "kill-orphans": _cmd_kill_orphans,
     "serve": _cmd_serve,
 }
 
@@ -325,6 +461,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser(
         "doctor", help="check Python, platform, session root, backend, and Chrome"
+    )
+
+    sub.add_parser(
+        "stop", help="terminate the shared backend (kills all live browser sessions)"
+    )
+
+    sub.add_parser(
+        "restart",
+        help="restart the shared backend (kills all live browser sessions)",
+    )
+
+    kill_orphans = sub.add_parser(
+        "kill-orphans",
+        help="reap orphaned browser processes left behind by a dead backend "
+        "(refuses against a live backend unless --force)",
+    )
+    kill_orphans.add_argument(
+        "--force",
+        action="store_true",
+        help="override the live-backend guard and reap anyway",
     )
 
     serve = sub.add_parser(

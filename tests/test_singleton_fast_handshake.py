@@ -95,7 +95,7 @@ class TestEnsureServerRunningNonBlocking:
         assert port == 12345
         thread_cls.assert_not_called()  # already up → no startup thread
 
-    def test_does_not_block_on_cold_start(self):
+    def test_does_not_block_on_cold_start(self, monkeypatch):
         import time
         from unittest.mock import patch
 
@@ -105,6 +105,16 @@ class TestEnsureServerRunningNonBlocking:
         # blocked here for up to 30s; the new code must return immediately.
         def slow_start(port):
             time.sleep(5)
+
+        # A1's port selection reads recorded state; this test is
+        # deliberately non-hermetic about STATE_DIR, and on a machine with a
+        # live backend the recorded port (not 19222) would be preferred -
+        # selection behavior itself is pinned hermetically in
+        # test_singleton_port_fallback.py, so stubbing it here loses no
+        # coverage (pre-authorized migration, plan_M8 SSA1.6).
+        monkeypatch.setattr(
+            singleton, "_select_backend_port", lambda p=singleton.DEFAULT_PORT: 19222
+        )
 
         with patch.object(singleton, "_find_running_server", return_value=None):
             with patch.object(singleton, "_start_backend_holding_lock", slow_start):
