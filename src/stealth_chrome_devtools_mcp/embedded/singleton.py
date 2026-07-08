@@ -507,6 +507,21 @@ def _start_backend_holding_lock(port: int) -> None:
                 return  # another session owns startup; just proxy to it
             if _find_running_server() is not None:
                 return  # already up (same version)
+            # M2-3: surface WHY a fresh backend is about to spawn when the cause
+            # is a source change (version matches, fingerprint differs) - the
+            # eviction is otherwise silent. Logged once per spawn HERE rather
+            # than inside _find_running_server (which runs up to 3x per locked
+            # cold start); the state re-read is a cheap diagnostic probe,
+            # deliberately NOT a second reuse gate (that stays single-homed in
+            # _find_running_server). Source-only: a version-change eviction
+            # (issue #14) must not emit this line.
+            state = _read_server_state()
+            if (
+                state is not None
+                and state.get("version") == _server_version()
+                and state.get("source_fingerprint") != _source_fingerprint()
+            ):
+                _logger.info("backend stale (source changed), evicting")
             # A stale/legacy backend (different or unknown version) may still be
             # holding the port; evict it under the lock so our fresh, correctly
             # versioned backend can bind — otherwise the proxy would fall back to

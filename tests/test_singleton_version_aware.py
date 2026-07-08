@@ -15,6 +15,7 @@ written for (issue #14), not the liveness signal itself (that migration is
 """
 
 import json
+import logging
 import os
 import socket
 from contextlib import contextmanager
@@ -513,6 +514,41 @@ class TestStartBackendHoldingLockEvicts:
         )
         singleton._start_backend_holding_lock(19222)
         assert calls == []  # a same-version backend is already up; leave it alone
+
+    def test_logs_source_change_eviction_once(
+        self, isolated_state, monkeypatch, caplog
+    ):
+        # M2-3: the eviction is otherwise silent. Mirrors the stubbing idiom
+        # above, but drives the REAL _find_running_server to None via a stale
+        # source fingerprint (version matches, fingerprint OLD != NEW - the gate
+        # fires before the health probe, so no health stub is needed). The
+        # reason is logged ONCE per spawn from _start_backend_holding_lock, not
+        # inside the thrice-called gate - assert exactly-one.
+        @contextmanager
+        def fake_lock():
+            yield True
+
+        monkeypatch.setattr(singleton, "_exclusive_lock", fake_lock)
+        monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+        monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "NEW")
+        (isolated_state / "server.json").write_text(
+            json.dumps(
+                {
+                    "port": 19222,
+                    "version": "1.2.1",
+                    "pid": 4242,
+                    "source_fingerprint": "OLD",
+                }
+            )
+        )
+        monkeypatch.setattr(singleton, "_clear_stale_backend", lambda port: None)
+        monkeypatch.setattr(singleton, "_start_server_process", lambda port: None)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: True)
+
+        with caplog.at_level(logging.INFO, logger="stealth.proxy"):
+            singleton._start_backend_holding_lock(19222)
+
+        assert caplog.messages.count("backend stale (source changed), evicting") == 1
 
 
 @pytest.mark.integration
