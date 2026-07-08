@@ -57,6 +57,10 @@ class TestVersionAwareReuse:
         sock, port = _listening_socket()
         try:
             monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+            # M2: reuse now also gates on the source fingerprint - stub it to the
+            # recorded value so this version-semantics test still reaches reuse
+            # (else the new fingerprint gate would return None first).
+            monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "fp-match")
             # M1-2: _find_running_server now gates reuse on _backend_http_ready
             # (a real initialize->200), not the bare socket check this module's
             # _listening_socket() stands in for. Stub it True so this test keeps
@@ -68,7 +72,14 @@ class TestVersionAwareReuse:
                 singleton, "_backend_http_ready", lambda port, **kw: True
             )
             (isolated_state / "server.json").write_text(
-                json.dumps({"port": port, "version": "1.2.1", "pid": os.getpid()})
+                json.dumps(
+                    {
+                        "port": port,
+                        "version": "1.2.1",
+                        "pid": os.getpid(),
+                        "source_fingerprint": "fp-match",
+                    }
+                )
             )
             (isolated_state / "server.port").write_text(str(port))
             assert singleton._find_running_server() == port
@@ -108,41 +119,218 @@ class TestVersionAwareReuse:
         sock, port = _listening_socket()
         sock.close()  # free the port -> unhealthy
         monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+        # M2: a MATCHING fingerprint so reuse still reaches the health gate this
+        # test is named for (else the new source-fingerprint gate short-circuits
+        # to None first and the test would pass for the wrong reason).
+        monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "fp-match")
         (isolated_state / "server.json").write_text(
-            json.dumps({"port": port, "version": "1.2.1", "pid": os.getpid()})
+            json.dumps(
+                {
+                    "port": port,
+                    "version": "1.2.1",
+                    "pid": os.getpid(),
+                    "source_fingerprint": "fp-match",
+                }
+            )
         )
         assert singleton._find_running_server() is None
 
 
+class TestSourceFingerprintReuse:
+    """M2 (F-206/F-120/F-504): reuse also gates on a fingerprint of the backend's
+    SOURCE, composed with the version key, so a source edit that the frozen
+    package version (1.2.0 on this editable install) can never see still evicts
+    and respawns the backend through the existing eviction path. The fingerprint
+    is stubbed here (per brief), except the two dedicated stability/sensitivity
+    cases that point SOURCE_ROOT at a tmp tree.
+    """
+
+    def test_stale_fingerprint_is_evicted(self, isolated_state, monkeypatch):
+        # The fix: a same-version backend whose recorded source fingerprint no
+        # longer matches the current source is NOT reused (it is respawned).
+        sock, port = _listening_socket()
+        try:
+            monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+            monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "NEW")
+            monkeypatch.setattr(
+                singleton, "_backend_http_ready", lambda port, **kw: True
+            )
+            (isolated_state / "server.json").write_text(
+                json.dumps(
+                    {
+                        "port": port,
+                        "version": "1.2.1",
+                        "pid": os.getpid(),
+                        "source_fingerprint": "OLD",
+                    }
+                )
+            )
+            assert singleton._find_running_server() is None
+        finally:
+            sock.close()
+
+    def test_matching_version_and_fingerprint_is_reused(
+        self, isolated_state, monkeypatch
+    ):
+        # Warm-start preservation: matching version AND fingerprint AND a live
+        # probe -> the backend is reused (no needless respawn of live sessions).
+        sock, port = _listening_socket()
+        try:
+            monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+            monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "SAME")
+            monkeypatch.setattr(
+                singleton, "_backend_http_ready", lambda port, **kw: True
+            )
+            (isolated_state / "server.json").write_text(
+                json.dumps(
+                    {
+                        "port": port,
+                        "version": "1.2.1",
+                        "pid": os.getpid(),
+                        "source_fingerprint": "SAME",
+                    }
+                )
+            )
+            assert singleton._find_running_server() == port
+        finally:
+            sock.close()
+
+    def test_fingerprint_matches_but_version_differs_is_evicted(
+        self, isolated_state, monkeypatch
+    ):
+        # Compose with the version key: an identical fingerprint cannot rescue a
+        # version mismatch (the version gate fires first).
+        sock, port = _listening_socket()
+        try:
+            monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+            monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "SAME")
+            monkeypatch.setattr(
+                singleton, "_backend_http_ready", lambda port, **kw: True
+            )
+            (isolated_state / "server.json").write_text(
+                json.dumps(
+                    {
+                        "port": port,
+                        "version": "1.1.0",
+                        "pid": os.getpid(),
+                        "source_fingerprint": "SAME",
+                    }
+                )
+            )
+            assert singleton._find_running_server() is None
+        finally:
+            sock.close()
+
+    def test_version_matches_but_fingerprint_differs_is_evicted(
+        self, isolated_state, monkeypatch
+    ):
+        # Compose with the version key, other direction: a matching version
+        # cannot rescue a fingerprint mismatch. Reuse requires BOTH.
+        sock, port = _listening_socket()
+        try:
+            monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+            monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "NEW")
+            monkeypatch.setattr(
+                singleton, "_backend_http_ready", lambda port, **kw: True
+            )
+            (isolated_state / "server.json").write_text(
+                json.dumps(
+                    {
+                        "port": port,
+                        "version": "1.2.1",
+                        "pid": os.getpid(),
+                        "source_fingerprint": "OLD",
+                    }
+                )
+            )
+            assert singleton._find_running_server() is None
+        finally:
+            sock.close()
+
+    def test_empty_fingerprint_never_matches(self, isolated_state, monkeypatch):
+        # Cross-review hardening (plan_M2 SS2.1): a transient read error yields ""
+        # at BOTH record and discovery time. "" == "" must NOT count as a match,
+        # or a possibly-stale backend would be falsely reused - the exact
+        # false-fresh hole M2 closes. Fail-closed: an empty computed digest evicts.
+        sock, port = _listening_socket()
+        try:
+            monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+            monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "")
+            monkeypatch.setattr(
+                singleton, "_backend_http_ready", lambda port, **kw: True
+            )
+            (isolated_state / "server.json").write_text(
+                json.dumps(
+                    {
+                        "port": port,
+                        "version": "1.2.1",
+                        "pid": os.getpid(),
+                        "source_fingerprint": "",
+                    }
+                )
+            )
+            assert singleton._find_running_server() is None
+        finally:
+            sock.close()
+
+    def test_fingerprint_is_stable_across_calls(self):
+        # Anti-churn: no edits between calls -> identical digest, so warm reuse
+        # is preserved (a false-stale digest would respawn on every cold start,
+        # destroying live browser sessions).
+        assert singleton._source_fingerprint() == singleton._source_fingerprint()
+
+    def test_fingerprint_detects_source_edits(self, tmp_path, monkeypatch):
+        # Sensitivity + completeness: editing an existing file changes the digest,
+        # and ADDING a file changes it too (every *.py participates).
+        monkeypatch.setattr(singleton, "SOURCE_ROOT", tmp_path)
+        (tmp_path / "a.py").write_text("x = 1\n")
+        first = singleton._source_fingerprint()
+        (tmp_path / "a.py").write_text("x = 2\n")
+        second = singleton._source_fingerprint()
+        assert second != first
+        (tmp_path / "b.py").write_text("y = 3\n")
+        assert singleton._source_fingerprint() != second
+
+
 class TestServerStatePersistence:
     def test_write_then_read_roundtrips(self, isolated_state):
-        singleton._write_server_state(port=12345, version="9.9.9", pid=4242)
+        singleton._write_server_state(
+            port=12345, version="9.9.9", pid=4242, source_fingerprint="deadbeef"
+        )
         assert singleton._read_server_state() == {
             "port": 12345,
             "version": "9.9.9",
             "pid": 4242,
+            "source_fingerprint": "deadbeef",
         }
 
     def test_written_state_makes_backend_reusable(self, isolated_state, monkeypatch):
         sock, port = _listening_socket()
         try:
             monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+            monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "fp-match")
             # M1-2: see the matching comment in test_reuses_backend_with_
             # matching_version above - same stub, same reason.
             monkeypatch.setattr(
                 singleton, "_backend_http_ready", lambda port, **kw: True
             )
-            singleton._write_server_state(port=port, version="1.2.1", pid=os.getpid())
+            singleton._write_server_state(
+                port=port,
+                version="1.2.1",
+                pid=os.getpid(),
+                source_fingerprint="fp-match",
+            )
             assert singleton._find_running_server() == port
         finally:
             sock.close()
 
-    def test_start_server_process_records_current_version_and_pid(
+    def test_start_server_process_records_current_version_pid_and_fingerprint(
         self, isolated_state, monkeypatch
     ):
         from unittest.mock import MagicMock
 
         monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+        monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "test-fp")
         fake_proc = MagicMock()
         fake_proc.pid = 4242
         monkeypatch.setattr(
@@ -155,6 +343,7 @@ class TestServerStatePersistence:
         assert state["port"] == 4321
         assert state["version"] == "1.2.1"
         assert state["pid"] == 4242
+        assert state["source_fingerprint"] == "test-fp"
 
 
 class TestBackendIdentity:

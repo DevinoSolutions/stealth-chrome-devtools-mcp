@@ -46,6 +46,12 @@ PORT_FILE = STATE_DIR / "server.port"
 # an upgraded session silently reuses a stale old-version backend (issue #14).
 SERVER_STATE_FILE = STATE_DIR / "server.json"
 DEFAULT_PORT = 19222
+# The installed package tree (the .../stealth_chrome_devtools_mcp dir this file
+# lives under). _source_fingerprint() hashes every *.py below it so a backend
+# running now-stale source is evicted and respawned exactly like a version
+# mismatch (F-206/F-120/F-504): on this editable install the package version is
+# frozen at 1.2.0, so the version key alone can never see an in-place source edit.
+SOURCE_ROOT = Path(__file__).resolve().parent.parent
 STARTUP_TIMEOUT = 30
 SERVER_NAME = "stealth-chrome-devtools-mcp"
 # How long the stdio proxy will wait for the backend before later requests
@@ -115,14 +121,25 @@ def _read_server_state() -> dict | None:
     return state if isinstance(state, dict) else None
 
 
-def _write_server_state(port: int, version: str, pid: int) -> None:
+def _write_server_state(
+    port: int, version: str, pid: int, source_fingerprint: str
+) -> None:
     """Record the running backend's identity: its port, the package version that
-    started it, and its pid. Discovery uses the version to confirm reuse is safe,
-    and the pid to evict the backend if it is a stale (mismatched) version.
+    started it, its pid, and a fingerprint of the source it is running. Discovery
+    reuses the backend only when BOTH the version AND the source fingerprint still
+    match (and it answers a live probe); the pid is used to evict a stale backend
+    (mismatched version or source).
     """
     _ensure_state_dir()
     SERVER_STATE_FILE.write_text(
-        json.dumps({"port": port, "version": version, "pid": pid})
+        json.dumps(
+            {
+                "port": port,
+                "version": version,
+                "pid": pid,
+                "source_fingerprint": source_fingerprint,
+            }
+        )
     )
 
 
@@ -185,6 +202,16 @@ def _find_running_server() -> int | None:
     if not isinstance(port, int):
         return None
     if state.get("version") != _server_version():
+        return None
+    # M2 (F-206/F-120): reuse also requires the backend's SOURCE to match, not
+    # just its packaged version (frozen at 1.2.0 on this editable install, so a
+    # source edit is invisible to the version key). Fail-closed: an empty
+    # computed fingerprint (transient read error) never matches, so a
+    # possibly-stale backend is respawned rather than falsely reused; and a real
+    # digest never equals a legacy record's missing key or an empty recorded
+    # value, so those evict here too.
+    fp = _source_fingerprint()
+    if not fp or state.get("source_fingerprint") != fp:
         return None
     if not _backend_http_ready(port):
         return None
@@ -346,7 +373,7 @@ def _start_server_process(port: int):
 
     _ensure_state_dir()
     PORT_FILE.write_text(str(port))
-    _write_server_state(port, _server_version(), proc.pid)
+    _write_server_state(port, _server_version(), proc.pid, _source_fingerprint())
 
 
 def _wait_for_server(port: int, timeout: int = STARTUP_TIMEOUT) -> bool:
@@ -439,6 +466,31 @@ def _server_version() -> str:
     except Exception:
         _logger.debug("could not resolve installed package version", exc_info=True)
         return "0.0.0"
+
+
+def _source_fingerprint() -> str:
+    """SHA-256 over the package's ``*.py`` source, so a backend built from
+    now-stale source is not reused. COMPLETE (every module the backend can
+    import), STABLE (identical bytes -> identical digest, immune to
+    mtime/OneDrive/git quirks), CHEAP (~1 MB read+hash per cold-start
+    discovery). Best-effort: any OS read error yields ``""`` so a transient
+    hiccup costs one respawn, never a crash of discovery - and the reuse gate
+    treats ``""`` as a miss, so an empty digest is never falsely reused.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    try:
+        for p in sorted(SOURCE_ROOT.rglob("*.py")):
+            if "__pycache__" in p.parts:
+                continue
+            h.update(p.relative_to(SOURCE_ROOT).as_posix().encode("utf-8"))
+            h.update(b"\0")
+            h.update(p.read_bytes())
+            h.update(b"\0")
+    except OSError:
+        return ""
+    return h.hexdigest()
 
 
 def _start_backend_holding_lock(port: int) -> None:

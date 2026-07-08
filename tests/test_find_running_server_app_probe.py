@@ -109,8 +109,19 @@ class TestFindRunningServerAppProbe:
         self, isolated_state, monkeypatch, wedged_stub
     ):
         monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+        # M2: a MATCHING fingerprint so reuse reaches the HEALTH gate this test is
+        # named for - the wedged backend must be rejected there, not
+        # short-circuited at the new source-fingerprint gate.
+        monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "fp-match")
         (isolated_state / "server.json").write_text(
-            json.dumps({"port": wedged_stub, "version": "1.2.1", "pid": os.getpid()})
+            json.dumps(
+                {
+                    "port": wedged_stub,
+                    "version": "1.2.1",
+                    "pid": os.getpid(),
+                    "source_fingerprint": "fp-match",
+                }
+            )
         )
         assert singleton._find_running_server() is None
 
@@ -118,9 +129,17 @@ class TestFindRunningServerAppProbe:
         self, isolated_state, monkeypatch, responsive_stub
     ):
         monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+        # M2: a matching fingerprint so reuse composes through to the health gate
+        # (the responsive stub answers, so the port is returned).
+        monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "fp-match")
         (isolated_state / "server.json").write_text(
             json.dumps(
-                {"port": responsive_stub, "version": "1.2.1", "pid": os.getpid()}
+                {
+                    "port": responsive_stub,
+                    "version": "1.2.1",
+                    "pid": os.getpid(),
+                    "source_fingerprint": "fp-match",
+                }
             )
         )
         assert singleton._find_running_server() == responsive_stub
