@@ -3,7 +3,6 @@
 import asyncio
 import base64
 import hashlib
-import importlib
 import json
 import os
 import re
@@ -3083,75 +3082,6 @@ async def clone_element_complete(
             "url": getattr(tab, "url", "unknown"),
         },
     )
-
-
-@section_tool("debugging")
-async def hot_reload() -> str:
-    """
-    Hot reload all modules without restarting the server.
-
-    Returns:
-        str: Status message.
-    """
-    try:
-        modules_to_reload = [
-            "browser_manager",
-            "network_interceptor",
-            "dom_handler",
-            "debug_logger",
-            "models",
-        ]
-        reloaded_modules = []
-        for module_name in modules_to_reload:
-            if module_name in sys.modules:
-                importlib.reload(sys.modules[module_name])
-                reloaded_modules.append(module_name)
-                if module_name == "browser_manager":
-                    global browser_manager, BrowserManager
-                    browser_manager = BrowserManager()
-                elif module_name == "network_interceptor":
-                    global network_interceptor, NetworkInterceptor
-                    network_interceptor = NetworkInterceptor()
-                elif module_name == "dom_handler":
-                    global dom_handler, DOMHandler
-                    dom_handler = DOMHandler()
-                elif module_name == "debug_logger":
-                    global debug_logger
-                    from debug_logger import debug_logger
-        return f"Hot reload completed. Reloaded modules: {', '.join(reloaded_modules)}"
-    except Exception as e:
-        return f"Hot reload failed: {e!s}"
-
-
-@section_tool("debugging")
-async def reload_status() -> str:
-    """
-    Check the status of loaded modules.
-
-    Returns:
-        str: Module status information.
-    """
-    try:
-        modules_info = []
-        modules_to_check = [
-            "browser_manager",
-            "network_interceptor",
-            "dom_handler",
-            "debug_logger",
-            "models",
-            "persistent_storage",
-        ]
-        for module_name in modules_to_check:
-            if module_name in sys.modules:
-                module = sys.modules[module_name]
-                modules_info.append(
-                    f"✅ {module_name}: {getattr(module, '__file__', 'built-in')}"
-                )
-            else:
-                modules_info.append(f"❌ {module_name}: Not loaded")
-        return "\n".join(modules_info)
-    except Exception as e:
-        return f"Error checking module status: {e!s}"
 
 
 @section_tool("debugging")

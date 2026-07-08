@@ -252,7 +252,9 @@ class TestStopBackend:
         try:
             port = _free_closed_port()
             singleton.PORT_FILE.write_text(str(port))
-            singleton._write_server_state(port=port, version="1.2.1", pid=proc.pid)
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=proc.pid, source_fingerprint=""
+            )
             monkeypatch.setattr(
                 singleton, "_probe_backend_status", lambda: ("responsive", port)
             )
@@ -274,7 +276,9 @@ class TestStopBackend:
         proc = _spawn_marked_sleeper()
         try:
             port = _free_closed_port()
-            singleton._write_server_state(port=port, version="1.2.1", pid=proc.pid)
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=proc.pid, source_fingerprint=""
+            )
             monkeypatch.setattr(
                 singleton, "_probe_backend_status", lambda: ("wedged", port)
             )
@@ -291,7 +295,9 @@ class TestStopBackend:
 
     def test_down_backend_reports_already_stopped(self, isolated_state, monkeypatch):
         port = _free_closed_port()
-        singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+        singleton._write_server_state(
+            port=port, version="1.2.1", pid=4242, source_fingerprint=""
+        )
         monkeypatch.setattr(singleton, "_probe_backend_status", lambda: ("down", port))
         # Deterministic "the recorded pid no longer exists" - avoids relying
         # on a magic pid number that happens not to be in use.
@@ -335,7 +341,9 @@ class TestStopBackend:
         proc = _spawn_plain_sleeper()
         try:
             port = _free_closed_port()
-            singleton._write_server_state(port=port, version="1.2.1", pid=proc.pid)
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=proc.pid, source_fingerprint=""
+            )
             monkeypatch.setattr(
                 singleton, "_probe_backend_status", lambda: ("responsive", port)
             )
@@ -381,7 +389,9 @@ class TestRestartBackend:
         # real DEFAULT_PORT on this machine (hermeticity rule shared with
         # test_singleton_port_fallback.py).
         recorded_port = _free_closed_port()
-        singleton._write_server_state(port=recorded_port, version="1.2.1", pid=1111)
+        singleton._write_server_state(
+            port=recorded_port, version="1.2.1", pid=1111, source_fingerprint=""
+        )
 
         calls: list = []
         monkeypatch.setattr(
@@ -395,7 +405,9 @@ class TestRestartBackend:
             calls.append("spawn")
             # Mimics the real _start_server_process's contract: the spawn
             # itself is what rewrites server.json with the fresh pid.
-            singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=4242, source_fingerprint=""
+            )
 
         monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
         monkeypatch.setattr(
@@ -439,7 +451,9 @@ class TestRestartBackend:
         # _select_backend_port call must read isolated state, never probe
         # the real DEFAULT_PORT.
         recorded_port = _free_closed_port()
-        singleton._write_server_state(port=recorded_port, version="1.2.1", pid=1111)
+        singleton._write_server_state(
+            port=recorded_port, version="1.2.1", pid=1111, source_fingerprint=""
+        )
 
         monkeypatch.setattr(
             singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
@@ -447,7 +461,9 @@ class TestRestartBackend:
         monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
 
         def _fake_spawn(port):
-            singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=4242, source_fingerprint=""
+            )
 
         monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
         monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
@@ -479,7 +495,9 @@ class TestRestartPortSelection:
         port exists, so this needs no real squat on "the default" to pin -
         the plan's "default squatted" half of case (1) collapses to this."""
         recorded_port = _free_closed_port()
-        singleton._write_server_state(port=recorded_port, version="1.2.1", pid=1111)
+        singleton._write_server_state(
+            port=recorded_port, version="1.2.1", pid=1111, source_fingerprint=""
+        )
 
         # Deterministic "not foreign-held": a _free_closed_port() is only
         # PROBABLY still free - under machine load another process can rebind
@@ -501,7 +519,9 @@ class TestRestartPortSelection:
 
         def _fake_spawn(port):
             spawned_on["port"] = port
-            singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=4242, source_fingerprint=""
+            )
 
         monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
 
@@ -522,7 +542,9 @@ class TestRestartPortSelection:
         squatter = _bind_and_listen()
         try:
             squatted_port = squatter.getsockname()[1]
-            singleton._write_server_state(port=squatted_port, version="1.2.1", pid=1111)
+            singleton._write_server_state(
+                port=squatted_port, version="1.2.1", pid=1111, source_fingerprint=""
+            )
 
             monkeypatch.setattr(
                 singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
@@ -540,7 +562,9 @@ class TestRestartPortSelection:
 
             def _fake_spawn(port):
                 spawned_on["port"] = port
-                singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+                singleton._write_server_state(
+                    port=port, version="1.2.1", pid=4242, source_fingerprint=""
+                )
 
             monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
 
@@ -559,7 +583,9 @@ class TestRestartPortSelection:
         shape M8-5 pinned, still produced once M8-8's selection call sits
         between terminate and spawn."""
         recorded_port = _free_closed_port()
-        singleton._write_server_state(port=recorded_port, version="1.2.1", pid=1111)
+        singleton._write_server_state(
+            port=recorded_port, version="1.2.1", pid=1111, source_fingerprint=""
+        )
 
         # Same deterministic not-foreign stub as the rebind test above.
         monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: False)
@@ -573,7 +599,9 @@ class TestRestartPortSelection:
         )
 
         def _fake_spawn(port):
-            singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=4242, source_fingerprint=""
+            )
 
         monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
 
