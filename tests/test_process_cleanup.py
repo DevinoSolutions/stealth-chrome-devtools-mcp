@@ -491,3 +491,92 @@ class TestAutoCloneMetadata:
         out = ProcessCleanup._normalize_process_metadata(raw)
         assert out["modern"]["auto_clone"] is False
         assert out["legacy"]["auto_clone"] is False
+
+
+# ---------------------------------------------------------------------------
+# F-608: non-recovery fallback PID identity check
+# ---------------------------------------------------------------------------
+
+
+class TestFallbackPidIdentity:
+    """F-608: non-recovery cleanup must verify fallback_pid identity before killing."""
+
+    def _make_cleanup(self):
+        pc = ProcessCleanup.__new__(ProcessCleanup)
+        pc.pid_file = Path(os.path.expanduser("~/.stealth_browser_pids_test.json"))
+        pc.tracked_pids = set()
+        pc.browser_processes = {}
+        pc.orphan_profile_max_age_seconds = 21600
+        pc._init_time = 1700000100.0
+        return pc
+
+    def _metadata(self, pid, create_time):
+        return {
+            "pid": pid,
+            "create_time": create_time,
+            "user_data_dir": None,
+            "uses_custom_data_dir": None,
+            "timestamp": 0,
+        }
+
+    def test_fallback_identity_match_kills(self):
+        """Fallback PID whose create_time matches stored value is killed."""
+        pc = self._make_cleanup()
+        stored_ct = 1700000050.0
+        metadata = self._metadata(55555, stored_ct)
+        killed = []
+
+        with patch.object(pc, "_get_browser_pids_for_profile", return_value=set()):
+            with patch.object(
+                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+            ):
+                with patch("process_cleanup.psutil.Process") as mock_cls:
+                    mock_proc = MagicMock()
+                    mock_proc.create_time.return_value = stored_ct + 0.1
+                    mock_cls.return_value = mock_proc
+                    pc._kill_processes_for_metadata(
+                        "test-f608", metadata, recovery=False
+                    )
+
+        assert 55555 in killed
+
+    def test_fallback_identity_mismatch_skips(self):
+        """Fallback PID whose create_time diverges (recycled PID) is NOT killed."""
+        pc = self._make_cleanup()
+        stored_ct = 1700000050.0
+        metadata = self._metadata(55556, stored_ct)
+        killed = []
+
+        with patch.object(pc, "_get_browser_pids_for_profile", return_value=set()):
+            with patch.object(
+                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+            ):
+                with patch("process_cleanup.psutil.Process") as mock_cls:
+                    mock_proc = MagicMock()
+                    mock_proc.create_time.return_value = stored_ct + 100.0
+                    mock_cls.return_value = mock_proc
+                    pc._kill_processes_for_metadata(
+                        "test-f608", metadata, recovery=False
+                    )
+
+        assert 55556 not in killed
+
+    def test_fallback_identity_none_stored_kills(self):
+        """Fallback PID with stored_create_time=None is killed (best-effort)."""
+        pc = self._make_cleanup()
+        metadata = self._metadata(55557, None)
+        killed = []
+
+        with patch.object(pc, "_get_browser_pids_for_profile", return_value=set()):
+            with patch.object(
+                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+            ):
+                with patch("process_cleanup.psutil.Process") as mock_cls:
+                    mock_proc = MagicMock()
+                    mock_proc.create_time.return_value = 1700000200.0
+                    mock_cls.return_value = mock_proc
+                    pc._kill_processes_for_metadata(
+                        "test-f608", metadata, recovery=False
+                    )
+
+        assert 55557 in killed

@@ -29,7 +29,9 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # + 3 (plan_M7 step M7-1: close_instance restructured into 4 phases with
     # _blocking_teardown extracted + _close_proxy_forwarder_ref helper).
     "embedded/browser_manager.py": (1452, "DEBT(F-702) + plan_M10a + plan_M7"),
-    "embedded/process_cleanup.py": (1022, "plan_M11a"),
+    # + 27 (plan_M7 step M7-2: _fallback_pid_identity_ok shared predicate +
+    # non-recovery fallback identity check + recovery branch refactored).
+    "embedded/process_cleanup.py": (1049, "plan_M11a + plan_M7"),
 }
 
 
