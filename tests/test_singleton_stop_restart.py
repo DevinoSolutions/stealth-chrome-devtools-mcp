@@ -40,6 +40,13 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(
         singleton, "SERVER_STATE_FILE", tmp_path / "server.json", raising=False
     )
+    # LOCK_FILE is bound at module import (like SERVER_STATE_FILE), so patching
+    # STATE_DIR alone does not redirect it - patch it explicitly. Without this,
+    # tests reaching the real _exclusive_lock() open the REAL user lock file:
+    # FileNotFoundError on a clean CI runner, cross-talk with a live backend on dev.
+    monkeypatch.setattr(
+        singleton, "LOCK_FILE", tmp_path / "singleton.lock", raising=False
+    )
     return tmp_path
 
 
