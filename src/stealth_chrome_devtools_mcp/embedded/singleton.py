@@ -515,11 +515,19 @@ def restart_backend() -> tuple[str, int | None]:
     `_probe_backend_status()` up front to short-circuit: restart's job is
     unconditional — evict whatever is on the target port (nothing, if it is
     already down) and bring a fresh backend up, so a "down"/"none" backend
-    also ends up running, not merely evicted. The target port is the one
-    recorded in `server.json`, else `DEFAULT_PORT` (no `_select_backend_port`
-    fallback yet — that lands in a later step). Lock contention (a
-    concurrent cold start/stop/restart already holding it) reports "busy" so
-    the operator can retry instead of racing it.
+    also ends up running, not merely evicted. The TERMINATE target is the
+    port recorded in `server.json`, else `DEFAULT_PORT`. After the terminate,
+    the SPAWN port routes through `_select_backend_port()` (F-509 Amendment
+    A1, squatter-survival symmetry with cold start): the common case
+    (recorded port is ours) is unchanged — once `_terminate_backend` frees
+    it, selection returns that same port and rebinds it — but a squatter
+    that moved onto the now-dead backend's port during the outage forces a
+    fresh `_free_port()` pick instead of a repeat 120s outage. A restart
+    that falls back stays on the new port across further restarts (recorded-
+    port stability, SSA1.5); `stop` clears `server.json`, which is the reset
+    path back to `DEFAULT_PORT`. Lock contention (a concurrent cold start/
+    stop/restart already holding it) reports "busy" so the operator can
+    retry instead of racing it.
 
     After the spawn, reports the TRUE post-restart state via M1's
     `_probe_backend_status()` (binding ruling: one liveness vocabulary, no
@@ -539,6 +547,7 @@ def restart_backend() -> tuple[str, int | None]:
         if not got:
             return ("busy", None)
         _terminate_backend(port)
+        port = _select_backend_port(port)
         _start_server_process(port)
         _wait_for_server(port)
 

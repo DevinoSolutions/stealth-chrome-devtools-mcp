@@ -24,9 +24,11 @@ import json
 import socket
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
+import psutil
 import pytest
 import singleton
 
@@ -54,23 +56,63 @@ def _spawn_marked_sleeper():
     both stealth_chrome_devtools_mcp AND --transport), even though it never
     runs the actual backend - _is_our_backend only inspects cmdline() text,
     so the extra argv tokens are sufficient to stand in for a real backend
-    identity without spawning the real (heavy) server module."""
-    return subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "import time; time.sleep(30)",
-            "stealth_chrome_devtools_mcp",
-            "--transport",
-            "http",
-        ]
-    )
+    identity without spawning the real (heavy) server module.
+
+    Spawn-verified: under machine load a just-Popen'd child can die at birth
+    (spawn failure) or take long enough to initialize that psutil transiently
+    sees no cmdline - either way _is_our_backend would refuse a legitimate
+    terminate and the test would flake (observed in a contended full-suite
+    run). Poll until the identity markers are visible to psutil, respawning
+    a child that died before becoming visible, so callers always receive a
+    sleeper that _is_our_backend provably recognizes."""
+    for _ in range(3):
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(120)",
+                "stealth_chrome_devtools_mcp",
+                "--transport",
+                "http",
+            ]
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break  # died at birth - respawn
+            try:
+                if "--transport" in psutil.Process(proc.pid).cmdline():
+                    return proc
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+            time.sleep(0.05)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+    pytest.fail("could not spawn a psutil-visible marked sleeper in 3 attempts")
 
 
 def _spawn_plain_sleeper():
     """Same sleeper shape, no identity markers - the recycled-pid stand-in
-    _is_our_backend must refuse to terminate."""
-    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    _is_our_backend must refuse to terminate. Spawn-verified like the marked
+    sleeper (its tests assert the child SURVIVES, so a child that died at
+    birth under load would flake them the same way)."""
+    for _ in range(3):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break  # died at birth - respawn
+            try:
+                if psutil.Process(proc.pid).cmdline():
+                    return proc
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+            time.sleep(0.05)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+    pytest.fail("could not spawn a psutil-visible plain sleeper in 3 attempts")
 
 
 @contextmanager
@@ -84,6 +126,18 @@ def _tracking_lock(calls: list, got: bool):
         yield got
     finally:
         calls.append("lock-exit")
+
+
+def _bind_and_listen() -> socket.socket:
+    """A real, foreign-by-construction listener on a throwaway ephemeral
+    port (duplicated from test_singleton_port_fallback.py's convention):
+    this test process's cmdline never satisfies _is_our_backend, so
+    _backend_pid_on_port(port) is None for it - exactly the "socket open,
+    not ours" shape _port_is_foreign_held checks for. Caller closes it."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    return sock
 
 
 class TestTerminateBackendIdentity:
@@ -292,15 +346,18 @@ class TestStopBackend:
 
 
 class TestRestartBackend:
-    """M8-5: restart_backend() = _exclusive_lock -> _terminate_backend(port)
-    -> _start_server_process(port) -> _wait_for_server(port), all under the
-    SAME lock cold start uses (plan_M8 SS2.1-B) - no second spawn path, no
-    new kill logic. Unlike stop_backend, restart does not consult
-    _probe_backend_status() up front to short-circuit: its job is
-    unconditional - evict whatever is on the target port (nothing, if
-    already down) and bring a fresh backend up. The target port is the one
-    recorded in server.json, else DEFAULT_PORT (no _select_backend_port yet
-    - that is a later step).
+    """M8-5+M8-8: restart_backend() = _exclusive_lock -> _terminate_backend(
+    port) -> _select_backend_port(port) -> _start_server_process(port) ->
+    _wait_for_server(port), all under the SAME lock cold start uses (plan_M8
+    SS2.1-B / Amendment A1). No second spawn path, no new kill logic. Unlike
+    stop_backend, restart does not consult _probe_backend_status() up front
+    to short-circuit: its job is unconditional - evict whatever is on the
+    target port (nothing, if already down) and bring a fresh backend up.
+    The TERMINATE target is the port recorded in server.json, else
+    DEFAULT_PORT; the SPAWN port then routes through _select_backend_port
+    (M8-8/A1) so a squatter that moved onto the dead backend's port during
+    the outage is survived, same as cold start - see
+    TestRestartPortSelection below for that behavior's own pinning tests.
 
     The final state reported is _probe_backend_status()'s, read AFTER the
     lock releases (M1's one liveness vocabulary - binding ruling: no new
@@ -311,6 +368,14 @@ class TestRestartBackend:
     def test_terminate_then_spawn_ordering_under_the_lock(
         self, isolated_state, monkeypatch
     ):
+        # Pre-write a recorded port (a real free ephemeral port, never the
+        # literal 19222) so the REAL (unmocked) _select_backend_port call
+        # inside restart_backend reads isolated state instead of probing the
+        # real DEFAULT_PORT on this machine (hermeticity rule shared with
+        # test_singleton_port_fallback.py).
+        recorded_port = _free_closed_port()
+        singleton._write_server_state(port=recorded_port, version="1.2.1", pid=1111)
+
         calls: list = []
         monkeypatch.setattr(
             singleton, "_exclusive_lock", lambda: _tracking_lock(calls, True)
@@ -335,6 +400,9 @@ class TestRestartBackend:
 
         result = singleton.restart_backend()
 
+        # The selector runs for real here (not mocked) but appends nothing
+        # to `calls` - it is a pure read+decide, not part of the observable
+        # terminate/spawn/wait ordering.
         assert calls == ["lock-enter", "terminate", "spawn", "wait", "lock-exit"]
         assert result == ("responsive", 4242)
 
@@ -360,6 +428,12 @@ class TestRestartBackend:
     def test_final_state_is_the_reporters_not_assumed_responsive(
         self, isolated_state, monkeypatch
     ):
+        # Same hermeticity pre-write as the ordering test above - the real
+        # _select_backend_port call must read isolated state, never probe
+        # the real DEFAULT_PORT.
+        recorded_port = _free_closed_port()
+        singleton._write_server_state(port=recorded_port, version="1.2.1", pid=1111)
+
         monkeypatch.setattr(
             singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
         )
@@ -379,3 +453,123 @@ class TestRestartBackend:
         result = singleton.restart_backend()
 
         assert result == ("wedged", 4242)
+
+
+class TestRestartPortSelection:
+    """M8-8/A1 restart bullet: restart_backend's SPAWN port routes through
+    _select_backend_port() AFTER _terminate_backend, so a squatter that
+    moved onto the dead backend's port during the outage is survived - the
+    same "keep target unless foreign" policy cold start uses (plan_M8
+    SSA1.1 restart bullet, SSA1.4 Step M8-8). The TERMINATE target (read
+    before the lock) is untouched by this - only the spawn's port changes."""
+
+    def test_recorded_port_is_rebound_when_still_free(
+        self, isolated_state, monkeypatch
+    ):
+        """The common case: a recorded port that is still free (nothing
+        foreign squatting it) after the terminate is kept by selection and
+        rebound. DEFAULT_PORT/19222 is never even consulted once a recorded
+        port exists, so this needs no real squat on "the default" to pin -
+        the plan's "default squatted" half of case (1) collapses to this."""
+        recorded_port = _free_closed_port()
+        singleton._write_server_state(port=recorded_port, version="1.2.1", pid=1111)
+
+        # Deterministic "not foreign-held": a _free_closed_port() is only
+        # PROBABLY still free - under machine load another process can rebind
+        # it inside the probe window (observed once as a full-suite flake).
+        # Stubbing the socket probe pins the policy ("keep the recorded port
+        # unless foreign") without racing the OS; the real-socket foreign
+        # case is the next test, whose squatter is HELD for the duration.
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: False)
+        monkeypatch.setattr(
+            singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
+        )
+        monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
+        monkeypatch.setattr(
+            singleton, "_probe_backend_status", lambda: ("responsive", recorded_port)
+        )
+
+        spawned_on = {}
+
+        def _fake_spawn(port):
+            spawned_on["port"] = port
+            singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+
+        monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
+
+        singleton.restart_backend()
+
+        assert spawned_on["port"] == recorded_port
+
+    def test_recorded_port_now_foreign_held_falls_back(
+        self, isolated_state, monkeypatch
+    ):
+        """A squatter took the recorded port while the old backend was dead
+        (e.g. during the outage restart is recovering from) - selection must
+        fall back to a fresh free port, same as cold start's squatter
+        survival, rather than trying to rebind a port something else now
+        owns. server.json ends up recording the NEW port, not the squatted
+        one - the spawn (stubbed here, matching the real contract) is what
+        writes it."""
+        squatter = _bind_and_listen()
+        try:
+            squatted_port = squatter.getsockname()[1]
+            singleton._write_server_state(port=squatted_port, version="1.2.1", pid=1111)
+
+            monkeypatch.setattr(
+                singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
+            )
+            # No real kill: the recorded pid (1111) is not the squatter, and
+            # _terminate_backend is stubbed regardless - nothing real is
+            # touched by this test.
+            monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
+            monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
+            monkeypatch.setattr(
+                singleton, "_probe_backend_status", lambda: ("responsive", 0)
+            )
+
+            spawned_on = {}
+
+            def _fake_spawn(port):
+                spawned_on["port"] = port
+                singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+
+            monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
+
+            singleton.restart_backend()
+
+            assert spawned_on["port"] != squatted_port
+            assert singleton._read_server_state()["port"] == spawned_on["port"]
+        finally:
+            squatter.close()
+
+    def test_normal_case_return_shape_unchanged_vs_m8_5(
+        self, isolated_state, monkeypatch
+    ):
+        """Selection must not change restart_backend's return contract in
+        the common (recorded port still free) case - the same (status, pid)
+        shape M8-5 pinned, still produced once M8-8's selection call sits
+        between terminate and spawn."""
+        recorded_port = _free_closed_port()
+        singleton._write_server_state(port=recorded_port, version="1.2.1", pid=1111)
+
+        # Same deterministic not-foreign stub as the rebind test above.
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: False)
+        monkeypatch.setattr(
+            singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
+        )
+        monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
+        monkeypatch.setattr(
+            singleton, "_probe_backend_status", lambda: ("responsive", recorded_port)
+        )
+
+        def _fake_spawn(port):
+            singleton._write_server_state(port=port, version="1.2.1", pid=4242)
+
+        monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
+
+        result = singleton.restart_backend()
+
+        assert result == ("responsive", 4242)

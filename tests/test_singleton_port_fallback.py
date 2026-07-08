@@ -69,13 +69,23 @@ class TestSelectBackendPort:
 
             selected = singleton._select_backend_port(squatted_port)
 
+            # No re-probe of `selected` here: _free_port() just handed it
+            # out, and probing a released ephemeral port races other
+            # processes under machine load (the flake class this file exists
+            # to avoid). The pinned property is only "not the squatted port".
             assert selected != squatted_port
-            assert singleton._server_is_healthy(selected) is False
         finally:
             squatter.close()
 
-    def test_preferred_free_returns_preferred(self, isolated_state):
+    def test_preferred_free_returns_preferred(self, isolated_state, monkeypatch):
         preferred = _free_closed_port()  # bound then closed: free right now
+
+        # Deterministic "not foreign-held": under machine load another
+        # process can rebind a just-released ephemeral port inside the probe
+        # window (observed once as a full-suite flake in the sibling
+        # stop/restart file). Stub the socket probe; the real-socket foreign
+        # case is test_squatted_preferred_returns_a_different_free_port.
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: False)
 
         selected = singleton._select_backend_port(preferred)
 
