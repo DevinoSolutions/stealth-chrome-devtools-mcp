@@ -1163,18 +1163,12 @@ class BrowserManager:
     async def get_tab(
         self,
         instance_id: str,
-        touch_activity: bool = True,
+        touch_activity: bool = False,
     ) -> Tab | None:
-        """
-        Get the main tab for a browser instance.
+        """Get the main tab for a browser instance (pure read).
 
-        Args:
-            instance_id (str): The ID of the browser instance.
-            touch_activity (bool): Whether retrieving the tab should refresh
-            last activity.
-
-        Returns:
-            Optional[Tab]: The main tab if found, else None.
+        Does NOT refresh the idle timer. Pass ``touch_activity=True``
+        or call ``touch_instance`` explicitly to record activity.
         """
         data = await self.get_instance(instance_id)
         if data:
@@ -1186,18 +1180,12 @@ class BrowserManager:
     async def get_browser(
         self,
         instance_id: str,
-        touch_activity: bool = True,
+        touch_activity: bool = False,
     ) -> Browser | None:
-        """
-        Get the browser object for an instance.
+        """Get the browser object for an instance (pure read).
 
-        Args:
-            instance_id (str): The ID of the browser instance.
-            touch_activity (bool): Whether retrieving the browser should
-            refresh last activity.
-
-        Returns:
-            Optional[Browser]: The browser object if found, else None.
+        Does NOT refresh the idle timer. Pass ``touch_activity=True``
+        or call ``touch_instance`` explicitly to record activity.
         """
         data = await self.get_instance(instance_id)
         if data:
