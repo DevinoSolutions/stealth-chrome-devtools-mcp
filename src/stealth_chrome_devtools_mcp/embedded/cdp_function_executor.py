@@ -818,10 +818,21 @@ class CDPFunctionExecutor:
                 self.inject_and_execute_script(tab, js_code), timeout=10.0
             )
         except TimeoutError:
+            # Best-effort: terminate_execution is NOT a reliable interrupt for
+            # a synchronous JS loop; this is best-effort, not a guarantee.
+            try:
+                await tab.send(uc.cdp.runtime.terminate_execution())
+            except Exception as te:
+                debug_logger.log_info(
+                    "cdp_function_executor",
+                    "execute_python_in_browser",
+                    f"terminate_execution best-effort failed: {te}",
+                )
             return {
                 "success": False,
-                "error": "Python execution timeout - code may have infinite loop "
-                "or syntax error",
+                "error": "Execution exceeded 10s; attempted "
+                "Runtime.terminateExecution — if the tab stays "
+                "unresponsive, close_instance and respawn.",
             }
         except Exception as e:
             debug_logger.log_error(

@@ -32,6 +32,9 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # + 27 (plan_M7 step M7-2: _fallback_pid_identity_ok shared predicate +
     # non-recovery fallback identity check + recovery branch refactored).
     "embedded/process_cleanup.py": (1049, "plan_M11a + plan_M7"),
+    # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
+    # + honest message + debug_logger.log_info on failure).
+    "embedded/cdp_function_executor.py": (1011, "plan_M7"),
 }
 
 
