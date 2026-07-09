@@ -16,10 +16,12 @@ def main() -> None:
     if embedded_path not in sys.path:
         sys.path.insert(0, embedded_path)
 
+    from singleton import DEFAULT_PORT
+
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--transport", default="stdio")
     parser.add_argument("--standalone", action="store_true")
-    parser.add_argument("--singleton-port", type=int, default=19222)
+    parser.add_argument("--singleton-port", type=int, default=DEFAULT_PORT)
     known, _ = parser.parse_known_args()
 
     if known.transport == "stdio" and not known.standalone:

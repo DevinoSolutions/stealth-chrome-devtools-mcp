@@ -35,9 +35,9 @@ sys.path.insert(
 from browser_manager import BrowserManager
 from debug_logger import debug_logger
 from dynamic_hook_system import dynamic_hook_system
+from in_memory_storage import in_memory_storage
 from models import BrowserOptions
 from network_interceptor import NetworkInterceptor
-from persistent_storage import persistent_storage
 
 # Enable debug logging so the DebugLogger lists accumulate (leak vector)
 debug_logger.enable()
@@ -105,11 +105,11 @@ def print_snapshot(s: dict):
 def print_internal_state():
     """Print sizes of all singleton state dicts to detect accumulation."""
     print("\n--- Internal State Sizes ---")
-    # persistent_storage
-    data = persistent_storage._data
-    print(f"  persistent_storage._data keys:    {len(data)}")
-    print(f"  persistent_storage instances:     {len(data.get('instances', {}))}")
-    prog = persistent_storage.get("progressive_elements", {})
+    # in_memory_storage
+    data = in_memory_storage._data
+    print(f"  in_memory_storage._data keys:    {len(data)}")
+    print(f"  in_memory_storage instances:     {len(data.get('instances', {}))}")
+    prog = in_memory_storage.get("progressive_elements", {})
     print(f"  progressive_elements stored:      {len(prog)}")
 
     # debug_logger
@@ -228,8 +228,8 @@ async def stress_test(num_instances: int = 3, num_rounds: int = 2):
 
     # Check for leaked internal state
     print("\n  --- Leaked Internal State ---")
-    leaked_instances = len(persistent_storage._data.get("instances", {}))
-    leaked_prog = len(persistent_storage.get("progressive_elements", {}))
+    leaked_instances = len(in_memory_storage._data.get("instances", {}))
+    leaked_prog = len(in_memory_storage.get("progressive_elements", {}))
     leaked_hooks = len(dynamic_hook_system.instance_hooks)
     leaked_errors = len(debug_logger._errors)
     leaked_warnings = len(debug_logger._warnings)
@@ -237,7 +237,7 @@ async def stress_test(num_instances: int = 3, num_rounds: int = 2):
     leaked_seen = len(debug_logger._seen_errors)
 
     print(
-        f"  persistent_storage instances:     {leaked_instances}  {'LEAK!' if leaked_instances > 0 else 'OK'}"
+        f"  in_memory_storage instances:     {leaked_instances}  {'LEAK!' if leaked_instances > 0 else 'OK'}"
     )
     print(
         f"  progressive_elements:             {leaked_prog}  {'LEAK!' if leaked_prog > 0 else 'OK'}"

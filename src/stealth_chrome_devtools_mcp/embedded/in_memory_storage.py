@@ -24,15 +24,7 @@ class InMemoryStorage:
         with self._lock:
             if "instances" not in self._data:
                 self._data["instances"] = {}
-            serializable_data = {
-                "instance_id": instance_id,
-                "state": data.get("state", "unknown"),
-                "created_at": data.get("created_at", ""),
-                "current_url": data.get("current_url", ""),
-                "title": data.get("title", ""),
-                "tabs": [],
-            }
-            self._data["instances"][instance_id] = serializable_data
+            self._data["instances"][instance_id] = dict(data)
 
     def remove_instance(self, instance_id: str):
         """
@@ -95,4 +87,4 @@ class InMemoryStorage:
             self._data[key] = value
 
 
-persistent_storage = InMemoryStorage()
+in_memory_storage = InMemoryStorage()

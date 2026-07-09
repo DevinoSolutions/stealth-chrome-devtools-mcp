@@ -244,7 +244,7 @@ ban-relative-imports = "all"
 "src/stealth_chrome_devtools_mcp/embedded/debug_logger.py" = [
     "ANN201", "ANN202", "ANN204", "ANN401", "TID251",
 ]  # DEBT(F-703) (pre-typing module; M3 rewrites logging surface)
-"src/stealth_chrome_devtools_mcp/embedded/persistent_storage.py" = [
+"src/stealth_chrome_devtools_mcp/embedded/in_memory_storage.py" = [
     "ANN201", "ANN204", "ANN401", "TID251",
 ]  # plan_M4ph1 (pre-typing storage layer)
 "src/stealth_chrome_devtools_mcp/cli.py" = [

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from singleton import STATE_DIR
+
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 
@@ -23,7 +25,7 @@ def default_clone_output_dir() -> Path:
     configured = get_settings().clone_output_dir
     if configured and configured.strip():
         return Path(configured).expanduser()
-    return Path.home() / ".stealth-mcp" / "element_clones"
+    return STATE_DIR / "element_clones"
 
 
 class ResponseHandler:

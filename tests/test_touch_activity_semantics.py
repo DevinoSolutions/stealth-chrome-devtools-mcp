@@ -51,7 +51,7 @@ def _seed_manager(manager, instance_id="t-1", idle_timeout=600):
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
-    from persistent_storage import persistent_storage as ps
+    from in_memory_storage import in_memory_storage as ps
     from process_cleanup import process_cleanup
 
     monkeypatch.setattr(process_cleanup, "kill_browser_process", MagicMock())

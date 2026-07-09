@@ -385,7 +385,7 @@ def _cmd_kill_orphans(args) -> int:
         )
         return 1
 
-    process_cleanup.process_cleanup._recover_orphaned_processes()
+    process_cleanup.process_cleanup.recover_orphans()
     print(
         "orphan recovery triggered: reaped any browsers left over from a dead backend."
     )
@@ -489,8 +489,14 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--http", action="store_true", help="serve over HTTP instead of stdio"
     )
+    _ensure_embedded_on_path()
+    from singleton import DEFAULT_PORT
+
     serve.add_argument(
-        "--port", type=int, default=19222, help="HTTP port (default 19222)"
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"HTTP port (default {DEFAULT_PORT})",
     )
     serve.add_argument(
         "--host", default="127.0.0.1", help="HTTP host (default 127.0.0.1)"

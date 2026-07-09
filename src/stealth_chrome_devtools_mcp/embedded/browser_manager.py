@@ -13,9 +13,9 @@ import nodriver as uc
 import psutil
 from debug_logger import debug_logger
 from dynamic_hook_system import dynamic_hook_system
+from in_memory_storage import in_memory_storage
 from models import BrowserInstance, BrowserOptions, BrowserState, PageState
 from nodriver import Browser, Tab
-from persistent_storage import persistent_storage
 from platform_utils import (
     check_browser_executable,
     get_platform_info,
@@ -178,7 +178,7 @@ class BrowserManager:
                 f"Process finalize failed for {instance_id}: {e}",
             )
         with contextlib.suppress(KeyError):
-            persistent_storage.remove_instance(instance_id)
+            in_memory_storage.remove_instance(instance_id)
         with contextlib.suppress(KeyError):
             dynamic_hook_system.remove_instance(instance_id)
         debug_logger.log_info(
@@ -600,14 +600,10 @@ class BrowserManager:
             instance.state = BrowserState.READY
             instance.update_activity()
 
-            persistent_storage.store_instance(
-                instance_id,
-                {
-                    "state": instance.state.value,
-                    "created_at": instance.created_at.isoformat(),
-                    "current_url": getattr(tab, "url", ""),
-                    "title": "Browser Instance",
-                },
+            instance.current_url = getattr(tab, "url", "") or instance.current_url
+            instance.update_activity()
+            in_memory_storage.store_instance(
+                instance_id, instance.model_dump(mode="json")
             )
 
         except asyncio.CancelledError:
@@ -860,7 +856,7 @@ class BrowserManager:
 
             # -- Phase 4: finalize bookkeeping --------------------------------
             with contextlib.suppress(KeyError):
-                persistent_storage.remove_instance(instance_id)
+                in_memory_storage.remove_instance(instance_id)
 
             return True
         except Exception as e:

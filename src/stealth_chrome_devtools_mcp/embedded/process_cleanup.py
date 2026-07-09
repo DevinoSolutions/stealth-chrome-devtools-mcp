@@ -19,6 +19,7 @@ else:
 
 import psutil
 from debug_logger import debug_logger
+from singleton import STATE_DIR
 
 from stealth_chrome_devtools_mcp.settings import get_settings
 
@@ -30,28 +31,24 @@ class ProcessCleanup:
     _MAX_CLEANUP_RETRIES = 5
 
     def __init__(self):
-        """
-        Initialize process cleanup state and run startup orphan recovery.
-
-        Returns:
-            None
-        """
-        self.pid_file = Path("~/.stealth_browser_pids.json").expanduser()
+        """Initialize process cleanup state (side-effect-free)."""
+        self.pid_file = STATE_DIR / "browser_pids.json"
         self.tracked_pids: set[int] = set()
         self.browser_processes: dict[str, dict[str, Any]] = {}
         self.orphan_profile_max_age_seconds = (
             get_settings().browser_orphan_profile_max_age
         )
-        # Record server start time so recovery never kills processes spawned
-        # during the current session (create_time >= _init_time).
         self._init_time = time.time()
-        # Read-only tooling (the `stealth-chrome-devtools` CLI) imports this
-        # package to reuse profile helpers without taking over process
-        # lifecycle. Honor an opt-out so importing never kills the running
-        # server's browsers, deletes their profiles, or wipes PID tracking.
+
+    def activate(self) -> None:
+        """Install cleanup handlers and run orphan recovery once at serve startup."""
         if get_settings().no_auto_recovery:
             return
         self._setup_cleanup_handlers()
+        self._recover_orphaned_processes()
+
+    def recover_orphans(self) -> None:
+        """Public seam for CLI kill-orphans."""
         self._recover_orphaned_processes()
 
     @staticmethod
@@ -188,17 +185,25 @@ class ProcessCleanup:
         self._cleanup_all_tracked()
         sys.exit(0)
 
+    _LOCK_RETRIES = 4
+    _LOCK_RETRY_DELAY = 0.05
+
     @staticmethod
     @contextlib.contextmanager
     def _file_lock(file_handle):
-        """Acquire an exclusive file lock, released on exit."""
+        """Acquire an exclusive file lock with bounded retry, or raise."""
+        for attempt in range(ProcessCleanup._LOCK_RETRIES + 1):
+            try:
+                if sys.platform == "win32":
+                    msvcrt.locking(file_handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if attempt == ProcessCleanup._LOCK_RETRIES:
+                    raise
+                time.sleep(ProcessCleanup._LOCK_RETRY_DELAY)
         try:
-            if sys.platform == "win32":
-                msvcrt.locking(file_handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                fcntl.flock(file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            yield
-        except OSError:
             yield
         finally:
             try:
