@@ -322,7 +322,24 @@ class ProcessCleanup:
 
         return matching_pids
 
-    def _kill_processes_for_metadata(  # noqa: PLR0912  plan_M11a
+    @staticmethod
+    def _fallback_pid_identity_ok(
+        fallback_pid: int, stored_create_time: float | None
+    ) -> bool:
+        """Check whether *fallback_pid* still belongs to the process we recorded.
+
+        Returns True when ``stored_create_time`` is None (best-effort parity) or
+        the live process's create_time matches the stored value within 1 second.
+        Returns False when the process is gone, inaccessible, or the create_time
+        diverges (recycled PID).
+        """
+        try:
+            actual = psutil.Process(fallback_pid).create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            return False
+        return stored_create_time is None or abs(actual - stored_create_time) < 1.0
+
+    def _kill_processes_for_metadata(  # noqa: C901,PLR0912  plan_M11a
         self,
         instance_id: str,
         metadata: dict[str, Any],
@@ -367,28 +384,38 @@ class ProcessCleanup:
             pids_to_kill = safe_pids
 
             if not pids_to_kill and isinstance(fallback_pid, int):
-                # Use the stored PID only if it predates this session and,
-                # when create_time was recorded, the identity still matches.
-                try:
-                    proc = psutil.Process(fallback_pid)
-                    actual_create_time = proc.create_time()
-                    create_time_ok = (
-                        stored_create_time is None
-                        or abs(actual_create_time - stored_create_time) < 1.0
+                # Use the stored PID only if it predates this session and
+                # the identity check passes (shared predicate).
+                if self._fallback_pid_identity_ok(fallback_pid, stored_create_time):
+                    try:
+                        if psutil.Process(fallback_pid).create_time() < self._init_time:
+                            pids_to_kill = {fallback_pid}
+                        else:
+                            debug_logger.log_info(
+                                "process_cleanup",
+                                "recovery",
+                                f"Skipping fallback PID {fallback_pid} for "
+                                f"{instance_id}: started after server init",
+                            )
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                else:
+                    debug_logger.log_info(
+                        "process_cleanup",
+                        "recovery",
+                        f"Skipping fallback PID {fallback_pid} for {instance_id}: "
+                        "create_time mismatch (recycled PID)",
                     )
-                    if actual_create_time < self._init_time and create_time_ok:
-                        pids_to_kill = {fallback_pid}
-                    else:
-                        debug_logger.log_info(
-                            "process_cleanup",
-                            "recovery",
-                            f"Skipping fallback PID {fallback_pid} for {instance_id}: "
-                            "create_time mismatch or started after server init",
-                        )
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass  # gone or inaccessible — skip conservatively
         elif not pids_to_kill and isinstance(fallback_pid, int):
-            pids_to_kill = {fallback_pid}
+            if self._fallback_pid_identity_ok(fallback_pid, stored_create_time):
+                pids_to_kill = {fallback_pid}
+            else:
+                debug_logger.log_info(
+                    "process_cleanup",
+                    "kill_browser_process",
+                    f"Skipping fallback PID {fallback_pid} for {instance_id}: "
+                    "create_time mismatch (recycled PID)",
+                )
 
         if not pids_to_kill:
             return True
