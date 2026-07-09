@@ -31,6 +31,7 @@ os.environ.setdefault(
     "STEALTH_MCP_CLONE_OUTPUT_DIR",
     str(Path(tempfile.gettempdir()) / "stealth-mcp-test-clone-output"),
 )
+os.environ.setdefault("STEALTH_MCP_NO_AUTO_RECOVERY", "1")
 
 
 # ---------------------------------------------------------------------------

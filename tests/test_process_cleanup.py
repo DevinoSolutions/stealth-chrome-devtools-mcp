@@ -28,25 +28,20 @@ class TestProcessCleanupInit:
         """_init_time must be set before _recover_orphaned_processes runs."""
         call_order = []
 
-        original_init = ProcessCleanup.__init__
-
         def patched_recover(self_obj):
             call_order.append(("recover", hasattr(self_obj, "_init_time")))
 
+        env = os.environ.copy()
+        env.pop("STEALTH_MCP_NO_AUTO_RECOVERY", None)
         with (
             patch.object(
                 ProcessCleanup, "_recover_orphaned_processes", patched_recover
             ),
             patch.object(ProcessCleanup, "_setup_cleanup_handlers", lambda self: None),
+            patch.dict(os.environ, env, clear=True),
         ):
-            pc = ProcessCleanup.__new__(ProcessCleanup)
-            pc.pid_file = Path(os.path.expanduser("~/.stealth_browser_pids_test.json"))
-            pc.tracked_pids = set()
-            pc.browser_processes = {}
-            pc.orphan_profile_max_age_seconds = 21600
-            pc._init_time = time.time()
-            pc._setup_cleanup_handlers()
-            pc._recover_orphaned_processes()
+            pc = ProcessCleanup()
+            pc.activate()
 
         assert call_order == [("recover", True)]
 

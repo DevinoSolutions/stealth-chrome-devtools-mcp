@@ -30,12 +30,12 @@ from dynamic_hook_system import dynamic_hook_system
 from element_cloner import element_cloner
 from fastmcp import FastMCP
 from file_based_element_cloner import file_based_element_cloner
+from in_memory_storage import in_memory_storage
 from logging_setup import bootstrap_backend_process_logging, with_correlation_id
 from models import (
     BrowserOptions,
 )
 from network_interceptor import NetworkInterceptor
-from persistent_storage import persistent_storage
 from platform_utils import get_platform_info, validate_browser_environment
 from process_cleanup import process_cleanup
 from progressive_element_cloner import progressive_element_cloner
@@ -1266,6 +1266,7 @@ async def app_lifespan(server):
     debug_logger.log_info(
         "server", "startup", "Starting Browser Automation MCP Server..."
     )
+    process_cleanup.activate()
     try:
         await browser_manager.start_idle_reaper()
         # Reclaim leaked auto-clones and trim oversized idle named profiles left
@@ -1293,14 +1294,14 @@ async def app_lifespan(server):
         except Exception as e:
             debug_logger.log_error("server", "cleanup", f"Process cleanup failed: {e}")
         try:
-            persistent_instances = persistent_storage.list_instances()
+            persistent_instances = in_memory_storage.list_instances()
             if persistent_instances.get("instances"):
                 debug_logger.log_info(
                     "server",
                     "storage_cleanup",
                     f"Clearing in-memory storage with {len(persistent_instances['instances'])} instances...",
                 )
-                persistent_storage.clear_all()
+                in_memory_storage.clear_all()
                 debug_logger.log_info(
                     "server", "storage_cleanup", "In-memory storage cleared"
                 )
@@ -1468,7 +1469,7 @@ async def list_instances() -> list[dict[str, Any]]:
         List[Dict[str, Any]]: List of browser instances with their current state.
     """
     memory_instances = await browser_manager.list_instances()
-    storage_instances = persistent_storage.list_instances()
+    storage_instances = in_memory_storage.list_instances()
     result = []
     for inst in memory_instances:
         result.append(
