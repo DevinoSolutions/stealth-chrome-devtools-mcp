@@ -17,8 +17,8 @@ import psutil
 import pytest
 from debug_logger import DebugLogger
 from dynamic_hook_system import DynamicHookSystem
+from in_memory_storage import InMemoryStorage
 from network_interceptor import NetworkInterceptor
-from persistent_storage import InMemoryStorage
 
 # ---------------------------------------------------------------------------
 # DebugLogger — bounded growth
@@ -339,7 +339,7 @@ class TestBrowserProcessIsAlive:
 
 class TestDiscardInstanceCleanup:
     def test_keyerror_on_storage_remove_is_safe(self):
-        """If persistent_storage.remove_instance raises KeyError, it should be caught."""
+        """If in_memory_storage.remove_instance raises KeyError, it should be caught."""
         from browser_manager import BrowserManager
 
         manager = BrowserManager()
@@ -347,7 +347,7 @@ class TestDiscardInstanceCleanup:
         data["instance"].state = "ready"
 
         with patch("browser_manager.process_cleanup") as mock_pc:
-            with patch("browser_manager.persistent_storage") as mock_ps:
+            with patch("browser_manager.in_memory_storage") as mock_ps:
                 mock_ps.remove_instance.side_effect = KeyError("already gone")
                 with patch("browser_manager.dynamic_hook_system") as mock_dh:
                     # Should not raise
@@ -364,7 +364,7 @@ class TestDiscardInstanceCleanup:
 
         with patch("browser_manager.process_cleanup") as mock_pc:
             mock_pc.finalize_browser_process.side_effect = RuntimeError("unexpected")
-            with patch("browser_manager.persistent_storage"):
+            with patch("browser_manager.in_memory_storage"):
                 with patch("browser_manager.dynamic_hook_system"):
                     with pytest.raises(RuntimeError):
                         manager._discard_instance_unlocked("inst-1", data, "test")

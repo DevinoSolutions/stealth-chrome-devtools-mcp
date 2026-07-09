@@ -73,14 +73,14 @@ PATCHES = {
     "process_cleanup.kill_browser_process": MagicMock(),
     "process_cleanup.finalize_browser_process": MagicMock(),
     "process_cleanup.cleanup_deferred_profiles": MagicMock(),
-    "persistent_storage.remove_instance": MagicMock(),
+    "in_memory_storage.remove_instance": MagicMock(),
 }
 
 
 @pytest.fixture(autouse=True)
 def _isolate_process_cleanup(monkeypatch):
-    """Stub out process_cleanup and persistent_storage so no real OS work happens."""
-    from persistent_storage import persistent_storage as ps
+    """Stub out process_cleanup and in_memory_storage so no real OS work happens."""
+    from in_memory_storage import in_memory_storage as ps
     from process_cleanup import process_cleanup
 
     monkeypatch.setattr(process_cleanup, "kill_browser_process", MagicMock())
@@ -250,8 +250,8 @@ async def test_concurrent_close_exactly_one_claims(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_happy_path_fast_kill(monkeypatch):
-    """Fast stubbed kill: returns True, instance removed, persistent_storage called."""
-    from persistent_storage import persistent_storage as ps
+    """Fast stubbed kill: returns True, instance removed, in_memory_storage called."""
+    from in_memory_storage import in_memory_storage as ps
 
     storage_mock = MagicMock()
     monkeypatch.setattr(ps, "remove_instance", storage_mock)

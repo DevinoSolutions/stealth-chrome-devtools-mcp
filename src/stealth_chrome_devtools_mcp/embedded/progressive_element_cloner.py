@@ -12,7 +12,7 @@ from typing import Any
 
 from comprehensive_element_cloner import comprehensive_element_cloner
 from debug_logger import debug_logger
-from persistent_storage import persistent_storage
+from in_memory_storage import in_memory_storage
 
 
 class ProgressiveElementCloner:
@@ -22,10 +22,10 @@ class ProgressiveElementCloner:
         self.STORAGE_KEY = "progressive_elements"
 
     def _get_store(self) -> dict[str, dict[str, Any]]:
-        return persistent_storage.get(self.STORAGE_KEY, {})
+        return in_memory_storage.get(self.STORAGE_KEY, {})
 
     def _save_store(self, data: dict[str, dict[str, Any]]) -> None:
-        persistent_storage.set(self.STORAGE_KEY, data)
+        in_memory_storage.set(self.STORAGE_KEY, data)
 
     async def clone_element_progressive(
         self,
