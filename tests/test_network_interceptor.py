@@ -7,6 +7,9 @@ filter logic that the MCP network tools call. These are the filters an agent
 relies on to find the one request that matters among thousands.
 """
 
+import base64
+import json
+
 from models import NetworkRequest, NetworkResponse
 from network_interceptor import NetworkInterceptor
 
@@ -75,20 +78,54 @@ def _fixture():
     return ni
 
 
+class _SpyTab:
+    """Minimal async CDP tab double for ``_on_response``: counts body-fetch
+    sends and either returns a ``(body, base64_encoded)`` tuple or raises."""
+
+    def __init__(self, body=None, raises=None):
+        self._body = body
+        self._raises = raises
+        self.send_count = 0
+
+    async def send(self, cmd):
+        self.send_count += 1
+        close = getattr(cmd, "close", None)
+        if close:
+            close()  # close the un-driven CDP command generator (no warning)
+        if self._raises is not None:
+            raise self._raises
+        return self._body
+
+
+class _FakeResponse:
+    def __init__(self, status=200, headers=None, mime_type="application/json"):
+        self.status = status
+        self.headers = headers or {}
+        self.mime_type = mime_type
+
+
+class _FakeEvent:
+    def __init__(self, request_id, response):
+        self.request_id = request_id
+        self.response = response
+
+
 class TestCaptureFilters:
     async def test_default_filters_empty(self):
         ni = NetworkInterceptor()
-        assert await ni.get_capture_filters("i1") == {"include": [], "exclude": []}
+        filters = await ni.get_capture_filters("i1")
+        assert filters["include"] == []
+        assert filters["exclude"] == []
+        assert filters["capture_bodies"] is False  # off by default
 
     async def test_set_and_get_filters(self):
         ni = NetworkInterceptor()
         await ni.set_capture_filters(
             "i1", include_types=["XHR"], exclude_types=["Image"]
         )
-        assert await ni.get_capture_filters("i1") == {
-            "include": ["XHR"],
-            "exclude": ["Image"],
-        }
+        filters = await ni.get_capture_filters("i1")
+        assert filters["include"] == ["XHR"]
+        assert filters["exclude"] == ["Image"]
 
 
 class TestSearchRequests:
@@ -156,3 +193,178 @@ class TestListAndGet:
         ni = _fixture()
         assert (await ni.get_response("r2")).status == 401
         assert await ni.get_response("nope") is None
+
+
+class TestBodyStoreByteCaps:
+    """M9-1 (F-605): the response-body store is byte-bounded at its single
+    write chokepoint ``_store_response``. Caps are resolved from Settings at
+    call time; the autouse ``_reset_settings_cache`` fixture makes
+    ``monkeypatch.setenv`` visible. 0 on either cap = unbounded.
+    """
+
+    def test_over_per_body_cap_drops_body_keeps_metadata(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_MAX_BYTES", "100")
+        ni = NetworkInterceptor()
+        ni._store_response("r1", _resp("r1", status=200, body=b"x" * 200))
+        stored = ni._responses["r1"]
+        assert stored.body is None  # over per-body cap -> body dropped
+        assert stored.status == 200  # metadata retained
+        assert ni._body_bytes == 0  # nothing counted
+        assert "r1" not in ni._body_order  # not tracked for eviction
+
+    def test_total_store_cap_evicts_oldest_fifo(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_STORE_MAX_BYTES", "250")
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_MAX_BYTES", "0")  # no per-body cap
+        ni = NetworkInterceptor()
+        ni._store_response("r1", _resp("r1", body=b"a" * 100))
+        ni._store_response("r2", _resp("r2", body=b"b" * 100))
+        ni._store_response("r3", _resp("r3", body=b"c" * 100))  # 300 > 250 -> evict
+        assert ni._body_bytes <= 250
+        assert ni._body_bytes == 200
+        assert ni._responses["r1"].body is None  # oldest evicted first (FIFO)
+        assert ni._responses["r2"].body == b"b" * 100
+        assert ni._responses["r3"].body == b"c" * 100
+
+    def test_overwrite_same_request_id_does_not_double_count(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_MAX_BYTES", "0")
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_STORE_MAX_BYTES", "0")
+        ni = NetworkInterceptor()
+        ni._store_response("r1", _resp("r1", body=b"x" * 100))
+        assert ni._body_bytes == 100
+        ni._store_response("r1", _resp("r1", body=b"y" * 30))  # overwrite
+        assert ni._body_bytes == 30  # prior 100 subtracted, not summed to 130
+        assert ni._responses["r1"].body == b"y" * 30
+
+    def test_cap_zero_is_unbounded(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_MAX_BYTES", "0")
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_STORE_MAX_BYTES", "0")
+        ni = NetworkInterceptor()
+        for i in range(5):
+            ni._store_response(f"r{i}", _resp(f"r{i}", body=b"z" * 1_000_000))
+        assert ni._body_bytes == 5_000_000  # nothing dropped or evicted
+        assert all(ni._responses[f"r{i}"].body is not None for i in range(5))
+
+    async def test_import_from_json_is_capped(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_STORE_MAX_BYTES", "250")
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_MAX_BYTES", "0")
+        requests, responses = [], []
+        for i in range(3):
+            rid = f"r{i}"
+            requests.append(
+                {
+                    "request_id": rid,
+                    "url": f"https://x/{i}",
+                    "method": "GET",
+                    "headers": {},
+                    "cookies": {},
+                    "post_data": None,
+                    "resource_type": "XHR",
+                    "timestamp": "2026-01-01T00:00:00",
+                }
+            )
+            responses.append(
+                {
+                    "request_id": rid,
+                    "status": 200,
+                    "headers": {},
+                    "content_type": "application/json",
+                    "body": base64.b64encode(b"q" * 100).decode("utf-8"),
+                    "timestamp": "2026-01-01T00:00:00",
+                }
+            )
+        fp = tmp_path / "net.json"
+        fp.write_text(json.dumps({"requests": requests, "responses": responses}))
+        ni = NetworkInterceptor()
+        await ni.import_from_json("i1", str(fp))
+        assert ni._body_bytes <= 250
+        assert ni._responses["r0"].body is None  # oldest imported evicted first
+        assert ni._responses["r2"].body is not None
+
+    async def test_clear_instance_data_returns_body_bytes_to_zero(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_MAX_BYTES", "0")
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_STORE_MAX_BYTES", "0")
+        ni = NetworkInterceptor()
+        ni._instance_requests["i1"] = []
+        for i in range(3):
+            rid = f"r{i}"
+            ni._instance_requests["i1"].append(rid)
+            ni._store_response(rid, _resp(rid, body=b"m" * 100))
+        assert ni._body_bytes == 300
+        await ni.clear_instance_data("i1")
+        assert ni._body_bytes == 0
+        assert ni._responses == {}
+
+
+class TestCaptureOptIn:
+    """M9-2 (F-605): response-body capture is opt-in / off-by-default.
+    ``_on_response`` gates the CDP body fetch on the resolved capture flag —
+    the per-instance filter if set, else ``network_capture_bodies``."""
+
+    async def test_default_off_stores_metadata_and_skips_body_fetch(self):
+        ni = NetworkInterceptor()
+        tab = _SpyTab(body=("hello", False))
+        await ni._on_response(_FakeEvent("r1", _FakeResponse(status=200)), "i1", tab)
+        stored = await ni.get_response("r1")
+        assert stored is not None
+        assert stored.status == 200  # metadata captured
+        assert stored.body is None  # body not captured
+        assert tab.send_count == 0  # CDP body fetch never attempted
+
+    async def test_per_instance_enable_fetches_and_stores_body(self):
+        ni = NetworkInterceptor()
+        await ni.set_capture_filters("i1", capture_bodies=True)
+        tab = _SpyTab(body=("hello", False))
+        await ni._on_response(_FakeEvent("r1", _FakeResponse()), "i1", tab)
+        stored = await ni.get_response("r1")
+        assert tab.send_count == 1
+        assert stored.body == b"hello"
+        assert ni._body_bytes == len(b"hello")
+
+    async def test_global_env_enable_fetches_body(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_CAPTURE_BODIES", "1")
+        ni = NetworkInterceptor()
+        tab = _SpyTab(body=("data", False))
+        await ni._on_response(_FakeEvent("r1", _FakeResponse()), "i1", tab)
+        assert tab.send_count == 1
+        assert (await ni.get_response("r1")).body == b"data"
+
+    async def test_capture_bodies_only_update_preserves_include_exclude(self):
+        ni = NetworkInterceptor()
+        await ni.set_capture_filters(
+            "i1", include_types=["XHR"], exclude_types=["Image"]
+        )
+        await ni.set_capture_filters("i1", capture_bodies=True)  # merge, not clobber
+        filters = await ni.get_capture_filters("i1")
+        assert filters["include"] == ["XHR"]
+        assert filters["exclude"] == ["Image"]
+        assert filters["capture_bodies"] is True
+
+    async def test_get_capture_filters_reports_flag_and_store_stats(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_STORE_MAX_BYTES", "1000")
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_BODY_MAX_BYTES", "500")
+        ni = NetworkInterceptor()
+        ni._store_response("r1", _resp("r1", body=b"a" * 42))
+        filters = await ni.get_capture_filters("i1")
+        assert filters["capture_bodies"] is False  # resolved global default
+        assert filters["body_store_bytes"] == 42
+        assert filters["body_store_max_bytes"] == 1000
+        assert filters["body_max_bytes"] == 500
+
+    async def test_m10a_7b_debug_log_survives_when_body_fetch_raises(self, monkeypatch):
+        # Carry-through pin: with capture ON, a failing body fetch still emits the
+        # M10a-7b DEBUG record (the log line survived M9's _on_response rewrite).
+        import network_interceptor as ni_mod
+
+        calls = []
+        monkeypatch.setattr(
+            ni_mod.debug_logger,
+            "log_debug",
+            lambda *a, **k: calls.append(a),
+        )
+        ni = NetworkInterceptor()
+        await ni.set_capture_filters("i1", capture_bodies=True)
+        tab = _SpyTab(raises=ValueError("boom"))
+        await ni._on_response(_FakeEvent("r1", _FakeResponse()), "i1", tab)
+        assert tab.send_count == 1
+        assert any("boom" in str(a) for a in calls), "expected M10a-7b debug log"
+        assert (await ni.get_response("r1")).body is None  # metadata still stored

@@ -67,6 +67,9 @@ class TestNetworkInterceptorSilentExcepts:
         from network_interceptor import NetworkInterceptor
 
         ni = NetworkInterceptor()
+        # Body capture is opt-in (M9-2/F-605); enable it so _on_response actually
+        # attempts the fetch that this test forces to fail.
+        await ni.set_capture_filters("inst-1", capture_bodies=True)
         tab = MagicMock()
         tab.send = AsyncMock(side_effect=ValueError("preflight body-fail"))
 
