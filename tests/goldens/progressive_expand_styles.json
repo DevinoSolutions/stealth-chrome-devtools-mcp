@@ -1,0 +1,10 @@
+{
+  "data_type": "styles",
+  "element_id": "elem_fixedtest01",
+  "returned_count": 2,
+  "styles": {
+    "color": "red",
+    "display": "block"
+  },
+  "total_available": 2
+}

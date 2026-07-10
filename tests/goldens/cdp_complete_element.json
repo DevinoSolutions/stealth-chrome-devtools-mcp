@@ -1,0 +1,45 @@
+{
+  "element": {
+    "children": [],
+    "computed_styles": {
+      "color": "rgb(0, 0, 0)",
+      "display": "block"
+    },
+    "event_listeners": [],
+    "html": {
+      "attributes": [
+        {
+          "name": "id",
+          "value": "demo"
+        },
+        {
+          "name": "class",
+          "value": "box"
+        }
+      ],
+      "localName": "div",
+      "nodeId": 2,
+      "nodeName": "DIV",
+      "nodeValue": null,
+      "outerHTML": "<div id=\"demo\" class=\"box\">hi</div>",
+      "tagName": "div"
+    },
+    "matched_styles": {
+      "attributesStyle": null,
+      "inherited": [],
+      "inlineStyle": null,
+      "matchedCSSRules": [],
+      "pseudoElements": []
+    }
+  },
+  "extraction_method": "CDP",
+  "extraction_stats": {
+    "children_count": 0,
+    "computed_styles_count": 2,
+    "css_rules_count": 0,
+    "event_listeners_count": 0
+  },
+  "selector": "#demo",
+  "timestamp": "<TIMESTAMP>",
+  "url": "https://fake.test/page"
+}

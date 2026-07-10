@@ -1,0 +1,14 @@
+{
+  "stored_elements": [
+    {
+      "children_count": 0,
+      "element_id": "elem_fixedtest01",
+      "selector": "#demo",
+      "styles_count": 2,
+      "tagName": "DIV",
+      "timestamp": "<TIMESTAMP>",
+      "url": "https://fake.test/page"
+    }
+  ],
+  "total_count": 1
+}
