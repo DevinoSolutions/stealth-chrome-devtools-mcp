@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>fixture-hard-dom-page</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <h1 id="page-title">HARD DOM</h1>
+    <p id="sentinel">fixture-hard-dom-page</p>
+
+    <!-- Open shadow root: app.js attaches it with a pinned-color <style>, a
+         button, and a <slot>. The light-DOM <span slot="label"> below is the
+         slotted child (stays in light DOM; rendered through the slot). -->
+    <div id="shadow-open-host">
+      <span slot="label">SLOTTED-LIGHT-TEXT</span>
+    </div>
+
+    <!-- Closed shadow root: app.js attaches it with mode:"closed" and keeps the
+         root reference private in its closure, so host.shadowRoot stays null. -->
+    <div id="shadow-closed-host"></div>
+
+    <!-- Child-document iframe: same-origin, served as its own page. -->
+    <iframe id="iframe-src" src="iframe_child.html"></iframe>
+
+    <!-- srcdoc iframe: same-origin inline document (HTML-escaped attribute). -->
+    <iframe
+      id="iframe-srcdoc"
+      srcdoc="&lt;!doctype html&gt;&lt;html&gt;&lt;body&gt;&lt;p id=&quot;srcdoc-sentinel&quot;&gt;SRCDOC-SENTINEL-TEXT&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;"
+    ></iframe>
+
+    <!-- Sandboxed srcdoc iframe: allow-scripts WITHOUT allow-same-origin, so the
+         frame gets an opaque origin (the "weird properties" case: the parent
+         cannot reach its contentDocument). -->
+    <iframe
+      id="iframe-sandbox"
+      sandbox="allow-scripts"
+      srcdoc="&lt;!doctype html&gt;&lt;html&gt;&lt;body&gt;&lt;p id=&quot;sandbox-sentinel&quot;&gt;SANDBOX-SENTINEL-TEXT&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;"
+    ></iframe>
+
+    <!-- contenteditable div with pinned initial text; app.js logs input:editable. -->
+    <div id="editable" contenteditable="true">EDITABLE-INITIAL-TEXT</div>
+
+    <!-- multi-select; app.js logs change:select-multi:<comma-joined values>. -->
+    <select id="select-multi" multiple>
+      <option value="red">red</option>
+      <option value="green">green</option>
+      <option value="blue">blue</option>
+    </select>
+
+    <!-- Inline SVG (no xmlns needed under HTML parsing); circle click logs. -->
+    <svg id="svg-shape" width="100" height="100">
+      <circle id="svg-circle" cx="50" cy="50" r="40" fill="rgb(0, 128, 0)"></circle>
+    </svg>
+
+    <!-- Canvas painted deterministically on load in app.js; click logs. -->
+    <canvas id="canvas-box" width="80" height="60"></canvas>
+
+    <!-- Disclosure widget; toggle logs details-box:<open|closed>. -->
+    <details id="details-box">
+      <summary id="summary-toggle">Toggle me</summary>
+      <p>DETAILS-BODY-TEXT</p>
+    </details>
+
+    <pre id="action-log"></pre>
+    <script src="app.js"></script>
+  </body>
+</html>

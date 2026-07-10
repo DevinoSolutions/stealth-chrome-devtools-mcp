@@ -137,6 +137,93 @@
         window.logAction("mouseover", "styled-card");
       });
     }
+
+    // hard_dom.html: shadow roots, contenteditable, multi-select, SVG, canvas,
+    // and a disclosure widget. Each block is gated on its host id, so it stays a
+    // no-op on the other fixture pages (same guarded-wiring contract as above).
+
+    // Open shadow root: a pinned-color <style>, a button that logs through the
+    // page's logAction, and a named <slot> for the host's light-DOM span.
+    var shadowOpenHost = document.getElementById("shadow-open-host");
+    if (shadowOpenHost && shadowOpenHost.attachShadow) {
+      var openRoot = shadowOpenHost.attachShadow({ mode: "open" });
+      openRoot.innerHTML =
+        "<style>button { color: rgb(9, 99, 199); }</style>" +
+        '<button id="shadow-open-btn">Shadow Open</button>' +
+        '<slot name="label"></slot>';
+      var openBtn = openRoot.querySelector("#shadow-open-btn");
+      if (openBtn) {
+        openBtn.addEventListener("click", function () {
+          window.logAction("click", "shadow-open-btn");
+        });
+      }
+    }
+
+    // Closed shadow root: attachShadow returns the root here, but the host's
+    // .shadowRoot property stays null. The reference lives only in this closure
+    // (never stashed on window) so external JS cannot reach the inner button.
+    var shadowClosedHost = document.getElementById("shadow-closed-host");
+    if (shadowClosedHost && shadowClosedHost.attachShadow) {
+      var closedRoot = shadowClosedHost.attachShadow({ mode: "closed" });
+      closedRoot.innerHTML =
+        '<button id="shadow-closed-btn">Shadow Closed</button>';
+      var closedBtn = closedRoot.querySelector("#shadow-closed-btn");
+      if (closedBtn) {
+        closedBtn.addEventListener("click", function () {
+          window.logAction("click", "shadow-closed-btn");
+        });
+      }
+    }
+
+    // contenteditable div logs an input event on every edit.
+    on("editable", "input", function () {
+      window.logAction("input", "editable");
+    });
+
+    // Multi-select logs the comma-joined selected values as the detail.
+    on("select-multi", "change", function (e) {
+      var picked = [];
+      var opts = e.target.options;
+      for (var j = 0; j < opts.length; j++) {
+        if (opts[j].selected) {
+          picked.push(opts[j].value);
+        }
+      }
+      window.logAction("change", "select-multi", picked.join(","));
+    });
+
+    // SVG circle click logs like any other element.
+    on("svg-circle", "click", function () {
+      window.logAction("click", "svg-circle");
+    });
+
+    // Canvas: one deterministic fill on load, plus a click log. Pinned color is
+    // rgb(10, 100, 200) so any pixel oracle stays stable.
+    var canvas = document.getElementById("canvas-box");
+    if (canvas) {
+      if (canvas.getContext) {
+        var ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.fillStyle = "rgb(10, 100, 200)";
+          ctx.fillRect(0, 0, 80, 60);
+        }
+      }
+      canvas.addEventListener("click", function () {
+        window.logAction("click", "canvas-box");
+      });
+    }
+
+    // Disclosure widget logs its open/closed state on every toggle.
+    var details = document.getElementById("details-box");
+    if (details) {
+      details.addEventListener("toggle", function () {
+        window.logAction(
+          "toggle",
+          "details-box",
+          details.open ? "open" : "closed"
+        );
+      });
+    }
   }
 
   if (document.readyState === "loading") {
