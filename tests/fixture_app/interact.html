@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>fixture-interact-page</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <h1 id="page-title">INTERACT</h1>
+    <p id="sentinel">fixture-interact-page</p>
+
+    <button id="btn-counter">Increment</button>
+    <span id="counter-value">0</span>
+
+    <select id="select-single">
+      <option value="alpha">alpha</option>
+      <option value="beta">beta</option>
+      <option value="gamma">gamma</option>
+    </select>
+
+    <label><input type="checkbox" id="check-me" /> check me</label>
+
+    <fieldset id="flavor-group">
+      <label><input type="radio" name="flavor" value="vanilla" /> vanilla</label>
+      <label><input type="radio" name="flavor" value="chocolate" /> chocolate</label>
+      <label><input type="radio" name="flavor" value="strawberry" /> strawberry</label>
+    </fieldset>
+
+    <input type="text" id="text-input" value="" />
+    <textarea id="textarea-input"></textarea>
+
+    <input type="file" id="single-file" />
+    <input type="file" id="multi-file" multiple />
+
+    <form id="hook-form">
+      <input type="text" id="form-name" name="name" />
+      <button type="submit" id="form-submit">Submit</button>
+    </form>
+
+    <button id="reveal-btn">Reveal</button>
+    <div id="delayed-el" class="hidden">DELAYED-VISIBLE</div>
+
+    <div id="scroll-spacer"></div>
+    <div id="scroll-bottom">SCROLL-BOTTOM-MARKER</div>
+
+    <pre id="action-log"></pre>
+    <script src="app.js"></script>
+  </body>
+</html>

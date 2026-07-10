@@ -1,0 +1,63 @@
+/* Shared fixture stylesheet (plan_E2E STEP 1).
+ *
+ * Ground-truth styles for #styled-card live here so extract_element_styles
+ * (include_css_rules) and extract_related_files have a real linked stylesheet
+ * to analyze. Every pinned value is repeated verbatim in the E2E asserts, so a
+ * fixture edit surfaces as a test diff. No external URLs; no timing coupling.
+ */
+
+body {
+  font-family: monospace;
+  margin: 0;
+  padding: 16px;
+}
+
+nav a {
+  display: inline-block;
+  margin-right: 8px;
+}
+
+#action-log {
+  border: 1px solid rgb(200, 200, 200);
+  min-height: 20px;
+  white-space: pre-wrap;
+}
+
+/* Ground-truth extraction/cloning component. Pinned computed values:
+ *   color            rgb(17, 34, 51)
+ *   background-color rgb(250, 235, 215)
+ *   padding          12px
+ *   border           2px solid rgb(68, 85, 102)
+ * The animation is PAUSED so computed styles never vary mid-test, while
+ * extract_element_animations still sees a named animation.
+ */
+#styled-card {
+  color: rgb(17, 34, 51);
+  background-color: rgb(250, 235, 215);
+  padding: 12px;
+  border: 2px solid rgb(68, 85, 102);
+  background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==");
+  animation: fixture-pulse 2s infinite;
+  animation-play-state: paused;
+}
+
+#styled-card::before {
+  content: "FIXTURE-BEFORE";
+}
+
+@keyframes fixture-pulse {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.5;
+  }
+}
+
+.hidden {
+  display: none;
+}
+
+#scroll-spacer {
+  height: 3000px;
+}
