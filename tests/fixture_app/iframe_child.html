@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>fixture-iframe-child</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <p id="child-sentinel">CHILD-SENTINEL-TEXT</p>
+    <button id="child-btn">Child Button</button>
+    <!-- Self-contained: the child owns its OWN window.__actions (it does not
+         load app.js), so an E2E oracle can click #child-btn via the parent and
+         read the entry back from the child window. Deterministic, ASCII. -->
+    <script>
+      (function () {
+        "use strict";
+        window.__actions = [];
+        var btn = document.getElementById("child-btn");
+        if (btn) {
+          btn.addEventListener("click", function () {
+            window.__actions.push("click:child-btn");
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

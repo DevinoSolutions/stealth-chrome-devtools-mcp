@@ -21,6 +21,7 @@ PAGES = {
     "network.html": "fixture-network-page",
     "cookies.html": "fixture-cookies-page",
     "hooks.html": "fixture-hooks-page",
+    "hard_dom.html": "fixture-hard-dom-page",
 }
 
 
@@ -29,6 +30,17 @@ def test_every_page_serves_200_with_sentinel(fixture_app_server):
         r = requests.get(f"{fixture_app_server}/{page}", timeout=5)
         assert r.status_code == 200, page
         assert sentinel in r.text, page
+
+
+def test_iframe_child_page_serves(fixture_app_server):
+    """The hard_dom.html child-frame document (loaded via <iframe src>) serves
+    with its own child-sentinel and the button the E2E oracle clicks. It carries
+    a distinct <p id="child-sentinel"> (not the shared #sentinel), so it is not
+    part of PAGES above."""
+    r = requests.get(f"{fixture_app_server}/iframe_child.html", timeout=5)
+    assert r.status_code == 200
+    assert "CHILD-SENTINEL-TEXT" in r.text
+    assert 'id="child-btn"' in r.text
 
 
 def test_api_json_is_exact(fixture_app_server):
