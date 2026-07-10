@@ -224,6 +224,191 @@
         );
       });
     }
+
+    // interactions.html: fidelity + completeness probes. Gated on the page's
+    // marker button so the whole block stays a no-op on the other fixture
+    // pages (same guarded-wiring contract as the hard_dom block above). Each
+    // listener records event.isTrusted where relevant, so a real user-like
+    // interaction (trusted) is distinguishable from a synthetic shortcut.
+    if (document.getElementById("fidelity-btn")) {
+      // Event-fidelity probe: a real coordinate click emits the full
+      // pointer/mouse chain (all trusted); a synthetic element.click() emits a
+      // lone untrusted click.
+      ["pointerdown", "mousedown", "focus", "pointerup", "mouseup", "click"].forEach(
+        function (type) {
+          on("fidelity-btn", type, function (e) {
+            window.logAction(
+              "ev",
+              "fidelity",
+              e.type + ":" + (e.isTrusted ? "trusted" : "untrusted")
+            );
+          });
+        }
+      );
+
+      // Overlay traps: covered button vs the overlay covering it. The pen
+      // overlay is pointer-events:none, so a real click passes through.
+      on("covered-btn", "click", function () {
+        window.logAction("click", "covered-btn");
+      });
+      on("overlay-trap", "click", function () {
+        window.logAction("click", "overlay-trap");
+      });
+      on("pen-covered-btn", "click", function () {
+        window.logAction("click", "pen-covered-btn");
+      });
+      on("overlay-pen", "click", function () {
+        window.logAction("click", "overlay-pen");
+      });
+
+      // Offscreen target (below the tall spacer).
+      on("offscreen-btn", "click", function () {
+        window.logAction("click", "offscreen-btn");
+      });
+
+      // Disabled button must never log a click; the label toggles its checkbox.
+      on("disabled-btn", "click", function () {
+        window.logAction("click", "disabled-btn");
+      });
+      on("labeled-check", "change", function (e) {
+        window.logAction("change", "labeled-check", e.target.checked ? "on" : "off");
+      });
+
+      // Validation form: submit is prevented (and only fires when valid);
+      // an empty required field fires invalid; reset fires reset.
+      var vform = document.getElementById("validated-form");
+      if (vform) {
+        vform.addEventListener("submit", function (e) {
+          e.preventDefault();
+          window.logAction("submit", "validated-form");
+        });
+        vform.addEventListener("reset", function () {
+          window.logAction("reset", "validated-form");
+        });
+      }
+      on("required-input", "invalid", function () {
+        window.logAction("invalid", "required-input");
+      });
+
+      // Enter-submit form: a single field, no submit button; only a trusted
+      // Enter keypress triggers native implicit submission.
+      var eform = document.getElementById("enter-form");
+      if (eform) {
+        eform.addEventListener("submit", function (e) {
+          e.preventDefault();
+          window.logAction("submit", "enter-form");
+        });
+      }
+
+      // Key probe: keydown/keyup/keypress carry isTrusted; input carries the
+      // resulting value. Capped at 40 logged key events to stay bounded.
+      var keyProbe = document.getElementById("key-probe");
+      if (keyProbe) {
+        var keyLogged = 0;
+        var logKey = function (kind, e) {
+          if (keyLogged >= 40) {
+            return;
+          }
+          keyLogged++;
+          window.logAction(
+            "key",
+            kind,
+            e.key + ":" + (e.isTrusted ? "trusted" : "untrusted")
+          );
+        };
+        keyProbe.addEventListener("keydown", function (e) {
+          logKey("down", e);
+        });
+        keyProbe.addEventListener("keyup", function (e) {
+          logKey("up", e);
+        });
+        keyProbe.addEventListener("keypress", function (e) {
+          logKey("press", e);
+        });
+        keyProbe.addEventListener("input", function (e) {
+          window.logAction("input", "key-probe", e.target.value);
+        });
+      }
+
+      // Select exercising select_option's value / index / text paths.
+      on("select-fidelity", "change", function (e) {
+        window.logAction("change", "select-fidelity", e.target.value);
+      });
+
+      // Value-typed inputs: each logs its live value on input.
+      ["range-input", "number-input", "date-input", "color-input"].forEach(
+        function (id) {
+          on(id, "input", function (e) {
+            window.logAction("input", id, e.target.value);
+          });
+        }
+      );
+
+      // Top layer: modal <dialog> (showModal / close) + popover (toggle).
+      on("dialog-open-btn", "click", function () {
+        var dlg = document.getElementById("modal-dialog");
+        if (dlg && dlg.showModal) {
+          dlg.showModal();
+        }
+        window.logAction("click", "dialog-open-btn");
+      });
+      on("dialog-close-btn", "click", function () {
+        var dlg = document.getElementById("modal-dialog");
+        if (dlg && dlg.close) {
+          dlg.close();
+        }
+      });
+      var dlgEl = document.getElementById("modal-dialog");
+      if (dlgEl) {
+        dlgEl.addEventListener("close", function () {
+          window.logAction("close", "modal-dialog");
+        });
+      }
+      var popBox = document.getElementById("pop-box");
+      if (popBox) {
+        popBox.addEventListener("toggle", function (e) {
+          window.logAction("toggle", "pop-box", e.newState);
+        });
+      }
+
+      // In-page anchor click logs (nav-link / blank-link navigate away).
+      on("anchor-link", "click", function () {
+        window.logAction("click", "anchor-link");
+      });
+
+      // Scroll fidelity: a real scroll fires the listener exactly once.
+      window.addEventListener(
+        "scroll",
+        function () {
+          window.logAction("scroll", "window");
+        },
+        { once: true }
+      );
+
+      // Unreachable census: double-click, context-menu, drag-and-drop. No MCP
+      // interaction tool can express any of these, so these listeners stay
+      // silent under the tool surface (proven in the fidelity suite).
+      on("dbl-target", "dblclick", function () {
+        window.logAction("dblclick", "dbl-target");
+      });
+      on("ctx-target", "contextmenu", function (e) {
+        e.preventDefault();
+        window.logAction("contextmenu", "ctx-target");
+      });
+      on("drag-src", "dragstart", function () {
+        window.logAction("dragstart", "drag-src");
+      });
+      var dropZone = document.getElementById("drop-zone");
+      if (dropZone) {
+        dropZone.addEventListener("dragover", function (e) {
+          e.preventDefault();
+        });
+        dropZone.addEventListener("drop", function (e) {
+          e.preventDefault();
+          window.logAction("drop", "drop-zone");
+        });
+      }
+    }
   }
 
   if (document.readyState === "loading") {

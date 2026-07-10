@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>fixture-interactions-page</title>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      /* Page-local layout for the fidelity/completeness probes. Kept here (not
+         in the shared styles.css) so it stays page-safe. No external URLs. */
+
+      /* Overlay traps: an absolutely-positioned div fully covering a button so
+         a coordinate-based (real) click lands on the OVERLAY, while a synthetic
+         element.click() would bypass it and reach the button underneath. */
+      .cover-wrap {
+        position: relative;
+        display: inline-block;
+      }
+      #overlay-trap,
+      #overlay-pen {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: transparent;
+        z-index: 10;
+      }
+      /* Control case: pointer-events:none lets a real click pass THROUGH to the
+         button, so hit-testing (respecting pointer-events) is observable. */
+      #overlay-pen {
+        pointer-events: none;
+      }
+
+      /* CSS-:hover-gated submenu: revealed ONLY by a real hover. No interaction
+         tool can drive :hover, so #hover-submenu is an unreachable target. */
+      #hover-submenu {
+        display: none;
+      }
+      #hover-menu:hover #hover-submenu {
+        display: block;
+      }
+
+      #drop-zone {
+        min-height: 30px;
+        border: 1px dashed rgb(150, 150, 150);
+      }
+    </style>
+  </head>
+  <body>
+    <h1 id="page-title">INTERACTIONS</h1>
+    <p id="sentinel">fixture-interactions-page</p>
+
+    <!-- Event-fidelity probe: logs every event with its isTrusted flag, so a
+         real user-like click (trusted, full pointer/mouse chain) is
+         distinguishable from a synthetic element.click() (untrusted, click
+         only). -->
+    <button id="fidelity-btn">Fidelity</button>
+
+    <!-- Overlay trap: #covered-btn is fully covered by a pointer-events:auto
+         div. A coordinate click hits the overlay (real hit-testing); a
+         synthetic click would reach the button. -->
+    <span class="cover-wrap">
+      <button id="covered-btn">Covered</button>
+      <div id="overlay-trap"></div>
+    </span>
+
+    <!-- Control: overlay with pointer-events:none, so a real click passes
+         through to #pen-covered-btn. -->
+    <span class="cover-wrap">
+      <button id="pen-covered-btn">Pen Covered</button>
+      <div id="overlay-pen"></div>
+    </span>
+
+    <!-- Disabled / readonly / label-for. Disabled must never log a click; the
+         label click must toggle its associated checkbox. -->
+    <button id="disabled-btn" disabled>Disabled</button>
+    <input id="readonly-input" readonly value="READONLY-INITIAL" />
+    <label id="label-for-check" for="labeled-check">Toggle via label</label>
+    <input type="checkbox" id="labeled-check" />
+
+    <!-- Validation form: submitting with the required field empty fires
+         `invalid` and blocks `submit`; a reset fires `reset`. -->
+    <form id="validated-form">
+      <input id="required-input" name="required-input" required />
+      <button type="submit" id="validated-submit">Submit</button>
+      <button type="reset" id="reset-btn">Reset</button>
+    </form>
+
+    <!-- Enter-submit form: a single text field with no submit button. Only a
+         trusted Enter keypress triggers native implicit submission. -->
+    <form id="enter-form">
+      <input id="enter-input" name="enter-input" />
+    </form>
+
+    <!-- Key probe: logs keydown/keyup/keypress (with isTrusted) + input, so the
+         exact keyboard event fidelity of type_text is observable. -->
+    <input id="key-probe" />
+
+    <!-- Value-typed inputs: each logs input:<id>:<value>. Range/date/color have
+         no plain text surface; number does. -->
+    <input type="range" id="range-input" min="0" max="100" value="50" />
+    <input type="number" id="number-input" />
+    <input type="date" id="date-input" />
+    <input type="color" id="color-input" />
+
+    <!-- Select for select_option's three param paths (value / index / text). -->
+    <select id="select-fidelity">
+      <option value="one">one</option>
+      <option value="two">two</option>
+      <option value="three">three</option>
+    </select>
+
+    <!-- Top layer: modal <dialog> (showModal) + close button inside it. -->
+    <button id="dialog-open-btn">Open Dialog</button>
+    <dialog id="modal-dialog">
+      <p>DIALOG-BODY-TEXT</p>
+      <button id="dialog-close-btn">Close Dialog</button>
+    </dialog>
+
+    <!-- Top layer: popover via popovertarget (native, no JS trigger). -->
+    <button id="pop-open-btn" popovertarget="pop-box">Open Popover</button>
+    <div id="pop-box" popover>POPOVER-BODY-TEXT</div>
+
+    <!-- Links: in-page anchor, same-page navigation, new-tab (target=_blank). -->
+    <a id="anchor-link" href="#anchor-target">Jump to anchor</a>
+    <a id="nav-link" href="index.html">Go to index</a>
+    <a id="blank-link" href="index.html" target="_blank">Open index in new tab</a>
+
+    <!-- Unreachable census: CSS-:hover-gated submenu (no hover tool). -->
+    <div id="hover-menu">
+      Hover menu
+      <div id="hover-submenu">HOVER-SUBMENU-TEXT</div>
+    </div>
+
+    <!-- Unreachable census: dblclick + contextmenu (no double/right-click tool). -->
+    <button id="dbl-target">Double-click target</button>
+    <button id="ctx-target">Context-menu target</button>
+
+    <!-- Unreachable census: HTML5 drag-and-drop (no drag tool). -->
+    <div id="drag-src" draggable="true">DRAG-ME</div>
+    <div id="drop-zone">DROP-HERE</div>
+
+    <!-- Offscreen target below a tall spacer: proves click auto-scrolls. -->
+    <div id="scroll-spacer"></div>
+    <button id="offscreen-btn">Offscreen</button>
+
+    <!-- Anchor destination, far down the page. -->
+    <div id="anchor-target">ANCHOR-TARGET-TEXT</div>
+
+    <pre id="action-log"></pre>
+    <script src="app.js"></script>
+  </body>
+</html>

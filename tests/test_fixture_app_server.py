@@ -22,6 +22,7 @@ PAGES = {
     "cookies.html": "fixture-cookies-page",
     "hooks.html": "fixture-hooks-page",
     "hard_dom.html": "fixture-hard-dom-page",
+    "interactions.html": "fixture-interactions-page",
 }
 
 
