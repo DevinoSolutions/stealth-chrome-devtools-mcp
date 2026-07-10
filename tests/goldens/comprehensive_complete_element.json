@@ -1,0 +1,31 @@
+{
+  "children": [],
+  "computedStyles": {
+    "color": "rgb(0, 0, 0)",
+    "display": "block"
+  },
+  "cssRules": [],
+  "eventListeners": [
+    {
+      "handler": "f()",
+      "source": "inline",
+      "type": "click"
+    }
+  ],
+  "html": {
+    "attributes": [
+      {
+        "name": "id",
+        "value": "demo"
+      }
+    ],
+    "className": "box",
+    "id": "demo",
+    "outerHTML": "<div id=\"demo\">hi</div>",
+    "tagName": "DIV"
+  },
+  "includesChildren": true,
+  "selector": "#demo",
+  "timestamp": "<TIMESTAMP>",
+  "url": "https://fake.test/page"
+}

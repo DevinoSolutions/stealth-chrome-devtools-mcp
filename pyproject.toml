@@ -74,6 +74,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "integration: tests that spawn real browsers (need Chrome installed)",
+    "characterization: pins CURRENT observable behavior (quirks/known bugs included) so an intended M5a/M4/M5b change surfaces as a failing test to update deliberately",
 ]
 # Coverage is intentionally NOT in addopts: enabling it globally would slow
 # every single-file TDD run and trip --cov-fail-under on partial runs. CI turns

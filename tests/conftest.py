@@ -22,6 +22,12 @@ EMBEDDED_DIR = (
 if str(EMBEDDED_DIR) not in sys.path:
     sys.path.insert(0, str(EMBEDDED_DIR))
 
+# ── Make the tests/ dir importable so modules can `from fakes import ...`
+# (the canonical M6 harness home) regardless of pytest import mode. ──
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
 # Redirect clone / large-response artifacts to a temp dir for the whole test
 # session. The module-global ResponseHandler()/FileBasedElementCloner() create
 # their output dir at import time, and various tools spill files there — none of
@@ -118,3 +124,59 @@ def tmp_empty_root(tmp_path):
             "snapshot": tmp_path / "master-snapshot",
             "sessions": sessions,
         }
+
+
+# ---------------------------------------------------------------------------
+# M6 characterization harness fixtures — thin wrappers over tests/fakes.py
+# (the canonical home). Convenience defaults; tests needing custom config
+# import the classes from ``fakes`` directly.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def call_tool():
+    """The one in-process tool invoker (unwrap ``.fn``, await if awaitable)."""
+    from fakes import call_tool as _call_tool
+
+    return _call_tool
+
+
+@pytest.fixture()
+def fake_tab():
+    from fakes import FakeTab
+
+    return FakeTab()
+
+
+@pytest.fixture()
+def fake_browser():
+    from fakes import FakeBrowser
+
+    return FakeBrowser()
+
+
+@pytest.fixture()
+def fake_browser_manager():
+    from fakes import FakeBrowserManager
+
+    return FakeBrowserManager()
+
+
+@pytest.fixture()
+def patched_server(monkeypatch):
+    """Return a helper that swaps ``server``'s module-global singletons for fakes
+    and hands back the ``server`` module.
+
+    Tools resolve ``browser_manager``/``element_cloner``/``in_memory_storage``/…
+    as names in ``server``'s namespace at call time, so ``setattr(server, name,
+    fake)`` is a clean hermetic seam needing no production change. ``monkeypatch``
+    restores every attr at teardown.
+    """
+    import server
+
+    def _patch(**singletons):
+        for name, obj in singletons.items():
+            monkeypatch.setattr(server, name, obj)
+        return server
+
+    return _patch

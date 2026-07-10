@@ -1,0 +1,8 @@
+{
+  "computed_styles": {
+    "color": "rgb(0, 0, 0)",
+    "display": "block"
+  },
+  "css_rules": [],
+  "method": "cdp_direct"
+}
