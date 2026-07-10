@@ -347,8 +347,10 @@ async def test_rich_input_types(fixture_app_server):
         via char events -> value stays "" ; execute_script sets it.
       * color  (FINDING/tool-gap): type_text cannot drive the color control ->
         value stays "#000000" ; execute_script sets it.
-    (select_option is covered by test_e2e_interaction / test_e2e_hard_dom; it is
-    not re-exercised here to keep this test focused on the typed-input surface.)
+    select_option IS exercised here and pinned as a FINDING (see the value+index
+    asserts below): a second evaluate-path call on the same document silently
+    no-ops yet returns True -- a ``const select`` re-declaration collision
+    (dom_handler.py:513-536); route M4-Ph1/M5b.
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
