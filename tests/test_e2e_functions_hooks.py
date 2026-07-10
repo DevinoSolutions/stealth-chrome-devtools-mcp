@@ -16,6 +16,7 @@ import pytest
 from e2e_helpers import (
     CAN_RUN,
     get_fn,
+    navigate_and_settle,
     sandbox_kwargs,
     server_mod,
     warmup_once,
@@ -63,13 +64,12 @@ async def test_cdp_functions_walk(fixture_app_server):
     await warmup_once()
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     close = get_fn("close_instance")
 
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/hooks.html")
+        await navigate_and_settle(iid, f"{base}/hooks.html")
 
         commands = await get_fn("list_cdp_commands")()
         assert isinstance(commands, list) and len(commands) > 0
@@ -169,13 +169,12 @@ async def test_execute_cdp_command_rejects_domain_qualified_name(fixture_app_ser
     await warmup_once()
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     close = get_fn("close_instance")
 
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/hooks.html")
+        await navigate_and_settle(iid, f"{base}/hooks.html")
         cdp = await get_fn("execute_cdp_command")(
             instance_id=iid,
             command="Runtime.evaluate",
@@ -197,7 +196,6 @@ async def test_dynamic_hooks_lifecycle(fixture_app_server):
     await warmup_once()
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     create_simple = get_fn("create_simple_dynamic_hook")
     create_full = get_fn("create_dynamic_hook")
     list_hooks = get_fn("list_dynamic_hooks")
@@ -208,7 +206,7 @@ async def test_dynamic_hooks_lifecycle(fixture_app_server):
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/hooks.html")
+        await navigate_and_settle(iid, f"{base}/hooks.html")
 
         created = await create_simple(
             name="fixture-hook",

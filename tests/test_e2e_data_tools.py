@@ -23,6 +23,7 @@ import pytest
 from e2e_helpers import (
     get_fn,
     integration_pytestmark,
+    navigate_and_settle,
     sandbox_kwargs,
     warmup_once,
 )
@@ -91,7 +92,6 @@ def _first_existing_path(result) -> Path | None:
 async def test_network_debugging_flow(fixture_app_server, tmp_path):
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     click = get_fn("click_element")
     set_filters = get_fn("set_network_capture_filters")
     get_filters = get_fn("get_network_capture_filters")
@@ -106,7 +106,7 @@ async def test_network_debugging_flow(fixture_app_server, tmp_path):
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/network.html")
+        await navigate_and_settle(iid, f"{base}/network.html")
 
         # M9 opt-in: body capture is OFF by default; enable it for this instance.
         assert await set_filters(instance_id=iid, capture_bodies=True) is True
@@ -171,7 +171,6 @@ async def test_network_debugging_flow(fixture_app_server, tmp_path):
 async def test_element_extraction_ground_truth(fixture_app_server):
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     extract_styles = get_fn("extract_element_styles")
     extract_structure = get_fn("extract_element_structure")
     extract_events = get_fn("extract_element_events")
@@ -185,7 +184,7 @@ async def test_element_extraction_ground_truth(fixture_app_server):
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/extract.html")
+        await navigate_and_settle(iid, f"{base}/extract.html")
 
         styles = await extract_styles(instance_id=iid, selector="#styled-card")
         styles_blob = json.dumps(styles, default=str)
@@ -231,14 +230,13 @@ async def test_clone_element_complete_current_shape(fixture_app_server):
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     clone_complete = get_fn("clone_element_complete")
     close = get_fn("close_instance")
 
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/extract.html")
+        await navigate_and_settle(iid, f"{base}/extract.html")
         complete = await clone_complete(instance_id=iid, selector="#styled-card")
         # Current behavior: returns a dict (never raises for a present element).
         assert isinstance(complete, dict)
@@ -274,7 +272,6 @@ async def test_progressive_cloning_walk(fixture_app_server):
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     clone_progressive = get_fn("clone_element_progressive")
     expand_styles = get_fn("expand_styles")
     expand_events = get_fn("expand_events")
@@ -290,7 +287,7 @@ async def test_progressive_cloning_walk(fixture_app_server):
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/extract.html")
+        await navigate_and_settle(iid, f"{base}/extract.html")
 
         base_clone = await clone_progressive(instance_id=iid, selector="#styled-card")
         assert "element_id" in base_clone
@@ -339,7 +336,6 @@ async def test_progressive_cloning_walk(fixture_app_server):
 async def test_file_extraction_walk(fixture_app_server):
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     clone_to_file = get_fn("clone_element_to_file")
     complete_to_file = get_fn("extract_complete_element_to_file")
     styles_to_file = get_fn("extract_element_styles_to_file")
@@ -354,7 +350,7 @@ async def test_file_extraction_walk(fixture_app_server):
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/extract.html")
+        await navigate_and_settle(iid, f"{base}/extract.html")
 
         results = [
             await clone_to_file(instance_id=iid, selector="#styled-card"),

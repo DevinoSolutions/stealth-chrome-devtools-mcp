@@ -23,6 +23,7 @@ from e2e_helpers import (
     eval_js,
     get_fn,
     integration_pytestmark,
+    navigate_and_settle,
     read_actions,
     sandbox_kwargs,
     wait_for_js,
@@ -48,7 +49,6 @@ async def test_browser_lifecycle_and_history(fixture_app_server):
     spawn = get_fn("spawn_browser")
     list_instances = get_fn("list_instances")
     get_instance_state = get_fn("get_instance_state")
-    navigate = get_fn("navigate")
     go_back = get_fn("go_back")
     go_forward = get_fn("go_forward")
     reload_page = get_fn("reload_page")
@@ -66,12 +66,12 @@ async def test_browser_lifecycle_and_history(fixture_app_server):
         assert isinstance(state, dict)
         assert iid in json.dumps(state, default=str)
 
-        nav = await navigate(instance_id=iid, url=f"{base}/index.html")
+        nav = await navigate_and_settle(iid, f"{base}/index.html")
         assert isinstance(nav, dict)
         content = await get_page_content(instance_id=iid)
         assert "fixture-index-page" in json.dumps(content, default=str)
 
-        await navigate(instance_id=iid, url=f"{base}/interact.html")
+        await navigate_and_settle(iid, f"{base}/interact.html")
         assert (
             await wait_for_js(iid, "document.title", "fixture-interact-page")
             == "fixture-interact-page"
@@ -131,7 +131,6 @@ async def test_interaction_controls_and_log(fixture_app_server):
     both the in-page action log and the resulting live DOM property."""
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     click = get_fn("click_element")
     select = get_fn("select_option")
     close = get_fn("close_instance")
@@ -139,7 +138,7 @@ async def test_interaction_controls_and_log(fixture_app_server):
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/interact.html")
+        await navigate_and_settle(iid, f"{base}/interact.html")
 
         # query_elements: exact ground-truth counts (bounded-poll past the stale
         # document-node race that transiently returns []).
@@ -183,7 +182,6 @@ async def test_text_input_scroll_and_wait(fixture_app_server):
     """type_text, paste_text, scroll_page, wait_for_element, click_element."""
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     type_text = get_fn("type_text")
     paste_text = get_fn("paste_text")
     scroll_page = get_fn("scroll_page")
@@ -194,7 +192,7 @@ async def test_text_input_scroll_and_wait(fixture_app_server):
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/interact.html")
+        await navigate_and_settle(iid, f"{base}/interact.html")
 
         # type_text -> the live .value property reflects exactly what was typed.
         assert await type_text(instance_id=iid, selector="#text-input", text="hello")
@@ -232,7 +230,6 @@ async def test_upload_screenshot_and_content(fixture_app_server, tmp_path):
     """upload_file (single + multi), take_screenshot (PNG bytes), get_page_content."""
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     upload = get_fn("upload_file")
     screenshot = get_fn("take_screenshot")
     get_page_content = get_fn("get_page_content")
@@ -246,7 +243,7 @@ async def test_upload_screenshot_and_content(fixture_app_server, tmp_path):
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/interact.html")
+        await navigate_and_settle(iid, f"{base}/interact.html")
 
         single = await upload(
             instance_id=iid, selector="#single-file", file_paths=str(f1)
@@ -299,7 +296,6 @@ async def test_get_element_state_pins_current_shape(fixture_app_server):
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     type_text = get_fn("type_text")
     get_element_state = get_fn("get_element_state")
     close = get_fn("close_instance")
@@ -307,7 +303,7 @@ async def test_get_element_state_pins_current_shape(fixture_app_server):
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/interact.html")
+        await navigate_and_settle(iid, f"{base}/interact.html")
 
         # A visible element returns the current dict shape (stable fields).
         card = await get_element_state(instance_id=iid, selector="#select-single")
@@ -349,7 +345,6 @@ async def test_cookies_lifecycle(fixture_app_server):
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     click = get_fn("click_element")
     set_cookie = get_fn("set_cookie")
     clear_cookies = get_fn("clear_cookies")
@@ -358,7 +353,7 @@ async def test_cookies_lifecycle(fixture_app_server):
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/cookies.html")
+        await navigate_and_settle(iid, f"{base}/cookies.html")
 
         # Page button sets client_cookie=from-js; the tool sets tool_cookie.
         assert await click(instance_id=iid, selector="#set-client-cookie-btn")
@@ -387,7 +382,6 @@ async def test_cookies_lifecycle(fixture_app_server):
 async def test_tabs_lifecycle(fixture_app_server):
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
-    navigate = get_fn("navigate")
     list_tabs = get_fn("list_tabs")
     new_tab = get_fn("new_tab")
     get_active_tab = get_fn("get_active_tab")
@@ -398,7 +392,7 @@ async def test_tabs_lifecycle(fixture_app_server):
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
-        await navigate(instance_id=iid, url=f"{base}/index.html")
+        await navigate_and_settle(iid, f"{base}/index.html")
 
         before = await list_tabs(instance_id=iid)
         assert isinstance(before, list) and len(before) >= 1
