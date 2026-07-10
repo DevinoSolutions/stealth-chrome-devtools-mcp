@@ -13,7 +13,9 @@ by PNG magic bytes + nonzero size only, every URL is ``base_url``-relative.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 import pytest
 
@@ -103,13 +105,33 @@ async def test_browser_lifecycle_and_history(fixture_app_server):
 # ---------------------------------------------------------------------------
 
 
+async def _query_at_least(iid, selector, min_count, timeout=10.0, **kwargs):
+    """Bounded-poll query_elements until it returns a list with len >= min_count.
+
+    Finding: query_elements transiently returns [] right after navigation —
+    nodriver's cached document node goes stale so tab.select_all raises a
+    ProtocolException (-32000, "Could not find node with given id"), which the
+    broad except in dom_handler swallows into an empty list (route: src fix; this
+    is a CI-determinism workaround). Returns the last result either way so the
+    caller's assertion shows the real value on timeout."""
+    query = get_fn("query_elements")
+    deadline = time.monotonic() + timeout
+    result = await query(instance_id=iid, selector=selector, **kwargs)
+    while (
+        not (isinstance(result, list) and len(result) >= min_count)
+        and time.monotonic() < deadline
+    ):
+        await asyncio.sleep(0.25)
+        result = await query(instance_id=iid, selector=selector, **kwargs)
+    return result
+
+
 async def test_interaction_controls_and_log(fixture_app_server):
     """query_elements, click_element, select_option, execute_script — verified by
     both the in-page action log and the resulting live DOM property."""
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
     navigate = get_fn("navigate")
-    query = get_fn("query_elements")
     click = get_fn("click_element")
     select = get_fn("select_option")
     close = get_fn("close_instance")
@@ -119,11 +141,12 @@ async def test_interaction_controls_and_log(fixture_app_server):
     try:
         await navigate(instance_id=iid, url=f"{base}/interact.html")
 
-        # query_elements: exact ground-truth counts.
-        singles = await query(instance_id=iid, selector="#btn-counter")
+        # query_elements: exact ground-truth counts (bounded-poll past the stale
+        # document-node race that transiently returns []).
+        singles = await _query_at_least(iid, "#btn-counter", 1)
         assert isinstance(singles, list) and len(singles) == 1
-        radios = await query(
-            instance_id=iid, selector="input[name='flavor']", visible_only=False
+        radios = await _query_at_least(
+            iid, "input[name='flavor']", 3, visible_only=False
         )
         assert len(radios) == 3
 
@@ -400,7 +423,14 @@ async def test_tabs_lifecycle(fixture_app_server):
         assert await switch_tab(instance_id=iid, tab_id=an_original) is True
         assert await close_tab(instance_id=iid, tab_id=new_id) is True
 
+        # close_tab returns before CDP target-detach propagates, so the closed
+        # tab can still be listed for a beat (a Linux/CI race) — bounded-poll
+        # list_tabs until it drops out (plan §2.6 deadline + interval).
+        deadline = time.monotonic() + 10.0
         remaining = {t["tab_id"] for t in await list_tabs(instance_id=iid)}
+        while new_id in remaining and time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+            remaining = {t["tab_id"] for t in await list_tabs(instance_id=iid)}
         assert new_id not in remaining
     finally:
         await close(instance_id=iid)
