@@ -509,8 +509,10 @@ def process_request(request):
                 "Always return a HookAction object",
                 "Handle exceptions gracefully",
                 (
-                    "Use priority (lower = higher priority) to control "
-                    "hook execution order"
+                    "Set priority (lower = higher priority) to pick which single "
+                    "hook wins when several match the same request; the highest-"
+                    "priority match runs and lower-priority matches are shadowed "
+                    "(first-match-by-priority, not a chain)"
                 ),
             ],
         }

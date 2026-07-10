@@ -38,7 +38,7 @@ jobs:
           uv run pytest -m "not integration" -v --tb=short
           --cov=src/stealth_chrome_devtools_mcp
           --cov-report=term-missing
-          --cov-fail-under=41
+          --cov-fail-under=55
 
   quality:
     name: "Lint & Type Check (ruff + ty + vulture)"

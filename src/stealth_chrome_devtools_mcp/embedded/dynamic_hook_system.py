@@ -376,8 +376,12 @@ class DynamicHookSystem:
                 )
 
     async def _process_request_hooks(self, tab, request: RequestInfo, event=None):  # noqa: C901,PLR0912,PLR0915  DEBT(F-165)
-        """Process hooks for a request/response in real-time with priority chain
-        processing."""
+        """Process hooks for a request/response in real-time.
+
+        When several hooks match, the highest-priority match (lowest priority
+        number) runs and lower-priority matches are shadowed - they do NOT run
+        (first-match-by-priority, not a chain).
+        """
         try:
             instance_hook_ids = self.instance_hooks.get(request.instance_id, [])
 
@@ -443,6 +447,16 @@ class DynamicHookSystem:
                     )
 
             hook = matching_hooks[0]
+
+            if len(matching_hooks) > 1:
+                debug_logger.log_warning(
+                    "dynamic_hook_system",
+                    "_process_request_hooks",
+                    f"{len(matching_hooks)} hooks matched {request.stage} "
+                    f"{request.url}; only highest-priority '{hook.name}' "
+                    f"(priority={hook.priority}) runs - shadowed "
+                    f"(never fire): {[h.name for h in matching_hooks[1:]]}",
+                )
 
             request_data = request.to_dict()
             if response_body:

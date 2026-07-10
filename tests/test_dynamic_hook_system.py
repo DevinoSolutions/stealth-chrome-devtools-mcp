@@ -10,12 +10,16 @@ Safety focus: a malformed or malicious hook function must NEVER crash request
 processing — every bad path must degrade to HookAction("continue").
 """
 
+import dynamic_hook_system as dhs
+import pytest
 from dynamic_hook_system import (
     DynamicHook,
     DynamicHookSystem,
     HookAction,
     RequestInfo,
 )
+
+from fakes import FakeTab
 
 CONTINUE = "def process_request(request):\n    return HookAction(action='continue')\n"
 
@@ -194,3 +198,95 @@ class TestRegistry:
         assert sys.instance_hooks["inst-1"] == []
         sys.remove_instance("inst-1")
         assert "inst-1" not in sys.instance_hooks
+
+
+class TestProcessRequestHooks:
+    """Dispatch is first-match-by-priority (F-163): when several hooks match one
+    request, only the highest-priority match (lowest priority number) runs; the
+    lower-priority matches are shadowed and never fire. A WARNING names the winner
+    and the shadowed hooks so the silent 'trigger_count stuck at 0' trap is
+    visible. Reuses FakeTab (M6 canon) + the _req() helper -- no browser.
+    """
+
+    async def test_first_match_by_priority_wins_only_one_runs(self):
+        sys = DynamicHookSystem()
+        hi = await sys.create_hook(
+            name="win-hi",
+            requirements={"url_pattern": "*example.com*"},
+            function_code=CONTINUE,
+            instance_ids=["inst-1"],
+            priority=10,
+        )
+        lo = await sys.create_hook(
+            name="shadow-lo",
+            requirements={"url_pattern": "*example.com*"},
+            function_code=CONTINUE,
+            instance_ids=["inst-1"],
+            priority=20,
+        )
+        await sys._process_request_hooks(FakeTab(), _req(stage="request"))
+        assert sys.hooks[hi].trigger_count == 1
+        assert sys.hooks[lo].trigger_count == 0
+
+    async def test_shadowed_match_emits_warning(self, monkeypatch):
+        sys = DynamicHookSystem()
+        await sys.create_hook(
+            name="win-hi",
+            requirements={"url_pattern": "*example.com*"},
+            function_code=CONTINUE,
+            instance_ids=["inst-1"],
+            priority=10,
+        )
+        await sys.create_hook(
+            name="shadow-lo",
+            requirements={"url_pattern": "*example.com*"},
+            function_code=CONTINUE,
+            instance_ids=["inst-1"],
+            priority=20,
+        )
+        messages = []
+        monkeypatch.setattr(
+            dhs.debug_logger,
+            "log_warning",
+            lambda component, method, message: messages.append(message),
+        )
+        await sys._process_request_hooks(FakeTab(), _req(stage="request"))
+        shadow = [m for m in messages if "shadowed" in m]
+        assert len(shadow) == 1
+        assert "shadow-lo" in shadow[0]
+        assert "win-hi" in shadow[0]
+
+    async def test_single_match_emits_no_shadow_warning(self, monkeypatch):
+        sys = DynamicHookSystem()
+        only = await sys.create_hook(
+            name="solo",
+            requirements={"url_pattern": "*example.com*"},
+            function_code=CONTINUE,
+            instance_ids=["inst-1"],
+            priority=10,
+        )
+        messages = []
+        monkeypatch.setattr(
+            dhs.debug_logger,
+            "log_warning",
+            lambda component, method, message: messages.append(message),
+        )
+        await sys._process_request_hooks(FakeTab(), _req(stage="request"))
+        assert [m for m in messages if "shadowed" in m] == []
+        assert sys.hooks[only].trigger_count == 1
+
+
+class TestResponseStageHooksRemoved:
+    """F-721/F-742: the dead ResponseStageProcessor duplicate is deleted, so the
+    HookAction -> CDP dispatch lives in exactly one place (dynamic_hook_system)."""
+
+    def test_response_stage_hooks_module_is_deleted(self):
+        import importlib
+
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("response_stage_hooks")
+
+        # The canonical home for the dispatch types survives the deletion.
+        from dynamic_hook_system import HookAction, RequestInfo
+
+        assert HookAction is not None and RequestInfo is not None
