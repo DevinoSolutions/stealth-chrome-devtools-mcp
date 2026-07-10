@@ -1,10 +1,13 @@
 """Shared fixtures for stealth-chrome-devtools-mcp test suite."""
 
+import functools
 import json
 import os
 import shutil
 import sys
 import tempfile
+import threading
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -180,3 +183,81 @@ def patched_server(monkeypatch):
         return server
 
     return _patch
+
+
+# ---------------------------------------------------------------------------
+# plan_E2E — self-contained fixture web app served over a local HTTP server.
+# Session-scoped so the E2E integration suite (and the hermetic smoke test)
+# share one ephemeral-port server. Serves tests/fixture_app plus the four
+# deterministic API routes from plan_E2E §2.2. No external network; the port is
+# ephemeral and threaded through base_url, so it never appears in fixture files.
+# ---------------------------------------------------------------------------
+
+FIXTURE_APP_DIR = Path(__file__).resolve().parent / "fixture_app"
+
+
+class _FixtureHandler(SimpleHTTPRequestHandler):
+    """Static file server for tests/fixture_app + the plan_E2E §2.2 API routes."""
+
+    def log_message(self, *args, **kwargs):
+        """Silence per-request stderr logging (keeps test output clean)."""
+
+    def _send_json(self, payload, status=200, extra_headers=None):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802  stdlib override, PERMANENT(interface)
+        if self.path == "/api/json":
+            self._send_json({"ok": True, "value": 42, "source": "fixture"})
+            return
+        if self.path == "/api/set-cookie":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Set-Cookie", "fixture_cookie=server-set; Path=/")
+            self.end_headers()
+            self.wfile.write(b"cookie set")
+            return
+        if self.path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", "/api/json")
+            self.end_headers()
+            return
+        super().do_GET()
+
+    def do_POST(self):  # noqa: N802  stdlib override, PERMANENT(interface)
+        if self.path == "/api/echo":
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+            reflected = {key.lower(): value for key, value in self.headers.items()}
+            self._send_json({"body": raw, "headers": reflected})
+            return
+        self.send_response(404)
+        self.end_headers()
+
+
+@pytest.fixture(scope="session")
+def fixture_app_server():
+    """Yield the base_url of a session-scoped HTTP server for the fixture app.
+
+    Binds an ephemeral 127.0.0.1 port, serves ``tests/fixture_app`` plus the
+    §2.2 JSON/cookie/redirect routes on a daemon thread, and shuts the server
+    down on teardown. Hermetic: importing it costs nothing until a test requests
+    it, and it never touches the network or a fixed port.
+    """
+    handler = functools.partial(_FixtureHandler, directory=str(FIXTURE_APP_DIR))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    host, port = httpd.server_address
+    try:
+        yield f"http://{host}:{port}"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
