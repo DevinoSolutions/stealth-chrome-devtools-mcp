@@ -1376,6 +1376,14 @@ async def spawn_browser(
             creating one as a deliberate, space-consuming action. Do not invent names.
         sandbox (Optional[Any]): Enable browser sandbox. Accepts bool, string ('true'/'false'), int (1/0), or None for auto-detect.
 
+    Network interception captures request/response metadata by default, but
+    response *bodies* are NOT stored unless capture is enabled — via
+    set_network_capture_filters(capture_bodies=True) or
+    STEALTH_MCP_NETWORK_CAPTURE_BODIES=1 (F-605, off by default). When on, the
+    body store is byte-bounded (STEALTH_MCP_NETWORK_BODY_MAX_BYTES per body,
+    STEALTH_MCP_NETWORK_BODY_STORE_MAX_BYTES total). get_response_content
+    live-refetches a body on demand regardless of this setting.
+
     Returns:
         Dict[str, Any]: Instance information including instance_id.
     """
@@ -2199,10 +2207,23 @@ async def get_request_details(request_id: str) -> dict[str, Any] | None:
     return None
 
 
+# Surfaced by the body-consuming tools when a body is absent because capture is
+# off, so an empty body doesn't read as a broken tool (F-605, off-by-default).
+_CAPTURE_OFF_NOTE = (
+    "response-body capture is off; enable via "
+    "set_network_capture_filters(capture_bodies=True) or "
+    "STEALTH_MCP_NETWORK_CAPTURE_BODIES=1"
+)
+
+
 @section_tool("network-debugging")
 async def get_response_details(request_id: str) -> dict[str, Any] | None:
     """
     Get response details for a network request.
+
+    Response bodies are only stored when capture is enabled (off by default);
+    status/headers/content-type metadata is always captured. When the body is
+    absent because capture is off, a ``capture_note`` explains how to enable it.
 
     Args:
         request_id (str): Network request ID.
@@ -2212,7 +2233,10 @@ async def get_response_details(request_id: str) -> dict[str, Any] | None:
     """
     response = await network_interceptor.get_response(request_id)
     if response:
-        return response.dict()
+        result = response.dict()
+        if response.body is None and not get_settings().network_capture_bodies:
+            result["capture_note"] = _CAPTURE_OFF_NOTE
+        return result
     return None
 
 
@@ -2220,6 +2244,10 @@ async def get_response_details(request_id: str) -> dict[str, Any] | None:
 async def get_response_content(instance_id: str, request_id: str) -> str | None:
     """
     Get response body content.
+
+    Live-refetches the body from CDP on demand, so it works even when
+    response-body capture is off (the default) and independent of the stored-body
+    cap. CDP evicts bodies from its own buffer quickly, so fetch soon after load.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -2271,9 +2299,10 @@ async def search_network_requests(
         offset (int): Starting index for pagination.
 
     Returns:
-        Dict[str, Any]: Paginated results with metadata.
+        Dict[str, Any]: Paginated results with metadata. Includes a ``capture_note``
+        when body capture is off (response_contains matching is unavailable then).
     """
-    return await network_interceptor.search_requests(
+    result = await network_interceptor.search_requests(
         instance_id,
         url_pattern,
         method,
@@ -2284,10 +2313,14 @@ async def search_network_requests(
         limit,
         offset,
     )
+    filters = await network_interceptor.get_capture_filters(instance_id)
+    if not filters.get("capture_bodies"):
+        result["capture_note"] = _CAPTURE_OFF_NOTE
+    return result
 
 
 @section_tool("network-debugging")
-async def export_network_data(instance_id: str, filepath: str) -> bool:
+async def export_network_data(instance_id: str, filepath: str) -> dict[str, Any]:
     """
     Export network data to JSON file.
 
@@ -2296,9 +2329,15 @@ async def export_network_data(instance_id: str, filepath: str) -> bool:
         filepath (str): Path to save JSON file.
 
     Returns:
-        bool: True if successful.
+        Dict[str, Any]: ``{"success": bool}``, plus a ``capture_note`` when body
+        capture is off (exported responses have no bodies until it is enabled).
     """
-    return await network_interceptor.export_to_json(instance_id, filepath)
+    success = await network_interceptor.export_to_json(instance_id, filepath)
+    result: dict[str, Any] = {"success": success}
+    filters = await network_interceptor.get_capture_filters(instance_id)
+    if not filters.get("capture_bodies"):
+        result["capture_note"] = _CAPTURE_OFF_NOTE
+    return result
 
 
 @section_tool("network-debugging")
@@ -2321,6 +2360,7 @@ async def set_network_capture_filters(
     instance_id: str,
     include_types: list[str] | None = None,
     exclude_types: list[str] | None = None,
+    capture_bodies: bool | None = None,
 ) -> bool:
     """
     Set resource type filters for network capture to reduce memory usage.
@@ -2329,6 +2369,9 @@ async def set_network_capture_filters(
         instance_id (str): Browser instance ID.
         include_types (Optional[List[str]]): Only capture these types (e.g., ['XHR', 'Fetch', 'Document']).
         exclude_types (Optional[List[str]]): Exclude these types (e.g., ['Image', 'Stylesheet', 'Font', 'Script']).
+        capture_bodies (Optional[bool]): Enable/disable response-body capture for this
+            instance (default off; overrides STEALTH_MCP_NETWORK_CAPTURE_BODIES). Each
+            argument is merged — passing only capture_bodies keeps include/exclude.
 
     Common resource types: Document, Stylesheet, Image, Media, Font, Script, XHR, Fetch, WebSocket, Manifest, Other
 
@@ -2336,21 +2379,23 @@ async def set_network_capture_filters(
         bool: True if successful.
     """
     await network_interceptor.set_capture_filters(
-        instance_id, include_types, exclude_types
+        instance_id, include_types, exclude_types, capture_bodies
     )
     return True
 
 
 @section_tool("network-debugging")
-async def get_network_capture_filters(instance_id: str) -> dict[str, list[str]]:
+async def get_network_capture_filters(instance_id: str) -> dict[str, Any]:
     """
-    Get current network capture filters.
+    Get current network capture filters plus resolved body-capture state.
 
     Args:
         instance_id (str): Browser instance ID.
 
     Returns:
-        Dict[str, List[str]]: Current filters with 'include' and 'exclude' lists.
+        Dict[str, Any]: 'include'/'exclude' lists, the resolved 'capture_bodies'
+        flag, and body-store usage ('body_store_bytes', 'body_store_max_bytes',
+        'body_max_bytes').
     """
     return await network_interceptor.get_capture_filters(instance_id)
 

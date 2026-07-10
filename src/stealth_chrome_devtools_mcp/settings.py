@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     # logging setup must never be the reason the server won't boot.
     log_level: str = "INFO"
 
+    # -- Response-body capture (F-605) ---------------------------------------
+    # Body capture is OFF by default (metadata is always captured); when on, the
+    # response-body store is byte-bounded. 0 on either byte cap = unbounded.
+    network_capture_bodies: bool = False
+    network_body_max_bytes: int = Field(5 * 1024 * 1024, ge=0)
+    network_body_store_max_bytes: int = Field(128 * 1024 * 1024, ge=0)
+
     # -- Legacy unprefixed config (names preserved verbatim via alias) -------
     # 0 = idle reaping disabled (never auto-close): the correct default for a
     # persistent server. The old server.py forced BROWSER_IDLE_TIMEOUT=0 via an

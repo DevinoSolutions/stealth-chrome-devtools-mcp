@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,8 @@ from debug_logger import debug_logger
 from models import NetworkRequest, NetworkResponse
 from nodriver import Tab
 
+from stealth_chrome_devtools_mcp.settings import get_settings
+
 
 class NetworkInterceptor:
     """Intercepts and manages network traffic for browser instances."""
@@ -20,8 +23,12 @@ class NetworkInterceptor:
         self._requests: dict[str, NetworkRequest] = {}
         self._responses: dict[str, NetworkResponse] = {}
         self._instance_requests: dict[str, list[str]] = {}
-        self._instance_filters: dict[str, dict[str, list[str]]] = {}
+        self._instance_filters: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
+        # Byte-bounded body store (F-605): running total of stored response-body
+        # bytes, plus the FIFO capture order used for oldest-first eviction.
+        self._body_bytes: int = 0
+        self._body_order: deque[str] = deque()
 
     async def setup_interception(
         self, tab: Tab, instance_id: str, block_resources: list[str] | None = None
@@ -175,8 +182,15 @@ class NetworkInterceptor:
             request_id = event.request_id
             response = event.response
 
+            async with self._lock:
+                capture_bodies = self._instance_filters.get(instance_id, {}).get(
+                    "capture_bodies"
+                )
+            if capture_bodies is None:
+                capture_bodies = get_settings().network_capture_bodies
+
             body = None
-            if tab:
+            if capture_bodies and tab:
                 try:
                     result = await tab.send(
                         uc.cdp.network.get_response_body(request_id=request_id)
@@ -209,7 +223,7 @@ class NetworkInterceptor:
                 body=body,
             )
             async with self._lock:
-                self._responses[request_id] = network_response
+                self._store_response(request_id, network_response)
         except Exception as e:
             debug_logger.log_warning(
                 "network_interceptor",
@@ -217,11 +231,63 @@ class NetworkInterceptor:
                 f"Failed to capture response for {instance_id}: {e}",
             )
 
+    def _store_response(self, request_id: str, response: NetworkResponse) -> None:
+        """Insert a response into the byte-bounded body store (F-605).
+
+        The single write chokepoint for the body store; callers (``_on_response``,
+        ``import_from_json``) MUST already hold ``self._lock``. Both caps are
+        resolved from Settings at call time and treat 0 as "no cap":
+
+        * per-body (``network_body_max_bytes``): a body larger than the cap is
+          dropped to ``None`` (its metadata is still stored).
+        * total store (``network_body_store_max_bytes``): once the running byte
+          total exceeds the cap, oldest-captured bodies are evicted FIFO — their
+          ``.body`` nulled, metadata kept — until back under the cap.
+        """
+        settings = get_settings()
+        max_body = settings.network_body_max_bytes
+        max_store = settings.network_body_store_max_bytes
+
+        # Overwrite: drop the previously-counted bytes for this request_id first.
+        prior = self._responses.get(request_id)
+        if prior is not None and prior.body is not None:
+            self._body_bytes -= len(prior.body)
+
+        if response.body is not None and max_body and len(response.body) > max_body:
+            debug_logger.log_debug(
+                "network_interceptor",
+                "_store_response",
+                f"response body for {request_id} ({len(response.body)} bytes) "
+                f"exceeds per-body cap {max_body}; storing metadata only",
+            )
+            response.body = None
+
+        self._responses[request_id] = response
+        if response.body is not None:
+            self._body_bytes += len(response.body)
+            self._body_order.append(request_id)
+
+        while max_store and self._body_bytes > max_store and self._body_order:
+            oldest_id = self._body_order.popleft()
+            victim = self._responses.get(oldest_id)
+            if victim is None or victim.body is None:
+                continue  # already cleared or evicted; skip its stale order entry
+            evicted = len(victim.body)
+            self._body_bytes -= evicted
+            debug_logger.log_debug(
+                "network_interceptor",
+                "_store_response",
+                f"evicted oldest response body {oldest_id} ({evicted} bytes) "
+                f"to stay under store cap {max_store}",
+            )
+            victim.body = None
+
     async def set_capture_filters(
         self,
         instance_id: str,
         include_types: list[str] | None = None,
         exclude_types: list[str] | None = None,
+        capture_bodies: bool | None = None,
     ):
         """
         Set resource type filters for network capture.
@@ -230,24 +296,45 @@ class NetworkInterceptor:
         include_types: Optional[List[str]] - Only capture these types
         (Document, Stylesheet, Image, Media, Font, Script, XHR, Fetch, etc).
         exclude_types: Optional[List[str]] - Exclude these types from capture.
+        capture_bodies: Optional[bool] - Enable/disable response-body capture for
+        this instance (overrides the STEALTH_MCP_NETWORK_CAPTURE_BODIES default).
+
+        Each argument is merged into the existing entry; passing None leaves that
+        field unchanged (a capture_bodies-only update keeps include/exclude).
         """
         async with self._lock:
-            self._instance_filters[instance_id] = {
-                "include": include_types or [],
-                "exclude": exclude_types or [],
-            }
-
-    async def get_capture_filters(self, instance_id: str) -> dict[str, list[str]]:
-        """
-        Get current capture filters.
-
-        instance_id: str - The browser instance identifier.
-        Returns: Dict[str, List[str]] - Current filters.
-        """
-        async with self._lock:
-            return self._instance_filters.get(
+            entry = self._instance_filters.setdefault(
                 instance_id, {"include": [], "exclude": []}
             )
+            if include_types is not None:
+                entry["include"] = include_types
+            if exclude_types is not None:
+                entry["exclude"] = exclude_types
+            if capture_bodies is not None:
+                entry["capture_bodies"] = capture_bodies
+
+    async def get_capture_filters(self, instance_id: str) -> dict[str, Any]:
+        """
+        Get current capture filters plus resolved body-capture state and store stats.
+
+        instance_id: str - The browser instance identifier.
+        Returns: Dict[str, Any] - include/exclude lists, the resolved
+        capture_bodies flag, and body-store byte usage vs the configured caps.
+        """
+        async with self._lock:
+            entry = self._instance_filters.get(instance_id, {})
+            settings = get_settings()
+            capture_bodies = entry.get("capture_bodies")
+            if capture_bodies is None:
+                capture_bodies = settings.network_capture_bodies
+            return {
+                "include": entry.get("include", []),
+                "exclude": entry.get("exclude", []),
+                "capture_bodies": capture_bodies,
+                "body_store_bytes": self._body_bytes,
+                "body_store_max_bytes": settings.network_body_store_max_bytes,
+                "body_max_bytes": settings.network_body_max_bytes,
+            }
 
     async def search_requests(  # noqa: PLR0913  PERMANENT(function interface)
         self,
@@ -530,7 +617,7 @@ class NetworkInterceptor:
                     else None,
                     timestamp=datetime.fromisoformat(resp_data["timestamp"]),
                 )
-                self._responses[resp.request_id] = resp
+                self._store_response(resp.request_id, resp)
 
             return True
 
@@ -664,6 +751,8 @@ class NetworkInterceptor:
             if instance_id in self._instance_requests:
                 for req_id in self._instance_requests[instance_id]:
                     self._requests.pop(req_id, None)
-                    self._responses.pop(req_id, None)
+                    removed = self._responses.pop(req_id, None)
+                    if removed is not None and removed.body is not None:
+                        self._body_bytes -= len(removed.body)
                 del self._instance_requests[instance_id]
             self._instance_filters.pop(instance_id, None)
