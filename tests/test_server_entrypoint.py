@@ -9,7 +9,7 @@ control surface to every host on the network. The singleton always passes
 operators who genuinely need a public bind pass --host 0.0.0.0 deliberately.
 """
 
-import server
+from stealth_chrome_devtools_mcp.embedded import server
 
 
 def test_http_host_defaults_to_loopback():

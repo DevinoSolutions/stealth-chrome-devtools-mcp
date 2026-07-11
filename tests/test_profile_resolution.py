@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 # These are module-level functions in server.py (bare imports via sys.path)
-from server import (
+from stealth_chrome_devtools_mcp.embedded.server import (
     _copy_profile_delta,
     _copy_profile_tree,
     _is_relative_to,

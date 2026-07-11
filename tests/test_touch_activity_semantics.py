@@ -13,8 +13,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from browser_manager import BrowserManager
-from models import BrowserInstance, BrowserState
+
+from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserState
 
 
 def _make_fake_tab():
@@ -51,8 +52,10 @@ def _seed_manager(manager, instance_id="t-1", idle_timeout=600):
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
-    from in_memory_storage import in_memory_storage as ps
-    from process_cleanup import process_cleanup
+    from stealth_chrome_devtools_mcp.embedded.in_memory_storage import (
+        in_memory_storage as ps,
+    )
+    from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 
     monkeypatch.setattr(process_cleanup, "kill_browser_process", MagicMock())
     monkeypatch.setattr(process_cleanup, "finalize_browser_process", MagicMock())

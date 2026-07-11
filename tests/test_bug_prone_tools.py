@@ -15,27 +15,15 @@ Three targets the upcoming M4/M13 refactors will churn:
   round-trip, so a process-alive-but-CDP-dead instance still reads active.
 """
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
-import browser_manager as _bm
-import server
-from browser_manager import BrowserManager
-
 from fakes import FakeBrowser, FakeBrowserManager, FakeStorage
+from stealth_chrome_devtools_mcp.embedded import browser_manager as _bm
+from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
 # ===========================================================================
 # spawn_browser — param forwarding through the (multi-collaborator) seam.

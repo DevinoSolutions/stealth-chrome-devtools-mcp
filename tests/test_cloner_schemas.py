@@ -18,26 +18,10 @@ golden never embeds a real time/path — that would be a flake/portability bug.
 """
 
 import inspect
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
-import cdp_element_cloner as _cdc
-import comprehensive_element_cloner as _cec
-import element_cloner as _ec
-import file_based_element_cloner as _fbc
-import progressive_element_cloner as _pec
 
 from fakes import (
     FakeStorage,
@@ -46,6 +30,11 @@ from fakes import (
     load_or_capture_golden,
     normalize_golden,
 )
+from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
+from stealth_chrome_devtools_mcp.embedded import comprehensive_element_cloner as _cec
+from stealth_chrome_devtools_mcp.embedded import element_cloner as _ec
+from stealth_chrome_devtools_mcp.embedded import file_based_element_cloner as _fbc
+from stealth_chrome_devtools_mcp.embedded import progressive_element_cloner as _pec
 
 GOLDENS_DIR = Path(__file__).resolve().parent / "goldens"
 

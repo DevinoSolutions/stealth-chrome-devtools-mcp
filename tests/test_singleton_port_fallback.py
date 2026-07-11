@@ -26,7 +26,8 @@ import threading
 from unittest.mock import MagicMock
 
 import pytest
-import singleton
+
+from stealth_chrome_devtools_mcp.embedded import singleton
 
 
 @pytest.fixture()

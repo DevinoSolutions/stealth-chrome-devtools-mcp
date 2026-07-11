@@ -53,7 +53,7 @@ def _mock_tab(tab_id: str) -> MagicMock:
 class TestBrowserManagerSilentExcepts:
     @pytest.mark.asyncio
     async def test_switch_to_tab_logs_on_failure(self, captured_backend_records):
-        from browser_manager import BrowserManager
+        from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
         manager = BrowserManager()
         tab = _mock_tab("tab-1")
@@ -73,7 +73,7 @@ class TestBrowserManagerSilentExcepts:
 
     @pytest.mark.asyncio
     async def test_close_tab_logs_on_failure(self, captured_backend_records):
-        from browser_manager import BrowserManager
+        from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
         manager = BrowserManager()
         tab = _mock_tab("tab-2")
@@ -101,7 +101,7 @@ class TestDomHandlerSilentExcepts:
     async def test_click_element_mouse_click_fallback_logs_at_debug(
         self, captured_backend_records
     ):
-        from dom_handler import DOMHandler
+        from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 
         element = MagicMock()
         element.scroll_into_view = AsyncMock()
@@ -123,7 +123,7 @@ class TestDomHandlerSilentExcepts:
     async def test_type_text_clear_fallback_logs_at_debug(
         self, captured_backend_records
     ):
-        from dom_handler import DOMHandler
+        from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 
         element = MagicMock()
         element.focus = AsyncMock()
@@ -144,7 +144,7 @@ class TestDomHandlerSilentExcepts:
     async def test_paste_text_clear_fallback_logs_at_debug(
         self, captured_backend_records
     ):
-        from dom_handler import DOMHandler
+        from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 
         element = MagicMock()
         element.focus = AsyncMock()
@@ -165,7 +165,7 @@ class TestDomHandlerSilentExcepts:
     async def test_get_page_content_iframe_skip_logs_at_debug(
         self, captured_backend_records
     ):
-        from dom_handler import DOMHandler
+        from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 
         good_iframe = MagicMock()
         good_iframe.attrs = {"src": "https://good.example"}

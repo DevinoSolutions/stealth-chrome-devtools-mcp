@@ -7,8 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from debug_logger import debug_logger
-
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 

@@ -6,9 +6,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from debug_logger import debug_logger
-from models import ElementInfo
 from nodriver import Tab
+
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.models import ElementInfo
 
 
 class DOMHandler:

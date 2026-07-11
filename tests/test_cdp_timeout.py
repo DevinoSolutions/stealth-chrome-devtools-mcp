@@ -8,26 +8,15 @@ Verifies that:
 """
 
 import asyncio
-import sys
 import time
 from pathlib import Path
 
 import psutil
 import pytest
-
-# Make embedded/ importable
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
-from models import NavigationOptions
 from pydantic import ValidationError
-from server import (
+
+from stealth_chrome_devtools_mcp.embedded.models import NavigationOptions
+from stealth_chrome_devtools_mcp.embedded.server import (
     CDP_OPERATION_TIMEOUT,
     MAX_TIMEOUT_MS,
     _clamp_timeout,
@@ -433,8 +422,8 @@ class TestRealBrowserDeadConnection:
     @pytest.fixture
     async def browser_and_tab(self):
         """Spawn a real browser, return (browser_manager, instance_id, tab)."""
-        from browser_manager import BrowserManager
-        from models import BrowserOptions
+        from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+        from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
 
         bm = BrowserManager()
         opts = BrowserOptions(headless=True)

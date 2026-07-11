@@ -7,23 +7,10 @@ loops, blocking dialogs and oversized inline payloads — and confirm that
 benign async/DOM code is allowed through unchanged.
 """
 
-import sys
-from pathlib import Path
-
 import pytest
 
-# Make embedded/ importable the same way the real entrypoint does.
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
-import server
-from server import (
+from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded.server import (
     EXECUTE_SCRIPT_TIMEOUT,
     MAX_USER_SCRIPT_BYTES,
     _script_rejection_reason,

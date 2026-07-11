@@ -12,9 +12,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-import singleton
 
 from stealth_chrome_devtools_mcp import cli
+from stealth_chrome_devtools_mcp.embedded import singleton
 
 
 @pytest.fixture()
@@ -30,7 +30,8 @@ class TestCliStatusBackendState:
     def test_wedged_backend_prints_unresponsive(self, fake_server, capsys):
         with patch.object(cli, "_server", return_value=fake_server):
             with patch(
-                "singleton._probe_backend_status", return_value=("wedged", 19222)
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("wedged", 19222),
             ):
                 cli._cmd_status(None)
         out = capsys.readouterr().out
@@ -41,7 +42,8 @@ class TestCliStatusBackendState:
     def test_responsive_backend_prints_responsive(self, fake_server, capsys):
         with patch.object(cli, "_server", return_value=fake_server):
             with patch(
-                "singleton._probe_backend_status", return_value=("responsive", 19222)
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("responsive", 19222),
             ):
                 cli._cmd_status(None)
         out = capsys.readouterr().out
@@ -51,7 +53,10 @@ class TestCliStatusBackendState:
 
     def test_no_backend_prints_not_running(self, fake_server, capsys):
         with patch.object(cli, "_server", return_value=fake_server):
-            with patch("singleton._probe_backend_status", return_value=("none", None)):
+            with patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("none", None),
+            ):
                 cli._cmd_status(None)
         out = capsys.readouterr().out
         assert "not running" in out
@@ -61,7 +66,8 @@ class TestCliDoctorBackendState:
     def test_wedged_backend_prints_unresponsive(self, fake_server, capsys):
         with patch.object(cli, "_server", return_value=fake_server):
             with patch(
-                "singleton._probe_backend_status", return_value=("wedged", 19222)
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("wedged", 19222),
             ):
                 with patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"):
                     cli._cmd_doctor(None)
@@ -72,7 +78,8 @@ class TestCliDoctorBackendState:
     def test_responsive_backend_prints_responsive(self, fake_server, capsys):
         with patch.object(cli, "_server", return_value=fake_server):
             with patch(
-                "singleton._probe_backend_status", return_value=("responsive", 19222)
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("responsive", 19222),
             ):
                 with patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"):
                     cli._cmd_doctor(None)
@@ -82,7 +89,10 @@ class TestCliDoctorBackendState:
 
     def test_no_backend_prints_not_running(self, fake_server, capsys):
         with patch.object(cli, "_server", return_value=fake_server):
-            with patch("singleton._probe_backend_status", return_value=("none", None)):
+            with patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("none", None),
+            ):
                 with patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"):
                     cli._cmd_doctor(None)
         out = capsys.readouterr().out
@@ -98,13 +108,17 @@ class TestCliStatusPidAndLog:
         with (
             patch.object(cli, "_server", return_value=fake_server),
             patch(
-                "singleton._probe_backend_status", return_value=("responsive", 19222)
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("responsive", 19222),
             ),
             patch(
-                "singleton._read_server_state",
+                "stealth_chrome_devtools_mcp.embedded.singleton._read_server_state",
                 return_value={"port": 19222, "version": "1.2.1", "pid": 4242},
             ),
-            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.logging_setup.resolve_log_dir",
+                return_value=tmp_path,
+            ),
         ):
             cli._cmd_status(None)
         out = capsys.readouterr().out
@@ -115,9 +129,18 @@ class TestCliStatusPidAndLog:
     def test_status_prints_boot_log_when_no_record(self, fake_server, tmp_path, capsys):
         with (
             patch.object(cli, "_server", return_value=fake_server),
-            patch("singleton._probe_backend_status", return_value=("none", None)),
-            patch("singleton._read_server_state", return_value=None),
-            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("none", None),
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._read_server_state",
+                return_value=None,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.logging_setup.resolve_log_dir",
+                return_value=tmp_path,
+            ),
         ):
             cli._cmd_status(None)
         out = capsys.readouterr().out
@@ -132,11 +155,26 @@ class TestCliDoctorPortOccupant:
     def test_doctor_reports_foreign_occupant(self, fake_server, tmp_path, capsys):
         with (
             patch.object(cli, "_server", return_value=fake_server),
-            patch("singleton._probe_backend_status", return_value=("down", None)),
-            patch("singleton._read_server_state", return_value=None),
-            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
-            patch("singleton._backend_pid_on_port", return_value=None),
-            patch("singleton._server_is_healthy", return_value=True),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("down", None),
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._read_server_state",
+                return_value=None,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.logging_setup.resolve_log_dir",
+                return_value=tmp_path,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._backend_pid_on_port",
+                return_value=None,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._server_is_healthy",
+                return_value=True,
+            ),
             patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"),
         ):
             cli._cmd_doctor(None)
@@ -148,14 +186,21 @@ class TestCliDoctorPortOccupant:
         with (
             patch.object(cli, "_server", return_value=fake_server),
             patch(
-                "singleton._probe_backend_status", return_value=("responsive", 19222)
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("responsive", 19222),
             ),
             patch(
-                "singleton._read_server_state",
+                "stealth_chrome_devtools_mcp.embedded.singleton._read_server_state",
                 return_value={"port": 19222, "version": "1.2.1", "pid": 4242},
             ),
-            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
-            patch("singleton._backend_pid_on_port", return_value=4242),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.logging_setup.resolve_log_dir",
+                return_value=tmp_path,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._backend_pid_on_port",
+                return_value=4242,
+            ),
             patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"),
         ):
             cli._cmd_doctor(None)
@@ -166,11 +211,26 @@ class TestCliDoctorPortOccupant:
     def test_doctor_reports_free_port(self, fake_server, tmp_path, capsys):
         with (
             patch.object(cli, "_server", return_value=fake_server),
-            patch("singleton._probe_backend_status", return_value=("none", None)),
-            patch("singleton._read_server_state", return_value=None),
-            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
-            patch("singleton._backend_pid_on_port", return_value=None),
-            patch("singleton._server_is_healthy", return_value=False),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("none", None),
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._read_server_state",
+                return_value=None,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.logging_setup.resolve_log_dir",
+                return_value=tmp_path,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._backend_pid_on_port",
+                return_value=None,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._server_is_healthy",
+                return_value=False,
+            ),
             patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"),
         ):
             cli._cmd_doctor(None)
@@ -192,11 +252,26 @@ class TestCliDoctorPortOccupant:
         recomputing "foreign" inline."""
         with (
             patch.object(cli, "_server", return_value=fake_server),
-            patch("singleton._probe_backend_status", return_value=("down", None)),
-            patch("singleton._read_server_state", return_value=None),
-            patch("logging_setup.resolve_log_dir", return_value=tmp_path),
-            patch("singleton._backend_pid_on_port", return_value=None),
-            patch("singleton._port_is_foreign_held", return_value=True),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("down", None),
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._read_server_state",
+                return_value=None,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.logging_setup.resolve_log_dir",
+                return_value=tmp_path,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._backend_pid_on_port",
+                return_value=None,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._port_is_foreign_held",
+                return_value=True,
+            ),
             patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"),
         ):
             cli._cmd_doctor(None)

@@ -15,10 +15,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import psutil
 import pytest
-from debug_logger import DebugLogger
-from dynamic_hook_system import DynamicHookSystem
-from in_memory_storage import InMemoryStorage
-from network_interceptor import NetworkInterceptor
+
+from stealth_chrome_devtools_mcp.embedded.debug_logger import DebugLogger
+from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import DynamicHookSystem
+from stealth_chrome_devtools_mcp.embedded.in_memory_storage import InMemoryStorage
+from stealth_chrome_devtools_mcp.embedded.network_interceptor import NetworkInterceptor
 
 # ---------------------------------------------------------------------------
 # DebugLogger — bounded growth
@@ -239,7 +240,7 @@ class TestExceptionSpecificity:
 
     def test_process_cleanup_create_time_catches_psutil_errors(self):
         """track_browser_process should handle psutil errors for create_time."""
-        from process_cleanup import ProcessCleanup
+        from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
         with patch.object(ProcessCleanup, "_setup_cleanup_handlers", lambda self: None):
             with patch.object(
@@ -263,7 +264,9 @@ class TestExceptionSpecificity:
 
     def test_proxy_forwarder_close_catches_connection_errors(self):
         """_close_writer should handle OSError/ConnectionError."""
-        from proxy_forwarder import AuthenticatedProxyForwarder
+        from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import (
+            AuthenticatedProxyForwarder,
+        )
 
         writer = MagicMock()
         writer.is_closing.return_value = False
@@ -280,7 +283,9 @@ class TestExceptionSpecificity:
 
     def test_proxy_forwarder_close_propagates_unexpected_errors(self):
         """_close_writer should NOT catch unexpected errors like ValueError."""
-        from proxy_forwarder import AuthenticatedProxyForwarder
+        from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import (
+            AuthenticatedProxyForwarder,
+        )
 
         writer = MagicMock()
         writer.is_closing.return_value = False
@@ -300,7 +305,7 @@ class TestExceptionSpecificity:
 class TestBrowserProcessIsAlive:
     def test_oserror_on_poll_returns_fallback(self):
         """OSError during poll() should be caught, falling through to returncode check."""
-        from browser_manager import BrowserManager
+        from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
         browser = MagicMock()
         mock_process = MagicMock()
@@ -313,7 +318,7 @@ class TestBrowserProcessIsAlive:
 
     def test_unexpected_error_on_poll_propagates(self):
         """Non-OSError during poll() should NOT be caught — it's a bug."""
-        from browser_manager import BrowserManager
+        from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
         browser = MagicMock()
         mock_process = MagicMock()
@@ -325,7 +330,7 @@ class TestBrowserProcessIsAlive:
 
     def test_no_process_no_pid_returns_true(self):
         """When browser has no _process and no _process_pid, assume alive."""
-        from browser_manager import BrowserManager
+        from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
         browser = MagicMock(spec=[])  # no _process, no _process_pid attrs
         result = BrowserManager._browser_process_is_alive(browser)
@@ -340,32 +345,44 @@ class TestBrowserProcessIsAlive:
 class TestDiscardInstanceCleanup:
     def test_keyerror_on_storage_remove_is_safe(self):
         """If in_memory_storage.remove_instance raises KeyError, it should be caught."""
-        from browser_manager import BrowserManager
+        from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
         manager = BrowserManager()
         data = {"instance": MagicMock()}
         data["instance"].state = "ready"
 
-        with patch("browser_manager.process_cleanup") as mock_pc:
-            with patch("browser_manager.in_memory_storage") as mock_ps:
+        with patch(
+            "stealth_chrome_devtools_mcp.embedded.browser_manager.process_cleanup"
+        ) as mock_pc:
+            with patch(
+                "stealth_chrome_devtools_mcp.embedded.browser_manager.in_memory_storage"
+            ) as mock_ps:
                 mock_ps.remove_instance.side_effect = KeyError("already gone")
-                with patch("browser_manager.dynamic_hook_system") as mock_dh:
+                with patch(
+                    "stealth_chrome_devtools_mcp.embedded.browser_manager.dynamic_hook_system"
+                ) as mock_dh:
                     # Should not raise
                     manager._discard_instance_unlocked("inst-1", data, "test")
 
     def test_unexpected_error_on_finalize_propagates(self):
         """If process finalize raises an unexpected error (e.g. RuntimeError),
         it should propagate since we only catch (OSError, psutil.Error, KeyError)."""
-        from browser_manager import BrowserManager
+        from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
         manager = BrowserManager()
         data = {"instance": MagicMock()}
         data["instance"].state = "ready"
 
-        with patch("browser_manager.process_cleanup") as mock_pc:
+        with patch(
+            "stealth_chrome_devtools_mcp.embedded.browser_manager.process_cleanup"
+        ) as mock_pc:
             mock_pc.finalize_browser_process.side_effect = RuntimeError("unexpected")
-            with patch("browser_manager.in_memory_storage"):
-                with patch("browser_manager.dynamic_hook_system"):
+            with patch(
+                "stealth_chrome_devtools_mcp.embedded.browser_manager.in_memory_storage"
+            ):
+                with patch(
+                    "stealth_chrome_devtools_mcp.embedded.browser_manager.dynamic_hook_system"
+                ):
                     with pytest.raises(RuntimeError):
                         manager._discard_instance_unlocked("inst-1", data, "test")
 

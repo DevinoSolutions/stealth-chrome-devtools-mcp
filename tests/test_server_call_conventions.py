@@ -16,7 +16,7 @@ which tool it lands in.
 import ast
 from pathlib import Path
 
-import server
+from stealth_chrome_devtools_mcp.embedded import server
 
 
 def _server_tree() -> ast.AST:

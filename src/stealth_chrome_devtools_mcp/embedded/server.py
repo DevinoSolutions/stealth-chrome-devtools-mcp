@@ -19,28 +19,44 @@ from pathlib import Path
 from typing import Any
 
 import psutil
-from browser_manager import BrowserManager
-from cdp_element_cloner import CDPElementCloner
-from cdp_function_executor import CDPFunctionExecutor
-from comprehensive_element_cloner import comprehensive_element_cloner
-from debug_logger import debug_logger
-from dom_handler import DOMHandler
-from dynamic_hook_ai_interface import dynamic_hook_ai
-from dynamic_hook_system import dynamic_hook_system
-from element_cloner import element_cloner
 from fastmcp import FastMCP
-from file_based_element_cloner import file_based_element_cloner
-from in_memory_storage import in_memory_storage
-from logging_setup import bootstrap_backend_process_logging, with_correlation_id
-from models import (
+
+from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import CDPElementCloner
+from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
+    CDPFunctionExecutor,
+)
+from stealth_chrome_devtools_mcp.embedded.comprehensive_element_cloner import (
+    comprehensive_element_cloner,
+)
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
+from stealth_chrome_devtools_mcp.embedded.dynamic_hook_ai_interface import (
+    dynamic_hook_ai,
+)
+from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
+from stealth_chrome_devtools_mcp.embedded.element_cloner import element_cloner
+from stealth_chrome_devtools_mcp.embedded.file_based_element_cloner import (
+    file_based_element_cloner,
+)
+from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
+from stealth_chrome_devtools_mcp.embedded.logging_setup import (
+    bootstrap_backend_process_logging,
+    with_correlation_id,
+)
+from stealth_chrome_devtools_mcp.embedded.models import (
     BrowserOptions,
 )
-from network_interceptor import NetworkInterceptor
-from platform_utils import get_platform_info, validate_browser_environment
-from process_cleanup import process_cleanup
-from progressive_element_cloner import progressive_element_cloner
-from response_handler import response_handler
-
+from stealth_chrome_devtools_mcp.embedded.network_interceptor import NetworkInterceptor
+from stealth_chrome_devtools_mcp.embedded.platform_utils import (
+    get_platform_info,
+    validate_browser_environment,
+)
+from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
+from stealth_chrome_devtools_mcp.embedded.progressive_element_cloner import (
+    progressive_element_cloner,
+)
+from stealth_chrome_devtools_mcp.embedded.response_handler import response_handler
 from stealth_chrome_devtools_mcp.observability import sentry_init
 from stealth_chrome_devtools_mcp.settings import get_settings
 
@@ -1388,7 +1404,10 @@ async def spawn_browser(
         Dict[str, Any]: Instance information including instance_id.
     """
     try:
-        from platform_utils import is_running_as_root, is_running_in_container
+        from stealth_chrome_devtools_mcp.embedded.platform_utils import (
+            is_running_as_root,
+            is_running_in_container,
+        )
 
         if sandbox is None:
             sandbox = not (is_running_as_root() or is_running_in_container())
@@ -3924,7 +3943,7 @@ async def execute_function_sequence(
     Returns:
         List[Dict[str, Any]]: List of function call results.
     """
-    from cdp_function_executor import FunctionCall
+    from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import FunctionCall
 
     tab = await browser_manager.get_tab(instance_id)
     if not tab:

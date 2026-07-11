@@ -18,9 +18,9 @@ else:
     import fcntl
 
 import psutil
-from debug_logger import debug_logger
-from singleton import STATE_DIR
 
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.singleton import STATE_DIR
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 

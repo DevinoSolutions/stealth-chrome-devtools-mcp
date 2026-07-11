@@ -5,24 +5,11 @@ fresh, synthetically-seeded one and the ``@section_tool`` functions are invoked
 through their FastMCP ``.fn`` (the real tool body, minus the transport layer).
 """
 
-import sys
-from pathlib import Path
-
 import pytest
 
-# Make embedded/ importable the same way the real entrypoint / conftest does.
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
-import server
-from models import NetworkResponse
-from network_interceptor import NetworkInterceptor
+from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded.models import NetworkResponse
+from stealth_chrome_devtools_mcp.embedded.network_interceptor import NetworkInterceptor
 
 
 @pytest.fixture()

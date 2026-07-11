@@ -13,8 +13,8 @@ Pure filesystem tests: no browser.
 
 import json
 
-import server
-from server import (
+from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded.server import (
     _clone_is_named,
     _enforce_named_profile_trim_in,
     _trim_profile_regenerable,

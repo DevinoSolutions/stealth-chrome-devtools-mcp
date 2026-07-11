@@ -52,7 +52,7 @@ def unwrap(fn):
 _can_run = False
 _needs_no_sandbox = False
 try:
-    from platform_utils import (
+    from stealth_chrome_devtools_mcp.embedded.platform_utils import (
         check_browser_executable,
         is_running_as_root,
         is_running_in_container,

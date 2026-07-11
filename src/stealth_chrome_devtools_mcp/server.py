@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import runpy
-import sys
 from pathlib import Path
 
 EMBEDDED_DIR = Path(__file__).with_name("embedded")
@@ -12,11 +11,7 @@ EMBEDDED_DIR = Path(__file__).with_name("embedded")
 
 def main() -> None:
     """Run the embedded stealth browser MCP server from this package."""
-    embedded_path = str(EMBEDDED_DIR)
-    if embedded_path not in sys.path:
-        sys.path.insert(0, embedded_path)
-
-    from singleton import DEFAULT_PORT
+    from stealth_chrome_devtools_mcp.embedded.singleton import DEFAULT_PORT
 
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--transport", default="stdio")
@@ -25,7 +20,10 @@ def main() -> None:
     known, _ = parser.parse_known_args()
 
     if known.transport == "stdio" and not known.standalone:
-        from singleton import ensure_server_running, run_stdio_proxy
+        from stealth_chrome_devtools_mcp.embedded.singleton import (
+            ensure_server_running,
+            run_stdio_proxy,
+        )
 
         port = ensure_server_running(port=known.singleton_port)
         if port is not None:

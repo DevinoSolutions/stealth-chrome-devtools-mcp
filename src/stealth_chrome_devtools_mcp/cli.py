@@ -19,14 +19,6 @@ from pathlib import Path
 
 from stealth_chrome_devtools_mcp.observability import sentry_init
 
-EMBEDDED_DIR = Path(__file__).with_name("embedded")
-
-
-def _ensure_embedded_on_path() -> None:
-    path = str(EMBEDDED_DIR)
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
 
 def _server():
     """Import the embedded server module, reusing its profile/storage helpers.
@@ -37,8 +29,7 @@ def _server():
     os.environ.setdefault(  # noqa: TID251  PERMANENT(env write before import)
         "STEALTH_MCP_NO_AUTO_RECOVERY", "1"
     )
-    _ensure_embedded_on_path()
-    import server
+    from stealth_chrome_devtools_mcp.embedded import server
 
     return server
 
@@ -112,7 +103,7 @@ def _format_backend_status() -> str:
     this performs a single initialize+DELETE probe, self-cleaning, same as
     every other consumer of `_backend_http_ready` (never evicts or spawns).
     """
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     status, port = singleton._probe_backend_status()
     # "down" (a stale record but nothing actually listening) and "none" (no
@@ -134,7 +125,7 @@ def _recorded_backend_pid() -> int | None:
     """The pid singleton last recorded for the backend (server.json), or None
     if there is no record. Independent of liveness — status/doctor combine
     this with `_format_backend_status()`'s liveness read separately (F-305)."""
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     state = singleton._read_server_state()
     return state.get("pid") if state else None
@@ -144,7 +135,7 @@ def _backend_log_location(pid: int | None) -> str:
     """Where to look for backend logs (F-503's log-path half: M3 delivered
     "there is now a log"; this delivers "here is where"). Names the exact
     per-pid file when a pid is recorded, else the shared boot log."""
-    from logging_setup import resolve_log_dir
+    from stealth_chrome_devtools_mcp.embedded.logging_setup import resolve_log_dir
 
     filename = f"backend-{pid}.log" if pid is not None else "backend-boot.log"
     return str(resolve_log_dir() / filename)
@@ -154,7 +145,7 @@ def _doctor_port_occupant_line() -> str:
     """F-509 visibility: is the target port free, ours, or a NON-stealth
     process squatting it (which would otherwise silently block a backend
     from binding)? Uses only existing helpers — no new port logic."""
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     state = singleton._read_server_state()
     port = (
@@ -172,7 +163,7 @@ def _doctor_port_occupant_line() -> str:
 
 def _cmd_status(_args) -> int:
     server = _server()
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     root = server._default_session_root()
     pid = _recorded_backend_pid()
@@ -310,7 +301,7 @@ def _cmd_stop(_args) -> int:
     """Thin front-end over `singleton.stop_backend()` — no matching/kill
     logic of its own (that lives in singleton.py, reused from eviction)."""
     _server()
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     result, pid = singleton.stop_backend()
     if result == "stopped":
@@ -331,7 +322,7 @@ def _cmd_restart(_args) -> int:
     fresh cold-start spawn under the same lock cold start uses; no lifecycle
     logic of its own (that lives in singleton.py)."""
     _server()
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     status, pid = singleton.restart_backend()
     if status == "busy":
@@ -373,8 +364,7 @@ def _cmd_kill_orphans(args) -> int:
     behavioral partition. `--force` overrides the guard.
     """
     _server()
-    import process_cleanup
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import process_cleanup, singleton
 
     status, _ = singleton._probe_backend_status()
     if status in ("responsive", "wedged") and not args.force:
@@ -489,8 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--http", action="store_true", help="serve over HTTP instead of stdio"
     )
-    _ensure_embedded_on_path()
-    from singleton import DEFAULT_PORT
+    from stealth_chrome_devtools_mcp.embedded.singleton import DEFAULT_PORT
 
     serve.add_argument(
         "--port",

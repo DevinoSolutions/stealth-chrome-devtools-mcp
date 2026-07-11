@@ -9,7 +9,10 @@ These tests pin the behavior: cache dirs are skipped, session state is kept.
 No browser required.
 """
 
-from server import _copy_profile_delta, _profile_ignore_names
+from stealth_chrome_devtools_mcp.embedded.server import (
+    _copy_profile_delta,
+    _profile_ignore_names,
+)
 
 CACHE_DIRS_THAT_MUST_BE_SKIPPED = [
     "Cache",

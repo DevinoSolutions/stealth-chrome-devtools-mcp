@@ -20,7 +20,12 @@ import json
 import logging
 
 import pytest
-from logging_setup import CorrelationIdFilter, correlation_id_var, with_correlation_id
+
+from stealth_chrome_devtools_mcp.embedded.logging_setup import (
+    CorrelationIdFilter,
+    correlation_id_var,
+    with_correlation_id,
+)
 
 # Captured from the pre-change tree: one representative tool's real FastMCP
 # name + inputSchema per section (11 sections). See M3-5's commit message for
@@ -255,7 +260,7 @@ class TestSectionToolIntegration:
     async def test_real_tool_call_stamps_correlation_id_on_log_lines(
         self, captured_backend_records
     ):
-        import server
+        from stealth_chrome_devtools_mcp.embedded import server
 
         tools = await server.mcp.get_tools()
         # Sync, static-documentation tool - no browser instance needed.
@@ -283,7 +288,7 @@ class TestToolsListSchemaSnapshot:
     async def test_representative_tool_schema_unchanged_per_section(self):
         golden = json.loads(_GOLDEN_SCHEMA_JSON)
 
-        import server
+        from stealth_chrome_devtools_mcp.embedded import server
 
         tools = await server.mcp.get_tools()
 

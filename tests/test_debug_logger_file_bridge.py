@@ -26,7 +26,8 @@ import logging
 import threading
 
 import pytest
-from debug_logger import DebugLogger
+
+from stealth_chrome_devtools_mcp.embedded.debug_logger import DebugLogger
 
 
 @pytest.fixture()

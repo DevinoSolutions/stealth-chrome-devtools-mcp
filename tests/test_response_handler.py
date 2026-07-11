@@ -9,7 +9,7 @@ plus size metadata.
 
 import json
 
-from response_handler import ResponseHandler
+from stealth_chrome_devtools_mcp.embedded.response_handler import ResponseHandler
 
 
 class TestEstimateTokens:

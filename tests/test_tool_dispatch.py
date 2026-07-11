@@ -14,22 +14,8 @@ FastMCP ``.fn`` seam with the module-global singletons swapped for fakes.
 
 import inspect
 import json
-import sys
-from pathlib import Path
 
 import pytest
-
-# Make embedded/ importable the same way the entrypoint / conftest does.
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
-import server
 
 from fakes import (
     FakeBrowserManager,
@@ -37,6 +23,7 @@ from fakes import (
     FakeTab,
     fake_instance,
 )
+from stealth_chrome_devtools_mcp.embedded import server
 
 # The true post-M2 tool count (F-108 tripwire). If M4-Ph1 changes the tool set,
 # it updates this one number with intent.

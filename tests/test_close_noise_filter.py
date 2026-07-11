@@ -9,21 +9,10 @@ handler. No browser required.
 """
 
 import asyncio
-import sys
-from pathlib import Path
 
 import pytest
 
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
-import server
+from stealth_chrome_devtools_mcp.embedded import server
 
 
 def _make_exc(name, module):

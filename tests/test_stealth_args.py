@@ -6,7 +6,10 @@ before they reach the browser, preserving stealth.
 No browser or network required — pure function tests.
 """
 
-from platform_utils import filter_stealth_args, merge_browser_args
+from stealth_chrome_devtools_mcp.embedded.platform_utils import (
+    filter_stealth_args,
+    merge_browser_args,
+)
 
 # ---------------------------------------------------------------------------
 # filter_stealth_args
@@ -177,7 +180,9 @@ class TestFilterStealthArgs:
 
     def test_all_blocked_flags_individually(self):
         """Every flag in the blocklist should be stripped when passed alone."""
-        from platform_utils import _stealth_blocked_args
+        from stealth_chrome_devtools_mcp.embedded.platform_utils import (
+            _stealth_blocked_args,
+        )
 
         blocked = _stealth_blocked_args()
         for flag in blocked:

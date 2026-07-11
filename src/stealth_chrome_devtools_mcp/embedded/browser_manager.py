@@ -11,26 +11,33 @@ from typing import Any
 
 import nodriver as uc
 import psutil
-from debug_logger import debug_logger
-from dynamic_hook_system import dynamic_hook_system
-from in_memory_storage import in_memory_storage
-from models import BrowserInstance, BrowserOptions, BrowserState, PageState
 from nodriver import Browser, Tab
-from platform_utils import (
+
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
+from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
+from stealth_chrome_devtools_mcp.embedded.models import (
+    BrowserInstance,
+    BrowserOptions,
+    BrowserState,
+    PageState,
+)
+from stealth_chrome_devtools_mcp.embedded.platform_utils import (
     check_browser_executable,
     get_platform_info,
     merge_browser_args,
 )
-from process_cleanup import process_cleanup
-from proxy_forwarder import AuthenticatedProxyForwarder
-from proxy_utils import (
+from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
+from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import (
+    AuthenticatedProxyForwarder,
+)
+from stealth_chrome_devtools_mcp.embedded.proxy_utils import (
     ProxyConfig,
     ProxyConfigError,
     merge_proxy_server_arg,
     parse_proxy_config,
     redact_launch_arg,
 )
-
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 

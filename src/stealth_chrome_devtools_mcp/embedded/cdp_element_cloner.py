@@ -19,7 +19,8 @@ from datetime import datetime
 from typing import Any
 
 import nodriver as uc
-from debug_logger import debug_logger
+
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 
 class CDPElementCloner:

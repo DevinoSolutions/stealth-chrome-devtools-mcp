@@ -10,8 +10,8 @@ relies on to find the one request that matters among thousands.
 import base64
 import json
 
-from models import NetworkRequest, NetworkResponse
-from network_interceptor import NetworkInterceptor
+from stealth_chrome_devtools_mcp.embedded.models import NetworkRequest, NetworkResponse
+from stealth_chrome_devtools_mcp.embedded.network_interceptor import NetworkInterceptor
 
 
 def _req(rid, url, method="GET", post_data=None, resource_type="XHR", iid="i1"):
@@ -353,7 +353,7 @@ class TestCaptureOptIn:
     async def test_m10a_7b_debug_log_survives_when_body_fetch_raises(self, monkeypatch):
         # Carry-through pin: with capture ON, a failing body fetch still emits the
         # M10a-7b DEBUG record (the log line survived M9's _on_response rewrite).
-        import network_interceptor as ni_mod
+        from stealth_chrome_devtools_mcp.embedded import network_interceptor as ni_mod
 
         calls = []
         monkeypatch.setattr(

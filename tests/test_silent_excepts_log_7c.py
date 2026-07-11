@@ -52,7 +52,7 @@ class TestProxyUtilsSilentExcepts:
     def test_redact_proxy_server_arg_parse_failure_logs_type_only(
         self, captured_backend_records
     ):
-        from proxy_utils import redact_launch_arg
+        from stealth_chrome_devtools_mcp.embedded.proxy_utils import redact_launch_arg
 
         malformed = "--proxy-server=http://user:secret@[bad-ipv6"
         out = redact_launch_arg(malformed)
@@ -72,7 +72,7 @@ class TestProxyUtilsSilentExcepts:
     def test_redact_bare_url_parse_failure_logs_type_only(
         self, captured_backend_records
     ):
-        from proxy_utils import redact_launch_arg
+        from stealth_chrome_devtools_mcp.embedded.proxy_utils import redact_launch_arg
 
         malformed = "http://user:secret@[bad-ipv6@host/path"
         out = redact_launch_arg(malformed)
@@ -98,7 +98,9 @@ class TestProxyForwarderSilentExcepts:
     async def test_pipe_unexpected_error_logs_at_debug(self, captured_backend_records):
         import asyncio
 
-        from proxy_forwarder import AuthenticatedProxyForwarder
+        from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import (
+            AuthenticatedProxyForwarder,
+        )
 
         class _BoomReader:
             async def read(self, _n):
@@ -136,7 +138,7 @@ class TestPlatformUtilsSilentExcepts:
     ):
         import shutil
 
-        import platform_utils
+        from stealth_chrome_devtools_mcp.embedded import platform_utils
 
         # Force the static-path pre-check (platform_utils.py:295-301) to miss on
         # every candidate so execution actually reaches the shutil.which

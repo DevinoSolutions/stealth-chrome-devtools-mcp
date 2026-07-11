@@ -16,8 +16,8 @@ Pure filesystem + seeded ProcessCleanup: no browser.
 import json
 import time
 
-import server
-from process_cleanup import ProcessCleanup
+from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 GIB = 1024**3

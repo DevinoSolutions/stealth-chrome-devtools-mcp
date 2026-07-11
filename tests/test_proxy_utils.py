@@ -6,7 +6,8 @@ credentials must never leak into logged/echoed launch args.
 """
 
 import pytest
-from proxy_utils import (
+
+from stealth_chrome_devtools_mcp.embedded.proxy_utils import (
     ProxyConfig,
     ProxyConfigError,
     merge_proxy_server_arg,

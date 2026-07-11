@@ -7,7 +7,7 @@ server.py referenced ``psutil.Error`` at the handler but never imported ``psutil
 ``try`` body therefore masked itself with a NameError and crashed the caller.
 """
 
-import server
+from stealth_chrome_devtools_mcp.embedded import server
 
 
 def test_profile_pid_check_survives_os_error(tmp_path, monkeypatch):

@@ -29,7 +29,6 @@ check for it).
 """
 
 import ast
-import sys
 from pathlib import Path
 
 EMBEDDED_DIR = (
@@ -38,8 +37,6 @@ EMBEDDED_DIR = (
     / "stealth_chrome_devtools_mcp"
     / "embedded"
 )
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
 
 LOG_MARKERS = (
     "log_error",

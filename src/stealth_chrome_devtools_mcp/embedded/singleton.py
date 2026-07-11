@@ -329,7 +329,7 @@ def _start_server_process(port: int):
     # in-process logging (configure_logging) can install itself, so only a
     # raw stream redirect at Popen can capture it. stdin stays DEVNULL - the
     # backend never reads stdin, and it remains the legitimately-allowed use.
-    from logging_setup import resolve_log_dir
+    from stealth_chrome_devtools_mcp.embedded.logging_setup import resolve_log_dir
 
     boot_log = None
     try:
@@ -646,7 +646,8 @@ def _select_backend_port(preferred: int = DEFAULT_PORT) -> int:
     convention), so a port collision is recoverable instead of a silent
     120s outage.
     """
-    from proxy_forwarder import _free_port  # lazy; no module-top cycle
+    # lazy; no module-top cycle
+    from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import _free_port
 
     state = _read_server_state()
     recorded = state.get("port") if state else None
@@ -968,7 +969,9 @@ async def _bridge(port: int):
 def run_stdio_proxy(port: int):
     """Run the stdio-to-HTTP proxy (blocking)."""
     import anyio
-    from logging_setup import configure_logging  # deferred: breaks the cycle
+
+    # deferred: breaks the cycle
+    from stealth_chrome_devtools_mcp.embedded.logging_setup import configure_logging
 
     configure_logging("proxy")
     anyio.run(_bridge, port)

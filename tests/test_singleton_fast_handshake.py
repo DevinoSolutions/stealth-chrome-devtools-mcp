@@ -16,7 +16,8 @@ import anyio
 import pytest
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCRequest, JSONRPCResponse
-from singleton import _proxy_streams
+
+from stealth_chrome_devtools_mcp.embedded.singleton import _proxy_streams
 
 
 def _free_port() -> int:
@@ -86,7 +87,7 @@ class TestEnsureServerRunningNonBlocking:
     def test_returns_existing_without_starting(self):
         from unittest.mock import patch
 
-        import singleton
+        from stealth_chrome_devtools_mcp.embedded import singleton
 
         with patch.object(singleton, "_find_running_server", return_value=12345):
             with patch.object(singleton.threading, "Thread") as thread_cls:
@@ -99,7 +100,7 @@ class TestEnsureServerRunningNonBlocking:
         import time
         from unittest.mock import patch
 
-        import singleton
+        from stealth_chrome_devtools_mcp.embedded import singleton
 
         # Simulate a backend that takes "forever" to come up. The old code
         # blocked here for up to 30s; the new code must return immediately.

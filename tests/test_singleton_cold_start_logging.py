@@ -12,7 +12,8 @@ import os
 from contextlib import contextmanager
 
 import pytest
-import singleton
+
+from stealth_chrome_devtools_mcp.embedded import singleton
 
 
 @pytest.fixture()
@@ -53,7 +54,7 @@ def captured_proxy_records():
 
 class TestColdStartLogging:
     def test_coldstart_failure_is_logged(self, isolated_proxy_log, monkeypatch):
-        from logging_setup import configure_logging
+        from stealth_chrome_devtools_mcp.embedded.logging_setup import configure_logging
 
         configure_logging("proxy")
 

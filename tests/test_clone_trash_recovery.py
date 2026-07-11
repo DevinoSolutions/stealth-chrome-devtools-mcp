@@ -24,7 +24,7 @@ import json
 import os
 import time
 
-import server
+from stealth_chrome_devtools_mcp.embedded import server
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 

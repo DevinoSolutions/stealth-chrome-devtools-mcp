@@ -9,8 +9,8 @@ reference, risking mid-close GC and silently swallowing any close() exception.
 
 import asyncio
 
-from browser_manager import BrowserManager
-from debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 
 async def test_run_in_background_retains_task_and_surfaces_exception(monkeypatch):

@@ -10,16 +10,16 @@ Safety focus: a malformed or malicious hook function must NEVER crash request
 processing — every bad path must degrade to HookAction("continue").
 """
 
-import dynamic_hook_system as dhs
 import pytest
-from dynamic_hook_system import (
+
+from fakes import FakeTab
+from stealth_chrome_devtools_mcp.embedded import dynamic_hook_system as dhs
+from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import (
     DynamicHook,
     DynamicHookSystem,
     HookAction,
     RequestInfo,
 )
-
-from fakes import FakeTab
 
 CONTINUE = "def process_request(request):\n    return HookAction(action='continue')\n"
 
@@ -287,6 +287,9 @@ class TestResponseStageHooksRemoved:
             importlib.import_module("response_stage_hooks")
 
         # The canonical home for the dispatch types survives the deletion.
-        from dynamic_hook_system import HookAction, RequestInfo
+        from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import (
+            HookAction,
+            RequestInfo,
+        )
 
         assert HookAction is not None and RequestInfo is not None
