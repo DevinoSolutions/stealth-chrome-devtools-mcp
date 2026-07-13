@@ -5,6 +5,13 @@ singleton, list profiles, reclaim disk (the storage sweep), check the
 environment, or start the server. It never reimplements browser logic — to drive
 a browser, use the MCP server (or its HTTP backend) directly.
 
+Two surfaces, one backend (F-700/F-109): this project ships two entry points —
+``stealth-chrome-devtools-mcp`` (the MCP server: the tool surface an AI client
+drives) and ``stealth-chrome-devtools`` (this ops CLI: the surface a human
+inspects and operates). They are deliberately separate surfaces over the one
+backend, not a single merged command; the registry side of this note lives in
+``embedded/tool_registry.py``. Recorded for M14 (CONTRIBUTING/DESIGN).
+
 Read-only commands (``status``, ``profiles``, ``cleanup`` without ``--apply``,
 ``doctor``) import the package with ``STEALTH_MCP_NO_AUTO_RECOVERY=1`` so merely
 running the CLI never kills a running server's browsers or touches its profiles.

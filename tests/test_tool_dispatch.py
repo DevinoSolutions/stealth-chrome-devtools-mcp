@@ -23,7 +23,7 @@ from fakes import (
     FakeTab,
     fake_instance,
 )
-from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded import server, tool_registry
 
 # The true post-M2 tool count (F-108 tripwire). If M4-Ph1 changes the tool set,
 # it updates this one number with intent.
@@ -148,7 +148,9 @@ class TestSectionGating:
         tabs_tools = set(server.SECTION_TOOLS["tabs"])
         keep_section = set(server.SECTION_TOOLS["cookies-storage"])
         try:
-            monkeypatch.setattr(server, "DISABLED_SECTIONS", {"tabs"})
+            # apply_disabled_sections reads tool_registry's module-global set
+            # (server rebinds no longer reach it), so gate the DEFINING module.
+            monkeypatch.setattr(tool_registry, "DISABLED_SECTIONS", {"tabs"})
             server.apply_disabled_sections()
 
             after = await _live_tools()

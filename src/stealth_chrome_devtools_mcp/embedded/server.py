@@ -7,7 +7,6 @@ import os
 import re
 import sys
 import tempfile
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -37,7 +36,6 @@ from stealth_chrome_devtools_mcp.embedded.file_based_element_cloner import (
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
 from stealth_chrome_devtools_mcp.embedded.logging_setup import (
     bootstrap_backend_process_logging,
-    with_correlation_id,
 )
 from stealth_chrome_devtools_mcp.embedded.models import (
     BrowserOptions,
@@ -52,12 +50,13 @@ from stealth_chrome_devtools_mcp.embedded.progressive_element_cloner import (
     progressive_element_cloner,
 )
 from stealth_chrome_devtools_mcp.embedded.response_handler import response_handler
+from stealth_chrome_devtools_mcp.embedded.tool_registry import (
+    DISABLED_SECTIONS,
+    SECTION_TOOLS,  # noqa: F401  plan_M4ph1: re-exported as server.SECTION_TOOLS
+    ToolRegistry,
+)
 from stealth_chrome_devtools_mcp.observability import sentry_init
 from stealth_chrome_devtools_mcp.settings import get_settings
-
-DISABLED_SECTIONS = set()
-SECTION_TOOLS: dict[str, list[str]] = defaultdict(list)
-
 
 CDP_OPERATION_TIMEOUT = get_settings().cdp_operation_timeout_seconds
 MAX_TIMEOUT_MS = 60_000
@@ -211,33 +210,6 @@ def _install_nodriver_cookie_compat() -> None:
 DEBUG_LOGGING_ENABLED = get_settings().stealth_browser_debug or get_settings().debug
 
 
-def is_section_enabled(section: str) -> bool:
-    """Check if a tool section is enabled."""
-    return section not in DISABLED_SECTIONS
-
-
-def section_tool(section: str):
-    """Decorator that registers tools and tracks section membership."""
-
-    def decorator(func):
-        SECTION_TOOLS[section].append(func.__name__)
-        return mcp.tool(with_correlation_id(func))
-
-    return decorator
-
-
-def apply_disabled_sections() -> None:
-    """Apply section disable rules by unregistering tools from FastMCP."""
-    for section in sorted(DISABLED_SECTIONS):
-        for tool_name in SECTION_TOOLS.get(section, []):
-            try:
-                mcp.remove_tool(tool_name)
-            except Exception as e:
-                # Tool may already be removed by another section policy.
-                debug_logger.log_debug("server", "apply_disabled_sections", str(e))
-                continue
-
-
 @asynccontextmanager
 async def app_lifespan(server):
     """
@@ -314,6 +286,10 @@ mcp = FastMCP(
     """,
     lifespan=app_lifespan,
 )
+
+registry = ToolRegistry(mcp)
+section_tool = registry.section_tool
+apply_disabled_sections = registry.apply_disabled_sections
 
 browser_manager = BrowserManager()
 network_interceptor = NetworkInterceptor()
@@ -987,7 +963,11 @@ async def execute_script(
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     """
-    Execute JavaScript in the page and return its value.
+    Execute JavaScript source in the active page and return its value.
+
+    The default exec-family tool; prefer a sibling when it fits — `inject_and_execute_script`
+    (specific execution context), `call_javascript_function`/`execute_function_sequence`
+    (invoke defined functions), `execute_python_in_browser` (Python), `execute_cdp_command` (raw CDP).
 
     ⚠️ Async, non-blocking code only. The script runs on the page's main thread,
     so anything that blocks it freezes the whole tab and makes every later call
@@ -2653,7 +2633,9 @@ async def execute_cdp_command(
     instance_id: str, command: str, params: dict[str, Any] = None
 ) -> dict[str, Any]:
     """
-    Execute any CDP Runtime command with given parameters.
+    Execute a raw CDP Runtime command by name — the low-level escape hatch
+    beneath the exec-family tools. Prefer `execute_script` for ordinary page JS;
+    use this only for a specific CDP method (e.g. 'evaluate', 'callFunctionOn').
 
     Args:
         instance_id (str): Browser instance ID.
@@ -2806,7 +2788,12 @@ async def call_javascript_function(
     instance_id: str, function_path: str, args: list[Any] = None
 ) -> dict[str, Any]:
     """
-    Call a JavaScript function with arguments.
+    Invoke an already-defined JavaScript function by its dotted path — does not
+    run arbitrary source.
+
+    Use `execute_script` / `inject_and_execute_script` to run source; use this
+    when the function already exists on the page (e.g. 'document.querySelector');
+    use `execute_function_sequence` to chain several such calls in one round trip.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -2853,7 +2840,11 @@ async def inject_and_execute_script(
     instance_id: str, script_code: str, context_id: str = None
 ) -> dict[str, Any]:
     """
-    Inject and execute custom JavaScript code.
+    Run custom JavaScript source, optionally inside a specific execution context
+    (isolated world / iframe) via `context_id`.
+
+    Like `execute_script`, but lets you choose the execution context; prefer
+    plain `execute_script` when the default page context is what you want.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -2903,7 +2894,11 @@ async def execute_function_sequence(
     instance_id: str, function_calls: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """
-    Execute a sequence of JavaScript function calls.
+    Invoke several already-defined JavaScript functions in order, in a single
+    round trip.
+
+    Each entry is one `call_javascript_function`-style call; use this to batch
+    them instead of issuing repeated `call_javascript_function` calls.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -2978,7 +2973,11 @@ async def execute_python_in_browser(
     instance_id: str, python_code: str
 ) -> dict[str, Any]:
     """
-    Execute Python code by translating it to JavaScript.
+    Author browser logic in Python — it is transpiled to JavaScript and then
+    executed in the page.
+
+    Use `execute_script` to write JavaScript directly; use this when you would
+    rather write Python.
 
     Args:
         instance_id (str): Browser instance ID.
