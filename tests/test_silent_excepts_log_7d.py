@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded import clone_storage, server
 
 
 @pytest.fixture()
@@ -78,7 +78,7 @@ class TestClientSessionSeedSilentExcept:
         with patch(
             "fastmcp.server.dependencies.get_context", side_effect=_boom_get_context
         ):
-            await server._client_session_seed()
+            await clone_storage._client_session_seed()
 
         assert len(captured_backend_records) == 1
         record = captured_backend_records[0]

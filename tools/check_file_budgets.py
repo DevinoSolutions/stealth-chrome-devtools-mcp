@@ -14,14 +14,18 @@ SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
 LOC_BUDGET = 1000
 
 GRANDFATHER: dict[str, tuple[int, str]] = {
-    # 4420 (plan_M4ph1) + 2 (plan_M3 step 2: single bootstrap_backend_process_
-    # logging() import + call in __main__ — the M3/M10a except-surface work
-    # plan_M4ph1's own tag already anticipated) + 3 (plan_M10a step 7d: the
-    # final 3 of the 17 truly-silent excepts - _install_nodriver_cookie_compat,
-    # _client_session_seed, apply_disabled_sections - each add one
-    # debug_logger.log_warning/log_debug(...) line closing F-181 rows 15-17;
-    # same minimal-bump rationale as browser_manager.py below.
-    "embedded/server.py": (4425, "plan_M4ph1 + plan_M3 + plan_M10a"),
+    # plan_M4ph1 C1 (F-201): extracted the 50-def clone-storage subsystem into
+    # clone_storage.py, shrinking server.py from its 4425 grandfathered cap to
+    # its actual 3389 LOC (measured after ruff format). Ratcheted DOWN per the
+    # no-grow discipline; the prior M3/M10a except-surface bumps are folded into
+    # this post-extraction baseline. Owner string unchanged.
+    "embedded/server.py": (3389, "plan_M4ph1 + plan_M3 + plan_M10a"),
+    # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
+    # irreducibly ~1024-line contiguous block, landing this module over the
+    # 1000-LOC budget. GRANDFATHERED at its actual post-ruff-format LOC per the
+    # human gate ruling 2026-07-12 (cap == actual, no padding; the two-module
+    # split and the partial move were both explicitly declined). No-grow applies.
+    "embedded/clone_storage.py": (1057, "plan_M4ph1"),
     # 1447 (DEBT(F-702)) + 2 (plan_M10a step 7a: switch_to_tab/close_tab's two
     # truly-silent `except Exception: return False` handlers now each add one
     # debug_logger.log_warning(...) line closing F-181 rows 1-2; same minimal-

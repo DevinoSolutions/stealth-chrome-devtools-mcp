@@ -22,7 +22,7 @@ import pytest
 
 from fakes import FakeBrowser, FakeBrowserManager, FakeStorage
 from stealth_chrome_devtools_mcp.embedded import browser_manager as _bm
-from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded import clone_storage
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
 # ===========================================================================
@@ -38,7 +38,7 @@ class TestSpawnBrowserSeam:
     together. The 230-line internals stay unexercised by design."""
 
     async def test_forwards_kwargs_into_browser_options(
-        self, call_tool, patched_server
+        self, call_tool, patched_server, monkeypatch
     ):
         fake_instance = SimpleNamespace(
             instance_id="i1",
@@ -51,9 +51,8 @@ class TestSpawnBrowserSeam:
         async def fake_resolve(user_data_dir, **kwargs):
             return {"user_data_dir": "/fake/dir", "profile_role": "clone"}
 
-        srv = patched_server(
-            browser_manager=fbm, _resolve_profile_selection=fake_resolve
-        )
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        srv = patched_server(browser_manager=fbm)
         # get_tab returns None (default) → network interception is skipped, so the
         # network_interceptor collaborator need not be patched.
         result = await call_tool(
@@ -81,7 +80,7 @@ class TestSpawnBrowserSeam:
         # profile_role == "clone" flows through to auto_clone.
         assert options.auto_clone is True
 
-    async def test_result_shape(self, call_tool, patched_server):
+    async def test_result_shape(self, call_tool, patched_server, monkeypatch):
         fake_instance = SimpleNamespace(
             instance_id="i1",
             state="active",
@@ -95,9 +94,8 @@ class TestSpawnBrowserSeam:
         async def fake_resolve(user_data_dir, **kwargs):
             return {"user_data_dir": "/fake/dir", "profile_role": "clone"}
 
-        srv = patched_server(
-            browser_manager=fbm, _resolve_profile_selection=fake_resolve
-        )
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        srv = patched_server(browser_manager=fbm)
         result = await call_tool(srv, "spawn_browser", sandbox=False)
 
         assert set(result) == {
@@ -125,12 +123,16 @@ class TestFallbackProfileSelection:
     async def test_non_clone_selection_never_retries(self):
         # profile_role != "clone" short-circuits to None before any dir I/O (pure).
         assert (
-            await server._fallback_profile_selection({"profile_role": "explicit"}, 0)
+            await clone_storage._fallback_profile_selection(
+                {"profile_role": "explicit"}, 0
+            )
             is None
         )
-        assert await server._fallback_profile_selection({}, 0) is None
+        assert await clone_storage._fallback_profile_selection({}, 0) is None
         assert (
-            await server._fallback_profile_selection({"profile_role": "explicit"}, 5)
+            await clone_storage._fallback_profile_selection(
+                {"profile_role": "explicit"}, 5
+            )
             is None
         )
 
@@ -138,11 +140,15 @@ class TestFallbackProfileSelection:
         # A clone selection retries from the master snapshot; with no snapshot on
         # disk (tmp_empty_root), both the first and final attempts yield None.
         assert (
-            await server._fallback_profile_selection({"profile_role": "clone"}, 0)
+            await clone_storage._fallback_profile_selection(
+                {"profile_role": "clone"}, 0
+            )
             is None
         )
         assert (
-            await server._fallback_profile_selection({"profile_role": "clone"}, 1)
+            await clone_storage._fallback_profile_selection(
+                {"profile_role": "clone"}, 1
+            )
             is None
         )
 

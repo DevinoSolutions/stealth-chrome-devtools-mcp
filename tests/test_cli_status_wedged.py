@@ -20,15 +20,15 @@ from stealth_chrome_devtools_mcp.embedded import singleton
 @pytest.fixture()
 def fake_server(tmp_path):
     server = MagicMock()
-    server._default_session_root.return_value = Path(tmp_path)
-    server._clone_storage_cap_bytes.return_value = 1024**3
-    server._session_storage_cap_bytes.return_value = 1024**3
+    server.default_session_root.return_value = Path(tmp_path)
+    server.clone_storage_cap_bytes.return_value = 1024**3
+    server.session_storage_cap_bytes.return_value = 1024**3
     return server
 
 
 class TestCliStatusBackendState:
     def test_wedged_backend_prints_unresponsive(self, fake_server, capsys):
-        with patch.object(cli, "_server", return_value=fake_server):
+        with patch.object(cli, "_clone_storage", return_value=fake_server):
             with patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("wedged", 19222),
@@ -40,7 +40,7 @@ class TestCliStatusBackendState:
         assert "19222" in out
 
     def test_responsive_backend_prints_responsive(self, fake_server, capsys):
-        with patch.object(cli, "_server", return_value=fake_server):
+        with patch.object(cli, "_clone_storage", return_value=fake_server):
             with patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("responsive", 19222),
@@ -52,7 +52,7 @@ class TestCliStatusBackendState:
         assert "19222" in out
 
     def test_no_backend_prints_not_running(self, fake_server, capsys):
-        with patch.object(cli, "_server", return_value=fake_server):
+        with patch.object(cli, "_clone_storage", return_value=fake_server):
             with patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("none", None),
@@ -64,7 +64,7 @@ class TestCliStatusBackendState:
 
 class TestCliDoctorBackendState:
     def test_wedged_backend_prints_unresponsive(self, fake_server, capsys):
-        with patch.object(cli, "_server", return_value=fake_server):
+        with patch.object(cli, "_clone_storage", return_value=fake_server):
             with patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("wedged", 19222),
@@ -76,7 +76,7 @@ class TestCliDoctorBackendState:
         assert "wedged" in out
 
     def test_responsive_backend_prints_responsive(self, fake_server, capsys):
-        with patch.object(cli, "_server", return_value=fake_server):
+        with patch.object(cli, "_clone_storage", return_value=fake_server):
             with patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("responsive", 19222),
@@ -88,7 +88,7 @@ class TestCliDoctorBackendState:
         assert "UNRESPONSIVE" not in out
 
     def test_no_backend_prints_not_running(self, fake_server, capsys):
-        with patch.object(cli, "_server", return_value=fake_server):
+        with patch.object(cli, "_clone_storage", return_value=fake_server):
             with patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("none", None),
@@ -106,7 +106,7 @@ class TestCliStatusPidAndLog:
 
     def test_status_prints_pid_and_log_location(self, fake_server, tmp_path, capsys):
         with (
-            patch.object(cli, "_server", return_value=fake_server),
+            patch.object(cli, "_clone_storage", return_value=fake_server),
             patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("responsive", 19222),
@@ -128,7 +128,7 @@ class TestCliStatusPidAndLog:
 
     def test_status_prints_boot_log_when_no_record(self, fake_server, tmp_path, capsys):
         with (
-            patch.object(cli, "_server", return_value=fake_server),
+            patch.object(cli, "_clone_storage", return_value=fake_server),
             patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("none", None),
@@ -154,7 +154,7 @@ class TestCliDoctorPortOccupant:
 
     def test_doctor_reports_foreign_occupant(self, fake_server, tmp_path, capsys):
         with (
-            patch.object(cli, "_server", return_value=fake_server),
+            patch.object(cli, "_clone_storage", return_value=fake_server),
             patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("down", None),
@@ -184,7 +184,7 @@ class TestCliDoctorPortOccupant:
 
     def test_doctor_reports_our_backend_occupant(self, fake_server, tmp_path, capsys):
         with (
-            patch.object(cli, "_server", return_value=fake_server),
+            patch.object(cli, "_clone_storage", return_value=fake_server),
             patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("responsive", 19222),
@@ -210,7 +210,7 @@ class TestCliDoctorPortOccupant:
 
     def test_doctor_reports_free_port(self, fake_server, tmp_path, capsys):
         with (
-            patch.object(cli, "_server", return_value=fake_server),
+            patch.object(cli, "_clone_storage", return_value=fake_server),
             patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("none", None),
@@ -251,7 +251,7 @@ class TestCliDoctorPortOccupant:
         flip the branch, proving doctor delegates to it instead of
         recomputing "foreign" inline."""
         with (
-            patch.object(cli, "_server", return_value=fake_server),
+            patch.object(cli, "_clone_storage", return_value=fake_server),
             patch(
                 "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
                 return_value=("down", None),

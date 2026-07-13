@@ -19,10 +19,12 @@ Pure filesystem tests: no browser.
 import json
 import os
 
-from stealth_chrome_devtools_mcp.embedded import server
-from stealth_chrome_devtools_mcp.embedded.server import (
-    _clone_is_auto,
+from stealth_chrome_devtools_mcp.embedded import clone_storage
+from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     _enforce_clone_storage_cap_in,
+)
+from stealth_chrome_devtools_mcp.embedded.clone_storage import (
+    clone_is_auto as _clone_is_auto,
 )
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
@@ -143,7 +145,7 @@ class TestCapSweep:
         _set_mtime(newer_idle, 2_000)
 
         monkeypatch.setattr(
-            server,
+            clone_storage,
             "_profile_has_running_browser",
             lambda p: str(p).endswith("old-running"),
         )

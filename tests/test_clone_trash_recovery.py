@@ -24,7 +24,7 @@ import json
 import os
 import time
 
-from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded import clone_storage
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
@@ -58,29 +58,31 @@ class TestEvictionIsRecoverable:
         _set_mtime(new, 2_000)
 
         # ~8 KB total, cap 6 KB -> the oldest is evicted.
-        removed = server._enforce_clone_storage_cap_in(tmp_path, cap_bytes=6000)
+        removed = clone_storage._enforce_clone_storage_cap_in(tmp_path, cap_bytes=6000)
 
         assert removed == 1
         assert not old.exists(), "evicted clone must leave its original path"
         assert new.exists()
 
-        trashed = server._clone_trash_dir(tmp_path) / "old"
+        trashed = clone_storage._clone_trash_dir(tmp_path) / "old"
         assert trashed.exists(), "evicted clone must be recoverable from .trash"
         assert (trashed / "data.bin").read_bytes() == b"x" * 4096, "contents intact"
 
     def test_trash_clone_returns_new_location(self, tmp_path):
         clone = _make_clone(tmp_path, "sess", size_bytes=100)
-        dest = server._trash_clone(clone, tmp_path)
+        dest = clone_storage._trash_clone(clone, tmp_path)
         assert dest is not None
         assert dest.exists()
         assert not clone.exists()
-        assert server._clone_trash_dir(tmp_path) in dest.parents
+        assert clone_storage._clone_trash_dir(tmp_path) in dest.parents
 
     def test_trash_clone_refuses_running_profile(self, tmp_path, monkeypatch):
         clone = _make_clone(tmp_path, "live", size_bytes=100)
-        monkeypatch.setattr(server, "_profile_has_running_browser", lambda p: True)
+        monkeypatch.setattr(
+            clone_storage, "_profile_has_running_browser", lambda p: True
+        )
 
-        dest = server._trash_clone(clone, tmp_path)
+        dest = clone_storage._trash_clone(clone, tmp_path)
 
         assert dest is None, "a running profile must never be moved to trash"
         assert clone.exists(), "running profile must stay exactly where it is"
@@ -90,10 +92,10 @@ class TestTrashIsInvisibleToScans:
     def test_trash_not_selected_as_autoclone(self, tmp_path):
         # A trashed auto-clone (marker still says auto) lives one level under
         # .trash; the selector must not descend into it or treat .trash as a clone.
-        trash = server._clone_trash_dir(tmp_path)
+        trash = clone_storage._clone_trash_dir(tmp_path)
         _make_clone(trash, "old-evicted", size_bytes=50_000)
 
-        victims = server._idle_autoclones_over_cap(tmp_path, cap_bytes=1000)
+        victims = clone_storage._idle_autoclones_over_cap(tmp_path, cap_bytes=1000)
 
         assert victims == [], ".trash contents must never be re-selected for eviction"
 
@@ -108,9 +110,13 @@ class TestTrashIsInvisibleToScans:
             source_kind="explicit-master",
             auto_clean=False,
         )
-        _make_clone(server._clone_trash_dir(tmp_path), "old-evicted", size_bytes=4000)
+        _make_clone(
+            clone_storage._clone_trash_dir(tmp_path), "old-evicted", size_bytes=4000
+        )
 
-        victims = server._named_profiles_over_session_cap(tmp_path, cap_bytes=6000)
+        victims = clone_storage._named_profiles_over_session_cap(
+            tmp_path, cap_bytes=6000
+        )
 
         assert named not in victims
         assert victims == []
@@ -118,20 +124,20 @@ class TestTrashIsInvisibleToScans:
 
 class TestPurge:
     def test_purge_removes_expired_keeps_fresh(self, tmp_path):
-        trash = server._clone_trash_dir(tmp_path)
+        trash = clone_storage._clone_trash_dir(tmp_path)
         old = _make_clone(trash, "ancient", size_bytes=100)
         fresh = _make_clone(trash, "recent", size_bytes=100)
         _set_mtime(old, 1_000)  # epoch-ancient
         _set_mtime(fresh, time.time())  # just now
 
-        purged = server._purge_expired_trash(tmp_path, max_age_seconds=3600)
+        purged = clone_storage._purge_expired_trash(tmp_path, max_age_seconds=3600)
 
         assert purged == 1
         assert not old.exists(), "trash older than retention must be purged"
         assert fresh.exists(), "trash within retention must survive"
 
     def test_purge_noop_when_no_trash(self, tmp_path):
-        assert server._purge_expired_trash(tmp_path, max_age_seconds=3600) == 0
+        assert clone_storage._purge_expired_trash(tmp_path, max_age_seconds=3600) == 0
 
 
 class TestSweepWiring:
@@ -139,11 +145,11 @@ class TestSweepWiring:
         # cleanup_deferred_profiles touches real global state; neutralize it so
         # this stays a hermetic filesystem test.
         monkeypatch.setattr(
-            server.process_cleanup, "cleanup_deferred_profiles", lambda: None
+            clone_storage.process_cleanup, "cleanup_deferred_profiles", lambda: None
         )
 
         ancient = _make_clone(
-            server._clone_trash_dir(tmp_path), "ancient", size_bytes=100
+            clone_storage._clone_trash_dir(tmp_path), "ancient", size_bytes=100
         )
         _set_mtime(ancient, 1_000)  # far older than the default 24h retention
 
@@ -152,13 +158,13 @@ class TestSweepWiring:
         _set_mtime(old, 1_000)
         _set_mtime(new, 2_000)
 
-        server._run_storage_sweep(
+        clone_storage.run_storage_sweep(
             tmp_path, clone_cap=6000, session_cap=0, reason="test"
         )
 
         assert not ancient.exists(), "sweep must purge expired trash"
         assert not old.exists(), "sweep must evict the oldest over-cap auto-clone"
-        assert (server._clone_trash_dir(tmp_path) / "old" / "data.bin").exists(), (
-            "evicted clone must be recoverable from trash after the sweep"
-        )
+        assert (
+            clone_storage._clone_trash_dir(tmp_path) / "old" / "data.bin"
+        ).exists(), "evicted clone must be recoverable from trash after the sweep"
         assert new.exists()

@@ -34,6 +34,19 @@ def _server():
     return server
 
 
+def _clone_storage():
+    """Import the clone-storage subsystem (the profile/storage helpers),
+    forcing the same read-only import semantics as :func:`_server`: the
+    NO_AUTO_RECOVERY guard is set before the import so the CLI never disturbs
+    a running backend."""
+    os.environ.setdefault(  # noqa: TID251  PERMANENT(env write before import)
+        "STEALTH_MCP_NO_AUTO_RECOVERY", "1"
+    )
+    from stealth_chrome_devtools_mcp.embedded import clone_storage
+
+    return clone_storage
+
+
 _BINARY_UNIT = 1024
 
 
@@ -46,15 +59,15 @@ def _human(num: int) -> str:
     return f"{value:.1f} TB"
 
 
-def _role(server, path: Path) -> str:
-    if server._clone_is_auto(path):
+def _role(cs, path: Path) -> str:
+    if cs.clone_is_auto(path):
         return "auto-clone"
-    if server._clone_is_named(path):
+    if cs.clone_is_named(path):
         return "named"
     return "unmarked"
 
 
-def _collect_profiles(server) -> list[dict]:
+def _collect_profiles(cs) -> list[dict]:
     """Every profile under the session root with size, role, and in-use flag."""
     rows: list[dict] = []
 
@@ -63,21 +76,21 @@ def _collect_profiles(server) -> list[dict]:
             "name": path.name,
             "path": path,
             "role": role,
-            "size": server._dir_size_bytes(path),
-            "in_use": server._profile_has_running_browser(path),
+            "size": cs._dir_size_bytes(path),
+            "in_use": cs._profile_has_running_browser(path),
         }
 
-    master = server._master_profile_dir()
-    snapshot = server._master_snapshot_dir()
+    master = cs.master_profile_dir()
+    snapshot = cs.master_snapshot_dir()
     if master.exists():
         rows.append(_row(master, "master"))
     if snapshot.exists():
         rows.append(_row(snapshot, "snapshot"))
 
-    clone_root = server._clone_root_dir()
+    clone_root = cs.clone_root_dir()
     if clone_root.exists():
         rows.extend(
-            _row(child, _role(server, child))
+            _row(child, _role(cs, child))
             for child in sorted(clone_root.iterdir())
             if child.is_dir()
         )
@@ -162,10 +175,10 @@ def _doctor_port_occupant_line() -> str:
 
 
 def _cmd_status(_args) -> int:
-    server = _server()
+    cs = _clone_storage()
     from stealth_chrome_devtools_mcp.embedded import singleton
 
-    root = server._default_session_root()
+    root = cs.default_session_root()
     pid = _recorded_backend_pid()
     print(f"backend     : {_format_backend_status()}")
     print(f"pid         : {pid if pid is not None else '-'}")
@@ -173,19 +186,18 @@ def _cmd_status(_args) -> int:
     print(f"version     : {singleton._server_version()}")
     print(f"session root: {root}  (exists: {root.exists()})")
     print(
-        f"clone cap   : {_human(server._clone_storage_cap_bytes())}  "
+        f"clone cap   : {_human(cs.clone_storage_cap_bytes())}  "
         f"[STEALTH_MCP_CLONE_STORAGE_CAP_GB]"
     )
     print(
-        f"session cap : {_human(server._session_storage_cap_bytes())}  "
+        f"session cap : {_human(cs.session_storage_cap_bytes())}  "
         f"[STEALTH_MCP_SESSION_STORAGE_CAP_GB]"
     )
     return 0
 
 
 def _cmd_profiles(_args) -> int:
-    server = _server()
-    rows = _collect_profiles(server)
+    rows = _collect_profiles(_clone_storage())
     if not rows:
         print("no profiles found.")
         return 0
@@ -199,16 +211,16 @@ def _cmd_profiles(_args) -> int:
 
 
 def _cmd_cleanup(args) -> int:
-    server = _server()
-    clone_root = server._clone_root_dir()
-    clone_cap = _gb_to_bytes(args.clone_cap_gb, server._clone_storage_cap_bytes())
-    session_cap = _gb_to_bytes(args.session_cap_gb, server._session_storage_cap_bytes())
+    cs = _clone_storage()
+    clone_root = cs.clone_root_dir()
+    clone_cap = _gb_to_bytes(args.clone_cap_gb, cs.clone_storage_cap_bytes())
+    session_cap = _gb_to_bytes(args.session_cap_gb, cs.session_storage_cap_bytes())
 
     # Same selectors the live sweep uses — dry-run and apply can't disagree.
-    to_delete = server._idle_autoclones_over_cap(clone_root, clone_cap)
-    to_trim = server._named_profiles_over_session_cap(clone_root, session_cap)
-    delete_bytes = sum(server._dir_size_bytes(p) for p in to_delete)
-    trim_bytes = sum(server._regenerable_size(p) for p in to_trim)
+    to_delete = cs._idle_autoclones_over_cap(clone_root, clone_cap)
+    to_trim = cs._named_profiles_over_session_cap(clone_root, session_cap)
+    delete_bytes = sum(cs._dir_size_bytes(p) for p in to_delete)
+    trim_bytes = sum(cs._regenerable_size(p) for p in to_trim)
 
     print(f"clone root  : {clone_root}")
     print(f"caps        : clone {_human(clone_cap)} | session {_human(session_cap)}")
@@ -222,9 +234,7 @@ def _cmd_cleanup(args) -> int:
             f"{_human(delete_bytes)}:"
         )
         for path in to_delete:
-            print(
-                f"   - {path.name[:50]:50s} {_human(server._dir_size_bytes(path)):>10s}"
-            )
+            print(f"   - {path.name[:50]:50s} {_human(cs._dir_size_bytes(path)):>10s}")
     if to_trim:
         print(
             f"\ntrim {len(to_trim)} idle named profile(s) - frees "
@@ -232,8 +242,7 @@ def _cmd_cleanup(args) -> int:
         )
         for path in to_trim:
             print(
-                f"   - {path.name[:50]:50s} "
-                f"~{_human(server._regenerable_size(path)):>10s}"
+                f"   - {path.name[:50]:50s} ~{_human(cs._regenerable_size(path)):>10s}"
             )
     print(f"\ntotal reclaimable: ~{_human(delete_bytes + trim_bytes)}")
 
@@ -241,8 +250,8 @@ def _cmd_cleanup(args) -> int:
         print("\n(dry run - nothing deleted. Re-run with --apply to reclaim.)")
         return 0
 
-    removed = server._enforce_clone_storage_cap_in(clone_root, clone_cap, "cli")
-    freed = server._enforce_named_profile_trim_in(clone_root, session_cap, "cli")
+    removed = cs._enforce_clone_storage_cap_in(clone_root, clone_cap, "cli")
+    freed = cs._enforce_named_profile_trim_in(clone_root, session_cap, "cli")
     print(
         f"\napplied: deleted {removed} auto-clone(s); trimmed "
         f"{_human(freed)} from named profiles."
@@ -253,12 +262,12 @@ def _cmd_cleanup(args) -> int:
 def _cmd_doctor(_args) -> int:
     import platform
 
-    server = _server()
+    cs = _clone_storage()
 
     ok = True
     print(f"python      : {platform.python_version()}")
     print(f"platform    : {platform.platform()}")
-    root = server._default_session_root()
+    root = cs.default_session_root()
     print(f"session root: {root}  (exists: {root.exists()})")
     pid = _recorded_backend_pid()
     print(f"backend     : {_format_backend_status()}")

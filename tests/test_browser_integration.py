@@ -73,8 +73,12 @@ if not _can_run:
 
 
 def _get_fn(name):
-    """Get an unwrapped server function by name."""
+    """Get an unwrapped server function by name. The profile/clone-storage
+    helpers now live in ``clone_storage`` (reached via the server module's import
+    of it), so fall back there before skipping."""
     fn = getattr(_server_mod, name, None)
+    if fn is None and _server_mod is not None:
+        fn = getattr(getattr(_server_mod, "clone_storage", None), name, None)
     if fn is None:
         pytest.skip(f"server.{name} not found")
     return _unwrap(fn)
