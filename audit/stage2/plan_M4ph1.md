@@ -169,6 +169,8 @@ server.py is the most-shifted file in the pipeline. **Rule for Stage 3: re-ancho
 
 *Rejected alt B2 — leave the functions in server.py, only move them below the tools (cosmetic reorder).* Keeps them one import unit with the tools — F-201's exact complaint (a break in storage code disables all tools; the 14 import-server tests still couple). Does not close the finding. Rejected.
 
+**[GATE RULING 2026-07-12 — C1 LOC budget]** At the STEP 0 tip (`5744b76`) the verbatim 50-def move is a contiguous ~1024-line block ⇒ `clone_storage.py` ≈ 1052 LOC, irreducibly over the 1000-LOC gate in `tools/check_file_budgets.py` (the gate postdates this plan's approval). Human ruled: **GRANDFATHER** `embedded/clone_storage.py` at its actual landed LOC (cap == actual, no padding), owner-tagged `plan_M4ph1`, consistent with the 4 existing grandfathered files; the B1-style split and the partial move (3 profile-selection fns staying behind) were both declined — the cohesive verbatim move stands. `embedded/server.py`'s grandfathered cap ratchets DOWN to its actual post-C1 LOC in the same commit. The no-grow discipline applies to both rows thereafter.
+
 ### C. Component 2 — formalize the section_tool registry (F-101/F-505/F-612) + F-760/F-743/F-700
 
 **CHOSEN — extract the registry mechanism into `embedded/tool_registry.py`, carrying M3's correlation wrapper verbatim; server.py imports `section_tool`, `SECTION_TOOLS`, `DISABLED_SECTIONS`, `is_section_enabled`, `apply_disabled_sections` from it.**
