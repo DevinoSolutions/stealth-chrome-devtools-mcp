@@ -52,6 +52,7 @@ from stealth_chrome_devtools_mcp.embedded.progressive_element_cloner import (
 from stealth_chrome_devtools_mcp.embedded.response_handler import response_handler
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     InstanceNotFoundError,
+    ToolError,
     _require_browser,
     _require_tab,
 )
@@ -434,7 +435,7 @@ async def spawn_browser(
             "spawn_diagnostics": spawn_diagnostics or {},
         }
     except Exception as e:
-        raise Exception(f"Failed to spawn browser: {e!s}")
+        raise ToolError(f"Failed to spawn browser: {e!s}")
 
 
 @section_tool("browser-management")
@@ -857,7 +858,7 @@ async def select_option(
         try:
             converted_index = int(index)
         except (ValueError, TypeError):
-            raise Exception(f"Invalid index value: {index}. Must be a number.")
+            raise ToolError(f"Invalid index value: {index}. Must be a number.")
 
     return await _with_cdp_timeout(
         dom_handler.select_option(tab, selector, value, text, converted_index),
@@ -990,7 +991,7 @@ async def execute_script(
         )
         return {"success": True, "result": result, "error": None}
     except Exception as e:
-        return {"success": False, "result": None, "error": str(e)}
+        raise ToolError(str(e))
 
 
 @section_tool("element-interaction")
@@ -1416,7 +1417,7 @@ async def set_cookie(
         if current_url:
             url = current_url
         else:
-            raise Exception("At least one of 'url' or 'domain' must be specified")
+            raise ToolError("At least one of 'url' or 'domain' must be specified")
 
     cookie = {
         "name": name,
@@ -1620,7 +1621,7 @@ async def get_debug_lock_status() -> dict[str, Any]:
     try:
         return debug_logger.get_lock_status()
     except Exception as e:
-        return {"error": str(e)}
+        raise ToolError(str(e))
 
 
 @section_tool("tabs")
@@ -1688,7 +1689,7 @@ async def get_active_tab(instance_id: str) -> dict[str, Any]:
         browser_manager.get_active_tab(instance_id), instance_id=instance_id
     )
     if not tab:
-        return {"error": "No active tab found"}
+        raise ToolError("No active tab found")
     await _with_cdp_timeout(tab, instance_id=instance_id)
     return {
         "tab_id": str(tab.target.target_id),
@@ -1723,7 +1724,7 @@ async def new_tab(instance_id: str, url: str = "about:blank") -> dict[str, Any]:
             "type": getattr(new_tab_obj.target, "type_", "page"),
         }
     except Exception as e:
-        raise Exception(f"Failed to create new tab: {e!s}")
+        raise ToolError(f"Failed to create new tab: {e!s}")
 
 
 @section_tool("element-extraction")
@@ -2020,7 +2021,7 @@ async def clone_element_complete(
         try:
             parsed_options = json.loads(extraction_options)
         except json.JSONDecodeError:
-            raise Exception(f"Invalid JSON in extraction_options: {extraction_options}")
+            raise ToolError(f"Invalid JSON in extraction_options: {extraction_options}")
     tab = await _require_tab(browser_manager, instance_id)
     result = await _with_cdp_timeout(
         comprehensive_element_cloner.extract_complete_element(
@@ -2870,7 +2871,7 @@ async def create_python_binding(
                 python_function = obj
                 break
         if not python_function:
-            return {"success": False, "error": "No function found in Python code"}
+            raise ToolError("No function found in Python code")
         return await _with_cdp_timeout(
             cdp_function_executor.create_python_binding(
                 tab, binding_name, python_function
@@ -2878,10 +2879,7 @@ async def create_python_binding(
             instance_id=instance_id,
         )
     except Exception as e:
-        return {
-            "success": False,
-            "error": f"Failed to create Python function: {e!s}",
-        }
+        raise ToolError(f"Failed to create Python function: {e!s}")
 
 
 @section_tool("cdp-functions")

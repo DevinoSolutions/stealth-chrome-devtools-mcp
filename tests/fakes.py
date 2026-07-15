@@ -36,7 +36,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 
-async def call_tool(server_mod: Any, name: str, **kwargs: Any) -> Any:
+async def call_tool(server_mod: Any, name: str, /, **kwargs: Any) -> Any:
     """Invoke the registered tool ``name`` on ``server_mod`` in-process.
 
     Unwraps the FastMCP ``.fn`` seam (``getattr(fn, "fn", fn)`` — a no-op if the
