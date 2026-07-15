@@ -608,6 +608,68 @@ second instance reuses the backend (no double-bind).
 
 ---
 
+## Phase 19 — Performance & Resource Budgets
+
+### MQ-114: Each tool returns within its latency budget
+**Manual**: navigate/click/type/extract on the fixture app "feel instant" — no
+multi-second stall on a simple action. A tool that suddenly takes 10× as long is
+a regression a human would notice immediately.
+**Automated by**: `test_perf::test_tool_latency_budgets` (W9 — p95 over K runs, per-tool budget on the fixture)
+
+### MQ-115: A full session stays within a memory/handle ceiling and cleans up
+**Manual**: run a realistic workload (spawn → many navigations/interactions/
+extractions → close); memory doesn't balloon, and after close there are no
+leftover Chrome processes or file handles.
+**Automated by**: `test_perf::test_memory_and_handle_ceiling` (W9 — psutil RSS/fd/child-count under ceiling, returns to baseline after close)
+
+### MQ-116: Startup + handshake completes within a budget
+**Manual**: launching the server into the MCP host and getting the first
+`tools/list` back is quick, not a long cold-start hang.
+**Automated by**: `test_perf::test_startup_handshake_budget` (W9 — spawn + MCP handshake within bound)
+
+### MQ-117: Large-payload extraction is bounded in time and memory
+**Manual**: extract/clone a very large element (≥10k-node DOM) and export a large
+network capture; it completes in reasonable time without OOM and returns correct
+output.
+**Automated by**: `test_perf::test_large_payload_stress` (W9 — large-DOM fixture, bounded time+memory, correctness preserved)
+
+---
+
+## Phase 20 — Resilience / Fault-Injection
+
+### MQ-118: Chrome crash mid-session → typed error, then recovers
+**Manual**: kill the browser process while a session is live; the next tool call
+returns a clear typed error (not a hang or raw −32000), and a fresh `spawn_browser`
+works afterward — the server didn't wedge.
+**Automated by**: `test_resilience::test_crash_recovery` (W10 — psutil-kill child, assert typed error + successful respawn, no orphan)
+
+### MQ-119: Tab closed under an active tool → typed error, not a hang
+**Manual**: close the active tab out of band, then call a tab-scoped tool; it
+returns a typed error, doesn't hang or silently succeed.
+**Automated by**: `test_resilience::test_tab_closed_under_tool` (W10)
+
+### MQ-120: Navigation to a hanging endpoint times out cleanly
+**Manual**: navigate to an endpoint that never finishes loading; the tool honors
+its timeout and returns a typed timeout error within a bound, rather than blocking
+forever.
+**Automated by**: `test_resilience::test_hanging_endpoint_timeout` (W10 — bounded typed timeout; the disciplined form of the get_cookies-hang class)
+
+### MQ-121: Network drop mid-operation → typed error, recoverable
+**Manual**: cut connectivity mid-navigate/mid-capture (offline emulation); the
+tool returns a typed error and the session is usable again afterward.
+**Automated by**: `test_resilience::test_network_drop_recoverable` (W10 — CDP offline emulation / route-abort)
+
+---
+
+## Phase 21 — Documentation Examples
+
+### MQ-122: Every runnable README/docs example executes successfully
+**Manual**: copy-paste each runnable code example from the README/docs and run it;
+it works as written. The advertised install command and tool names are real.
+**Automated by**: `test_doc_examples::test_runnable_examples` + `test_doc_examples::test_claims_sync` (W11 — extract-and-run marked blocks; claims-sync reuses `gen_release_contract.py`)
+
+---
+
 ## Summary
 
 | Phase | Steps | Already automated | New (this plan) |
@@ -630,9 +692,16 @@ second instance reuses the backend (no double-bind).
 | Singleton/Process | MQ-103..108 | 6 | 0 |
 | Cross-Platform | MQ-109..110 | 0 | 2 (W2) |
 | Completeness | MQ-111..113 | 1 | 2 (W5, W8) |
-| **Total** | **113** | **91** | **22** |
+| Performance & Resource Budgets | MQ-114..117 | 0 | 4 (W9) |
+| Resilience / Fault-Injection | MQ-118..121 | 0 | 4 (W10) |
+| Documentation Examples | MQ-122 | 0 | 1 (W11) |
+| **Total** | **122** | **91** | **31** |
 
-91 of 113 steps already have live automated tests. 22 new tests to write
-(stealth verification is the biggest block at 8). Once W1–W8 land, the green
-gate is a machine-verified stand-in for this entire document, and you push on
-green.
+91 of 122 steps already have live automated tests. 31 new tests to write —
+stealth verification is the biggest single block (8), followed by performance (4)
+and resilience (4). The manifest covers the three pillars of the manual pass:
+**it works** (functional/stealth/cross-platform, W1–W8), **it's fast and lean**
+(latency + memory budgets, W9), and **it fails safe** (typed-error recovery under
+crash/close/timeout/network-drop, W10) — plus the docs a user's first five minutes
+depend on (W11). Once W1–W11 land, the green gate is a machine-verified stand-in
+for this entire document, and you push on green.

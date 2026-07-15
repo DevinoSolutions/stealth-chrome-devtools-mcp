@@ -19,8 +19,8 @@
 - **Branch**: `release/e2e-gate` off `main` at the post-M14 merge SHA (executor
   pins the exact SHA at start; re-anchors every claim at HEAD per house rule).
 - **Nature**: tests + test fixtures + **CI workflow changes** + docs. The one
-  plan in the campaign that is *allowed* to edit `.github/workflows/*` and add a
-  new pytest marker. **Zero `src/` production edits** (same hard rule as
+  plan in the campaign that is *allowed* to edit `.github/workflows/*` and add new
+  pytest markers (`transport`, `stealth`, `perf`). **Zero `src/` production edits** (same hard rule as
   plan_E2E — any bug this suite hits is pinned with `@pytest.mark.characterization`
   and routed, never fixed here). No new *runtime* dependencies; new **test-extra**
   deps only, and only if unavoidable (§1.3).
@@ -61,7 +61,7 @@ tiers and the residual gap in plain words — the strongest claim that is *true*
 | Console scripts | `pyproject.toml:47-49` — `stealth-chrome-devtools-mcp = "stealth_chrome_devtools_mcp.server:main"` (the MCP server; **stdio default**), `stealth-chrome-devtools = "...cli:main"`. |
 | Transports | server supports stdio (default) **and** `--transport http` (loopback-default, **unauthenticated** — `tests/test_server_entrypoint.py`). Market-relevant: the HTTP surface has no auth by design; the contract (§W5) must state this. |
 | FastMCP available as runtime dep | `pyproject.toml` deps: `fastmcp==2.11.2`. `fastmcp.Client` with a **stdio** transport can spawn the console script as a subprocess — **no new dependency** needed for W1 (executor verifies the exact 2.11.2 `Client`/stdio-transport API against the installed package before coding). |
-| Existing markers | `pyproject.toml:75-78` — only `integration`, `characterization`. This plan **adds `transport` and `stealth`**. |
+| Existing markers | `pyproject.toml:75-78` — only `integration`, `characterization`. This plan **adds `transport`, `stealth`, and `perf`**. |
 | CI shape | `.github/workflows/test.yml` — `unit-tests` (ubuntu, py3.11/3.12/3.13, `-m "not integration"`, `--cov-fail-under=55`), `quality` (ruff/ty/vulture/owners/budgets), `integration-tests` (ubuntu, google-chrome-stable + Xvfb, `-m integration --timeout=120`). All `runs-on: ubuntu-latest`. |
 | Publish shape | `.github/workflows/publish.yml` — on `v*` tag: unit-only tests (ubuntu, py3.11–3.13) → `uv build` → PyPI publish → GH release advertising `uv tool install` / `uvx`. **No install smoke.** |
 | Package classifier | `pyproject.toml` — `Development Status :: 5 - Production/Stable`, version `1.2.0`, already on PyPI. The "Production/Stable" claim is what this plan makes *true under test*. |
@@ -73,9 +73,12 @@ The bar the whole plan is held to: **a green RELEASE gate must be a faithful,
 complete stand-in for the manual test pass a human would otherwise run before
 shipping.** Every step you'd take by hand — install it into an MCP host, spawn a
 browser, log into a real Cloudflare-fronted site, fill the awkward inputs, confirm
-it isn't detected, extract data, close without orphaning a process — has a *named*
-automated counterpart. When that holds, green ⇒ no human click-through needed; you
-push on green.
+it isn't detected, extract data, **watch that each action returns quickly and the
+process doesn't balloon in memory**, **see it recover cleanly when the browser
+crashes under you**, close without orphaning a process — has a *named* automated
+counterpart. When that holds, green ⇒ no human click-through needed; you push on
+green. The three pillars of that hand-pass — **it works** (W1–W8), **it's fast and
+lean** (W9), **it fails safe** (W10) — are each machine-checked.
 
 Three properties make "green ⇒ blindly pushable" **true** rather than aspirational.
 Skipping any one turns blind-push back into a leap of faith — itself the subtle
@@ -113,7 +116,10 @@ you, and the green is trustworthy enough to push on."**
 | **W5** | **Release contract** (`RELEASE_CONTRACT.md`) + **known-limitations register** + **transport coverage manifest** tripwire test. | ties all | W1, W4 |
 | **W6** | **Continuous verification**: scheduled canary runs against a growing live real-site corpus + rotating detectors; regression alerting; auto-captured minimal repros (HAR + DOM + screenshot). Converts a point-in-time green suite into a continuously-proven one. | the **"forever"** axis | W1, W4 |
 | **W7** | **Adversarial breadth**: property-based DOM-shape fuzzing (shadow DOM, nested iframes, CSP, SPA route swaps, lazy-load, canvas/WebGL), a curated real-site smoke corpus, a **Chrome-version matrix**, and **differential stealth** (stealth build vs vanilla headless). Converts "one fixture" into structural coverage of the interaction/detection feature space. | the **"any site"** axis | W1, W4 |
-| **W8** | **Manual-QA parity** (the capstone): the manual sign-off protocol written as an enumerated manifest, each step mapped to a live E2E test + a parity tripwire; the lifecycle/leak/recovery and multi-instance-concurrency steps a human checks by hand; **mutation testing** proving the suite bites; and zero-flake quarantine discipline. Binds W1–W7 to the "blind push" bar (§0.2). | **green ⇒ blind push** | W1–W7 |
+| **W8** | **Manual-QA parity** (the capstone mechanism): the manual sign-off protocol written as an enumerated manifest, each step mapped to a live E2E test + a parity tripwire; the lifecycle/leak/recovery and multi-instance-concurrency steps a human checks by hand; **mutation testing** proving the suite bites; and zero-flake quarantine discipline. Establishes the manifest + tripwire; **W9–W11 extend it** (each lands its MQ step + test together, so the tripwire stays green). Binds W1–W11 to the "blind push" bar (§0.2). | **green ⇒ blind push** | W1–W7 |
+| **W9** | **Performance & resource budgets**: deterministic per-tool latency budgets and a session-wide memory/handle ceiling on the fixture app (gating), a large-payload stress tier, and a perf-regression baseline lane in the canary. Turns "correct" into "correct **and fast enough**" — the pillar W1–W8 never assert. | **"great performance"** | W1 |
+| **W10** | **Resilience / fault-injection**: kill Chrome mid-session, close a tab under an active tool, navigate to a hanging endpoint, drop the network mid-op — assert each yields a **typed** error (never a hang or silent wrong-value) and the server **recovers** (next spawn/op works). The dynamic half of edge-case coverage that the static negative-space steps (W8) don't reach. | dynamic **edge cases** | W1 |
+| **W11** | **Documentation-example tests**: every runnable code block in `README.md` / `docs/` is extracted and executed against the real server, so the first thing a user copy-pastes cannot silently rot. | **docs never lie** | W1, W5 |
 
 ### 1.2 Non-goals (hard OUT) — same discipline as plan_E2E §1.2
 
@@ -324,6 +330,11 @@ promise the future can't break.
   runner tracks stable) so a Chrome-stable bump that breaks stealth/CDP surfaces
   within one cycle; W7's version matrix covers *known* versions, the canary covers
   *new* ones as they ship.
+- **Nightly soak lane**: a longer `workflow_dispatch`/cron run drives a high-count
+  workload (≥1000 tool calls, or a fixed wall-clock) and asserts **no memory/handle
+  growth and no latency drift across the run** — the endurance shape of a real
+  multi-hour session, distinct from W9's short leak ceiling. Non-gating (too long
+  for a PR), tracked + alerting; a slow leak that a 20-op test misses surfaces here.
 - **Non-gating by construction**: the online/live half never blocks a PR or the
   release tag (that stays the deterministic gate, §3). W6 is the early-warning
   radar, not a wall — so live-web flake can't hold the pipeline hostage.
@@ -346,9 +357,15 @@ plus a corpus that *grows toward* the population it can never fully enumerate.
   properties**, not as one hand-picked case.
 - **Curated real-site smoke corpus** (`tests/corpus/sites.toml`): a small,
   reviewed, ToS-checked set of stable public pages exercised by the W6 canary
-  (informational). It **grows** — every field bug reproduced becomes a new corpus
-  entry (regression-forever for *seen* sites). Explicitly a sample; §8 quantifies
-  the residual it can never close.
+  (informational). It must **span a named structural taxonomy**, not N arbitrary
+  URLs — at least one representative of each of: cookie-consent walls, SPA
+  route-swaps (History API, no full reload), lazy-load / infinite-scroll,
+  shadow-DOM-heavy pages, deeply-nested / cross-origin iframes, each major heavy-JS
+  framework (React / Vue / Angular), and one page behind each major anti-bot
+  vendor class (Cloudflare / DataDome-style). Sampling the *structural population*
+  is what makes the "any site" claim bite. It **grows** — every field bug
+  reproduced becomes a new corpus entry (regression-forever for *seen* sites).
+  Explicitly a sample; §8 quantifies the residual it can never close.
 - **Chrome-version matrix**: the integration/transport job pins and rotates across
   the current + N recent Chrome stable versions (executor picks N by runner
   budget; ≥2), so a version-specific break is caught pre-release, not in the wild.
@@ -361,7 +378,7 @@ plus a corpus that *grows toward* the population it can never fully enumerate.
 
 ### 2.8 W8 — manual-QA parity (the "blind push" contract)
 
-- **`tests/MANUAL_QA_PROTOCOL.md`** — **113 steps across 18 phases**, each with a
+- **`tests/MANUAL_QA_PROTOCOL.md`** — **122 steps across 21 phases**, each with a
   stable `MQ-<n>` id and the id(s) of the automated test(s) covering it.
   Phases: installation/launch (MQ-1…4), browser lifecycle (MQ-5…12), stealth
   verification (MQ-13…21), navigation/interaction (MQ-22…37), negative/failure
@@ -369,13 +386,20 @@ plus a corpus that *grows toward* the population it can never fully enumerate.
   (MQ-55…61), element extraction (MQ-62…70), progressive cloning (MQ-71…74),
   file extraction (MQ-75…79), CDP/JS functions (MQ-80…91), dynamic hooks
   (MQ-92…96), debugging tools (MQ-97…99), complex DOM structures (MQ-100…102),
-  singleton/process management (MQ-103…108), cross-platform (MQ-109…110), and
-  completeness tripwires (MQ-111…113). Of these, **91 already have live
+  singleton/process management (MQ-103…108), cross-platform (MQ-109…110),
+  completeness tripwires (MQ-111…113), **performance & resource budgets
+  (MQ-114…117, W9)**, **resilience / fault-injection (MQ-118…121, W10)**, and
+  **documentation examples (MQ-122, W11)**. Of these, **91 already have live
   automated tests** from the E2E-7/E2E-8 campaign and the singleton suite.
-  **22 new tests** to write (stealth=8, lifecycle/leak=4, negative-space=4,
-  transport/install=2, cross-platform CI=2, completeness=2). This file *is* the
-  coverage spec — writing a manual step you can't yet map is how a real gap gets
-  recorded.
+  **31 new tests** to write (stealth=8, lifecycle/leak=4, negative-space=4,
+  transport/install=2, cross-platform CI=2, completeness=2, **performance=4**,
+  **resilience=4**, **doc-examples=1**). This file *is* the coverage spec —
+  writing a manual step you can't yet map is how a real gap gets recorded.
+- **The manifest is extensible by design.** W8 builds the tripwire mechanism; the
+  perf (W9), resilience (W10) and doc-example (W11) steps are appended by those
+  workstreams, **each landing its MQ step and its test in the same commit** so
+  the parity tripwire is green at every checkpoint. No workstream may add a manual
+  step without its live test, or a test-less step — that is the whole point.
 - **Parity tripwire** — `tests/test_manual_qa_parity.py`: parses the protocol,
   asserts every `MQ-<n>` maps to ≥1 test that is **collected and not
   `skip`/`xfail`**, and (reverse) that no step is unmapped. A new manual step
@@ -407,6 +431,90 @@ plus a corpus that *grows toward* the population it can never fully enumerate.
 - **Zero-flake quarantine** — any test that flakes once is quarantined (out of the
   gate, tracked as a bug) within one cycle. By policy the blind-push gate contains
   **no** known-flaky test — otherwise "green" is not trustworthy enough to push on.
+
+### 2.9 W9 — performance & resource budgets (the "great performance" pillar)
+
+A functionally-green suite can hide a tool that is *correct but unusably slow* or
+that *leaks memory over a session*. W9 asserts the second half of "works super
+well": fast enough, bounded footprint. All budgets are measured against the
+**fixture app** (no live network), so they are **deterministic and gate** — the
+same reason W4's offline tier gates.
+
+- **Per-tool latency budgets (GATING)** — `tests/test_perf.py` (`integration` +
+  new `perf` marker) drives each tool class through the real transport K times and
+  asserts **p95 ≤ a budget**: e.g. `navigate` ≤ N s, `click_element`/`type_text`
+  ≤ M s, an extraction/clone ≤ K s. Budgets are set from observed baselines × a
+  safety factor (generous, so normal variance never flakes); a tool that silently
+  regresses to 10× its baseline turns the gate red. The budgets live in one
+  reviewed table at the top of the module, not scattered magic numbers.
+- **Memory / handle ceiling (GATING)** — run a defined workload (spawn → a fixed
+  sequence of navigations + interactions + extractions → close) under `psutil`;
+  assert peak RSS, fd count and child-process count stay under a ceiling **and
+  return to baseline after close**. Catches the leak class a short lifecycle test
+  (W8) misses because it never drives enough operations.
+- **Startup / handshake budget** — the subprocess spawn + MCP handshake completes
+  within a bound (reuses W1's `wait_for` wrapper). Cold-start latency is the first
+  thing a user feels; a regression here is user-visible.
+- **Large-payload stress (GATING, generous bound)** — a fixture page with a very
+  large DOM (≥10k nodes) plus a large captured-network set; assert
+  extraction/clone/export complete within a bounded time **and** memory, no OOM,
+  with correct output. This is where performance and correctness intersect on the
+  payloads that actually hurt.
+- **Perf-regression baseline lane (informational, in the W6 canary)** — store
+  per-tool timing baselines as an artifact; the canary compares each run and alerts
+  on a >X% regression. Non-gating (wall-clock is machine-variable) — the
+  early-warning for *gradual* slowdown that no single-run budget would catch.
+- **Discipline**: any measured breach that is a *product* perf bug → a
+  characterization pin + route (a new F-id), **never** a `src/` fix here (§1.2).
+  Budgets are tuned once against green baselines; padding a budget to hide a
+  regression is the §8.1 "score-chase" cheat and is banned.
+
+### 2.10 W10 — resilience / fault-injection (the dynamic edge cases)
+
+W8's negative-space steps are **static** (a disabled button, a readonly field).
+The edge cases users actually hit are **dynamic**: the browser dies, a tab vanishes,
+the network drops mid-operation. W10 injects those faults and asserts the tool
+**fails in a typed, recoverable way** — never a hang, never a raw `−32000`, never a
+silent wrong-`True`, and the server stays usable afterward. `tests/test_resilience.py`
+(`integration` marker; faults injected through the real transport where possible,
+harness/CDP where injection requires it).
+
+- **Crash recovery** (the single most important real-world fault — browsers *do*
+  crash) — terminate the Chrome child mid-session (`psutil` kill), then call the
+  next tool; assert a **typed error**, then assert a fresh `spawn_browser`
+  **succeeds** (the server didn't wedge, no orphaned process left behind).
+- **Tab-closed-under-tool** — close the active tab out of band, then call a
+  tab-scoped tool; assert a typed error, not a hang or silent success.
+- **Hanging / slow endpoint** — navigate to a fixture route that never completes
+  (and one that is deliberately slow); assert the tool honors its timeout and
+  returns a **typed timeout error within a bound**. This is the disciplined way to
+  characterize the hang-prone class (cf. the `get_cookies` real-Chrome hang, E2E
+  exempt) without wedging CI.
+- **Network drop mid-op** — via CDP `Network.emulateNetworkConditions` (offline) or
+  route-abort, cut connectivity mid-navigate / mid-capture; assert a typed error,
+  recoverable.
+- **Recovery invariant** — after *every* injected fault the server must be usable
+  again: close/respawn works and leaves no orphan (ties back to W9's ceiling). A
+  fault that leaves the server wedged is the finding; if it's a product bug it is
+  characterization-pinned + routed, not fixed here.
+
+### 2.11 W11 — documentation-example tests (docs never lie)
+
+A user's first five minutes are spent copy-pasting from the README. A broken
+example is a worse first impression than any internal bug, and no internal green
+catches it. `tests/test_doc_examples.py`:
+
+- **Extract-and-run** — parse fenced code blocks in `README.md` and `docs/*.md`
+  that are marked **runnable** (an explicit fence info-string / marker, so authors
+  opt in; prose and pseudo-code stay opt-out), execute each against the real
+  server + fixture, assert success.
+- **Claims-sync** — assert the README's advertised install command matches the
+  actual console-script name, and its advertised tool list is a subset of the live
+  `tools/list`. **Reuses W5's `gen_release_contract.py`** rather than a second
+  source of truth (ADDENDUM_LENSES: no second way of doing something) — docs can't
+  advertise a tool that isn't there.
+- **Scope**: only marked-runnable blocks; a doc example that hits a known-bug path
+  is pinned + flagged exactly like an MQ known-gap, never quietly deleted.
 
 ---
 
@@ -467,6 +575,26 @@ plus a corpus that *grows toward* the population it can never fully enumerate.
   processes; a nightly mutation run produces a kill-score baseline; adding an
   unmapped MQ step locally fails the tripwire (proof it bites). **Commit:**
   `RELEASE-8: manual-QA parity manifest + lifecycle/concurrency + mutation proof (blind-push bar)`.
+- **RELEASE-9 — W9 performance & resource budgets.** Add the `perf` marker;
+  `tests/test_perf.py` (latency budgets, memory/handle ceiling, startup budget,
+  large-payload stress) + the large-DOM fixture page + the canary baseline lane;
+  **append MQ-114…117 + their tests to the protocol** (parity tripwire stays
+  green). DoD: budget suite green twice (no flake on generous budgets); a
+  deliberately-slowed tool locally turns it RED (proof it bites); memory ceiling
+  holds and returns to baseline after close. **Commit:**
+  `RELEASE-9: performance & resource budgets — latency + memory ceiling + large-payload stress (great-performance pillar)`.
+- **RELEASE-10 — W10 resilience / fault-injection.** `tests/test_resilience.py`
+  (crash-recovery, tab-closed-under-tool, hanging-endpoint timeout, network-drop)
+  + the hanging fixture route; **append MQ-118…121 + their tests** (tripwire stays
+  green). DoD: every fault yields a typed error and a successful respawn; no test
+  hangs (all bounded); any wedge that surfaces is characterization-pinned + routed.
+  **Commit:** `RELEASE-10: resilience / fault-injection — typed-error + recovery under crash/close/timeout/network-drop (dynamic edge cases)`.
+- **RELEASE-11 — W11 documentation-example tests.** `tests/test_doc_examples.py`
+  (extract-and-run runnable blocks + claims-sync reusing `gen_release_contract.py`);
+  **append MQ-122 + its test** (tripwire stays green). DoD: every runnable README/docs
+  example green; breaking an example locally turns it RED; claims-sync catches a
+  fabricated tool name. **Commit:**
+  `RELEASE-11: documentation-example tests — every runnable README/docs snippet executes (docs never lie)`.
 
 ---
 
@@ -527,16 +655,20 @@ plus a corpus that *grows toward* the population it can never fully enumerate.
 - **The guarantee delivered** (two tiers — a proof and an asymptote):
   1. **Proven, absolute — for the surface under our control.** *If the RELEASE
      gate (unit + integration + transport + offline-stealth + install-smoke,
-     property-based DOM fuzz, on all supported OS × Chrome-version cells) is green
-     at a release SHA, then every advertised MCP tool has been driven end-to-end
-     through the real stdio protocol against real Chrome from a clean install on
-     each supported platform — **Linux, Windows and macOS, all three gating**
-     (human ruling 2026-07-15), which is what licenses the contract's explicit
-     "works on Linux, Windows and macOS" claim; every interaction/extraction invariant holds as a
-     **property** (not one case); stealth invariants hold **differentially**
-     (vanilla flagged, stealth not); and every known deviation is documented.*
-     This half is a genuine guarantee because the domain is closed (our code, our
-     protocol, our fixtures, pinned Chromes).
+     property-based DOM fuzz, **per-tool latency + memory-ceiling budgets**,
+     **fault-injection recovery**, on all supported OS × Chrome-version cells) is
+     green at a release SHA, then every advertised MCP tool has been driven
+     end-to-end through the real stdio protocol against real Chrome from a clean
+     install on each supported platform — **Linux, Windows and macOS, all three
+     gating** (human ruling 2026-07-15), which is what licenses the contract's
+     explicit "works on Linux, Windows and macOS" claim; every interaction/extraction
+     invariant holds as a **property** (not one case); every tool returns **within
+     a measured latency budget** with a **bounded memory footprint**; every injected
+     fault (crash, tab-close, timeout, network-drop) yields a **typed, recoverable**
+     error; stealth invariants hold **differentially** (vanilla flagged, stealth
+     not); and every known deviation is documented.* This half is a genuine
+     guarantee because the domain is closed (our code, our protocol, our fixtures,
+     pinned Chromes).
   2. **Asymptotic, monitored — for the open web.** Against arbitrary live sites
      the guarantee is not "it works" but a **convergent process**: a growing
      corpus that regresses-forever on everything seen, structural fuzz coverage of
