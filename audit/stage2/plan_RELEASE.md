@@ -1,11 +1,15 @@
 # plan_RELEASE (E2E-9) — Release-gate hardening: real-transport E2E, cross-platform CI, install smoke, stealth verification, release contract
 
-- **Status**: **DRAFT — awaiting human approval.** Not yet in the serial FIX queue.
-  Drafted 2026-07-14 by the orchestrator in answer to the directive: *"what is
-  remaining to get stealth-mcp stable into the market with E2E tests that
-  guarantee that if they pass, it'll be working perfectly for the user."* This
-  plan is the bridge from **audit-clean** to **market-shippable**. It is written
-  to be executed by an **Opus High-effort subagent** one workstream at a time.
+- **Status**: **APPROVED-IN-PRINCIPLE — all §7 decisions resolved (human,
+  2026-07-15); queued behind the audit FIX pipeline.** Not yet started; enters the
+  serial FIX queue after M4-Ph1+A1 → M5b → M14+A1 land (§ Position). Drafted
+  2026-07-14 by the orchestrator in answer to the directive: *"what is remaining to
+  get stealth-mcp stable into the market with E2E tests that guarantee that if they
+  pass, it'll be working perfectly for the user."* This plan is the bridge from
+  **audit-clean** to **market-shippable**. It is written to be executed by an
+  **Opus High-effort subagent** one workstream at a time. The four release choices
+  (three-OS gating, online detectors, smoke-blocks-publish, contract location) are
+  **settled** — see §7.
 - **Position in campaign**: executes **AFTER** the audit FIX pipeline lands
   (M4-Ph1+A1 → M5b → M14+A1) and its PRs merge through the human merge-gate, and
   **before** (or folded into) CODIFY. It depends on the known user-facing bugs
@@ -216,11 +220,13 @@ condition — flag to team-lead.
   version>` (or `pip install` the just-built wheel from `dist/`), then run the
   **W1 canonical journey** headless against a locally-served fixture copy, assert
   success, exit non-zero on any failure.
-- **Wire into `publish.yml`** as a **required job before `publish`** (`needs:`),
-  on `ubuntu-latest` + `windows-latest` + `macos-latest` — all three gating
-  (human ruling 2026-07-15): the "works on Linux, Windows and macOS" claim covers
-  the **install path** too, so a wheel that installs-and-runs on only two of the
-  three must **block the release tag**, not ship.
+- **Wire into `publish.yml`** as a **required, hard-blocking job before `publish`**
+  (`needs:`), on `ubuntu-latest` + `windows-latest` + `macos-latest` — all three
+  gating (human ruling 2026-07-15, §7 decision 3 RESOLVED = **block, not warn**):
+  the "works on Linux, Windows and macOS" claim covers the **install path** too,
+  so a wheel that installs-and-runs on only two of the three (or fails smoke on
+  any) **blocks the release tag** and nothing publishes. There is no warn-and-ship
+  path — a red smoke means no PyPI upload.
 - **CI dry-run**: add the same smoke as a non-blocking `workflow_dispatch` /
   nightly job in `test.yml` so packaging breakage is caught before tag time, not
   at release.
@@ -245,11 +251,15 @@ conflict:
   invariant. This tier is **deterministic and gates** (no external network).
 - **Online/informational tier (NON-GATING, opt-in)** — `stealth` only, **excluded
   from every default run and from the release gate**; runs on
-  `workflow_dispatch`/nightly. Drives the MCP against 1–2 well-known public
-  detector pages and records a report artifact. It **must not fail the build on a
-  detector score** (vendor-volatile) — it asserts only the same hard invariants
-  as the offline tier and logs the rest for human review. Network flakiness here
-  is expected and tolerated by design.
+  `workflow_dispatch`/nightly. Drives the MCP against the **two detector pages the
+  human chose (2026-07-15): CreepJS (`abrahamjuliot.github.io/creepjs`) and
+  `bot.incolumitas.com`** — both research-oriented and tolerant of automated
+  access — and records a report artifact (the full fingerprint/trust JSON + a
+  screenshot per page). It **must not fail the build on a detector score**
+  (vendor-volatile) — it asserts only the same hard invariants as the offline
+  tier and logs the rest for human review. Network flakiness here is expected and
+  tolerated by design. If either page later blocks automation or changes ToS, the
+  mitigation is to drop it and log the removal — never to make it gating.
 - **Marker wiring**: add `stealth: anti-bot/undetectability checks; offline tier
   gates, online tier is opt-in and non-gating` to `pyproject.toml` markers.
   Default `-m "not integration"` already excludes both tiers from the unit gate;
@@ -257,8 +267,9 @@ conflict:
 
 ### 2.5 W5 — release contract + limitations register + transport manifest
 
-- **`RELEASE_CONTRACT.md`** (repo root or `docs/`): the honest, checkable
-  guarantee. Sections:
+- **`RELEASE_CONTRACT.md`** (**repo root** — human ruling 2026-07-15, §7
+  decision 4 RESOLVED; it's a marketing-grade artifact and sits next to README):
+  the honest, checkable guarantee. Sections:
   1. **Supported matrix** — OS × Python × transport (stdio/http), each marked
      *verified-by* (which CI job). Opens with the headline claim **"works on
      Linux, Windows and macOS"** (human ruling 2026-07-15) — permitted precisely
@@ -425,8 +436,9 @@ plus a corpus that *grows toward* the population it can never fully enumerate.
   ubuntu+Windows+macOS in a dry-run; deliberately breaking package-data locally
   makes it RED (proof it bites). **Commit:** `RELEASE-3: clean-install smoke gating the release tag (G-C)`.
 - **RELEASE-4 — W4 stealth.** `stealth_probe.html` + `test_stealth.py` (offline
-  gating tier + online opt-in tier) + marker. DoD: offline tier green twice;
-  online tier runs under `workflow_dispatch` only and never in the default gate.
+  gating tier + online opt-in tier against **CreepJS + bot.incolumitas**) + marker.
+  DoD: offline tier green twice; online tier runs under `workflow_dispatch` only,
+  never in the default gate, and asserts invariants-only (never a detector score).
   **Commit:** `RELEASE-4: stealth invariant verification — offline gating + online informational (G-D)`.
 - **RELEASE-5 — W5 contract + manifest.** `RELEASE_CONTRACT.md`,
   `gen_release_contract.py`, transport coverage manifest test. DoD: manifest test
@@ -490,8 +502,10 @@ plus a corpus that *grows toward* the population it can never fully enumerate.
   wall-clock becomes a problem, the mitigation is splitting/parallelizing jobs,
   never demoting an OS to optional.
 - **Stealth online-tier flakiness / ToS** → non-gating, opt-in, invariant-only
-  asserts, ≤2 detector pages, results are artifacts for human review; never fails
-  the build on a score. Confirm the chosen detector pages permit automated access.
+  asserts, the two chosen detector pages (CreepJS + bot.incolumitas), results are
+  artifacts for human review; never fails the build on a score. Both pages are
+  research-oriented and automation-tolerant; if either changes ToS, drop-and-log
+  it — never make it gating.
 - **fastmcp 2.11.2 stdio API mismatch** → executor proves the API against the
   installed package **before** writing the suite; documented fallback is the `mcp`
   SDK client in the `test` extra only (runtime deps untouched — a STOP if that's
@@ -534,19 +548,23 @@ plus a corpus that *grows toward* the population it can never fully enumerate.
   Chrome versions that don't exist yet — see §8 for why that last step cannot be
   taken without cheating, and the specific cheats this plan refuses.
 
-## 7. Open decisions for the human (before approval)
+## 7. Decisions — ALL RESOLVED (human, 2026-07-15)
 
-1. ~~**macOS CI now or fast-follow?**~~ **RESOLVED (human, 2026-07-15): macOS
-   NOW, mandatory and gating alongside Linux and Windows** — the release
-   contract makes the strong claim "works on Linux, Windows and macOS", so all
-   three OSes run unit + integration + transport + install-smoke on every
-   PR/tag. The Windows-now/macOS-later recommendation is superseded.
-2. **Online stealth detector pages** — which 1–2, and are we comfortable with the
-   ToS of automated access? (Offline tier gates regardless.)
-3. **Release-gate composition** — should `install-smoke` block the **tag/publish**
-   (recommended) or only warn?
-4. **Contract location** — `RELEASE_CONTRACT.md` at repo root (user-visible) vs
-   `docs/`. Recommend root.
+No open decisions remain; the plan is fully specified for execution.
+
+1. ~~**macOS CI now or fast-follow?**~~ **RESOLVED: macOS NOW, mandatory and
+   gating alongside Linux and Windows** — the release contract makes the strong
+   claim "works on Linux, Windows and macOS", so all three OSes run unit +
+   integration + transport + install-smoke on every PR/tag. The
+   Windows-now/macOS-later recommendation is superseded.
+2. ~~**Online stealth detector pages**~~ **RESOLVED: CreepJS + bot.incolumitas**,
+   both research-oriented and automation-tolerant. Online tier is opt-in,
+   non-gating, invariant-only, artifact-producing; the offline probe gates
+   regardless. Either page may be dropped-and-logged if its ToS changes.
+3. ~~**Release-gate composition**~~ **RESOLVED: `install-smoke` HARD-BLOCKS
+   tag/publish** on all three OSes — no warn-and-ship path.
+4. ~~**Contract location**~~ **RESOLVED: `RELEASE_CONTRACT.md` at repo root**
+   (marketing-grade, sits next to README).
 
 ---
 
