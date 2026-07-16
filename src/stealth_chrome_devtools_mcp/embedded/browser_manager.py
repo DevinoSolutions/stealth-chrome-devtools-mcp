@@ -420,19 +420,14 @@ class BrowserManager:
             await self._idle_reaper_task
         self._idle_reaper_task = None
 
-    async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)
-        """
-        Spawn a new browser instance with given options.
+    def _build_instance(
+        self, instance_id: str, options: BrowserOptions
+    ) -> BrowserInstance:
+        """Construct the in-memory ``BrowserInstance`` record from spawn options.
 
-        Args:
-            options (BrowserOptions): Options for browser configuration.
-
-        Returns:
-            BrowserInstance: The spawned browser instance.
-        """
-        instance_id = str(uuid.uuid4())
-
-        instance = BrowserInstance(
+        Pure (no I/O); the first pipeline phase so the record exists for the
+        orchestrator's cleanup paths even if a later phase raises."""
+        return BrowserInstance(
             instance_id=instance_id,
             headless=options.headless,
             user_agent=options.user_agent,
@@ -442,86 +437,208 @@ class BrowserManager:
             },
         )
 
+    def _resolve_proxy(
+        self, options: BrowserOptions
+    ) -> tuple[ProxyConfig | None, AuthenticatedProxyForwarder | None, str | None]:
+        """Parse the proxy option and, for an authenticated proxy, CREATE (but not
+        start) the forwarder.
+
+        Returns ``(proxy_config, proxy_forwarder, launch_proxy_server)``. The
+        forwarder is returned un-started with ``launch_proxy_server`` ``None`` for
+        the authenticated case: the orchestrator starts it and derives its server
+        string, so the forwarder is owned by the caller's try/except (and torn
+        down) the instant it exists — mirroring the original
+        assign-before-``start`` ordering."""
+        if not options.proxy:
+            return None, None, None
+        try:
+            proxy_config = parse_proxy_config(options.proxy)
+        except ProxyConfigError as error:
+            raise Exception(str(error))  # noqa: B904  plan_M4ph1
+        if proxy_config.username is not None:
+            return proxy_config, AuthenticatedProxyForwarder(options.proxy), None
+        return proxy_config, None, proxy_config.server
+
+    def _resolve_launch_args(
+        self,
+        options: BrowserOptions,
+        launch_proxy_server: str | None,
+        platform_info: dict[str, Any],
+    ) -> tuple[list[str], str, list[str]]:
+        """Detect the browser executable and assemble the stealth-filtered launch
+        arguments.
+
+        Returns ``(launch_args, browser_executable, stealth_warnings)``; raises if
+        no compatible browser is found. Pure apart from the executable probe.
+        ``--no-sandbox`` is re-added after the stealth filter when the sandbox is
+        explicitly disabled (a deliberate operator choice, not an accidental
+        automation leak)."""
+        # Detect the best available browser executable (Chrome, Chromium, or Edge)
+        browser_executable = check_browser_executable()
+        if not browser_executable:
+            raise Exception(
+                "No compatible browser found (Chrome, Chromium, or Microsoft Edge)"
+            )
+
+        # Identify browser type for logging
+        browser_type = "Unknown"
+        if (
+            "edge" in browser_executable.lower()
+            or "msedge" in browser_executable.lower()
+        ):
+            browser_type = "Microsoft Edge"
+        elif "chromium" in browser_executable.lower():
+            browser_type = "Chromium"
+        elif "chrome" in browser_executable.lower():
+            browser_type = "Google Chrome"
+
+        debug_logger.log_info(
+            "browser_manager",
+            "spawn_browser",
+            f"Platform: {platform_info['system']} | "
+            f"Root: {platform_info['is_root']} | "
+            f"Container: {platform_info['is_container']} | "
+            f"Sandbox: {options.sandbox} | "
+            f"Browser: {browser_type} ({browser_executable})",
+        )
+
+        caller_args = list(options.browser_args or [])
+        caller_args = self._append_user_agent_arg(caller_args, options.user_agent)
+        caller_args = merge_proxy_server_arg(
+            caller_args,
+            launch_proxy_server,
+        )
+        launch_args, stealth_warnings = merge_browser_args(caller_args)
+        if stealth_warnings:
+            debug_logger.log_warning(
+                "browser_manager",
+                "stealth_filter",
+                f"Stripped {len(stealth_warnings)} detectable arg(s): "
+                + "; ".join(stealth_warnings),
+            )
+
+        # When sandbox is explicitly disabled, ensure --no-sandbox is present
+        # in launch args (added after stealth filter since this is a deliberate
+        # platform/user choice, not an accidental automation leak).
+        if options.sandbox is False and "--no-sandbox" not in launch_args:
+            launch_args.append("--no-sandbox")
+
+        return launch_args, browser_executable, stealth_warnings
+
+    async def _launch_browser(
+        self,
+        options: BrowserOptions,
+        browser_executable: str,
+        launch_args: list[str],
+    ) -> Browser:
+        """Build the ``uc.Config`` and start the browser, returning the live
+        ``Browser``.
+
+        Kept minimal — only the fallible ``uc.start`` await lives here — so the
+        orchestrator captures the browser handle immediately and can tear it down
+        if any later phase raises."""
+        config = uc.Config(
+            headless=options.headless,
+            user_data_dir=options.user_data_dir,
+            sandbox=options.sandbox,
+            browser_executable_path=browser_executable,
+            browser_args=launch_args,
+        )
+
+        return await uc.start(config=config)
+
+    async def _apply_post_launch(  # noqa: PLR0913  PERMANENT(function interface)
+        self,
+        browser: Browser,
+        tab: Tab,
+        options: BrowserOptions,
+        instance_id: str,
+        actual_user_data_dir: str | None,
+        uses_custom_data_dir: bool,
+    ) -> str | None:
+        """Register the process for cleanup and apply the per-instance CDP
+        overrides (extra headers, viewport, timezone).
+
+        Returns the applied IANA timezone id (or ``None``). Runs after the browser
+        is orchestrator-owned, so a failure here still routes through the spawn
+        cleanup path."""
+        if hasattr(browser, "_process") and browser._process:
+            process_cleanup.track_browser_process(
+                instance_id,
+                browser._process,
+                user_data_dir=actual_user_data_dir,
+                uses_custom_data_dir=uses_custom_data_dir,
+                auto_clone=options.auto_clone,
+            )
+        else:
+            debug_logger.log_warning(
+                "browser_manager",
+                "spawn_browser",
+                f"Browser {instance_id} has no process to track",
+            )
+
+        if options.extra_headers:
+            await tab.send(
+                uc.cdp.network.set_extra_http_headers(headers=options.extra_headers)
+            )
+
+        await tab.set_window_size(
+            left=0,
+            top=0,
+            width=options.viewport_width,
+            height=options.viewport_height,
+        )
+        debug_logger.log_info(
+            "browser_manager",
+            "spawn_browser",
+            f"Set viewport to {options.viewport_width}x{options.viewport_height}",
+        )
+
+        return await self._apply_timezone_override(
+            tab=tab,
+            timezone_id=options.timezone_id,
+        )
+
+    async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)
+        """
+        Spawn a new browser instance with given options.
+
+        Orchestrates the spawn pipeline (``_build_instance`` → ``_resolve_proxy``
+        → ``_resolve_launch_args`` → ``_launch_browser`` → ``_apply_post_launch``)
+        under one try/except that owns the cancel/error cleanup. ``browser`` and
+        ``proxy_forwarder`` are held as orchestrator locals so a failure at any
+        phase tears down whatever was already created.
+
+        Args:
+            options (BrowserOptions): Options for browser configuration.
+
+        Returns:
+            BrowserInstance: The spawned browser instance.
+        """
+        instance_id = str(uuid.uuid4())
+        instance = self._build_instance(instance_id, options)
+
         browser: Browser | None = None
         proxy_forwarder: AuthenticatedProxyForwarder | None = None
         try:
             platform_info = get_platform_info()
-            proxy_config: ProxyConfig | None = None
-            launch_proxy_server: str | None = None
             idle_timeout_seconds = self._resolve_idle_timeout_seconds(
                 options.idle_timeout_seconds,
             )
-            if options.proxy:
-                try:
-                    proxy_config = parse_proxy_config(options.proxy)
-                except ProxyConfigError as error:
-                    raise Exception(str(error))  # noqa: B904  plan_M4ph1
-                if proxy_config.username is not None:
-                    proxy_forwarder = AuthenticatedProxyForwarder(options.proxy)
-                    await proxy_forwarder.start()
-                    launch_proxy_server = proxy_forwarder.proxy_server
-                else:
-                    launch_proxy_server = proxy_config.server
+            proxy_config, proxy_forwarder, launch_proxy_server = self._resolve_proxy(
+                options
+            )
+            if proxy_forwarder is not None:
+                await proxy_forwarder.start()
+                launch_proxy_server = proxy_forwarder.proxy_server
 
-            # Detect the best available browser executable (Chrome, Chromium, or Edge)
-            browser_executable = check_browser_executable()
-            if not browser_executable:
-                raise Exception(  # noqa: TRY301  plan_M4ph1
-                    "No compatible browser found (Chrome, Chromium, or Microsoft Edge)"
-                )
-
-            # Identify browser type for logging
-            browser_type = "Unknown"
-            if (
-                "edge" in browser_executable.lower()
-                or "msedge" in browser_executable.lower()
-            ):
-                browser_type = "Microsoft Edge"
-            elif "chromium" in browser_executable.lower():
-                browser_type = "Chromium"
-            elif "chrome" in browser_executable.lower():
-                browser_type = "Google Chrome"
-
-            debug_logger.log_info(
-                "browser_manager",
-                "spawn_browser",
-                f"Platform: {platform_info['system']} | "
-                f"Root: {platform_info['is_root']} | "
-                f"Container: {platform_info['is_container']} | "
-                f"Sandbox: {options.sandbox} | "
-                f"Browser: {browser_type} ({browser_executable})",
+            launch_args, browser_executable, stealth_warnings = (
+                self._resolve_launch_args(options, launch_proxy_server, platform_info)
             )
 
-            caller_args = list(options.browser_args or [])
-            caller_args = self._append_user_agent_arg(caller_args, options.user_agent)
-            caller_args = merge_proxy_server_arg(
-                caller_args,
-                launch_proxy_server,
+            browser = await self._launch_browser(
+                options, browser_executable, launch_args
             )
-            launch_args, stealth_warnings = merge_browser_args(caller_args)
-            if stealth_warnings:
-                debug_logger.log_warning(
-                    "browser_manager",
-                    "stealth_filter",
-                    f"Stripped {len(stealth_warnings)} detectable arg(s): "
-                    + "; ".join(stealth_warnings),
-                )
-
-            # When sandbox is explicitly disabled, ensure --no-sandbox is present
-            # in launch args (added after stealth filter since this is a deliberate
-            # platform/user choice, not an accidental automation leak).
-            if options.sandbox is False and "--no-sandbox" not in launch_args:
-                launch_args.append("--no-sandbox")
-
-            config = uc.Config(
-                headless=options.headless,
-                user_data_dir=options.user_data_dir,
-                sandbox=options.sandbox,
-                browser_executable_path=browser_executable,
-                browser_args=launch_args,
-            )
-
-            browser = await uc.start(config=config)
             tab = browser.main_tab
             config_obj = getattr(browser, "config", None)
             actual_user_data_dir = getattr(
@@ -533,41 +650,13 @@ class BrowserManager:
                 bool(options.user_data_dir),
             )
 
-            if hasattr(browser, "_process") and browser._process:
-                process_cleanup.track_browser_process(
-                    instance_id,
-                    browser._process,
-                    user_data_dir=actual_user_data_dir,
-                    uses_custom_data_dir=uses_custom_data_dir,
-                    auto_clone=options.auto_clone,
-                )
-            else:
-                debug_logger.log_warning(
-                    "browser_manager",
-                    "spawn_browser",
-                    f"Browser {instance_id} has no process to track",
-                )
-
-            if options.extra_headers:
-                await tab.send(
-                    uc.cdp.network.set_extra_http_headers(headers=options.extra_headers)
-                )
-
-            await tab.set_window_size(
-                left=0,
-                top=0,
-                width=options.viewport_width,
-                height=options.viewport_height,
-            )
-            debug_logger.log_info(
-                "browser_manager",
-                "spawn_browser",
-                f"Set viewport to {options.viewport_width}x{options.viewport_height}",
-            )
-
-            applied_timezone_id = await self._apply_timezone_override(
-                tab=tab,
-                timezone_id=options.timezone_id,
+            applied_timezone_id = await self._apply_post_launch(
+                browser,
+                tab,
+                options,
+                instance_id,
+                actual_user_data_dir,
+                uses_custom_data_dir,
             )
 
             await self._setup_dynamic_hooks(tab, instance_id)
