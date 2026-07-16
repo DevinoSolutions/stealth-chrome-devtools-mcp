@@ -522,6 +522,10 @@ async def get_instance_state(instance_id: str) -> dict[str, Any] | None:
     """
     timeout_seconds = get_settings().browser_state_timeout_seconds
     try:
+        # F-164 non-CDP: bounds a multi-step page-state aggregation with its own
+        # browser_state_timeout_seconds budget; the except paths below return an
+        # honest partial record (F-746), not the generic CDP-timeout error that
+        # _with_cdp_timeout raises — so this is deliberately not that wrapper.
         state = await asyncio.wait_for(
             browser_manager.get_page_state(instance_id),
             timeout=timeout_seconds,
@@ -1558,6 +1562,9 @@ async def clear_debug_view() -> bool:
         bool: True if cleared successfully.
     """
     try:
+        # F-164 non-CDP: guards a thread-offloaded debug-logger clear (no CDP);
+        # a timeout is this tool's documented ``-> bool`` False path, not a CDP
+        # hang, so it is deliberately not routed through _with_cdp_timeout.
         await asyncio.wait_for(
             asyncio.to_thread(debug_logger.clear_debug_view_safe), timeout=10.0
         )
@@ -1594,6 +1601,9 @@ async def export_debug_logs(
         str: Path to the exported file.
     """
     try:
+        # F-164 non-CDP: guards a thread-offloaded file export (no CDP); a timeout
+        # returns this tool's ``-> str`` guidance string, not a CDP-hang error, so
+        # it is deliberately not routed through _with_cdp_timeout.
         filepath = await asyncio.wait_for(
             asyncio.to_thread(
                 debug_logger.export_to_file_paginated,

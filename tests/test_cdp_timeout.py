@@ -8,6 +8,7 @@ Verifies that:
 """
 
 import asyncio
+import re
 import time
 from pathlib import Path
 
@@ -408,6 +409,77 @@ class TestFastTimeoutFailure:
         # We don't actually wait 60s — just verify the clamp produces
         # a value that _with_cdp_timeout can use (i.e. not infinity).
         assert clamped / 1000 <= 60.0
+
+
+# ---------------------------------------------------------------------------
+# F-164 (C5): _with_cdp_timeout is the single canonical CDP-timeout wrapper.
+# ---------------------------------------------------------------------------
+
+
+class TestWithCdpTimeoutIsCanonical:
+    """Guards the F-164 convention: every CDP await in server.py is bounded by
+    the ONE wrapper, ``_with_cdp_timeout``. Any *other* ``asyncio.wait_for`` in
+    server.py must be a deliberately non-CDP guard, tagged ``# F-164 non-CDP`` so
+    a future edit cannot silently introduce a second CDP-timeout mechanism (a
+    conventions defect). This turns "one way to bound a CDP await" into an
+    enforced invariant rather than a convention on trust.
+
+    RED before C5 tags the three non-CDP sites (``get_instance_state`` state
+    collection, ``clear_debug_view`` / ``export_debug_logs`` thread offloads),
+    each of which uses its own timeout + a deliberate fallback contract and so is
+    intentionally NOT routed through ``_with_cdp_timeout``."""
+
+    EXEMPTION_MARKER = "# F-164 non-CDP"
+
+    def _server_source_lines(self):
+        import stealth_chrome_devtools_mcp.embedded.server as srv
+
+        return Path(srv.__file__).read_text(encoding="utf-8").splitlines()
+
+    def _wrapper_line_range(self, lines):
+        """Return the [start, end) line index range of the ``_with_cdp_timeout``
+        definition (its own ``asyncio.wait_for`` is the canonical one)."""
+        start = None
+        for i, line in enumerate(lines):
+            if re.match(r"async def _with_cdp_timeout\b", line):
+                start = i
+                break
+        assert start is not None, "_with_cdp_timeout must be defined in server.py"
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            # next module-level (column-0) statement ends the function body.
+            if lines[j] and not lines[j][0].isspace():
+                end = j
+                break
+        return start, end
+
+    def test_with_cdp_timeout_defined_exactly_once(self):
+        lines = self._server_source_lines()
+        defs = [
+            line
+            for line in lines
+            if re.match(r"\s*async def _with_cdp_timeout\b", line)
+        ]
+        assert len(defs) == 1, f"expected one _with_cdp_timeout, found {len(defs)}"
+
+    def test_raw_wait_for_sites_are_wrapper_or_marked_non_cdp(self):
+        lines = self._server_source_lines()
+        w_start, w_end = self._wrapper_line_range(lines)
+        offenders = []
+        for i, line in enumerate(lines):
+            if "asyncio.wait_for(" not in line:
+                continue
+            if w_start <= i < w_end:
+                continue  # the canonical wrapper's own wait_for — allowed.
+            # A raw wait_for anywhere else must be an explicit non-CDP guard.
+            window = "\n".join(lines[max(0, i - 6) : i + 1])
+            if self.EXEMPTION_MARKER not in window:
+                offenders.append(i + 1)  # 1-based line number
+        assert not offenders, (
+            "raw asyncio.wait_for outside _with_cdp_timeout without a "
+            f"'{self.EXEMPTION_MARKER}' exemption at server.py line(s) {offenders}; "
+            "CDP awaits must go through _with_cdp_timeout (F-164)."
+        )
 
 
 # ---------------------------------------------------------------------------
