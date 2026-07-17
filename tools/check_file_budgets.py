@@ -32,7 +32,21 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # bump rationale as server.py above, cross-review-confirmed there).
     # + 3 (plan_M7 step M7-1: close_instance restructured into 4 phases with
     # _blocking_teardown extracted + _close_proxy_forwarder_ref helper).
-    "embedded/browser_manager.py": (1452, "DEBT(F-702) + plan_M10a + plan_M7"),
+    # + 80 (plan_M4ph1 C4 / M13 / F-208: spawn_browser's ~230-line god-method
+    # extracted IN PLACE into 5 testable sub-methods (_build_instance,
+    # _resolve_proxy, _resolve_launch_args, _launch_browser, _apply_post_launch)
+    # plus the orchestrator. This is method-boundary overhead (signatures,
+    # returns, ruff-mandated separators), NOT logic growth: the exact
+    # modularity/testability gain the budget gate exists to encourage, so it
+    # cannot fit the prior no-grow headroom. Unlike C1's server.py ratchet-DOWN
+    # (code physically left the file), this is an in-file split with no offset,
+    # so it is a net increase. GRANDFATHERED at the actual ruff-clean LOC (cap
+    # == actual, no padding) per the human gate ruling 2026-07-17. No-grow
+    # applies from this commit forward.
+    "embedded/browser_manager.py": (
+        1532,
+        "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1",
+    ),
     # + 27 (plan_M7 step M7-2: _fallback_pid_identity_ok shared predicate +
     # non-recovery fallback identity check + recovery branch refactored).
     "embedded/process_cleanup.py": (1054, "plan_M11a_M15 + plan_M7"),
