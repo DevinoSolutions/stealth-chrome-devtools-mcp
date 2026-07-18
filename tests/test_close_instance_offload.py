@@ -14,9 +14,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from browser_manager import BrowserManager
-from debug_logger import debug_logger
-from models import BrowserInstance, BrowserState
+
+from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserState
 
 
 def _noop_coro():
@@ -70,18 +71,20 @@ def _seed_manager(manager: BrowserManager, instance_id: str = "test-1"):
 
 
 PATCHES = {
-    "process_cleanup.kill_browser_process": MagicMock(),
-    "process_cleanup.finalize_browser_process": MagicMock(),
-    "process_cleanup.cleanup_deferred_profiles": MagicMock(),
-    "in_memory_storage.remove_instance": MagicMock(),
+    "stealth_chrome_devtools_mcp.embedded.process_cleanup.kill_browser_process": MagicMock(),
+    "stealth_chrome_devtools_mcp.embedded.process_cleanup.finalize_browser_process": MagicMock(),
+    "stealth_chrome_devtools_mcp.embedded.process_cleanup.cleanup_deferred_profiles": MagicMock(),
+    "stealth_chrome_devtools_mcp.embedded.in_memory_storage.remove_instance": MagicMock(),
 }
 
 
 @pytest.fixture(autouse=True)
 def _isolate_process_cleanup(monkeypatch):
     """Stub out process_cleanup and in_memory_storage so no real OS work happens."""
-    from in_memory_storage import in_memory_storage as ps
-    from process_cleanup import process_cleanup
+    from stealth_chrome_devtools_mcp.embedded.in_memory_storage import (
+        in_memory_storage as ps,
+    )
+    from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 
     monkeypatch.setattr(process_cleanup, "kill_browser_process", MagicMock())
     monkeypatch.setattr(process_cleanup, "finalize_browser_process", MagicMock())
@@ -105,7 +108,7 @@ async def test_loop_stays_responsive_during_stuck_kill(monkeypatch):
     """
     import threading
 
-    from process_cleanup import process_cleanup
+    from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 
     kill_call_count = 0
     kill_done = threading.Event()
@@ -251,7 +254,9 @@ async def test_concurrent_close_exactly_one_claims(monkeypatch):
 @pytest.mark.asyncio
 async def test_happy_path_fast_kill(monkeypatch):
     """Fast stubbed kill: returns True, instance removed, in_memory_storage called."""
-    from in_memory_storage import in_memory_storage as ps
+    from stealth_chrome_devtools_mcp.embedded.in_memory_storage import (
+        in_memory_storage as ps,
+    )
 
     storage_mock = MagicMock()
     monkeypatch.setattr(ps, "remove_instance", storage_mock)

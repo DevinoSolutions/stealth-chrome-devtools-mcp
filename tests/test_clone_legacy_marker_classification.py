@@ -25,8 +25,14 @@ import json
 import os
 
 import pytest
-import server
-from server import _clone_is_auto, _enforce_clone_storage_cap_in
+
+from stealth_chrome_devtools_mcp.embedded import clone_storage
+from stealth_chrome_devtools_mcp.embedded.clone_storage import (
+    _enforce_clone_storage_cap_in,
+)
+from stealth_chrome_devtools_mcp.embedded.clone_storage import (
+    clone_is_auto as _clone_is_auto,
+)
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
@@ -34,9 +40,9 @@ MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 @pytest.fixture(autouse=True)
 def _isolate_protected_registry():
     """The protected-dir registry is module-global; keep it hermetic per test."""
-    server._clear_protected_clone_dirs()
+    clone_storage._clear_protected_clone_dirs()
     yield
-    server._clear_protected_clone_dirs()
+    clone_storage._clear_protected_clone_dirs()
 
 
 def _write_marker(clone_dir, data):
@@ -132,7 +138,9 @@ class TestSweepNeverDeletesLegacyNamedProfile:
 
         # No running browser and nothing protected: only classification stands
         # between the business profile and deletion.
-        monkeypatch.setattr(server, "_profile_has_running_browser", lambda p: False)
+        monkeypatch.setattr(
+            clone_storage, "_profile_has_running_browser", lambda p: False
+        )
 
         removed = _enforce_clone_storage_cap_in(tmp_path, cap_bytes=6000)
 
@@ -150,7 +158,9 @@ class TestSweepNeverDeletesLegacyNamedProfile:
             tmp_path, "stealth-auto", size_bytes=8000, auto_clean=True
         )
         _set_mtime(auto, 1_000)
-        monkeypatch.setattr(server, "_profile_has_running_browser", lambda p: False)
+        monkeypatch.setattr(
+            clone_storage, "_profile_has_running_browser", lambda p: False
+        )
 
         removed = _enforce_clone_storage_cap_in(tmp_path, cap_bytes=1000)
 

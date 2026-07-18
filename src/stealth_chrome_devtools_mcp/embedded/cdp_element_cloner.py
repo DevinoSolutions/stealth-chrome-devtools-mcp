@@ -19,7 +19,9 @@ from datetime import datetime
 from typing import Any
 
 import nodriver as uc
-from debug_logger import debug_logger
+
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.element_resolution import query_selector_all
 
 
 class CDPElementCloner:
@@ -54,8 +56,7 @@ class CDPElementCloner:
             await tab.send(uc.cdp.dom.enable())
             await tab.send(uc.cdp.css.enable())
             await tab.send(uc.cdp.runtime.enable())
-            doc = await tab.send(uc.cdp.dom.get_document())
-            nodes = await tab.send(uc.cdp.dom.query_selector_all(doc.node_id, selector))
+            nodes = await query_selector_all(tab, selector)
             if not nodes:
                 return {"error": f"Element not found: {selector}"}
             node_id = nodes[0]

@@ -14,8 +14,9 @@ import logging
 import os
 
 import pytest
-import singleton
-from logging_setup import (
+
+from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded.logging_setup import (
     configure_logging,
     correlation_id_var,
     new_correlation_id,

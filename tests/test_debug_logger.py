@@ -8,7 +8,7 @@ These are the memory-safety properties the server relies on during
 long-lived sessions.
 """
 
-from debug_logger import DebugLogger
+from stealth_chrome_devtools_mcp.embedded.debug_logger import DebugLogger
 
 
 class TestEnableGating:
@@ -115,7 +115,9 @@ class TestErrorDedup:
         assert log.get_debug_view()["summary"]["total_errors"] == total_before + 1
 
     def test_error_entry_stamped_with_correlation_id(self):
-        from logging_setup import correlation_id_var
+        from stealth_chrome_devtools_mcp.embedded.logging_setup import (
+            correlation_id_var,
+        )
 
         log = DebugLogger()
         log.enable()

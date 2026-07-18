@@ -13,11 +13,13 @@ Pure filesystem tests: no browser.
 
 import json
 
-import server
-from server import (
-    _clone_is_named,
+from stealth_chrome_devtools_mcp.embedded import clone_storage
+from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     _enforce_named_profile_trim_in,
     _trim_profile_regenerable,
+)
+from stealth_chrome_devtools_mcp.embedded.clone_storage import (
+    clone_is_named as _clone_is_named,
 )
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
@@ -133,6 +135,8 @@ class TestNamedProfileTrimCap:
 
     def test_never_trims_running_profile(self, tmp_path, monkeypatch):
         d = _named_profile(tmp_path, "github", model_mb=50)
-        monkeypatch.setattr(server, "_profile_has_running_browser", lambda p: True)
+        monkeypatch.setattr(
+            clone_storage, "_profile_has_running_browser", lambda p: True
+        )
         assert _enforce_named_profile_trim_in(tmp_path, cap_bytes=1024) == 0
         assert (d / "OptGuideOnDeviceModel").exists()

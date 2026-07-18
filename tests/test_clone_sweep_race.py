@@ -21,8 +21,11 @@ import json
 import os
 
 import pytest
-import server
-from server import _enforce_clone_storage_cap_in
+
+from stealth_chrome_devtools_mcp.embedded import clone_storage
+from stealth_chrome_devtools_mcp.embedded.clone_storage import (
+    _enforce_clone_storage_cap_in,
+)
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
@@ -30,9 +33,9 @@ MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 @pytest.fixture(autouse=True)
 def _isolate_protected_registry():
     """The protected-dir registry is module-global; keep it hermetic per test."""
-    server._clear_protected_clone_dirs()
+    clone_storage._clear_protected_clone_dirs()
     yield
-    server._clear_protected_clone_dirs()
+    clone_storage._clear_protected_clone_dirs()
 
 
 def _make_clone(root, name, *, size_bytes, source_kind="master-snapshot"):
@@ -71,15 +74,17 @@ class TestProtectedInFlightClone:
 
         # In-flight: marker on disk, but Chrome has not attached yet, so the
         # filesystem heuristic (correctly) reports "not running".
-        monkeypatch.setattr(server, "_profile_has_running_browser", lambda p: False)
+        monkeypatch.setattr(
+            clone_storage, "_profile_has_running_browser", lambda p: False
+        )
 
-        server._protect_clone_dir(protected)
+        clone_storage._protect_clone_dir(protected)
         try:
             # ~16 KB total, cap 6 KB. Oldest is the protected in-flight clone, so
             # the idle one must be reclaimed instead — the session survives.
             removed = _enforce_clone_storage_cap_in(tmp_path, cap_bytes=6000)
         finally:
-            server._release_clone_dir(protected)
+            clone_storage._release_clone_dir(protected)
 
         assert protected.exists(), "protected in-flight clone must not be evicted"
         assert not idle.exists(), "the idle clone should be reclaimed instead"
@@ -88,10 +93,12 @@ class TestProtectedInFlightClone:
     def test_released_clone_becomes_evictable_again(self, tmp_path, monkeypatch):
         d = _make_clone(tmp_path, "sess", size_bytes=8000)
         _set_mtime(d, 1_000)
-        monkeypatch.setattr(server, "_profile_has_running_browser", lambda p: False)
+        monkeypatch.setattr(
+            clone_storage, "_profile_has_running_browser", lambda p: False
+        )
 
-        server._protect_clone_dir(d)
-        server._release_clone_dir(d)
+        clone_storage._protect_clone_dir(d)
+        clone_storage._release_clone_dir(d)
 
         # Once released (instance closed), the clone is a normal reclaim target.
         removed = _enforce_clone_storage_cap_in(tmp_path, cap_bytes=1000)
@@ -105,13 +112,15 @@ class TestProtectedInFlightClone:
         # the spawn flow registered.
         d = _make_clone(tmp_path, "norm", size_bytes=8000)
         _set_mtime(d, 1_000)
-        monkeypatch.setattr(server, "_profile_has_running_browser", lambda p: False)
+        monkeypatch.setattr(
+            clone_storage, "_profile_has_running_browser", lambda p: False
+        )
 
-        server._protect_clone_dir(str(d) + os.sep)  # trailing-separator variant
+        clone_storage._protect_clone_dir(str(d) + os.sep)  # trailing-separator variant
         try:
             removed = _enforce_clone_storage_cap_in(tmp_path, cap_bytes=1000)
         finally:
-            server._release_clone_dir(str(d) + os.sep)
+            clone_storage._release_clone_dir(str(d) + os.sep)
 
         assert d.exists(), "normalized-path protection must shield the same dir"
         assert removed == 0
@@ -127,9 +136,9 @@ class TestSpawnFlowProtectsClone:
         # Force the clone branch by making the master profile look busy.
         (tmp_session_root["master"] / "SingletonLock").write_text("lock")
 
-        result = await server._resolve_profile_selection(None)
+        result = await clone_storage.resolve_profile_selection(None)
 
         assert result["profile_role"] == "clone"
-        assert server._clone_dir_is_protected(result["user_data_dir"]), (
+        assert clone_storage._clone_dir_is_protected(result["user_data_dir"]), (
             "spawn flow must protect the clone dir before its marker is written"
         )

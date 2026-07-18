@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 import nodriver as uc
-from debug_logger import debug_logger
-from models import NetworkRequest, NetworkResponse
 from nodriver import Tab
 
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.models import NetworkRequest, NetworkResponse
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 

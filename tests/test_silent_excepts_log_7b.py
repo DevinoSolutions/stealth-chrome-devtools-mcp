@@ -13,7 +13,8 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from models import NetworkRequest
+
+from stealth_chrome_devtools_mcp.embedded.models import NetworkRequest
 
 
 @pytest.fixture()
@@ -46,7 +47,9 @@ class TestNetworkInterceptorSilentExcepts:
     async def test_get_response_body_unexpected_error_logs_at_debug(
         self, captured_backend_records
     ):
-        from network_interceptor import NetworkInterceptor
+        from stealth_chrome_devtools_mcp.embedded.network_interceptor import (
+            NetworkInterceptor,
+        )
 
         ni = NetworkInterceptor()
         tab = MagicMock()
@@ -64,7 +67,9 @@ class TestNetworkInterceptorSilentExcepts:
     async def test_on_response_unexpected_body_error_logs_at_debug(
         self, captured_backend_records
     ):
-        from network_interceptor import NetworkInterceptor
+        from stealth_chrome_devtools_mcp.embedded.network_interceptor import (
+            NetworkInterceptor,
+        )
 
         ni = NetworkInterceptor()
         # Body capture is opt-in (M9-2/F-605); enable it so _on_response actually
@@ -93,7 +98,9 @@ class TestNetworkInterceptorSilentExcepts:
     async def test_search_requests_undecodable_body_logs_at_debug(
         self, captured_backend_records
     ):
-        from network_interceptor import NetworkInterceptor
+        from stealth_chrome_devtools_mcp.embedded.network_interceptor import (
+            NetworkInterceptor,
+        )
 
         ni = NetworkInterceptor()
         req = NetworkRequest(
@@ -135,7 +142,9 @@ class TestNetworkInterceptorSilentExcepts:
 
 
 def _make_matching_response_hook():
-    from dynamic_hook_system import DynamicHookSystem
+    from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import (
+        DynamicHookSystem,
+    )
 
     system = DynamicHookSystem()
     return system
@@ -146,7 +155,7 @@ class TestDynamicHookSystemSilentExcepts:
     async def test_response_header_normalization_failure_logs_at_warning(
         self, captured_backend_records
     ):
-        from dynamic_hook_system import RequestInfo
+        from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import RequestInfo
 
         system = _make_matching_response_hook()
         hook_id = await system.create_hook(

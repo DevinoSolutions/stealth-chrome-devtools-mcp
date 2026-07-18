@@ -16,7 +16,7 @@ Written against HEAD these assertions FAIL (both tools are still registered via
 pass. That red→green inversion is the pin.
 """
 
-import server
+from stealth_chrome_devtools_mcp.embedded import server
 
 
 def test_hot_reload_tool_removed():

@@ -15,29 +15,16 @@ import argparse
 import asyncio
 import gc
 import os
-import sys
 import time
 
 import psutil
 
-# Add the embedded source to path so we can import directly
-sys.path.insert(
-    0,
-    os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "src",
-        "stealth_chrome_devtools_mcp",
-        "embedded",
-    ),
-)
-
-from browser_manager import BrowserManager
-from debug_logger import debug_logger
-from dynamic_hook_system import dynamic_hook_system
-from in_memory_storage import in_memory_storage
-from models import BrowserOptions
-from network_interceptor import NetworkInterceptor
+from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
+from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
+from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
+from stealth_chrome_devtools_mcp.embedded.network_interceptor import NetworkInterceptor
 
 # Enable debug logging so the DebugLogger lists accumulate (leak vector)
 debug_logger.enable()

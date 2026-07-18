@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from logging_setup import correlation_id_var
+from stealth_chrome_devtools_mcp.embedded.logging_setup import correlation_id_var
 
 # The durable half of F-182/F-304: every log_error/log_warning/log_info call
 # also emits here (unconditionally - see the gate removed in each method

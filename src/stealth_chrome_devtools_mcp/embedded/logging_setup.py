@@ -129,7 +129,7 @@ def resolve_log_dir() -> Path:
     if configured and configured.strip():
         return Path(configured).expanduser()
 
-    import singleton  # deferred: breaks the singleton<->logging_setup cycle
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     return singleton.STATE_DIR / "logs"
 

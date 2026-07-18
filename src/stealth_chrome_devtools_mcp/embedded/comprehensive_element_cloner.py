@@ -15,14 +15,9 @@ Key features:
 - Child element extraction with depth tracking
 """
 
-import sys
-from pathlib import Path
 from typing import Any
 
-project_root = Path(__file__).parent
-sys.path.append(str(project_root))
-
-from debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 
 class ComprehensiveElementCloner:

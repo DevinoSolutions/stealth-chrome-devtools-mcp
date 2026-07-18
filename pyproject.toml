@@ -188,6 +188,14 @@ ban-relative-imports = "all"
     "PTH105", "PTH108", "PTH109", "PTH123", "RET504", "RUF013", "S102",
     "S112", "SIM105", "T201", "TID251", "TRY002", "TRY300", "TRY301", "W293",
 ]  # plan_M4ph1 (F-101 god-file split + M3/M10a except surface)
+"src/stealth_chrome_devtools_mcp/embedded/clone_storage.py" = [
+    "ANN001", "ANN202", "ANN401", "ARG001", "ARG005", "ASYNC240",
+    "BLE001", "DTZ005", "DTZ006", "E501", "PIE810", "PLR2004", "PTH100",
+    "PTH101", "PTH105", "PTH109", "SIM105", "TID251", "TRY300",
+]  # plan_M4ph1 (F-201 clone-storage extraction — suppressions carried verbatim from server.py)
+"src/stealth_chrome_devtools_mcp/embedded/tool_registry.py" = [
+    "ANN001", "ANN201", "ANN202", "BLE001",
+]  # plan_M4ph1 (F-101/F-505/F-612 registry extraction — suppressions carried verbatim from server.py)
 "src/stealth_chrome_devtools_mcp/embedded/singleton.py" = [
     "ANN001", "ANN201", "ANN202", "BLE001", "C901", "PLR0915",
     "PLR2004", "PTH123", "S603", "SIM115", "TID251", "TRY300",

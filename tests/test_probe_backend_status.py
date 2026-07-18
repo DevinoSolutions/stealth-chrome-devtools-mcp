@@ -13,7 +13,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-import singleton
+
+from stealth_chrome_devtools_mcp.embedded import singleton
 
 
 @pytest.fixture()

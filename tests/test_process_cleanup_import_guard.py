@@ -13,7 +13,8 @@ import os
 from unittest.mock import patch
 
 import pytest
-from process_cleanup import ProcessCleanup
+
+from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 
 class TestSideEffectFreeInit:

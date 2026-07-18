@@ -16,7 +16,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from process_cleanup import ProcessCleanup
+
+from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 # ---------------------------------------------------------------------------
 # ProcessCleanup init
@@ -197,7 +198,9 @@ class TestRecoveryFiltering:
 
         with patch.object(pc, "_get_browser_pids_for_profile", return_value={99999}):
             with patch.object(pc, "_kill_process_by_pid", mock_kill_by_pid):
-                with patch("process_cleanup.psutil.Process") as mock_proc_cls:
+                with patch(
+                    "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process"
+                ) as mock_proc_cls:
                     mock_proc = MagicMock()
                     mock_proc.create_time.return_value = 1700000050.0
                     mock_proc_cls.return_value = mock_proc
@@ -226,7 +229,9 @@ class TestRecoveryFiltering:
 
         with patch.object(pc, "_get_browser_pids_for_profile", return_value={88888}):
             with patch.object(pc, "_kill_process_by_pid", mock_kill_by_pid):
-                with patch("process_cleanup.psutil.Process") as mock_proc_cls:
+                with patch(
+                    "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process"
+                ) as mock_proc_cls:
                     mock_proc = MagicMock()
                     mock_proc.create_time.return_value = 1700000200.0
                     mock_proc_cls.return_value = mock_proc
@@ -392,7 +397,7 @@ class TestAutoCloneCleanup:
             patch.object(
                 pc, "_get_active_browser_profile_dirs", return_value={normalized}
             ),
-            patch("process_cleanup.time.sleep"),
+            patch("stealth_chrome_devtools_mcp.embedded.process_cleanup.time.sleep"),
         ):
             result = pc._cleanup_profile_for_metadata(
                 "inst", metadata, active_profile_dirs={normalized}
@@ -525,7 +530,9 @@ class TestFallbackPidIdentity:
             with patch.object(
                 pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
             ):
-                with patch("process_cleanup.psutil.Process") as mock_cls:
+                with patch(
+                    "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process"
+                ) as mock_cls:
                     mock_proc = MagicMock()
                     mock_proc.create_time.return_value = stored_ct + 0.1
                     mock_cls.return_value = mock_proc
@@ -546,7 +553,9 @@ class TestFallbackPidIdentity:
             with patch.object(
                 pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
             ):
-                with patch("process_cleanup.psutil.Process") as mock_cls:
+                with patch(
+                    "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process"
+                ) as mock_cls:
                     mock_proc = MagicMock()
                     mock_proc.create_time.return_value = stored_ct + 100.0
                     mock_cls.return_value = mock_proc
@@ -566,7 +575,9 @@ class TestFallbackPidIdentity:
             with patch.object(
                 pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
             ):
-                with patch("process_cleanup.psutil.Process") as mock_cls:
+                with patch(
+                    "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process"
+                ) as mock_cls:
                     mock_proc = MagicMock()
                     mock_proc.create_time.return_value = 1700000200.0
                     mock_cls.return_value = mock_proc

@@ -28,7 +28,7 @@ EMBEDDED_DIR = (
 @pytest.fixture(autouse=True)
 def _isolate_imports():
     """Remove cached module so each test gets a fresh import."""
-    mod_name = "file_based_element_cloner"
+    mod_name = "stealth_chrome_devtools_mcp.embedded.file_based_element_cloner"
     had = mod_name in sys.modules
     old = sys.modules.pop(mod_name, None)
     yield
@@ -38,9 +38,9 @@ def _isolate_imports():
 
 
 def _import_cloner_class():
-    if str(EMBEDDED_DIR) not in sys.path:
-        sys.path.insert(0, str(EMBEDDED_DIR))
-    from file_based_element_cloner import FileBasedElementCloner
+    from stealth_chrome_devtools_mcp.embedded.file_based_element_cloner import (
+        FileBasedElementCloner,
+    )
 
     return FileBasedElementCloner
 
@@ -54,7 +54,9 @@ class TestOutputDirResolution:
         system path) and never inside the installed package (``site-packages``
         is frequently read-only on real installs)."""
         FileBasedElementCloner = _import_cloner_class()
-        from response_handler import default_clone_output_dir
+        from stealth_chrome_devtools_mcp.embedded.response_handler import (
+            default_clone_output_dir,
+        )
 
         with patch.object(Path, "mkdir"):
             cloner = FileBasedElementCloner()

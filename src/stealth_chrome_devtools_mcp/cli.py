@@ -5,6 +5,13 @@ singleton, list profiles, reclaim disk (the storage sweep), check the
 environment, or start the server. It never reimplements browser logic — to drive
 a browser, use the MCP server (or its HTTP backend) directly.
 
+Two surfaces, one backend (F-700/F-109): this project ships two entry points —
+``stealth-chrome-devtools-mcp`` (the MCP server: the tool surface an AI client
+drives) and ``stealth-chrome-devtools`` (this ops CLI: the surface a human
+inspects and operates). They are deliberately separate surfaces over the one
+backend, not a single merged command; the registry side of this note lives in
+``embedded/tool_registry.py``. Recorded for M14 (CONTRIBUTING/DESIGN).
+
 Read-only commands (``status``, ``profiles``, ``cleanup`` without ``--apply``,
 ``doctor``) import the package with ``STEALTH_MCP_NO_AUTO_RECOVERY=1`` so merely
 running the CLI never kills a running server's browsers or touches its profiles.
@@ -19,14 +26,6 @@ from pathlib import Path
 
 from stealth_chrome_devtools_mcp.observability import sentry_init
 
-EMBEDDED_DIR = Path(__file__).with_name("embedded")
-
-
-def _ensure_embedded_on_path() -> None:
-    path = str(EMBEDDED_DIR)
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
 
 def _server():
     """Import the embedded server module, reusing its profile/storage helpers.
@@ -37,10 +36,22 @@ def _server():
     os.environ.setdefault(  # noqa: TID251  PERMANENT(env write before import)
         "STEALTH_MCP_NO_AUTO_RECOVERY", "1"
     )
-    _ensure_embedded_on_path()
-    import server
+    from stealth_chrome_devtools_mcp.embedded import server
 
     return server
+
+
+def _clone_storage():
+    """Import the clone-storage subsystem (the profile/storage helpers),
+    forcing the same read-only import semantics as :func:`_server`: the
+    NO_AUTO_RECOVERY guard is set before the import so the CLI never disturbs
+    a running backend."""
+    os.environ.setdefault(  # noqa: TID251  PERMANENT(env write before import)
+        "STEALTH_MCP_NO_AUTO_RECOVERY", "1"
+    )
+    from stealth_chrome_devtools_mcp.embedded import clone_storage
+
+    return clone_storage
 
 
 _BINARY_UNIT = 1024
@@ -55,15 +66,15 @@ def _human(num: int) -> str:
     return f"{value:.1f} TB"
 
 
-def _role(server, path: Path) -> str:
-    if server._clone_is_auto(path):
+def _role(cs, path: Path) -> str:
+    if cs.clone_is_auto(path):
         return "auto-clone"
-    if server._clone_is_named(path):
+    if cs.clone_is_named(path):
         return "named"
     return "unmarked"
 
 
-def _collect_profiles(server) -> list[dict]:
+def _collect_profiles(cs) -> list[dict]:
     """Every profile under the session root with size, role, and in-use flag."""
     rows: list[dict] = []
 
@@ -72,21 +83,21 @@ def _collect_profiles(server) -> list[dict]:
             "name": path.name,
             "path": path,
             "role": role,
-            "size": server._dir_size_bytes(path),
-            "in_use": server._profile_has_running_browser(path),
+            "size": cs._dir_size_bytes(path),
+            "in_use": cs._profile_has_running_browser(path),
         }
 
-    master = server._master_profile_dir()
-    snapshot = server._master_snapshot_dir()
+    master = cs.master_profile_dir()
+    snapshot = cs.master_snapshot_dir()
     if master.exists():
         rows.append(_row(master, "master"))
     if snapshot.exists():
         rows.append(_row(snapshot, "snapshot"))
 
-    clone_root = server._clone_root_dir()
+    clone_root = cs.clone_root_dir()
     if clone_root.exists():
         rows.extend(
-            _row(child, _role(server, child))
+            _row(child, _role(cs, child))
             for child in sorted(clone_root.iterdir())
             if child.is_dir()
         )
@@ -112,7 +123,7 @@ def _format_backend_status() -> str:
     this performs a single initialize+DELETE probe, self-cleaning, same as
     every other consumer of `_backend_http_ready` (never evicts or spawns).
     """
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     status, port = singleton._probe_backend_status()
     # "down" (a stale record but nothing actually listening) and "none" (no
@@ -134,7 +145,7 @@ def _recorded_backend_pid() -> int | None:
     """The pid singleton last recorded for the backend (server.json), or None
     if there is no record. Independent of liveness — status/doctor combine
     this with `_format_backend_status()`'s liveness read separately (F-305)."""
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     state = singleton._read_server_state()
     return state.get("pid") if state else None
@@ -144,7 +155,7 @@ def _backend_log_location(pid: int | None) -> str:
     """Where to look for backend logs (F-503's log-path half: M3 delivered
     "there is now a log"; this delivers "here is where"). Names the exact
     per-pid file when a pid is recorded, else the shared boot log."""
-    from logging_setup import resolve_log_dir
+    from stealth_chrome_devtools_mcp.embedded.logging_setup import resolve_log_dir
 
     filename = f"backend-{pid}.log" if pid is not None else "backend-boot.log"
     return str(resolve_log_dir() / filename)
@@ -154,7 +165,7 @@ def _doctor_port_occupant_line() -> str:
     """F-509 visibility: is the target port free, ours, or a NON-stealth
     process squatting it (which would otherwise silently block a backend
     from binding)? Uses only existing helpers — no new port logic."""
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     state = singleton._read_server_state()
     port = (
@@ -171,10 +182,10 @@ def _doctor_port_occupant_line() -> str:
 
 
 def _cmd_status(_args) -> int:
-    server = _server()
-    import singleton
+    cs = _clone_storage()
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
-    root = server._default_session_root()
+    root = cs.default_session_root()
     pid = _recorded_backend_pid()
     print(f"backend     : {_format_backend_status()}")
     print(f"pid         : {pid if pid is not None else '-'}")
@@ -182,19 +193,18 @@ def _cmd_status(_args) -> int:
     print(f"version     : {singleton._server_version()}")
     print(f"session root: {root}  (exists: {root.exists()})")
     print(
-        f"clone cap   : {_human(server._clone_storage_cap_bytes())}  "
+        f"clone cap   : {_human(cs.clone_storage_cap_bytes())}  "
         f"[STEALTH_MCP_CLONE_STORAGE_CAP_GB]"
     )
     print(
-        f"session cap : {_human(server._session_storage_cap_bytes())}  "
+        f"session cap : {_human(cs.session_storage_cap_bytes())}  "
         f"[STEALTH_MCP_SESSION_STORAGE_CAP_GB]"
     )
     return 0
 
 
 def _cmd_profiles(_args) -> int:
-    server = _server()
-    rows = _collect_profiles(server)
+    rows = _collect_profiles(_clone_storage())
     if not rows:
         print("no profiles found.")
         return 0
@@ -208,16 +218,16 @@ def _cmd_profiles(_args) -> int:
 
 
 def _cmd_cleanup(args) -> int:
-    server = _server()
-    clone_root = server._clone_root_dir()
-    clone_cap = _gb_to_bytes(args.clone_cap_gb, server._clone_storage_cap_bytes())
-    session_cap = _gb_to_bytes(args.session_cap_gb, server._session_storage_cap_bytes())
+    cs = _clone_storage()
+    clone_root = cs.clone_root_dir()
+    clone_cap = _gb_to_bytes(args.clone_cap_gb, cs.clone_storage_cap_bytes())
+    session_cap = _gb_to_bytes(args.session_cap_gb, cs.session_storage_cap_bytes())
 
     # Same selectors the live sweep uses — dry-run and apply can't disagree.
-    to_delete = server._idle_autoclones_over_cap(clone_root, clone_cap)
-    to_trim = server._named_profiles_over_session_cap(clone_root, session_cap)
-    delete_bytes = sum(server._dir_size_bytes(p) for p in to_delete)
-    trim_bytes = sum(server._regenerable_size(p) for p in to_trim)
+    to_delete = cs._idle_autoclones_over_cap(clone_root, clone_cap)
+    to_trim = cs._named_profiles_over_session_cap(clone_root, session_cap)
+    delete_bytes = sum(cs._dir_size_bytes(p) for p in to_delete)
+    trim_bytes = sum(cs._regenerable_size(p) for p in to_trim)
 
     print(f"clone root  : {clone_root}")
     print(f"caps        : clone {_human(clone_cap)} | session {_human(session_cap)}")
@@ -231,9 +241,7 @@ def _cmd_cleanup(args) -> int:
             f"{_human(delete_bytes)}:"
         )
         for path in to_delete:
-            print(
-                f"   - {path.name[:50]:50s} {_human(server._dir_size_bytes(path)):>10s}"
-            )
+            print(f"   - {path.name[:50]:50s} {_human(cs._dir_size_bytes(path)):>10s}")
     if to_trim:
         print(
             f"\ntrim {len(to_trim)} idle named profile(s) - frees "
@@ -241,8 +249,7 @@ def _cmd_cleanup(args) -> int:
         )
         for path in to_trim:
             print(
-                f"   - {path.name[:50]:50s} "
-                f"~{_human(server._regenerable_size(path)):>10s}"
+                f"   - {path.name[:50]:50s} ~{_human(cs._regenerable_size(path)):>10s}"
             )
     print(f"\ntotal reclaimable: ~{_human(delete_bytes + trim_bytes)}")
 
@@ -250,8 +257,8 @@ def _cmd_cleanup(args) -> int:
         print("\n(dry run - nothing deleted. Re-run with --apply to reclaim.)")
         return 0
 
-    removed = server._enforce_clone_storage_cap_in(clone_root, clone_cap, "cli")
-    freed = server._enforce_named_profile_trim_in(clone_root, session_cap, "cli")
+    removed = cs._enforce_clone_storage_cap_in(clone_root, clone_cap, "cli")
+    freed = cs._enforce_named_profile_trim_in(clone_root, session_cap, "cli")
     print(
         f"\napplied: deleted {removed} auto-clone(s); trimmed "
         f"{_human(freed)} from named profiles."
@@ -262,12 +269,12 @@ def _cmd_cleanup(args) -> int:
 def _cmd_doctor(_args) -> int:
     import platform
 
-    server = _server()
+    cs = _clone_storage()
 
     ok = True
     print(f"python      : {platform.python_version()}")
     print(f"platform    : {platform.platform()}")
-    root = server._default_session_root()
+    root = cs.default_session_root()
     print(f"session root: {root}  (exists: {root.exists()})")
     pid = _recorded_backend_pid()
     print(f"backend     : {_format_backend_status()}")
@@ -310,7 +317,7 @@ def _cmd_stop(_args) -> int:
     """Thin front-end over `singleton.stop_backend()` — no matching/kill
     logic of its own (that lives in singleton.py, reused from eviction)."""
     _server()
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     result, pid = singleton.stop_backend()
     if result == "stopped":
@@ -331,7 +338,7 @@ def _cmd_restart(_args) -> int:
     fresh cold-start spawn under the same lock cold start uses; no lifecycle
     logic of its own (that lives in singleton.py)."""
     _server()
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import singleton
 
     status, pid = singleton.restart_backend()
     if status == "busy":
@@ -373,8 +380,7 @@ def _cmd_kill_orphans(args) -> int:
     behavioral partition. `--force` overrides the guard.
     """
     _server()
-    import process_cleanup
-    import singleton
+    from stealth_chrome_devtools_mcp.embedded import process_cleanup, singleton
 
     status, _ = singleton._probe_backend_status()
     if status in ("responsive", "wedged") and not args.force:
@@ -489,8 +495,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--http", action="store_true", help="serve over HTTP instead of stdio"
     )
-    _ensure_embedded_on_path()
-    from singleton import DEFAULT_PORT
+    from stealth_chrome_devtools_mcp.embedded.singleton import DEFAULT_PORT
 
     serve.add_argument(
         "--port",

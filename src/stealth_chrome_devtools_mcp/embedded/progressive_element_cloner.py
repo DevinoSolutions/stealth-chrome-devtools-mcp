@@ -10,9 +10,11 @@ import time
 import uuid
 from typing import Any
 
-from comprehensive_element_cloner import comprehensive_element_cloner
-from debug_logger import debug_logger
-from in_memory_storage import in_memory_storage
+from stealth_chrome_devtools_mcp.embedded.comprehensive_element_cloner import (
+    comprehensive_element_cloner,
+)
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
 
 
 class ProgressiveElementCloner:

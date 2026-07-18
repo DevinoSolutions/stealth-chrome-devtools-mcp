@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
-from debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 
 class ProxyConfigError(ValueError):

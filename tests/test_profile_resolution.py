@@ -16,14 +16,16 @@ from pathlib import Path
 import pytest
 
 # These are module-level functions in server.py (bare imports via sys.path)
-from server import (
+from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     _copy_profile_delta,
     _copy_profile_tree,
     _is_relative_to,
     _next_available_explicit_dir,
     _profile_ignore_names,
-    _resolve_profile_selection,
     _snapshot_needs_refresh,
+)
+from stealth_chrome_devtools_mcp.embedded.clone_storage import (
+    resolve_profile_selection as _resolve_profile_selection,
 )
 
 # ---------------------------------------------------------------------------

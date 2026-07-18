@@ -14,22 +14,8 @@ FastMCP ``.fn`` seam with the module-global singletons swapped for fakes.
 
 import inspect
 import json
-import sys
-from pathlib import Path
 
 import pytest
-
-# Make embedded/ importable the same way the entrypoint / conftest does.
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
-import server
 
 from fakes import (
     FakeBrowserManager,
@@ -37,6 +23,7 @@ from fakes import (
     FakeTab,
     fake_instance,
 )
+from stealth_chrome_devtools_mcp.embedded import server, tool_registry
 
 # The true post-M2 tool count (F-108 tripwire). If M4-Ph1 changes the tool set,
 # it updates this one number with intent.
@@ -161,7 +148,9 @@ class TestSectionGating:
         tabs_tools = set(server.SECTION_TOOLS["tabs"])
         keep_section = set(server.SECTION_TOOLS["cookies-storage"])
         try:
-            monkeypatch.setattr(server, "DISABLED_SECTIONS", {"tabs"})
+            # apply_disabled_sections reads tool_registry's module-global set
+            # (server rebinds no longer reach it), so gate the DEFINING module.
+            monkeypatch.setattr(tool_registry, "DISABLED_SECTIONS", {"tabs"})
             server.apply_disabled_sections()
 
             after = await _live_tools()

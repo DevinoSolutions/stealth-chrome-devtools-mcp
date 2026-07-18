@@ -16,8 +16,8 @@ Pure filesystem + seeded ProcessCleanup: no browser.
 import json
 import time
 
-import server
-from process_cleanup import ProcessCleanup
+from stealth_chrome_devtools_mcp.embedded import clone_storage
+from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 GIB = 1024**3
@@ -71,11 +71,11 @@ def test_storage_sweep_reclaims_deferred_leaked_clone(tmp_path, monkeypatch):
     leaked = _make_leaked_clone(clone_root, "sess-deferred")
 
     pc = _seed_process_cleanup(tmp_path, "dead-instance", leaked)
-    monkeypatch.setattr(server, "process_cleanup", pc)
+    monkeypatch.setattr(clone_storage, "process_cleanup", pc)
 
     # Cap is far above the tiny leaked clone, so the SIZE sweep selects nothing —
     # the only thing that can reclaim this dir is deferred-profile cleanup.
-    server._run_storage_sweep(
+    clone_storage.run_storage_sweep(
         clone_root, clone_cap=10 * GIB, session_cap=20 * GIB, reason="test"
     )
 

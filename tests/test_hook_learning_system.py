@@ -6,7 +6,10 @@ must flag a missing entrypoint, a wrong signature, and dangerous calls, while
 letting a well-formed hook through.
 """
 
-from hook_learning_system import HookLearningSystem, hook_learning_system
+from stealth_chrome_devtools_mcp.embedded.hook_learning_system import (
+    HookLearningSystem,
+    hook_learning_system,
+)
 
 
 class TestDocumentationGetters:

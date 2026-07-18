@@ -22,9 +22,12 @@ import os
 import sys
 import threading
 
-import logging_setup
 import pytest
-from logging_setup import bootstrap_backend_process_logging
+
+from stealth_chrome_devtools_mcp.embedded import logging_setup
+from stealth_chrome_devtools_mcp.embedded.logging_setup import (
+    bootstrap_backend_process_logging,
+)
 
 
 def _raise_injected_fatal():

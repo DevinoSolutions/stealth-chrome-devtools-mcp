@@ -15,27 +15,17 @@ Three targets the upcoming M4/M13 refactors will churn:
   round-trip, so a process-alive-but-CDP-dead instance still reads active.
 """
 
-import sys
-from pathlib import Path
+import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
-import browser_manager as _bm
-import server
-from browser_manager import BrowserManager
-
 from fakes import FakeBrowser, FakeBrowserManager, FakeStorage
+from stealth_chrome_devtools_mcp.embedded import browser_manager as _bm
+from stealth_chrome_devtools_mcp.embedded import clone_storage
+from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
 
 # ===========================================================================
 # spawn_browser — param forwarding through the (multi-collaborator) seam.
@@ -50,7 +40,7 @@ class TestSpawnBrowserSeam:
     together. The 230-line internals stay unexercised by design."""
 
     async def test_forwards_kwargs_into_browser_options(
-        self, call_tool, patched_server
+        self, call_tool, patched_server, monkeypatch
     ):
         fake_instance = SimpleNamespace(
             instance_id="i1",
@@ -63,9 +53,8 @@ class TestSpawnBrowserSeam:
         async def fake_resolve(user_data_dir, **kwargs):
             return {"user_data_dir": "/fake/dir", "profile_role": "clone"}
 
-        srv = patched_server(
-            browser_manager=fbm, _resolve_profile_selection=fake_resolve
-        )
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        srv = patched_server(browser_manager=fbm)
         # get_tab returns None (default) → network interception is skipped, so the
         # network_interceptor collaborator need not be patched.
         result = await call_tool(
@@ -93,7 +82,7 @@ class TestSpawnBrowserSeam:
         # profile_role == "clone" flows through to auto_clone.
         assert options.auto_clone is True
 
-    async def test_result_shape(self, call_tool, patched_server):
+    async def test_result_shape(self, call_tool, patched_server, monkeypatch):
         fake_instance = SimpleNamespace(
             instance_id="i1",
             state="active",
@@ -107,9 +96,8 @@ class TestSpawnBrowserSeam:
         async def fake_resolve(user_data_dir, **kwargs):
             return {"user_data_dir": "/fake/dir", "profile_role": "clone"}
 
-        srv = patched_server(
-            browser_manager=fbm, _resolve_profile_selection=fake_resolve
-        )
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        srv = patched_server(browser_manager=fbm)
         result = await call_tool(srv, "spawn_browser", sandbox=False)
 
         assert set(result) == {
@@ -137,12 +125,16 @@ class TestFallbackProfileSelection:
     async def test_non_clone_selection_never_retries(self):
         # profile_role != "clone" short-circuits to None before any dir I/O (pure).
         assert (
-            await server._fallback_profile_selection({"profile_role": "explicit"}, 0)
+            await clone_storage._fallback_profile_selection(
+                {"profile_role": "explicit"}, 0
+            )
             is None
         )
-        assert await server._fallback_profile_selection({}, 0) is None
+        assert await clone_storage._fallback_profile_selection({}, 0) is None
         assert (
-            await server._fallback_profile_selection({"profile_role": "explicit"}, 5)
+            await clone_storage._fallback_profile_selection(
+                {"profile_role": "explicit"}, 5
+            )
             is None
         )
 
@@ -150,11 +142,15 @@ class TestFallbackProfileSelection:
         # A clone selection retries from the master snapshot; with no snapshot on
         # disk (tmp_empty_root), both the first and final attempts yield None.
         assert (
-            await server._fallback_profile_selection({"profile_role": "clone"}, 0)
+            await clone_storage._fallback_profile_selection(
+                {"profile_role": "clone"}, 0
+            )
             is None
         )
         assert (
-            await server._fallback_profile_selection({"profile_role": "clone"}, 1)
+            await clone_storage._fallback_profile_selection(
+                {"profile_role": "clone"}, 1
+            )
             is None
         )
 
@@ -224,3 +220,87 @@ class TestListInstancesLiveness:
         }
         survivors = await isolated_manager.list_instances()
         assert [inst.instance_id for inst in survivors] == ["wedged"]
+
+
+# ===========================================================================
+# spawn_browser sub-method pipeline (M13/F-208) — the seam C4 creates.
+# ===========================================================================
+
+
+class TestSpawnBrowserSubMethodSeam:
+    """C4/M13 extracts ``spawn_browser``'s ~230-line body into a private-method
+    pipeline so each phase is individually callable with fakes — the seam F-208
+    lacked (previously the only way to reach a phase was to drive the whole
+    method through ``uc.start``). These pins call the pure/cheap phases directly,
+    proving the seam exists; the orchestrator still owns the try/except cleanup
+    (``browser``/``proxy_forwarder`` stay orchestrator-owned so a failed launch
+    or proxy start is still torn down)."""
+
+    def test_pipeline_methods_exist_with_expected_asyncness(self):
+        for name in (
+            "_build_instance",
+            "_resolve_proxy",
+            "_resolve_launch_args",
+            "_launch_browser",
+            "_apply_post_launch",
+        ):
+            assert hasattr(BrowserManager, name), f"missing pipeline seam: {name}"
+        # The pure phases are sync; the I/O phases are coroutines.
+        assert not inspect.iscoroutinefunction(BrowserManager._build_instance)
+        assert not inspect.iscoroutinefunction(BrowserManager._resolve_proxy)
+        assert not inspect.iscoroutinefunction(BrowserManager._resolve_launch_args)
+        assert inspect.iscoroutinefunction(BrowserManager._launch_browser)
+        assert inspect.iscoroutinefunction(BrowserManager._apply_post_launch)
+
+    def test_build_instance_maps_options(self):
+        inst = BrowserManager()._build_instance(
+            "iid-1",
+            BrowserOptions(
+                headless=True,
+                user_agent="UA",
+                viewport_width=800,
+                viewport_height=600,
+            ),
+        )
+        assert inst.instance_id == "iid-1"
+        assert inst.headless is True
+        assert inst.user_agent == "UA"
+        assert inst.viewport == {"width": 800, "height": 600}
+
+    def test_resolve_proxy_none_when_unset(self):
+        proxy_config, forwarder, launch_proxy_server = BrowserManager()._resolve_proxy(
+            BrowserOptions()
+        )
+        assert proxy_config is None
+        assert forwarder is None
+        assert launch_proxy_server is None
+
+    def test_resolve_proxy_unauthenticated_passthrough(self):
+        # A credential-free proxy needs no forwarder: the server string flows
+        # straight into the launch args, so launch_proxy_server == config.server.
+        proxy_config, forwarder, launch_proxy_server = BrowserManager()._resolve_proxy(
+            BrowserOptions(proxy="http://host:8080")
+        )
+        assert forwarder is None
+        assert proxy_config is not None
+        assert launch_proxy_server == proxy_config.server
+
+    def test_resolve_launch_args_detects_browser_and_forces_no_sandbox(
+        self, monkeypatch
+    ):
+        # No real browser needed: the executable probe is stubbed. sandbox=False
+        # must re-add --no-sandbox after the stealth filter.
+        monkeypatch.setattr(
+            _bm, "check_browser_executable", lambda: "/opt/google/chrome/chrome"
+        )
+        platform_info = {"system": "Linux", "is_root": False, "is_container": False}
+        (
+            launch_args,
+            browser_executable,
+            stealth_warnings,
+        ) = BrowserManager()._resolve_launch_args(
+            BrowserOptions(sandbox=False), None, platform_info
+        )
+        assert browser_executable == "/opt/google/chrome/chrome"
+        assert "--no-sandbox" in launch_args
+        assert isinstance(stealth_warnings, list)

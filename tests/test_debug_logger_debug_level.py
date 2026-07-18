@@ -14,7 +14,7 @@ log_info. No lock is taken: no shared state is mutated.
 
 import logging
 
-from debug_logger import DebugLogger
+from stealth_chrome_devtools_mcp.embedded.debug_logger import DebugLogger
 
 
 class TestLogDebugEmitsWhenLevelAllows:

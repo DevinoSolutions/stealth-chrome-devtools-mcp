@@ -15,21 +15,11 @@ default.
 
 import logging
 import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
-import server
+from stealth_chrome_devtools_mcp.embedded import clone_storage, server
 
 
 @pytest.fixture()
@@ -88,7 +78,7 @@ class TestClientSessionSeedSilentExcept:
         with patch(
             "fastmcp.server.dependencies.get_context", side_effect=_boom_get_context
         ):
-            await server._client_session_seed()
+            await clone_storage._client_session_seed()
 
         assert len(captured_backend_records) == 1
         record = captured_backend_records[0]

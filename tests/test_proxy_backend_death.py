@@ -20,7 +20,8 @@ import socket
 import anyio
 import anyio.lowlevel
 import pytest
-import singleton
+
+from stealth_chrome_devtools_mcp.embedded import singleton
 
 
 def _free_port() -> int:
@@ -152,7 +153,7 @@ class TestProxyExitsOnBackendDeath:
         import subprocess
         import sys
 
-        from singleton import _proxy_streams
+        from stealth_chrome_devtools_mcp.embedded.singleton import _proxy_streams
 
         port = _free_port()
         env = dict(os.environ)

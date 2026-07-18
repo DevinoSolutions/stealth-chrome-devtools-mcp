@@ -13,25 +13,11 @@ NOT integration-marked: runs in the unit job.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import fastmcp
 import pytest
 
-# Make embedded/ importable the same way conftest / the entrypoint does.
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
-import server
-
 from fakes import FakeBrowserManager, FakeStorage, call_tool, fake_instance
+from stealth_chrome_devtools_mcp.embedded import server
 
 
 class _ProtocolBrowserManager(FakeBrowserManager):

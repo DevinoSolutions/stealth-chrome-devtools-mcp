@@ -7,9 +7,11 @@ about dynamic hook functions.
 
 from typing import Any
 
-from debug_logger import debug_logger
-from dynamic_hook_system import dynamic_hook_system
-from hook_learning_system import hook_learning_system
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
+from stealth_chrome_devtools_mcp.embedded.hook_learning_system import (
+    hook_learning_system,
+)
 
 
 class DynamicHookAIInterface:

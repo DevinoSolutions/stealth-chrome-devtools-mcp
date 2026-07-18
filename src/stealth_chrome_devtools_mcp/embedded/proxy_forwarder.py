@@ -12,7 +12,7 @@ from struct import calcsize, pack, unpack
 from struct import error as struct_error
 from urllib.parse import urlparse
 
-from debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 _HTTP_REQUEST_LINE_MIN_PARTS = 3
 _MAX_PORT = 65535

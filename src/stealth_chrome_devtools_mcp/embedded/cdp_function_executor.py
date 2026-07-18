@@ -16,8 +16,9 @@ from collections.abc import Callable
 from typing import Any
 
 import nodriver as uc
-from debug_logger import debug_logger
 from nodriver import Tab
+
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 
 class ExecutionContext:

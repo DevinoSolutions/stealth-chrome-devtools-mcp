@@ -78,25 +78,37 @@ class TestStopVerb:
 
     def test_stop_dispatches_and_prints_result(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_server", lambda: None)
-        with patch("singleton.stop_backend", return_value=("stopped", 4242)):
+        with patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton.stop_backend",
+            return_value=("stopped", 4242),
+        ):
             assert cli.main(["stop"]) == 0
         assert "4242" in capsys.readouterr().out
 
     def test_stop_busy_returns_nonzero(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_server", lambda: None)
-        with patch("singleton.stop_backend", return_value=("busy", None)):
+        with patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton.stop_backend",
+            return_value=("busy", None),
+        ):
             assert cli.main(["stop"]) == 1
         assert "busy" in capsys.readouterr().out.lower()
 
     def test_stop_not_running(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_server", lambda: None)
-        with patch("singleton.stop_backend", return_value=("not running", None)):
+        with patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton.stop_backend",
+            return_value=("not running", None),
+        ):
             assert cli.main(["stop"]) == 0
         assert "not running" in capsys.readouterr().out.lower()
 
     def test_stop_already_stopped(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_server", lambda: None)
-        with patch("singleton.stop_backend", return_value=("already stopped", None)):
+        with patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton.stop_backend",
+            return_value=("already stopped", None),
+        ):
             assert cli.main(["stop"]) == 0
         assert "already stopped" in capsys.readouterr().out.lower()
 
@@ -110,19 +122,28 @@ class TestRestartVerb:
 
     def test_restart_responsive_returns_zero_with_pid(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_server", lambda: None)
-        with patch("singleton.restart_backend", return_value=("responsive", 4242)):
+        with patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton.restart_backend",
+            return_value=("responsive", 4242),
+        ):
             assert cli.main(["restart"]) == 0
         assert "4242" in capsys.readouterr().out
 
     def test_restart_busy_returns_nonzero(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_server", lambda: None)
-        with patch("singleton.restart_backend", return_value=("busy", None)):
+        with patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton.restart_backend",
+            return_value=("busy", None),
+        ):
             assert cli.main(["restart"]) == 1
         assert "busy" in capsys.readouterr().out.lower()
 
     def test_restart_down_returns_nonzero_with_honest_output(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_server", lambda: None)
-        with patch("singleton.restart_backend", return_value=("down", None)):
+        with patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton.restart_backend",
+            return_value=("down", None),
+        ):
             assert cli.main(["restart"]) == 1
         assert "down" in capsys.readouterr().out.lower()
 
@@ -138,14 +159,15 @@ class TestKillOrphansVerb:
         monkeypatch.setattr(cli, "_server", lambda: None)
         with (
             patch(
-                "singleton._probe_backend_status", return_value=("responsive", 19222)
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("responsive", 19222),
             ),
             patch(
-                "singleton._read_server_state",
+                "stealth_chrome_devtools_mcp.embedded.singleton._read_server_state",
                 return_value={"pid": 4242, "port": 19222, "version": "1.2.1"},
             ),
             patch(
-                "process_cleanup.process_cleanup._recover_orphaned_processes"
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.process_cleanup._recover_orphaned_processes"
             ) as reaper,
         ):
             rc = cli.main(["kill-orphans"])
@@ -160,13 +182,16 @@ class TestKillOrphansVerb:
     def test_wedged_refuses_and_does_not_call_reaper(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_server", lambda: None)
         with (
-            patch("singleton._probe_backend_status", return_value=("wedged", 19222)),
             patch(
-                "singleton._read_server_state",
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("wedged", 19222),
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.singleton._read_server_state",
                 return_value={"pid": 4242, "port": 19222, "version": "1.2.1"},
             ),
             patch(
-                "process_cleanup.process_cleanup._recover_orphaned_processes"
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.process_cleanup._recover_orphaned_processes"
             ) as reaper,
         ):
             rc = cli.main(["kill-orphans"])
@@ -179,10 +204,11 @@ class TestKillOrphansVerb:
         monkeypatch.setattr(cli, "_server", lambda: None)
         with (
             patch(
-                "singleton._probe_backend_status", return_value=("responsive", 19222)
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("responsive", 19222),
             ),
             patch(
-                "process_cleanup.process_cleanup._recover_orphaned_processes"
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.process_cleanup._recover_orphaned_processes"
             ) as reaper,
         ):
             rc = cli.main(["kill-orphans", "--force"])
@@ -193,9 +219,12 @@ class TestKillOrphansVerb:
     def test_down_calls_reaper(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_server", lambda: None)
         with (
-            patch("singleton._probe_backend_status", return_value=("down", 19222)),
             patch(
-                "process_cleanup.process_cleanup._recover_orphaned_processes"
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("down", 19222),
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.process_cleanup._recover_orphaned_processes"
             ) as reaper,
         ):
             rc = cli.main(["kill-orphans"])
@@ -206,9 +235,12 @@ class TestKillOrphansVerb:
     def test_none_calls_reaper(self, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_server", lambda: None)
         with (
-            patch("singleton._probe_backend_status", return_value=("none", None)),
             patch(
-                "process_cleanup.process_cleanup._recover_orphaned_processes"
+                "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+                return_value=("none", None),
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.process_cleanup._recover_orphaned_processes"
             ) as reaper,
         ):
             rc = cli.main(["kill-orphans"])

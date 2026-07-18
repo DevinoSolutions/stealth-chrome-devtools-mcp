@@ -10,7 +10,10 @@ Validates:
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from cdp_function_executor import CDPFunctionExecutor
+
+from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
+    CDPFunctionExecutor,
+)
 
 
 @pytest.fixture
@@ -33,7 +36,10 @@ async def test_timeout_attempts_terminate_execution(executor, monkeypatch):
     async def raise_timeout(*_a, **_kw):
         raise TimeoutError
 
-    monkeypatch.setattr("cdp_function_executor.asyncio.wait_for", raise_timeout)
+    monkeypatch.setattr(
+        "stealth_chrome_devtools_mcp.embedded.cdp_function_executor.asyncio.wait_for",
+        raise_timeout,
+    )
 
     result = await executor.execute_python_in_browser(tab, "while True: pass")
 
@@ -52,7 +58,10 @@ async def test_timeout_terminate_failure_swallowed(executor, monkeypatch):
     async def raise_timeout(*_a, **_kw):
         raise TimeoutError
 
-    monkeypatch.setattr("cdp_function_executor.asyncio.wait_for", raise_timeout)
+    monkeypatch.setattr(
+        "stealth_chrome_devtools_mcp.embedded.cdp_function_executor.asyncio.wait_for",
+        raise_timeout,
+    )
 
     result = await executor.execute_python_in_browser(tab, "x = 1")
 

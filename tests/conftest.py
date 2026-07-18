@@ -15,16 +15,6 @@ import pytest
 
 from stealth_chrome_devtools_mcp.settings import get_settings
 
-# ── Make embedded/ importable the same way the real entrypoint does ──
-EMBEDDED_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "src"
-    / "stealth_chrome_devtools_mcp"
-    / "embedded"
-)
-if str(EMBEDDED_DIR) not in sys.path:
-    sys.path.insert(0, str(EMBEDDED_DIR))
-
 # ── Make the tests/ dir importable so modules can `from fakes import ...`
 # (the canonical M6 harness home) regardless of pytest import mode. ──
 TESTS_DIR = Path(__file__).resolve().parent
@@ -175,7 +165,7 @@ def patched_server(monkeypatch):
     fake)`` is a clean hermetic seam needing no production change. ``monkeypatch``
     restores every attr at teardown.
     """
-    import server
+    from stealth_chrome_devtools_mcp.embedded import server
 
     def _patch(**singletons):
         for name, obj in singletons.items():

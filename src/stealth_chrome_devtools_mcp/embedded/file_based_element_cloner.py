@@ -1,25 +1,17 @@
 import json
-import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-try:
-    from .debug_logger import debug_logger
-except ImportError:
-    from debug_logger import debug_logger
-
-project_root = Path(__file__).parent.parent
-sys.path.append(str(project_root))
-
-from comprehensive_element_cloner import ComprehensiveElementCloner
-from element_cloner import element_cloner
-
-try:
-    from .response_handler import default_clone_output_dir
-except ImportError:
-    from response_handler import default_clone_output_dir
+from stealth_chrome_devtools_mcp.embedded.comprehensive_element_cloner import (
+    ComprehensiveElementCloner,
+)
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.element_cloner import element_cloner
+from stealth_chrome_devtools_mcp.embedded.response_handler import (
+    default_clone_output_dir,
+)
 
 
 class FileBasedElementCloner:

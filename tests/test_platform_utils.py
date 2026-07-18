@@ -8,8 +8,8 @@ stealth-blocked. Sandbox detection is monkeypatched so the tests are
 deterministic across CI environments.
 """
 
-import platform_utils
-from platform_utils import (
+from stealth_chrome_devtools_mcp.embedded import platform_utils
+from stealth_chrome_devtools_mcp.embedded.platform_utils import (
     filter_stealth_args,
     get_platform_info,
     get_required_sandbox_args,

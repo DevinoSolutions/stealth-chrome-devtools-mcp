@@ -45,7 +45,7 @@ pytestmark = pytest.mark.integration
 _can_run = False
 _needs_no_sandbox = False
 try:
-    from platform_utils import (
+    from stealth_chrome_devtools_mcp.embedded.platform_utils import (
         check_browser_executable,
         is_running_as_root,
         is_running_in_container,
@@ -73,8 +73,12 @@ if not _can_run:
 
 
 def _get_fn(name):
-    """Get an unwrapped server function by name."""
+    """Get an unwrapped server function by name. The profile/clone-storage
+    helpers now live in ``clone_storage`` (reached via the server module's import
+    of it), so fall back there before skipping."""
     fn = getattr(_server_mod, name, None)
+    if fn is None and _server_mod is not None:
+        fn = getattr(getattr(_server_mod, "clone_storage", None), name, None)
     if fn is None:
         pytest.skip(f"server.{name} not found")
     return _unwrap(fn)
@@ -237,8 +241,9 @@ class TestCloseKillsProcessTree:
 
     @pytest.mark.asyncio
     async def test_close_kills_entire_chrome_tree(self):
-        import process_cleanup as pc_mod
         import psutil
+
+        from stealth_chrome_devtools_mcp.embedded import process_cleanup as pc_mod
 
         spawn = _get_fn("spawn_browser")
         navigate = _get_fn("navigate")
@@ -502,7 +507,9 @@ class TestAutoCloneDeletion:
 
     @pytest.mark.asyncio
     async def test_auto_clone_deleted_master_survives(self, tmp_session_root):
-        from process_cleanup import process_cleanup as _pc
+        from stealth_chrome_devtools_mcp.embedded.process_cleanup import (
+            process_cleanup as _pc,
+        )
 
         spawn = _get_fn("spawn_browser")
         close = _get_fn("close_instance")
