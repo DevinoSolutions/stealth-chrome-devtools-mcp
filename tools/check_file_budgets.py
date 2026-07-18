@@ -56,6 +56,17 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # debug_logger's import is the absolute
     # stealth_chrome_devtools_mcp.embedded.debug_logger form).
     "embedded/cdp_function_executor.py": (1012, "plan_M7 + plan_M4ph1"),
+    # plan_M5b-1 (F-140/F-203/F-601 5->1 cloner consolidation): CDPElementCloner
+    # is the canonical extraction engine the five cloner modules converge onto,
+    # so it absorbs the six per-aspect methods + the composing extract_complete_
+    # element + node-id/JS helpers (styles=CDP; structure/events/animations/
+    # assets/related_files=JS-eval per the 2026-07-18 ruling). M5b-1 is ADDITIVE
+    # (nothing deleted yet), so this is the transitional PEAK — element_cloner.py
+    # (833) + comprehensive_element_cloner.py (400) are deleted in M5b-3/M5b-5,
+    # and this engine's own now-superseded nested extract_complete_element_cdp +
+    # _get_* helpers ratchet the cap DOWN then. GRANDFATHERED at actual ruff-clean
+    # LOC (cap == actual, no padding) per the C1/C4 gate-ruling discipline.
+    "embedded/cdp_element_cloner.py": (1013, "plan_M5b"),
 }
 
 

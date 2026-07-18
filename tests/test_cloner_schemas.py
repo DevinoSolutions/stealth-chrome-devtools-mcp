@@ -374,3 +374,118 @@ class TestFileBasedCloner:
         assert set(result) == {"file_path", "extraction_type", "selector", "summary"}
         assert "error" not in result
         assert result["summary"]["tag_name"] is None
+
+
+# ===========================================================================
+# M5b canonical engine surface — CDPElementCloner grows the ONE home the five
+# engines converge onto (additive; nothing re-pointed/deleted yet in M5b-1).
+# ===========================================================================
+
+
+class TestCanonicalEngine:
+    def test_singleton_exists(self):
+        # F-144: module-level singleton, mirroring the sibling cloners.
+        assert isinstance(_cdc.cdp_element_cloner, _cdc.CDPElementCloner)
+
+    async def test_styles_uses_cdp_direct_schema(self):
+        tab = FakeTab(
+            cdp_responses=_cdp_responses(), select_result=SimpleNamespace(node_id=2)
+        )
+        result = await _cdc.cdp_element_cloner.extract_element_styles(
+            tab, selector="#demo"
+        )
+        assert result["method"] == "cdp_direct"
+        assert result["computed_styles"] == {
+            "color": "rgb(0, 0, 0)",
+            "display": "block",
+        }
+        assert result["css_rules"] == []
+        # REUSES the element_cloner styles golden on purpose: the engine's CDP
+        # styles path must be byte-identical to the one it replaces (dedup, no
+        # schema change). A drift in either implementation reds this.
+        _assert_golden("extract_element_styles", result)
+
+    async def test_styles_error_shape_when_unresolved(self):
+        tab = FakeTab(cdp_responses=_cdp_responses(), select_result=None)
+        result = await _cdc.cdp_element_cloner.extract_element_styles(
+            tab, selector="#demo"
+        )
+        assert result == {"error": "Element not found"}
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "extract_element_structure",
+            "extract_element_events",
+            "extract_element_animations",
+            "extract_element_assets",
+        ],
+    )
+    async def test_js_aspect_passes_dict_through(self, method):
+        # Structure/events/animations/assets stay on JS-eval (§2.1 + 2026-07-18
+        # structure ruling) — zero capability loss vs the retired ElementCloner.
+        tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
+        result = await getattr(_cdc.cdp_element_cloner, method)(tab, selector="#demo")
+        assert result == CANNED_JS_ELEMENT
+        assert tab.evaluate_calls  # JS-eval path exercised
+        assert not tab.send_calls  # and NOT the CDP path
+
+    async def test_transport_split_styles_cdp_others_js(self):
+        """Pins the §2.1 transport decision deterministically (no timing): styles
+        takes the CDP (``.send``) path; the JS aspects take ``.evaluate``."""
+        styles_tab = FakeTab(
+            cdp_responses=_cdp_responses(), select_result=SimpleNamespace(node_id=2)
+        )
+        await _cdc.cdp_element_cloner.extract_element_styles(
+            styles_tab, selector="#demo"
+        )
+        assert styles_tab.send_calls and not styles_tab.evaluate_calls
+
+        js_tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
+        await _cdc.cdp_element_cloner.extract_element_structure(
+            js_tab, selector="#demo"
+        )
+        assert js_tab.evaluate_calls and not js_tab.send_calls
+
+    async def test_resolve_node_id_variants(self):
+        tab = FakeTab(cdp_responses=_cdp_responses())
+        assert (
+            await _cdc.cdp_element_cloner._resolve_node_id(
+                tab, element=SimpleNamespace(node_id=7)
+            )
+            == 7
+        )
+        unresolved = FakeTab(select_result=None)
+        assert (
+            await _cdc.cdp_element_cloner._resolve_node_id(unresolved, selector="#x")
+            is None
+        )
+
+    async def test_complete_composes_all_six_aspects(self):
+        tab = FakeTab(
+            evaluate_result=dict(CANNED_JS_ELEMENT),
+            cdp_responses=_cdp_responses(),
+            select_result=SimpleNamespace(node_id=2),
+        )
+        result = await _cdc.cdp_element_cloner.extract_complete_element(
+            tab, selector="#demo"
+        )
+        # ONE canonical flat schema (F-140 3->1): NOT nested under "element".
+        assert "element" not in result
+        assert {"url", "timestamp", "selector", "extraction_options"} <= set(result)
+        assert {
+            "styles",
+            "structure",
+            "events",
+            "animations",
+            "assets",
+            "related_files",
+        } <= set(result)
+        # F-142 fixed: every aspect populates (selector forwarded), unlike the
+        # retired clone_element_complete where the JS ones erred "Selector ...".
+        assert result["styles"]["method"] == "cdp_direct"
+        assert result["structure"] == CANNED_JS_ELEMENT
+        assert result["events"] == CANNED_JS_ELEMENT
+        assert result["animations"] == CANNED_JS_ELEMENT
+        assert result["assets"] == CANNED_JS_ELEMENT
+        _assert_golden("canonical_engine", result)
