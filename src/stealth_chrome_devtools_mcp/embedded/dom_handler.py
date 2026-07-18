@@ -9,6 +9,10 @@ from typing import Any
 from nodriver import Tab
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.element_resolution import (
+    resolve_by_text,
+    resolve_element,
+)
 from stealth_chrome_devtools_mcp.embedded.models import ElementInfo
 
 
@@ -226,9 +230,9 @@ class DOMHandler:
             element = None
 
             if text_match:
-                element = await tab.find(text_match, best_match=True)
+                element = await resolve_by_text(tab, text_match, best_match=True)
             else:
-                element = await tab.select(selector, timeout=timeout / 1000)
+                element = await resolve_element(tab, selector, timeout=timeout / 1000)
 
             if not element:
                 raise Exception(f"Element not found: {selector}")
@@ -282,7 +286,7 @@ class DOMHandler:
                     raise Exception(f"File not found: {path}")
                 resolved.append(str(path.resolve()))
 
-            element = await tab.select(selector, timeout=timeout / 1000)
+            element = await resolve_element(tab, selector, timeout=timeout / 1000)
             if not element:
                 raise Exception(f"File input not found: {selector}")
 
@@ -336,7 +340,7 @@ class DOMHandler:
             bool: True if typing succeeded, False otherwise.
         """
         try:
-            element = await tab.select(selector)
+            element = await resolve_element(tab, selector)
             if not element:
                 raise Exception(f"Element not found: {selector}")
 
@@ -426,7 +430,7 @@ class DOMHandler:
         from nodriver import cdp
 
         try:
-            element = await tab.select(selector)
+            element = await resolve_element(tab, selector)
             if not element:
                 raise Exception(f"Element not found: {selector}")
 
@@ -503,7 +507,7 @@ class DOMHandler:
             bool: True if option selected, False otherwise.
         """
         try:
-            select_element = await tab.select(selector)
+            select_element = await resolve_element(tab, selector)
             if not select_element:
                 raise Exception(f"Select element not found: {selector}")
 
@@ -554,7 +558,7 @@ class DOMHandler:
             Dict[str, Any]: Dictionary of element state properties.
         """
         try:
-            element = await tab.select(selector)
+            element = await resolve_element(tab, selector)
             if not element:
                 raise Exception(f"Element not found: {selector}")
 
@@ -621,7 +625,7 @@ class DOMHandler:
 
         while time.time() - start_time < timeout_seconds:
             try:
-                element = await tab.select(selector)
+                element = await resolve_element(tab, selector)
 
                 if element:
                     if visible:

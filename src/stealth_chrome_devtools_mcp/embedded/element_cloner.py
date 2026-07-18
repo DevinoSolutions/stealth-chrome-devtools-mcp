@@ -10,6 +10,7 @@ from urllib.parse import urljoin
 import requests
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.element_resolution import resolve_element
 
 
 class ElementCloner:
@@ -600,7 +601,7 @@ class ElementCloner:
                     else:
                         default_options[key] = value
             if element is None and selector:
-                element = await tab.select(selector)
+                element = await resolve_element(tab, selector)
             if not element:
                 return {"error": "Element not found"}
             result = {
@@ -715,7 +716,7 @@ class ElementCloner:
             await tab.send(cdp.css.enable())
 
             if element is None and selector:
-                element = await tab.select(selector)
+                element = await resolve_element(tab, selector)
             if not element:
                 return {"error": "Element not found"}
 
