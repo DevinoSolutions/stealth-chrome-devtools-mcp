@@ -16,7 +16,7 @@ from fastmcp import FastMCP
 
 from stealth_chrome_devtools_mcp.embedded import clone_storage
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
-from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import CDPElementCloner
+from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import cdp_element_cloner
 from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
     CDPFunctionExecutor,
 )
@@ -1762,7 +1762,7 @@ async def extract_element_styles(
     """
     tab = await _require_tab(browser_manager, instance_id)
     return await _with_cdp_timeout(
-        element_cloner.extract_element_styles(
+        cdp_element_cloner.extract_element_styles(
             tab,
             selector=selector,
             include_computed=include_computed,
@@ -1799,7 +1799,7 @@ async def extract_element_structure(
     """
     tab = await _require_tab(browser_manager, instance_id)
     return await _with_cdp_timeout(
-        element_cloner.extract_element_structure(
+        cdp_element_cloner.extract_element_structure(
             tab,
             selector=selector,
             include_children=include_children,
@@ -1836,7 +1836,7 @@ async def extract_element_events(
     """
     tab = await _require_tab(browser_manager, instance_id)
     return await _with_cdp_timeout(
-        element_cloner.extract_element_events(
+        cdp_element_cloner.extract_element_events(
             tab,
             selector=selector,
             include_inline=include_inline,
@@ -1873,7 +1873,7 @@ async def extract_element_animations(
     """
     tab = await _require_tab(browser_manager, instance_id)
     return await _with_cdp_timeout(
-        element_cloner.extract_element_animations(
+        cdp_element_cloner.extract_element_animations(
             tab,
             selector=selector,
             include_css_animations=include_css_animations,
@@ -1910,7 +1910,7 @@ async def extract_element_assets(
     """
     tab = await _require_tab(browser_manager, instance_id)
     result = await _with_cdp_timeout(
-        element_cloner.extract_element_assets(
+        cdp_element_cloner.extract_element_assets(
             tab,
             selector=selector,
             include_images=include_images,
@@ -2340,9 +2340,10 @@ async def extract_complete_element_cdp(
         Dict[str, Any]: Complete element data with 100% accuracy.
     """
     tab = await _require_tab(browser_manager, instance_id)
-    cdp_cloner = CDPElementCloner()
     return await _with_cdp_timeout(
-        cdp_cloner.extract_complete_element_cdp(tab, selector, include_children),
+        cdp_element_cloner.extract_complete_element_cdp(
+            tab, selector, include_children
+        ),
         instance_id=instance_id,
     )
 

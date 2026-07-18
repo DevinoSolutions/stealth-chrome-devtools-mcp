@@ -282,6 +282,10 @@ class TestF202RuntimeArchetype:
         fake_cloner = _FakeResponseCloner()
         srv = patched_server(
             browser_manager=FakeBrowserManager(tabs={"i1": FakeTab()}),
+            # M5b-2 re-pointed extract_element_assets at the canonical engine;
+            # patch it too so the fake intercepts (element_cloner/comprehensive
+            # still back extract_related_files/clone_element_complete until M5b-3/5).
+            cdp_element_cloner=fake_cloner,
             element_cloner=fake_cloner,
             comprehensive_element_cloner=fake_cloner,
         )
