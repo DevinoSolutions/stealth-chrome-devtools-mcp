@@ -315,33 +315,34 @@ class TestFileBasedCloner:
         result = await _fbc.file_based_element_cloner.extract_element_structure_to_file(
             tab, selector="#demo"
         )
-        # The F-141 to-file boilerplate shape (repeated across 8 *_to_file methods).
-        assert set(result) == {"file_path", "extraction_type", "selector", "summary"}
+        # The one unified to-file contract (F-141): every *_to_file method now
+        # returns exactly {file_path, extraction_type, summary} via the shared
+        # _extract_and_save helper; selector re-homes into summary.
+        assert set(result) == {"file_path", "extraction_type", "summary"}
         assert result["extraction_type"] == "structure"
-        assert result["selector"] == "#demo"
+        assert result["summary"]["selector"] == "#demo"
         assert isinstance(result["summary"], dict)
         # The file really landed under the patched (temp) output dir.
         assert Path(result["file_path"]).exists()
         assert not inspect.iscoroutine(result)
         _assert_golden("file_based_structure_to_file", result, volatile=("file_path",))
 
-    @pytest.mark.characterization
     async def test_structure_to_file_swallows_delegated_error(
         self, tmp_path, monkeypatch
     ):
-        """PINS CURRENT BEHAVIOR incl. known quirk F-141 (to-file boilerplate x8);
-        M5b will consolidate these — update when that fix lands. When the
-        delegated extractor returns ``{"error": ...}`` (here: no selector), the
-        to-file wrapper does NOT propagate it: it writes the error dict to disk
-        and still returns the normal ``{file_path, extraction_type, selector,
-        summary}`` shape with an all-empty summary. The delegated error is
-        swallowed, not surfaced."""
+        """The unified to-file contract (F-141) swallows a delegated extractor
+        error rather than propagating it: when the engine returns
+        ``{"error": ...}`` (here: no selector), ``_extract_and_save`` still writes
+        that payload to disk and returns the normal
+        ``{file_path, extraction_type, summary}`` shape with an all-empty summary
+        (``tag_name`` None). This is now the deliberate one-contract behavior —
+        previously only 7 of 8 copies swallowed; clone_complete propagated."""
         monkeypatch.setattr(_fbc.file_based_element_cloner, "output_dir", tmp_path)
         tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
         result = await _fbc.file_based_element_cloner.extract_element_structure_to_file(
             tab, selector=None
         )
-        assert set(result) == {"file_path", "extraction_type", "selector", "summary"}
+        assert set(result) == {"file_path", "extraction_type", "summary"}
         assert "error" not in result
         assert result["summary"]["tag_name"] is None
 

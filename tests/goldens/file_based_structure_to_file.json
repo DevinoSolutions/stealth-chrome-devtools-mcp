@@ -1,12 +1,12 @@
 {
   "extraction_type": "structure",
   "file_path": "<FILE_PATH>",
-  "selector": "#demo",
   "summary": {
     "attributes_count": 1,
     "children_count": 0,
     "data_attributes_count": 0,
     "dom_path": "html>body>div",
+    "selector": "#demo",
     "tag_name": "DIV"
   }
 }

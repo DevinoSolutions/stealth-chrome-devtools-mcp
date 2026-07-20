@@ -12,7 +12,14 @@ from stealth_chrome_devtools_mcp.embedded.response_handler import (
 
 
 class FileBasedElementCloner:
-    """Element cloner that saves data to files and returns file paths."""
+    """Thin to-file adapter over the canonical ``cdp_element_cloner`` engine.
+
+    Every ``*_to_file`` method is a call site of the one ``_extract_and_save``
+    helper (F-141): extract via the engine, persist to the output dir, return
+    the uniform ``{file_path, extraction_type, summary}`` contract. This class
+    owns only file-writing + the ``output_dir`` resolution contract; all
+    extraction lives in the engine.
+    """
 
     def __init__(self, output_dir: str | None = None):
         """
@@ -60,77 +67,6 @@ class FileBasedElementCloner:
         unique_id = str(uuid.uuid4())[:8]
         return f"{prefix}_{timestamp}_{unique_id}.{extension}"
 
-    async def extract_element_styles_to_file(
-        self,
-        tab,
-        selector: str,
-        include_computed: bool = True,
-        include_css_rules: bool = True,
-        include_pseudo: bool = True,
-        include_inheritance: bool = False,
-    ) -> dict[str, Any]:
-        """
-        Extract element styles and save to file, returning file path.
-
-        Args:
-            tab: Browser tab instance
-            selector (str): CSS selector for the element
-            include_computed (bool): Include computed styles
-            include_css_rules (bool): Include matching CSS rules
-            include_pseudo (bool): Include pseudo-element styles
-            include_inheritance (bool): Include style inheritance chain
-
-        Returns:
-            Dict[str, Any]: File path and summary of extracted styles
-        """
-        try:
-            debug_logger.log_info(
-                "file_element_cloner",
-                "extract_styles_to_file",
-                f"Starting style extraction for selector: {selector}",
-            )
-
-            # Extract styles using element_cloner
-            style_data = await cdp_element_cloner.extract_element_styles(
-                tab,
-                selector=selector,
-                include_computed=include_computed,
-                include_css_rules=include_css_rules,
-                include_pseudo=include_pseudo,
-                include_inheritance=include_inheritance,
-            )
-
-            # Generate filename and save
-            filename = self._generate_filename("styles")
-            file_path = self._save_to_file(style_data, filename)
-
-            # Create summary
-            summary = {
-                "file_path": str(file_path),
-                "extraction_type": "styles",
-                "selector": selector,
-                "url": getattr(tab, "url", "unknown"),
-                "components": {
-                    "computed_styles_count": len(style_data.get("computed_styles", {})),
-                    "css_rules_count": len(style_data.get("css_rules", [])),
-                    "pseudo_elements_count": len(style_data.get("pseudo_elements", {})),
-                    "custom_properties_count": len(
-                        style_data.get("custom_properties", {})
-                    ),
-                },
-            }
-
-            debug_logger.log_info(
-                "file_element_cloner",
-                "extract_styles_to_file",
-                f"Styles saved to {file_path}",
-            )
-            return summary
-
-        except Exception as e:
-            debug_logger.log_error("file_element_cloner", "extract_styles_to_file", e)
-            return {"error": str(e)}
-
     def _save_to_file(self, data: dict[str, Any], filename: str) -> str:
         """
         Save data to file and return absolute path.
@@ -147,78 +83,96 @@ class FileBasedElementCloner:
             json.dump(data, f, indent=2, ensure_ascii=False)
         return str(file_path.absolute())
 
+    async def _extract_and_save(self, prefix, extraction_coro, summary_fn):
+        """The one to-file shape (F-141): extract → save → uniform contract.
+
+        Extract via the engine coroutine, persist the raw payload under
+        ``output_dir``, and return ``{file_path, extraction_type, summary}``.
+        A delegated ``{"error": ...}`` payload is still written to disk and its
+        (empty) summary returned — the to-file layer never propagates a
+        delegated extractor error (unified swallow, was inconsistent across the
+        8 copies). An exception in extraction/save yields ``{"error": str(e)}``.
+        """
+        op = f"{prefix}_to_file"
+        try:
+            data = await extraction_coro
+            filename = self._generate_filename(prefix)
+            file_path = self._save_to_file(data, filename)
+            debug_logger.log_info(
+                "file_element_cloner", op, f"Saved {prefix} data to {file_path}"
+            )
+            return {
+                "file_path": file_path,
+                "extraction_type": prefix,
+                "summary": summary_fn(data),
+            }
+        except Exception as e:
+            debug_logger.log_error("file_element_cloner", op, e)
+            return {"error": str(e)}
+
+    async def extract_element_styles_to_file(
+        self,
+        tab,
+        selector: str,
+        include_computed: bool = True,
+        include_css_rules: bool = True,
+        include_pseudo: bool = True,
+        include_inheritance: bool = False,
+    ) -> dict[str, Any]:
+        """Extract element styles (engine, CDP) and save to file."""
+        return await self._extract_and_save(
+            "styles",
+            cdp_element_cloner.extract_element_styles(
+                tab,
+                selector=selector,
+                include_computed=include_computed,
+                include_css_rules=include_css_rules,
+                include_pseudo=include_pseudo,
+                include_inheritance=include_inheritance,
+            ),
+            lambda d: {
+                "selector": selector,
+                "url": getattr(tab, "url", "unknown"),
+                "computed_styles_count": len(d.get("computed_styles", {})),
+                "css_rules_count": len(d.get("css_rules", [])),
+                "pseudo_elements_count": len(d.get("pseudo_elements", {})),
+                "custom_properties_count": len(d.get("custom_properties", {})),
+            },
+        )
+
     async def extract_complete_element_to_file(
         self, tab, selector: str, include_children: bool = True
     ) -> dict[str, Any]:
-        """
-        Extract complete element using working comprehensive cloner and save to file.
-
-        Args:
-            tab: Browser tab object.
-            selector (str): CSS selector for the element.
-            include_children (bool): Whether to include children.
-
-        Returns:
-            Dict[str, Any]: Summary of extraction and file path.
-        """
-        try:
-            complete_data = await cdp_element_cloner.extract_complete_element(
+        """Extract the complete element (engine composer) and save to file."""
+        return await self._extract_and_save(
+            "complete_comprehensive",
+            cdp_element_cloner.extract_complete_element(
                 tab,
                 selector=selector,
                 extraction_options={
                     "structure": {"include_children": include_children}
                 },
-            )
-            complete_data["_metadata"] = {
-                "extraction_type": "complete_comprehensive",
+            ),
+            lambda d: {
                 "selector": selector,
-                "timestamp": datetime.now().isoformat(),
-                "include_children": include_children,
-            }
-            filename = self._generate_filename("complete_comprehensive")
-            file_path = self._save_to_file(complete_data, filename)
-            debug_logger.log_info(
-                "file_element_cloner",
-                "extract_complete_to_file",
-                f"Saved complete element data to {file_path}",
-            )
-            summary = {
-                "file_path": file_path,
-                "extraction_type": "complete_comprehensive",
-                "selector": selector,
-                "url": complete_data.get("url", "unknown"),
-                "summary": {
-                    "tag_name": complete_data.get("structure", {}).get(
-                        "tag_name", "unknown"
-                    ),
-                    "computed_styles_count": len(
-                        complete_data.get("styles", {}).get("computed_styles", {})
-                    ),
-                    "attributes_count": len(
-                        complete_data.get("structure", {}).get("attributes", {})
-                    ),
-                    "event_listeners_count": len(
-                        complete_data.get("events", {}).get("event_listeners", [])
-                    ),
-                    "children_count": len(
-                        complete_data.get("structure", {}).get("children", [])
-                    )
-                    if include_children
-                    else 0,
-                    "has_pseudo_elements": bool(
-                        complete_data.get("styles", {}).get("pseudo_elements")
-                    ),
-                    "css_rules_count": len(
-                        complete_data.get("styles", {}).get("css_rules", [])
-                    ),
-                    "animations_count": len(complete_data.get("animations", {})),
-                    "file_size_kb": round(len(json.dumps(complete_data)) / 1024, 2),
-                },
-            }
-            return summary
-        except Exception as e:
-            debug_logger.log_error("file_element_cloner", "extract_complete_to_file", e)
-            return {"error": str(e)}
+                "url": d.get("url", "unknown"),
+                "tag_name": d.get("structure", {}).get("tag_name", "unknown"),
+                "computed_styles_count": len(
+                    d.get("styles", {}).get("computed_styles", {})
+                ),
+                "attributes_count": len(d.get("structure", {}).get("attributes", {})),
+                "event_listeners_count": len(
+                    d.get("events", {}).get("event_listeners", [])
+                ),
+                "children_count": len(d.get("structure", {}).get("children", []))
+                if include_children
+                else 0,
+                "has_pseudo_elements": bool(d.get("styles", {}).get("pseudo_elements")),
+                "css_rules_count": len(d.get("styles", {}).get("css_rules", [])),
+                "animations_count": len(d.get("animations", {})),
+                "file_size_kb": round(len(json.dumps(d)) / 1024, 2),
+            },
+        )
 
     async def extract_element_structure_to_file(
         self,
@@ -229,24 +183,11 @@ class FileBasedElementCloner:
         include_attributes: bool = True,
         include_data_attributes: bool = True,
         max_depth: int = 3,
-    ) -> dict[str, str]:
-        """
-        Extract structure and save to file, return file path.
-
-        Args:
-            tab: Browser tab object.
-            element: DOM element object.
-            selector (str): CSS selector for the element.
-            include_children (bool): Whether to include children.
-            include_attributes (bool): Whether to include attributes.
-            include_data_attributes (bool): Whether to include data attributes.
-            max_depth (int): Maximum depth for extraction.
-
-        Returns:
-            Dict[str, str]: Summary of extraction and file path.
-        """
-        try:
-            structure_data = await cdp_element_cloner.extract_element_structure(
+    ) -> dict[str, Any]:
+        """Extract structure (engine, JS) and save to file."""
+        return await self._extract_and_save(
+            "structure",
+            cdp_element_cloner.extract_element_structure(
                 tab,
                 element,
                 selector,
@@ -254,44 +195,16 @@ class FileBasedElementCloner:
                 include_attributes,
                 include_data_attributes,
                 max_depth,
-            )
-            structure_data["_metadata"] = {
-                "extraction_type": "structure",
+            ),
+            lambda d: {
                 "selector": selector,
-                "timestamp": datetime.now().isoformat(),
-                "options": {
-                    "include_children": include_children,
-                    "include_attributes": include_attributes,
-                    "include_data_attributes": include_data_attributes,
-                    "max_depth": max_depth,
-                },
-            }
-            filename = self._generate_filename("structure")
-            file_path = self._save_to_file(structure_data, filename)
-            debug_logger.log_info(
-                "file_element_cloner",
-                "extract_structure_to_file",
-                f"Saved structure data to {file_path}",
-            )
-            return {
-                "file_path": file_path,
-                "extraction_type": "structure",
-                "selector": selector,
-                "summary": {
-                    "tag_name": structure_data.get("tag_name"),
-                    "attributes_count": len(structure_data.get("attributes", {})),
-                    "data_attributes_count": len(
-                        structure_data.get("data_attributes", {})
-                    ),
-                    "children_count": len(structure_data.get("children", [])),
-                    "dom_path": structure_data.get("dom_path"),
-                },
-            }
-        except Exception as e:
-            debug_logger.log_error(
-                "file_element_cloner", "extract_structure_to_file", e
-            )
-            return {"error": str(e)}
+                "tag_name": d.get("tag_name"),
+                "attributes_count": len(d.get("attributes", {})),
+                "data_attributes_count": len(d.get("data_attributes", {})),
+                "children_count": len(d.get("children", [])),
+                "dom_path": d.get("dom_path"),
+            },
+        )
 
     async def extract_element_events_to_file(
         self,
@@ -302,24 +215,11 @@ class FileBasedElementCloner:
         include_listeners: bool = True,
         include_framework: bool = True,
         analyze_handlers: bool = True,
-    ) -> dict[str, str]:
-        """
-        Extract events and save to file, return file path.
-
-        Args:
-            tab: Browser tab object.
-            element: DOM element object.
-            selector (str): CSS selector for the element.
-            include_inline (bool): Include inline event handlers.
-            include_listeners (bool): Include event listeners.
-            include_framework (bool): Include framework event handlers.
-            analyze_handlers (bool): Analyze event handlers.
-
-        Returns:
-            Dict[str, str]: Summary of extraction and file path.
-        """
-        try:
-            event_data = await cdp_element_cloner.extract_element_events(
+    ) -> dict[str, Any]:
+        """Extract events (engine, JS) and save to file."""
+        return await self._extract_and_save(
+            "events",
+            cdp_element_cloner.extract_element_events(
                 tab,
                 element,
                 selector,
@@ -327,41 +227,17 @@ class FileBasedElementCloner:
                 include_listeners,
                 include_framework,
                 analyze_handlers,
-            )
-            event_data["_metadata"] = {
-                "extraction_type": "events",
+            ),
+            lambda d: {
                 "selector": selector,
-                "timestamp": datetime.now().isoformat(),
-                "options": {
-                    "include_inline": include_inline,
-                    "include_listeners": include_listeners,
-                    "include_framework": include_framework,
-                    "analyze_handlers": analyze_handlers,
-                },
-            }
-            filename = self._generate_filename("events")
-            file_path = self._save_to_file(event_data, filename)
-            debug_logger.log_info(
-                "file_element_cloner",
-                "extract_events_to_file",
-                f"Saved events data to {file_path}",
-            )
-            return {
-                "file_path": file_path,
-                "extraction_type": "events",
-                "selector": selector,
-                "summary": {
-                    "inline_handlers_count": len(event_data.get("inline_handlers", [])),
-                    "event_listeners_count": len(event_data.get("event_listeners", [])),
-                    "detected_frameworks": event_data.get("detected_frameworks", []),
-                    "framework_handlers": self._safe_process_framework_handlers(
-                        event_data.get("framework_handlers", {})
-                    ),
-                },
-            }
-        except Exception as e:
-            debug_logger.log_error("file_element_cloner", "extract_events_to_file", e)
-            return {"error": str(e)}
+                "inline_handlers_count": len(d.get("inline_handlers", [])),
+                "event_listeners_count": len(d.get("event_listeners", [])),
+                "detected_frameworks": d.get("detected_frameworks", []),
+                "framework_handlers": self._safe_process_framework_handlers(
+                    d.get("framework_handlers", {})
+                ),
+            },
+        )
 
     async def extract_element_animations_to_file(
         self,
@@ -372,24 +248,11 @@ class FileBasedElementCloner:
         include_transitions: bool = True,
         include_transforms: bool = True,
         analyze_keyframes: bool = True,
-    ) -> dict[str, str]:
-        """
-        Extract animations and save to file, return file path.
-
-        Args:
-            tab: Browser tab object.
-            element: DOM element object.
-            selector (str): CSS selector for the element.
-            include_css_animations (bool): Include CSS animations.
-            include_transitions (bool): Include transitions.
-            include_transforms (bool): Include transforms.
-            analyze_keyframes (bool): Analyze keyframes.
-
-        Returns:
-            Dict[str, str]: Summary of extraction and file path.
-        """
-        try:
-            animation_data = await cdp_element_cloner.extract_element_animations(
+    ) -> dict[str, Any]:
+        """Extract animations (engine, JS) and save to file."""
+        return await self._extract_and_save(
+            "animations",
+            cdp_element_cloner.extract_element_animations(
                 tab,
                 element,
                 selector,
@@ -397,50 +260,20 @@ class FileBasedElementCloner:
                 include_transitions,
                 include_transforms,
                 analyze_keyframes,
-            )
-            animation_data["_metadata"] = {
-                "extraction_type": "animations",
+            ),
+            lambda d: {
                 "selector": selector,
-                "timestamp": datetime.now().isoformat(),
-                "options": {
-                    "include_css_animations": include_css_animations,
-                    "include_transitions": include_transitions,
-                    "include_transforms": include_transforms,
-                    "analyze_keyframes": analyze_keyframes,
-                },
-            }
-            filename = self._generate_filename("animations")
-            file_path = self._save_to_file(animation_data, filename)
-            debug_logger.log_info(
-                "file_element_cloner",
-                "extract_animations_to_file",
-                f"Saved animations data to {file_path}",
-            )
-            return {
-                "file_path": file_path,
-                "extraction_type": "animations",
-                "selector": selector,
-                "summary": {
-                    "has_animations": animation_data.get("animations", {}).get(
-                        "animation_name", "none"
-                    )
-                    != "none",
-                    "has_transitions": animation_data.get("transitions", {}).get(
-                        "transition_property", "none"
-                    )
-                    != "none",
-                    "has_transforms": animation_data.get("transforms", {}).get(
-                        "transform", "none"
-                    )
-                    != "none",
-                    "keyframes_count": len(animation_data.get("keyframes", [])),
-                },
-            }
-        except Exception as e:
-            debug_logger.log_error(
-                "file_element_cloner", "extract_animations_to_file", e
-            )
-            return {"error": str(e)}
+                "has_animations": d.get("animations", {}).get("animation_name", "none")
+                != "none",
+                "has_transitions": d.get("transitions", {}).get(
+                    "transition_property", "none"
+                )
+                != "none",
+                "has_transforms": d.get("transforms", {}).get("transform", "none")
+                != "none",
+                "keyframes_count": len(d.get("keyframes", [])),
+            },
+        )
 
     async def extract_element_assets_to_file(
         self,
@@ -451,24 +284,11 @@ class FileBasedElementCloner:
         include_backgrounds: bool = True,
         include_fonts: bool = True,
         fetch_external: bool = False,
-    ) -> dict[str, str]:
-        """
-        Extract assets and save to file, return file path.
-
-        Args:
-            tab: Browser tab object.
-            element: DOM element object.
-            selector (str): CSS selector for the element.
-            include_images (bool): Include images.
-            include_backgrounds (bool): Include background images.
-            include_fonts (bool): Include fonts.
-            fetch_external (bool): Fetch external assets.
-
-        Returns:
-            Dict[str, str]: Summary of extraction and file path.
-        """
-        try:
-            asset_data = await cdp_element_cloner.extract_element_assets(
+    ) -> dict[str, Any]:
+        """Extract assets (engine, JS) and save to file."""
+        return await self._extract_and_save(
+            "assets",
+            cdp_element_cloner.extract_element_assets(
                 tab,
                 element,
                 selector,
@@ -476,46 +296,18 @@ class FileBasedElementCloner:
                 include_backgrounds,
                 include_fonts,
                 fetch_external,
-            )
-            asset_data["_metadata"] = {
-                "extraction_type": "assets",
+            ),
+            lambda d: {
                 "selector": selector,
-                "timestamp": datetime.now().isoformat(),
-                "options": {
-                    "include_images": include_images,
-                    "include_backgrounds": include_backgrounds,
-                    "include_fonts": include_fonts,
-                    "fetch_external": fetch_external,
-                },
-            }
-            filename = self._generate_filename("assets")
-            file_path = self._save_to_file(asset_data, filename)
-            debug_logger.log_info(
-                "file_element_cloner",
-                "extract_assets_to_file",
-                f"Saved assets data to {file_path}",
-            )
-            return {
-                "file_path": file_path,
-                "extraction_type": "assets",
-                "selector": selector,
-                "summary": {
-                    "images_count": len(asset_data.get("images", [])),
-                    "background_images_count": len(
-                        asset_data.get("background_images", [])
-                    ),
-                    "font_family": asset_data.get("fonts", {}).get("family"),
-                    "custom_fonts_count": len(
-                        asset_data.get("fonts", {}).get("custom_fonts", [])
-                    ),
-                    "icons_count": len(asset_data.get("icons", [])),
-                    "videos_count": len(asset_data.get("videos", [])),
-                    "audio_count": len(asset_data.get("audio", [])),
-                },
-            }
-        except Exception as e:
-            debug_logger.log_error("file_element_cloner", "extract_assets_to_file", e)
-            return {"error": str(e)}
+                "images_count": len(d.get("images", [])),
+                "background_images_count": len(d.get("background_images", [])),
+                "font_family": d.get("fonts", {}).get("family"),
+                "custom_fonts_count": len(d.get("fonts", {}).get("custom_fonts", [])),
+                "icons_count": len(d.get("icons", [])),
+                "videos_count": len(d.get("videos", [])),
+                "audio_count": len(d.get("audio", [])),
+            },
+        )
 
     async def extract_related_files_to_file(
         self,
@@ -526,24 +318,11 @@ class FileBasedElementCloner:
         analyze_js: bool = True,
         follow_imports: bool = False,
         max_depth: int = 2,
-    ) -> dict[str, str]:
-        """
-        Extract related files and save to file, return file path.
-
-        Args:
-            tab: Browser tab object.
-            element: DOM element object.
-            selector (str): CSS selector for the element.
-            analyze_css (bool): Analyze CSS files.
-            analyze_js (bool): Analyze JS files.
-            follow_imports (bool): Follow imports.
-            max_depth (int): Maximum depth for import following.
-
-        Returns:
-            Dict[str, str]: Summary of extraction and file path.
-        """
-        try:
-            file_data = await cdp_element_cloner.extract_related_files(
+    ) -> dict[str, Any]:
+        """Extract related files (engine, JS+HTTP) and save to file."""
+        return await self._extract_and_save(
+            "related_files",
+            cdp_element_cloner.extract_related_files(
                 tab,
                 element,
                 selector,
@@ -551,41 +330,15 @@ class FileBasedElementCloner:
                 analyze_js,
                 follow_imports,
                 max_depth,
-            )
-            file_data["_metadata"] = {
-                "extraction_type": "related_files",
+            ),
+            lambda d: {
                 "selector": selector,
-                "timestamp": datetime.now().isoformat(),
-                "options": {
-                    "analyze_css": analyze_css,
-                    "analyze_js": analyze_js,
-                    "follow_imports": follow_imports,
-                    "max_depth": max_depth,
-                },
-            }
-            filename = self._generate_filename("related_files")
-            file_path = self._save_to_file(file_data, filename)
-            debug_logger.log_info(
-                "file_element_cloner",
-                "extract_related_files_to_file",
-                f"Saved related files data to {file_path}",
-            )
-            return {
-                "file_path": file_path,
-                "extraction_type": "related_files",
-                "selector": selector,
-                "summary": {
-                    "stylesheets_count": len(file_data.get("stylesheets", [])),
-                    "scripts_count": len(file_data.get("scripts", [])),
-                    "imports_count": len(file_data.get("imports", [])),
-                    "modules_count": len(file_data.get("modules", [])),
-                },
-            }
-        except Exception as e:
-            debug_logger.log_error(
-                "file_element_cloner", "extract_related_files_to_file", e
-            )
-            return {"error": str(e)}
+                "stylesheets_count": len(d.get("stylesheets", [])),
+                "scripts_count": len(d.get("scripts", [])),
+                "imports_count": len(d.get("imports", [])),
+                "modules_count": len(d.get("modules", [])),
+            },
+        )
 
     async def clone_element_complete_to_file(
         self,
@@ -594,90 +347,64 @@ class FileBasedElementCloner:
         selector: str = None,
         extraction_options: dict[str, Any] = None,
     ) -> dict[str, Any]:
-        """
-        Master function that extracts all element data and saves to file.
-        Returns file path instead of full data.
+        """Extract all element data (engine composer) and save to file."""
 
-        Args:
-            tab: Browser tab object.
-            element: DOM element object.
-            selector (str): CSS selector for the element.
-            extraction_options (Dict[str, Any]): Extraction options.
-
-        Returns:
-            Dict[str, Any]: Summary of extraction and file path.
-        """
-        try:
-            complete_data = await cdp_element_cloner.extract_complete_element(
-                tab, element, selector, extraction_options
-            )
-            if "error" in complete_data:
-                return complete_data
-            complete_data["_metadata"] = {
-                "extraction_type": "complete_clone",
-                "selector": selector,
-                "timestamp": datetime.now().isoformat(),
-                "extraction_options": extraction_options,
-            }
-            filename = self._generate_filename("complete_clone")
-            file_path = self._save_to_file(complete_data, filename)
-            summary = {
-                "file_path": file_path,
-                "extraction_type": "complete_clone",
-                "selector": selector,
-                "url": complete_data.get("url"),
-                "components": {},
-            }
-            if "styles" in complete_data:
-                styles = complete_data["styles"]
-                summary["components"]["styles"] = {
+        def _summary(d):
+            components: dict[str, Any] = {}
+            if "styles" in d:
+                styles = d["styles"]
+                components["styles"] = {
                     "computed_styles_count": len(styles.get("computed_styles", {})),
                     "css_rules_count": len(styles.get("css_rules", [])),
                     "pseudo_elements_count": len(styles.get("pseudo_elements", {})),
                 }
-            if "structure" in complete_data:
-                structure = complete_data["structure"]
-                summary["components"]["structure"] = {
+            if "structure" in d:
+                structure = d["structure"]
+                components["structure"] = {
                     "tag_name": structure.get("tag_name"),
                     "attributes_count": len(structure.get("attributes", {})),
                     "children_count": len(structure.get("children", [])),
                 }
-            if "events" in complete_data:
-                events = complete_data["events"]
-                summary["components"]["events"] = {
+            if "events" in d:
+                events = d["events"]
+                components["events"] = {
                     "inline_handlers_count": len(events.get("inline_handlers", [])),
                     "detected_frameworks": events.get("detected_frameworks", []),
                 }
-            if "animations" in complete_data:
-                animations = complete_data["animations"]
-                summary["components"]["animations"] = {
+            if "animations" in d:
+                animations = d["animations"]
+                components["animations"] = {
                     "has_animations": animations.get("animations", {}).get(
                         "animation_name", "none"
                     )
                     != "none",
                     "keyframes_count": len(animations.get("keyframes", [])),
                 }
-            if "assets" in complete_data:
-                assets = complete_data["assets"]
-                summary["components"]["assets"] = {
+            if "assets" in d:
+                assets = d["assets"]
+                components["assets"] = {
                     "images_count": len(assets.get("images", [])),
                     "background_images_count": len(assets.get("background_images", [])),
                 }
-            if "related_files" in complete_data:
-                files = complete_data["related_files"]
-                summary["components"]["related_files"] = {
+            if "related_files" in d:
+                files = d["related_files"]
+                components["related_files"] = {
                     "stylesheets_count": len(files.get("stylesheets", [])),
                     "scripts_count": len(files.get("scripts", [])),
                 }
-            debug_logger.log_info(
-                "file_element_cloner",
-                "clone_complete_to_file",
-                f"Saved complete clone data to {file_path}",
-            )
-            return summary
-        except Exception as e:
-            debug_logger.log_error("file_element_cloner", "clone_complete_to_file", e)
-            return {"error": str(e)}
+            return {
+                "selector": selector,
+                "url": d.get("url"),
+                "components": components,
+            }
+
+        return await self._extract_and_save(
+            "complete_clone",
+            cdp_element_cloner.extract_complete_element(
+                tab, element, selector, extraction_options
+            ),
+            _summary,
+        )
 
     def list_clone_files(self) -> list[dict[str, Any]]:
         """
