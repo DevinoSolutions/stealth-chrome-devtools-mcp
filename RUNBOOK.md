@@ -39,7 +39,7 @@ and teardown live in the backend and are reused from the eviction path.
 ## Reading `status`
 
 ```
-backend     : responsive on port 19222
+backend     : running (responsive) on port 19222
 pid         : 12345
 log         : C:\Users\you\.stealth-mcp\logs\backend-12345.log
 version     : 1.2.0
@@ -130,7 +130,7 @@ To confirm the server is actually answering the MCP protocol (not just holding a
 1. Ensure a backend is up — either let a client connect, or start one yourself:
    `stealth-chrome-devtools serve --http` (or `.venv\Scripts\python.exe -m
    stealth_chrome_devtools_mcp --transport http`).
-2. `stealth-chrome-devtools status` → **`backend : responsive on port <port>`**.
+2. `stealth-chrome-devtools status` → **`backend : running (responsive) on port <port>`**.
 
 Step 2 is the smoke: `status` performs a **real MCP `initialize` handshake** against
 the backend over HTTP (`singleton._backend_http_ready`) and only prints `responsive`

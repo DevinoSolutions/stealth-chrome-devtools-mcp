@@ -28,12 +28,14 @@ pytest-timeout, pytest-cov) and `dev` (ruff, ty, vulture) extras. Verify:
 .venv\Scripts\python.exe -c "import stealth_chrome_devtools_mcp; print('ok')"
 ```
 
-### The `uv run` caveat (important on this checkout)
+### The `uv run pytest` caveat (on a spaces/`&` checkout path)
 
-If your checkout path contains spaces or an `&` — the dev checkout lives under
-`…/CUSTOM MCPs & PRODUCTIVITY/…` — **`uv run` may fail to resolve** its environment.
-That is not a bug in this package; it is `uv`'s resolver tripping on the special
-characters in the path. Two working responses:
+The dev checkout lives under `…/CUSTOM MCPs & PRODUCTIVITY/…`. On such a path,
+**`uv run pytest` fails** with `Failed to canonicalize script path` — `uv` cannot
+resolve the `pytest` entry-point script through the special characters. (`uv run
+python …` and `uv run stealth-chrome-devtools …` still work — it is specifically the
+`pytest` console-script path that trips.) That is not a bug in this package. Two
+working responses:
 
 1. Invoke the **venv Python directly** (works everywhere, and is what the commands in
    this repo's docs use):
@@ -41,7 +43,8 @@ characters in the path. Two working responses:
    .venv\Scripts\python.exe -m pytest -m "not integration" -q
    ```
 2. Or check the repo out to a path without spaces/`&` (e.g. `C:\src\stealth-…`), where
-   `uv run` works. CI checks out to a clean path, which is why CI uses `uv run`.
+   `uv run pytest` works too. CI checks out to a clean path, which is why CI uses
+   `uv run`.
 
 Prefer a clean checkout path for local work; where you can't, the `.venv\Scripts\python.exe`
 forms below are the ones that run.

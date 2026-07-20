@@ -77,7 +77,7 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 **Cloner subsystem** (one engine + thin adapters + disk storage)
 | File | Owns |
 |---|---|
-| `cdp_element_cloner.py` | **THE cloner engine** (`CDPElementCloner`) — every aspect (`styles` via CDP; `structure`/`events`/`animations`/`assets`/`related_files` via JS-eval) |
+| `cdp_element_cloner.py` | **THE cloner engine** (`CDPElementCloner`) — the complete-element **clone schema** (its shape lives here, **not** in `models.py`) + every aspect (`styles` via CDP; `structure`/`events`/`animations`/`assets`/`related_files` via JS-eval) |
 | `file_based_element_cloner.py` | thin to-file adapter (`FileBasedElementCloner`, name KEPT) — owns `output_dir` only |
 | `progressive_element_cloner.py` | thin adapter (`ProgressiveElementCloner`) — `expand_*` slices from cached extraction |
 | `clone_storage.py` | on-disk **profile/clone quota + GC** (NOT extraction — see glossary "clone") |

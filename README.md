@@ -191,8 +191,8 @@ uv run pytest
 uv run pytest -v --tb=short
 ```
 
-> If your checkout path contains spaces or an `&`, `uv run` may not resolve — use
-> the venv Python directly:
+> If your checkout path contains spaces or an `&`, `uv run pytest` fails with
+> `Failed to canonicalize script path` — use the venv Python directly:
 > `.venv\Scripts\python.exe -m pytest -m "not integration"`. See
 > [CONTRIBUTING.md](CONTRIBUTING.md) for the full test/gate workflow.
 
