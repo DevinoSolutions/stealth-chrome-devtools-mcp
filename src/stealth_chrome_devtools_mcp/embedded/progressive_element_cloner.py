@@ -10,9 +10,7 @@ import time
 import uuid
 from typing import Any
 
-from stealth_chrome_devtools_mcp.embedded.comprehensive_element_cloner import (
-    comprehensive_element_cloner,
-)
+from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import cdp_element_cloner
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
 
@@ -43,8 +41,12 @@ class ProgressiveElementCloner:
                 f"Cloning {selector} -> {element_id}",
             )
 
-            full_data = await comprehensive_element_cloner.extract_complete_element(
-                tab, selector, include_children
+            full_data = await cdp_element_cloner.extract_complete_element(
+                tab,
+                selector=selector,
+                extraction_options={
+                    "structure": {"include_children": include_children}
+                },
             )
             if not isinstance(full_data, dict) or "error" in full_data:
                 return {
@@ -63,30 +65,23 @@ class ProgressiveElementCloner:
             self._save_store(store)
 
             base = {
-                "tagName": full_data.get("element", {}).get("html", {}).get("tagName")
-                or full_data.get("tagName", "unknown"),
+                "tagName": full_data.get("structure", {}).get("tag_name", "unknown"),
                 "attributes_count": len(
-                    full_data.get("element", {}).get("html", {}).get("attributes", [])
+                    full_data.get("structure", {}).get("attributes", {})
                 ),
-                "children_count": len(full_data.get("children", [])),
+                "children_count": len(
+                    full_data.get("structure", {}).get("children", [])
+                ),
                 "summary": {
                     "styles_count": len(
-                        full_data.get("element", {}).get("computed_styles", {})
-                    )
-                    or len(full_data.get("styles", {})),
+                        full_data.get("styles", {}).get("computed_styles", {})
+                    ),
                     "event_listeners_count": len(
-                        full_data.get("element", {}).get("event_listeners", [])
-                    )
-                    or len(full_data.get("eventListeners", [])),
+                        full_data.get("events", {}).get("event_listeners", [])
+                    ),
                     "css_rules_count": len(
-                        full_data.get("element", {})
-                        .get("matched_styles", {})
-                        .get("matchedCSSRules", [])
-                    )
-                    if isinstance(
-                        full_data.get("element", {}).get("matched_styles"), dict
-                    )
-                    else len(full_data.get("cssRules", [])),
+                        full_data.get("styles", {}).get("css_rules", [])
+                    ),
                 },
             }
 
@@ -121,11 +116,7 @@ class ProgressiveElementCloner:
         if element_id not in store:
             return {"error": f"Element {element_id} not found"}
         data = store[element_id]["full_data"]
-        styles = (
-            data.get("element", {}).get("computed_styles", {})
-            if isinstance(data.get("element", {}).get("computed_styles"), dict)
-            else data.get("styles", {})
-        )
+        styles = data.get("styles", {}).get("computed_styles", {})
         if properties:
             filtered = {k: v for k, v in styles.items() if k in properties}
         elif categories:
@@ -169,9 +160,7 @@ class ProgressiveElementCloner:
         if element_id not in store:
             return {"error": f"Element {element_id} not found"}
         data = store[element_id]["full_data"]
-        events = data.get("eventListeners", []) or data.get("element", {}).get(
-            "event_listeners", []
-        )
+        events = data.get("events", {}).get("event_listeners", [])
         if event_types:
             events = [
                 e
@@ -196,7 +185,7 @@ class ProgressiveElementCloner:
         if element_id not in store:
             return {"error": f"Element {element_id} not found"}
         data = store[element_id]["full_data"]
-        children = data.get("children", [])
+        children = data.get("structure", {}).get("children", [])
 
         # Ensure children is a list that can be sliced
         if not isinstance(children, list):
@@ -224,7 +213,7 @@ class ProgressiveElementCloner:
             "element_id": element_id,
             "data_type": "children",
             "children": children,
-            "total_available": len(data.get("children", [])),
+            "total_available": len(data.get("structure", {}).get("children", [])),
             "returned_count": len(children),
         }
 
@@ -235,7 +224,7 @@ class ProgressiveElementCloner:
         if element_id not in store:
             return {"error": f"Element {element_id} not found"}
         data = store[element_id]["full_data"]
-        rules = data.get("cssRules", [])
+        rules = data.get("styles", {}).get("css_rules", [])
         if source_types:
             rules = [
                 r for r in rules if any(s in r.get("source", "") for s in source_types)
@@ -244,7 +233,7 @@ class ProgressiveElementCloner:
             "element_id": element_id,
             "data_type": "css_rules",
             "css_rules": rules,
-            "total_available": len(data.get("cssRules", [])),
+            "total_available": len(data.get("styles", {}).get("css_rules", [])),
             "returned_count": len(rules),
         }
 
@@ -253,7 +242,7 @@ class ProgressiveElementCloner:
         if element_id not in store:
             return {"error": f"Element {element_id} not found"}
         data = store[element_id]["full_data"]
-        pseudos = data.get("pseudoElements", {})
+        pseudos = data.get("styles", {}).get("pseudo_elements", {})
         return {
             "element_id": element_id,
             "data_type": "pseudo_elements",
@@ -267,7 +256,7 @@ class ProgressiveElementCloner:
             return {"error": f"Element {element_id} not found"}
         data = store[element_id]["full_data"]
         animations = data.get("animations", {})
-        fonts = data.get("fonts", {})
+        fonts = data.get("assets", {}).get("fonts", {})
         return {
             "element_id": element_id,
             "data_type": "animations",
@@ -285,11 +274,11 @@ class ProgressiveElementCloner:
                     "element_id": element_id,
                     "selector": meta.get("selector"),
                     "url": meta.get("url"),
-                    "tagName": fd.get("tagName")
-                    or fd.get("element", {}).get("html", {}).get("tagName", "unknown"),
-                    "children_count": len(fd.get("children", [])),
-                    "styles_count": len(fd.get("styles", {}))
-                    or len(fd.get("element", {}).get("computed_styles", {})),
+                    "tagName": fd.get("structure", {}).get("tag_name", "unknown"),
+                    "children_count": len(fd.get("structure", {}).get("children", [])),
+                    "styles_count": len(
+                        fd.get("styles", {}).get("computed_styles", {})
+                    ),
                     "timestamp": meta.get("timestamp"),
                 }
             )

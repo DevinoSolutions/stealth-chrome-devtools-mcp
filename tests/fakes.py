@@ -8,11 +8,12 @@ in a test module is a defect.
 
 Two tab-interaction seams the cloners use are both faked:
 
-* ``FakeTab.evaluate(js)`` — the **JS-eval path** (``element_cloner`` JS methods,
-  ``comprehensive_element_cloner``). Returns a canned value; a substring→value
-  map lets one tab answer several distinct ``evaluate`` calls.
-* ``FakeTab.send(cdp_obj)`` — the **CDP path** (``cdp_element_cloner``,
-  ``element_cloner`` CDP styles). nodriver CDP commands are *generators*; the
+* ``FakeTab.evaluate(js)`` — the **JS-eval path** (the canonical engine's
+  structure/events/animations/assets/related_files aspects). Returns a canned
+  value; a substring→value map lets one tab answer several distinct ``evaluate``
+  calls.
+* ``FakeTab.send(cdp_obj)`` — the **CDP path** (``cdp_element_cloner`` styles).
+  nodriver CDP commands are *generators*; the
   canned response is keyed by the generator's ``co_name`` (e.g. ``get_document``)
   which is stable and call-order-independent. The generator is closed so it is
   never left un-iterated.

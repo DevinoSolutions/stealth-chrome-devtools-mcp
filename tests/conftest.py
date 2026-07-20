@@ -160,7 +160,7 @@ def patched_server(monkeypatch):
     """Return a helper that swaps ``server``'s module-global singletons for fakes
     and hands back the ``server`` module.
 
-    Tools resolve ``browser_manager``/``element_cloner``/``in_memory_storage``/…
+    Tools resolve ``browser_manager``/``cdp_element_cloner``/``in_memory_storage``/…
     as names in ``server``'s namespace at call time, so ``setattr(server, name,
     fake)`` is a clean hermetic seam needing no production change. ``monkeypatch``
     restores every attr at teardown.
