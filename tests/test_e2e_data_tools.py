@@ -249,26 +249,21 @@ async def test_clone_element_complete_current_shape(fixture_app_server):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.characterization
 async def test_progressive_cloning_walk(fixture_app_server):
-    """PINS the progressive-clone tier's CURRENT real-Chrome behavior: every
-    expansion comes back EMPTY.
+    """The progressive-clone tier over real Chrome, post-M5b.
 
-    Finding — progressive tier returns empty expansions under real Chrome:
-    ``comprehensive_element_cloner.extract_complete_element``'s live output shape
-    matches NEITHER shape the progressive readers try (``element.computed_styles``
-    nor a top-level ``styles`` map — see progressive_element_cloner.py:112-161 and
-    the shape-hedging OR at :71-74), so every expand_* reader falls through to its
-    empty default even though #styled-card verifiably has rgb styles, 2 listeners,
-    a ::before, a paused animation, and a 3-level child tree. The fakes-tier
-    goldens (tests/goldens/progressive_expand_*.json) pin the intended NON-empty
-    shape; live Chrome never produces it. Route M5b.
+    Pre-M5b every expand_* came back EMPTY: ``comprehensive_element_cloner``'s
+    live output shape matched neither shape the readers tried. M5b routed the
+    tier onto the canonical engine (``cdp_element_cloner.extract_complete_element``
+    — styles via CDP, the rest JS-eval, selector forwarded), so the readers now
+    read the shape the engine actually produces.
 
-    ``expand_children`` is the lone non-empty reader, but it iterates the KEYS of
-    a dict (``full_data["children"]``) rather than a child list, so we pin only the
-    list/consistency invariants — not the garbage values, which nodriver
-    serialization can shift. The list/clear lifecycle tools work and stay asserted
-    for real.
+    #styled-card verifiably has rgb styles, a paused named animation (fixture-
+    pulse), a ::before, 2 listeners, and a 3-level child tree. Styles + animations
+    are asserted against fixture ground truth (deterministic); events / css_rules
+    / pseudo are shape-checked, matching the sibling ``extract_element_events``
+    E2E which also only shape-checks those aspects' live capture. The list/clear
+    lifecycle tools are asserted for real.
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
@@ -293,29 +288,37 @@ async def test_progressive_cloning_walk(fixture_app_server):
         assert "element_id" in base_clone
         assert base_clone["selector"] == "#styled-card"
         element_id = base_clone["element_id"]
-        # Quirk: the base summary reports zero styles for an element that has them.
-        assert base_clone["base"]["summary"]["styles_count"] == 0
+        # M5b: the base summary now surfaces real styles (canonical engine forwards
+        # selector + produces styles.computed_styles) — was 0 pre-M5b.
+        assert base_clone["base"]["summary"]["styles_count"] > 0
 
-        # Every typed expansion is empty under real Chrome (the finding).
+        # Styles expansion returns the real computed styles (ground-truth color).
         styles = await expand_styles(element_id=element_id)
-        assert styles["styles"] == {}
-        assert styles["total_available"] == 0
+        assert styles["total_available"] > 0
+        assert "rgb(17, 34, 51)" in json.dumps(styles["styles"], default=str)
 
-        assert (await expand_events(element_id=element_id))["event_listeners"] == []
+        # Events / css_rules / pseudo readers return well-shaped containers (live
+        # capture of these aspects varies — the sibling extract_* E2E shape-checks
+        # them too).
+        assert isinstance(
+            (await expand_events(element_id=element_id))["event_listeners"], list
+        )
+        assert isinstance(
+            (await expand_css_rules(element_id=element_id))["css_rules"], list
+        )
+        assert isinstance(
+            (await expand_pseudo(element_id=element_id))["pseudo_elements"], dict
+        )
 
-        assert (await expand_css_rules(element_id=element_id))["css_rules"] == []
+        # Animations expansion surfaces the named fixture animation.
+        animations = await expand_animations(element_id=element_id)
+        assert "fixture-pulse" in json.dumps(animations, default=str)
 
-        # ::before exists in the fixture, yet the reader returns no pseudo-elements.
-        assert (await expand_pseudo(element_id=element_id))["pseudo_elements"] == {}
-
-        # fixture-pulse exists in the fixture, yet the reader returns no animations.
-        assert (await expand_animations(element_id=element_id))["animations"] == {}
-
-        # expand_children is non-empty but reads dict KEYS as "children"; pin only
-        # the list/consistency invariants, not the serialization-volatile values.
+        # Children now read structure.children (a real list), not dict keys.
         children = await expand_children(element_id=element_id)
         assert isinstance(children["children"], list)
         assert children["total_available"] == children["returned_count"]
+        assert len(children["children"]) > 0
 
         # list + clear lifecycle works correctly (asserted for real, not pinned).
         stored = await list_stored()
