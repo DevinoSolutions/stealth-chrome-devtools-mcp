@@ -60,12 +60,12 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # is the canonical extraction engine the five cloner modules converge onto,
     # so it absorbs the six per-aspect methods + the composing extract_complete_
     # element + node-id/JS helpers (styles=CDP; structure/events/animations/
-    # assets/related_files=JS-eval per the 2026-07-18 ruling). M5b-1 is ADDITIVE
-    # (nothing deleted yet), so this is the transitional PEAK — element_cloner.py
-    # (833) + comprehensive_element_cloner.py (400) are deleted in M5b-3/M5b-5,
-    # and this engine's own now-superseded nested extract_complete_element_cdp +
-    # _get_* helpers ratchet the cap DOWN then. GRANDFATHERED at actual ruff-clean
-    # LOC (cap == actual, no padding) per the C1/C4 gate-ruling discipline.
+    # assets/related_files=JS-eval per the 2026-07-18 ruling). element_cloner.py
+    # (833) + comprehensive_element_cloner.py (400) are now deleted (M5b-4a/M5b-5);
+    # the engine retains the CDP-native extract_complete_element_cdp + _get_*
+    # helpers (they back the live extract_complete_element_cdp tool, not dead), so
+    # the cap holds at 1013. GRANDFATHERED at actual ruff-clean LOC (cap == actual,
+    # no padding) per the C1/C4 gate-ruling discipline.
     "embedded/cdp_element_cloner.py": (1013, "plan_M5b"),
 }
 

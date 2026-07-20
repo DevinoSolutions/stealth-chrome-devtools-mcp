@@ -31,7 +31,6 @@ from fakes import (
     normalize_golden,
 )
 from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
-from stealth_chrome_devtools_mcp.embedded import element_cloner as _ec
 from stealth_chrome_devtools_mcp.embedded import file_based_element_cloner as _fbc
 from stealth_chrome_devtools_mcp.embedded import progressive_element_cloner as _pec
 
@@ -122,99 +121,6 @@ class TestCompleteElementEngines:
             tab, "#missing"
         )
         assert result == {"error": "Element not found: #missing"}
-
-    @pytest.mark.characterization
-    async def test_element_cloner_clone_is_flat_multi_key(self):
-        """PINS CURRENT BEHAVIOR incl. known quirks F-140 (3 divergent schemas)
-        and F-142 (selector not forwarded to the JS sub-extractors); M5b/M5a will
-        intentionally change this — update the golden/assertion when that fix
-        lands. ``clone_element_complete`` resolves the element via ``tab.select``
-        then gathers the 5 ``extract_*`` — but forwards ``element`` positionally
-        (not ``selector``), so the JS sub-extractors error with
-        ``"Selector is required"`` while CDP ``styles`` succeeds."""
-        tab = FakeTab(
-            evaluate_result=dict(CANNED_JS_ELEMENT),
-            cdp_responses=_cdp_responses(),
-            select_result=SimpleNamespace(node_id=2),
-        )
-        result = await _ec.element_cloner.clone_element_complete(tab, selector="#demo")
-        # Flat multi-key: the 6 extraction names at the top level + metadata.
-        assert {
-            "styles",
-            "structure",
-            "events",
-            "animations",
-            "assets",
-            "related_files",
-        } <= set(result)
-        assert {"url", "timestamp", "selector", "extraction_options"} <= set(result)
-        assert "element" not in result
-        # The selector-not-forwarded quirk: styles (CDP) works, JS ones error.
-        assert result["styles"]["method"] == "cdp_direct"
-        assert result["structure"] == {"error": "Selector is required"}
-        _assert_golden("element_cloner_clone_complete", result)
-
-
-# ===========================================================================
-# The 5 ElementCloner.extract_* methods.
-# ===========================================================================
-
-
-class TestExtractMethods:
-    async def test_styles_uses_cdp_direct_schema(self):
-        tab = FakeTab(
-            cdp_responses=_cdp_responses(), select_result=SimpleNamespace(node_id=2)
-        )
-        result = await _ec.element_cloner.extract_element_styles(tab, selector="#demo")
-        assert result["method"] == "cdp_direct"
-        assert result["computed_styles"] == {
-            "color": "rgb(0, 0, 0)",
-            "display": "block",
-        }
-        assert result["css_rules"] == []
-        _assert_golden("extract_element_styles", result)
-
-    async def test_styles_error_shape_when_element_unresolved(self):
-        # tab.select → None → the styles "Element not found" contract.
-        tab = FakeTab(cdp_responses=_cdp_responses(), select_result=None)
-        result = await _ec.element_cloner.extract_element_styles(tab, selector="#demo")
-        assert result == {"error": "Element not found"}
-
-    @pytest.mark.characterization
-    @pytest.mark.parametrize(
-        "method",
-        [
-            "extract_element_structure",
-            "extract_element_events",
-            "extract_element_animations",
-            "extract_element_assets",
-        ],
-    )
-    async def test_js_extract_passes_dict_through(self, method):
-        """PINS CURRENT BEHAVIOR incl. known quirk F-142 (4 of 5 extract_* still on
-        the JS-eval path); M5a will intentionally move these to CDP — update when
-        that fix lands. Each JS-path method returns a ``dict`` result from
-        ``tab.evaluate`` unchanged (passthrough)."""
-        tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
-        result = await getattr(_ec.element_cloner, method)(tab, selector="#demo")
-        assert result == CANNED_JS_ELEMENT
-        assert tab.evaluate_calls  # the JS-eval path was actually exercised
-
-    async def test_structure_requires_selector(self):
-        tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
-        result = await _ec.element_cloner.extract_element_structure(tab, selector=None)
-        assert result == {"error": "Selector is required"}
-
-    async def test_structure_converts_nodriver_array_result(self):
-        # nodriver's [[key, {type,value}], ...] array format → dict via converter.
-        tab = FakeTab(
-            evaluate_result=[["tag_name", {"type": "string", "value": "DIV"}]]
-        )
-        result = await _ec.element_cloner.extract_element_structure(
-            tab, selector="#demo"
-        )
-        assert result == {"tag_name": "DIV"}
-        _assert_golden("extract_element_structure_list_convert", result, volatile=())
 
 
 # ===========================================================================
@@ -400,6 +306,25 @@ class TestCanonicalEngine:
         assert result == CANNED_JS_ELEMENT
         assert tab.evaluate_calls  # JS-eval path exercised
         assert not tab.send_calls  # and NOT the CDP path
+
+    async def test_structure_requires_selector(self):
+        tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
+        result = await _cdc.cdp_element_cloner.extract_element_structure(
+            tab, selector=None
+        )
+        assert result == {"error": "Selector is required"}
+
+    async def test_structure_converts_nodriver_array_result(self):
+        # nodriver's [[key, {type,value}], ...] array format → dict via the
+        # engine's _convert_nodriver_result (verbatim move from ElementCloner).
+        tab = FakeTab(
+            evaluate_result=[["tag_name", {"type": "string", "value": "DIV"}]]
+        )
+        result = await _cdc.cdp_element_cloner.extract_element_structure(
+            tab, selector="#demo"
+        )
+        assert result == {"tag_name": "DIV"}
+        _assert_golden("extract_element_structure_list_convert", result, volatile=())
 
     async def test_transport_split_styles_cdp_others_js(self):
         """Pins the §2.1 transport decision deterministically (no timing): styles

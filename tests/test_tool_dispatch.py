@@ -282,12 +282,12 @@ class TestF202RuntimeArchetype:
         fake_cloner = _FakeResponseCloner()
         srv = patched_server(
             browser_manager=FakeBrowserManager(tabs={"i1": FakeTab()}),
-            # extract_element_assets + clone_element_complete now route through the
-            # canonical engine (M5b-2/3a) -> extract_complete_element; only
-            # extract_related_files still goes via element_cloner (until M5b-5).
-            # comprehensive_element_cloner is no longer a server global.
+            # All three handle_response tools now route through the canonical
+            # engine (M5b): extract_element_assets + clone_element_complete via
+            # extract_complete_element, extract_related_files via the engine's
+            # related-files extractor. element_cloner / comprehensive_element_cloner
+            # are no longer server globals.
             cdp_element_cloner=fake_cloner,
-            element_cloner=fake_cloner,
         )
         result = await call_tool(srv, tool, **kwargs)
         # The real (synchronous) response_handler passes a small dict through

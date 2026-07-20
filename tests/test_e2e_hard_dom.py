@@ -77,7 +77,7 @@ async def test_shadow_dom_characterization(fixture_app_server):
         OPEN root (clicking its button logs through the page), while a CLOSED host
         exposes ``shadowRoot === null``.
       * extract_element_structure walks the light DOM only (extract_structure.js
-        uses ``document.querySelector`` + ``.children``; element_cloner.py:156),
+        uses ``document.querySelector`` + ``.children``; cdp_element_cloner.py),
         so open-shadow content (the inner button and its pinned color) is ABSENT
         from the structure output — a real limitation, pinned here.
     """

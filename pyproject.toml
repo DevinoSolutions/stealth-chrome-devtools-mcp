@@ -203,18 +203,13 @@ ban-relative-imports = "all"
 # Suppression-shrink (2026-07-07, post M3-3+M3-6): E501/S110/SIM105/T201
 # removed - the prints are now stealth.proxy logs and the except: pass
 # blocks now log before the sentinel, so none of those codes fire anymore.
-"src/stealth_chrome_devtools_mcp/embedded/element_cloner.py" = [
-    "ANN001", "ANN202", "ANN204", "ARG002", "ASYNC210", "ASYNC230",
-    "BLE001", "C901", "E501", "PLR0912", "PLR0913", "PLR2004", "PTH123",
-    "RUF013", "SIM102", "TID251", "TID252", "TRY300",
-]  # plan_M5b (cloner consolidation)
 "src/stealth_chrome_devtools_mcp/embedded/cdp_element_cloner.py" = [
     "ANN001", "ANN202", "ANN204", "ARG002", "ASYNC210", "BLE001", "C901",
     "DTZ005", "E501", "PERF401", "PLR0912", "PLR0913", "PLR2004", "TID251",
     "TRY300",
-]  # plan_M5b (canonical engine; absorbs element_cloner.py's verbatim-moved
-# JS/HTTP-extraction debt at the 5->1 consolidation — element_cloner.py's entry
-# is removed when that file is deleted in M5b-5, so net repo debt is unchanged)
+]  # plan_M5b (canonical engine; absorbed element_cloner.py's verbatim-moved
+# JS/HTTP-extraction debt at the 5->1 consolidation — element_cloner.py deleted
+# in M5b-5 with its per-file-ignore entry, so net repo debt is unchanged)
 "src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py" = [
     "ANN001", "ANN202", "ANN204", "BLE001", "DTZ005", "DTZ006", "E402",
     "PLR0913", "PTH123", "RET504", "RUF013", "TID251", "TID252", "TRY300",
@@ -277,9 +272,7 @@ ban-relative-imports = "all"
 exclude = [
     "src/stealth_chrome_devtools_mcp/embedded/server.py",
     "src/stealth_chrome_devtools_mcp/embedded/singleton.py",
-    "src/stealth_chrome_devtools_mcp/embedded/element_cloner.py",
     "src/stealth_chrome_devtools_mcp/embedded/cdp_element_cloner.py",
-    "src/stealth_chrome_devtools_mcp/embedded/comprehensive_element_cloner.py",
     "src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py",
     "src/stealth_chrome_devtools_mcp/embedded/progressive_element_cloner.py",
     "src/stealth_chrome_devtools_mcp/embedded/response_stage_hooks.py",

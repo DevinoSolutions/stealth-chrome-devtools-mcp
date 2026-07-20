@@ -26,7 +26,6 @@ from stealth_chrome_devtools_mcp.embedded.dynamic_hook_ai_interface import (
     dynamic_hook_ai,
 )
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
-from stealth_chrome_devtools_mcp.embedded.element_cloner import element_cloner
 from stealth_chrome_devtools_mcp.embedded.file_based_element_cloner import (
     file_based_element_cloner,
 )
@@ -1949,7 +1948,7 @@ async def extract_element_styles_cdp(
     """
     tab = await _require_tab(browser_manager, instance_id)
     return await _with_cdp_timeout(
-        element_cloner.extract_element_styles_cdp(
+        cdp_element_cloner.extract_element_styles(
             tab,
             selector=selector,
             include_computed=include_computed,
@@ -1984,7 +1983,7 @@ async def extract_related_files(
     """
     tab = await _require_tab(browser_manager, instance_id)
     result = await _with_cdp_timeout(
-        element_cloner.extract_related_files(
+        cdp_element_cloner.extract_related_files(
             tab,
             analyze_css=analyze_css,
             analyze_js=analyze_js,
@@ -2002,10 +2001,17 @@ async def clone_element_complete(
     instance_id: str, selector: str, extraction_options: str | None = None
 ) -> dict[str, Any]:
     """
-    Master function that extracts ALL element data using specialized functions.
+    Extract ALL element data inline as one canonical flat clone (the authoritative
+    "complete" extractor).
 
-    This is the ultimate element cloning tool that combines all extraction methods.
-    Use this when you want complete element fidelity for recreation or analysis.
+    Composes the six aspects on the canonical engine — styles via direct CDP, and
+    structure/events/animations/assets/related_files via JS-eval — into a flat,
+    aspect-keyed dict with ``selector`` forwarded to every sub-extractor. Prefer
+    this for complete fidelity when the payload can be returned inline. The three
+    siblings differ only in delivery/transport: ``clone_element_to_file`` and
+    ``extract_complete_element_to_file`` write this same clone to disk (path +
+    summary) instead of returning it; ``extract_complete_element_cdp`` returns the
+    pure-CDP *nested* variant (``element`` block) for CDP-native fidelity.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -2252,11 +2258,14 @@ async def clone_element_to_file(
     instance_id: str, selector: str, extraction_options: str | None = None
 ) -> dict[str, Any]:
     """
-    Clone element completely and save to file, returning file path instead of full data.
+    Save the complete canonical clone to a file — the to-file twin of
+    ``clone_element_complete`` (same engine, same per-aspect transport, accepts the
+    same ``extraction_options``).
 
-    This is ideal when you want complete element data but don't want to overwhelm
-    the response with large JSON objects. The data is saved to a JSON file that
-    can be read later.
+    Returns ``{file_path, extraction_type, summary}`` instead of the full data, so
+    a large clone never overwhelms the response. Use
+    ``extract_complete_element_to_file`` for the lighter variant that takes only an
+    ``include_children`` toggle (no per-aspect options).
 
     Args:
         instance_id (str): Browser instance ID.
@@ -2286,10 +2295,13 @@ async def extract_complete_element_to_file(
     instance_id: str, selector: str, include_children: bool = True
 ) -> dict[str, Any]:
     """
-    Extract complete element using working comprehensive cloner and save to file.
+    Save a complete canonical clone to a file — the lightweight to-file variant.
 
-    This uses the proven comprehensive extraction logic that returns large amounts
-    of data, but saves it to a file instead of overwhelming the response.
+    Same canonical engine as ``clone_element_complete`` (styles via CDP, the rest
+    via JS-eval) but exposes only an ``include_children`` toggle rather than
+    per-aspect ``extraction_options``. Returns ``{file_path, extraction_type,
+    summary}``. Use ``clone_element_to_file`` when you need the full per-aspect
+    option set.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -2313,16 +2325,20 @@ async def extract_complete_element_cdp(
     instance_id: str, selector: str, include_children: bool = True
 ) -> dict[str, Any]:
     """
-    Extract complete element using native CDP methods for 100% accuracy.
+    Extract a complete element inline via native CDP for every aspect — the
+    pure-CDP variant with a *nested* schema (data under an ``element`` block).
 
-    This uses Chrome DevTools Protocol's native methods to extract:
-    - Complete computed styles via CSS.getComputedStyleForNode
+    Unlike ``clone_element_complete`` (canonical flat schema; styles CDP + the rest
+    JS-eval), this bypasses JavaScript entirely and uses CDP directly for all
+    aspects:
+    - Computed styles via CSS.getComputedStyleForNode
     - Matched CSS rules via CSS.getMatchedStylesForNode
     - Event listeners via DOMDebugger.getEventListeners
-    - Complete DOM structure and attributes
+    - DOM structure and attributes via DOM.describeNode
 
-    This provides the most accurate element cloning possible by bypassing
-    JavaScript limitations and using CDP's direct browser access.
+    Prefer this when you specifically need CDP-native fidelity (e.g. matched CSS
+    rules, CDP event listeners) and can consume the nested shape; prefer
+    ``clone_element_complete`` for the flat, per-aspect default.
 
     Args:
         instance_id (str): Browser instance ID.
