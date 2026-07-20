@@ -20,9 +20,6 @@ from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import cdp_element_
 from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
     CDPFunctionExecutor,
 )
-from stealth_chrome_devtools_mcp.embedded.comprehensive_element_cloner import (
-    comprehensive_element_cloner,
-)
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_ai_interface import (
@@ -2034,14 +2031,10 @@ async def clone_element_complete(
             raise ToolError(f"Invalid JSON in extraction_options: {extraction_options}")
     tab = await _require_tab(browser_manager, instance_id)
     result = await _with_cdp_timeout(
-        comprehensive_element_cloner.extract_complete_element(
+        cdp_element_cloner.extract_complete_element(
             tab,
             selector=selector,
-            include_children=parsed_options.get("structure", {}).get(
-                "include_children", True
-            )
-            if parsed_options
-            else True,
+            extraction_options=parsed_options,
         ),
         instance_id=instance_id,
     )
