@@ -260,14 +260,21 @@ class TestExtractMethods:
 
 
 ELEMENT_ID = "elem_fixedtest01"
+# The ONE canonical aspect-keyed shape produced by
+# cdp_element_cloner.extract_complete_element (M5b-3b re-point). The old nested
+# ``{"element": {...}}`` dual-schema fallback (F-143) is deleted; progressive
+# now reads styles.computed_styles / events.event_listeners / structure.children.
 STORED_FULL_DATA = {
-    "element": {
+    "styles": {
+        "method": "cdp_direct",
         "computed_styles": {"color": "red", "display": "block"},
-        "event_listeners": [{"type": "click"}],
-        "matched_styles": {"matchedCSSRules": []},
-        "children": [],
-        "html": {"tagName": "DIV", "attributes": []},
-    }
+        "css_rules": [],
+    },
+    "structure": {"tag_name": "DIV", "attributes": {}, "children": []},
+    "events": {"event_listeners": [{"type": "click"}]},
+    "animations": {},
+    "assets": {"fonts": {}},
+    "related_files": {},
 }
 
 
