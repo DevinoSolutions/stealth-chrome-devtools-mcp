@@ -142,3 +142,35 @@ class TestCountTripwire:
         tools = await server.mcp.get_tools()
         section_sum = sum(len(v) for v in server.SECTION_TOOLS.values())
         assert len(tools) == section_sum == self.EXPECTED_TOOL_COUNT
+
+    def test_cli_description_count_is_registry_derived(self):
+        """F-108: the ArgumentParser description count is DERIVED from
+        SECTION_TOOLS, never hand-typed — so it can't drift from the surface."""
+        section_sum = sum(len(v) for v in server.SECTION_TOOLS.values())
+        assert section_sum == self.EXPECTED_TOOL_COUNT
+        assert f"with {section_sum} tools" in server.build_arg_parser().description
+
+    def test_list_sections_printed_total_matches_registry(self):
+        """F-108: `--list-sections` prints the registry-derived total (and
+        per-section counts), so a documented count can't silently diverge from
+        the real tool surface."""
+        import subprocess
+        import sys as _sys
+
+        section_sum = sum(len(v) for v in server.SECTION_TOOLS.values())
+        proc = subprocess.run(
+            [
+                _sys.executable,
+                "-m",
+                "stealth_chrome_devtools_mcp",
+                "--transport",
+                "http",
+                "--list-sections",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert f"Total: {section_sum} tools" in proc.stdout
+        assert f"Total: {self.EXPECTED_TOOL_COUNT} tools" in proc.stdout

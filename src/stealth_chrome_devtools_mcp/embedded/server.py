@@ -54,7 +54,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import (
 )
 from stealth_chrome_devtools_mcp.embedded.tool_registry import (
     DISABLED_SECTIONS,
-    SECTION_TOOLS,  # noqa: F401  plan_M4ph1: re-exported as server.SECTION_TOOLS
+    SECTION_TOOLS,  # used by --list-sections + the derived tool-count (F-108); also re-exported as server.SECTION_TOOLS
     ToolRegistry,
 )
 from stealth_chrome_devtools_mcp.observability import sentry_init
@@ -3132,7 +3132,10 @@ def build_arg_parser():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Stealth Browser MCP Server with 90 tools"
+        description=(
+            "Stealth Browser MCP Server with "
+            f"{sum(len(v) for v in SECTION_TOOLS.values())} tools"
+        )
     )
     parser.add_argument(
         "--transport",
@@ -3243,20 +3246,27 @@ if __name__ == "__main__":
         debug_logger.enable()
 
     if args.list_sections:
+        # F-108: per-section counts + total are DERIVED from the live
+        # SECTION_TOOLS registry, never hand-typed, so they can't drift when a
+        # tool is added or removed. The descriptions are cosmetic labels.
+        section_descriptions = {
+            "browser-management": "Core browser operations",
+            "element-interaction": "Page interaction and element manipulation",
+            "element-extraction": "Element cloning and extraction",
+            "file-extraction": "File-based extraction tools",
+            "network-debugging": "Network monitoring and interception",
+            "cdp-functions": "Chrome DevTools Protocol function execution",
+            "progressive-cloning": "Advanced element cloning system",
+            "cookies-storage": "Cookie and storage management",
+            "tabs": "Tab management",
+            "debugging": "Debug and system tools",
+            "dynamic-hooks": "AI-powered network hook system",
+        }
         print("Available tool sections:")
-        print("  browser-management: Core browser operations (11 tools)")
-        print(
-            "  element-interaction: Page interaction and element manipulation (8 tools)"
-        )
-        print("  element-extraction: Element cloning and extraction (10 tools)")
-        print("  file-extraction: File-based extraction tools (9 tools)")
-        print("  network-debugging: Network monitoring and interception (10 tools)")
-        print("  cdp-functions: Chrome DevTools Protocol function execution (15 tools)")
-        print("  progressive-cloning: Advanced element cloning system (10 tools)")
-        print("  cookies-storage: Cookie and storage management (3 tools)")
-        print("  tabs: Tab management (5 tools)")
-        print("  debugging: Debug and system tools (6 tools)")
-        print("  dynamic-hooks: AI-powered network hook system (12 tools)")
+        for section, tools in SECTION_TOOLS.items():
+            label = section_descriptions.get(section, section)
+            print(f"  {section}: {label} ({len(tools)} tools)")
+        print(f"\nTotal: {sum(len(v) for v in SECTION_TOOLS.values())} tools")
         print("\nUse --disable-<section-name> to disable specific sections")
         print("Use --minimal to enable only core functionality")
         sys.exit(0)
