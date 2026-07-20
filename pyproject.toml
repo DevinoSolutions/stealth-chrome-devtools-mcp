@@ -215,10 +215,6 @@ ban-relative-imports = "all"
 ]  # plan_M5b (canonical engine; absorbs element_cloner.py's verbatim-moved
 # JS/HTTP-extraction debt at the 5->1 consolidation — element_cloner.py's entry
 # is removed when that file is deleted in M5b-5, so net repo debt is unchanged)
-"src/stealth_chrome_devtools_mcp/embedded/comprehensive_element_cloner.py" = [
-    "ANN001", "ANN204", "BLE001", "E402", "E501", "PLR0912", "PLR2004",
-    "TID251", "TRY300", "W293",
-]  # plan_M5b
 "src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py" = [
     "ANN001", "ANN202", "ANN204", "BLE001", "DTZ005", "DTZ006", "E402",
     "PLR0913", "PTH123", "RET504", "RUF013", "TID251", "TID252", "TRY300",

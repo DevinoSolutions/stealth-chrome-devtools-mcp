@@ -31,7 +31,6 @@ from fakes import (
     normalize_golden,
 )
 from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
-from stealth_chrome_devtools_mcp.embedded import comprehensive_element_cloner as _cec
 from stealth_chrome_devtools_mcp.embedded import element_cloner as _ec
 from stealth_chrome_devtools_mcp.embedded import file_based_element_cloner as _fbc
 from stealth_chrome_devtools_mcp.embedded import progressive_element_cloner as _pec
@@ -99,17 +98,6 @@ def _assert_golden(name, obj, volatile=("timestamp",)):
 
 
 class TestCompleteElementEngines:
-    async def test_comprehensive_is_flat_with_selector_url_timestamp(self):
-        tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
-        result = await _cec.comprehensive_element_cloner.extract_complete_element(
-            tab, "#demo", include_children=True
-        )
-        # Flat: the JS keys sit at the top level, NOT nested under "element".
-        assert "element" not in result
-        assert {"selector", "url", "timestamp", "includesChildren"} <= set(result)
-        assert "html" in result and "computedStyles" in result
-        _assert_golden("comprehensive_complete_element", result)
-
     async def test_cdp_is_nested_under_element(self):
         tab = FakeTab(cdp_responses=_cdp_responses())
         result = await _cdc.CDPElementCloner().extract_complete_element_cdp(
@@ -165,31 +153,6 @@ class TestCompleteElementEngines:
         assert result["styles"]["method"] == "cdp_direct"
         assert result["structure"] == {"error": "Selector is required"}
         _assert_golden("element_cloner_clone_complete", result)
-
-    @pytest.mark.characterization
-    async def test_three_engines_have_divergent_top_level_schemas(self):
-        """PINS CURRENT BEHAVIOR incl. known quirk F-140 (three cloners emit three
-        different schemas for "the complete element"); M5b will consolidate them —
-        update this when that fix lands. The three top-level key sets are pairwise
-        distinct, which is exactly the duplication F-140 flags."""
-        comp_tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
-        comp = await _cec.comprehensive_element_cloner.extract_complete_element(
-            comp_tab, "#demo"
-        )
-        cdp_tab = FakeTab(cdp_responses=_cdp_responses())
-        cdp = await _cdc.CDPElementCloner().extract_complete_element_cdp(
-            cdp_tab, "#demo"
-        )
-        clone_tab = FakeTab(
-            evaluate_result=dict(CANNED_JS_ELEMENT),
-            cdp_responses=_cdp_responses(),
-            select_result=SimpleNamespace(node_id=2),
-        )
-        clone = await _ec.element_cloner.clone_element_complete(
-            clone_tab, selector="#demo"
-        )
-        keysets = [frozenset(comp), frozenset(cdp), frozenset(clone)]
-        assert len(set(keysets)) == 3  # pairwise distinct
 
 
 # ===========================================================================

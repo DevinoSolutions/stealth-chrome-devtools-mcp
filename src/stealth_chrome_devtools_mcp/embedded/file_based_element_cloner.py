@@ -4,11 +4,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from stealth_chrome_devtools_mcp.embedded.comprehensive_element_cloner import (
-    ComprehensiveElementCloner,
-)
+from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import cdp_element_cloner
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
-from stealth_chrome_devtools_mcp.embedded.element_cloner import element_cloner
 from stealth_chrome_devtools_mcp.embedded.response_handler import (
     default_clone_output_dir,
 )
@@ -36,7 +33,6 @@ class FileBasedElementCloner:
         else:
             self.output_dir = Path(__file__).resolve().parent.parent / output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.comprehensive_cloner = ComprehensiveElementCloner()
 
     def _safe_process_framework_handlers(self, framework_handlers):
         """Safely process framework handlers that might be dict or list."""
@@ -95,7 +91,7 @@ class FileBasedElementCloner:
             )
 
             # Extract styles using element_cloner
-            style_data = await element_cloner.extract_element_styles(
+            style_data = await cdp_element_cloner.extract_element_styles(
                 tab,
                 selector=selector,
                 include_computed=include_computed,
@@ -166,8 +162,12 @@ class FileBasedElementCloner:
             Dict[str, Any]: Summary of extraction and file path.
         """
         try:
-            complete_data = await self.comprehensive_cloner.extract_complete_element(
-                tab, selector, include_children
+            complete_data = await cdp_element_cloner.extract_complete_element(
+                tab,
+                selector=selector,
+                extraction_options={
+                    "structure": {"include_children": include_children}
+                },
             )
             complete_data["_metadata"] = {
                 "extraction_type": "complete_comprehensive",
@@ -188,20 +188,30 @@ class FileBasedElementCloner:
                 "selector": selector,
                 "url": complete_data.get("url", "unknown"),
                 "summary": {
-                    "tag_name": complete_data.get("html", {}).get("tagName", "unknown"),
-                    "computed_styles_count": len(complete_data.get("styles", {})),
+                    "tag_name": complete_data.get("structure", {}).get(
+                        "tag_name", "unknown"
+                    ),
+                    "computed_styles_count": len(
+                        complete_data.get("styles", {}).get("computed_styles", {})
+                    ),
                     "attributes_count": len(
-                        complete_data.get("html", {}).get("attributes", [])
+                        complete_data.get("structure", {}).get("attributes", {})
                     ),
                     "event_listeners_count": len(
-                        complete_data.get("eventListeners", [])
+                        complete_data.get("events", {}).get("event_listeners", [])
                     ),
-                    "children_count": len(complete_data.get("children", []))
+                    "children_count": len(
+                        complete_data.get("structure", {}).get("children", [])
+                    )
                     if include_children
                     else 0,
-                    "has_pseudo_elements": bool(complete_data.get("pseudoElements")),
-                    "css_rules_count": len(complete_data.get("cssRules", [])),
-                    "animations_count": len(complete_data.get("animations", [])),
+                    "has_pseudo_elements": bool(
+                        complete_data.get("styles", {}).get("pseudo_elements")
+                    ),
+                    "css_rules_count": len(
+                        complete_data.get("styles", {}).get("css_rules", [])
+                    ),
+                    "animations_count": len(complete_data.get("animations", {})),
                     "file_size_kb": round(len(json.dumps(complete_data)) / 1024, 2),
                 },
             }
@@ -236,7 +246,7 @@ class FileBasedElementCloner:
             Dict[str, str]: Summary of extraction and file path.
         """
         try:
-            structure_data = await element_cloner.extract_element_structure(
+            structure_data = await cdp_element_cloner.extract_element_structure(
                 tab,
                 element,
                 selector,
@@ -309,7 +319,7 @@ class FileBasedElementCloner:
             Dict[str, str]: Summary of extraction and file path.
         """
         try:
-            event_data = await element_cloner.extract_element_events(
+            event_data = await cdp_element_cloner.extract_element_events(
                 tab,
                 element,
                 selector,
@@ -379,7 +389,7 @@ class FileBasedElementCloner:
             Dict[str, str]: Summary of extraction and file path.
         """
         try:
-            animation_data = await element_cloner.extract_element_animations(
+            animation_data = await cdp_element_cloner.extract_element_animations(
                 tab,
                 element,
                 selector,
@@ -458,7 +468,7 @@ class FileBasedElementCloner:
             Dict[str, str]: Summary of extraction and file path.
         """
         try:
-            asset_data = await element_cloner.extract_element_assets(
+            asset_data = await cdp_element_cloner.extract_element_assets(
                 tab,
                 element,
                 selector,
@@ -533,7 +543,7 @@ class FileBasedElementCloner:
             Dict[str, str]: Summary of extraction and file path.
         """
         try:
-            file_data = await element_cloner.extract_related_files(
+            file_data = await cdp_element_cloner.extract_related_files(
                 tab,
                 element,
                 selector,
@@ -598,7 +608,7 @@ class FileBasedElementCloner:
             Dict[str, Any]: Summary of extraction and file path.
         """
         try:
-            complete_data = await element_cloner.clone_element_complete(
+            complete_data = await cdp_element_cloner.extract_complete_element(
                 tab, element, selector, extraction_options
             )
             if "error" in complete_data:
