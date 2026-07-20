@@ -393,12 +393,10 @@ def _enforce_clone_storage_cap_in(
     return removed
 
 
-def session_storage_cap_bytes() -> int:
-    """Cap (in bytes) on total clone-root storage before idle *named* profiles
-    are trimmed of regenerable data. Default 20 GiB; override with
-    ``STEALTH_MCP_SESSION_STORAGE_CAP_GB`` (a value <= 0 disables the trim).
-    """
-    gb = get_settings().session_storage_cap_gb
+def browser_session_storage_cap_bytes() -> int:
+    """Cap (bytes) on clone-root storage before idle *named* profiles are trimmed.
+    Default 20 GiB; ``STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB`` (<= 0 disables)."""
+    gb = get_settings().browser_session_storage_cap_gb
     if gb <= 0:
         return 0
     return int(gb * (1024**3))
@@ -545,7 +543,9 @@ def enforce_session_storage(reason: str = "") -> None:
     try:
         clone_root = clone_root_dir()
         _enforce_clone_storage_cap_in(clone_root, clone_storage_cap_bytes(), reason)
-        _enforce_named_profile_trim_in(clone_root, session_storage_cap_bytes(), reason)
+        _enforce_named_profile_trim_in(
+            clone_root, browser_session_storage_cap_bytes(), reason
+        )
     except Exception as error:
         debug_logger.log_warning(
             "server", "session_storage_sweep", f"sweep failed: {error}"
@@ -595,7 +595,7 @@ def spawn_background_sweep(reason: str = "") -> None:
         return
     clone_root = clone_root_dir()
     clone_cap = clone_storage_cap_bytes()
-    session_cap = session_storage_cap_bytes()
+    session_cap = browser_session_storage_cap_bytes()
 
     task = asyncio.create_task(
         asyncio.to_thread(run_storage_sweep, clone_root, clone_cap, session_cap, reason)

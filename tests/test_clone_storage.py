@@ -35,7 +35,7 @@ PUBLIC_API = (
     "clone_root_dir",
     "master_snapshot_dir",
     "clone_storage_cap_bytes",
-    "session_storage_cap_bytes",
+    "browser_session_storage_cap_bytes",
 )
 
 
@@ -121,5 +121,5 @@ class TestDelegateIdentity:
     def test_caps_are_positive_ints(self, tmp_session_root):
         assert isinstance(clone_storage.clone_storage_cap_bytes(), int)
         assert clone_storage.clone_storage_cap_bytes() > 0
-        assert isinstance(clone_storage.session_storage_cap_bytes(), int)
-        assert clone_storage.session_storage_cap_bytes() > 0
+        assert isinstance(clone_storage.browser_session_storage_cap_bytes(), int)
+        assert clone_storage.browser_session_storage_cap_bytes() > 0

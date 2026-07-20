@@ -30,7 +30,7 @@ def _clear_app_env(monkeypatch):
 def test_defaults_instantiate(monkeypatch):
     _clear_app_env(monkeypatch)
     s = Settings(_env_file=None)
-    assert s.session_storage_cap_gb == 20.0
+    assert s.browser_session_storage_cap_gb == 20.0
     assert s.clone_storage_cap_gb == 10.0
     assert s.clone_trash_retention_hours == 24.0
     assert s.browser_idle_timeout == 0  # 0 = idle reaping disabled (never auto-close)
@@ -42,10 +42,10 @@ def test_defaults_instantiate(monkeypatch):
 
 
 def test_bad_value_names_the_field(monkeypatch):
-    monkeypatch.setenv("STEALTH_MCP_SESSION_STORAGE_CAP_GB", "not-a-number")
+    monkeypatch.setenv("STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB", "not-a-number")
     with pytest.raises(ValidationError) as excinfo:
         Settings(_env_file=None)
-    assert "session_storage_cap_gb" in str(excinfo.value)
+    assert "browser_session_storage_cap_gb" in str(excinfo.value)
 
 
 def test_unknown_prefixed_env_var_is_rejected(monkeypatch):

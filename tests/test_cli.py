@@ -252,7 +252,21 @@ class TestKillOrphansVerb:
 class TestStatusProfiles:
     def test_status_runs(self, tmp_session_root, capsys):
         assert cli.main(["status"]) == 0
-        assert "session root" in capsys.readouterr().out.lower()
+        assert "browser-session root" in capsys.readouterr().out.lower()
+
+    def test_status_labels_are_glossary_conformant(self, tmp_session_root, capsys):
+        """F-741 pin: status/doctor use glossary-conformant 'browser-session'
+        labels and the renamed cap env var; a reverted bare 'session root' or
+        'session cap' leading label fails this test."""
+        import re
+
+        assert cli.main(["status"]) == 0
+        cli.main(["doctor"])  # return code is Chrome-dependent; we scan its output
+        out = capsys.readouterr().out
+        assert "browser-session root" in out.lower()
+        assert "STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB" in out
+        for line in out.splitlines():
+            assert not re.match(r"\s*session (root|cap)\b", line), line
 
     def test_profiles_lists_roles(self, tmp_session_root, capsys):
         sessions = tmp_session_root["sessions"]
@@ -273,7 +287,7 @@ class TestCleanup:
 
         # Tiny caps so both the auto-clone and the named profile are over.
         rc = cli.main(
-            ["cleanup", "--clone-cap-gb", "0.001", "--session-cap-gb", "0.001"]
+            ["cleanup", "--clone-cap-gb", "0.001", "--browser-session-cap-gb", "0.001"]
         )
         out = capsys.readouterr().out.lower()
 
@@ -295,7 +309,7 @@ class TestCleanup:
                 "--apply",
                 "--clone-cap-gb",
                 "0.001",
-                "--session-cap-gb",
+                "--browser-session-cap-gb",
                 "0.001",
             ]
         )
