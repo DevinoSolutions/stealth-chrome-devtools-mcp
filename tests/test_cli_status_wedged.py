@@ -22,7 +22,7 @@ def fake_server(tmp_path):
     server = MagicMock()
     server.default_session_root.return_value = Path(tmp_path)
     server.clone_storage_cap_bytes.return_value = 1024**3
-    server.session_storage_cap_bytes.return_value = 1024**3
+    server.browser_session_storage_cap_bytes.return_value = 1024**3
     return server
 
 

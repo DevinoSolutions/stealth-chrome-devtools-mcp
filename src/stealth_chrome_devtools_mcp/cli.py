@@ -191,14 +191,14 @@ def _cmd_status(_args) -> int:
     print(f"pid         : {pid if pid is not None else '-'}")
     print(f"log         : {_backend_log_location(pid)}")
     print(f"version     : {singleton._server_version()}")
-    print(f"session root: {root}  (exists: {root.exists()})")
+    print(f"browser-session root: {root}  (exists: {root.exists()})")
     print(
         f"clone cap   : {_human(cs.clone_storage_cap_bytes())}  "
         f"[STEALTH_MCP_CLONE_STORAGE_CAP_GB]"
     )
     print(
-        f"session cap : {_human(cs.session_storage_cap_bytes())}  "
-        f"[STEALTH_MCP_SESSION_STORAGE_CAP_GB]"
+        f"browser-session cap : {_human(cs.browser_session_storage_cap_bytes())}  "
+        f"[STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB]"
     )
     return 0
 
@@ -221,7 +221,9 @@ def _cmd_cleanup(args) -> int:
     cs = _clone_storage()
     clone_root = cs.clone_root_dir()
     clone_cap = _gb_to_bytes(args.clone_cap_gb, cs.clone_storage_cap_bytes())
-    session_cap = _gb_to_bytes(args.session_cap_gb, cs.session_storage_cap_bytes())
+    session_cap = _gb_to_bytes(
+        args.browser_session_cap_gb, cs.browser_session_storage_cap_bytes()
+    )
 
     # Same selectors the live sweep uses — dry-run and apply can't disagree.
     to_delete = cs._idle_autoclones_over_cap(clone_root, clone_cap)
@@ -230,7 +232,10 @@ def _cmd_cleanup(args) -> int:
     trim_bytes = sum(cs._regenerable_size(p) for p in to_trim)
 
     print(f"clone root  : {clone_root}")
-    print(f"caps        : clone {_human(clone_cap)} | session {_human(session_cap)}")
+    print(
+        f"caps        : clone {_human(clone_cap)} | "
+        f"browser-session {_human(session_cap)}"
+    )
     if not to_delete and not to_trim:
         print("nothing to reclaim - storage is within caps.")
         return 0
@@ -275,7 +280,7 @@ def _cmd_doctor(_args) -> int:
     print(f"python      : {platform.python_version()}")
     print(f"platform    : {platform.platform()}")
     root = cs.default_session_root()
-    print(f"session root: {root}  (exists: {root.exists()})")
+    print(f"browser-session root: {root}  (exists: {root.exists()})")
     pid = _recorded_backend_pid()
     print(f"backend     : {_format_backend_status()}")
     print(f"pid         : {pid if pid is not None else '-'}")
@@ -439,22 +444,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("status", help="show backend state, session root, and storage caps")
+    sub.add_parser(
+        "status", help="show backend state, browser-session root, and storage caps"
+    )
     sub.add_parser("profiles", help="list profiles with size, role, and in-use flag")
 
     clean = sub.add_parser(
         "cleanup",
         help="reclaim disk: delete idle auto-clones over the clone cap and trim "
-        "idle named profiles over the session cap (dry run unless --apply)",
+        "idle named profiles over the browser-session cap (dry run unless --apply)",
     )
     clean.add_argument(
         "--apply", action="store_true", help="actually reclaim (default: dry run)"
     )
     clean.add_argument(
-        "--session-cap-gb",
+        "--browser-session-cap-gb",
         type=float,
         default=None,
-        dest="session_cap_gb",
+        dest="browser_session_cap_gb",
         help="override the named-profile trim cap for this run (GB; 0 disables)",
     )
     clean.add_argument(
@@ -466,7 +473,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser(
-        "doctor", help="check Python, platform, session root, backend, and Chrome"
+        "doctor",
+        help="check Python, platform, browser-session root, backend, and Chrome",
     )
 
     sub.add_parser(

@@ -16,9 +16,10 @@ Design invariants:
 * ``STEALTH_MCP_*`` keys are the application namespace: a typo'd one fails loudly.
   Legacy unprefixed names (``BROWSER_*``, ``CDP_*``, ``DEBUG``, ``PORT`` ...) and
   host/runtime detection vars (``DISPLAY``, ``USERNAME``, ``container`` ...) are
-  read verbatim via ``validation_alias`` so NO env var is renamed here. Plan
-  M14+A1 (X-HARD) later renames ``STEALTH_MCP_SESSION_STORAGE_CAP_GB`` inside this
-  model; the gates workstream keeps the old name.
+  read verbatim via ``validation_alias`` so NO env var is renamed here — except
+  the one M14+A1 (X-HARD) field rename below (no back-compat alias):
+  ``STEALTH_MCP_SESSION_STORAGE_CAP_GB`` becomes
+  ``STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB``.
 * ``extra="forbid"`` rejects unknown keys found in the ``.env`` FILE. pydantic's
   env-var source only reads known-field names, so unknown ``STEALTH_MCP_*`` env
   VARS are rejected by ``_reject_unknown_prefixed_env`` below instead.
@@ -51,9 +52,10 @@ class Settings(BaseSettings):
     browser_session_root: str | None = None
     clone_storage_cap_gb: float = 10.0
     clone_trash_retention_hours: float = 24.0
-    # Do NOT rename: plan M14+A1 (X-HARD) renames this to
-    # STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB later, inside this model.
-    session_storage_cap_gb: float = 20.0
+    # Trims idle named browser-session profiles over this cap (GB). M14+A1
+    # (X-HARD) renamed the field from session_storage_cap_gb, so the env var is
+    # now STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB (no back-compat alias).
+    browser_session_storage_cap_gb: float = 20.0
     # Directory for the M3 observability file logs (default: the state-dir
     # convention, ``~/.stealth-mcp/logs`` — same idiom as ``clone_output_dir``).
     log_dir: str | None = None
