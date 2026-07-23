@@ -61,6 +61,20 @@ class TestParseProxyConfig:
         with pytest.raises(ProxyConfigError):
             parse_proxy_config("http://user:@host.example:8080")
 
+    @pytest.mark.characterization
+    def test_proxy_creds_percent_encoding(self):
+        """PIN (finding A12): credentials are NOT percent-decoded — fix owned by
+        plan_RELEASE W-B3 (the proxy suite). ``urlsplit`` returns userinfo
+        percent-ENCODED, so a proxy password like ``p@ss`` (written ``p%40ss`` in
+        the URL) is forwarded literally as ``p%40ss`` and auth fails. This pins
+        the current (encoded) behaviour so W-B3's ``urllib.parse.unquote`` fix
+        surfaces as a deliberate pin update, not a silent pass. C8 changes NO
+        production code (proxy_utils.py / proxy_forwarder.py stay untouched)."""
+        cfg = parse_proxy_config("http://us%40er:p%40ss@host.example:8080")
+        # Current behaviour: still-encoded (the bug W-B3 will fix to us@er / p@ss).
+        assert cfg.username == "us%40er"
+        assert cfg.password == "p%40ss"
+
 
 class TestMergeProxyServerArg:
     def test_none_leaves_args_untouched(self):
