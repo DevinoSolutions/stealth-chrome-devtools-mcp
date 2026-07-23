@@ -110,6 +110,28 @@ class _FakeEvent:
         self.response = response
 
 
+class _FakeReqType:
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeRequestObj:
+    def __init__(self, url, method="GET", headers=None, post_data=None):
+        self.url = url
+        self.method = method
+        self.headers = headers or {}
+        self.post_data = post_data
+
+
+class _FakeReqEvent:
+    """Minimal ``RequestWillBeSent`` double for ``_on_request``."""
+
+    def __init__(self, request_id, request, rtype="XHR"):
+        self.request_id = request_id
+        self.request = request
+        self.type = _FakeReqType(rtype)
+
+
 class TestCaptureFilters:
     async def test_default_filters_empty(self):
         ni = NetworkInterceptor()
@@ -293,6 +315,44 @@ class TestBodyStoreByteCaps:
         await ni.clear_instance_data("i1")
         assert ni._body_bytes == 0
         assert ni._responses == {}
+
+
+class TestRequestStoreCaps:
+    """C4 (A3): the request store is count- and metadata-bounded at its single
+    write chokepoint ``_store_request``, mirroring the byte-bounded body store.
+    Caps are resolved from Settings at call time (the autouse
+    ``_reset_settings_cache`` fixture makes ``monkeypatch.setenv`` visible); 0 on
+    either cap = unbounded. Driven through the real ``_on_request`` capture path.
+    """
+
+    async def test_retained_request_count_is_capped_fifo(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_REQUEST_MAX_COUNT", "3")
+        ni = NetworkInterceptor()
+        ni._instance_requests["i1"] = []
+        for i in range(5):
+            await ni._on_request(
+                _FakeReqEvent(f"r{i}", _FakeRequestObj(f"https://x/{i}")), "i1"
+            )
+        assert len(ni._requests) == 3  # retained count capped
+        assert "r0" not in ni._requests and "r1" not in ni._requests  # oldest evicted
+        assert list(ni._requests) == ["r2", "r3", "r4"]  # FIFO
+        assert ni._instance_requests["i1"] == ["r2", "r3", "r4"]  # per-instance pruned
+
+    async def test_oversize_post_data_is_bounded(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_POST_DATA_MAX_BYTES", "100")
+        ni = NetworkInterceptor()
+        ni._instance_requests["i1"] = []
+        await ni._on_request(
+            _FakeReqEvent(
+                "r1",
+                _FakeRequestObj("https://x/1", method="POST", post_data="p" * 200),
+            ),
+            "i1",
+        )
+        stored = ni._requests["r1"]
+        assert stored.post_data is None  # over per-post_data cap -> dropped
+        assert stored.url == "https://x/1"  # metadata retained
+        assert stored.method == "POST"
 
 
 class TestCaptureOptIn:

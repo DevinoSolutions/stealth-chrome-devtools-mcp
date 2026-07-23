@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     network_body_max_bytes: int = Field(5 * 1024 * 1024, ge=0)
     network_body_store_max_bytes: int = Field(128 * 1024 * 1024, ge=0)
 
+    # -- Request capture bounding (A3) ---------------------------------------
+    # Request metadata is always captured; the retained set is count-bounded
+    # (oldest evicted FIFO) and each request's post_data is byte-bounded. This
+    # mirrors the response-body caps above so a long session cannot leak memory
+    # through unbounded request retention. 0 on either cap = unbounded.
+    network_request_max_count: int = Field(10_000, ge=0)
+    network_post_data_max_bytes: int = Field(5 * 1024 * 1024, ge=0)
+
     # -- Legacy unprefixed config (names preserved verbatim via alias) -------
     # 0 = idle reaping disabled (never auto-close): the correct default for a
     # persistent server. The old server.py forced BROWSER_IDLE_TIMEOUT=0 via an
