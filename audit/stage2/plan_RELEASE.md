@@ -1,11 +1,16 @@
 # plan_RELEASE (E2E-9) — Release-gate hardening: transport, platforms, packaging, trust boundaries, resilience, and an honest release contract
 
-- **Status**: **REMEDIATED AFTER INDEPENDENT COVERAGE VALIDATION; REVALIDATION
-  REQUIRED BEFORE IMPLEMENTATION.** Not yet started. The four human release
-  choices recorded on 2026-07-15 remain settled (§7), but they are decisions, not
-  evidence that the gate exists. This revision removes claims disproved at HEAD
-  and turns each into an acceptance condition. Phase 0 must be rerun at the exact
-  execution HEAD and return GO or GO-with-changes before RELEASE-1 begins.
+- **Status**: **GO — Phase 0 re-run at execution HEAD `83afe42` (2026-07-23):
+  PASS.** All prerequisite SHAs proven ancestors of HEAD via
+  `git merge-base --is-ancestor`: the FIX pipeline (M4-Ph1+A1 `ac89b81`, M5b
+  `b80bd59`, M14+A1 `6b41c63`) **and** RELEASE-FIX-A (C1–C8: `7d5315b` … `b532b1b`,
+  merged via PR #41 merge-commit `83afe42`). The Tier-A silent-correctness /
+  lying-success defects that would have poisoned honest soak/perf/parity
+  measurement are fixed and CI-green (5/5 incl. Browser Integration), so the
+  W-items now build on true behaviour. The four human release choices recorded on
+  2026-07-15 remain settled (§7); version target **2.0.0**, full **W1–W16 before
+  the tag**. RELEASE-1 execution begins at W1. (Prior status: "REVALIDATION
+  REQUIRED BEFORE IMPLEMENTATION" — superseded by this Phase-0 pass.)
 - **Position in campaign**: executes **AFTER** the audit FIX pipeline lands
   (M4-Ph1+A1 → M5b → M14+A1) through the human merge-gate and **before** (or
   folded into) CODIFY. Before RELEASE-1, record the three prerequisite merge
