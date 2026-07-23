@@ -862,7 +862,7 @@ class BrowserManager:
                 if hasattr(browser, "tabs") and browser.tabs:
                     for tab in browser.tabs[:]:
                         try:
-                            await tab.close()
+                            await asyncio.wait_for(tab.close(), timeout=2.0)
                         except Exception as tab_err:
                             debug_logger.log_warning(
                                 "browser_manager",
