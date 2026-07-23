@@ -16,6 +16,7 @@ Uses the hermetic ``fakes.FakeTab`` harness (``evaluate``/``send`` are canned;
 no real Chrome).
 """
 
+import json
 from types import SimpleNamespace
 
 from fakes import FakeTab
@@ -65,3 +66,30 @@ class TestExtractStylesPseudoWithoutCssRules:
         assert result["pseudo_elements"] == {"before": {"matches": 2}}
         # css_rules were NOT requested, so that key must be absent.
         assert "css_rules" not in result
+
+
+class TestSelectorSubstitutionEncoding:
+    def test_selector_with_double_quote_produces_valid_js(self):
+        # A quoted-attribute selector must survive substitution into the
+        # double-quoted template `const selector = "$SELECTOR$";`. Before the
+        # fix the raw selector was embedded, producing invalid JS
+        # (`const selector = "input[name="email"]";`).
+        selector = 'input[name="email"]'
+        js = cdp_element_cloner._load_js_file("extract_styles.js", selector, {})
+        expected = f"const selector = {json.dumps(selector)};"
+        assert expected in js
+
+    def test_single_quoted_template_selector_is_encoded(self):
+        # extract_assets.js wraps the placeholder in single quotes
+        # (`})('$SELECTOR', {`); json.dumps supplies its own double quotes.
+        selector = "a[href='/x']"
+        js = cdp_element_cloner._encode_into("})('$SELECTOR', {", "SELECTOR", selector)
+        assert js == "})(" + json.dumps(selector) + ", {"
+
+    def test_plain_selector_is_byte_identical_to_prior_output(self):
+        # For a plain selector json.dumps yields the same double-quoted literal
+        # the template already had, so the emitted JS is unchanged.
+        js = cdp_element_cloner._encode_into(
+            'const selector = "$SELECTOR$";', "SELECTOR", "div.foo"
+        )
+        assert js == 'const selector = "div.foo";'
