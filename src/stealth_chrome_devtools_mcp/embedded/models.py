@@ -24,8 +24,8 @@ class BrowserInstance(BaseModel):
     state: BrowserState = Field(default=BrowserState.STARTING)
     current_url: str | None = Field(default=None, description="Current page URL")
     title: str | None = Field(default=None, description="Current page title")
-    created_at: datetime = Field(default_factory=datetime.now)
-    last_activity: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_activity: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     headless: bool = Field(default=False)
     user_agent: str | None = None
     viewport: dict[str, int] = Field(
