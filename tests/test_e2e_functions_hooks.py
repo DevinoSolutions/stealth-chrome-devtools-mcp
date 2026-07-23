@@ -155,6 +155,51 @@ async def test_cdp_functions_walk(fixture_app_server):
 
 
 @integration_test
+async def test_python_binding_is_callable_from_javascript(fixture_app_server):
+    """RELEASE-FIX-A C6 (A4): the genuine JS→Python round-trip, end-to-end.
+
+    create_python_binding wires Runtime.bindingCalled → the Python function;
+    calling ``window[name](...)`` in the page must resolve to the value the
+    Python function returned. Before the fix the binding was never wired (the
+    wrapper called ``chrome.runtime.sendMessage`` and no handler existed), so the
+    page promise never resolved. This asserts the JS-visible return value equals
+    Python's — the real-coverage proof a characterization pin cannot give.
+    """
+    await warmup_once()
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+
+    result = await spawn(headless=True, **sandbox_kwargs())
+    iid = result["instance_id"]
+    try:
+        await navigate_and_settle(iid, f"{base}/hooks.html")
+
+        binding = await get_fn("create_python_binding")(
+            instance_id=iid,
+            binding_name="pyAdd",
+            python_code="def add(a, b):\n    return a + b",
+        )
+        assert isinstance(binding, dict) and binding.get("success") is True
+
+        # Call the binding from JS and await the promise it returns; the resolved
+        # value must equal what Python returned (40 + 2 == 42).
+        cdp = await get_fn("execute_cdp_command")(
+            instance_id=iid,
+            command="evaluate",
+            params={
+                "expression": "window.pyAdd(40, 2)",
+                "await_promise": True,
+                "return_by_value": True,
+            },
+        )
+        assert cdp["success"] is True, cdp
+        assert "42" in json.dumps(cdp, default=str), cdp
+    finally:
+        await close(instance_id=iid)
+
+
+@integration_test
 @pytest.mark.characterization
 async def test_execute_cdp_command_rejects_domain_qualified_name(fixture_app_server):
     """PINS execute_cdp_command's advertised-vs-executable mismatch.

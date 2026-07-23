@@ -234,6 +234,9 @@ ban-relative-imports = "all"
 "src/stealth_chrome_devtools_mcp/embedded/cdp_function_executor.py" = [
     "ANN204", "BLE001", "TID251", "TRY300",
 ]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/python_binding.py" = [
+    "ANN401", "BLE001", "TID251", "TRY300", "TRY301",
+]  # RELEASE-FIX-A C6 (A4) — lint profile inherited from cdp_function_executor.py
 "src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py" = [
     "ANN001", "ANN201", "ANN202", "ANN204", "BLE001", "TID251", "TRY300",
 ]  # DEBT(F-181) + plan_M4ph1

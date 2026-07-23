@@ -3,6 +3,8 @@
 
 Owner-tag grammar (from the 2.5-gates spec):
     plan_M<id>               -- an approved Stage-3 plan owns this code
+    RELEASE-FIX-<tier>       -- an approved pre-release fix plan owns this code
+                                (e.g. RELEASE-FIX-A; a non-M-series FIX plan)
     PERMANENT(<reason>)      -- by-design; will never be "fixed"
     FALSE-POSITIVE(<reason>) -- ruff is wrong here
     DEBT(F-<id>)             -- known debt tracked in audit/findings.json
@@ -21,7 +23,8 @@ import sys
 from pathlib import Path
 
 OWNER_RE = re.compile(
-    r"(plan_M\w+|PERMANENT\(.+?\)|FALSE-POSITIVE\(.+?\)|DEBT\(F-\d+\))"
+    r"(plan_M\w+|RELEASE-FIX-[A-Z]\w*|PERMANENT\(.+?\)|FALSE-POSITIVE\(.+?\)"
+    r"|DEBT\(F-\d+\))"
 )
 
 # An inline ruff suppression marker (the "n-o-q-a" comment), with or without
