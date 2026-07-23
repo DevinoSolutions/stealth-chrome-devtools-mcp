@@ -514,11 +514,11 @@ class CDPElementCloner:
                 result["computed_styles"] = {
                     prop.name: prop.value for prop in computed_styles_list
                 }
-
-            if include_css_rules:
+            if include_css_rules or include_pseudo or include_inheritance:
                 matched_styles = await tab.send(
                     uc.cdp.css.get_matched_styles_for_node(node_id)
                 )
+            if include_css_rules:
                 result["css_rules"] = []
                 if matched_styles[2]:
                     for rule_match in matched_styles[2]:
