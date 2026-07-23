@@ -12,8 +12,10 @@ from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     resolve_by_text,
     resolve_element,
+    resolve_elements,
 )
 from stealth_chrome_devtools_mcp.embedded.models import ElementInfo
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 
 class DOMHandler:
@@ -85,7 +87,7 @@ class DOMHandler:
                     f"XPath query returned {len(elements)} elements",
                 )
             else:
-                elements = await tab.select_all(selector)
+                elements = await resolve_elements(tab, selector)
                 debug_logger.log_info(
                     "DOMHandler",
                     "query_elements",
@@ -205,7 +207,9 @@ class DOMHandler:
                 e,
                 {"selector": selector, "tab": str(tab)},
             )
-            return []
+            raise ToolError(
+                f"Failed to query elements for selector {selector!r}: {e!s}"
+            ) from e
 
     @staticmethod
     async def click_element(
@@ -722,7 +726,7 @@ class DOMHandler:
 
             if include_frames:
                 frames = []
-                iframe_elements = await tab.select_all("iframe")
+                iframe_elements = await resolve_elements(tab, "iframe")
 
                 for i, iframe in enumerate(iframe_elements):
                     try:

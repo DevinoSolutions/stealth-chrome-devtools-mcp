@@ -251,6 +251,40 @@ async def test_concurrent_close_exactly_one_claims(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 5. Phase-2 tab close is bounded (RELEASE-FIX-A C5 / A7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_close_instance_bounds_hung_tab_close():
+    """A wedged renderer whose ``tab.close()`` never returns must not hang
+    close_instance. Phase-2 wraps each ``tab.close()`` in ``asyncio.wait_for``
+    (timeout=2.0), so a hung tab is logged and teardown proceeds to completion.
+
+    RED before the fix: the bare ``await tab.close()`` blocks forever, so the
+    outer 15s guard cancels close_instance and raises TimeoutError.
+    """
+
+    class _HungTab:
+        async def close(self):
+            await asyncio.Event().wait()  # never set — hangs forever
+
+    manager = BrowserManager()
+    browser, _instance = _seed_manager(manager, "hung-1")
+    browser.tabs = [_HungTab()]
+
+    t0 = time.monotonic()
+    result = await asyncio.wait_for(manager.close_instance("hung-1"), timeout=15)
+    elapsed = time.monotonic() - t0
+
+    assert result is True
+    assert "hung-1" not in manager._instances
+    # Phase-2 bounded the hung tab close at ~2s; without the fix it would run
+    # until the outer guard cancels at 15s (raising TimeoutError above instead).
+    assert elapsed < 10.0, f"close_instance took {elapsed:.1f}s — tab close unbounded"
+
+
 @pytest.mark.asyncio
 async def test_happy_path_fast_kill(monkeypatch):
     """Fast stubbed kill: returns True, instance removed, in_memory_storage called."""

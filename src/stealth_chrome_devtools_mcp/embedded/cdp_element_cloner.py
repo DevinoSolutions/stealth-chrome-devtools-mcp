@@ -430,22 +430,22 @@ class CDPElementCloner:
             return node_info.node.node_id
         return None
 
+    def _encode_into(self, js_code: str, name: str, value: object) -> str:
+        # Sub json.dumps(value) into "$NAME$"/'$NAME'/bare $NAME, eating any quotes.
+        enc = json.dumps(value)
+        return re.sub(rf"""(["']?)\${name}\$?\1""", lambda _: enc, js_code)
+
     def _load_js_file(self, filename: str, selector: str, options: dict) -> str:
         """Load and prepare a JavaScript file with template substitution."""
         js_dir = Path(__file__).parent / "js"
         js_file = js_dir / filename
-
         if not js_file.exists():
             raise FileNotFoundError(f"JavaScript file not found: {js_file}")
 
         with js_file.open(encoding="utf-8") as f:
             js_code = f.read()
-
-        js_code = js_code.replace("$SELECTOR$", selector)
-        js_code = js_code.replace("$SELECTOR", selector)
-        js_code = js_code.replace("$OPTIONS$", json.dumps(options))
-        js_code = js_code.replace("$OPTIONS", json.dumps(options))
-
+        js_code = self._encode_into(js_code, "SELECTOR", selector)
+        js_code = self._encode_into(js_code, "OPTIONS", options)
         for key, value in options.items():
             placeholder_key = f"${key.upper()}"
             placeholder_value = "true" if value else "false"
@@ -514,11 +514,11 @@ class CDPElementCloner:
                 result["computed_styles"] = {
                     prop.name: prop.value for prop in computed_styles_list
                 }
-
-            if include_css_rules:
+            if include_css_rules or include_pseudo or include_inheritance:
                 matched_styles = await tab.send(
                     uc.cdp.css.get_matched_styles_for_node(node_id)
                 )
+            if include_css_rules:
                 result["css_rules"] = []
                 if matched_styles[2]:
                     for rule_match in matched_styles[2]:
@@ -729,7 +729,7 @@ class CDPElementCloner:
             with js_file.open(encoding="utf-8") as f:
                 js_code = f.read()
 
-            js_code = js_code.replace("$SELECTOR", selector)
+            js_code = self._encode_into(js_code, "SELECTOR", selector)
             js_code = js_code.replace(
                 "$INCLUDE_IMAGES", "true" if include_images else "false"
             )

@@ -29,6 +29,9 @@ class NetworkInterceptor:
         # bytes, plus the FIFO capture order used for oldest-first eviction.
         self._body_bytes: int = 0
         self._body_order: deque[str] = deque()
+        # Count-bounded request store (A3): FIFO capture order used for
+        # oldest-first eviction once the retained request count exceeds the cap.
+        self._request_order: deque[str] = deque()
 
     async def setup_interception(
         self, tab: Tab, instance_id: str, block_resources: list[str] | None = None
@@ -161,8 +164,7 @@ class NetworkInterceptor:
                 resource_type=resource_type,
             )
             async with self._lock:
-                self._requests[request_id] = network_request
-                self._instance_requests[instance_id].append(request_id)
+                self._store_request(request_id, network_request, instance_id)
         except Exception as e:
             debug_logger.log_warning(
                 "network_interceptor",
@@ -281,6 +283,63 @@ class NetworkInterceptor:
                 f"to stay under store cap {max_store}",
             )
             victim.body = None
+
+    def _store_request(
+        self, request_id: str, request: NetworkRequest, instance_id: str
+    ) -> None:
+        """Insert a request into the count-bounded request store (A3).
+
+        The single write chokepoint for the request store; callers
+        (``_on_request``, ``import_from_json``) MUST already hold ``self._lock``.
+        Both caps are resolved from Settings at call time and treat 0 as "no
+        cap":
+
+        * per-``post_data`` (``network_post_data_max_bytes``): a request whose
+          ``post_data`` encodes to more than the cap has it dropped to ``None``
+          (all other metadata is still stored).
+        * retained count (``network_request_max_count``): once the number of
+          retained requests exceeds the cap, oldest-captured requests are
+          evicted FIFO — removed from ``self._requests`` and from their own
+          instance's id list — until back under the cap.
+        """
+        settings = get_settings()
+        max_post = settings.network_post_data_max_bytes
+        max_count = settings.network_request_max_count
+
+        if request.post_data is not None and max_post:
+            post_bytes = len(request.post_data.encode("utf-8"))
+            if post_bytes > max_post:
+                debug_logger.log_debug(
+                    "network_interceptor",
+                    "_store_request",
+                    f"post_data for {request_id} ({post_bytes} bytes) exceeds "
+                    f"per-post_data cap {max_post}; storing metadata only",
+                )
+                request.post_data = None
+
+        is_new = request_id not in self._requests
+        self._requests[request_id] = request
+        if instance_id not in self._instance_requests:
+            self._instance_requests[instance_id] = []
+        if request_id not in self._instance_requests[instance_id]:
+            self._instance_requests[instance_id].append(request_id)
+        if is_new:
+            self._request_order.append(request_id)
+
+        while max_count and len(self._requests) > max_count and self._request_order:
+            oldest_id = self._request_order.popleft()
+            victim = self._requests.pop(oldest_id, None)
+            if victim is None:
+                continue  # already evicted; skip its stale order entry
+            victim_list = self._instance_requests.get(victim.instance_id)
+            if victim_list and oldest_id in victim_list:
+                victim_list.remove(oldest_id)
+            debug_logger.log_debug(
+                "network_interceptor",
+                "_store_request",
+                f"evicted oldest request {oldest_id} to stay under "
+                f"count cap {max_count}",
+            )
 
     async def set_capture_filters(
         self,
@@ -602,9 +661,7 @@ class NetworkInterceptor:
                     resource_type=req_data.get("resource_type"),
                     timestamp=datetime.fromisoformat(req_data["timestamp"]),
                 )
-                self._requests[req.request_id] = req
-                if req.request_id not in self._instance_requests[instance_id]:
-                    self._instance_requests[instance_id].append(req.request_id)
+                self._store_request(req.request_id, req, instance_id)
 
             for resp_data in data.get("responses", []):
                 resp = NetworkResponse(

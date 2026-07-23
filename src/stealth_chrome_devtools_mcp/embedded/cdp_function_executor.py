@@ -18,6 +18,7 @@ from typing import Any
 import nodriver as uc
 from nodriver import Tab
 
+from stealth_chrome_devtools_mcp.embedded import python_binding
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 
@@ -747,50 +748,14 @@ class CDPFunctionExecutor:
         Returns:
             Dict[str, Any]: Result of binding creation.
         """
-        try:
-            await self.enable_runtime(tab)
-            self._python_bindings[binding_name] = python_function
-            await tab.send(uc.cdp.runtime.add_binding(name=binding_name))
-            wrapper_script = f"""
-            (function() {{
-                if (!window.{binding_name}) {{
-                    window.{binding_name} = function(...args) {{
-                        return new Promise((resolve, reject) => {{
-                            const callId = Math.random().toString(36).substr(2, 9);
-                            const evtName = `{binding_name}_response_${{callId}}`;
-                            window.addEventListener(evtName, function(event) {{
-                                if (event.detail.success) {{
-                                    resolve(event.detail.result);
-                                }} else {{
-                                    reject(new Error(event.detail.error));
-                                }}
-                            }}, {{ once: true }});
-                            window.chrome.runtime.sendMessage({{
-                                binding: '{binding_name}',
-                                args: args,
-                                callId: callId
-                            }});
-                        }});
-                    }};
-                }}
-                return {{
-                    success: true,
-                    binding_name: '{binding_name}',
-                    available_as: 'window.{binding_name}'
-                }};
-            }})()
-            """
-            result = await tab.send(
-                uc.cdp.runtime.evaluate(
-                    expression=wrapper_script, return_by_value=True, await_promise=True
-                )
-            )
-            if result and result[0] and result[0].value:
-                return result[0].value
-            return {"success": False, "error": "Failed to create binding"}
-        except Exception as e:
-            debug_logger.log_error("cdp_function_executor", "create_python_binding", e)
-            return {"success": False, "error": str(e)}
+        await self.enable_runtime(tab)
+        self._python_bindings[binding_name] = python_function
+        # The genuine Runtime.bindingCalled round-trip lives in python_binding
+        # (extracted so this file stays within its LOC budget). Raises ToolError
+        # on failure — the executor no longer returns a lying success dict.
+        return await python_binding.install_binding(
+            tab, binding_name, self._python_bindings
+        )
 
     async def execute_python_in_browser(
         self, tab: Tab, python_code: str
@@ -812,8 +777,6 @@ class CDPFunctionExecutor:
                 "execute_python_in_browser",
                 f"Translated JS: {js_code}",
             )
-
-            import asyncio
 
             return await asyncio.wait_for(
                 self.inject_and_execute_script(tab, js_code), timeout=10.0
@@ -947,42 +910,6 @@ class CDPFunctionExecutor:
             js_code = js_code.rsplit(";", 2)[0] + f"; return {last_line};"
 
         return f"(function() {{ {js_code} }})()"
-
-    async def call_python_from_js(
-        self, binding_name: str, args: list[Any]
-    ) -> dict[str, Any]:
-        """
-        Handles JavaScript calls to Python functions.
-
-        Args:
-            binding_name (str): Name of the Python binding.
-            args (List[Any]): Arguments to pass to the Python function.
-
-        Returns:
-            Dict[str, Any]: Result of the Python function call.
-        """
-        try:
-            if binding_name not in self._python_bindings:
-                return {"success": False, "error": f"Unknown binding: {binding_name}"}
-            python_function = self._python_bindings[binding_name]
-            if asyncio.iscoroutinefunction(python_function):
-                result = await python_function(*args)
-            else:
-                result = python_function(*args)
-            return {
-                "success": True,
-                "result": result,
-                "binding_name": binding_name,
-                "args": args,
-            }
-        except Exception as e:
-            debug_logger.log_error("cdp_function_executor", "call_python_from_js", e)
-            return {
-                "success": False,
-                "error": str(e),
-                "binding_name": binding_name,
-                "args": args,
-            }
 
     async def get_function_executor_info(
         self, instance_id: str | None = None

@@ -117,6 +117,22 @@ async def resolve_by_text(
     return await _resolve_with_recovery(f"find {text!r}", _do)
 
 
+async def resolve_elements(tab: Tab, selector: str) -> list[Element]:
+    """``tab.select_all(selector)`` with stale-document recovery.
+
+    The multi-``Element`` counterpart to :func:`resolve_element`: returns the
+    full match list of live ``Element`` objects (with ``.attrs``/``.text_all``/
+    ``.get_position()``), or an empty list on a genuine zero-match. A -32000
+    stale-node race re-resolves against a fresh document; a persistent one
+    surfaces after ``_MAX_RESOLVES`` exactly like the single-element path.
+    """
+
+    async def _do() -> list[Element]:
+        return await tab.select_all(selector)
+
+    return await _resolve_with_recovery(f"select_all {selector!r}", _do)
+
+
 async def query_selector_all(tab: Tab, selector: str) -> list[NodeId]:
     """``DOM.getDocument`` + ``DOM.querySelectorAll`` with stale-document recovery.
 

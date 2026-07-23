@@ -276,8 +276,20 @@ byte-bounded, always:
 
 Both caps are enforced at the single write chokepoint
 `network_interceptor.NetworkInterceptor._store_response`. `0` on either cap means
-unbounded. All three knobs are typed fields on `Settings` (§4) — not hand-rolled
-`os.getenv`.
+unbounded.
+
+The **request** store is bounded symmetrically (A3), so a long session cannot leak
+memory through unbounded request retention:
+
+- retained-count cap **10 000** (`STEALTH_MCP_NETWORK_REQUEST_MAX_COUNT`) with **FIFO
+  eviction** of the oldest requests until under cap;
+- per-`post_data` cap **5 MiB** (`STEALTH_MCP_NETWORK_POST_DATA_MAX_BYTES`) — an
+  oversize `post_data` is dropped to `None`, the rest of the request metadata kept.
+
+These are enforced at the single write chokepoint
+`network_interceptor.NetworkInterceptor._store_request` (both the live capture path and
+JSON import route through it). `0` on either cap means unbounded. All five knobs are
+typed fields on `Settings` (§4) — not hand-rolled `os.getenv`.
 
 ---
 
