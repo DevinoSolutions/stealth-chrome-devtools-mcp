@@ -662,3 +662,100 @@ class TestOverCapSweepPreservesLiveAndLegacyProfiles:
             if clone_iid:
                 await close(instance_id=clone_iid)
             await close(instance_id=master_iid)
+
+
+class TestRepeatedSpawnClose:
+    """plan_RELEASE W2: repeated spawn→close cycles (leak / handle-reuse guard).
+
+    The only prior spawn/close-cycle coverage was ``stress_memory_leak.py`` — a
+    standalone script that is never pytest-collected — so no automated test drove
+    a cycle (survey verdict: NOT-COVERED). This runs on all three OSes via the
+    gate's integration matrix, exercising Chrome process + profile-handle teardown
+    repeatedly on each platform.
+    """
+
+    @pytest.mark.asyncio
+    async def test_three_cycles_leave_no_leftover_instances(self):
+        spawn = _get_fn("spawn_browser")
+        close = _get_fn("close_instance")
+        list_instances = _get_fn("list_instances")
+
+        baseline = len(await list_instances())
+        for i in range(3):
+            result = await spawn(
+                headless=True, user_data_dir=f"ci-cycle-{i}", **_sandbox_kwargs()
+            )
+            assert result["state"] == "ready", result
+            iid = result["instance_id"]
+            assert iid
+            closed = await close(instance_id=iid)
+            assert closed is True or (
+                isinstance(closed, dict) and closed.get("result") is True
+            )
+            live_ids = {
+                inst.get("instance_id")
+                for inst in await list_instances()
+                if isinstance(inst, dict)
+            }
+            assert iid not in live_ids, (iid, live_ids)
+        # Every cycle must fully reclaim its instance: no net growth.
+        assert len(await list_instances()) == baseline
+
+
+class TestChromeIdentity:
+    """plan_RELEASE W2: three-way image-Chrome-Stable identity.
+
+    Production auto-discovery (``check_browser_executable``), the expected
+    identity from ``tools/resolve_chrome`` (the one resolver source), and the
+    LAUNCHED binary's CDP ``Browser.getVersion`` product must all name the same
+    Chrome Stable. Auto-discovery drifting to Chromium/Edge/another channel fails
+    the path compare; a different launched binary fails the version compare.
+    """
+
+    @staticmethod
+    def _expected_identity() -> dict:
+        tools_dir = Path(__file__).resolve().parent.parent / "tools"
+        if str(tools_dir) not in sys.path:
+            sys.path.insert(0, str(tools_dir))
+        import resolve_chrome
+
+        return resolve_chrome.resolve_chrome()
+
+    @pytest.mark.asyncio
+    async def test_autodiscovery_and_cdp_match_image_chrome(self):
+        import nodriver as uc
+
+        from stealth_chrome_devtools_mcp.embedded.platform_utils import (
+            check_browser_executable,
+        )
+
+        expected = self._expected_identity()
+
+        # (1) Production auto-discovery must resolve to the SAME binary.
+        discovered = check_browser_executable()
+        assert discovered is not None, "auto-discovery found no browser"
+        assert Path(discovered).resolve() == Path(expected["path"]).resolve(), (
+            discovered,
+            expected["path"],
+        )
+
+        # (2) The launched binary must report that identity over CDP.
+        spawn = _get_fn("spawn_browser")
+        close = _get_fn("close_instance")
+        result = await spawn(
+            headless=True, user_data_dir="ci-chrome-identity", **_sandbox_kwargs()
+        )
+        iid = result["instance_id"]
+        try:
+            tab = await _server_mod.browser_manager.get_tab(iid)
+            assert tab is not None, "no tab for launched instance"
+            # get_version() -> (protocolVersion, product, revision, userAgent, jsVersion)
+            version = await tab.send(uc.cdp.browser.get_version())
+            product = version[1]
+            assert product.startswith(("Chrome/", "HeadlessChrome/")), product
+            if expected["version"]:
+                got_major = product.split("/", 1)[1].split(".", 1)[0]
+                want_major = expected["version"].split(".", 1)[0]
+                assert got_major == want_major, (product, expected["version"])
+        finally:
+            await close(instance_id=iid)
