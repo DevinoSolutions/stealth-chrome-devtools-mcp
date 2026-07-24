@@ -1,0 +1,342 @@
+name: release-gate
+
+# The ONE reusable release gate (plan_RELEASE W2). test.yml (PR/push) and, later,
+# publish.yml (tags, W3) both CALL this workflow — job semantics live here only,
+# never duplicated into a second YAML source of truth. The gate qualifies exactly
+# three GitHub-hosted cells (Ubuntu x64, Windows x64, macOS ARM64) and exposes one
+# stable aggregate check, `release-gate`, that a repository ruleset can require.
+#
+# Edge inventory (W2): quality, unit-tests, coverage, integration, transport,
+# offline-stealth. W3 adds build-dist, package-verify, install-smoke; W5 adds
+# release-evidence. Each new edge slots into the aggregate's `needs:` list — the
+# aggregate is never replaced and never forgets a direct edge.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: >-
+          Git ref/SHA to check out. Empty (default) checks out the event's
+          default ref; W3 passes the exact tag SHA so the gate tests the same
+          commit it will build and publish.
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Lint / type / static gates (OS-independent → one cell) ──────────────────
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5.4.1
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: ruff format --check
+        run: uv run ruff format --check
+      - name: ruff check
+        run: uv run ruff check
+      - name: ty check
+        run: uv run ty check --exit-zero-on-warning src/stealth_chrome_devtools_mcp/
+      - name: vulture
+        run: uv run vulture src/stealth_chrome_devtools_mcp/ tools/vulture_allowlist.py
+      - name: check suppression owners
+        run: uv run python tools/check_suppression_owners.py
+      - name: check file budgets
+        run: uv run python tools/check_file_budgets.py
+
+  # ── Unit + coverage floor on all three OSes, py3.11–3.13 ───────────────────
+  unit-tests:
+    name: unit-tests (${{ matrix.runner_os }}/${{ matrix.runner_arch }} py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, python-version: "3.11" }
+          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, python-version: "3.12" }
+          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, python-version: "3.13" }
+          - { os: windows-latest, runner_os: Windows, runner_arch: X64, python-version: "3.11" }
+          - { os: windows-latest, runner_os: Windows, runner_arch: X64, python-version: "3.12" }
+          - { os: windows-latest, runner_os: Windows, runner_arch: X64, python-version: "3.13" }
+          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64, python-version: "3.11" }
+          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64, python-version: "3.12" }
+          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64, python-version: "3.13" }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5.4.1
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync --extra test --extra sentry
+      - name: Assert qualified runner + record identity
+        shell: bash
+        run: >-
+          uv run python tools/runner_identity.py
+          --runner-os "${{ runner.os }}" --runner-arch "${{ runner.arch }}"
+          --runner-name "${{ runner.name }}" --expect-os "${{ matrix.runner_os }}"
+          --expect-arch "${{ matrix.runner_arch }}"
+          --python "${{ matrix.python-version }}"
+          --out "runner-identity.json"
+      - name: Upload runner identity
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: runner-identity-unit-${{ matrix.runner_os }}-${{ matrix.runner_arch }}-py${{ matrix.python-version }}
+          path: runner-identity.json
+      - name: Run unit tests
+        shell: bash
+        run: uv run pytest -m "not integration" -v --tb=short
+
+  coverage:
+    name: coverage (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64 }
+          - { os: windows-latest, runner_os: Windows, runner_arch: X64 }
+          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64 }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5.4.1
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --extra test --extra sentry
+      - name: Assert qualified runner + record identity
+        shell: bash
+        run: >-
+          uv run python tools/runner_identity.py
+          --runner-os "${{ runner.os }}" --runner-arch "${{ runner.arch }}"
+          --runner-name "${{ runner.name }}" --expect-os "${{ matrix.runner_os }}"
+          --expect-arch "${{ matrix.runner_arch }}" --python "3.12"
+          --out "runner-identity.json"
+      - name: Run unit tests with coverage floor
+        # CI path form of --cov (NOT the module form: the module form mis-resolves
+        # the editable install to a false ~53%). Same reviewed floor on every OS;
+        # each OS uploads its OWN report — no Linux-only or merged-that-hides-red.
+        shell: bash
+        run: >-
+          uv run pytest -m "not integration" -v --tb=short
+          --cov=src/stealth_chrome_devtools_mcp
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+          --cov-fail-under=55
+      - name: Upload coverage report + runner identity
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: coverage-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
+          path: |
+            coverage.xml
+            runner-identity.json
+
+  # ── Real-Chrome evidence on all three OSes ─────────────────────────────────
+  integration:
+    name: integration (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64 }
+          - { os: windows-latest, runner_os: Windows, runner_arch: X64 }
+          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64 }
+    env:
+      # Runner-native temp — no hard-coded /tmp or separators (plan_RELEASE §2.2).
+      STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5.4.1
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --extra test --extra sentry
+      - name: Assert qualified runner + record identity
+        shell: bash
+        run: >-
+          uv run python tools/runner_identity.py
+          --runner-os "${{ runner.os }}" --runner-arch "${{ runner.arch }}"
+          --runner-name "${{ runner.name }}" --expect-os "${{ matrix.runner_os }}"
+          --expect-arch "${{ matrix.runner_arch }}" --python "3.12"
+          --out "runner-identity.json"
+      - name: Resolve image Chrome Stable identity
+        shell: bash
+        run: uv run python tools/resolve_chrome.py --out chrome-identity.json
+      - name: Start Xvfb (Linux headed cases only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+          sleep 3
+      - name: Run integration + Chrome-identity tests
+        # Headless cases must not depend on DISPLAY; Linux sets it only for the
+        # headed cases that need Xvfb, and Windows/macOS never inherit :99.
+        shell: bash
+        run: uv run pytest -m integration -v --tb=short --timeout=180
+        env:
+          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+      - name: Upload Chrome + runner identity
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: identity-integration-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
+          path: |
+            chrome-identity.json
+            runner-identity.json
+
+  transport:
+    name: transport (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64 }
+          - { os: windows-latest, runner_os: Windows, runner_arch: X64 }
+          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64 }
+    env:
+      STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5.4.1
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --extra test --extra sentry
+      - name: Assert qualified runner + record identity
+        shell: bash
+        run: >-
+          uv run python tools/runner_identity.py
+          --runner-os "${{ runner.os }}" --runner-arch "${{ runner.arch }}"
+          --runner-name "${{ runner.name }}" --expect-os "${{ matrix.runner_os }}"
+          --expect-arch "${{ matrix.runner_arch }}" --python "3.12"
+          --out "runner-identity.json"
+      - name: Resolve image Chrome Stable identity
+        shell: bash
+        run: uv run python tools/resolve_chrome.py --out chrome-identity.json
+      - name: Start Xvfb (Linux headed cases only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+          sleep 3
+      - name: Run real-stdio transport journey
+        shell: bash
+        run: uv run pytest -m transport -v --tb=short --timeout=300
+        env:
+          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+      - name: Upload Chrome + runner identity
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: identity-transport-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
+          path: |
+            chrome-identity.json
+            runner-identity.json
+
+  # ── Offline stealth lane (W2 wires the edge; W4 lands the tests) ───────────
+  offline-stealth:
+    name: offline-stealth (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64 }
+          - { os: windows-latest, runner_os: Windows, runner_arch: X64 }
+          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64 }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5.4.1
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --extra test --extra sentry
+      - name: Assert qualified runner + record identity
+        shell: bash
+        run: >-
+          uv run python tools/runner_identity.py
+          --runner-os "${{ runner.os }}" --runner-arch "${{ runner.arch }}"
+          --runner-name "${{ runner.name }}" --expect-os "${{ matrix.runner_os }}"
+          --expect-arch "${{ matrix.runner_arch }}" --python "3.12"
+          --out "runner-identity.json"
+      - name: Run offline stealth lane
+        # W2 wires the job id; the stealth TESTS land in W4. The selector collects
+        # zero tests today → pytest exits 5. That empty edge is expected and is
+        # NOT continue-on-error: exit 5 is treated as success, any other non-zero
+        # (a real failure once W4 adds tests) still fails the job and the gate.
+        shell: bash
+        run: |
+          set +e
+          uv run pytest -m "stealth and not online" -v --tb=short --timeout=180
+          code=$?
+          set -e
+          if [ "$code" -eq 5 ]; then
+            echo "offline-stealth: 0 tests collected (W4 fills this lane) — pass"
+            exit 0
+          fi
+          exit "$code"
+
+  # ── Stable aggregate: the ONE public required check ────────────────────────
+  release-gate:
+    name: release-gate
+    if: always()
+    needs:
+      - quality
+      - unit-tests
+      - coverage
+      - integration
+      - transport
+      - offline-stealth
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every edge to have succeeded
+        shell: bash
+        # A matrix job's result already folds ALL its cells: one failed/skipped
+        # cell (fail-fast:false) makes the job result != success. The gate is red
+        # unless every listed edge is exactly `success` — failure, skipped,
+        # cancelled, or missing (any non-success) blocks merge.
+        run: |
+          overall=0
+          check() {
+            echo "edge $1 = $2"
+            if [ "$2" != "success" ]; then overall=1; fi
+          }
+          check quality        "${{ needs.quality.result }}"
+          check unit-tests     "${{ needs.unit-tests.result }}"
+          check coverage       "${{ needs.coverage.result }}"
+          check integration    "${{ needs.integration.result }}"
+          check transport      "${{ needs.transport.result }}"
+          check offline-stealth "${{ needs.offline-stealth.result }}"
+          if [ "$overall" -ne 0 ]; then
+            echo "::error::release-gate: one or more required edges were not success"
+            exit 1
+          fi
+          echo "release-gate: all required edges succeeded"
