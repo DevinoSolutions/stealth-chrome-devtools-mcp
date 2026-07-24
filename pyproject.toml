@@ -76,6 +76,8 @@ markers = [
     "integration: tests that spawn real browsers (need Chrome installed)",
     "characterization: pins CURRENT observable behavior (quirks/known bugs included) so an intended M5a/M4/M5b change surfaces as a failing test to update deliberately",
     "transport: real-stdio release-gate E2E (plan_RELEASE W1) — spawns the installed console launcher over stdio JSON-RPC and drives a real-Chrome journey via tools/call",
+    "stealth: deterministic offline stealth-invariant probes (plan_RELEASE W4) — the offline-stealth gate lane runs `stealth and not online`; W2 wires the empty edge, W4 lands the tests",
+    "online: opt-in NON-GATING live-detector observations (plan_RELEASE W4) — CreepJS + bot.incolumitas; excluded from every default run and the release gate; asserts only hard invariants and logs the rest",
 ]
 # Coverage is intentionally NOT in addopts: enabling it globally would slow
 # every single-file TDD run and trip --cov-fail-under on partial runs. CI turns
