@@ -106,13 +106,18 @@ async def _warmup_chrome():
     _warmed_up = True
     spawn = _get_fn("spawn_browser")
     close = _get_fn("close_instance")
-    try:
-        result = await spawn(
-            headless=True, user_data_dir="ci-warmup", **_sandbox_kwargs()
-        )
-        await close(instance_id=result["instance_id"])
-    except Exception:
-        pass  # warmup failure is non-fatal
+    # Bounded retry — the cold launch intermittently fails outright ("Failed to
+    # connect to browser"), which on one Linux CI run defeated this warmup AND
+    # then the first real test. Warmup asserts nothing, so retrying is free.
+    for _ in range(2):
+        try:
+            result = await spawn(
+                headless=True, user_data_dir="ci-warmup", **_sandbox_kwargs()
+            )
+            await close(instance_id=result["instance_id"])
+            break
+        except Exception:
+            pass  # warmup failure is non-fatal
     yield
 
 

@@ -56,6 +56,7 @@ import json
 import logging
 import os
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -81,6 +82,7 @@ INIT_TIMEOUT = 60.0  # initialize handshake (answered locally by the proxy)
 LIST_TIMEOUT = 130.0  # first backend-bound call — covers backend cold start
 SPAWN_TIMEOUT = 120.0  # first real Chrome launch
 WARMUP_TIMEOUT = 150.0  # cold Chrome + master-profile bootstrap (best-effort)
+WARMUP_ATTEMPTS = 2  # the cold launch intermittently fails outright, not just slowly
 NAV_TIMEOUT = 60.0
 CALL_TIMEOUT = 45.0
 CLOSE_TIMEOUT = 45.0
@@ -207,8 +209,6 @@ def resolve_launcher(interpreter: str | os.PathLike[str] | None = None) -> Path:
 
 
 def _this_executable() -> str:
-    import sys
-
     return sys.executable
 
 
@@ -522,9 +522,30 @@ async def _representative_parity(client: Client, record: dict[str, Any]) -> None
     }
 
 
+def _isolated_home_browser_args() -> list[str]:
+    """Chrome flags the THROWAWAY home needs to behave like a real one.
+
+    macOS only. The redirected ``HOME`` has no login keychain, so Chrome's Safe
+    Storage lookup has nothing to talk to and blocks — observed on the macOS
+    runner as ``navigate`` burning the product's full 35s CDP deadline while the
+    spawn itself succeeded, reproducibly, at a SHA where Linux and Windows were
+    green. ``--use-mock-keychain`` is the standard automation answer (Puppeteer
+    ships it by default for exactly this reason).
+
+    This is an isolated-home accommodation, the macOS sibling of the Windows
+    ``AppData`` and macOS ``Library`` skeletons in :func:`_isolated_env` — NOT a
+    product default and NOT a product-timeout change (raising the CDP deadline
+    to pass CI would mask user-facing latency instead of fixing the cause).
+    """
+    return ["--use-mock-keychain"] if sys.platform == "darwin" else []
+
+
 def _headless_spawn_kwargs(**extra: Any) -> dict[str, Any]:
-    """``{'headless': True}`` plus this environment's sandbox policy."""
+    """``{'headless': True}`` plus this environment's sandbox + home policy."""
     kwargs: dict[str, Any] = {"headless": True, **extra}
+    args = _isolated_home_browser_args()
+    if args:
+        kwargs["browser_args"] = args
     with contextlib.suppress(Exception):
         from e2e_helpers import sandbox_kwargs
 
@@ -532,7 +553,9 @@ def _headless_spawn_kwargs(**extra: Any) -> dict[str, Any]:
     return kwargs
 
 
-async def _cold_start_warmup(client: Client, record: dict[str, Any]) -> None:
+async def _cold_start_warmup(
+    client: Client, base_url: str, record: dict[str, Any]
+) -> None:
     """Absorb the first-Chrome-launch cost BEFORE the measured journey.
 
     The backend's first spawn into a fresh browser-session root pays for both a
@@ -547,25 +570,53 @@ async def _cold_start_warmup(client: Client, record: dict[str, Any]) -> None:
     convention: the journey drives a SEPARATE backend process, so it cannot
     share the in-process one.
 
+    It warms BOTH cold paths, because they are separately expensive: the launch
+    (Chrome binary + master-profile bootstrap) and the first page LOAD (network
+    service, renderer, font cache). A spawn-only warmup left the journey's first
+    navigate still cold — which is exactly where macOS kept failing.
+
+    Bounded retry, because the cold launch is not merely slow but intermittently
+    FAILS ("Failed to connect to browser" — seen on the Linux runner defeating
+    even the in-process warmup). Retrying warmup costs nothing and asserts
+    nothing.
+
     Best-effort by construction: the outcome is recorded and never fatal. It
     proves nothing and is asserted on by nobody — the canonical journey below
     remains the sole evidence and is still asserted in full.
     """
-    warmup: dict[str, Any] = {"attempted": True, "ok": False}
+    warmup: dict[str, Any] = {"attempted": True, "ok": False, "attempts": 0}
     record["cold_start_warmup"] = warmup
-    try:
-        spawn = await _call(
-            client,
-            "spawn_browser",
-            _headless_spawn_kwargs(user_data_dir="release-gate-warmup"),
-            WARMUP_TIMEOUT,
-        )
-        iid = spawn.get("instance_id") if isinstance(spawn, dict) else None
-        if iid:
-            await _call(client, "close_instance", {"instance_id": iid}, CLOSE_TIMEOUT)
+    for attempt in range(1, WARMUP_ATTEMPTS + 1):
+        warmup["attempts"] = attempt
+        iid: str | None = None
+        try:
+            spawn = await _call(
+                client,
+                "spawn_browser",
+                _headless_spawn_kwargs(user_data_dir="release-gate-warmup"),
+                WARMUP_TIMEOUT,
+            )
+            iid = spawn.get("instance_id") if isinstance(spawn, dict) else None
+            if not iid:
+                continue
+            # Warm the first page load too, not just the launch.
+            await _call(
+                client,
+                "navigate",
+                {"instance_id": iid, "url": f"{base_url}/index.html"},
+                WARMUP_TIMEOUT,
+            )
             warmup["ok"] = True
-    except BaseException as exc:  # noqa: BLE001  PERMANENT(warmup is best-effort: record the reason, never fail the gate on it)
-        warmup["error"] = f"{type(exc).__name__}: {exc}"
+            warmup.pop("error", None)
+            return
+        except BaseException as exc:  # noqa: BLE001  PERMANENT(warmup is best-effort: record the reason, never fail the gate on it)
+            warmup["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            if iid:
+                with contextlib.suppress(Exception):
+                    await _call(
+                        client, "close_instance", {"instance_id": iid}, CLOSE_TIMEOUT
+                    )
 
 
 async def _canonical_journey(
@@ -746,7 +797,7 @@ async def run_release_gate_journey(
                     async with Client(transport, init_timeout=INIT_TIMEOUT) as client:
                         await _foundation_proof(client, record)
                         await _representative_parity(client, record)
-                        await _cold_start_warmup(client, record)
+                        await _cold_start_warmup(client, base_url, record)
                         await _canonical_journey(client, base_url, record)
                 except BaseException as exc:  # noqa: BLE001  PERMANENT(augment with child stderr + boot log, then re-raise)
                     err = exc

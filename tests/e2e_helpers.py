@@ -107,13 +107,19 @@ async def warmup_once() -> None:
     _warmed_up = True
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
-    try:
-        result = await spawn(
-            headless=True, user_data_dir="e2e-warmup", **sandbox_kwargs()
-        )
-        await close(instance_id=result["instance_id"])
-    except Exception:
-        pass  # warmup failure is non-fatal
+    # Bounded retry: the cold launch does not merely run slow, it intermittently
+    # FAILS outright ("Failed to connect to browser" on the CI runners) — and a
+    # warmup that fails leaves the first real test paying the cold cost it was
+    # meant to absorb. Retrying costs nothing: warmup asserts nothing.
+    for _ in range(2):
+        try:
+            result = await spawn(
+                headless=True, user_data_dir="e2e-warmup", **sandbox_kwargs()
+            )
+            await close(instance_id=result["instance_id"])
+            return
+        except Exception:
+            pass  # warmup failure is non-fatal
 
 
 async def navigate_and_settle(iid: str, url: str, timeout: float = 10.0):
