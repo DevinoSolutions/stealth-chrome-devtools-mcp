@@ -100,11 +100,29 @@ _STDERR_CAP_LINES = 200
 # here). Serves tests/fixture_app plus the plan_E2E §2.2 API routes over an
 # ephemeral 127.0.0.1 port. Moved verbatim from conftest so there is one home.
 # ---------------------------------------------------------------------------
+# Diagnostics only: every request the fixture server actually served. When a
+# navigation fails there is no other way to tell "Chrome never reached the
+# server" (a network/launch problem) from "Chrome fetched the page but the load
+# never completed" (a CDP/page problem) — the two have identical symptoms at the
+# tool boundary. Bounded, and never asserted on.
+_FIXTURE_HITS: list[str] = []
+_FIXTURE_HITS_CAP = 50
+
+
 class _FixtureHandler(SimpleHTTPRequestHandler):
     """Static file server for tests/fixture_app + the plan_E2E §2.2 API routes."""
 
     def log_message(self, *args, **kwargs):
         """Silence per-request stderr logging (keeps test output clean)."""
+
+    def handle_one_request(self):
+        """Record the request line, then serve normally (stdlib override)."""
+        super().handle_one_request()
+        line = getattr(self, "raw_requestline", b"") or b""
+        if line and len(_FIXTURE_HITS) < _FIXTURE_HITS_CAP:
+            _FIXTURE_HITS.append(
+                f"{self.client_address[0]} {line.decode('latin-1').strip()}"
+            )
 
     def _send_json(self, payload, status=200, extra_headers=None):
         body = json.dumps(payload).encode("utf-8")
@@ -155,6 +173,7 @@ def serve_fixture_app():
     the lifetime; the journey below owns its own instance so it can close it in a
     ``finally``.
     """
+    _FIXTURE_HITS.clear()
     handler = functools.partial(_FixtureHandler, directory=str(FIXTURE_APP_DIR))
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -545,30 +564,17 @@ async def _representative_parity(client: Client, record: dict[str, Any]) -> None
     }
 
 
-def _isolated_home_browser_args() -> list[str]:
-    """Chrome flags the THROWAWAY home needs to behave like a real one.
-
-    macOS only. The redirected ``HOME`` has no login keychain, so Chrome's Safe
-    Storage lookup has nothing to talk to and blocks — observed on the macOS
-    runner as ``navigate`` burning the product's full 35s CDP deadline while the
-    spawn itself succeeded, reproducibly, at a SHA where Linux and Windows were
-    green. ``--use-mock-keychain`` is the standard automation answer (Puppeteer
-    ships it by default for exactly this reason).
-
-    This is an isolated-home accommodation, the macOS sibling of the Windows
-    ``AppData`` and macOS ``Library`` skeletons in :func:`_isolated_env` — NOT a
-    product default and NOT a product-timeout change (raising the CDP deadline
-    to pass CI would mask user-facing latency instead of fixing the cause).
-    """
-    return ["--use-mock-keychain"] if sys.platform == "darwin" else []
-
-
 def _headless_spawn_kwargs(**extra: Any) -> dict[str, Any]:
-    """``{'headless': True}`` plus this environment's sandbox + home policy."""
+    """``{'headless': True}`` plus this environment's sandbox policy.
+
+    No ``--use-mock-keychain`` here, deliberately: an earlier round passed it to
+    rule out macOS keychain blocking, and the backend log showed the product's
+    own stealth filter removing it ("Stripped 1 detectable arg(s):
+    --use-mock-keychain stripped: Playwright default"). It never reached Chrome,
+    so it tested nothing — keeping it would be an inert flag that also trips a
+    stealth warning on every spawn.
+    """
     kwargs: dict[str, Any] = {"headless": True, **extra}
-    args = _isolated_home_browser_args()
-    if args:
-        kwargs["browser_args"] = args
     with contextlib.suppress(Exception):
         from e2e_helpers import sandbox_kwargs
 
@@ -845,6 +851,8 @@ async def run_release_gate_journey(
         raise RuntimeError(
             "release-gate journey failed: "
             f"{type(err).__name__}: {err}\n"
+            f"--- fixture server hits ({len(_FIXTURE_HITS)}) ---\n"
+            f"{chr(10).join(_FIXTURE_HITS) or '(the fixture server served NOTHING)'}\n"
             f"--- backend logs (capped) ---\n{_backend_logs(log_dir, home_dir)}\n"
             f"--- child stderr (capped) ---\n{child_stderr}\n"
             f"--- backend boot log (capped) ---\n{boot_log}"
