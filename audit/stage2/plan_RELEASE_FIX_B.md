@@ -1,6 +1,10 @@
 # plan_RELEASE_FIX_B — B1: per-session app_lifespan destroys all browser state over the real wire path
 
-**Status: PROPOSED (awaiting human go)**
+**Status: EXECUTED** — human go 2026-07-24 ("I trust your execution"); C1 = f81ff8f
+(session-reentrant lifespan; if-guard in `finally` instead of the planned early
+return, deliberately — a `return` inside `finally` would suppress a propagating
+session exception), C2 = 585ebf2 (xfail flipped; transport journey 3/3 green over
+real stdio + independent orchestrator re-run). Merge gate: human, PR pending.
 **Found by:** W1's real-stdio transport gate (`tests/test_e2e_transport.py`), first run.
 **Severity:** Tier-A-equivalent, release-blocking. Invisible to the entire in-process
 test suite; reproduced 3/3 over the real user path.
