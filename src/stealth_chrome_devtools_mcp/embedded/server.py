@@ -211,6 +211,17 @@ def _install_nodriver_cookie_compat() -> None:
 
 DEBUG_LOGGING_ENABLED = get_settings().stealth_browser_debug or get_settings().debug
 
+# B1 (RELEASE-FIX-B): FastMCP runs the server ``lifespan`` once PER MCP SESSION
+# over streamable HTTP, not once per process. Startup must therefore be guarded
+# to the first entry per process, and the destructive teardown must be bound to
+# *process* end (stdio standalone), never *session* end — otherwise every probe
+# session's exit tears down all live browsers. ``_SERVE_TRANSPORT`` is stamped by
+# the ``__main__`` entrypoint from the parsed ``--transport``; the default keeps
+# the standalone-stdio contract. A boolean guard (not a refcount) is deliberate:
+# an idle HTTP backend crossing back to zero sessions must NOT re-arm startup.
+_LIFESPAN_STARTED = False
+_SERVE_TRANSPORT = "stdio"
+
 
 @asynccontextmanager
 async def app_lifespan(server):
@@ -220,55 +231,69 @@ async def app_lifespan(server):
     Args:
         server (Any): The server instance for which the lifespan is being managed.
     """
-    _install_asyncio_close_noise_filter()
-    _install_nodriver_cookie_compat()
-    debug_logger.log_info(
-        "server", "startup", "Starting Browser Automation MCP Server..."
-    )
-    process_cleanup.activate()
-    try:
+    global _LIFESPAN_STARTED
+    if not _LIFESPAN_STARTED:
+        _LIFESPAN_STARTED = True
+        _install_asyncio_close_noise_filter()
+        _install_nodriver_cookie_compat()
+        debug_logger.log_info(
+            "server", "startup", "Starting Browser Automation MCP Server..."
+        )
+        process_cleanup.activate()
         await browser_manager.start_idle_reaper()
         # Reclaim leaked auto-clones and trim oversized idle named profiles left
         # by a previous run. Fire-and-forget so a large first sweep never delays
         # server readiness.
         clone_storage.spawn_background_sweep("startup")
+    try:
         yield
     finally:
-        debug_logger.log_info(
-            "server", "shutdown", "Shutting down Browser Automation MCP Server..."
-        )
-        try:
-            await browser_manager.stop_idle_reaper()
-        except Exception as e:
-            debug_logger.log_error("server", "cleanup", e)
-        try:
-            await browser_manager.close_all()
-            debug_logger.log_info("server", "cleanup", "All browser instances closed")
-        except Exception as e:
-            debug_logger.log_error("server", "cleanup", e)
+        # HTTP session exit is a no-op: instances are shared across sessions and
+        # process termination is already reaped by process_cleanup's atexit/signal
+        # handlers. Only the standalone-stdio process (one session == process
+        # lifetime) runs the destructive teardown, preserving the 1.x contract.
+        # An ``if`` guard (not an early ``return``) is deliberate: a ``return`` in
+        # a ``finally`` would suppress an exception propagating from the session.
+        if _SERVE_TRANSPORT != "http":
+            debug_logger.log_info(
+                "server", "shutdown", "Shutting down Browser Automation MCP Server..."
+            )
+            try:
+                await browser_manager.stop_idle_reaper()
+            except Exception as e:
+                debug_logger.log_error("server", "cleanup", e)
+            try:
+                await browser_manager.close_all()
+                debug_logger.log_info(
+                    "server", "cleanup", "All browser instances closed"
+                )
+            except Exception as e:
+                debug_logger.log_error("server", "cleanup", e)
 
-        try:
-            process_cleanup._cleanup_all_tracked()
-            debug_logger.log_info("server", "cleanup", "Process cleanup complete")
-        except Exception as e:
-            debug_logger.log_error("server", "cleanup", f"Process cleanup failed: {e}")
-        try:
-            persistent_instances = in_memory_storage.list_instances()
-            if persistent_instances.get("instances"):
-                debug_logger.log_info(
-                    "server",
-                    "storage_cleanup",
-                    f"Clearing in-memory storage with {len(persistent_instances['instances'])} instances...",
+            try:
+                process_cleanup._cleanup_all_tracked()
+                debug_logger.log_info("server", "cleanup", "Process cleanup complete")
+            except Exception as e:
+                debug_logger.log_error(
+                    "server", "cleanup", f"Process cleanup failed: {e}"
                 )
-                in_memory_storage.clear_all()
-                debug_logger.log_info(
-                    "server", "storage_cleanup", "In-memory storage cleared"
-                )
-        except Exception as e:
-            debug_logger.log_error("server", "storage_cleanup", e)
-        debug_logger.log_info(
-            "server", "shutdown", "Browser Automation MCP Server shutdown complete"
-        )
+            try:
+                persistent_instances = in_memory_storage.list_instances()
+                if persistent_instances.get("instances"):
+                    debug_logger.log_info(
+                        "server",
+                        "storage_cleanup",
+                        f"Clearing in-memory storage with {len(persistent_instances['instances'])} instances...",
+                    )
+                    in_memory_storage.clear_all()
+                    debug_logger.log_info(
+                        "server", "storage_cleanup", "In-memory storage cleared"
+                    )
+            except Exception as e:
+                debug_logger.log_error("server", "storage_cleanup", e)
+            debug_logger.log_info(
+                "server", "shutdown", "Browser Automation MCP Server shutdown complete"
+            )
 
 
 mcp = FastMCP(
@@ -3323,6 +3348,10 @@ if __name__ == "__main__":
 
     # Ship errors to Sentry when SENTRY_DSN is set (no-op otherwise).
     sentry_init()
+
+    # B1: bind app_lifespan's teardown policy to the serve transport. HTTP runs
+    # the lifespan per MCP session, so session-exit teardown must be a no-op.
+    _SERVE_TRANSPORT = args.transport
 
     if args.transport == "http":
         mcp.run(transport="http", host=args.host, port=args.port)

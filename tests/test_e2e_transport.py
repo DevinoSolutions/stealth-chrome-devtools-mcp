@@ -10,19 +10,6 @@ returned record. W3 imports the same harness unchanged for its install smoke.
 
 Marked ``integration`` + ``transport``; skipped when Chrome / the server is
 unavailable (same guard as the other e2e modules).
-
-KNOWN RED (finding B1, fix owned by RELEASE-FIX-B): the journey currently dies
-mid-flight because FastMCP runs ``app_lifespan`` PER MCP SESSION over streamable
-HTTP, and the stdio proxy's liveness watchdog opens+closes a probe session
-(``_backend_http_ready``: real ``initialize`` then DELETE) every 2s — each probe's
-lifespan entry re-runs orphan recovery (killing freshly spawned Chrome) and each
-exit runs the full server cleanup ("All browser instances closed"). Every browser
-instance on the backend dies within ~2s of any probe. The in-process E2E seam
-bypasses the proxy+HTTP entirely, which is why only this transport gate sees it.
-With the watchdog quieted locally the full journey passes end-to-end, so the
-xfail below pins exactly this defect and nothing else. ``strict=False`` because
-the failure point depends on where the 2s tick lands in the journey (a lucky
-run could sneak through). RELEASE-FIX-B must remove the marker.
 """
 
 from __future__ import annotations
@@ -44,13 +31,6 @@ if not CAN_RUN:
     pytestmark.append(pytest.mark.skip("Chrome not available or server failed to load"))
 
 
-@pytest.mark.xfail(
-    reason=(
-        "B1 (RELEASE-FIX-B): per-MCP-session app_lifespan + the proxy's 2s "
-        "watchdog probe sessions close all browser instances over real stdio"
-    ),
-    strict=False,
-)
 async def test_real_stdio_release_gate_journey(tmp_path):
     """Foundation proof + handshake/schema + canonical journey over real stdio."""
     launcher = resolve_launcher()  # this env's absolute installed console launcher
