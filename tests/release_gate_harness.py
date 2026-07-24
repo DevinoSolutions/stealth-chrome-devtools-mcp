@@ -259,6 +259,29 @@ def _isolated_env(
     return env
 
 
+def _backend_logs(*dirs: Path) -> str:
+    """The isolated backend's own logs, for failures the exception text alone
+    cannot explain.
+
+    The journey runs the backend as a DETACHED child, so a tool failure arrives
+    as a bare protocol error — the reason (Chrome launch args, CDP stalls, the
+    orphan-recovery lines that root-caused B1) is only in the backend's log
+    files, which die with the throwaway home. Cheap on the happy path: only
+    read when the journey has already failed.
+    """
+    seen: set[Path] = set()
+    chunks: list[str] = []
+    for d in (*dirs, *(p / ".stealth-mcp" / "logs" for p in dirs)):
+        if not d.is_dir():
+            continue
+        for log in sorted(d.glob("*.log"), key=lambda p: p.stat().st_mtime)[-2:]:
+            if log in seen:
+                continue
+            seen.add(log)
+            chunks.append(f"[{log.name}]\n{_read_capped(log)}")
+    return "\n".join(chunks) if chunks else "(no backend log files found)"
+
+
 def _backend_pid_from_state(home_dir: Path) -> int | None:
     """Read the isolated backend's recorded pid from its ``server.json``."""
     state_file = home_dir / ".stealth-mcp" / "server.json"
@@ -822,6 +845,7 @@ async def run_release_gate_journey(
         raise RuntimeError(
             "release-gate journey failed: "
             f"{type(err).__name__}: {err}\n"
+            f"--- backend logs (capped) ---\n{_backend_logs(log_dir, home_dir)}\n"
             f"--- child stderr (capped) ---\n{child_stderr}\n"
             f"--- backend boot log (capped) ---\n{boot_log}"
         ) from err
