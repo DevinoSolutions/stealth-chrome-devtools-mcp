@@ -628,13 +628,31 @@ async def _cold_start_warmup(
             iid = spawn.get("instance_id") if isinstance(spawn, dict) else None
             if not iid:
                 continue
-            # Warm the first page load too, not just the launch.
-            await _call(
-                client,
-                "navigate",
-                {"instance_id": iid, "url": f"{base_url}/index.html"},
-                WARMUP_TIMEOUT,
-            )
+            # Diagnostic probe (recorded, never asserted): "about:blank" needs no
+            # NETWORK request, so Chrome's Fetch interception — which the product
+            # enables catch-all on every spawn even with zero hooks — has nothing
+            # to pause. A real URL does. If blank succeeds where http hangs, the
+            # stall is the paused-request path, not the tab, the CDP session, or
+            # reachability. Cheap, and it turns the next red into an answer.
+            for label, url in (
+                ("about_blank", "about:blank"),
+                ("http", f"{base_url}/index.html"),
+            ):
+                started = time.monotonic()
+                try:
+                    await _call(
+                        client,
+                        "navigate",
+                        {"instance_id": iid, "url": url},
+                        NAV_TIMEOUT,
+                    )
+                    outcome = "ok"
+                except BaseException as exc:  # noqa: BLE001  PERMANENT(probe records the failure shape; the journey below is what actually gates)
+                    outcome = f"{type(exc).__name__}: {exc}"
+                warmup.setdefault("nav_probe", {})[label] = {
+                    "outcome": outcome,
+                    "seconds": round(time.monotonic() - started, 1),
+                }
             warmup["ok"] = True
             warmup.pop("error", None)
             return
@@ -851,6 +869,7 @@ async def run_release_gate_journey(
         raise RuntimeError(
             "release-gate journey failed: "
             f"{type(err).__name__}: {err}\n"
+            f"--- warmup / nav probe ---\n{json.dumps(record.get('cold_start_warmup'))}\n"
             f"--- fixture server hits ({len(_FIXTURE_HITS)}) ---\n"
             f"{chr(10).join(_FIXTURE_HITS) or '(the fixture server served NOTHING)'}\n"
             f"--- backend logs (capped) ---\n{_backend_logs(log_dir, home_dir)}\n"
