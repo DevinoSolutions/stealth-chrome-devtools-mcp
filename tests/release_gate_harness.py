@@ -80,6 +80,7 @@ FIXTURE_APP_DIR = Path(__file__).resolve().parent / "fixture_app"
 INIT_TIMEOUT = 60.0  # initialize handshake (answered locally by the proxy)
 LIST_TIMEOUT = 130.0  # first backend-bound call — covers backend cold start
 SPAWN_TIMEOUT = 120.0  # first real Chrome launch
+WARMUP_TIMEOUT = 150.0  # cold Chrome + master-profile bootstrap (best-effort)
 NAV_TIMEOUT = 60.0
 CALL_TIMEOUT = 45.0
 CLOSE_TIMEOUT = 45.0
@@ -245,6 +246,12 @@ def _isolated_env(
     roaming_appdata.mkdir(parents=True, exist_ok=True)
     env["LOCALAPPDATA"] = str(local_appdata)
     env["APPDATA"] = str(roaming_appdata)
+    # Same coherence rule for the macOS home: Chrome derives Application
+    # Support / Caches from HOME with no env var to point at them, so the
+    # skeleton is what makes the redirect coherent there. Created on every OS
+    # (cheap, inert off-macOS) so the isolated home has ONE shape everywhere.
+    for mac_dir in ("Application Support", "Caches", "Preferences"):
+        (home_dir / "Library" / mac_dir).mkdir(parents=True, exist_ok=True)
     # Known STEALTH_MCP_* settings fields (env has ONE home = settings.py).
     env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(session_root)
     env["STEALTH_MCP_CLONE_OUTPUT_DIR"] = str(clone_dir)
@@ -515,18 +522,60 @@ async def _representative_parity(client: Client, record: dict[str, Any]) -> None
     }
 
 
+def _headless_spawn_kwargs(**extra: Any) -> dict[str, Any]:
+    """``{'headless': True}`` plus this environment's sandbox policy."""
+    kwargs: dict[str, Any] = {"headless": True, **extra}
+    with contextlib.suppress(Exception):
+        from e2e_helpers import sandbox_kwargs
+
+        kwargs.update(sandbox_kwargs())
+    return kwargs
+
+
+async def _cold_start_warmup(client: Client, record: dict[str, Any]) -> None:
+    """Absorb the first-Chrome-launch cost BEFORE the measured journey.
+
+    The backend's first spawn into a fresh browser-session root pays for both a
+    Chrome cold start and the master-profile bootstrap that clone-on-spawn
+    needs. On the macOS CI image that cold path is slow enough to exceed
+    nodriver's internal connect patience (spawn: "Failed to connect to
+    browser") or the product's CDP deadline on the first navigate — while the
+    54 in-process integration tests pass on the same image, every one of them
+    behind :func:`e2e_helpers.warmup_once` ("the first Chrome launch on CI is
+    slow / flaky"). This is that same warmup at the wire level, for the same
+    reason and with the same best-effort contract — not a second warmup
+    convention: the journey drives a SEPARATE backend process, so it cannot
+    share the in-process one.
+
+    Best-effort by construction: the outcome is recorded and never fatal. It
+    proves nothing and is asserted on by nobody — the canonical journey below
+    remains the sole evidence and is still asserted in full.
+    """
+    warmup: dict[str, Any] = {"attempted": True, "ok": False}
+    record["cold_start_warmup"] = warmup
+    try:
+        spawn = await _call(
+            client,
+            "spawn_browser",
+            _headless_spawn_kwargs(user_data_dir="release-gate-warmup"),
+            WARMUP_TIMEOUT,
+        )
+        iid = spawn.get("instance_id") if isinstance(spawn, dict) else None
+        if iid:
+            await _call(client, "close_instance", {"instance_id": iid}, CLOSE_TIMEOUT)
+            warmup["ok"] = True
+    except BaseException as exc:  # noqa: BLE001  PERMANENT(warmup is best-effort: record the reason, never fail the gate on it)
+        warmup["error"] = f"{type(exc).__name__}: {exc}"
+
+
 async def _canonical_journey(
     client: Client, base_url: str, record: dict[str, Any]
 ) -> None:
     """spawn → navigate → tabs → interact → assert oracle+ground truth →
     structural extraction → PNG screenshot → close, all via ``tools/call``."""
-    spawn_kwargs: dict[str, Any] = {"headless": True}
-    with contextlib.suppress(Exception):
-        from e2e_helpers import sandbox_kwargs
-
-        spawn_kwargs.update(sandbox_kwargs())
-
-    spawn = await _call(client, "spawn_browser", spawn_kwargs, SPAWN_TIMEOUT)
+    spawn = await _call(
+        client, "spawn_browser", _headless_spawn_kwargs(), SPAWN_TIMEOUT
+    )
     assert isinstance(spawn, dict) and spawn.get("instance_id"), spawn
     iid = spawn["instance_id"]
     journey: dict[str, Any] = {"instance_id": iid, "spawn_state": spawn.get("state")}
@@ -697,6 +746,7 @@ async def run_release_gate_journey(
                     async with Client(transport, init_timeout=INIT_TIMEOUT) as client:
                         await _foundation_proof(client, record)
                         await _representative_parity(client, record)
+                        await _cold_start_warmup(client, record)
                         await _canonical_journey(client, base_url, record)
                 except BaseException as exc:  # noqa: BLE001  PERMANENT(augment with child stderr + boot log, then re-raise)
                     err = exc
