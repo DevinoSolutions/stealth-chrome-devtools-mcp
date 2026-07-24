@@ -157,9 +157,6 @@ jobs:
           - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64 }
           - { os: windows-latest, runner_os: Windows, runner_arch: X64 }
           - { os: macos-latest, runner_os: macOS, runner_arch: ARM64 }
-    env:
-      # Runner-native temp — no hard-coded /tmp or separators (plan_RELEASE §2.2).
-      STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -191,10 +188,14 @@ jobs:
       - name: Run integration + Chrome-identity tests
         # Headless cases must not depend on DISPLAY; Linux sets it only for the
         # headed cases that need Xvfb, and Windows/macOS never inherit :99.
+        # Session root: runner-native temp — no hard-coded /tmp or separators
+        # (plan_RELEASE §2.2). Step-level env because the `runner` context is
+        # not available in job-level env (actionlint [expression]).
         shell: bash
         run: uv run pytest -m integration -v --tb=short --timeout=180
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+          STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
       - name: Upload Chrome + runner identity
         if: always()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -214,8 +215,6 @@ jobs:
           - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64 }
           - { os: windows-latest, runner_os: Windows, runner_arch: X64 }
           - { os: macos-latest, runner_os: macOS, runner_arch: ARM64 }
-    env:
-      STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -245,10 +244,13 @@ jobs:
           Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
           sleep 3
       - name: Run real-stdio transport journey
+        # Session root at step level for the same runner-context reason as the
+        # integration job above.
         shell: bash
         run: uv run pytest -m transport -v --tb=short --timeout=300
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+          STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
       - name: Upload Chrome + runner identity
         if: always()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
