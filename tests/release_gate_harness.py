@@ -634,8 +634,17 @@ async def _cold_start_warmup(
             # to pause. A real URL does. If blank succeeds where http hangs, the
             # stall is the paused-request path, not the tab, the CDP session, or
             # reachability. Cheap, and it turns the next red into an answer.
+            # "refused" targets a port nothing listens on: the OS answers with
+            # an immediate ECONNREFUSED, so Chrome renders an error page fast.
+            # It separates the two remaining causes, which the fixture URL alone
+            # cannot: if a REFUSED connection also hangs, the request never
+            # reached the network stack at all (the paused-Fetch path — a
+            # product bug); if it errors fast while the fixture port hangs, the
+            # network stack is fine and something is dropping that connection
+            # (a runner/environment problem).
             for label, url in (
                 ("about_blank", "about:blank"),
+                ("refused", "http://127.0.0.1:1/"),
                 ("http", f"{base_url}/index.html"),
             ):
                 started = time.monotonic()

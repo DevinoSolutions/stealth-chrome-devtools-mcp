@@ -106,18 +106,20 @@ async def _warmup_chrome():
     _warmed_up = True
     spawn = _get_fn("spawn_browser")
     close = _get_fn("close_instance")
-    # Bounded retry — the cold launch intermittently fails outright ("Failed to
-    # connect to browser"), which on one Linux CI run defeated this warmup AND
-    # then the first real test. Warmup asserts nothing, so retrying is free.
-    for _ in range(2):
+    # Bounded retry WITH BACKOFF — the cold launch intermittently fails outright
+    # ("Failed to connect to browser"), which on two Linux CI runs defeated this
+    # warmup and then the first tests in this very file. An immediate retry hits
+    # the same busy machine, so the wait between attempts is the point. Warmup
+    # asserts nothing; this costs time only when the machine is struggling.
+    for attempt in range(3):
         try:
             result = await spawn(
                 headless=True, user_data_dir="ci-warmup", **_sandbox_kwargs()
             )
             await close(instance_id=result["instance_id"])
             break
-        except Exception:
-            pass  # warmup failure is non-fatal
+        except Exception:  # warmup failure is non-fatal
+            await asyncio.sleep(2.0 * (attempt + 1))
     yield
 
 
