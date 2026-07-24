@@ -174,19 +174,24 @@ def resolve_launcher(interpreter: str | os.PathLike[str] | None = None) -> Path:
     Given a target environment's interpreter (default: this process's), derive the
     console entry point from that environment's scripts directory —
     ``Scripts/stealth-chrome-devtools-mcp.exe`` on Windows,
-    ``bin/stealth-chrome-devtools-mcp`` on POSIX — canonicalize with
-    ``Path.resolve()``, and require an absolute, existing executable inside that
+    ``bin/stealth-chrome-devtools-mcp`` on POSIX — made absolute WITHOUT following
+    symlinks (``Path.absolute()``, never ``Path.resolve()``: on POSIX a venv's
+    ``bin/python`` is a symlink to the base interpreter, so resolving it escapes
+    the venv into a scripts dir that has no entry points — exactly what the first
+    Linux/macOS CI run hit). Requires an absolute, existing executable inside that
     environment. NEVER uses a bare command, mutates PATH, invokes ``python -m`` from
     the source tree, or falls back to another checkout.
     """
-    interp = Path(interpreter) if interpreter is not None else Path(_this_executable())
-    scripts_dir = interp.resolve().parent
+    interp = Path(
+        interpreter if interpreter is not None else _this_executable()
+    ).absolute()
+    scripts_dir = interp.parent
     name = (
         "stealth-chrome-devtools-mcp.exe"
         if os.name == "nt"
         else "stealth-chrome-devtools-mcp"
     )
-    launcher = (scripts_dir / name).resolve()
+    launcher = scripts_dir / name
     if not launcher.is_absolute():
         raise ValueError(f"resolved launcher is not absolute: {launcher}")
     if not launcher.exists() or not launcher.is_file():

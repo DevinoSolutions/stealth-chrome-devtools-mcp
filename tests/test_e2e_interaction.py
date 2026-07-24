@@ -417,14 +417,30 @@ async def test_tabs_lifecycle(fixture_app_server):
         assert await switch_tab(instance_id=iid, tab_id=an_original) is True
         assert await close_tab(instance_id=iid, tab_id=new_id) is True
 
-        # close_tab returns before CDP target-detach propagates, so the closed
-        # tab can still be listed for a beat (a Linux/CI race) — bounded-poll
-        # list_tabs until it drops out (plan §2.6 deadline + interval).
+        # close_tab returns before CDP target-detach propagates, so for a beat
+        # the closed tab can still be listed — or nodriver's target table can
+        # transiently hold a half-detached entry that makes list_tabs itself
+        # raise TypeError ("object Connection can't be used in 'await'
+        # expression"): the known close-path flake, seen on the Linux and
+        # Windows CI images. plan_RELEASE §2.8 rules this exact case a
+        # bounded-wait fix in the test HARNESS, never src, and bans
+        # xfail-quarantine. Teeth are preserved: the final list_tabs must
+        # succeed cleanly (no exception swallowed at the deadline) and the
+        # closed tab must be gone.
         deadline = time.monotonic() + 10.0
-        remaining = {t["tab_id"] for t in await list_tabs(instance_id=iid)}
-        while new_id in remaining and time.monotonic() < deadline:
+        remaining = None
+        while time.monotonic() < deadline:
+            try:
+                remaining = {t["tab_id"] for t in await list_tabs(instance_id=iid)}
+            except TypeError:
+                remaining = None  # half-detached target: table not settled yet
+            if remaining is not None and new_id not in remaining:
+                break
             await asyncio.sleep(0.25)
-            remaining = {t["tab_id"] for t in await list_tabs(instance_id=iid)}
+        assert remaining is not None, (
+            "list_tabs never returned cleanly within 10s of close_tab "
+            "(close-path flake did not settle)"
+        )
         assert new_id not in remaining
     finally:
         await close(instance_id=iid)
