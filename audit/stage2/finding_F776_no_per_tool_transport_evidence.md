@@ -39,15 +39,25 @@ general gap rather than a lone exception: the same bar applied to every other
 tool leaves it unqualified. The cookie node is also the template for closing the
 rest — a dedicated collected node, one harness, an asserted user outcome.
 
-## What this does NOT mean
+## What this does NOT mean — say this as loudly as the finding
 
-* It does not mean the tools do not work. Most are exercised against real Chrome
-  every run, and the transport lane proves the wire path itself works on two OS
-  cells.
-* It does not mean the E2E suite is worthless. It is real regression evidence; it
-  is simply the wrong *kind* of evidence for a per-tool transport claim.
-* It does not narrow the served surface. All registry tools remain served; the
-  contract lists each as `served-unqualified` with this tracking id.
+**`served-unqualified` is not `untested`.** Every served tool is driven against
+**real Chrome** by the E2E suite, and a set-equality tripwire keeps that coverage
+complete — at this SHA the manifest is 94 covered, 0 exempt. The transport lane
+separately proves the wire path itself works on two OS cells.
+
+What is missing is narrower and more specific: a **per-tool** assertion of the
+user-visible outcome **over stdio**. The gap is *where the tests run*, not whether
+they run, and closing it is test placement rather than a product fix.
+
+A reader who collapses that distinction gets it wrong in one of two directions —
+either dismissing the product ("91 untested tools") or dismissing the contract
+("they're clearly tested, this document is pedantic"). Both are wrong; the
+contract's §5 states each tool's actual evidence for exactly this reason.
+
+Also true: no served tool is in the *no execution evidence* state. If one ever
+lands there it is materially weaker than the rest, and the generated table says
+so in its own words rather than folding it into the same bucket.
 
 ## What closing it requires
 

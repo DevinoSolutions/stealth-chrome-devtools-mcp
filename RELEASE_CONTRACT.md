@@ -17,6 +17,18 @@ prose document — plan, finding, or README — can qualify anything.
 > **At the release SHA recorded in the ledger, this gate qualifies 3 of the 94 served MCP tools**, on the cells each
 > row names.
 
+**Read that number carefully, in both directions.** It does *not* say
+91 tools are untested. Every served tool
+is driven against **real Chrome** by the E2E suite — a set-equality
+tripwire keeps that coverage complete, and §5 shows each tool's actual
+evidence. What those tools lack is a *per-tool* assertion over the
+**stdio transport a user actually speaks**, because the suite drives
+them through the in-process function seam instead. plan_RELEASE §2.5
+does not let in-process evidence license a transport claim, so they
+are `served-unqualified`: tested, but not proved at the wire. Closing
+that is a question of where tests run, not of a product defect — see
+F-776.
+
 ### Breaking change from 1.x — read this before upgrading
 
 Two knobs were **renamed with no back-compatible alias**:
@@ -157,10 +169,13 @@ ARM64 is excluded from that lane under F-773, so no per-tool stdio claim
 in this document is qualified on three cells — every one of them is
 qualified on exactly two.
 
-`served-unqualified` does not mean broken. It means: the server serves the
-tool, and the gate at this SHA does not prove the user-visible outcome
-over the transport the user uses. The 'strongest current evidence' column
-says what does exist, and is a description — never a claim.
+`served-unqualified` does not mean broken, and it does not mean untested.
+It means: the server serves the tool, the suite exercises it against real
+Chrome, and the gate at this SHA does not prove the user-visible outcome
+*over the transport the user speaks*. The evidence column below states
+which of those is true for each row — it is a description, never a claim.
+A row reading **no execution evidence** would be materially weaker than
+the rest; if none appears below, no served tool is in that state.
 
 Unless a row names a specific defect, its tracking id is **F-776** and its
 impact is the shared one: no per-tool real-transport success assertion
@@ -168,100 +183,100 @@ exists at this SHA.
 
 | Tool | Section | State | Strongest current evidence | Tracking id |
 |---|---|---|---|---|
-| `close_instance` | browser-management | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-775d |
-| `get_instance_state` | browser-management | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `go_back` | browser-management | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `go_forward` | browser-management | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `list_instances` | browser-management | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `navigate` | browser-management | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `reload_page` | browser-management | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `spawn_browser` | browser-management | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `call_javascript_function` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | TRUST-BOUNDARY |
-| `create_persistent_function` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `create_python_binding` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | TRUST-BOUNDARY |
-| `discover_global_functions` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `discover_object_methods` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `execute_cdp_command` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | TRUST-BOUNDARY |
-| `execute_function_sequence` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `execute_python_in_browser` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | TRUST-BOUNDARY |
-| `get_execution_contexts` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_function_executor_info` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `inject_and_execute_script` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | TRUST-BOUNDARY |
-| `inspect_function_signature` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `list_cdp_commands` | cdp-functions | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
+| `close_instance` | browser-management | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-775d |
+| `get_instance_state` | browser-management | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `go_back` | browser-management | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `go_forward` | browser-management | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `list_instances` | browser-management | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `navigate` | browser-management | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `reload_page` | browser-management | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `spawn_browser` | browser-management | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `call_javascript_function` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | TRUST-BOUNDARY |
+| `create_persistent_function` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `create_python_binding` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | TRUST-BOUNDARY |
+| `discover_global_functions` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `discover_object_methods` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `execute_cdp_command` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | TRUST-BOUNDARY |
+| `execute_function_sequence` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `execute_python_in_browser` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | TRUST-BOUNDARY |
+| `get_execution_contexts` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_function_executor_info` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `inject_and_execute_script` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | TRUST-BOUNDARY |
+| `inspect_function_signature` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `list_cdp_commands` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
 | `clear_cookies` | cookies-storage | release-qualified-success | stdio — `tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip` | — |
 | `get_cookies` | cookies-storage | release-qualified-success | stdio — `tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip` | — |
 | `set_cookie` | cookies-storage | release-qualified-success | stdio — `tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip` | — |
-| `clear_debug_view` | debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `export_debug_logs` | debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_debug_lock_status` | debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_debug_view` | debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `validate_browser_environment_tool` | debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `create_dynamic_hook` | dynamic-hooks | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `create_simple_dynamic_hook` | dynamic-hooks | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_dynamic_hook_details` | dynamic-hooks | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_hook_common_patterns` | dynamic-hooks | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_hook_documentation` | dynamic-hooks | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_hook_examples` | dynamic-hooks | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_hook_requirements_documentation` | dynamic-hooks | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `list_dynamic_hooks` | dynamic-hooks | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `remove_dynamic_hook` | dynamic-hooks | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `validate_hook_function` | dynamic-hooks | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `clone_element_complete` | element-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_complete_element_cdp` | element-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_element_animations` | element-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_element_assets` | element-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_element_events` | element-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_element_structure` | element-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_element_styles` | element-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_element_styles_cdp` | element-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_related_files` | element-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `click_element` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | E8-2 |
-| `execute_script` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | TRUST-BOUNDARY |
-| `get_element_state` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | E7-6 |
-| `get_page_content` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `paste_text` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `query_elements` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `scroll_page` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `select_option` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | E8-1 |
-| `take_screenshot` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `type_text` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | E7-1/E8-3/E8-4 |
-| `upload_file` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `wait_for_element` | element-interaction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `cleanup_clone_files` | file-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `clone_element_to_file` | file-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_complete_element_to_file` | file-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_element_animations_to_file` | file-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_element_assets_to_file` | file-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_element_events_to_file` | file-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_element_structure_to_file` | file-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `extract_element_styles_to_file` | file-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `list_clone_files` | file-extraction | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `export_network_data` | network-debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_network_capture_filters` | network-debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_request_details` | network-debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_response_content` | network-debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `get_response_details` | network-debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `import_network_data` | network-debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `list_network_requests` | network-debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `modify_headers` | network-debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-165 |
-| `search_network_requests` | network-debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `set_network_capture_filters` | network-debugging | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `clear_all_elements` | progressive-cloning | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `clear_stored_element` | progressive-cloning | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `clone_element_progressive` | progressive-cloning | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `expand_animations` | progressive-cloning | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `expand_children` | progressive-cloning | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `expand_css_rules` | progressive-cloning | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `expand_events` | progressive-cloning | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `expand_pseudo_elements` | progressive-cloning | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `expand_styles` | progressive-cloning | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `list_stored_elements` | progressive-cloning | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `close_tab` | tabs | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-775b/macOS-close-flake |
-| `get_active_tab` | tabs | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `list_tabs` | tabs | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `new_tab` | tabs | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-776 |
-| `switch_tab` | tabs | served-unqualified | in-process E2E (`.fn` seam) — cannot license a transport claim | F-775c-residual |
+| `clear_debug_view` | debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `export_debug_logs` | debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_debug_lock_status` | debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_debug_view` | debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `validate_browser_environment_tool` | debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `create_dynamic_hook` | dynamic-hooks | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `create_simple_dynamic_hook` | dynamic-hooks | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_dynamic_hook_details` | dynamic-hooks | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_hook_common_patterns` | dynamic-hooks | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_hook_documentation` | dynamic-hooks | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_hook_examples` | dynamic-hooks | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_hook_requirements_documentation` | dynamic-hooks | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `list_dynamic_hooks` | dynamic-hooks | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `remove_dynamic_hook` | dynamic-hooks | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `validate_hook_function` | dynamic-hooks | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `clone_element_complete` | element-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_complete_element_cdp` | element-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_element_animations` | element-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_element_assets` | element-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_element_events` | element-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_element_structure` | element-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_element_styles` | element-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_element_styles_cdp` | element-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_related_files` | element-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `click_element` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | E8-2 |
+| `execute_script` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | TRUST-BOUNDARY |
+| `get_element_state` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | E7-6 |
+| `get_page_content` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `paste_text` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `query_elements` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `scroll_page` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `select_option` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | E8-1 |
+| `take_screenshot` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `type_text` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | E7-1/E8-3/E8-4 |
+| `upload_file` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `wait_for_element` | element-interaction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `cleanup_clone_files` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `clone_element_to_file` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_complete_element_to_file` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_element_animations_to_file` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_element_assets_to_file` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_element_events_to_file` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_element_structure_to_file` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `extract_element_styles_to_file` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `list_clone_files` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `export_network_data` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_network_capture_filters` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_request_details` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_response_content` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `get_response_details` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `import_network_data` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `list_network_requests` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `modify_headers` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-165 |
+| `search_network_requests` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `set_network_capture_filters` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `clear_all_elements` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `clear_stored_element` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `clone_element_progressive` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `expand_animations` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `expand_children` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `expand_css_rules` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `expand_events` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `expand_pseudo_elements` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `expand_styles` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `list_stored_elements` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `close_tab` | tabs | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-775b/macOS-close-flake |
+| `get_active_tab` | tabs | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `list_tabs` | tabs | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `new_tab` | tabs | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `switch_tab` | tabs | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-775c-residual |
 
 ### Tools whose row carries a specific defect
 
@@ -305,9 +320,9 @@ describes actually closes.
 | F-775c residual | tabs / `switch_tab` | open | Activation is fixed, but the instance's main tab is still stored from the raw `browser.tabs` entry, which can be a `Connection`. Loud if it fires; it seeds the F-775a class. | routed, not fixed. |
 | F-775d | lifecycle / `close_instance` | declared gap | Teardown uses the same verified CDP call as the fixed siblings but has no dedicated pin; it is exercised only indirectly by integration teardown. | no independent evidence — declared, not claimed. |
 | `_replace_main_tab` residual | tabs / instance main-tab identity | open | `browser_manager.py` awaits `browser.get(..., new_tab=True)`, which returns whatever `browser.targets` holds for that id — a `Connection` if `update_targets()` won the race. Same family as F-775, lower severity, outside FIX-F's four sites. | routed, not fixed. |
-| F-776 | evidence / per-tool transport coverage | open (opened by W5) | Only the cookie round-trip tools have a per-tool real-transport success assertion. For every other served tool the strongest evidence is the representative journey (disqualified per-tool by plan_RELEASE §2.5), the in-process `.fn` seam, or the in-memory client — none of which may license a transport claim. This is why the qualified count is what it is, and it is the count's whole explanation. | The contract records the gap rather than papering over it. Closing it means more per-tool transport assertions, not a relabelling. |
-| F-777 | test harness / `get_cookies` through the `.fn` seam | open (test infrastructure, not a user-facing defect) | Called through the in-process `.fn` seam the E2E suite uses, both CDP retrieval paths hang (~30s, no return) AND the tab's CDP connection is poisoned: the NEXT call on that tab dies with a 10s timeout. Measured on the same tool and the same Chrome that succeed over real stdio, so the blast radius is the seam, not the product. | The user-facing path is evidenced (the qualified cookie row). No E2E test may call `get_cookies` through the `.fn` seam; the tool's coverage lives in the transport lane. This row exists so nobody later reads it as either a product defect or as nothing at all. |
-| F-778 | types / `get_cookies` return shape | open (cosmetic) | `get_cookies` is declared `-> list[dict[str, Any]]` but returns nodriver `cdp.network.Cookie` dataclasses. The WIRE shape is correct — pydantic serializes them into proper JSON objects in `structuredContent` — so a client sees real cookie objects; only fastmcp's `.data` reconstruction is opaque (`[Root()]`). | No user impact measured. Recorded so the mismatch lives somewhere rather than nowhere. |
+| F-776 | evidence / per-tool transport coverage | open (opened by W5) | Only the cookie round-trip tools have a per-tool real-transport success assertion. Every other served tool IS exercised against real Chrome — through the in-process seam, plus the representative journey and the in-memory client — but none of those may license a per-tool transport claim under §2.5. The gap is where the tests run, not whether they run. | See audit/stage2/finding_F776_no_per_tool_transport_evidence.md. Closing it means moving/adding per-tool assertions into the transport lane, not relabelling what exists. |
+| F-777 | test harness / `get_cookies` through the `.fn` seam | open (test infrastructure, not a user-facing defect) | Called through the in-process `.fn` seam the E2E suite uses, both CDP retrieval paths hang (~30s, no return) AND the tab's CDP connection is poisoned: the NEXT call on that tab dies with a 10s timeout. Measured on the same tool and the same Chrome that succeed over real stdio, so the blast radius is the seam, not the product. | The user-facing path is evidenced (the qualified cookie row). No E2E test may call `get_cookies` through the `.fn` seam; the tool's coverage lives in the transport lane. See audit/stage2/finding_F777_get_cookies_fn_seam_hang.md. |
+| F-778 | types / `get_cookies` return shape | open (cosmetic) | `get_cookies` is declared `-> list[dict[str, Any]]` but returns nodriver `cdp.network.Cookie` dataclasses. The WIRE shape is correct — pydantic serializes them into proper JSON objects in `structuredContent` — so a client sees real cookie objects; only fastmcp's `.data` reconstruction is opaque (`[Root()]`). | No user impact measured. See audit/stage2/finding_F778_get_cookies_return_type_mismatch.md. |
 | install-smoke cold-spawn flake | gate reliability | open, observed once | `install-smoke (sdist Linux/X64)` failed a first attempt on a Chrome cold spawn inside the canonical journey and passed on re-run; the `wheel Linux/X64` cell ran identical code in the same run and passed. The harness's warmup retry did not absorb it. | This gate is therefore NOT proven flake-free. plan_RELEASE §0.2 makes flake-freedom one of the three properties behind 'green ⇒ blindly pushable'; W8 owns flake quarantine and has not run, so no flake-freedom claim is made here. |
 | missing interaction surface | tools / interaction census | excluded | There are no double-click, right-click, drag, or native-dialog tools. A workflow needing them cannot be automated by this server. | documented absence — plan_RELEASE §1.2 forbids building them here. |
 | HTTP transport | trust boundary / transport | excluded from qualification | `--transport http` is UNAUTHENTICATED by design and binds loopback by default. Anything that can reach the port drives the browser. | stdio evidence never licenses an HTTP claim; the gate qualifies stdio only. |

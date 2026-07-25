@@ -89,7 +89,10 @@ PYTHON_RE = re.compile(r"^3\.\d+(\.\d+)?$")
 VERSION_RE = re.compile(r"^\d+(\.\d+)*$")
 NODE_RE = re.compile(r"^[^:]+\.py::.+$")
 MQ_RE = re.compile(r"^MQ-\d+$")
-IMAGE_OS_RE = re.compile(r"^[a-z0-9]+$")
+# Real GitHub-hosted image ids carry hyphens and dots (`ubuntu24`, `macos15`,
+# `win25-vs2026`). The check that matters is that there IS one: a self-hosted
+# runner exposes no ImageOS at all, and an empty value still fails.
+IMAGE_OS_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 TERMINAL_OUTCOMES = frozenset({"success", "failure", "cancelled", "skipped"})
 WORKFLOW_EVENTS = frozenset(

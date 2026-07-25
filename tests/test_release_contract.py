@@ -157,6 +157,39 @@ def test_qualified_claims_are_bounded_to_the_cells_that_can_evidence_them(
         )
 
 
+def test_served_unqualified_never_reads_as_untested(contract: str):
+    """Over-qualification is dishonest in the other direction.
+
+    "3 qualified / 91 served-unqualified" would be read as "91 untested tools",
+    which is false: those tools ARE driven against real Chrome. The contract has
+    to make a skeptical reader and a fair reader arrive at the same
+    understanding — tested, but not proved at the wire.
+    """
+    assert "does not say" in contract or "does *not* say" in contract
+    assert "tools are untested" in contract
+    assert "not proved at the wire" in contract
+    assert "real Chrome" in contract
+    for row in gen.tool_rows():
+        if row.state != "served-unqualified":
+            continue
+        assert row.tier, f"{row.tool} has no stated evidence"
+        assert row.tier != "served-unqualified", (
+            "the evidence column must say what evidence EXISTS, not repeat the label"
+        )
+
+
+def test_a_tool_with_no_execution_evidence_is_called_out_separately(contract: str):
+    """The weakest bucket may never hide inside the general one."""
+    uncovered = [r.tool for r in gen.tool_rows() if "no execution evidence" in r.tier]
+    if uncovered:
+        assert "**no execution evidence**" in contract, (
+            f"{uncovered} have no execution evidence and the contract does not "
+            f"distinguish them"
+        )
+    else:
+        assert "if none appears below, no served tool is in that state" in contract
+
+
 def test_the_contract_does_not_claim_flake_freedom(contract: str):
     """§0.2 makes flake-freedom load-bearing; the gate has an observed flake."""
     assert "does **not** claim the gate is flake-free" in contract

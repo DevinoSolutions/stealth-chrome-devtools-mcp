@@ -53,8 +53,12 @@ def release_version() -> str:
     raise ValueError(f"{PYPROJECT} has no version")
 
 
-DEFAULT_TIER = "in-process E2E (`.fn` seam) — cannot license a transport claim"
-EXEMPT_TIER = "**none** — the standing coverage-manifest exemption"
+DEFAULT_TIER = (
+    "E2E-covered against **real Chrome** through the in-process seam; "
+    "not verified over the stdio transport"
+)
+EXEMPT_TIER = "**none** — an explicit coverage-manifest exemption"
+UNCOVERED_TIER = "**no execution evidence** — absent from the coverage manifest"
 
 
 # The evidence status every NOT-EVIDENCED row carries. One string, one home:
@@ -213,13 +217,13 @@ LIMITATIONS: tuple[Limitation, ...] = (
         "evidence / per-tool transport coverage",
         "open (opened by W5)",
         "Only the cookie round-trip tools have a per-tool real-transport success "
-        "assertion. For every other served tool the strongest evidence is the "
-        "representative journey (disqualified per-tool by plan_RELEASE §2.5), "
-        "the in-process `.fn` seam, or the in-memory client — none of which may "
-        "license a transport claim. This is why the qualified count is what it "
-        "is, and it is the count's whole explanation.",
-        "The contract records the gap rather than papering over it. Closing it "
-        "means more per-tool transport assertions, not a relabelling.",
+        "assertion. Every other served tool IS exercised against real Chrome — "
+        "through the in-process seam, plus the representative journey and the "
+        "in-memory client — but none of those may license a per-tool transport "
+        "claim under §2.5. The gap is where the tests run, not whether they run.",
+        "See audit/stage2/finding_F776_no_per_tool_transport_evidence.md. Closing "
+        "it means moving/adding per-tool assertions into the transport lane, not "
+        "relabelling what exists.",
     ),
     Limitation(
         "F-777",
@@ -232,8 +236,8 @@ LIMITATIONS: tuple[Limitation, ...] = (
         "blast radius is the seam, not the product.",
         "The user-facing path is evidenced (the qualified cookie row). No E2E "
         "test may call `get_cookies` through the `.fn` seam; the tool's coverage "
-        "lives in the transport lane. This row exists so nobody later reads it "
-        "as either a product defect or as nothing at all.",
+        "lives in the transport lane. See "
+        "audit/stage2/finding_F777_get_cookies_fn_seam_hang.md.",
     ),
     Limitation(
         "F-778",
@@ -244,8 +248,8 @@ LIMITATIONS: tuple[Limitation, ...] = (
         "serializes them into proper JSON objects in `structuredContent` — so a "
         "client sees real cookie objects; only fastmcp's `.data` reconstruction "
         "is opaque (`[Root()]`).",
-        "No user impact measured. Recorded so the mismatch lives somewhere "
-        "rather than nowhere.",
+        "No user impact measured. See "
+        "audit/stage2/finding_F778_get_cookies_return_type_mismatch.md.",
     ),
     Limitation(
         "install-smoke cold-spawn flake",
@@ -469,7 +473,7 @@ def tool_rows() -> tuple[ToolRow, ...]:
             note = note if isinstance(note, dict) else default
             tier = EXEMPT_TIER if tool in exempt else DEFAULT_TIER
             if tool not in covered and tool not in exempt:
-                tier = "**unknown** — absent from the coverage manifest"
+                tier = UNCOVERED_TIER
             rows.append(
                 ToolRow(
                     tool,
@@ -518,6 +522,18 @@ def _header(counts: dict[str, object]) -> str:
             "> **At the release SHA recorded in the ledger, this gate qualifies "
             f"{qualified} of the {served} served MCP tools**, on the cells each",
             "> row names.",
+            "",
+            "**Read that number carefully, in both directions.** It does *not* say",
+            f"{served - int(qualified or 0)} tools are untested. Every served tool",
+            "is driven against **real Chrome** by the E2E suite — a set-equality",
+            "tripwire keeps that coverage complete, and §5 shows each tool's actual",
+            "evidence. What those tools lack is a *per-tool* assertion over the",
+            "**stdio transport a user actually speaks**, because the suite drives",
+            "them through the in-process function seam instead. plan_RELEASE §2.5",
+            "does not let in-process evidence license a transport claim, so they",
+            "are `served-unqualified`: tested, but not proved at the wire. Closing",
+            "that is a question of where tests run, not of a product defect — see",
+            "F-776.",
             "",
             "### Breaking change from 1.x — read this before upgrading",
             "",
@@ -682,10 +698,13 @@ def _tool_section(counts: dict[str, object]) -> str:
         "in this document is qualified on three cells — every one of them is",
         "qualified on exactly two.",
         "",
-        "`served-unqualified` does not mean broken. It means: the server serves the",
-        "tool, and the gate at this SHA does not prove the user-visible outcome",
-        "over the transport the user uses. The 'strongest current evidence' column",
-        "says what does exist, and is a description — never a claim.",
+        "`served-unqualified` does not mean broken, and it does not mean untested.",
+        "It means: the server serves the tool, the suite exercises it against real",
+        "Chrome, and the gate at this SHA does not prove the user-visible outcome",
+        "*over the transport the user speaks*. The evidence column below states",
+        "which of those is true for each row — it is a description, never a claim.",
+        "A row reading **no execution evidence** would be materially weaker than",
+        "the rest; if none appears below, no served tool is in that state.",
         "",
         "Unless a row names a specific defect, its tracking id is **F-776** and its",
         "impact is the shared one: no per-tool real-transport success assertion",

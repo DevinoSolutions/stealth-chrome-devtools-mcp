@@ -154,7 +154,7 @@ jobs:
         shell: bash
         run: >-
           uv run pytest -m "not integration" -v --tb=short
-          --junitxml=junit.xml
+          --junitxml=junit.xml -o junit_family=xunit1
       - name: Emit this cell's release-evidence record
         # W5: `always()` so a RED cell still writes a record saying it was
         # red. The aggregate rejects any non-success terminal outcome, so
@@ -220,7 +220,7 @@ jobs:
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
           --cov-fail-under=55
-          --junitxml=junit.xml
+          --junitxml=junit.xml -o junit_family=xunit1
       - name: Upload coverage report + runner identity
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
@@ -315,7 +315,8 @@ jobs:
         run: >-
           uv run pytest
           -m "${{ runner.os == 'macOS' && 'integration and not transport' || 'integration' }}"
-          -v --tb=short --timeout=180 --junitxml=junit.xml
+          -v --tb=short --timeout=180
+          --junitxml=junit.xml -o junit_family=xunit1
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
           STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
@@ -408,7 +409,7 @@ jobs:
         shell: bash
         run: >-
           uv run pytest -m transport -v --tb=short --timeout=300
-          --junitxml=junit.xml
+          --junitxml=junit.xml -o junit_family=xunit1
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
           STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
@@ -555,7 +556,7 @@ jobs:
         shell: bash
         run: >-
           uv run pytest -m "stealth and not online" -v --tb=short --timeout=300
-          --junitxml=junit.xml
+          --junitxml=junit.xml -o junit_family=xunit1
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
       - name: Emit this cell's release-evidence record

@@ -40,7 +40,7 @@
   ],
   "default_note": {
     "tracking_id": "F-776",
-    "user_impact": "Served over stdio and exercised by the suite, but no per-tool real-transport success assertion exists at this SHA. The behaviour a user gets through the wire is evidenced only indirectly (the representative journey) or in-process (the .fn seam), neither of which plan_RELEASE 2.5 accepts as a per-tool transport claim."
+    "user_impact": "Tested, not proved at the wire: the E2E suite drives this tool against REAL Chrome through the in-process seam, but no per-tool assertion exists over the stdio transport a user speaks. plan_RELEASE 2.5 does not let in-process evidence license a transport claim. Not a known defect - a question of where the test runs."
   },
   "served_unqualified_notes": {
     "select_option": {

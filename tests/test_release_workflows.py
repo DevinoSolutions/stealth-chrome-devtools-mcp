@@ -336,3 +336,7 @@ def test_pytest_lanes_write_the_junit_the_ledger_hashes(gate_jobs):
         assert "--junitxml=junit.xml" in script, (
             f"{job!r} records pytest evidence but produces no JUnit report to hash"
         )
+        assert "junit_family=xunit1" in script, (
+            f"{job!r} would write a report with no `file` attribute, so its node "
+            f"ids could only be guessed — the ledger rejects guesses"
+        )

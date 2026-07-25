@@ -13,6 +13,7 @@ no Chrome.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -607,6 +608,85 @@ def test_junit_parsing_separates_skip_from_xfail(tmp_path: Path):
     assert "tests/test_demo.py::test_alpha" not in parsed["executed_node_ids"], (
         "a skipped node was collected, not executed — it may never read as success"
     )
+
+
+def test_a_dotted_module_path_is_not_a_node_id(ledger: Path):
+    """`tests.test_x.TestY::test_z` is NOT a node id and must be rejected.
+
+    This is the first CI run's real failure, pinned. The dotted form cannot be
+    resolved against `pytest --collect-only`, so a ledger that accepted it would
+    hold ids nobody can verify — and W8's parity gate is built on resolving
+    exactly these strings. The fix belongs in the producer (see the next test);
+    the check stays strict.
+    """
+    _mutate(
+        ledger,
+        "coverage/Linux-X64",
+        lambda r: r["pytest"].update(
+            {"executed_node_ids": ["tests.test_x.TestY::test_z"]}
+        ),
+    )
+    _, problems = _aggregate(ledger)
+    assert any("not a fully-qualified node id" in p for p in problems)
+
+
+def test_pytest_really_writes_the_file_attribute_the_parser_needs(tmp_path: Path):
+    """The producer contract, pinned against a REAL pytest run.
+
+    `junit_family=xunit2` (pytest's default) writes only `classname`/`name`; the
+    ledger's node ids would then be guesses. The gate passes
+    `-o junit_family=xunit1`, which writes the source `file`. If a pytest upgrade
+    ever drops that attribute, this fails here instead of silently producing
+    dotted ids that the validator rejects three CI hours later.
+    """
+    module = tmp_path / "test_probe_nodeids.py"
+    module.write_text(
+        "class TestGroup:\n"
+        "    def test_inside(self):\n"
+        "        assert True\n"
+        "\n"
+        "def test_outside():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "junit.xml"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(module),
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            f"--junitxml={report}",
+            "-o",
+            "junit_family=xunit1",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    parsed = re_mod.parse_junit(report)
+    assert parsed["executed_node_ids"] == [
+        "test_probe_nodeids.py::TestGroup::test_inside",
+        "test_probe_nodeids.py::test_outside",
+    ], "the gate's JUnit settings no longer yield resolvable node ids"
+
+
+def test_a_real_github_image_id_with_hyphens_is_accepted(ledger: Path):
+    """`win25-vs2026` is a real hosted image id; the check is PRESENCE, not shape.
+
+    The first CI run rejected it. What must stay rejected is an ABSENT image
+    identity — that is the self-hosted signal, and the test below still proves it.
+    """
+    _mutate(
+        ledger,
+        "unit-tests/Windows-X64-py3.12",
+        lambda r: r["runner"].update({"image_os": "win25-vs2026"}),
+    )
+    _, problems = _aggregate(ledger)
+    assert problems == []
 
 
 def test_junit_parsing_records_failures(tmp_path: Path):
