@@ -30,3 +30,10 @@ element_clones/
 # graphify knowledge-graph artifacts (local navigation aid)
 graphify-out/
 .graphify_*
+
+# Agent worktree scratch: each entry is a FULL checkout of this repo. Left
+# un-ignored it is linted as if it were project source (ruff walks it and
+# reports the same findings three times over) and, worse, hatchling sweeps it
+# into the sdist — a local `uv build` produced a 56 MB sdist of which 55 MB was
+# this directory. Ephemeral by construction; never part of the distribution.
+.claude/worktrees/
