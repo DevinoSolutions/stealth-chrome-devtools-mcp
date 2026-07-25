@@ -32,6 +32,8 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
+import nodriver.cdp.target as cdp_target
+
 # ---------------------------------------------------------------------------
 # In-process tool invoker (THE one way to drive a tool in a test)
 # ---------------------------------------------------------------------------
@@ -91,9 +93,13 @@ class FakeTab:
         evaluate_map: dict[str, Any] | None = None,
         cdp_responses: dict[str, Any] | None = None,
         select_result: Any = None,
+        target_id: str = "T-faketab",
     ) -> None:
         self.url = url
-        self.target = SimpleNamespace(url=url)
+        # ``fake_target`` (defined below) — a Tab's ``.target`` is a real
+        # ``TargetInfo``, so the double carries a real ``TargetID`` too.
+        self.target = fake_target(target_id=target_id, url=url)
+        self.awaited = 0
         self._evaluate_result = evaluate_result
         self._evaluate_map = evaluate_map or {}
         self._cdp_responses = cdp_responses or {}
@@ -103,6 +109,15 @@ class FakeTab:
         self.select_calls: list[str] = []
         self.cdp_frames: list[dict[str, Any]] = []
         self.handlers: list[tuple[Any, Any]] = []
+
+    def __await__(self) -> Any:
+        """nodriver's ``Tab.__await__`` (→ ``Tab.wait()``). Only ``Tab`` defines
+        it — see :class:`FakeDiscoveredTarget`, which deliberately does not."""
+
+        async def _wait() -> None:
+            self.awaited += 1
+
+        return _wait().__await__()
 
     async def evaluate(self, expression: str, *args: Any, **kwargs: Any) -> Any:
         self.evaluate_calls.append(expression)
@@ -161,8 +176,15 @@ def fake_target(
 
     This is the metadata ``list_tabs`` reads off every entry of ``Browser.tabs``,
     and the metadata ``Browser.update_targets()`` refreshes in place.
+
+    ``target_id`` is a real :class:`nodriver.cdp.target.TargetID` (a ``str``
+    subclass), not a bare ``str``: every by-id CDP command serialises it with
+    ``target_id.to_json()`` (``cdp/target.py:258``), so a bare ``str`` here would
+    make the F-775 by-id pins pass against a fake that could not exist.
     """
-    return SimpleNamespace(target_id=target_id, url=url, title=title, type_=type_)
+    return SimpleNamespace(
+        target_id=cdp_target.TargetID(target_id), url=url, title=title, type_=type_
+    )
 
 
 class FakeDiscoveredTarget:
@@ -229,6 +251,15 @@ class FakeBrowser:
     ``tabs`` seeds the target-listing seam (``list_tabs``/``switch_to_tab``/
     ``close_tab`` read it after ``update_targets()``); seed it with
     :class:`FakeAttachedTab` / :class:`FakeDiscoveredTarget`.
+
+    ``connection`` is the BROWSER-level websocket (nodriver ``Browser.connection``,
+    ``core/browser.py:437``) — the one every by-id Target-domain command travels
+    over. It is a :class:`FakeTab`, so ``connection.send_calls`` /
+    ``connection.cdp_frames`` record the command name AND its arguments.
+
+    ``get(url, new_tab=True)`` appends the tab it creates to ``tabs`` and records
+    the call in ``get_calls``, so a test can assert that a code path opened NO
+    extra tab (the F-775a leak).
     """
 
     def __init__(
@@ -246,9 +277,15 @@ class FakeBrowser:
         self.target = SimpleNamespace(url="https://fake.test/page")
         self.tabs = list(tabs or [])
         self.update_targets_calls = 0
+        self.connection = FakeTab(url="ws://fake.test/devtools/browser")
+        self.get_calls: list[tuple[str, bool]] = []
 
     async def get(self, url: str, new_tab: bool = False) -> FakeTab:
-        return FakeTab(url=url)
+        self.get_calls.append((url, new_tab))
+        tab = FakeTab(url=url, target_id=f"T-opened-{len(self.get_calls)}")
+        if new_tab:
+            self.tabs.append(tab)
+        return tab
 
     async def update_targets(self) -> None:
         """nodriver's target refresh. The real one rewrites every known

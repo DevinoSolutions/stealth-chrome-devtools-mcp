@@ -17,6 +17,7 @@ import asyncio
 import json
 import time
 
+import nodriver as uc
 import pytest
 
 from e2e_helpers import (
@@ -26,6 +27,7 @@ from e2e_helpers import (
     navigate_and_settle,
     read_actions,
     sandbox_kwargs,
+    server_mod,
     wait_for_js,
     warmup_once,
 )
@@ -555,5 +557,118 @@ async def test_tabs_lifecycle(fixture_app_server):
         # fails the test on the first call; it is never polled away.
         remaining = await _tabs_until(iid, lambda tabs: new_id not in tabs)
         assert new_id not in remaining
+    finally:
+        await close(instance_id=iid)
+
+
+# ---------------------------------------------------------------------------
+# RELEASE-FIX-F (F-775) — the swallowed half of the F-771 tab family
+# ---------------------------------------------------------------------------
+
+
+async def _force_rediscovery(browser, tab_id: str):
+    """Make nodriver hand back target ``tab_id`` as a raw ``Connection``.
+
+    This is the whole point of the probe: local Chrome does not reliably produce
+    the F-775 shape on its own (FIX-E established that every ``browser.tabs``
+    entry stays a ``Tab`` here), so the ONE step that creates it is forced
+    directly — drop the target from nodriver's inventory exactly as its
+    ``TargetDestroyed`` handler does (``core/browser.py:222-231``), then let
+    ``update_targets()`` re-append it, which it does as a ``Connection``, never a
+    ``Tab`` (``core/browser.py:574-583``).
+
+    Returns the genuine ``Connection``, and asserts it really is one — a probe
+    that silently failed to reproduce the shape would make every pin below
+    vacuous.
+    """
+    entry = next(t for t in browser.targets if str(t.target.target_id) == tab_id)
+    browser.targets.remove(entry)
+    await browser.update_targets()
+
+    rediscovered = next(t for t in browser.tabs if str(t.target.target_id) == tab_id)
+    assert not isinstance(rediscovered, uc.Tab), type(rediscovered)
+    assert isinstance(rediscovered, uc.core.connection.Connection)
+    return rediscovered
+
+
+async def test_navigation_survives_a_forced_rediscovery(fixture_app_server):
+    """F-775a against real Chrome and a GENUINE nodriver ``Connection``.
+
+    The tracked tab is found correctly by target id; awaiting it as a "liveness
+    check" then raised ``TypeError`` for the rediscovered object, and the broad
+    handler concluded the tab was "missing or invalid" — it was not, it had just
+    been found — and called ``_replace_main_tab(close_existing=False)``. Every
+    navigation silently landed in a different tab and leaked the abandoned one.
+
+    Asserted by tab IDENTITY and tab COUNT, never by absence of an exception: a
+    no-raise pin passes against the silent fallback and proves nothing.
+    """
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    list_tabs = get_fn("list_tabs")
+    close = get_fn("close_instance")
+
+    manager = server_mod.browser_manager
+    result = await spawn(headless=True, **sandbox_kwargs())
+    iid = result["instance_id"]
+    try:
+        await navigate_and_settle(iid, f"{base}/index.html")
+
+        data = await manager.get_instance(iid)
+        browser, tracked = data["browser"], data["tab"]
+        tab_id = manager._get_tab_target_id(tracked)
+        before = {t["tab_id"] for t in await list_tabs(instance_id=iid)}
+
+        await _force_rediscovery(browser, tab_id)
+
+        navigation_tab = await manager.get_navigation_tab(iid)
+        assert manager._get_tab_target_id(navigation_tab) == tab_id
+
+        nav = await navigate_and_settle(iid, f"{base}/interact.html")
+        assert nav["url"].endswith("/interact.html")
+
+        after = {t["tab_id"] for t in await list_tabs(instance_id=iid)}
+        assert after == before, "navigation opened or abandoned a tab"
+
+        still_tracked = (await manager.get_instance(iid))["tab"]
+        assert manager._get_tab_target_id(still_tracked) == tab_id
+    finally:
+        await close(instance_id=iid)
+
+
+async def test_close_and_switch_survive_a_forced_rediscovery(fixture_app_server):
+    """F-775b/c against real Chrome and a GENUINE nodriver ``Connection``.
+
+    ``Tab.close()`` / ``Tab.bring_to_front()`` do not exist on a ``Connection``;
+    ``__getattr__`` delegates to the ``TargetInfo`` and the resulting
+    ``AttributeError`` was swallowed into ``return False`` — a lying failure for
+    a tab that closes and activates perfectly well when addressed by id.
+    """
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    list_tabs = get_fn("list_tabs")
+    new_tab = get_fn("new_tab")
+    switch_tab = get_fn("switch_tab")
+    close_tab = get_fn("close_tab")
+    close = get_fn("close_instance")
+
+    manager = server_mod.browser_manager
+    result = await spawn(headless=True, **sandbox_kwargs())
+    iid = result["instance_id"]
+    try:
+        await navigate_and_settle(iid, f"{base}/index.html")
+        browser = (await manager.get_instance(iid))["browser"]
+
+        doomed_id = (await new_tab(instance_id=iid, url=f"{base}/interact.html"))[
+            "tab_id"
+        ]
+        await _force_rediscovery(browser, doomed_id)
+
+        assert await switch_tab(instance_id=iid, tab_id=doomed_id) is True
+        assert await close_tab(instance_id=iid, tab_id=doomed_id) is True
+
+        remaining = await _tabs_until(iid, lambda tabs: doomed_id not in tabs)
+        assert doomed_id not in remaining, "close_tab lied: the target survived"
+        assert await list_tabs(instance_id=iid)
     finally:
         await close(instance_id=iid)
