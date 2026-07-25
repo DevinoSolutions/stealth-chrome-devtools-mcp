@@ -51,12 +51,21 @@ jobs:
           echo "runner: ${{ runner.os }}/${{ runner.arch }} (expected ${{ matrix.runner_os }}/${{ matrix.runner_arch }})"
           uv run python -c "from stealth_chrome_devtools_mcp.embedded.platform_utils import check_browser_executable as c; print('chrome:', c())"
 
+      - name: Start Xvfb (Linux only — mirrors W2's integration cell)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+          sleep 3
+
       - name: Run the offline stealth lane (F-770 vector measurement)
         # -s so the D0 per-vector table reaches the log on a PASSING run; the
         # selector is W2's `offline-stealth` selector verbatim.
         shell: bash
         run: uv run pytest -m "stealth and not online" -v -s --tb=short --timeout=300
         env:
+          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
           STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
           STEALTH_PROBE_ARTIFACT_DIR: ${{ runner.temp }}/stealth-artifact
 

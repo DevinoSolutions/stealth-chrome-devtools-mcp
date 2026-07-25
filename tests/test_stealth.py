@@ -53,6 +53,7 @@ from e2e_helpers import (
     navigate_and_settle,
     sandbox_kwargs,
     server_mod,
+    warmup_once,
 )
 
 if TYPE_CHECKING:
@@ -377,6 +378,13 @@ async def _collect_probe(base_url: str, *, control: bool) -> dict:
     from stealth_chrome_devtools_mcp.embedded.platform_utils import (
         check_browser_executable,
     )
+
+    # The gate lane (``-m "stealth and not online"``) selects THIS module alone, so
+    # unlike the full integration lane no earlier E2E module has already paid for
+    # Chrome's cold start. nodriver gives the debug port only a few seconds, and a
+    # first launch on a cold Linux/macOS runner overruns it ("Failed to connect to
+    # browser"). Reuse the shared idempotent warmup rather than growing a timeout.
+    await warmup_once()
 
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
