@@ -15,6 +15,7 @@ They are hermetic: they read the repository, never CI.
 
 from __future__ import annotations
 
+import difflib
 import sys
 from pathlib import Path
 
@@ -32,11 +33,28 @@ def contract() -> str:
 
 
 def test_the_contract_is_regenerated_not_edited():
-    """CI fails on drift: the document is output, never a hand-maintained file."""
-    assert gen.check_contract() == [], (
+    """CI fails on drift: the document is output, never a hand-maintained file.
+
+    The failure prints the first differing lines. A drift failure that only says
+    "stale" sends the reader to regenerate blindly, which is exactly how a
+    deliberate change gets rubber-stamped.
+    """
+    problems = gen.check_contract()
+    if not problems:
+        return
+    diff = difflib.unified_diff(
+        gen.CONTRACT_PATH.read_text(encoding="utf-8").splitlines(),
+        gen.render_contract().splitlines(),
+        fromfile="RELEASE_CONTRACT.md (on disk)",
+        tofile="freshly generated",
+        lineterm="",
+        n=1,
+    )
+    pytest.fail(
         "RELEASE_CONTRACT.md is stale — regenerate it with "
         "`uv run python tools/gen_release_contract.py --write` in the SAME "
-        "commit as whatever changed the ledger, claims, or registry"
+        "commit as whatever changed the ledger, claims, or registry.\n"
+        + "\n".join(list(diff)[:40])
     )
 
 
