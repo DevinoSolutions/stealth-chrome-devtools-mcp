@@ -1300,21 +1300,20 @@ class BrowserManager:
         if not browser:
             return []
 
+        # No per-tab `await` (F-771): update_targets() just refreshed every field
+        # below; a rediscovered target is a raw Connection with no __await__ (its
+        # __getattr__ still answers .url); and Tab.wait() costs 0.5s per tab.
         await browser.update_targets()
 
-        tabs = []
-        for tab in browser.tabs:
-            await tab
-            tabs.append(
-                {
-                    "tab_id": str(tab.target.target_id),
-                    "url": getattr(tab, "url", "") or "",
-                    "title": getattr(tab.target, "title", "") or "Untitled",
-                    "type": getattr(tab.target, "type_", "page"),
-                }
-            )
-
-        return tabs
+        return [
+            {
+                "tab_id": str(tab.target.target_id),
+                "url": getattr(tab, "url", "") or "",
+                "title": getattr(tab.target, "title", "") or "Untitled",
+                "type": getattr(tab.target, "type_", "page"),
+            }
+            for tab in browser.tabs
+        ]
 
     async def switch_to_tab(self, instance_id: str, tab_id: str) -> bool:
         """
