@@ -217,11 +217,20 @@ class DynamicHookSystem:
         self.instance_hooks: dict[
             str, list[str]
         ] = {}  # instance_id -> list of hook_ids
+        self._instance_tabs: dict[str, Any] = {}  # instance_id -> tab (for re-arming)
+        self._paused_handlers: set[str] = set()  # instances with a RequestPaused hook
         self._lock = asyncio.Lock()
 
     async def setup_interception(self, tab, instance_id: str):
-        """Set up request and response interception for a browser tab."""
+        """Set up request and response interception for a browser tab.
+
+        Idempotent, and the ONE place Fetch interception is enabled: called once
+        at spawn, then again by ``create_hook`` whenever a hook first gives this
+        instance something to intercept (F-772).
+        """
         try:
+            self._instance_tabs[instance_id] = tab
+
             all_hooks = []
 
             instance_hook_ids = self.instance_hooks.get(instance_id, [])
@@ -272,24 +281,24 @@ class DynamicHookSystem:
             all_patterns = request_patterns + response_patterns
 
             if not all_patterns:
-                all_patterns = [
-                    uc.cdp.fetch.RequestPattern(
-                        url_pattern="*", request_stage=uc.cdp.fetch.RequestStage.REQUEST
-                    ),
-                    uc.cdp.fetch.RequestPattern(
-                        url_pattern="*",
-                        request_stage=uc.cdp.fetch.RequestStage.RESPONSE,
-                    ),
-                ]
+                debug_logger.log_info(
+                    "dynamic_hook_system",
+                    "setup_interception",
+                    f"No active hooks for instance {instance_id}; leaving Fetch "
+                    f"interception disabled (re-armed when a hook is created)",
+                )
+                return
 
             await tab.send(uc.cdp.fetch.enable(patterns=all_patterns))
 
-            tab.add_handler(
-                uc.cdp.fetch.RequestPaused,
-                lambda event: asyncio.create_task(
-                    self._on_request_paused(tab, event, instance_id)
-                ),
-            )
+            if instance_id not in self._paused_handlers:
+                tab.add_handler(
+                    uc.cdp.fetch.RequestPaused,
+                    lambda event: asyncio.create_task(
+                        self._on_request_paused(tab, event, instance_id)
+                    ),
+                )
+                self._paused_handlers.add(instance_id)
 
             debug_logger.log_info(
                 "dynamic_hook_system",
@@ -556,6 +565,16 @@ class DynamicHookSystem:
                     for instance_id in self.instance_hooks:
                         self.instance_hooks[instance_id].append(hook_id)
 
+                targets = list(instance_ids or self.instance_hooks)
+
+            # F-772: interception is armed only at spawn, and a zero-hook spawn
+            # now (correctly) arms nothing. Re-arm through the SAME entry point
+            # so a hook created later still intercepts.
+            for instance_id in targets:
+                tab = self._instance_tabs.get(instance_id)
+                if tab is not None:
+                    await self.setup_interception(tab, instance_id)
+
             debug_logger.log_info(
                 "dynamic_hook_system",
                 "create_hook",
@@ -643,6 +662,8 @@ class DynamicHookSystem:
     def remove_instance(self, instance_id: str):
         """Remove a browser instance and its hook associations."""
         self.instance_hooks.pop(instance_id, None)
+        self._instance_tabs.pop(instance_id, None)
+        self._paused_handlers.discard(instance_id)
 
     async def _execute_hook_action(  # noqa: C901,PLR0912  DEBT(F-165)
         self,
