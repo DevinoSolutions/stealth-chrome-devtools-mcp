@@ -56,11 +56,14 @@ class TestBrowserManagerSilentExcepts:
         from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
         manager = BrowserManager()
-        tab = _mock_tab("tab-1")
-        tab.bring_to_front = AsyncMock(side_effect=RuntimeError("front-fail"))
         browser = MagicMock()
-        browser.tabs = [tab]
+        browser.tabs = [_mock_tab("tab-1")]
         browser.update_targets = AsyncMock()
+        # RELEASE-FIX-F (F-775c): the failure seam moved from the Tab-only
+        # ``bring_to_front()`` to ``Target.activateTarget`` on the browser
+        # connection. The guarantee pinned here is unchanged — the broad handler
+        # must LOG, not swallow.
+        browser.connection.send = AsyncMock(side_effect=RuntimeError("front-fail"))
 
         with patch.object(manager, "get_browser", AsyncMock(return_value=browser)):
             result = await manager.switch_to_tab("inst-1", "tab-1")
@@ -76,10 +79,11 @@ class TestBrowserManagerSilentExcepts:
         from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
         manager = BrowserManager()
-        tab = _mock_tab("tab-2")
-        tab.close = AsyncMock(side_effect=RuntimeError("close-fail"))
         browser = MagicMock()
-        browser.tabs = [tab]
+        browser.tabs = [_mock_tab("tab-2")]
+        # RELEASE-FIX-F (F-775b): seam moved from the Tab-only ``close()`` to
+        # ``Target.closeTarget`` on the browser connection; same guarantee.
+        browser.connection.send = AsyncMock(side_effect=RuntimeError("close-fail"))
 
         with patch.object(manager, "get_browser", AsyncMock(return_value=browser)):
             result = await manager.close_tab("inst-1", "tab-2")
