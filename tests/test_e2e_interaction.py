@@ -379,6 +379,134 @@ async def test_cookies_lifecycle(fixture_app_server):
 # ---------------------------------------------------------------------------
 
 
+async def _tabs_until(iid, predicate, timeout: float = 10.0) -> dict[str, dict]:
+    """Poll ``list_tabs`` (keyed by ``tab_id``) until ``predicate`` holds.
+
+    Bounded deadline + fixed interval, per plan §2.6 — never sleep-then-assert.
+    Deliberately does NOT catch anything: a tab disappears via Chrome's
+    asynchronous ``Target.targetDestroyed``, so *absence* is worth polling for,
+    but an exception out of ``list_tabs`` is a hard failure that must surface on
+    the first call rather than be polled away (F-771, see below).
+
+    Returns the last observed listing so the caller's assert shows the real
+    mismatch when the deadline passes.
+    """
+    list_tabs = get_fn("list_tabs")
+    deadline = time.monotonic() + timeout
+    tabs = {t["tab_id"]: t for t in await list_tabs(instance_id=iid)}
+    while not predicate(tabs) and time.monotonic() < deadline:
+        await asyncio.sleep(0.25)
+        tabs = {t["tab_id"]: t for t in await list_tabs(instance_id=iid)}
+    return tabs
+
+
+async def test_list_tabs_after_close_tab(fixture_app_server):
+    """F-771: ``list_tabs`` must survive the rediscovery a ``close_tab`` forces.
+
+    ``close_tab`` makes the next ``update_targets()`` re-append surviving targets
+    as raw ``Connection`` objects, which ``Browser.tabs`` returns despite its
+    ``List[Tab]`` annotation. Only ``Tab`` defines ``__await__``, so a per-tab
+    ``await`` in the listing loop raised
+    ``TypeError: object Connection can't be used in 'await' expression`` —
+    permanently, for the life of the browser.
+
+    The surviving tab's ``url`` is asserted BY VALUE, not by presence: a listing
+    that comes back with blank urls would be a silent lie, strictly worse than
+    the crash it replaced. See ``audit/stage2/plan_RELEASE_FIX_E.md``.
+    """
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    list_tabs = get_fn("list_tabs")
+    new_tab = get_fn("new_tab")
+    close_tab = get_fn("close_tab")
+    close = get_fn("close_instance")
+
+    index_url = f"{base}/index.html"
+    result = await spawn(headless=True, **sandbox_kwargs())
+    iid = result["instance_id"]
+    try:
+        await navigate_and_settle(iid, index_url)
+
+        before = {t["tab_id"]: t for t in await list_tabs(instance_id=iid)}
+        main_ids = [tid for tid, t in before.items() if t["url"] == index_url]
+        assert main_ids, before
+        main_id = main_ids[0]
+
+        opened = await new_tab(instance_id=iid, url=f"{base}/interact.html")
+        new_id = opened["tab_id"]
+        assert await close_tab(instance_id=iid, tab_id=new_id) is True
+
+        after = await _tabs_until(iid, lambda tabs: new_id not in tabs)
+        assert new_id not in after
+        assert main_id in after
+        assert after[main_id]["url"] == index_url
+    finally:
+        await close(instance_id=iid)
+
+
+async def test_list_tabs_metadata_survives_rediscovery(fixture_app_server):
+    """F-771 anti-silent-regression pin: real metadata after a rediscovery.
+
+    Removing the ``await`` must not be paid for with empty fields.
+    ``Connection.__getattr__`` delegates to ``self.target``, so a rediscovered
+    target CAN supply its real url/title — every field below is therefore
+    asserted by value, and the shape check covers whatever extra page targets
+    Chrome happens to hold.
+    """
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    list_tabs = get_fn("list_tabs")
+    new_tab = get_fn("new_tab")
+    close_tab = get_fn("close_tab")
+    close = get_fn("close_instance")
+
+    index_url = f"{base}/index.html"
+    extract_url = f"{base}/extract.html"
+    result = await spawn(headless=True, **sandbox_kwargs())
+    iid = result["instance_id"]
+    try:
+        await navigate_and_settle(iid, index_url)
+
+        before = {t["tab_id"]: t for t in await list_tabs(instance_id=iid)}
+        main_id = next(tid for tid, t in before.items() if t["url"] == index_url)
+
+        survivor_id = (await new_tab(instance_id=iid, url=extract_url))["tab_id"]
+        doomed_id = (await new_tab(instance_id=iid, url=f"{base}/interact.html"))[
+            "tab_id"
+        ]
+        assert await close_tab(instance_id=iid, tab_id=doomed_id) is True
+
+        expected = {main_id: index_url, survivor_id: extract_url}
+        titles = {
+            index_url: "fixture-index-page",
+            extract_url: "fixture-extract-page",
+        }
+        after = await _tabs_until(
+            iid,
+            lambda tabs: (
+                doomed_id not in tabs
+                and all(
+                    tabs.get(tid, {}).get("title") == titles[url]
+                    for tid, url in expected.items()
+                )
+            ),
+        )
+
+        assert doomed_id not in after
+        for tid, url in expected.items():
+            assert after[tid]["url"] == url
+            assert after[tid]["title"] == titles[url]
+            assert after[tid]["type"] == "page"
+
+        # No record may be a blank placeholder — that is the regression shape.
+        for tid, record in after.items():
+            assert tid, record
+            assert record["url"], record
+            assert record["type"] == "page", record
+    finally:
+        await close(instance_id=iid)
+
+
 async def test_tabs_lifecycle(fixture_app_server):
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
@@ -417,42 +545,15 @@ async def test_tabs_lifecycle(fixture_app_server):
         assert await switch_tab(instance_id=iid, tab_id=an_original) is True
         assert await close_tab(instance_id=iid, tab_id=new_id) is True
 
-        # ── PINNED KNOWN DEFECT F-771 (characterization; do NOT "fix" here) ──
-        # After a close_tab, `list_tabs` can raise
+        # F-771 is CLOSED (RELEASE-FIX-E; audit/stage2/plan_RELEASE_FIX_E.md).
+        # The xfail branch that used to stand here tolerated
         #   TypeError: object Connection can't be used in 'await' expression
-        # from browser_manager.list_tabs's `await tab` (browser_manager.py:1307).
-        # Mechanism (read from nodriver 0.47 source, not inferred):
-        # `Browser.update_targets()` APPENDS raw `Connection` objects for newly
-        # discovered targets (browser.py:574-584), and `Browser.tabs` returns
-        # them even though it is annotated `List[Tab]`. Only `Tab` defines
-        # `__await__` (tab.py:1262) — `Connection` does not. So any target the
-        # browser DISCOVERED (rather than created as a Tab) makes `await tab`
-        # raise.
-        #
-        # This is NOT the transient detach race the earlier comment here
-        # assumed: the bad entry persists, so no bounded wait can clear it
-        # (proved on CI — a 10s poll expired with the TypeError still firing).
-        # plan_RELEASE forbids src edits, so per §2.8 this is the other allowed
-        # branch: a characterization pin + route, flagged as a KNOWN GAP so a
-        # green run never reads as "close_tab's post-state is verified".
-        #
-        # Teeth kept deliberately: close_tab's own contract is asserted hard
-        # above; when list_tabs DOES work the closed tab must be gone; and the
-        # ONLY tolerated deviation is this one pinned TypeError — any other
-        # exception, or a stale tab in a successful listing, still fails.
-        deadline = time.monotonic() + 10.0
-        remaining = None
-        pinned_defect: TypeError | None = None
-        while time.monotonic() < deadline:
-            try:
-                remaining = {t["tab_id"] for t in await list_tabs(instance_id=iid)}
-            except TypeError as exc:  # F-771 only — never a blanket except
-                pinned_defect, remaining = exc, None
-            if remaining is not None and new_id not in remaining:
-                break
-            await asyncio.sleep(0.25)
-        if remaining is None:
-            pytest.xfail(f"F-771: list_tabs broken after close_tab: {pinned_defect}")
+        # out of list_tabs' per-tab `await tab`; that await is gone, so the
+        # assertion is direct again. The bounded poll below is NOT for F-771 —
+        # it is for Chrome's asynchronous `Target.targetDestroyed`, which is what
+        # actually removes the closed tab from the listing. An exception here
+        # fails the test on the first call; it is never polled away.
+        remaining = await _tabs_until(iid, lambda tabs: new_id not in tabs)
         assert new_id not in remaining
     finally:
         await close(instance_id=iid)
