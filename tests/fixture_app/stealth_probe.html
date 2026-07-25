@@ -117,6 +117,39 @@
     obs.ua_client_hints_mobile = uad ? !!uad.mobile : null;
     obs.ua_client_hints_platform = uad ? (uad.platform || "") : "";
 
+    // F-770 vector V3 -- the UA client-hint high-entropy values. These are built
+    // from Chrome's own version info and are NOT affected by --user-agent=, so
+    // they are measured separately from navigator.userAgent (V1).
+    obs.ua_client_hints_high_entropy = null;
+    if (uad && typeof uad.getHighEntropyValues === "function") {
+      try {
+        obs.ua_client_hints_high_entropy = await uad.getHighEntropyValues([
+          "brands", "fullVersionList", "uaFullVersion", "platform",
+          "platformVersion", "architecture", "bitness", "model"
+        ]);
+      } catch (e) {
+        obs.ua_client_hints_high_entropy = "ERROR:" + String(e);
+      }
+    }
+
+    // F-770 vector V2 -- the HTTP User-Agent request header the SERVER actually
+    // received. A page cannot read its own request headers, so the probe issues
+    // one same-origin POST to the fixture app's /api/echo route, which reflects
+    // back the headers it read off the wire. This is the vector a server-side bot
+    // check reads first, and a page-level assertion alone can never prove it.
+    obs.http_request_headers = null;
+    obs.http_user_agent = null;
+    try {
+      var echoResp = await fetch("/api/echo", { method: "POST", body: "stealth-probe" });
+      var echoed = await echoResp.json();
+      obs.http_request_headers = (echoed && echoed.headers) ? echoed.headers : null;
+      obs.http_user_agent = obs.http_request_headers
+        ? (obs.http_request_headers["user-agent"] || "") : null;
+    } catch (e) {
+      obs.http_request_headers = "ERROR:" + String(e);
+      obs.http_user_agent = "ERROR:" + String(e);
+    }
+
     // Patched-builtin detection: native functions must serialize as native code,
     // and Function.prototype.toString itself must be native (a common patch hides
     // the patching by re-patching toString).
