@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stealth-chrome-devtools-mcp"
-version = "1.2.0"
+version = "2.0.0"
 description = "Undetectable browser automation for AI agents via the Model Context Protocol."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -93,6 +93,24 @@ source = ["src/stealth_chrome_devtools_mcp"]
 
 [tool.coverage.report]
 show_missing = true
+
+[tool.hatch.build.targets.sdist]
+# The sdist was 14.1 MB against a 191 KB wheel: 12.8 MB of demo media and 2.8 MB
+# of internal audit plans, none of which is needed to build, install, test, or
+# understand the package. W3's install-smoke installs the sdist on three runner
+# cells, so the weight was paid on every gate run as well as by every user who
+# builds from source.
+#
+# Only `pyproject.toml`, `README.md` and the embedded/js package data are
+# structurally required (tools/package_verify.py `_check_sdist_members` /
+# `_check_package_data`); `tests/` is kept deliberately so a downstream packager
+# can still run the suite from the sdist.
+exclude = [
+    "assets",   # demo media, referenced from the README by relative path
+    "audit",    # the audit campaign's plans and findings — repo history, not a distribution
+    ".claude",  # agent config and worktrees
+    ".husky",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stealth_chrome_devtools_mcp"]
