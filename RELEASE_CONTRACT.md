@@ -50,10 +50,10 @@ aggregate unless every cell below is present, current, and successful.
 
 | Job | Matrix cell | Runner | Python | Chrome | What the cell proves |
 |---|---|---|---|---|---|
-| `quality` | `default` | Linux/X64 |  | — | lint/type/vulture/owner/budget gates |
-| `known-gaps` | `default` | Linux/X64 |  | — | the declared gaps, in the check list |
-| `build-dist` | `default` | Linux/X64 |  | — | the ONE build + its hashed manifest |
-| `package-verify` | `default` | Linux/X64 |  | — | downloaded-bytes re-check + three bite proofs |
+| `quality` | `default` | Linux/X64 | image `python3` (recorded per run) | — | lint/type/vulture/owner/budget gates |
+| `known-gaps` | `default` | Linux/X64 | image `python3` (recorded per run) | — | the declared gaps, in the check list |
+| `build-dist` | `default` | Linux/X64 | image `python3` (recorded per run) | — | the ONE build + its hashed manifest |
+| `package-verify` | `default` | Linux/X64 | image `python3` (recorded per run) | — | downloaded-bytes re-check + three bite proofs |
 | `unit-tests` | `Linux-X64-py3.11` | Linux/X64 | 3.11 | — | hermetic unit suite (`-m 'not integration'`) |
 | `unit-tests` | `Windows-X64-py3.11` | Windows/X64 | 3.11 | — | hermetic unit suite (`-m 'not integration'`) |
 | `unit-tests` | `macOS-ARM64-py3.11` | macOS/ARM64 | 3.11 | — | hermetic unit suite (`-m 'not integration'`) |

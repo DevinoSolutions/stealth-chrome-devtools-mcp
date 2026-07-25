@@ -569,8 +569,11 @@ def _matrix_section() -> str:
             chrome = "resolved only (no launch)"
         else:
             chrome = "—"
+        # An unpinned cell records the interpreter it actually ran; pretending
+        # it pinned one would be a claim nothing checks.
+        python = spec.python_version or "image `python3` (recorded per run)"
         lines.append(
-            f"| `{spec.job}` | `{spec.cell}` | {spec.label} | {spec.python_version} "
+            f"| `{spec.job}` | `{spec.cell}` | {spec.label} | {python} "
             f"| {chrome} | {_md_escape(spec.proves)} |"
         )
     lines.extend(
