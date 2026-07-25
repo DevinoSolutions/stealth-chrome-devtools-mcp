@@ -23,14 +23,23 @@ Two tiers (stealth is the one place determinism and realism genuinely conflict):
   gate (``not online``). Drives CreepJS and bot.incolumitas, asserts only the hard
   invariants, logs the rest, and tolerates network flakiness by design.
 
-Design honesty (release-claim integrity): one product predicate — the headless UA
-still advertising ``HeadlessChrome`` — does NOT pass. It is pinned as a strict
-``xfail`` (F-770), NOT hidden by weakening a probe. An xfailed invariant cannot
-satisfy the stealth release claim; see :data:`XFAIL_SIGNALS` and the test docstring.
+Design honesty (release-claim integrity): a known gap is pinned as a strict
+``xfail`` with a finding id, never hidden by weakening a probe — an xfailed
+invariant does NOT satisfy a release claim.
 
-No ``src/`` edits: both browsers spawn through the project's own
-``spawn_browser`` tool; the ordered transcript uses the project's own nodriver
-``tab.send(uc.cdp.*)`` CDP seam; the fixture and env-isolation reuse W1's homes.
+* **F-770 — CLOSED by RELEASE-FIX-D.** The headless User-Agent advertised
+  ``HeadlessChrome`` on every vector that reaches a site. ``src/`` now supplies a
+  masked default ``--user-agent`` from ``platform_utils.merge_browser_args``, so
+  the signal moved into the GATING table and the xfail was deleted rather than
+  relaxed. The four measured vectors are documented at :data:`F770_VECTORS`.
+* **F-774 — OPEN, opened by that fix.** A ``--user-agent`` override makes Chrome
+  blank the high-entropy UA client hints; the low-entropy ``sec-ch-ua*`` headers
+  on the wire stay correct. Recorded in :data:`XFAIL_SIGNALS` with the measured
+  before/after, not papered over.
+
+Both browsers spawn through the project's own ``spawn_browser`` tool; the ordered
+transcript uses the project's own nodriver ``tab.send(uc.cdp.*)`` CDP seam; the
+fixture and env-isolation reuse W1's homes.
 """
 
 from __future__ import annotations
@@ -190,6 +199,58 @@ def _p_ua_no_headless(obs: dict, _os: str) -> bool:
     return "headlesschrome" not in str(obs.get("user_agent") or "").lower()
 
 
+def _p_http_ua_no_headless(obs: dict, _os: str) -> bool:
+    # F-770 V2 — the header the fixture server actually READ off the wire. A
+    # page-level override can satisfy _p_ua_no_headless while this still leaks.
+    header = obs.get("http_user_agent")
+    if not isinstance(header, str) or not header or header.startswith("ERROR:"):
+        return False
+    return "headlesschrome" not in header.lower()
+
+
+def _p_ua_matches_http_header(obs: dict, _os: str) -> bool:
+    # Coherence: a page UA that disagrees with the wire UA is a mismatch no real
+    # browser produces — a sharper tell than the honest headless token.
+    page = obs.get("user_agent")
+    header = obs.get("http_user_agent")
+    return bool(page) and isinstance(header, str) and header == page
+
+
+def _ua_major(user_agent: object) -> str | None:
+    m = re.search(r"(?:Headless)?Chrome/(\d+)\.", str(user_agent or ""))
+    return m.group(1) if m else None
+
+
+def _p_ua_client_hints_high_entropy_populated(obs: dict, _os: str) -> bool:
+    # F-774: a real Chrome fills every high-entropy hint. Chrome blanks them
+    # whenever a --user-agent override is active, which is how the F-770 mask
+    # works — see XFAIL_SIGNALS.
+    high_entropy = obs.get("ua_client_hints_high_entropy")
+    if not isinstance(high_entropy, dict):
+        return False
+    return all(
+        bool(high_entropy.get(key))
+        for key in ("architecture", "bitness", "uaFullVersion", "fullVersionList")
+    )
+
+
+def _p_ua_major_matches_client_hints(obs: dict, _os: str) -> bool:
+    # Coherence: the UA's major version must be one the UA client hints agree
+    # with. Masking the token while claiming a version sec-ch-ua contradicts
+    # would replace one tell with a worse one.
+    major = _ua_major(obs.get("user_agent"))
+    high_entropy = obs.get("ua_client_hints_high_entropy")
+    if not major or not isinstance(high_entropy, dict):
+        return False
+    majors = {
+        str(brand.get("version", "")).split(".")[0]
+        for brand in (high_entropy.get("brands") or [])
+        if isinstance(brand, dict)
+    }
+    majors.discard("")
+    return bool(majors) and major in majors
+
+
 # ── Gating table: the product MUST pass every applicable row ────────────────
 GATE_SIGNALS: tuple[Signal, ...] = (
     Signal(
@@ -266,21 +327,89 @@ GATE_SIGNALS: tuple[Signal, ...] = (
         {"outer_width": 0, "outer_height": 0},
         "window.outerWidth/outerHeight are non-zero (0x0 is a headless tell).",
     ),
-)
-
-# ── xfail table: a KNOWN product stealth gap, pinned honestly (never weakened) ─
-# F-770: under headless (the configuration the offline gate runs), the product's
-# default User-Agent still advertises "HeadlessChrome". The product ships nodriver
-# and does NOT mask the UA token, so this basic bot tell leaks. Pinned as a strict
-# xfail — an xfailed invariant does NOT satisfy the stealth release claim.
-XFAIL_SIGNALS: tuple[Signal, ...] = (
+    # ── F-770, closed by RELEASE-FIX-D. These four rows were a strict xfail until
+    # the product supplied a masked default --user-agent; they are GATING now, so
+    # a regression that reintroduces the headless token fails the release gate.
+    # An xfailed invariant never satisfied the stealth claim; these do.
     Signal(
         "ua_no_headless_token",
         ("user_agent",),
         _p_ua_no_headless,
         {"user_agent": "Mozilla/5.0 ... HeadlessChrome/150.0.0.0 Safari/537.36"},
-        "navigator.userAgent does not advertise HeadlessChrome.",
-        finding_id="F-770",
+        "navigator.userAgent does not advertise HeadlessChrome (F-770 V1).",
+    ),
+    Signal(
+        "http_ua_no_headless_token",
+        ("http_user_agent",),
+        _p_http_ua_no_headless,
+        {"http_user_agent": "Mozilla/5.0 ... HeadlessChrome/150.0.0.0 Safari/537.36"},
+        "The User-Agent header the SERVER received does not advertise "
+        "HeadlessChrome (F-770 V2 — the vector a bot check reads first).",
+    ),
+    Signal(
+        "ua_matches_http_header",
+        ("user_agent", "http_user_agent"),
+        _p_ua_matches_http_header,
+        {"http_user_agent": "Mozilla/5.0 ... HeadlessChrome/150.0.0.0 Safari/537.36"},
+        "The page User-Agent and the wire User-Agent are the same string "
+        "(a page-only override that leaves the header leaking is a worse tell).",
+    ),
+    Signal(
+        "ua_major_matches_client_hints",
+        ("user_agent", "ua_client_hints_high_entropy"),
+        _p_ua_major_matches_client_hints,
+        {
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+            )
+        },
+        "The masked User-Agent's major version is one the UA client hints agree "
+        "with (masking coherently, not swapping one tell for a worse one).",
+    ),
+)
+
+# ── xfail table: a KNOWN product stealth gap, pinned honestly (never weakened) ─
+# F-774 (opened by RELEASE-FIX-D, measured not assumed): whenever a --user-agent
+# override is active — which is exactly how the F-770 mask works — Chrome BLANKS
+# the high-entropy UA client hints it cannot derive from the override string.
+# Measured on Chrome 150, headless, with and without the mask:
+#
+#   architecture     "x86"              -> ""
+#   bitness          "64"               -> ""
+#   platformVersion  "19.0.0"           -> ""
+#   uaFullVersion    "150.0.7871.186"   -> ""
+#   fullVersionList  [3 brands]         -> []
+#   brands / mobile / platform          UNCHANGED and still correct
+#
+# So the LOW-entropy hints — the `sec-ch-ua`, `sec-ch-ua-mobile` and
+# `sec-ch-ua-platform` headers Chrome actually puts on the wire by default —
+# stay coherent with the masked UA; only the JS-only high-entropy set, which a
+# site must ask for explicitly, comes back empty. That is a strictly smaller and
+# strictly more expensive tell than the `HeadlessChrome` token it replaces (one
+# server-side substring test, before any JavaScript runs), but it IS a new tell
+# and is recorded here rather than papered over. Fixing it needs
+# Emulation.setUserAgentOverride's userAgentMetadata, which is per-target and
+# therefore a different mechanism with its own hazards — deliberately out of
+# FIX-D's scope. Strict xfail: if it is ever fixed, or Chrome changes, this
+# XPASSes and turns the suite red, forcing the review.
+XFAIL_SIGNALS: tuple[Signal, ...] = (
+    Signal(
+        "ua_client_hints_high_entropy_populated",
+        ("ua_client_hints_high_entropy",),
+        _p_ua_client_hints_high_entropy_populated,
+        {
+            "ua_client_hints_high_entropy": {
+                "brands": [{"brand": "Google Chrome", "version": "150"}],
+                "architecture": "",
+                "bitness": "",
+                "uaFullVersion": "",
+                "fullVersionList": [],
+            }
+        },
+        "getHighEntropyValues() returns populated architecture/bitness/"
+        "uaFullVersion/fullVersionList, as an unmasked Chrome does.",
+        finding_id="F-774",
     ),
 )
 
@@ -509,6 +638,97 @@ def control_probe(fixture_app_server) -> dict:
     return _collect_sync(fixture_app_server, control=True)
 
 
+# ── F-770 coverage facts: a LATER tab, and an explicit caller User-Agent ──────
+# The masked default is a launch flag, so it is process-wide by construction —
+# but "by construction" is exactly the reasoning FIX-C's re-arm defect punished,
+# so both properties are pinned against a real browser instead of argued.
+_EXPLICIT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/123.0.0.0 Safari/537.36 fix-d-explicit"
+)
+
+
+async def _read_tab_ua(tab) -> str:
+    raw = await tab.send(
+        uc.cdp.runtime.evaluate(expression="navigator.userAgent", return_by_value=True)
+    )
+    return raw[0].value if (raw and raw[0]) else ""
+
+
+async def _read_tab_http_ua(tab, base_url: str) -> str:
+    raw = await tab.send(
+        uc.cdp.runtime.evaluate(
+            expression=(
+                f"fetch('{base_url}/api/echo', {{method: 'POST', body: 'tab-probe'}})"
+                ".then(r => r.json()).then(j => j.headers['user-agent'])"
+            ),
+            return_by_value=True,
+            await_promise=True,
+        )
+    )
+    return raw[0].value if (raw and raw[0]) else ""
+
+
+async def _collect_ua_facts(base_url: str, *, user_agent: str | None) -> dict:
+    """Spawn once, then read the User-Agent from the spawn tab AND from a tab
+    created afterwards through the product's own ``new_tab`` tool."""
+    await warmup_once()
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+    open_tab = get_fn("new_tab")
+    bm = server_mod.browser_manager
+
+    explicit = {"user_agent": user_agent} if user_agent else {}
+    url = f"{base_url}/stealth_probe.html"
+    iid = None
+    try:
+        spawned = await spawn(headless=True, **explicit, **sandbox_kwargs())
+        iid = spawned["instance_id"]
+        await navigate_and_settle(iid, url)
+        spawn_tab = await bm.get_tab(iid)
+        created = await open_tab(instance_id=iid, url=url)
+        browser = await bm.get_browser(iid)
+        later_tab = next(
+            (t for t in browser.tabs if str(t.target.target_id) == created["tab_id"]),
+            None,
+        )
+        assert later_tab is not None, (
+            created["tab_id"],
+            [str(t.target.target_id) for t in browser.tabs],
+        )
+        return {
+            "spawn_tab_ua": await _read_tab_ua(spawn_tab),
+            "new_tab_ua": await _read_tab_ua(later_tab),
+            "new_tab_http_ua": await _read_tab_http_ua(later_tab, base_url),
+        }
+    finally:
+        if iid is not None:
+            try:
+                await close(instance_id=iid)
+            except Exception:  # teardown best-effort
+                pass
+
+
+def _collect_ua_facts_sync(base_url: str, *, user_agent: str | None) -> dict:
+    import asyncio
+
+    return asyncio.run(_collect_ua_facts(base_url, user_agent=user_agent))
+
+
+@pytest.fixture(scope="module")
+def ua_default_facts(fixture_app_server) -> dict:
+    if not CAN_RUN:
+        pytest.skip("Chrome not available or server failed to load")
+    return _collect_ua_facts_sync(fixture_app_server, user_agent=None)
+
+
+@pytest.fixture(scope="module")
+def ua_explicit_facts(fixture_app_server) -> dict:
+    if not CAN_RUN:
+        pytest.skip("Chrome not available or server failed to load")
+    return _collect_ua_facts_sync(fixture_app_server, user_agent=_EXPLICIT_UA)
+
+
 # ===========================================================================
 # Deterministic, browser-free sensitivity controls (run everywhere, gate-safe).
 # For each collector family: the predicate PASSES a good baseline and FAILS when
@@ -532,9 +752,36 @@ def _good_baseline() -> dict:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
         ),
+        "http_user_agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+        ),
+        "http_request_headers": {
+            "user-agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+            ),
+            "sec-ch-ua": '"Not;A=Brand";v="8", "Chromium";v="150", '
+            '"Google Chrome";v="150"',
+        },
         "platform": platform_value,
         "ua_client_hints_present": True,
         "ua_client_hints_brands": ["Chromium", "Google Chrome", "Not;A=Brand"],
+        "ua_client_hints_high_entropy": {
+            "brands": [
+                {"brand": "Not;A=Brand", "version": "8"},
+                {"brand": "Chromium", "version": "150"},
+                {"brand": "Google Chrome", "version": "150"},
+            ],
+            "fullVersionList": [
+                {"brand": "Google Chrome", "version": "150.0.7871.186"}
+            ],
+            "uaFullVersion": "150.0.7871.186",
+            "architecture": "x86",
+            "bitness": "64",
+            "platform": "Windows",
+            "platformVersion": "19.0.0",
+        },
         "fn_tostring_alert": "function alert() { [native code] }",
         "fn_tostring_meta": "function toString() { [native code] }",
         "automation_globals_window": [],
@@ -545,10 +792,18 @@ def _good_baseline() -> dict:
 
 
 def test_signal_table_is_reviewed_and_nonempty():
-    """The predicate table exists, is versioned, and has unique signal names."""
+    """The predicate table exists, is versioned, and has unique signal names.
+
+    Every row is GATING: RELEASE-FIX-D closed F-770, the last xfailed signal, so
+    the table no longer carries an xfail tier. A future known gap re-adds one
+    deliberately (with a finding id) — it is never created by weakening a row.
+    """
     names = [s.name for s in (*GATE_SIGNALS, *XFAIL_SIGNALS)]
     assert len(names) == len(set(names)), "duplicate signal names"
     assert len(GATE_SIGNALS) >= 8, "expected a broad gating table"
+    assert {"ua_no_headless_token", "http_ua_no_headless_token"} <= set(names), (
+        "F-770's page AND wire User-Agent signals must both gate"
+    )
     for s in XFAIL_SIGNALS:
         assert s.finding_id, f"xfail signal {s.name} must carry a finding id"
 
@@ -752,6 +1007,12 @@ def test_product_offline_stealth_gate(product_probe, control_probe, tmp_path):
     for forbidden_flag in ("--enable-automation", "--test-type"):
         assert not any(a == forbidden_flag for a in cmdline), (forbidden_flag, cmdline)
 
+    # F-770 vector V4 — the CDP-level User-Agent. Not a page observation, so it is
+    # asserted here rather than through the predicate table. The masked
+    # --user-agent= flag is process-wide, so it reaches this value too.
+    cdp_ua = product["cdp_user_agent"]
+    assert isinstance(cdp_ua, str) and "headlesschrome" not in cdp_ua.lower(), cdp_ua
+
     # Vanilla-control sensitivity: the deliberately non-stealth spawn (same product
     # path, stealth arg-filter neutralized) MUST be detected. If it is NOT detected,
     # the probe is worthless — fail. Config identity: same binary, same headless
@@ -834,9 +1095,14 @@ def test_f770_ua_vectors_are_measured(product_probe, control_probe):
         assert isinstance(v3["high_entropy"], dict), (
             f"{label}: getHighEntropyValues unmeasured: {v3['high_entropy']!r}"
         )
-        assert v3["high_entropy"].get("uaFullVersion") or v3["high_entropy"].get(
-            "fullVersionList"
-        ), v3["high_entropy"]
+        # ``brands`` is the part the V3 coherence gate reads and it is populated
+        # on both browsers. Whether the rest of the high-entropy set is populated
+        # is F-774's subject, not a measurability question — asserting it here
+        # would be judging, which this test deliberately does not do.
+        assert v3["high_entropy"].get("brands"), v3["high_entropy"]
+        assert v3["sec_ch_ua_header"], (
+            f"{label}: the fixture server saw no sec-ch-ua header: {v3!r}"
+        )
 
         v4 = readings["V4_cdp_browser_get_version"]["value"]
         assert isinstance(v4, str) and "Mozilla/5.0" in v4, v4
@@ -844,17 +1110,83 @@ def test_f770_ua_vectors_are_measured(product_probe, control_probe):
 
 @pytest.mark.xfail(
     strict=True,
-    reason="F-770: headless product UA advertises HeadlessChrome; nodriver's default "
-    "stealth does not mask the UA token. Pinned honestly — an xfailed invariant does "
-    "NOT satisfy the stealth release claim (the headless UA vector remains detectable).",
+    reason="F-774: Chrome blanks the high-entropy UA client hints (architecture, "
+    "bitness, platformVersion, uaFullVersion, fullVersionList) whenever a "
+    "--user-agent override is active, which is how the F-770 mask works. The "
+    "low-entropy sec-ch-ua* headers on the wire stay correct. Recorded honestly, "
+    "not papered over: fixing it needs Emulation.setUserAgentOverride's "
+    "userAgentMetadata, a per-target mechanism outside RELEASE-FIX-D's scope.",
 )
-def test_product_ua_headless_token_pinned_gap(product_probe):
-    """PINNED GAP (F-770). The headless product still leaks 'HeadlessChrome' in its
-    User-Agent. This assertion is what a fully-stealthy product WOULD satisfy; it
-    fails today, so the strict xfail passes and records the gap without weakening
-    any probe."""
+def test_product_ua_client_hints_high_entropy_pinned_gap(product_probe):
+    """PINNED GAP (F-774). This assertion is what a fully-coherent masked browser
+    WOULD satisfy. It fails today, so the strict xfail passes and records the
+    gap — no probe is weakened, and a future fix turns the suite red."""
     obs = product_probe["observations"]
-    assert _p_ua_no_headless(obs, _os_family()) is True, obs.get("user_agent")
+    assert _p_ua_client_hints_high_entropy_populated(obs, _os_family()) is True, (
+        obs.get("ua_client_hints_high_entropy")
+    )
+
+
+def test_f770_a_later_tab_is_covered(ua_default_facts):
+    """F-770: a tab created AFTER spawn is masked too, page and wire.
+
+    A per-target CDP override would satisfy the spawn tab and leak on the next
+    one (the failure mode that made FIX-C's ``create_hook`` re-arm necessary).
+    This is what makes the launch-flag mechanism the right one, so it is pinned.
+    """
+    facts = ua_default_facts
+    assert "HeadlessChrome" not in facts["spawn_tab_ua"], facts["spawn_tab_ua"]
+    assert "HeadlessChrome" not in facts["new_tab_ua"], facts["new_tab_ua"]
+    assert facts["new_tab_ua"] == facts["spawn_tab_ua"], facts
+    assert "HeadlessChrome" not in facts["new_tab_http_ua"], facts["new_tab_http_ua"]
+    assert facts["new_tab_http_ua"] == facts["new_tab_ua"], facts
+
+
+def test_f770_explicit_user_agent_still_wins(ua_explicit_facts):
+    """F-770: the masked default NEVER overrides a caller-supplied user_agent."""
+    facts = ua_explicit_facts
+    assert facts["spawn_tab_ua"] == _EXPLICIT_UA, facts["spawn_tab_ua"]
+    assert facts["new_tab_ua"] == _EXPLICIT_UA, facts["new_tab_ua"]
+    assert facts["new_tab_http_ua"] == _EXPLICIT_UA, facts["new_tab_http_ua"]
+
+
+def test_f770_product_masks_ua_while_control_still_leaks(product_probe, control_probe):
+    """F-770 D2 — the fix is real AND the suite that judges it is still sensitive.
+
+    W4's stealth suite is only worth anything because a deliberately non-stealth
+    control still FAILS the probes. The control is built by neutralizing
+    ``platform_utils.merge_browser_args``, which is exactly where FIX-D's masked
+    default ``--user-agent`` is applied — so the control genuinely does not get
+    it, and this differential proves that rather than assuming it:
+
+    * the control's User-Agent STILL advertises HeadlessChrome (so
+      ``vanilla_detected`` is not quietly going false, and the whole suite has
+      not become vacuous);
+    * the product's User-Agent is the control's with exactly the
+      ``HeadlessChrome`` token replaced by ``Chrome`` — byte-identical
+      otherwise. That equality is the coherence contract: the mask is Chrome's
+      own reduced User-Agent for this binary, not a plausible-looking string
+      that a platform-token or version mismatch would betray.
+    """
+    control_ua = control_probe["observations"]["user_agent"]
+    product_ua = product_probe["observations"]["user_agent"]
+
+    assert "HeadlessChrome" in control_ua, (
+        "the vanilla control no longer leaks the headless token — the masking was "
+        f"applied outside the seam the control neutralizes: {control_ua!r}"
+    )
+    assert control_ua.replace("HeadlessChrome", "Chrome") == product_ua, (
+        f"masked UA is not the browser's own UA minus the headless token\n"
+        f"  control: {control_ua!r}\n  product: {product_ua!r}"
+    )
+    # ...and the same differential holds on the wire, not just in the page.
+    assert "HeadlessChrome" in control_probe["observations"]["http_user_agent"]
+    assert (
+        control_probe["observations"]["http_user_agent"].replace(
+            "HeadlessChrome", "Chrome"
+        )
+        == product_probe["observations"]["http_user_agent"]
+    )
 
 
 # ===========================================================================

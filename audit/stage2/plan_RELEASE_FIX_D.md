@@ -1,8 +1,44 @@
 # plan_RELEASE_FIX_D — F-770: the headless User-Agent still advertises `HeadlessChrome`
 
-**Status: AUTHORIZED, not yet executed.** Human authorized the FIX-plan route
-2026-07-25. Branch stacked on `audit/release-4-w4` (PR #45). Merge gate: human —
+**Status: EXECUTED.** Human authorized the FIX-plan route 2026-07-25. Branch
+`audit/release-fix-d` stacked on `audit/release-4-w4` (PR #47). Merge gate: human —
 **the executor never merges.**
+
+> ## D0's measurement (the part that decided the mechanism)
+>
+> Measured under `headless=True` on all three qualified cells, Chrome 150:
+>
+> | Vector | Linux/X64 | Windows/X64 | macOS/ARM64 |
+> |---|---|---|---|
+> | V1 `navigator.userAgent` | **LEAK** | **LEAK** | **LEAK** |
+> | V2 HTTP `User-Agent` header the server received | **LEAK** | **LEAK** | **LEAK** |
+> | V3 `userAgentData` brands / high entropy / `sec-ch-ua` | clean | clean | clean |
+> | V4 `Browser.getVersion().userAgent` | **LEAK** | **LEAK** | **LEAK** |
+>
+> Two of §2/§3's stated assumptions were wrong, which is exactly what D0 exists
+> to catch:
+>
+> * **V3 does not leak.** The brands are identical headless and headed on every
+>   cell, so the UA-CH path (M-B) was never required.
+> * **V4 *is* covered by `--user-agent=`.** §3 lists it as not covered; the flag
+>   is process-wide and `Browser.getVersion` follows it.
+>
+> So **M-A alone covers every leaking vector** — chosen, and M-B not implemented.
+> `--user-agent-product=` was also measured and is inert in release Chrome.
+>
+> The frozen reduced-UA platform tokens the mask is built from were confirmed on
+> the runners themselves: `Windows NT 10.0; Win64; x64`,
+> `Macintosh; Intel Mac OS X 10_15_7` (frozen even on ARM64), `X11; Linux x86_64`.
+>
+> ## What the fix opened: F-774
+>
+> A `--user-agent` override makes Chrome blank the high-entropy UA client hints
+> (`architecture`, `bitness`, `platformVersion`, `uaFullVersion`,
+> `fullVersionList`); `brands`/`mobile`/`platform` — and therefore every
+> `sec-ch-ua*` header on the wire — stay correct. Recorded honestly as a strict
+> `xfail` and routed: see
+> [finding_F774_ua_client_hints_high_entropy_blanked.md](./finding_F774_ua_client_hints_high_entropy_blanked.md).
+> §6's scope-limit clause applies: partial fix + honest claim.
 
 **Found by:** plan_RELEASE W4's offline stealth probe (`audit/release-4-w4`, PR #45),
 pinned as a strict `xfail` in `tests/test_stealth.py`.

@@ -6,10 +6,27 @@ before they reach the browser, preserving stealth.
 No browser or network required — pure function tests.
 """
 
+import pytest
+
+from stealth_chrome_devtools_mcp.embedded import platform_utils
 from stealth_chrome_devtools_mcp.embedded.platform_utils import (
     filter_stealth_args,
     merge_browser_args,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_default_user_agent(monkeypatch):
+    """Keep these arg-filter tests hermetic.
+
+    ``merge_browser_args`` also supplies the F-770 masked default
+    ``--user-agent=``, which resolves a real browser (and, off Windows, probes
+    its version through a subprocess). Neither belongs in a "no browser or
+    network required" unit file; the masked-default behaviour is covered in
+    tests/test_platform_utils.py.
+    """
+    monkeypatch.setattr(platform_utils, "check_browser_executable", lambda: None)
+
 
 # ---------------------------------------------------------------------------
 # filter_stealth_args
