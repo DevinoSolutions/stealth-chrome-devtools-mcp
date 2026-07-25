@@ -276,6 +276,67 @@ class TestProcessRequestHooks:
         assert sys.hooks[only].trigger_count == 1
 
 
+class TestInterceptionArming:
+    """F-772: `Fetch.enable` pauses EVERY request until something resumes it, so
+    it must never be enabled when there is nothing to intercept.
+
+    The catch-all fallback armed on every spawn made a zero-hook instance depend
+    on the `Fetch.RequestPaused` handler firing for every navigation; on macOS
+    under the detached backend it does not, and every navigation hung. These pins
+    hold both halves: no hooks -> never enabled, and a hook created after spawn
+    still arms interception (the coverage the catch-all was accidentally giving).
+    """
+
+    async def test_no_hooks_means_no_fetch_enable(self):
+        sys = DynamicHookSystem()
+        sys.add_instance("inst-1")
+        tab = FakeTab()
+
+        await sys.setup_interception(tab, "inst-1")
+
+        assert tab.send_calls == []
+        assert tab.handlers == []
+
+    async def test_hooks_still_intercept(self):
+        sys = DynamicHookSystem()
+        sys.add_instance("inst-1")
+        await sys.create_hook(
+            "h", {"url_pattern": "*/api/*"}, CONTINUE, instance_ids=["inst-1"]
+        )
+        tab = FakeTab()
+
+        await sys.setup_interception(tab, "inst-1")
+
+        assert tab.send_calls == ["enable"]
+        patterns = tab.cdp_frames[0]["params"]["patterns"]
+        assert [p["urlPattern"] for p in patterns] == ["*/api/*"]
+        assert len(tab.handlers) == 1
+
+    async def test_hook_created_after_spawn_arms_interception(self):
+        sys = DynamicHookSystem()
+        sys.add_instance("inst-1")
+        tab = FakeTab()
+
+        await sys.setup_interception(tab, "inst-1")  # spawn: zero hooks
+        assert tab.send_calls == []
+
+        await sys.create_hook("h", {"url_pattern": "*/api/*"}, CONTINUE)
+
+        assert tab.send_calls == ["enable"]
+        patterns = tab.cdp_frames[0]["params"]["patterns"]
+        assert [p["urlPattern"] for p in patterns] == ["*/api/*"]
+
+        # Re-arming for a second hook re-sends the widened pattern set but must
+        # not stack a second RequestPaused handler (which would double-continue
+        # every paused request).
+        await sys.create_hook("h2", {"url_pattern": "*/other/*"}, CONTINUE)
+
+        assert tab.send_calls == ["enable", "enable"]
+        patterns = tab.cdp_frames[1]["params"]["patterns"]
+        assert sorted(p["urlPattern"] for p in patterns) == ["*/api/*", "*/other/*"]
+        assert len(tab.handlers) == 1
+
+
 class TestResponseStageHooksRemoved:
     """F-721/F-742: the dead ResponseStageProcessor duplicate is deleted, so the
     HookAction -> CDP dispatch lives in exactly one place (dynamic_hook_system)."""
