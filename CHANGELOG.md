@@ -104,6 +104,15 @@ Stated explicitly rather than by omission.
   upgrade/migration smoke, failure-observability, and worker/PWA/internationalized site
   shapes. These are planned work that has **not** been performed — do not read their
   absence as a passing result.
+- **Per-tool verification depth varies, and the release contract says so per tool.** All
+  94 tools have end-to-end coverage driving real Chrome against a local fixture,
+  enforced by a set-equality tripwire (94 covered, 0 exempt). But only `set_cookie`,
+  `get_cookies` and `clear_cookies` are additionally verified over the **real stdio
+  transport** your client actually speaks; the rest are exercised through an in-process
+  test seam that bypasses the wire. That distinction is not academic — every one of the
+  transport bugs fixed above was invisible to the seam. It is a gap in test placement
+  rather than a known defect in those 91 tools, which is why the contract calls them
+  *served* rather than *release-qualified*.
 - A known flake exists in one packaging smoke cell (`install-smoke (sdist Linux/X64)`) on
   Chrome cold-spawn; it passes on re-run.
 
