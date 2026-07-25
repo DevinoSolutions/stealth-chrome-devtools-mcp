@@ -1,7 +1,31 @@
 # plan_RELEASE_FIX_C — F-772: catch-all Fetch interception hangs every navigation on macOS
 
-**Status: AWAITING EXECUTION** — human authorized the FIX-plan route 2026-07-24
-(selected "Authorize a FIX plan" over routing macOS as a gap). Merge gate: human.
+**Status: EXECUTED — but its central hypothesis was WRONG.** Human authorized the
+FIX-plan route 2026-07-24. C1 = c58f51c, C2 = d5348d6 (PR #46). Merge gate: human.
+
+> ## ⚠️ Correction (2026-07-25): this plan does NOT fix macOS
+> The premise below — that catch-all Fetch interception was pausing every request
+> and hanging macOS navigation — is **disproved**. The fix shipped and ran on the
+> macOS runner (backend log: `No active hooks …; leaving Fetch interception
+> disabled`), and the hang was **byte-identical**: `about:blank` ok in 1.1s, a
+> connection to a **closed port** still hanging 35s. A refused connection cannot
+> hang, so the request never reached the network stack — with interception off,
+> something else is stopping it.
+>
+> The macOS defect continues as **F-773**
+> ([finding_F773_macos_detached_navigation.md](./finding_F773_macos_detached_navigation.md)),
+> cause unknown, with a full elimination table.
+>
+> **What C1/C2 are still worth** (why they were kept, not reverted): a default
+> spawn no longer enables interception with nothing to intercept, so no platform
+> pays a pause + CDP round-trip per request; and interception — previously armed
+> only at spawn, leaving hooks created later covered only by accident — is now
+> re-armed by `create_hook` through the same entry point, pinned by a test that
+> fails if that half is removed. Judge this plan on those merits only.
+>
+> Read everything below as the reasoning **as it stood before CI tested it**. It is
+> left intact deliberately: the evidence was strong and still wrong, which is the
+> useful part.
 **Found by:** W2's three-OS release gate (`audit/release-2-w2`, PR #44), macOS/ARM64
 cells, rounds 1-8. **Severity:** Tier-A-equivalent, release-blocking for any
 "works on macOS" claim.

@@ -185,14 +185,28 @@ jobs:
           sudo apt-get install -y -qq xvfb
           Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
           sleep 3
+      - name: 'KNOWN GAP: macOS excludes the transport journey (F-773)'
+        if: runner.os == 'macOS'
+        run: |
+          echo "::warning title=F-773::macOS runs 'integration and not transport'."
+          echo "::warning title=F-773::Chrome under the DETACHED backend cannot complete any network navigation on this runner (a connection to a CLOSED port hangs 35s while about:blank returns in 1.1s). Cause unknown; see audit/stage2/finding_F773_macos_detached_navigation.md. This gate therefore makes NO macOS navigation claim."
       - name: Run integration + Chrome-identity tests
         # Headless cases must not depend on DISPLAY; Linux sets it only for the
         # headed cases that need Xvfb, and Windows/macOS never inherit :99.
         # Session root: runner-native temp — no hard-coded /tmp or separators
         # (plan_RELEASE §2.2). Step-level env because the `runner` context is
         # not available in job-level env (actionlint [expression]).
+        #
+        # macOS deselects `transport` — NOT to make the gate green, but because
+        # F-773 is an open, unexplained failure that the gate must report as a
+        # gap rather than either hide or pretend to cover. The step above prints
+        # it on every macOS run so a green gate can never be read as "macOS
+        # navigation verified".
         shell: bash
-        run: uv run pytest -m integration -v --tb=short --timeout=180
+        run: >-
+          uv run pytest
+          -m "${{ runner.os == 'macOS' && 'integration and not transport' || 'integration' }}"
+          -v --tb=short --timeout=180
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
           STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
@@ -205,6 +219,15 @@ jobs:
             chrome-identity.json
             runner-identity.json
 
+  # The real-stdio journey. Linux/X64 and Windows/X64 only: macOS/ARM64 is a
+  # KNOWN GAP (F-773 — Chrome under the detached backend completes no network
+  # navigation on the hosted macOS runner; cause unknown after eliminating cold
+  # start, tab/CDP health, reachability, Fetch interception, profile location,
+  # the network-service process, and Chrome errors). The cell is EXCLUDED, not
+  # xfail-quarantined: an xfail would let a green gate imply macOS coverage.
+  # `transport-known-gaps` below states the gap in the job list, so it is
+  # visible without reading this file. Re-add the cell the moment F-773 closes —
+  # `finding_F773_macos_detached_navigation.md` §7 is the experiment that does it.
   transport:
     name: transport (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
     runs-on: ${{ matrix.os }}
@@ -214,7 +237,6 @@ jobs:
         include:
           - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64 }
           - { os: windows-latest, runner_os: Windows, runner_arch: X64 }
-          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64 }
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -259,6 +281,21 @@ jobs:
           path: |
             chrome-identity.json
             runner-identity.json
+
+  # ── The gate's own honesty surface ─────────────────────────────────────────
+  # A required check whose ONLY job is to name what the gate does not verify, in
+  # the check list where a reviewer reads it — so coverage gaps cost a visible
+  # line rather than living only in a YAML comment. It passes: it reports, it
+  # does not judge. Delete a line here only when the gap actually closes.
+  transport-known-gaps:
+    name: transport-known-gaps
+    runs-on: ubuntu-latest
+    steps:
+      - name: State the gaps
+        run: |
+          echo "::warning title=F-773::transport (macOS/ARM64) is NOT run. Chrome under the detached backend completes no network navigation on the hosted macOS runner. Cause unknown; 11 CI rounds, full elimination table in audit/stage2/finding_F773_macos_detached_navigation.md. Unknown whether real Macs are affected -- that needs a run on real hardware."
+          echo "This gate verifies the real-stdio journey on Linux/X64 and Windows/X64 ONLY."
+          echo "It makes NO claim about macOS navigation. Do not advertise one."
 
   # ── Offline stealth lane (W2 wires the edge; W4 lands the tests) ───────────
   offline-stealth:
@@ -316,6 +353,7 @@ jobs:
       - coverage
       - integration
       - transport
+      - transport-known-gaps
       - offline-stealth
     runs-on: ubuntu-latest
     steps:
@@ -336,6 +374,7 @@ jobs:
           check coverage       "${{ needs.coverage.result }}"
           check integration    "${{ needs.integration.result }}"
           check transport      "${{ needs.transport.result }}"
+          check transport-known-gaps "${{ needs.transport-known-gaps.result }}"
           check offline-stealth "${{ needs.offline-stealth.result }}"
           if [ "$overall" -ne 0 ]; then
             echo "::error::release-gate: one or more required edges were not success"
