@@ -147,6 +147,70 @@ class FakeTab:
 
 
 # ---------------------------------------------------------------------------
+# Fake target-listing seam (nodriver ``Browser.tabs`` entries)
+# ---------------------------------------------------------------------------
+
+
+def fake_target(
+    target_id: str = "T1",
+    url: str = "https://fake.test/page",
+    title: str = "Fake Page",
+    type_: str = "page",
+) -> SimpleNamespace:
+    """A nodriver ``cdp.target.TargetInfo`` double.
+
+    This is the metadata ``list_tabs`` reads off every entry of ``Browser.tabs``,
+    and the metadata ``Browser.update_targets()`` refreshes in place.
+    """
+    return SimpleNamespace(target_id=target_id, url=url, title=title, type_=type_)
+
+
+class FakeDiscoveredTarget:
+    """nodriver's raw ``Connection``, exactly as ``Browser.tabs`` yields it after
+    a rediscovery (the F-771 shape).
+
+    ``Browser.update_targets()`` appends a ``Connection`` — **not** a ``Tab`` —
+    for every target it did not already know about, and ``Browser.tabs`` returns
+    it anyway (it filters on ``type_ == "page"`` despite the ``List[Tab]``
+    annotation). Two behaviours matter and both are modelled here:
+
+    * **not awaitable** — only ``Tab`` defines ``__await__``, so awaiting this
+      raises ``TypeError: object ... can't be used in 'await' expression``;
+    * **attribute fall-through** — ``Connection.__getattr__`` delegates to
+      ``self.target``, so ``.url``/``.title`` still resolve to REAL values. A
+      listing that returns blank urls is therefore a product defect, not an
+      unavoidable consequence of the object type.
+    """
+
+    def __init__(self, target: Any) -> None:
+        self.target = target
+
+    def __getattr__(self, item: str) -> Any:
+        # ``self.__dict__`` (not ``self.target``) — attribute access inside a
+        # ``__getattr__`` would recurse for anything not yet set.
+        return getattr(self.__dict__["target"], item)
+
+
+class FakeAttachedTab(FakeDiscoveredTarget):
+    """nodriver's ``Tab``: a ``Connection`` that additionally defines
+    ``__await__`` (which resolves to ``Tab.wait()``).
+
+    Counts awaits in ``awaited`` so a test can pin that a metadata-only read
+    pays no per-tab lifecycle wait.
+    """
+
+    def __init__(self, target: Any) -> None:
+        super().__init__(target)
+        self.awaited = 0
+
+    def __await__(self) -> Any:
+        async def _wait() -> None:
+            self.awaited += 1
+
+        return _wait().__await__()
+
+
+# ---------------------------------------------------------------------------
 # Fake browser + browser manager
 # ---------------------------------------------------------------------------
 
@@ -161,9 +225,18 @@ class FakeBrowser:
     * ``FakeBrowser(alive=False)`` → ``_process.poll()`` returns ``0`` (exited)
     * ``FakeBrowser(alive=None, pid=<int>)`` → no ``_process``; psutil pid path
     * ``FakeBrowser(alive=None)`` → no ``_process``, no pid → defaults to alive
+
+    ``tabs`` seeds the target-listing seam (``list_tabs``/``switch_to_tab``/
+    ``close_tab`` read it after ``update_targets()``); seed it with
+    :class:`FakeAttachedTab` / :class:`FakeDiscoveredTarget`.
     """
 
-    def __init__(self, alive: bool | None = True, pid: int | None = None) -> None:
+    def __init__(
+        self,
+        alive: bool | None = True,
+        pid: int | None = None,
+        tabs: list[Any] | None = None,
+    ) -> None:
         if alive is None:
             self._process = None
         else:
@@ -171,9 +244,17 @@ class FakeBrowser:
             self._process = SimpleNamespace(poll=lambda: code, returncode=code)
         self._process_pid = pid
         self.target = SimpleNamespace(url="https://fake.test/page")
+        self.tabs = list(tabs or [])
+        self.update_targets_calls = 0
 
     async def get(self, url: str, new_tab: bool = False) -> FakeTab:
         return FakeTab(url=url)
+
+    async def update_targets(self) -> None:
+        """nodriver's target refresh. The real one rewrites every known
+        ``target``'s metadata in place from a fresh ``Target.getTargets``, which
+        is precisely why a metadata-listing loop has nothing left to await."""
+        self.update_targets_calls += 1
 
 
 class FakeBrowserManager:
