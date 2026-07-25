@@ -354,22 +354,25 @@ jobs:
           --runner-name "${{ runner.name }}" --expect-os "${{ matrix.runner_os }}"
           --expect-arch "${{ matrix.runner_arch }}" --python "3.12"
           --out "runner-identity.json"
-      - name: Run offline stealth lane
-        # W2 wires the job id; the stealth TESTS land in W4. The selector collects
-        # zero tests today → pytest exits 5. That empty edge is expected and is
-        # NOT continue-on-error: exit 5 is treated as success, any other non-zero
-        # (a real failure once W4 adds tests) still fails the job and the gate.
+      - name: Resolve image Chrome Stable identity
         shell: bash
+        run: uv run python tools/resolve_chrome.py --out chrome-identity.json
+      - name: Start Xvfb (Linux only)
+        if: runner.os == 'Linux'
         run: |
-          set +e
-          uv run pytest -m "stealth and not online" -v --tb=short --timeout=180
-          code=$?
-          set -e
-          if [ "$code" -eq 5 ]; then
-            echo "offline-stealth: 0 tests collected (W4 fills this lane) — pass"
-            exit 0
-          fi
-          exit "$code"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+      - name: Run offline stealth lane
+        # W4's stealth tests are now in this history, so the lane is no longer
+        # empty and pytest's exit 5 (zero collected) is NO LONGER treated as a
+        # pass. An empty selector now fails: a marker rename that silently
+        # stopped collecting these tests would otherwise leave a green lane
+        # asserting nothing, which is exactly the false green §8.1 forbids.
+        shell: bash
+        run: uv run pytest -m "stealth and not online" -v --tb=short --timeout=300
+        env:
+          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
 
   # ── W3: build ONCE, verify and smoke THOSE EXACT FILES (gap G-C) ───────────
   # The only `uv build` in the entire run. Everything downstream consumes the
