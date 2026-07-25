@@ -98,6 +98,53 @@ def test_get_cookies_is_never_presented_as_qualified(contract: str):
         assert "stdio" in row.tier
 
 
+def test_every_qualified_claim_cites_a_node_that_exists_in_this_tree():
+    """A claim for a phantom node is caught here, not three CI hours later.
+
+    CI is the authority (the ledger re-verifies the node executed AND passed on
+    every cell claimed); this is the cheap local tripwire in front of it.
+    """
+    for claim in re_mod.claim_rows(re_mod.load_claims()):
+        node = str(claim["node_id"])
+        file_part, _, rest = node.partition("::")
+        path = gen.REPO_ROOT / file_part
+        assert path.is_file(), f"claim cites a file that does not exist: {node}"
+        func = rest.split("::")[-1].split("[")[0]
+        assert f"def {func}(" in path.read_text(encoding="utf-8"), (
+            f"claim cites {node}, which {file_part} does not define"
+        )
+
+
+def test_qualified_claims_are_bounded_to_the_cells_that_can_evidence_them(
+    contract: str,
+):
+    """A stdio claim is qualified on TWO cells — never three (F-773)."""
+    transport_cells = {
+        spec.key for spec in gen.matrix_rows() if spec.job == "transport"
+    }
+    assert len(transport_cells) == 2
+    for claim in re_mod.claim_rows(re_mod.load_claims()):
+        if claim.get("transport") != "stdio":
+            continue
+        cells = set(map(str, claim["required_cells"]))
+        assert cells <= transport_cells, (
+            f"{claim['tool']} claims stdio on a cell that does not run the "
+            f"real-stdio lane: {sorted(cells - transport_cells)}"
+        )
+    if any(
+        c.get("transport") == "stdio" for c in re_mod.claim_rows(re_mod.load_claims())
+    ):
+        assert "qualified on exactly two" in contract, (
+            "the two-cell bound must be stated, not left for the reader to infer"
+        )
+
+
+def test_the_contract_does_not_claim_flake_freedom(contract: str):
+    """§0.2 makes flake-freedom load-bearing; the gate has an observed flake."""
+    assert "does **not** claim the gate is flake-free" in contract
+    assert "install-smoke cold-spawn flake" in contract
+
+
 def test_macos_transport_is_named_as_excluded_not_covered(contract: str):
     assert "F-773" in contract
     assert "excluded" in contract.lower()

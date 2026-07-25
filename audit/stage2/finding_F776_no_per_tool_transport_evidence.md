@@ -1,6 +1,10 @@
-# F-776 — no served tool has per-tool real-transport success evidence
+# F-776 — almost no served tool has per-tool real-transport success evidence
 
-**Status: OPEN.** Opened by RELEASE-5 (W5) while generating `RELEASE_CONTRACT.md`.
+**Status: OPEN, narrowed once.** Opened by RELEASE-5 (W5) while generating
+`RELEASE_CONTRACT.md`. Narrowed the same day by PR #52
+(`tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip`),
+which qualifies `set_cookie`, `get_cookies` and `clear_cookies` — the first and,
+at this SHA, only per-tool transport evidence in the tree.
 Not a product defect: an **evidence** gap, and the reason the generated contract
 qualifies the number of tools it does.
 **Severity: HIGH for claims, none for behaviour** — nothing here says a tool is
@@ -24,14 +28,16 @@ Applied to the tree at `audit/release-integration` (`ff35ae3`):
 
 | Evidence tier that exists | Where | Why it cannot qualify a tool |
 |---|---|---|
-| the real-stdio journey | `tests/test_e2e_transport.py::test_real_stdio_release_gate_journey` — the **only** node in the `transport` lane | it is *the* representative journey (§2.1), explicitly disqualified as per-tool evidence |
-| in-process E2E | `tests/test_e2e_*.py`, 93 tools in `E2E_COVERED` | drives tools through the `.fn` seam — a `.fn`-only call cannot satisfy a transport claim |
+| the real-stdio journey | `tests/test_e2e_transport.py::test_real_stdio_release_gate_journey` | it is *the* representative journey (§2.1), explicitly disqualified as per-tool evidence |
+| in-process E2E | `tests/test_e2e_*.py`, the `E2E_COVERED` manifest | drives tools through the `.fn` seam — a `.fn`-only call cannot satisfy a transport claim |
 | in-memory client | `tests/test_mcp_protocol_surface.py` | an in-memory FastMCP client, not the wire |
-| nothing at all | `get_cookies` (the standing `E2E_EXEMPT` entry) | already a declared hard block in §2.5 |
+| **per-tool transport** | `tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip` | **this one qualifies** — `set_cookie`/`get_cookies`/`clear_cookies`, on Linux/X64 + Windows/X64 |
 
-So the honest count of tools with per-tool transport success evidence at this SHA
-is **zero**, and the `get_cookies` hard block turns out to be the visible tip of a
-general gap rather than a lone exception.
+So at this SHA exactly three of the served tools have per-tool transport success
+evidence, and the `get_cookies` hard block turned out to be the visible tip of a
+general gap rather than a lone exception: the same bar applied to every other
+tool leaves it unqualified. The cookie node is also the template for closing the
+rest — a dedicated collected node, one harness, an asserted user outcome.
 
 ## What this does NOT mean
 
@@ -46,11 +52,11 @@ general gap rather than a lone exception.
 ## What closing it requires
 
 Per-tool assertions in the `transport` lane (real launcher, real stdio, real
-Chrome) that name a user outcome and assert it — the same shape the
-`audit/release-get-cookies` lane is building for `get_cookies`. Each such node,
-once it passes on the required cells, is added to `tools/release_tool_claims.json`
-and the `release-evidence` job re-verifies it against that run's ledger; the
-contract's count then moves on its own.
+Chrome) that name a user outcome and assert it — exactly the shape PR #52
+landed for the cookie tools. Each such node, once it passes on the required
+cells, is added to `tools/release_tool_claims.json` and the `release-evidence`
+job re-verifies it against that run's ledger; the contract's count then moves on
+its own, with no prose to update.
 
 Two bounds constrain any such claim before it is written:
 

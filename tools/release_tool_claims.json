@@ -12,7 +12,32 @@
     "from `default_note` otherwise. The tool NAMES are never listed here - they are derived",
     "from SECTION_TOOLS so this file cannot drift from the registry."
   ],
-  "qualified": [],
+  "qualified": [
+    {
+      "tool": "set_cookie",
+      "outcome": "Sets a cookie the browser really holds: the value is read back over the wire and cross-checked against document.cookie, so the assertion cannot be satisfied by the tool echoing its own input.",
+      "transport": "stdio",
+      "node_id": "tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip",
+      "site_shape": "local fixture app served over a real http:// origin (tests/fixture_app)",
+      "required_cells": ["transport/Linux-X64", "transport/Windows-X64"]
+    },
+    {
+      "tool": "get_cookies",
+      "outcome": "Returns the cookie's EXACT value - asserted from both CDP retrieval paths (scoped Network.getCookies and Network.getAllCookies), against a per-run unique value, not presence, type, or count.",
+      "transport": "stdio",
+      "node_id": "tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip",
+      "site_shape": "local fixture app served over a real http:// origin (tests/fixture_app)",
+      "required_cells": ["transport/Linux-X64", "transport/Windows-X64"]
+    },
+    {
+      "tool": "clear_cookies",
+      "outcome": "Removes the cookie, proved by RE-READING it afterwards rather than by trusting the tool's own return value.",
+      "transport": "stdio",
+      "node_id": "tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip",
+      "site_shape": "local fixture app served over a real http:// origin (tests/fixture_app)",
+      "required_cells": ["transport/Linux-X64", "transport/Windows-X64"]
+    }
+  ],
   "default_note": {
     "tracking_id": "F-776",
     "user_impact": "Served over stdio and exercised by the suite, but no per-tool real-transport success assertion exists at this SHA. The behaviour a user gets through the wire is evidenced only indirectly (the representative journey) or in-process (the .fn seam), neither of which plan_RELEASE 2.5 accepts as a per-tool transport claim."
@@ -49,10 +74,6 @@
     "close_instance": {
       "tracking_id": "F-775d",
       "user_impact": "Teardown uses the verified CDP call but has no dedicated pin - it is exercised only indirectly by integration teardown, so a regression here would surface as someone else's flake."
-    },
-    "get_cookies": {
-      "tracking_id": "F-108-exemption/plan_RELEASE-2.5-hard-block",
-      "user_impact": "The ONLY tool with no successful behavioural coverage of any tier: it is the standing exemption in the E2E coverage manifest, and plan_RELEASE 2.5 forbids presenting it as qualified until a real-Chrome real-transport test sets a cookie, retrieves it, and asserts its value."
     },
     "execute_script": {
       "tracking_id": "TRUST-BOUNDARY",

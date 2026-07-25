@@ -60,6 +60,37 @@ FAILED_JUNIT = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
+def _junit_for(nodes: list[str]) -> str:
+    """A passing JUnit report for exactly these node ids.
+
+    The positive control feeds the transport cells the nodes the SHIPPED claim
+    ledger cites, so "a complete ledger aggregates clean" also proves the
+    repository's own claims are the shape the verifier accepts.
+    """
+    cases = []
+    for node in nodes:
+        file_part, _, rest = node.partition("::")
+        module = file_part[: -len(".py")].replace("/", ".")
+        *classes, name = rest.split("::")
+        classname = ".".join([module, *classes])
+        cases.append(
+            f'<testcase classname="{classname}" name="{name}" '
+            f'file="{file_part}" line="1" time="0.01" />'
+        )
+    body = "\n".join(cases)
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        f'<testsuites><testsuite name="pytest" errors="0" failures="0" '
+        f'skipped="0" tests="{len(cases)}">\n{body}\n</testsuite></testsuites>\n'
+    )
+
+
+def _shipped_claim_nodes() -> list[str]:
+    return sorted(
+        {str(row.get("node_id", "")) for row in re_mod.claim_rows(re_mod.load_claims())}
+    )
+
+
 def _runner_identity(tmp_path: Path, spec: re_mod.CellSpec) -> Path:
     path = tmp_path / f"runner-{spec.job}-{spec.cell}.json"
     path.write_text(
@@ -103,6 +134,7 @@ def _emit_cell(
     outcome: str = "success",
     release_sha: str = SHA,
     run_id: str = RUN_ID,
+    claim_nodes: bool = False,
 ) -> dict[str, object]:
     runner = _runner_identity(work, spec)
     artifacts: list[tuple[str, Path]] = [("runner-identity", runner)]
@@ -113,7 +145,15 @@ def _emit_cell(
     junit = None
     if spec.expects_pytest:
         junit = work / f"junit-{spec.job}-{spec.cell}.xml"
-        junit.write_text(junit_body, encoding="utf-8")
+        body = junit_body
+        if claim_nodes and spec.job in re_mod.TRANSPORT_JOBS:
+            # Opt-in: the transport lane is where the SHIPPED claims are
+            # evidenced. Off by default so a test that wants a run which never
+            # executed those nodes gets exactly that.
+            body = _junit_for(
+                sorted({*_shipped_claim_nodes(), "tests/test_demo.py::test_alpha"})
+            )
+        junit.write_text(body, encoding="utf-8")
         artifacts.append(("junit", junit))
     emit = re_mod.EmitSpec(
         out_root=root,
@@ -141,13 +181,44 @@ def _emit_cell(
 
 @pytest.fixture
 def ledger(tmp_path: Path) -> Path:
-    """A complete, valid ledger for every required cell."""
+    """A complete, valid ledger for every required cell.
+
+    Its transport cells execute the nodes the SHIPPED claim ledger cites, so the
+    positive control also proves the repository's own claims are verifiable in
+    the shape the aggregate demands.
+    """
     root = tmp_path / "release-evidence"
     work = tmp_path / "work"
     work.mkdir()
     for spec in re_mod.REQUIRED_CELLS:
-        _emit_cell(root, work, spec)
+        _emit_cell(root, work, spec, claim_nodes=True)
     return root
+
+
+def _no_claims(root: Path) -> Path:
+    """A claims document with zero qualified rows.
+
+    The structural tests are about the ledger, not about what the repo currently
+    claims: pointing them at the SHIPPED ledger would make every one of them fail
+    the day a real claim lands, for a reason that has nothing to do with the
+    property under test. The shipped ledger gets its own tests below.
+    """
+    path = root.parent / "no-claims.json"
+    if not path.exists():
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": re_mod.CLAIMS_SCHEMA,
+                    "note": [],
+                    "qualified": [],
+                    "default_note": {"tracking_id": "F-776", "user_impact": "x"},
+                    "served_unqualified_notes": {},
+                    "not_served": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+    return path
 
 
 def _aggregate(root: Path, **overrides: str) -> tuple[dict[str, object], list[str]]:
@@ -158,7 +229,7 @@ def _aggregate(root: Path, **overrides: str) -> tuple[dict[str, object], list[st
         run_id=overrides.get("run_id", RUN_ID),
         run_attempt=overrides.get("run_attempt", RUN_ATTEMPT),
         event=EVENT,
-        claims_path=Path(overrides.get("claims", re_mod.CLAIMS_PATH)),
+        claims_path=Path(overrides.get("claims", _no_claims(root))),
     )
     return re_mod.build_aggregate(spec)
 
@@ -611,6 +682,48 @@ def test_a_claim_whose_node_really_passed_on_its_cells_is_accepted(
     claims = _claims(tmp_path, [_claim()])
     _, problems = _aggregate(ledger, claims=str(claims))
     assert problems == []
+
+
+def test_every_shipped_claim_is_one_the_ledger_can_actually_check(tmp_path: Path):
+    """The SHIPPED claim ledger, verified against a run where its nodes passed.
+
+    The positive control for what the repository actually claims today: the
+    fixture gives the transport cells a pass for every cited node, and the
+    aggregate goes clean. It proves the rows are checkable statements rather than
+    decoration — and, with the rejection test below, that they are checked.
+
+    It does NOT assert those nodes pass in reality. Only a real run says that;
+    until one exists the ledger has no current-SHA evidence and the
+    `release-evidence` job fails closed. Deliberately so.
+    """
+    if not re_mod.claim_rows(re_mod.load_claims()):
+        pytest.skip("no qualified claims are shipped at this SHA")
+    root = tmp_path / "release-evidence"
+    work = tmp_path / "work"
+    work.mkdir()
+    for spec in re_mod.REQUIRED_CELLS:
+        _emit_cell(root, work, spec, claim_nodes=True)
+    _, problems = _aggregate(root, claims=str(re_mod.CLAIMS_PATH))
+    assert problems == [], f"a shipped claim is not verifiable: {problems}"
+
+
+def test_a_shipped_claim_fails_when_its_node_did_not_pass(tmp_path: Path):
+    """The same shipped ledger against a run that never executed those nodes.
+
+    The transport cells here report an unrelated node, so every shipped claim
+    loses its evidence at once — the exact shape of "the test was renamed,
+    deselected, or quietly dropped, and the contract kept claiming it".
+    """
+    if not re_mod.claim_rows(re_mod.load_claims()):
+        pytest.skip("no qualified claims are shipped at this SHA")
+    root = tmp_path / "release-evidence"
+    work = tmp_path / "work"
+    work.mkdir()
+    unrelated = _junit_for(["tests/test_demo.py::test_alpha"])
+    for spec in re_mod.REQUIRED_CELLS:
+        _emit_cell(root, work, spec, junit_body=unrelated)
+    _, problems = _aggregate(root, claims=str(re_mod.CLAIMS_PATH))
+    assert any("did not execute and pass" in p for p in problems)
 
 
 def test_a_claim_whose_node_never_ran_is_rejected(ledger: Path, tmp_path: Path):

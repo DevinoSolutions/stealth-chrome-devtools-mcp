@@ -37,9 +37,31 @@ import release_evidence
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONTRACT_PATH = REPO_ROOT / "RELEASE_CONTRACT.md"
 E2E_MANIFEST = REPO_ROOT / "tests" / "test_e2e_functions_hooks.py"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
+
+
+def release_version() -> str:
+    """The version this tree publishes — read, never typed.
+
+    `build-dist` fails a tagged run unless the tag equals this value, so the
+    version in `pyproject.toml` IS the release version by construction; the
+    contract regenerates itself when it is bumped.
+    """
+    for line in PYPROJECT.read_text(encoding="utf-8").splitlines():
+        if line.startswith("version = "):
+            return line.split("=", 1)[1].strip().strip('"')
+    raise ValueError(f"{PYPROJECT} has no version")
+
 
 DEFAULT_TIER = "in-process E2E (`.fn` seam) — cannot license a transport claim"
 EXEMPT_TIER = "**none** — the standing coverage-manifest exemption"
+
+
+# The evidence status every NOT-EVIDENCED row carries. One string, one home:
+# a reader must never have to wonder whether two wordings mean two things.
+UNVERIFIED = (
+    "Nothing in this release verifies it; the reader may not infer that it was checked."
+)
 
 
 @dataclass(frozen=True)
@@ -190,13 +212,53 @@ LIMITATIONS: tuple[Limitation, ...] = (
         "F-776",
         "evidence / per-tool transport coverage",
         "open (opened by W5)",
-        "No served tool has a per-tool real-transport success assertion at this "
-        "SHA. The real-stdio evidence that exists is ONE representative journey "
-        "node, which plan_RELEASE §2.5 explicitly disqualifies as per-tool "
-        "evidence; everything else is in-process (`.fn` seam) or in-memory "
-        "client. This is why the release-qualified count below is what it is.",
-        "This contract records the gap rather than papering over it. Closing it "
-        "means per-tool transport assertions, not a relabelling.",
+        "Only the cookie round-trip tools have a per-tool real-transport success "
+        "assertion. For every other served tool the strongest evidence is the "
+        "representative journey (disqualified per-tool by plan_RELEASE §2.5), "
+        "the in-process `.fn` seam, or the in-memory client — none of which may "
+        "license a transport claim. This is why the qualified count is what it "
+        "is, and it is the count's whole explanation.",
+        "The contract records the gap rather than papering over it. Closing it "
+        "means more per-tool transport assertions, not a relabelling.",
+    ),
+    Limitation(
+        "F-777",
+        "test harness / `get_cookies` through the `.fn` seam",
+        "open (test infrastructure, not a user-facing defect)",
+        "Called through the in-process `.fn` seam the E2E suite uses, both CDP "
+        "retrieval paths hang (~30s, no return) AND the tab's CDP connection is "
+        "poisoned: the NEXT call on that tab dies with a 10s timeout. Measured on "
+        "the same tool and the same Chrome that succeed over real stdio, so the "
+        "blast radius is the seam, not the product.",
+        "The user-facing path is evidenced (the qualified cookie row). No E2E "
+        "test may call `get_cookies` through the `.fn` seam; the tool's coverage "
+        "lives in the transport lane. This row exists so nobody later reads it "
+        "as either a product defect or as nothing at all.",
+    ),
+    Limitation(
+        "F-778",
+        "types / `get_cookies` return shape",
+        "open (cosmetic)",
+        "`get_cookies` is declared `-> list[dict[str, Any]]` but returns nodriver "
+        "`cdp.network.Cookie` dataclasses. The WIRE shape is correct — pydantic "
+        "serializes them into proper JSON objects in `structuredContent` — so a "
+        "client sees real cookie objects; only fastmcp's `.data` reconstruction "
+        "is opaque (`[Root()]`).",
+        "No user impact measured. Recorded so the mismatch lives somewhere "
+        "rather than nowhere.",
+    ),
+    Limitation(
+        "install-smoke cold-spawn flake",
+        "gate reliability",
+        "open, observed once",
+        "`install-smoke (sdist Linux/X64)` failed a first attempt on a Chrome "
+        "cold spawn inside the canonical journey and passed on re-run; the "
+        "`wheel Linux/X64` cell ran identical code in the same run and passed. "
+        "The harness's warmup retry did not absorb it.",
+        "This gate is therefore NOT proven flake-free. plan_RELEASE §0.2 makes "
+        "flake-freedom one of the three properties behind 'green ⇒ blindly "
+        "pushable'; W8 owns flake quarantine and has not run, so no "
+        "flake-freedom claim is made here.",
     ),
     Limitation(
         "missing interaction surface",
@@ -250,90 +312,93 @@ LIMITATIONS: tuple[Limitation, ...] = (
     ),
     Limitation(
         "W6 scheduled observation",
-        "workstream not run",
-        "not run",
+        "NOT EVIDENCED in this release",
+        "no evidence exists",
         "There is no scheduled canary, so nothing observes drift between releases.",
-        "no evidence; no claim.",
+        UNVERIFIED,
     ),
     Limitation(
         "W7 site breadth",
-        "workstream not run",
-        "not run",
+        "NOT EVIDENCED in this release",
+        "no evidence exists",
         "Deterministic dynamic-site breadth is unqualified. Specifically "
         "unsupported or unqualified: stale live handles; recursive or "
         "frame-targeted content and interaction; redirect chains and loops; "
         "typed loading-failure and truncation; downloads; MCP-network SSE/WS "
         "detail; and generic or closed shadow-root access.",
-        "no evidence; no claim.",
+        UNVERIFIED,
     ),
     Limitation(
         "W8 manual-QA parity",
-        "workstream not run",
-        "not run",
+        "NOT EVIDENCED in this release",
+        "no evidence exists",
         "MQ steps are not yet mapped to runtime evidence, so the ledger's "
         "required-MQ set is empty and the manual protocol still governs.",
-        "the ledger enforces MQ ids structurally; W8 supplies the mapping.",
+        "Nothing in this release verifies manual-QA parity, flake-freedom, or "
+        "test strength; the reader may not infer that any of them was checked. "
+        "The ledger enforces MQ ids structurally, but no mapping exists to "
+        "enforce yet.",
     ),
     Limitation(
         "W9 performance",
-        "workstream not run",
-        "not run",
+        "NOT EVIDENCED in this release",
+        "no evidence exists",
         "No latency, memory, or large-payload budget is asserted.",
-        "no evidence; no claim.",
+        UNVERIFIED,
     ),
     Limitation(
         "W10 resilience",
-        "workstream not run",
-        "not run",
+        "NOT EVIDENCED in this release",
+        "no evidence exists",
         "Crash, hang, tab-loss and network-fault recovery are unqualified.",
-        "no evidence; no claim.",
+        UNVERIFIED,
     ),
     Limitation(
         "W11 executable docs",
-        "workstream not run",
-        "not run",
+        "NOT EVIDENCED in this release",
+        "no evidence exists",
         "Documentation examples are not executed, so a doc example may be stale.",
-        "no evidence; no claim.",
+        UNVERIFIED,
     ),
     Limitation(
         "W12 security",
-        "workstream not run",
-        "not run",
+        "NOT EVIDENCED in this release",
+        "no evidence exists",
         "No filesystem, upload/export, redaction, or bind-address property is "
         "verified.",
-        "no evidence; no claim.",
+        UNVERIFIED,
     ),
     Limitation(
         "W13 wire semantics",
-        "workstream not run",
-        "not run",
+        "NOT EVIDENCED in this release",
+        "no evidence exists",
         "Concurrency, correlation, cancellation, disconnect and framing are "
         "unqualified, and no independent MCP client has driven this server in "
         "the gate.",
-        "no evidence; no claim.",
+        UNVERIFIED,
     ),
     Limitation(
         "W14 upgrade / rollback",
-        "workstream not run",
-        "not run",
+        "NOT EVIDENCED in this release",
+        "no evidence exists",
         "NO upgrade, migration, or rollback claim of any kind is made — not from "
         "the literal N-1 stable tag, not from any other version.",
-        "no evidence; no claim.",
+        UNVERIFIED,
     ),
     Limitation(
         "W15 observability",
-        "workstream not run",
-        "not run",
+        "NOT EVIDENCED in this release",
+        "no evidence exists",
         "Failure diagnostics are not verified as actionable, bounded, or redacted.",
-        "no evidence; no claim.",
+        UNVERIFIED,
     ),
     Limitation(
         "W16 state / PWA / i18n",
-        "workstream not run",
-        "not run",
+        "NOT EVIDENCED in this release",
+        "no evidence exists",
         "Workers, persistent state, PWA behaviour and Unicode/RTL round-trips "
         "are unqualified.",
-        "no evidence; no claim.",
+        UNVERIFIED,
     ),
 )
 
@@ -437,7 +502,11 @@ def _header(counts: dict[str, object]) -> str:
             "<!-- Regenerate: `uv run python tools/gen_release_contract.py "
             "--write` -->",
             "",
-            "# Release contract",
+            f"# Release contract — version {release_version()}",
+            "",
+            "This is the contract for the version recorded in `pyproject.toml` at",
+            "this commit. A tagged run fails unless the tag equals that version,",
+            "so the two cannot disagree.",
             "",
             "What a green `release-gate` check does and does not authorize. Every",
             "number below is derived: the served-tool count from the live",
@@ -447,10 +516,36 @@ def _header(counts: dict[str, object]) -> str:
             "prose document — plan, finding, or README — can qualify anything.",
             "",
             "> **At the release SHA recorded in the ledger, this gate qualifies "
-            f"{qualified} of the {served} served MCP tools.**",
-            "> That number is small on purpose: see F-776 in the limitations",
-            "> register. It is what the evidence supports, not what the suite",
-            "> touches.",
+            f"{qualified} of the {served} served MCP tools**, on the cells each",
+            "> row names.",
+            "",
+            "### Breaking change from 1.x — read this before upgrading",
+            "",
+            "Two knobs were **renamed with no back-compatible alias**:",
+            "",
+            "| 1.x | now | effect if you keep using the old one |",
+            "|---|---|---|",
+            "| `STEALTH_MCP_SESSION_STORAGE_CAP_GB` "
+            "| `STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB` "
+            "| the variable is ignored — the cap silently returns to its default |",
+            "| `--session-cap-gb` | `--browser-session-cap-gb` "
+            "| the CLI rejects the unknown flag |",
+            "",
+            "The environment variable is the dangerous one: nothing errors, your",
+            "configured storage cap simply stops applying. Rename it before you",
+            "upgrade.",
+            "",
+            "### What this contract is NOT",
+            "",
+            "plan_RELEASE reserved a specific property — *a green gate is a",
+            "faithful stand-in for a manual pass, so you may push blind* — for a",
+            "workstream that has **not run**. That property rests on three things:",
+            "manual-QA parity, proven flake-freedom, and mutation-informed test",
+            "strength. **None of the three is established here**, and one required",
+            "cell has a known flake (below). This gate is strong on what it covers:",
+            "the real stdio wire path, three OSes, the exact published artifacts,",
+            "and offline stealth invariants. It is not a substitute for a human",
+            "release pass, and this document does not authorize a blind push.",
             "",
         ]
     )
@@ -577,6 +672,13 @@ def _tool_section(counts: dict[str, object]) -> str:
         "a `.fn`-only call, the representative journey, an error-only test, an",
         "exemption, or a characterization **cannot** satisfy that bar.",
         "",
+        "A qualified row is qualified **only on the cells its claim names**, and",
+        "the ledger enforces that: a `stdio` claim must be evidenced by the",
+        "transport lane, which runs on **Linux/X64 and Windows/X64 only**. macOS",
+        "ARM64 is excluded from that lane under F-773, so no per-tool stdio claim",
+        "in this document is qualified on three cells — every one of them is",
+        "qualified on exactly two.",
+        "",
         "`served-unqualified` does not mean broken. It means: the server serves the",
         "tool, and the gate at this SHA does not prove the user-visible outcome",
         "over the transport the user uses. The 'strongest current evidence' column",
@@ -644,6 +746,13 @@ def _ceiling_section() -> str:
             "predicates passed their failing controls on all three cells — that is",
             "sensitivity, not invisibility — and F-774 records a real residual",
             "client-hint tell in the headless UA override.",
+            "",
+            "It does **not** claim the gate is flake-free. A `install-smoke (sdist",
+            "Linux/X64)` cell failed a first attempt on a Chrome cold spawn and",
+            "passed on re-run; plan_RELEASE §0.2 makes flake-freedom one of the",
+            "three properties behind 'green ⇒ blindly pushable', and the",
+            "workstream that owns flake quarantine has not run. Read a green check",
+            "as evidence about this run, not as a promise about the next one.",
             "",
             "Live public sites and detector scores are read-only informational",
             "observations. They never license a deterministic claim, and no such",
