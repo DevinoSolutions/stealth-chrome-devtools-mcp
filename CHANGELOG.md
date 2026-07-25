@@ -73,6 +73,9 @@ they only appear over the real stdio transport a client actually uses.
 - A **deterministic offline stealth suite** asserting anti-detection invariants against a
   vanilla-Chrome control, so a regression that reintroduces an automation tell fails the
   build.
+- The **source distribution shrank from 15 MB to 592 KB.** It had been shipping 12.8 MB
+  of demo media and 2.8 MB of internal audit documents. The wheel — what `pip` and `uvx`
+  actually install — is unchanged at 192 KB; this only affects installing from source.
 
 ### Known limitations
 
