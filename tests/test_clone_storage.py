@@ -123,3 +123,23 @@ class TestDelegateIdentity:
         assert clone_storage.clone_storage_cap_bytes() > 0
         assert isinstance(clone_storage.browser_session_storage_cap_bytes(), int)
         assert clone_storage.browser_session_storage_cap_bytes() > 0
+
+    def test_default_session_root_uses_os_specific_default(self, monkeypatch):
+        # plan_RELEASE W2: with NO configured root, default_session_root() falls to
+        # an OS-specific default (the os.name branch in clone_storage). Every
+        # existing caller overrides the root via env, so this branch is asserted
+        # nowhere. The three-OS gate runs this on each OS, proving both the Windows
+        # (C:\stealth-mcp-browser-sessions) and POSIX (~/.stealth-mcp-browser-
+        # sessions) defaults on the platform that produces them.
+        import os
+
+        from stealth_chrome_devtools_mcp.settings import get_settings
+
+        monkeypatch.delenv("STEALTH_MCP_BROWSER_SESSION_ROOT", raising=False)
+        get_settings.cache_clear()
+
+        root = clone_storage.default_session_root()
+        if os.name == "nt":
+            assert root == Path(r"C:\stealth-mcp-browser-sessions")
+        else:
+            assert root == Path.home() / ".stealth-mcp-browser-sessions"

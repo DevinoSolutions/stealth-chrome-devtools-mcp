@@ -56,6 +56,7 @@ import json
 import logging
 import os
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -80,6 +81,8 @@ FIXTURE_APP_DIR = Path(__file__).resolve().parent / "fixture_app"
 INIT_TIMEOUT = 60.0  # initialize handshake (answered locally by the proxy)
 LIST_TIMEOUT = 130.0  # first backend-bound call — covers backend cold start
 SPAWN_TIMEOUT = 120.0  # first real Chrome launch
+WARMUP_TIMEOUT = 150.0  # cold Chrome + master-profile bootstrap (best-effort)
+WARMUP_ATTEMPTS = 2  # the cold launch intermittently fails outright, not just slowly
 NAV_TIMEOUT = 60.0
 CALL_TIMEOUT = 45.0
 CLOSE_TIMEOUT = 45.0
@@ -97,11 +100,29 @@ _STDERR_CAP_LINES = 200
 # here). Serves tests/fixture_app plus the plan_E2E §2.2 API routes over an
 # ephemeral 127.0.0.1 port. Moved verbatim from conftest so there is one home.
 # ---------------------------------------------------------------------------
+# Diagnostics only: every request the fixture server actually served. When a
+# navigation fails there is no other way to tell "Chrome never reached the
+# server" (a network/launch problem) from "Chrome fetched the page but the load
+# never completed" (a CDP/page problem) — the two have identical symptoms at the
+# tool boundary. Bounded, and never asserted on.
+_FIXTURE_HITS: list[str] = []
+_FIXTURE_HITS_CAP = 50
+
+
 class _FixtureHandler(SimpleHTTPRequestHandler):
     """Static file server for tests/fixture_app + the plan_E2E §2.2 API routes."""
 
     def log_message(self, *args, **kwargs):
         """Silence per-request stderr logging (keeps test output clean)."""
+
+    def handle_one_request(self):
+        """Record the request line, then serve normally (stdlib override)."""
+        super().handle_one_request()
+        line = getattr(self, "raw_requestline", b"") or b""
+        if line and len(_FIXTURE_HITS) < _FIXTURE_HITS_CAP:
+            _FIXTURE_HITS.append(
+                f"{self.client_address[0]} {line.decode('latin-1').strip()}"
+            )
 
     def _send_json(self, payload, status=200, extra_headers=None):
         body = json.dumps(payload).encode("utf-8")
@@ -152,6 +173,7 @@ def serve_fixture_app():
     the lifetime; the journey below owns its own instance so it can close it in a
     ``finally``.
     """
+    _FIXTURE_HITS.clear()
     handler = functools.partial(_FixtureHandler, directory=str(FIXTURE_APP_DIR))
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -174,19 +196,24 @@ def resolve_launcher(interpreter: str | os.PathLike[str] | None = None) -> Path:
     Given a target environment's interpreter (default: this process's), derive the
     console entry point from that environment's scripts directory —
     ``Scripts/stealth-chrome-devtools-mcp.exe`` on Windows,
-    ``bin/stealth-chrome-devtools-mcp`` on POSIX — canonicalize with
-    ``Path.resolve()``, and require an absolute, existing executable inside that
+    ``bin/stealth-chrome-devtools-mcp`` on POSIX — made absolute WITHOUT following
+    symlinks (``Path.absolute()``, never ``Path.resolve()``: on POSIX a venv's
+    ``bin/python`` is a symlink to the base interpreter, so resolving it escapes
+    the venv into a scripts dir that has no entry points — exactly what the first
+    Linux/macOS CI run hit). Requires an absolute, existing executable inside that
     environment. NEVER uses a bare command, mutates PATH, invokes ``python -m`` from
     the source tree, or falls back to another checkout.
     """
-    interp = Path(interpreter) if interpreter is not None else Path(_this_executable())
-    scripts_dir = interp.resolve().parent
+    interp = Path(
+        interpreter if interpreter is not None else _this_executable()
+    ).absolute()
+    scripts_dir = interp.parent
     name = (
         "stealth-chrome-devtools-mcp.exe"
         if os.name == "nt"
         else "stealth-chrome-devtools-mcp"
     )
-    launcher = (scripts_dir / name).resolve()
+    launcher = scripts_dir / name
     if not launcher.is_absolute():
         raise ValueError(f"resolved launcher is not absolute: {launcher}")
     if not launcher.exists() or not launcher.is_file():
@@ -201,8 +228,6 @@ def resolve_launcher(interpreter: str | os.PathLike[str] | None = None) -> Path:
 
 
 def _this_executable() -> str:
-    import sys
-
     return sys.executable
 
 
@@ -240,11 +265,40 @@ def _isolated_env(
     roaming_appdata.mkdir(parents=True, exist_ok=True)
     env["LOCALAPPDATA"] = str(local_appdata)
     env["APPDATA"] = str(roaming_appdata)
+    # Same coherence rule for the macOS home: Chrome derives Application
+    # Support / Caches from HOME with no env var to point at them, so the
+    # skeleton is what makes the redirect coherent there. Created on every OS
+    # (cheap, inert off-macOS) so the isolated home has ONE shape everywhere.
+    for mac_dir in ("Application Support", "Caches", "Preferences"):
+        (home_dir / "Library" / mac_dir).mkdir(parents=True, exist_ok=True)
     # Known STEALTH_MCP_* settings fields (env has ONE home = settings.py).
     env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(session_root)
     env["STEALTH_MCP_CLONE_OUTPUT_DIR"] = str(clone_dir)
     env["STEALTH_MCP_LOG_DIR"] = str(log_dir)
     return env
+
+
+def _backend_logs(*dirs: Path) -> str:
+    """The isolated backend's own logs, for failures the exception text alone
+    cannot explain.
+
+    The journey runs the backend as a DETACHED child, so a tool failure arrives
+    as a bare protocol error — the reason (Chrome launch args, CDP stalls, the
+    orphan-recovery lines that root-caused B1) is only in the backend's log
+    files, which die with the throwaway home. Cheap on the happy path: only
+    read when the journey has already failed.
+    """
+    seen: set[Path] = set()
+    chunks: list[str] = []
+    for d in (*dirs, *(p / ".stealth-mcp" / "logs" for p in dirs)):
+        if not d.is_dir():
+            continue
+        for log in sorted(d.glob("*.log"), key=lambda p: p.stat().st_mtime)[-2:]:
+            if log in seen:
+                continue
+            seen.add(log)
+            chunks.append(f"[{log.name}]\n{_read_capped(log)}")
+    return "\n".join(chunks) if chunks else "(no backend log files found)"
 
 
 def _backend_pid_from_state(home_dir: Path) -> int | None:
@@ -510,18 +564,125 @@ async def _representative_parity(client: Client, record: dict[str, Any]) -> None
     }
 
 
+def _headless_spawn_kwargs(**extra: Any) -> dict[str, Any]:
+    """``{'headless': True}`` plus this environment's sandbox policy.
+
+    No ``--use-mock-keychain`` here, deliberately: an earlier round passed it to
+    rule out macOS keychain blocking, and the backend log showed the product's
+    own stealth filter removing it ("Stripped 1 detectable arg(s):
+    --use-mock-keychain stripped: Playwright default"). It never reached Chrome,
+    so it tested nothing — keeping it would be an inert flag that also trips a
+    stealth warning on every spawn.
+    """
+    kwargs: dict[str, Any] = {"headless": True, **extra}
+    with contextlib.suppress(Exception):
+        from e2e_helpers import sandbox_kwargs
+
+        kwargs.update(sandbox_kwargs())
+    return kwargs
+
+
+async def _cold_start_warmup(
+    client: Client, base_url: str, record: dict[str, Any]
+) -> None:
+    """Absorb the first-Chrome-launch cost BEFORE the measured journey.
+
+    The backend's first spawn into a fresh browser-session root pays for both a
+    Chrome cold start and the master-profile bootstrap that clone-on-spawn
+    needs. On the macOS CI image that cold path is slow enough to exceed
+    nodriver's internal connect patience (spawn: "Failed to connect to
+    browser") or the product's CDP deadline on the first navigate — while the
+    54 in-process integration tests pass on the same image, every one of them
+    behind :func:`e2e_helpers.warmup_once` ("the first Chrome launch on CI is
+    slow / flaky"). This is that same warmup at the wire level, for the same
+    reason and with the same best-effort contract — not a second warmup
+    convention: the journey drives a SEPARATE backend process, so it cannot
+    share the in-process one.
+
+    It warms BOTH cold paths, because they are separately expensive: the launch
+    (Chrome binary + master-profile bootstrap) and the first page LOAD (network
+    service, renderer, font cache). A spawn-only warmup left the journey's first
+    navigate still cold — which is exactly where macOS kept failing.
+
+    Bounded retry, because the cold launch is not merely slow but intermittently
+    FAILS ("Failed to connect to browser" — seen on the Linux runner defeating
+    even the in-process warmup). Retrying warmup costs nothing and asserts
+    nothing.
+
+    Best-effort by construction: the outcome is recorded and never fatal. It
+    proves nothing and is asserted on by nobody — the canonical journey below
+    remains the sole evidence and is still asserted in full.
+    """
+    warmup: dict[str, Any] = {"attempted": True, "ok": False, "attempts": 0}
+    record["cold_start_warmup"] = warmup
+    for attempt in range(1, WARMUP_ATTEMPTS + 1):
+        warmup["attempts"] = attempt
+        iid: str | None = None
+        try:
+            spawn = await _call(
+                client,
+                "spawn_browser",
+                _headless_spawn_kwargs(user_data_dir="release-gate-warmup"),
+                WARMUP_TIMEOUT,
+            )
+            iid = spawn.get("instance_id") if isinstance(spawn, dict) else None
+            if not iid:
+                continue
+            # Diagnostic probe (recorded, never asserted): "about:blank" needs no
+            # NETWORK request, so Chrome's Fetch interception — which the product
+            # enables catch-all on every spawn even with zero hooks — has nothing
+            # to pause. A real URL does. If blank succeeds where http hangs, the
+            # stall is the paused-request path, not the tab, the CDP session, or
+            # reachability. Cheap, and it turns the next red into an answer.
+            # "refused" targets a port nothing listens on: the OS answers with
+            # an immediate ECONNREFUSED, so Chrome renders an error page fast.
+            # It separates the two remaining causes, which the fixture URL alone
+            # cannot: if a REFUSED connection also hangs, the request never
+            # reached the network stack at all (the paused-Fetch path — a
+            # product bug); if it errors fast while the fixture port hangs, the
+            # network stack is fine and something is dropping that connection
+            # (a runner/environment problem).
+            for label, url in (
+                ("about_blank", "about:blank"),
+                ("refused", "http://127.0.0.1:1/"),
+                ("http", f"{base_url}/index.html"),
+            ):
+                started = time.monotonic()
+                try:
+                    await _call(
+                        client,
+                        "navigate",
+                        {"instance_id": iid, "url": url},
+                        NAV_TIMEOUT,
+                    )
+                    outcome = "ok"
+                except BaseException as exc:  # noqa: BLE001  PERMANENT(probe records the failure shape; the journey below is what actually gates)
+                    outcome = f"{type(exc).__name__}: {exc}"
+                warmup.setdefault("nav_probe", {})[label] = {
+                    "outcome": outcome,
+                    "seconds": round(time.monotonic() - started, 1),
+                }
+            warmup["ok"] = True
+            warmup.pop("error", None)
+            return
+        except BaseException as exc:  # noqa: BLE001  PERMANENT(warmup is best-effort: record the reason, never fail the gate on it)
+            warmup["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            if iid:
+                with contextlib.suppress(Exception):
+                    await _call(
+                        client, "close_instance", {"instance_id": iid}, CLOSE_TIMEOUT
+                    )
+
+
 async def _canonical_journey(
     client: Client, base_url: str, record: dict[str, Any]
 ) -> None:
     """spawn → navigate → tabs → interact → assert oracle+ground truth →
     structural extraction → PNG screenshot → close, all via ``tools/call``."""
-    spawn_kwargs: dict[str, Any] = {"headless": True}
-    with contextlib.suppress(Exception):
-        from e2e_helpers import sandbox_kwargs
-
-        spawn_kwargs.update(sandbox_kwargs())
-
-    spawn = await _call(client, "spawn_browser", spawn_kwargs, SPAWN_TIMEOUT)
+    spawn = await _call(
+        client, "spawn_browser", _headless_spawn_kwargs(), SPAWN_TIMEOUT
+    )
     assert isinstance(spawn, dict) and spawn.get("instance_id"), spawn
     iid = spawn["instance_id"]
     journey: dict[str, Any] = {"instance_id": iid, "spawn_state": spawn.get("state")}
@@ -692,6 +853,7 @@ async def run_release_gate_journey(
                     async with Client(transport, init_timeout=INIT_TIMEOUT) as client:
                         await _foundation_proof(client, record)
                         await _representative_parity(client, record)
+                        await _cold_start_warmup(client, base_url, record)
                         await _canonical_journey(client, base_url, record)
                 except BaseException as exc:  # noqa: BLE001  PERMANENT(augment with child stderr + boot log, then re-raise)
                     err = exc
@@ -716,6 +878,10 @@ async def run_release_gate_journey(
         raise RuntimeError(
             "release-gate journey failed: "
             f"{type(err).__name__}: {err}\n"
+            f"--- warmup / nav probe ---\n{json.dumps(record.get('cold_start_warmup'))}\n"
+            f"--- fixture server hits ({len(_FIXTURE_HITS)}) ---\n"
+            f"{chr(10).join(_FIXTURE_HITS) or '(the fixture server served NOTHING)'}\n"
+            f"--- backend logs (capped) ---\n{_backend_logs(log_dir, home_dir)}\n"
             f"--- child stderr (capped) ---\n{child_stderr}\n"
             f"--- backend boot log (capped) ---\n{boot_log}"
         ) from err

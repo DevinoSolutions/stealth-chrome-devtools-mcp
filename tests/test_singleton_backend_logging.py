@@ -76,6 +76,29 @@ class TestBootLogRedirect:
         assert kwargs["stdout"] != subprocess.DEVNULL
         assert kwargs["stderr"] != subprocess.DEVNULL
 
+    def test_detach_flags_match_the_running_os(self, isolated_state, monkeypatch):
+        # plan_RELEASE W2: the backend is DETACHED from the parent so it outlives
+        # the stdio proxy. That is an OS-branch (Windows creationflags vs POSIX
+        # start_new_session) asserted nowhere else. The three-OS gate runs this on
+        # each OS, so both branches are proven on the platform that ships them.
+        fake_proc = MagicMock()
+        fake_proc.pid = 4242
+        popen_mock = MagicMock(return_value=fake_proc)
+        monkeypatch.setattr(singleton.subprocess, "Popen", popen_mock)
+        monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+
+        singleton._start_server_process(4321)
+
+        _, kwargs = popen_mock.call_args
+        if sys.platform == "win32":
+            assert kwargs["creationflags"] == (
+                subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+            assert "start_new_session" not in kwargs
+        else:
+            assert kwargs["start_new_session"] is True
+            assert "creationflags" not in kwargs
+
     def test_boot_log_path_under_resolved_log_dir(self, isolated_state, monkeypatch):
         fake_proc = MagicMock()
         fake_proc.pid = 4242
