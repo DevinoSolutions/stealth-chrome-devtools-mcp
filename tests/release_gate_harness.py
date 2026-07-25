@@ -72,6 +72,11 @@ from fastmcp.client.transports import StdioTransport
 _log = logging.getLogger("release_gate_harness")
 
 # ── Contract constants ──────────────────────────────────────────────────────
+# How far `run_release_gate_journey` runs. ONE journey, two declared extents —
+# never two journeys. See that function's docstring for what each one claims.
+FULL_JOURNEY = "full"
+HANDSHAKE_ONLY = "handshake"
+
 SERVER_NAME = "stealth-chrome-devtools-mcp"
 REGISTRY_TOOL_COUNT = 94  # remediation baseline (CLAUDE.md: derived == 94)
 RESULT_SCHEMA_VERSION = 1
@@ -865,13 +870,35 @@ async def run_release_gate_journey(
     launcher: str | os.PathLike[str],
     work_dir: str | os.PathLike[str],
     singleton_port: int | None = None,
+    stages: str = FULL_JOURNEY,
 ) -> dict[str, Any]:
     """Drive the canonical real-stdio journey against ``launcher`` and return a
     versioned, JSON-serializable result record (consumed unchanged by W3).
 
     ``work_dir`` is a throwaway directory (e.g. pytest ``tmp_path``) used for the
     isolated HOME (singleton state), session root, clone output, and logs.
+
+    ``stages`` selects how far the ONE journey runs — it never selects a
+    different journey:
+
+    ``"full"`` (default)
+        everything: handshake, registry, parity, cold-start warmup, and the
+        navigating canonical journey. This is what W1's transport test and
+        every non-macOS W3 smoke cell run.
+    ``"handshake"``
+        stops after the non-navigating prefix (initialize → ``tools/list`` →
+        ``list_instances`` → the representative parity call). W3 uses it for
+        the macOS/ARM64 install-smoke cells ONLY, because F-773 makes any
+        navigation through the detached backend hang on hosted macOS runners.
+        It is a genuinely reduced claim — "this artifact installs and serves"
+        — and the result record says so in ``stages`` so no consumer can read
+        it as the full journey. Not an xfail: nothing failing is being marked
+        as expected-to-fail; a smaller thing is being run and labelled.
     """
+    if stages not in (FULL_JOURNEY, HANDSHAKE_ONLY):
+        raise ValueError(
+            f"stages must be {FULL_JOURNEY!r} or {HANDSHAKE_ONLY!r}, got {stages!r}"
+        )
     launcher = Path(launcher)
     work_dir = Path(work_dir)
     home_dir = work_dir / "home"
@@ -891,6 +918,8 @@ async def run_release_gate_journey(
 
     record: dict[str, Any] = {
         "schema_version": RESULT_SCHEMA_VERSION,
+        "stages": stages,
+        "navigation_verified": stages == FULL_JOURNEY,
         "transport": "stdio",
         "launcher": str(launcher.resolve()),
         "singleton_port": port,
@@ -921,8 +950,9 @@ async def run_release_gate_journey(
                     async with Client(transport, init_timeout=INIT_TIMEOUT) as client:
                         await _foundation_proof(client, record)
                         await _representative_parity(client, record)
-                        await _cold_start_warmup(client, base_url, log_dir, record)
-                        await _canonical_journey(client, base_url, record)
+                        if stages == FULL_JOURNEY:
+                            await _cold_start_warmup(client, base_url, log_dir, record)
+                            await _canonical_journey(client, base_url, record)
                 except BaseException as exc:  # noqa: BLE001  PERMANENT(augment with child stderr + boot log, then re-raise)
                     err = exc
             child_stderr = cap["text"]

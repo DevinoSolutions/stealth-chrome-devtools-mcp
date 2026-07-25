@@ -62,6 +62,11 @@ test = [
     "pytest-asyncio>=0.23",
     "pytest-timeout>=2.3",
     "pytest-cov>=5.0",
+    # plan_RELEASE W3: tests/test_release_workflows.py parses the workflow YAML
+    # to pin the release topology (publish never rebuilds; the aggregate never
+    # forgets an edge). Test-only; already present transitively via
+    # uvicorn[standard], declared here so the pin cannot vanish silently.
+    "pyyaml>=6.0",
 ]
 dev = [
     "ruff==0.15.20",
