@@ -60,6 +60,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -72,10 +73,13 @@ from fastmcp.client.transports import StdioTransport
 _log = logging.getLogger("release_gate_harness")
 
 # ── Contract constants ──────────────────────────────────────────────────────
-# How far `run_release_gate_journey` runs. ONE journey, two declared extents —
-# never two journeys. See that function's docstring for what each one claims.
+# Which declared segment of the ONE gate mechanism `run_release_gate_journey`
+# runs. These are extents/segments, never duplicated machinery: every value
+# below shares the same launcher resolution, isolated env, fixture app, stdio
+# client, and teardown. See that function's docstring for what each claims.
 FULL_JOURNEY = "full"
 HANDSHAKE_ONLY = "handshake"
+COOKIE_ROUND_TRIP = "cookies"
 
 SERVER_NAME = "stealth-chrome-devtools-mcp"
 REGISTRY_TOOL_COUNT = 94  # remediation baseline (CLAUDE.md: derived == 94)
@@ -748,6 +752,128 @@ async def _cold_start_warmup(
                     )
 
 
+async def _cookie_round_trip(
+    client: Client, iid: str, page_url: str, journey: dict[str, Any]
+) -> None:
+    """plan_RELEASE W5 — the real success path for ``get_cookies``.
+
+    W5's ``get_cookies`` hard block (§2.5) requires a real Chrome + real
+    transport test that **sets a cookie, retrieves it, and asserts its value**;
+    a schema check, a mock, a missing-instance error, or a characterization
+    explicitly cannot satisfy it. This does the full round trip through
+    ``tools/call`` only:
+
+    ``set_cookie`` → ``get_cookies(urls=[page_url])`` → **assert the value** →
+    ``get_cookies()`` (the no-argument default, a different CDP call) →
+    ``document.cookie`` cross-check → ``clear_cookies`` → assert it is gone.
+
+    The value is unique per run, so a stale cookie from an earlier run in a
+    reused profile cannot forge the assertion, and the ``document.cookie``
+    cross-check proves the cookie really reached the browser rather than
+    ``get_cookies`` merely echoing what ``set_cookie`` was handed.
+
+    ``get_cookies`` is declared ``-> list[dict[str, Any]]`` but returns nodriver
+    ``cdp.network.Cookie`` **dataclasses**. pydantic serializes those to correct
+    JSON objects, so ``structuredContent`` — what ``_call`` returns, and what a
+    user's client receives — is a list of cookie dicts. Asserting through
+    fastmcp's ``result.data`` instead would see an opaque ``[Root()]``; that is
+    a property of the reconstruction, not a product defect.
+    """
+    name = "release_gate_cookie"
+    value = f"w5-{uuid.uuid4().hex}"
+    cookies: dict[str, Any] = {"name": name, "value": value}
+    journey["cookies"] = cookies
+
+    assert await _call(
+        client,
+        "set_cookie",
+        {"instance_id": iid, "name": name, "value": value, "url": page_url},
+        CALL_TIMEOUT,
+    ), "set_cookie did not report success"
+
+    # Retrieval #1 — scoped to the page URL (CDP Network.getCookies).
+    scoped = await _call(
+        client, "get_cookies", {"instance_id": iid, "urls": [page_url]}, CALL_TIMEOUT
+    )
+    assert isinstance(scoped, list) and scoped, (
+        f"get_cookies(urls=…) returned {scoped!r}"
+    )
+    assert all(isinstance(c, dict) for c in scoped), (
+        f"get_cookies did not serialize to dicts: {[type(c).__name__ for c in scoped]}"
+    )
+    scoped_hit = next((c for c in scoped if c.get("name") == name), None)
+    assert scoped_hit is not None, f"{name!r} absent from get_cookies(urls=…): {scoped}"
+    # THE assertion W5's hard block turns on.
+    assert scoped_hit.get("value") == value, (scoped_hit.get("value"), value)
+    cookies["scoped_value"] = scoped_hit["value"]
+    cookies["scoped_count"] = len(scoped)
+    cookies["field_names"] = sorted(scoped_hit)
+
+    # Retrieval #2 — the no-argument default (CDP Network.getAllCookies).
+    every = await _call(client, "get_cookies", {"instance_id": iid}, CALL_TIMEOUT)
+    assert isinstance(every, list), f"get_cookies() returned {every!r}"
+    all_hit = next(
+        (c for c in every if isinstance(c, dict) and c.get("name") == name), None
+    )
+    assert all_hit is not None, f"{name!r} absent from get_cookies(): {every}"
+    assert all_hit.get("value") == value, (all_hit.get("value"), value)
+    cookies["all_value"] = all_hit["value"]
+
+    # Ground truth: the cookie is really in the browser, not just in our reply.
+    document_cookie = await _eval(client, iid, "document.cookie")
+    assert f"{name}={value}" in str(document_cookie), document_cookie
+    cookies["document_cookie_confirms"] = True
+
+    # clear_cookies is part of the same real path — prove removal by re-reading,
+    # not by trusting its return value.
+    assert await _call(
+        client, "clear_cookies", {"instance_id": iid, "url": page_url}, CALL_TIMEOUT
+    ), "clear_cookies did not report success"
+    after = await _call(
+        client, "get_cookies", {"instance_id": iid, "urls": [page_url]}, CALL_TIMEOUT
+    )
+    assert isinstance(after, list), after
+    assert not any(isinstance(c, dict) and c.get("name") == name for c in after), (
+        f"{name!r} survived clear_cookies: {after}"
+    )
+    cookies["cleared"] = True
+
+
+async def _cookie_journey(
+    client: Client, base_url: str, record: dict[str, Any]
+) -> None:
+    """W5's segment: spawn → navigate → cookie round trip → close.
+
+    Deliberately minimal — everything here exists to make the cookie assertions
+    meaningful, so a failure reads as a cookie failure rather than as "the
+    journey" failing. A real page (not ``about:blank``) is required because
+    cookies need a real http:// origin, and the fixture app is that origin.
+    """
+    spawn = await _call(
+        client, "spawn_browser", _headless_spawn_kwargs(), SPAWN_TIMEOUT
+    )
+    assert isinstance(spawn, dict) and spawn.get("instance_id"), spawn
+    iid = spawn["instance_id"]
+    journey: dict[str, Any] = {"instance_id": iid}
+    record["journey"] = journey
+    try:
+        url = f"{base_url}/interact.html"
+        await _call(client, "navigate", {"instance_id": iid, "url": url}, NAV_TIMEOUT)
+        journey["navigated_url"] = url
+        await _settle_dom(client, iid)
+
+        await _cookie_round_trip(client, iid, url, journey)
+    finally:
+        await _call(
+            client,
+            "close_instance",
+            {"instance_id": iid},
+            CLOSE_TIMEOUT,
+            raise_on_error=False,
+            allow_fail=True,
+        )
+
+
 async def _canonical_journey(
     client: Client, base_url: str, record: dict[str, Any]
 ) -> None:
@@ -878,8 +1004,9 @@ async def run_release_gate_journey(
     ``work_dir`` is a throwaway directory (e.g. pytest ``tmp_path``) used for the
     isolated HOME (singleton state), session root, clone output, and logs.
 
-    ``stages`` selects how far the ONE journey runs — it never selects a
-    different journey:
+    ``stages`` selects which declared segment runs on top of the ONE shared
+    mechanism (launcher resolution, isolated env, fixture app, stdio client,
+    teardown). It never duplicates that machinery:
 
     ``"full"`` (default)
         everything: handshake, registry, parity, cold-start warmup, and the
@@ -894,11 +1021,19 @@ async def run_release_gate_journey(
         — and the result record says so in ``stages`` so no consumer can read
         it as the full journey. Not an xfail: nothing failing is being marked
         as expected-to-fail; a smaller thing is being run and labelled.
+    ``"cookies"``
+        the prefix plus warmup, then the focused ``set_cookie`` →
+        ``get_cookies`` → ``clear_cookies`` round trip (``_cookie_journey``)
+        instead of the canonical journey. plan_RELEASE §2.5 rules that a
+        *representative journey* cannot carry a per-tool success claim, so W5's
+        ``get_cookies`` evidence needs its own collected node
+        (``tests/test_e2e_transport_cookies.py``); this segment is what that
+        node drives. It navigates, so ``navigation_verified`` is true, but it
+        makes no canonical-journey claim.
     """
-    if stages not in (FULL_JOURNEY, HANDSHAKE_ONLY):
-        raise ValueError(
-            f"stages must be {FULL_JOURNEY!r} or {HANDSHAKE_ONLY!r}, got {stages!r}"
-        )
+    valid_stages = (FULL_JOURNEY, HANDSHAKE_ONLY, COOKIE_ROUND_TRIP)
+    if stages not in valid_stages:
+        raise ValueError(f"stages must be one of {valid_stages!r}, got {stages!r}")
     launcher = Path(launcher)
     work_dir = Path(work_dir)
     home_dir = work_dir / "home"
@@ -919,7 +1054,7 @@ async def run_release_gate_journey(
     record: dict[str, Any] = {
         "schema_version": RESULT_SCHEMA_VERSION,
         "stages": stages,
-        "navigation_verified": stages == FULL_JOURNEY,
+        "navigation_verified": stages in (FULL_JOURNEY, COOKIE_ROUND_TRIP),
         "transport": "stdio",
         "launcher": str(launcher.resolve()),
         "singleton_port": port,
@@ -950,9 +1085,12 @@ async def run_release_gate_journey(
                     async with Client(transport, init_timeout=INIT_TIMEOUT) as client:
                         await _foundation_proof(client, record)
                         await _representative_parity(client, record)
-                        if stages == FULL_JOURNEY:
+                        if stages in (FULL_JOURNEY, COOKIE_ROUND_TRIP):
                             await _cold_start_warmup(client, base_url, log_dir, record)
+                        if stages == FULL_JOURNEY:
                             await _canonical_journey(client, base_url, record)
+                        elif stages == COOKIE_ROUND_TRIP:
+                            await _cookie_journey(client, base_url, record)
                 except BaseException as exc:  # noqa: BLE001  PERMANENT(augment with child stderr + boot log, then re-raise)
                     err = exc
             child_stderr = cap["text"]
