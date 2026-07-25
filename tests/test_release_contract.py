@@ -193,7 +193,11 @@ def test_a_tool_with_no_execution_evidence_is_called_out_separately(contract: st
 def test_the_contract_does_not_claim_flake_freedom(contract: str):
     """§0.2 makes flake-freedom load-bearing; the gate has an observed flake."""
     assert "does **not** claim the gate is flake-free" in contract
-    assert "install-smoke cold-spawn flake" in contract
+    assert "Linux cold-spawn flake" in contract
+    # The flake has hit a cell a qualified claim depends on; saying so is the
+    # whole point of the row. A future edit that softens it back to a
+    # cosmetic-cell-only story must fail here.
+    assert "transport (Linux/X64)" in contract
 
 
 def test_macos_transport_is_named_as_excluded_not_covered(contract: str):

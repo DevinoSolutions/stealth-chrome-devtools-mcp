@@ -252,14 +252,20 @@ LIMITATIONS: tuple[Limitation, ...] = (
         "audit/stage2/finding_F778_get_cookies_return_type_mismatch.md.",
     ),
     Limitation(
-        "install-smoke cold-spawn flake",
+        "Linux cold-spawn flake",
         "gate reliability",
-        "open, observed once",
-        "`install-smoke (sdist Linux/X64)` failed a first attempt on a Chrome "
-        "cold spawn inside the canonical journey and passed on re-run; the "
-        "`wheel Linux/X64` cell ran identical code in the same run and passed. "
-        "The harness's warmup retry did not absorb it.",
-        "This gate is therefore NOT proven flake-free. plan_RELEASE §0.2 makes "
+        "open, observed repeatedly",
+        "Chrome intermittently refuses the first connect on the Linux runner "
+        "(`Failed to connect to browser`) inside the canonical journey, and the "
+        "harness's bounded warmup retry does not always absorb it. Observed in "
+        "`install-smoke (sdist Linux/X64)`, and later in the SAME run in both "
+        "`transport (Linux/X64)` and `install-smoke (wheel Linux/X64)` — while "
+        "`transport (Windows/X64)` and every other cell passed, and the "
+        "cookie test in the very same Linux transport job spawned Chrome "
+        "successfully seconds later. It is a cold-start race, not a code defect, "
+        "and it lands on a cell that carries a qualified claim.",
+        "This gate is therefore NOT proven flake-free, and the flake can hit a "
+        "cell whose evidence a claim depends on. plan_RELEASE §0.2 makes "
         "flake-freedom one of the three properties behind 'green ⇒ blindly "
         "pushable'; W8 owns flake quarantine and has not run, so no "
         "flake-freedom claim is made here.",
@@ -769,12 +775,21 @@ def _ceiling_section() -> str:
             "sensitivity, not invisibility — and F-774 records a real residual",
             "client-hint tell in the headless UA override.",
             "",
-            "It does **not** claim the gate is flake-free. A `install-smoke (sdist",
-            "Linux/X64)` cell failed a first attempt on a Chrome cold spawn and",
-            "passed on re-run; plan_RELEASE §0.2 makes flake-freedom one of the",
-            "three properties behind 'green ⇒ blindly pushable', and the",
-            "workstream that owns flake quarantine has not run. Read a green check",
-            "as evidence about this run, not as a promise about the next one.",
+            "It does **not** claim the gate is flake-free. A Chrome cold-spawn",
+            "race on the Linux runner has failed first attempts in three",
+            "different cells, including `transport (Linux/X64)` — one of the two",
+            "cells that carry the qualified stdio claims. plan_RELEASE §0.2 makes",
+            "flake-freedom one of the three properties behind 'green ⇒ blindly",
+            "pushable', and the workstream that owns flake quarantine has not",
+            "run. Read a green check as evidence about this run, not as a promise",
+            "about the next one.",
+            "",
+            "A green check is also evidence about ONE run attempt. The evidence",
+            "ledger binds every cell record to a single `run_id` + `run_attempt`,",
+            "so re-running only the failed jobs cannot produce a certificate —",
+            "the surviving records belong to the earlier attempt and are refused.",
+            "Re-run the whole workflow, or the gate stays red on identity, not on",
+            "the retried failure.",
             "",
             "Live public sites and detector scores are read-only informational",
             "observations. They never license a deterministic claim, and no such",
