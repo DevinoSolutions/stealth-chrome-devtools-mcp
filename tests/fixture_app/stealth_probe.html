@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>stealth-probe</title>
+</head>
+<body>
+<h1 id="probe-title">stealth-probe (armed)</h1>
+<!--
+  plan_RELEASE W4 -- passive stealth-signal collector.
+
+  This page is NOT its own judge: it collects RAW observations only and does no
+  pass/fail evaluation. The predicates live in tests/test_stealth.py. The page is
+  ARMED: it collects NOTHING until the test explicitly calls
+  window.__STEALTH_PROBE_START__() (a "released" state). This proves the observed
+  values come from real released CDP activity, not from a pristine idle page.
+
+  On release it publishes exactly ONE window.__STEALTH_PROBE_RESULT__ object with a
+  closed schema { schema_version, started_ms, finished_ms, complete, observations }
+  (monotonic performance.now() timestamps) and dispatches ONE 'stealth-probe-complete'
+  event. A second release call is a no-op (no duplicate result, no second event).
+-->
+<script>
+(function () {
+  "use strict";
+
+  var SCHEMA_VERSION = 1;
+
+  // Self-observed completion counter -- the test asserts exactly one dispatch.
+  window.__STEALTH_PROBE_EVENT_COUNT__ = 0;
+  window.addEventListener("stealth-probe-complete", function () {
+    window.__STEALTH_PROBE_EVENT_COUNT__ += 1;
+  });
+
+  // Exhaustive automation-leak global name policy (exact names + known prefixes).
+  // A real browser exposes NONE of these on window/document.
+  var LEAK_PREFIXES = [
+    "cdc_", "$cdc", "$chrome_asyncScriptInfo", "__$webdriverAsyncExecutor",
+    "__webdriver", "__driver_", "__driver_evaluate", "__webdriver_evaluate",
+    "__selenium_", "__fxdriver_", "__lastWatirAlert", "__lastWatirConfirm",
+    "__lastWatirPrompt", "_Selenium_IDE_Recorder", "_selenium", "calledSelenium",
+    "domAutomation", "domAutomationController", "__nightmare", "_phantom",
+    "callPhantom", "__phantomas", "webdriver", "__webdriverFunc",
+    "__driver_unwrapped", "__webdriver_script_fn", "__$webdriverAsyncExecutor",
+    "$wdc_"
+  ];
+
+  function scanLeakGlobals(target) {
+    var found = [];
+    var names;
+    try { names = Object.getOwnPropertyNames(target); } catch (e) { return found; }
+    for (var i = 0; i < names.length; i++) {
+      var n = names[i];
+      var low = String(n).toLowerCase();
+      for (var j = 0; j < LEAK_PREFIXES.length; j++) {
+        var p = LEAK_PREFIXES[j].toLowerCase();
+        if (low === p || low.indexOf(p) === 0) { found.push(n); break; }
+      }
+    }
+    return found;
+  }
+
+  function webglInfo() {
+    var out = { vendor: null, renderer: null, error: null };
+    try {
+      var c = document.createElement("canvas");
+      var gl = c.getContext("webgl") || c.getContext("experimental-webgl");
+      if (!gl) { out.error = "no-webgl-context"; return out; }
+      var dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      if (dbg) {
+        out.vendor = gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL);
+        out.renderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+      } else {
+        out.error = "no-debug-renderer-info";
+      }
+    } catch (e) { out.error = String(e); }
+    return out;
+  }
+
+  async function collect() {
+    var obs = {};
+
+    // navigator.webdriver -- THE core automation tell.
+    obs.webdriver = navigator.webdriver;
+    obs.webdriver_typeof = typeof navigator.webdriver;
+
+    // window.chrome required-member presence.
+    obs.window_chrome_present = (typeof window.chrome === "object" && window.chrome !== null);
+    obs.window_chrome_members = obs.window_chrome_present
+      ? Object.keys(window.chrome).sort() : [];
+
+    // plugins / mimeTypes (empty is a classic headless tell).
+    obs.plugins_count = navigator.plugins ? navigator.plugins.length : 0;
+    obs.mime_types_count = navigator.mimeTypes ? navigator.mimeTypes.length : 0;
+
+    // languages.
+    obs.languages = navigator.languages ? Array.prototype.slice.call(navigator.languages) : [];
+    obs.language = navigator.language || "";
+
+    // Notification.permission vs Permissions API (the denied/prompt mismatch leak).
+    obs.notification_permission = (typeof Notification !== "undefined")
+      ? Notification.permission : "NO_NOTIFICATION";
+    try {
+      var st = await navigator.permissions.query({ name: "notifications" });
+      obs.permissions_query_notifications = st.state;
+    } catch (e) {
+      obs.permissions_query_notifications = "ERROR:" + String(e);
+    }
+
+    // UA / platform / client hints.
+    obs.user_agent = navigator.userAgent || "";
+    obs.platform = navigator.platform || "";
+    var uad = navigator.userAgentData;
+    obs.ua_client_hints_present = !!uad;
+    obs.ua_client_hints_brands = uad && uad.brands
+      ? uad.brands.map(function (b) { return b.brand; }) : [];
+    obs.ua_client_hints_mobile = uad ? !!uad.mobile : null;
+    obs.ua_client_hints_platform = uad ? (uad.platform || "") : "";
+
+    // F-770 vector V3 -- the UA client-hint high-entropy values. These are built
+    // from Chrome's own version info and are NOT affected by --user-agent=, so
+    // they are measured separately from navigator.userAgent (V1).
+    obs.ua_client_hints_high_entropy = null;
+    if (uad && typeof uad.getHighEntropyValues === "function") {
+      try {
+        obs.ua_client_hints_high_entropy = await uad.getHighEntropyValues([
+          "brands", "fullVersionList", "uaFullVersion", "platform",
+          "platformVersion", "architecture", "bitness", "model"
+        ]);
+      } catch (e) {
+        obs.ua_client_hints_high_entropy = "ERROR:" + String(e);
+      }
+    }
+
+    // F-770 vector V2 -- the HTTP User-Agent request header the SERVER actually
+    // received. A page cannot read its own request headers, so the probe issues
+    // one same-origin POST to the fixture app's /api/echo route, which reflects
+    // back the headers it read off the wire. This is the vector a server-side bot
+    // check reads first, and a page-level assertion alone can never prove it.
+    obs.http_request_headers = null;
+    obs.http_user_agent = null;
+    try {
+      var echoResp = await fetch("/api/echo", { method: "POST", body: "stealth-probe" });
+      var echoed = await echoResp.json();
+      obs.http_request_headers = (echoed && echoed.headers) ? echoed.headers : null;
+      obs.http_user_agent = obs.http_request_headers
+        ? (obs.http_request_headers["user-agent"] || "") : null;
+    } catch (e) {
+      obs.http_request_headers = "ERROR:" + String(e);
+      obs.http_user_agent = "ERROR:" + String(e);
+    }
+
+    // Patched-builtin detection: native functions must serialize as native code,
+    // and Function.prototype.toString itself must be native (a common patch hides
+    // the patching by re-patching toString).
+    obs.fn_tostring_alert = window.alert.toString();
+    obs.fn_tostring_meta = Function.prototype.toString.toString();
+
+    // Automation-revealing globals (exhaustive prefix/name policy).
+    obs.automation_globals_window = scanLeakGlobals(window);
+    obs.automation_globals_document = scanLeakGlobals(document);
+
+    // Window outer dimensions (0x0 is a headless tell).
+    obs.outer_width = window.outerWidth;
+    obs.outer_height = window.outerHeight;
+    obs.inner_width = window.innerWidth;
+    obs.inner_height = window.innerHeight;
+    obs.is_secure_context = window.isSecureContext;
+
+    // Informational (env-dependent -- NOT gated by the predicate table).
+    var wg = webglInfo();
+    obs.webgl_vendor = wg.vendor;
+    obs.webgl_renderer = wg.renderer;
+    obs.webgl_error = wg.error;
+    obs.hardware_concurrency = navigator.hardwareConcurrency;
+    obs.device_memory = ("deviceMemory" in navigator) ? navigator.deviceMemory : null;
+    obs.max_touch_points = navigator.maxTouchPoints;
+
+    return obs;
+  }
+
+  // Armed release entry point. Idempotent: a second call returns the same result
+  // and does NOT re-dispatch (no duplicate publication).
+  window.__STEALTH_PROBE_START__ = async function () {
+    if (window.__STEALTH_PROBE_RESULT__ && window.__STEALTH_PROBE_RESULT__.complete) {
+      return window.__STEALTH_PROBE_RESULT__;
+    }
+    var started = performance.now();
+    var observations = await collect();
+    var finished = performance.now();
+    var result = {
+      schema_version: SCHEMA_VERSION,
+      started_ms: started,
+      finished_ms: finished,
+      complete: true,
+      observations: observations
+    };
+    window.__STEALTH_PROBE_RESULT__ = result;
+    var title = document.getElementById("probe-title");
+    if (title) { title.textContent = "stealth-probe (released)"; }
+    window.dispatchEvent(new Event("stealth-probe-complete"));
+    return result;
+  };
+})();
+</script>
+</body>
+</html>
