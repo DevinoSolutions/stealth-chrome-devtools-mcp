@@ -455,6 +455,11 @@ async def _collect_probe(base_url: str, *, control: bool) -> dict:
                 cmdline = []
         binary = check_browser_executable()
 
+        # F-770 vector V4 -- the CDP-level User-Agent (Browser.getVersion). Not a
+        # page observation, so it is collected here alongside the process evidence.
+        version = await tab.send(uc.cdp.browser.get_version())
+        cdp_user_agent = version[3] if version and len(version) > 3 else None
+
         return {
             "result": result,
             "observations": result.get("observations", {}),
@@ -463,6 +468,7 @@ async def _collect_probe(base_url: str, *, control: bool) -> dict:
             "event_count": event_count,
             "cmdline": cmdline,
             "binary": binary,
+            "cdp_user_agent": cdp_user_agent,
             "headless": True,
         }
     finally:
@@ -600,6 +606,67 @@ def _chrome_version_from_ua(ua: str) -> str | None:
     return m.group(1) if m else None
 
 
+# ===========================================================================
+# F-770 — the four User-Agent leak vectors (plan_RELEASE_FIX_D D0).
+#
+# "the UA leaks" is not precise enough to fix: a pre-launch ``--user-agent=``
+# flag and a post-launch ``Emulation.setUserAgentOverride`` cover DIFFERENT
+# subsets of the surface, so each vector is measured separately on every OS cell
+# BEFORE a masking mechanism is chosen. (RELEASE-FIX-C shipped on a strongly
+# evidenced but unmeasured hypothesis and was wrong; D0 exists so FIX-D cannot
+# repeat that.)
+#
+#   V1  navigator.userAgent                       page
+#   V2  the HTTP ``User-Agent`` request header    wire — what the fixture server
+#       the fixture server actually received           READ, not what the page says
+#   V3  navigator.userAgentData brands +          page — built from Chrome's own
+#       getHighEntropyValues()                         version info
+#   V4  Browser.getVersion() -> userAgent         CDP
+#
+# The table is a MEASUREMENT, not a judgement: :func:`f770_vector_readings`
+# records each vector's raw value and whether it contains the ``HeadlessChrome``
+# token. The gating verdict lives in :data:`GATE_SIGNALS`.
+# ===========================================================================
+F770_VECTORS: tuple[str, ...] = (
+    "V1_navigator_user_agent",
+    "V2_http_request_header",
+    "V3_ua_client_hints",
+    "V4_cdp_browser_get_version",
+)
+
+_HEADLESS_TOKEN = "headlesschrome"
+
+
+def _leaks_headless(value: object) -> bool:
+    """True when the serialized reading contains the ``HeadlessChrome`` token."""
+    return _HEADLESS_TOKEN in json.dumps(value, default=str).lower()
+
+
+def f770_vector_readings(probe: dict) -> dict[str, dict]:
+    """Measure the four F-770 UA vectors on one collected probe.
+
+    Returns ``{vector: {"value": <raw reading>, "leaks": bool}}``. Pure — it
+    judges nothing beyond "does this reading contain the token".
+    """
+    obs = probe["observations"]
+    readings: dict[str, object] = {
+        "V1_navigator_user_agent": obs.get("user_agent"),
+        "V2_http_request_header": obs.get("http_user_agent"),
+        "V3_ua_client_hints": {
+            "brands": obs.get("ua_client_hints_brands"),
+            "high_entropy": obs.get("ua_client_hints_high_entropy"),
+            "sec_ch_ua_header": (obs.get("http_request_headers") or {}).get("sec-ch-ua")
+            if isinstance(obs.get("http_request_headers"), dict)
+            else None,
+        },
+        "V4_cdp_browser_get_version": probe.get("cdp_user_agent"),
+    }
+    return {
+        name: {"value": value, "leaks": _leaks_headless(value)}
+        for name, value in readings.items()
+    }
+
+
 def _write_artifact(product: dict, control: dict, predicate_outcomes: dict, path):
     """Write the redacted result artifact: schema version, OS/arch, exact Chrome
     identity, raw observations, predicate outcomes, and control outcomes. No
@@ -623,6 +690,13 @@ def _write_artifact(product: dict, control: dict, predicate_outcomes: dict, path
                 control["observations"], _os_family()
             )
             is False,
+        },
+        # F-770 D0: the per-vector UA measurement for BOTH browsers. The control's
+        # readings are what an unmasked headless Chrome emits on this exact cell,
+        # so the pair is also the differential that proves the fix is real.
+        "f770_ua_vectors": {
+            "product": f770_vector_readings(product),
+            "control": f770_vector_readings(control),
         },
         "cdp_transcript": [e["method"] for e in product["transcript"]],
     }
@@ -695,7 +769,12 @@ def test_product_offline_stealth_gate(product_probe, control_probe, tmp_path):
     assert all(e.get("ok") for e in control["transcript"]), control["transcript"]
 
     # Redacted result artifact (validates on re-read; contains no secrets/profile).
-    artifact_dir = os.environ.get("STEALTH_MCP_STEALTH_ARTIFACT_DIR")
+    # NOT a ``STEALTH_MCP_*`` name on purpose: ``settings._reject_unknown_prefixed_env``
+    # fails ``get_settings()`` for any unknown key in that namespace, so setting
+    # ``STEALTH_MCP_STEALTH_ARTIFACT_DIR`` (this knob's original W4 name) would
+    # detonate the whole backend the moment CI exported it. This is a test-only
+    # artifact path and deliberately lives outside the product's env namespace.
+    artifact_dir = os.environ.get("STEALTH_PROBE_ARTIFACT_DIR")
     out_dir = tmp_path if not artifact_dir else Path(artifact_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = out_dir / "stealth_probe_result_v1.json"
@@ -707,6 +786,52 @@ def test_product_offline_stealth_gate(product_probe, control_probe, tmp_path):
     # No profile path / secret leaked into the artifact.
     blob = json.dumps(artifact)
     assert "user-data-dir" not in blob and "user_data_dir" not in blob
+
+
+def _format_vector_table(label: str, readings: dict[str, dict]) -> str:
+    rows = [f"[F-770:{label}] {_os_family()}/{_platform.machine()}"]
+    for name in F770_VECTORS:
+        entry = readings[name]
+        verdict = "LEAK" if entry["leaks"] else "clean"
+        rows.append(f"  {name:<28} {verdict:<5} {json.dumps(entry['value'])[:220]}")
+    return "\n".join(rows)
+
+
+def test_f770_ua_vectors_are_measured(product_probe, control_probe):
+    """F-770 D0 (plan_RELEASE_FIX_D §2) — MEASURE all four UA vectors, judge none.
+
+    This test's contract is that every vector is actually OBSERVABLE on this cell:
+    a vector that silently stops being collected would make the F-770 gating
+    signals vacuous without turning anything red. It deliberately asserts nothing
+    about whether a vector leaks — that verdict belongs to :data:`GATE_SIGNALS`
+    (and, before RELEASE-FIX-D, to the strict xfail). The measured table is
+    printed and written into the release artifact for every OS cell.
+    """
+    for label, probe in (("product", product_probe), ("control", control_probe)):
+        readings = f770_vector_readings(probe)
+        print(_format_vector_table(label, readings))
+
+        v1 = readings["V1_navigator_user_agent"]["value"]
+        assert isinstance(v1, str) and "Mozilla/5.0" in v1, v1
+
+        v2 = readings["V2_http_request_header"]["value"]
+        assert isinstance(v2, str) and not v2.startswith("ERROR:"), (
+            f"{label}: the fixture server never reported a User-Agent header "
+            f"(V2 unmeasured, so a wire-level leak could not be detected): {v2!r}"
+        )
+        assert "Mozilla/5.0" in v2, v2
+
+        v3 = readings["V3_ua_client_hints"]["value"]
+        assert v3["brands"], f"{label}: userAgentData.brands unmeasured: {v3!r}"
+        assert isinstance(v3["high_entropy"], dict), (
+            f"{label}: getHighEntropyValues unmeasured: {v3['high_entropy']!r}"
+        )
+        assert v3["high_entropy"].get("uaFullVersion") or v3["high_entropy"].get(
+            "fullVersionList"
+        ), v3["high_entropy"]
+
+        v4 = readings["V4_cdp_browser_get_version"]["value"]
+        assert isinstance(v4, str) and "Mozilla/5.0" in v4, v4
 
 
 @pytest.mark.xfail(
