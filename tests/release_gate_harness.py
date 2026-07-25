@@ -278,6 +278,59 @@ def _isolated_env(
     return env
 
 
+def _chrome_process_snapshot() -> list[str]:
+    """The live Chrome process tree by ``--type=``, captured while it is stalled.
+
+    Chrome runs its network stack in a separate ``--type=utility`` process
+    (``network.mojom.NetworkService``). When a navigation hangs but
+    ``about:blank`` returns instantly, whether that process EXISTS separates
+    "Chrome cannot reach the network" from "Chrome never asked it to" — and
+    nothing at the CDP boundary can tell those apart. Diagnostics only.
+    """
+    out: list[str] = []
+    for proc in psutil.process_iter(["name", "cmdline"]):
+        try:
+            name = (proc.info.get("name") or "").lower()
+            if "chrom" not in name:
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            kinds = [
+                arg
+                for arg in cmdline
+                if arg.startswith("--type=") or "utility-sub-type" in arg
+            ]
+            out.append(
+                f"pid={proc.pid} {name} {' '.join(kinds) or '(browser process)'}"
+            )
+        except psutil.Error:
+            continue
+    return out
+
+
+def gate_work_dir(fallback: Path) -> Path:
+    """The throwaway workspace root for a gate journey (profiles, HOME, logs).
+
+    Prefers the CI runner's own temp when ``RUNNER_TEMP`` is set, falling back to
+    the caller's (usually pytest ``tmp_path``) everywhere else.
+
+    Why not just use pytest's tmp_path on CI: on macOS that resolves into
+    ``/private/var/folders/...``, the sandboxed per-user temp, and it is the one
+    concrete difference between the macOS cases that pass and the one that does
+    not — in-process integration runs its Chrome profile under ``RUNNER_TEMP``
+    (``/Users/runner/work/_temp``) and navigates fine, while this journey ran
+    under ``/private/var/folders`` and could not complete ANY network navigation
+    (a connection to a CLOSED port hung too, with Fetch interception proven off,
+    so nothing product-side was pausing it). Same OS, same Chrome, same code.
+
+    The caller still owns the directory's lifetime; W3's install smoke gets this
+    policy for free by calling the same helper.
+    """
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if runner_temp and Path(runner_temp).is_dir():
+        return Path(tempfile.mkdtemp(prefix="gate-", dir=runner_temp))
+    return fallback
+
+
 def _backend_logs(*dirs: Path) -> str:
     """The isolated backend's own logs, for failures the exception text alone
     cannot explain.
@@ -583,7 +636,7 @@ def _headless_spawn_kwargs(**extra: Any) -> dict[str, Any]:
 
 
 async def _cold_start_warmup(
-    client: Client, base_url: str, record: dict[str, Any]
+    client: Client, base_url: str, log_dir: Path, record: dict[str, Any]
 ) -> None:
     """Absorb the first-Chrome-launch cost BEFORE the measured journey.
 
@@ -619,10 +672,21 @@ async def _cold_start_warmup(
         warmup["attempts"] = attempt
         iid: str | None = None
         try:
+            # Chrome's OWN log, into log_dir so the failure dump picks it up with
+            # the backend logs. Neither flag is in the product's stealth-arg
+            # blocklist, so unlike --use-mock-keychain these actually reach
+            # Chrome. Warmup instance only: the canonical journey below stays a
+            # clean default spawn.
             spawn = await _call(
                 client,
                 "spawn_browser",
-                _headless_spawn_kwargs(user_data_dir="release-gate-warmup"),
+                _headless_spawn_kwargs(
+                    user_data_dir="release-gate-warmup",
+                    browser_args=[
+                        "--enable-logging",
+                        f"--log-file={log_dir / 'chrome-warmup.log'}",
+                    ],
+                ),
                 WARMUP_TIMEOUT,
             )
             iid = spawn.get("instance_id") if isinstance(spawn, dict) else None
@@ -662,6 +726,10 @@ async def _cold_start_warmup(
                     "outcome": outcome,
                     "seconds": round(time.monotonic() - started, 1),
                 }
+                if outcome != "ok" and "chrome_processes" not in warmup:
+                    # Snapshot WHILE the navigation is stalled and Chrome is
+                    # still alive — after teardown the evidence is gone.
+                    warmup["chrome_processes"] = _chrome_process_snapshot()
             warmup["ok"] = True
             warmup.pop("error", None)
             return
@@ -853,7 +921,7 @@ async def run_release_gate_journey(
                     async with Client(transport, init_timeout=INIT_TIMEOUT) as client:
                         await _foundation_proof(client, record)
                         await _representative_parity(client, record)
-                        await _cold_start_warmup(client, base_url, record)
+                        await _cold_start_warmup(client, base_url, log_dir, record)
                         await _canonical_journey(client, base_url, record)
                 except BaseException as exc:  # noqa: BLE001  PERMANENT(augment with child stderr + boot log, then re-raise)
                     err = exc

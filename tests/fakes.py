@@ -101,6 +101,8 @@ class FakeTab:
         self.evaluate_calls: list[str] = []
         self.send_calls: list[str] = []
         self.select_calls: list[str] = []
+        self.cdp_frames: list[dict[str, Any]] = []
+        self.handlers: list[tuple[Any, Any]] = []
 
     async def evaluate(self, expression: str, *args: Any, **kwargs: Any) -> Any:
         self.evaluate_calls.append(expression)
@@ -117,11 +119,25 @@ class FakeTab:
         self.select_calls.append(selector)
         return self._select_result
 
+    def add_handler(self, event_type: Any, handler: Any) -> None:
+        """The nodriver CDP-event subscription seam (``Fetch.RequestPaused``, …).
+
+        Records the (event_type, handler) pair so a test can assert *how many*
+        handlers a code path registered, not just that it sent a command.
+        """
+        self.handlers.append((event_type, handler))
+
     async def send(self, cdp_obj: Any, *args: Any, **kwargs: Any) -> Any:
         name = cdp_command_name(cdp_obj)
         self.send_calls.append(name)
         close = getattr(cdp_obj, "close", None)
         if callable(close):
+            try:
+                # Advancing once yields the request frame ({"method", "params"}),
+                # so a test can assert the *arguments* of a CDP command.
+                self.cdp_frames.append(next(cdp_obj))
+            except Exception:
+                pass
             try:
                 close()  # never leave the generator un-iterated
             except Exception:
