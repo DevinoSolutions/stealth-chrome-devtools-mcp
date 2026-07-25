@@ -73,6 +73,41 @@ jobs:
         run: uv run python tools/check_suppression_owners.py
       - name: check file budgets
         run: uv run python tools/check_file_budgets.py
+      - name: The generated release contract is not stale
+        # W5: RELEASE_CONTRACT.md is generated from the ledger's required cells,
+        # the per-tool claim ledger and the live registry. Drift is a red gate,
+        # never a document that quietly stops matching the code.
+        run: uv run python tools/gen_release_contract.py --check
+      - name: Assert qualified runner + record identity
+        shell: bash
+        run: >-
+          python3 tools/runner_identity.py
+          --runner-os "${{ runner.os }}" --runner-arch "${{ runner.arch }}"
+          --runner-name "${{ runner.name }}" --expect-os "Linux"
+          --expect-arch "X64" --out "runner-identity.json"
+      - name: Emit this cell's release-evidence record
+        # W5: `always()` so a RED cell still writes a record saying it was
+        # red. The aggregate rejects any non-success terminal outcome, so
+        # this edge can only ever make the gate redder, never greener.
+        if: always()
+        shell: bash
+        run: >-
+          python3 tools/release_evidence.py emit
+          --release-sha "$(git rev-parse HEAD)"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --event "${{ github.event_name }}"
+          --job-id quality --matrix-cell "default"
+          --terminal-outcome "${{ job.status }}"
+          --runner-identity "runner-identity.json"
+          --artifact "runner-identity=runner-identity.json"
+      - name: Upload this cell's release-evidence record
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-evidence-quality
+          path: release-evidence
+          if-no-files-found: error
 
   # ── Unit + coverage floor on all three OSes, py3.11–3.13 ───────────────────
   unit-tests:
@@ -117,7 +152,34 @@ jobs:
           path: runner-identity.json
       - name: Run unit tests
         shell: bash
-        run: uv run pytest -m "not integration" -v --tb=short
+        run: >-
+          uv run pytest -m "not integration" -v --tb=short
+          --junitxml=junit.xml
+      - name: Emit this cell's release-evidence record
+        # W5: `always()` so a RED cell still writes a record saying it was
+        # red. The aggregate rejects any non-success terminal outcome, so
+        # this edge can only ever make the gate redder, never greener.
+        if: always()
+        shell: bash
+        run: >-
+          uv run python tools/release_evidence.py emit
+          --release-sha "$(git rev-parse HEAD)"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --event "${{ github.event_name }}"
+          --job-id unit-tests --matrix-cell "${{ matrix.runner_os }}-${{ matrix.runner_arch }}-py${{ matrix.python-version }}"
+          --terminal-outcome "${{ job.status }}"
+          --runner-identity "runner-identity.json"
+          --junit "junit.xml"
+          --artifact "junit=junit.xml"
+          --artifact "runner-identity=runner-identity.json"
+      - name: Upload this cell's release-evidence record
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-evidence-unit-${{ matrix.runner_os }}-${{ matrix.runner_arch }}-py${{ matrix.python-version }}
+          path: release-evidence
+          if-no-files-found: error
 
   coverage:
     name: coverage (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
@@ -158,6 +220,7 @@ jobs:
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
           --cov-fail-under=55
+          --junitxml=junit.xml
       - name: Upload coverage report + runner identity
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
@@ -165,6 +228,32 @@ jobs:
           path: |
             coverage.xml
             runner-identity.json
+      - name: Emit this cell's release-evidence record
+        # W5: `always()` so a RED cell still writes a record saying it was
+        # red. The aggregate rejects any non-success terminal outcome, so
+        # this edge can only ever make the gate redder, never greener.
+        if: always()
+        shell: bash
+        run: >-
+          uv run python tools/release_evidence.py emit
+          --release-sha "$(git rev-parse HEAD)"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --event "${{ github.event_name }}"
+          --job-id coverage --matrix-cell "${{ matrix.runner_os }}-${{ matrix.runner_arch }}"
+          --terminal-outcome "${{ job.status }}"
+          --runner-identity "runner-identity.json"
+          --junit "junit.xml"
+          --artifact "coverage=coverage.xml"
+          --artifact "junit=junit.xml"
+          --artifact "runner-identity=runner-identity.json"
+      - name: Upload this cell's release-evidence record
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-evidence-coverage-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
+          path: release-evidence
+          if-no-files-found: error
 
   # ── Real-Chrome evidence on all three OSes ─────────────────────────────────
   integration:
@@ -226,7 +315,7 @@ jobs:
         run: >-
           uv run pytest
           -m "${{ runner.os == 'macOS' && 'integration and not transport' || 'integration' }}"
-          -v --tb=short --timeout=180
+          -v --tb=short --timeout=180 --junitxml=junit.xml
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
           STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
@@ -238,6 +327,34 @@ jobs:
           path: |
             chrome-identity.json
             runner-identity.json
+      - name: Emit this cell's release-evidence record
+        # W5: `always()` so a RED cell still writes a record saying it was
+        # red. The aggregate rejects any non-success terminal outcome, so
+        # this edge can only ever make the gate redder, never greener.
+        if: always()
+        shell: bash
+        run: >-
+          uv run python tools/release_evidence.py emit
+          --release-sha "$(git rev-parse HEAD)"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --event "${{ github.event_name }}"
+          --job-id integration --matrix-cell "${{ matrix.runner_os }}-${{ matrix.runner_arch }}"
+          --terminal-outcome "${{ job.status }}"
+          --runner-identity "runner-identity.json"
+          --chrome-identity "chrome-identity.json"
+          --chrome-launched
+          --junit "junit.xml"
+          --artifact "chrome-identity=chrome-identity.json"
+          --artifact "junit=junit.xml"
+          --artifact "runner-identity=runner-identity.json"
+      - name: Upload this cell's release-evidence record
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-evidence-integration-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
+          path: release-evidence
+          if-no-files-found: error
 
   # The real-stdio journey. Linux/X64 and Windows/X64 only: macOS/ARM64 is a
   # KNOWN GAP (F-773 — Chrome under the detached backend completes no network
@@ -289,7 +406,9 @@ jobs:
         # Session root at step level for the same runner-context reason as the
         # integration job above.
         shell: bash
-        run: uv run pytest -m transport -v --tb=short --timeout=300
+        run: >-
+          uv run pytest -m transport -v --tb=short --timeout=300
+          --junitxml=junit.xml
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
           STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
@@ -301,6 +420,34 @@ jobs:
           path: |
             chrome-identity.json
             runner-identity.json
+      - name: Emit this cell's release-evidence record
+        # W5: `always()` so a RED cell still writes a record saying it was
+        # red. The aggregate rejects any non-success terminal outcome, so
+        # this edge can only ever make the gate redder, never greener.
+        if: always()
+        shell: bash
+        run: >-
+          uv run python tools/release_evidence.py emit
+          --release-sha "$(git rev-parse HEAD)"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --event "${{ github.event_name }}"
+          --job-id transport --matrix-cell "${{ matrix.runner_os }}-${{ matrix.runner_arch }}"
+          --terminal-outcome "${{ job.status }}"
+          --runner-identity "runner-identity.json"
+          --chrome-identity "chrome-identity.json"
+          --chrome-launched
+          --junit "junit.xml"
+          --artifact "chrome-identity=chrome-identity.json"
+          --artifact "junit=junit.xml"
+          --artifact "runner-identity=runner-identity.json"
+      - name: Upload this cell's release-evidence record
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-evidence-transport-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
+          path: release-evidence
+          if-no-files-found: error
 
   # ── The gate's own honesty surface ─────────────────────────────────────────
   # A required check whose ONLY job is to name what the gate does not verify, in
@@ -313,6 +460,16 @@ jobs:
     name: known-gaps
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Assert qualified runner + record identity
+        shell: bash
+        run: >-
+          python3 tools/runner_identity.py
+          --runner-os "${{ runner.os }}" --runner-arch "${{ runner.arch }}"
+          --runner-name "${{ runner.name }}" --expect-os "Linux"
+          --expect-arch "X64" --out "runner-identity.json"
       - name: State the gaps
         run: |
           echo "::warning title=F-773::transport (macOS/ARM64) is NOT run. Chrome under the detached backend completes no network navigation on the hosted macOS runner. Cause unknown; 11 CI rounds, full elimination table in audit/stage2/finding_F773_macos_detached_navigation.md. Unknown whether real Macs are affected -- that needs a run on real hardware."
@@ -324,6 +481,32 @@ jobs:
           echo "  install-smoke  : macOS/ARM64 -- wheel AND sdist (2 install+handshake cells)"
           echo "This gate makes NO claim about macOS navigation. Do not advertise one."
           echo "It DOES claim the built artifacts install and serve on macOS/ARM64."
+          echo "TOOL SURFACE: see RELEASE_CONTRACT.md -- the per-tool table is"
+          echo "  generated from the ledger, and at this SHA the release-qualified"
+          echo "  count is what the evidence supports, not the number of tools served."
+      - name: Emit this cell's release-evidence record
+        # W5: `always()` so a RED cell still writes a record saying it was
+        # red. The aggregate rejects any non-success terminal outcome, so
+        # this edge can only ever make the gate redder, never greener.
+        if: always()
+        shell: bash
+        run: >-
+          python3 tools/release_evidence.py emit
+          --release-sha "$(git rev-parse HEAD)"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --event "${{ github.event_name }}"
+          --job-id known-gaps --matrix-cell "default"
+          --terminal-outcome "${{ job.status }}"
+          --runner-identity "runner-identity.json"
+          --artifact "runner-identity=runner-identity.json"
+      - name: Upload this cell's release-evidence record
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-evidence-known-gaps
+          path: release-evidence
+          if-no-files-found: error
 
   # ── Offline stealth lane (W2 wires the edge; W4 lands the tests) ───────────
   offline-stealth:
@@ -370,9 +553,39 @@ jobs:
         # stopped collecting these tests would otherwise leave a green lane
         # asserting nothing, which is exactly the false green §8.1 forbids.
         shell: bash
-        run: uv run pytest -m "stealth and not online" -v --tb=short --timeout=300
+        run: >-
+          uv run pytest -m "stealth and not online" -v --tb=short --timeout=300
+          --junitxml=junit.xml
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+      - name: Emit this cell's release-evidence record
+        # W5: `always()` so a RED cell still writes a record saying it was
+        # red. The aggregate rejects any non-success terminal outcome, so
+        # this edge can only ever make the gate redder, never greener.
+        if: always()
+        shell: bash
+        run: >-
+          uv run python tools/release_evidence.py emit
+          --release-sha "$(git rev-parse HEAD)"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --event "${{ github.event_name }}"
+          --job-id offline-stealth --matrix-cell "${{ matrix.runner_os }}-${{ matrix.runner_arch }}"
+          --terminal-outcome "${{ job.status }}"
+          --runner-identity "runner-identity.json"
+          --chrome-identity "chrome-identity.json"
+          --chrome-launched
+          --junit "junit.xml"
+          --artifact "chrome-identity=chrome-identity.json"
+          --artifact "junit=junit.xml"
+          --artifact "runner-identity=runner-identity.json"
+      - name: Upload this cell's release-evidence record
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-evidence-offline-stealth-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
+          path: release-evidence
+          if-no-files-found: error
 
   # ── W3: build ONCE, verify and smoke THOSE EXACT FILES (gap G-C) ───────────
   # The only `uv build` in the entire run. Everything downstream consumes the
@@ -416,6 +629,37 @@ jobs:
           path: |
             dist
             release-manifest.json
+          if-no-files-found: error
+      - name: Assert qualified runner + record identity
+        shell: bash
+        run: >-
+          python3 tools/runner_identity.py
+          --runner-os "${{ runner.os }}" --runner-arch "${{ runner.arch }}"
+          --runner-name "${{ runner.name }}" --expect-os "Linux"
+          --expect-arch "X64" --out "runner-identity.json"
+      - name: Emit this cell's release-evidence record
+        # W5: `always()` so a RED cell still writes a record saying it was
+        # red. The aggregate rejects any non-success terminal outcome, so
+        # this edge can only ever make the gate redder, never greener.
+        if: always()
+        shell: bash
+        run: >-
+          python3 tools/release_evidence.py emit
+          --release-sha "$(git rev-parse HEAD)"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --event "${{ github.event_name }}"
+          --job-id build-dist --matrix-cell "default"
+          --terminal-outcome "${{ job.status }}"
+          --runner-identity "runner-identity.json"
+          --artifact "build-manifest=release-manifest.json"
+          --artifact "runner-identity=runner-identity.json"
+      - name: Upload this cell's release-evidence record
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-evidence-build-dist
+          path: release-evidence
           if-no-files-found: error
 
   # Independent re-check of the DOWNLOADED bytes, plus the negative controls
@@ -499,6 +743,39 @@ jobs:
           path: |
             package-verify.json
             release-manifest.json
+      - name: Assert qualified runner + record identity
+        if: always()
+        shell: bash
+        run: >-
+          python3 tools/runner_identity.py
+          --runner-os "${{ runner.os }}" --runner-arch "${{ runner.arch }}"
+          --runner-name "${{ runner.name }}" --expect-os "Linux"
+          --expect-arch "X64" --out "runner-identity.json"
+      - name: Emit this cell's release-evidence record
+        # W5: `always()` so a RED cell still writes a record saying it was
+        # red. The aggregate rejects any non-success terminal outcome, so
+        # this edge can only ever make the gate redder, never greener.
+        if: always()
+        shell: bash
+        run: >-
+          python3 tools/release_evidence.py emit
+          --release-sha "$(git rev-parse HEAD)"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --event "${{ github.event_name }}"
+          --job-id package-verify --matrix-cell "default"
+          --terminal-outcome "${{ job.status }}"
+          --runner-identity "runner-identity.json"
+          --artifact "build-manifest=release-manifest.json"
+          --artifact "package-verify=package-verify.json"
+          --artifact "runner-identity=runner-identity.json"
+      - name: Upload this cell's release-evidence record
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-evidence-package-verify
+          path: release-evidence
+          if-no-files-found: error
 
   # Install the EXACT downloaded artifact into a fresh environment and run W1's
   # canonical journey through the launcher that install produced. Both
@@ -591,6 +868,95 @@ jobs:
             chrome-identity.json
             runner-identity.json
           if-no-files-found: warn
+      - name: Emit this cell's release-evidence record
+        # W5: `always()` so a RED cell still writes a record saying it was
+        # red. The aggregate rejects any non-success terminal outcome, so
+        # this edge can only ever make the gate redder, never greener.
+        if: always()
+        shell: bash
+        run: >-
+          uv run python tools/release_evidence.py emit
+          --release-sha "$(git rev-parse HEAD)"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --event "${{ github.event_name }}"
+          --job-id install-smoke --matrix-cell "${{ matrix.kind }}-${{ matrix.cell.runner_os }}-${{ matrix.cell.runner_arch }}"
+          --terminal-outcome "${{ job.status }}"
+          --runner-identity "runner-identity.json"
+          --chrome-identity "chrome-identity.json"
+          ${{ matrix.cell.stages == 'full' && '--chrome-launched' || '' }}
+          --artifact "chrome-identity=chrome-identity.json"
+          --artifact "install-smoke=install-smoke-${{ matrix.kind }}.json"
+          --artifact "runner-identity=runner-identity.json"
+      - name: Upload this cell's release-evidence record
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-evidence-install-smoke-${{ matrix.kind }}-${{ matrix.cell.runner_os }}-${{ matrix.cell.runner_arch }}
+          path: release-evidence
+          if-no-files-found: error
+
+  # ── W5: the fail-closed acceptance ledger (gap: "green" vs "claimable") ────
+  # Every required cell above wrote one `release-evidence/v1` child record. This
+  # job re-reads ALL of them through the single parser and refuses to produce a
+  # successful aggregate on a missing/extra/duplicate child, a stale release SHA,
+  # a foreign workflow run, a non-success terminal outcome, a required node that
+  # skipped/xfailed/failed, a browser cell with no Chrome identity, a JUnit or
+  # artifact hash mismatch, a malformed/duplicate/absent MQ id, or a per-tool
+  # claim the run did not actually prove.
+  #
+  # It is a direct `needs:` edge of `release-gate` IN ADDITION to every child job
+  # it validates -- never instead of them. The ledger can only ever turn a green
+  # run red.
+  release-evidence:
+    name: release-evidence
+    if: always()
+    needs:
+      - quality
+      - unit-tests
+      - coverage
+      - integration
+      - transport
+      - known-gaps
+      - offline-stealth
+      - build-dist
+      - package-verify
+      - install-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5.4.1
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Install dependencies
+        # The aggregate derives the served tool surface from the live registry,
+        # so it needs the package importable -- the count is never typed.
+        run: uv sync --extra test --extra sentry
+      - name: Download every cell's evidence record
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: release-evidence-*
+          merge-multiple: true
+          path: release-evidence
+      - name: Aggregate the ledger (fail-closed)
+        shell: bash
+        run: >-
+          uv run python tools/release_evidence.py aggregate
+          --root release-evidence
+          --release-sha "$(git rev-parse HEAD)"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --event "${{ github.event_name }}"
+      - name: Upload the aggregate ledger
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-evidence-aggregate
+          path: release-evidence
+          if-no-files-found: error
 
   # ── Stable aggregate: the ONE public required check ────────────────────────
   release-gate:
@@ -607,6 +973,7 @@ jobs:
       - build-dist
       - package-verify
       - install-smoke
+      - release-evidence
     runs-on: ubuntu-latest
     steps:
       - name: Require every edge to have succeeded
@@ -631,6 +998,7 @@ jobs:
           check build-dist     "${{ needs.build-dist.result }}"
           check package-verify "${{ needs.package-verify.result }}"
           check install-smoke  "${{ needs.install-smoke.result }}"
+          check release-evidence "${{ needs.release-evidence.result }}"
           if [ "$overall" -ne 0 ]; then
             echo "::error::release-gate: one or more required edges were not success"
             exit 1

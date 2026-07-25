@@ -1,0 +1,714 @@
+#!/usr/bin/env python3
+"""Generate the root ``RELEASE_CONTRACT.md`` (plan_RELEASE W5).
+
+The contract is GENERATED, never hand-edited: its matrix table, its tool table
+and every count in it are derived from
+:mod:`release_evidence` (the one ledger parser) and from the live tool registry.
+``--check`` re-renders and diffs, so drift is a red test rather than a stale
+promise; ``tests/test_release_contract.py`` runs that check in the unit gate on
+all three OSes.
+
+Why the numbers cannot be typed
+-------------------------------
+* the served tool count comes from ``SECTION_TOOLS``;
+* the release-qualified count comes from ``tools/release_tool_claims.json``,
+  and every claim in that file is re-verified against the run's real
+  ``release-evidence/v1`` records by the ``release-evidence`` job;
+* the qualified matrix comes from :data:`release_evidence.REQUIRED_CELLS`, which
+  ``tests/test_release_workflows.py`` pins against ``release-gate.yml``.
+
+So a claim can only enter this document by way of evidence that a CI job either
+produced or failed for the lack of. Prose in a plan or a findings register is
+structurally incapable of qualifying a tool here.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import release_evidence
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CONTRACT_PATH = REPO_ROOT / "RELEASE_CONTRACT.md"
+E2E_MANIFEST = REPO_ROOT / "tests" / "test_e2e_functions_hooks.py"
+
+DEFAULT_TIER = "in-process E2E (`.fn` seam) — cannot license a transport claim"
+EXEMPT_TIER = "**none** — the standing coverage-manifest exemption"
+
+
+@dataclass(frozen=True)
+class Limitation:
+    """One row of the limitations register."""
+
+    ident: str
+    area: str
+    status: str
+    impact: str
+    evidence: str
+
+
+# The register. Every row is either an OPEN defect, an EXCLUDED surface, or a
+# workstream that has NOT RUN — and each says what the reader may therefore not
+# conclude. Rows are never deleted to make the document shorter; a row leaves
+# only when the thing it describes actually closes.
+LIMITATIONS: tuple[Limitation, ...] = (
+    Limitation(
+        "E8-1",
+        "interaction / `select_option`",
+        "open",
+        "A page script that re-declares a const makes the change a silent no-op "
+        "while the tool returns True.",
+        "characterization pin only — never a success claim.",
+    ),
+    Limitation(
+        "E8-2",
+        "interaction / `click_element`",
+        "open",
+        "Clicking a disabled control returns True; the caller cannot tell "
+        "'clicked' from 'ignored'.",
+        "characterization pin only.",
+    ),
+    Limitation(
+        "E8-3",
+        "interaction / `type_text`",
+        "open",
+        "`clear_first` bypasses a readonly field instead of refusing it.",
+        "characterization pin only.",
+    ),
+    Limitation(
+        "E8-4",
+        "interaction / typed inputs",
+        "open",
+        "range, color and date inputs are not reachable through the typing path.",
+        "characterization pin only.",
+    ),
+    Limitation(
+        "E7-1",
+        "interaction / contenteditable",
+        "open",
+        "`type_text` does not clear a contenteditable before typing.",
+        "characterization pin only.",
+    ),
+    Limitation(
+        "E7-6",
+        "state / `get_element_state`",
+        "open",
+        "Reports HTML attributes rather than live DOM properties, so a "
+        "script-updated value reads stale.",
+        "characterization pin only.",
+    ),
+    Limitation(
+        "F-165",
+        "network / `modify_headers`",
+        "open",
+        "Duplicate header names are mishandled by the rewrite loop.",
+        "characterization pin only.",
+    ),
+    Limitation(
+        "F-181",
+        "internal / stale live node",
+        "open (internal)",
+        "An internal `-32000` stale-node path. It is NOT a public acceptance "
+        "surface and is unsupported; no user-facing behaviour is claimed for it.",
+        "characterization pin only.",
+    ),
+    Limitation(
+        "close-path flake",
+        "lifecycle / close",
+        "open",
+        "The close path has a known flake history; teardown ordering is not "
+        "deterministic under all timings.",
+        "characterization pin only.",
+    ),
+    Limitation(
+        "macOS `close_tab` observation",
+        "lifecycle / `close_tab` on macOS",
+        "unreproduced",
+        "One CI attempt returned True while the target survived a 10s poll. Not "
+        "reproducible (Windows local and all three CI cells clean on re-run).",
+        "NOT characterized and NOT recorded as closed — an unexplained "
+        "single observation, listed so it is not forgotten.",
+    ),
+    Limitation(
+        "F-773",
+        "platform / macOS ARM64 navigation",
+        "open, cause unknown",
+        "Under the detached backend on hosted macOS runners, Chrome completes no "
+        "network navigation (a connection to a CLOSED port hangs ~35s while "
+        "about:blank returns in ~1.1s). Reproduced 11/11 on CI; never reproduced "
+        "on real Mac hardware.",
+        "The macOS transport cell is EXCLUDED (not xfailed) and both macOS "
+        "install-smoke cells are NO-NAVIGATION partial. This contract therefore "
+        "claims neither that macOS navigation works NOR that it is broken.",
+    ),
+    Limitation(
+        "F-774",
+        "stealth / UA client hints",
+        "open",
+        "The headless User-Agent override blanks the high-entropy UA client "
+        "hints (`architecture`, `bitness`, `platformVersion`, `uaFullVersion`, "
+        "`fullVersionList`). `brands`/`mobile`/`platform` and every `sec-ch-ua*` "
+        "wire header stay correct.",
+        "Measured and recorded. Headless is therefore NOT claimed undetectable; "
+        "the residue is strictly smaller than the leak it replaced (F-770).",
+    ),
+    Limitation(
+        "F-775c residual",
+        "tabs / `switch_tab`",
+        "open",
+        "Activation is fixed, but the instance's main tab is still stored from "
+        "the raw `browser.tabs` entry, which can be a `Connection`. Loud if it "
+        "fires; it seeds the F-775a class.",
+        "routed, not fixed.",
+    ),
+    Limitation(
+        "F-775d",
+        "lifecycle / `close_instance`",
+        "declared gap",
+        "Teardown uses the same verified CDP call as the fixed siblings but has "
+        "no dedicated pin; it is exercised only indirectly by integration "
+        "teardown.",
+        "no independent evidence — declared, not claimed.",
+    ),
+    Limitation(
+        "`_replace_main_tab` residual",
+        "tabs / instance main-tab identity",
+        "open",
+        "`browser_manager.py` awaits `browser.get(..., new_tab=True)`, which "
+        "returns whatever `browser.targets` holds for that id — a `Connection` "
+        "if `update_targets()` won the race. Same family as F-775, lower "
+        "severity, outside FIX-F's four sites.",
+        "routed, not fixed.",
+    ),
+    Limitation(
+        "F-776",
+        "evidence / per-tool transport coverage",
+        "open (opened by W5)",
+        "No served tool has a per-tool real-transport success assertion at this "
+        "SHA. The real-stdio evidence that exists is ONE representative journey "
+        "node, which plan_RELEASE §2.5 explicitly disqualifies as per-tool "
+        "evidence; everything else is in-process (`.fn` seam) or in-memory "
+        "client. This is why the release-qualified count below is what it is.",
+        "This contract records the gap rather than papering over it. Closing it "
+        "means per-tool transport assertions, not a relabelling.",
+    ),
+    Limitation(
+        "missing interaction surface",
+        "tools / interaction census",
+        "excluded",
+        "There are no double-click, right-click, drag, or native-dialog tools. "
+        "A workflow needing them cannot be automated by this server.",
+        "documented absence — plan_RELEASE §1.2 forbids building them here.",
+    ),
+    Limitation(
+        "HTTP transport",
+        "trust boundary / transport",
+        "excluded from qualification",
+        "`--transport http` is UNAUTHENTICATED by design and binds loopback by "
+        "default. Anything that can reach the port drives the browser.",
+        "stdio evidence never licenses an HTTP claim; the gate qualifies stdio only.",
+    ),
+    Limitation(
+        "code-execution surface",
+        "trust boundary / exec",
+        "excluded from qualification",
+        "`execute_script`, `inject_and_execute_script`, `call_javascript_"
+        "function`, `execute_cdp_command`, `execute_python_in_browser` and "
+        "`create_python_binding` run caller-supplied code by design.",
+        "W12 (security/trust boundary) has NOT run; no security property is claimed.",
+    ),
+    Limitation(
+        "architecture / channel",
+        "matrix",
+        "excluded",
+        "Untested Linux distributions, self-hosted runners, Windows ARM64, Intel "
+        "macOS, IPv6-only loopback, non-Stable Chrome channels and future runner "
+        "images are all outside the qualified matrix.",
+        "no evidence exists for any of them; a runner without a GitHub-hosted "
+        "image identity is rejected by the ledger.",
+    ),
+    Limitation(
+        "native IME",
+        "input / internationalization",
+        "excluded",
+        "Native IME/composition UI is not driven; only synthetic input is.",
+        "W16 has NOT run.",
+    ),
+    Limitation(
+        "live public web",
+        "site shapes",
+        "informational only",
+        "All deterministic evidence uses the local fixture app. No public site, "
+        "detector score, or arbitrary-site behaviour is qualified.",
+        "the live tier is read-only observation and is not part of the gate.",
+    ),
+    Limitation(
+        "W6 scheduled observation",
+        "workstream not run",
+        "not run",
+        "There is no scheduled canary, so nothing observes drift between releases.",
+        "no evidence; no claim.",
+    ),
+    Limitation(
+        "W7 site breadth",
+        "workstream not run",
+        "not run",
+        "Deterministic dynamic-site breadth is unqualified. Specifically "
+        "unsupported or unqualified: stale live handles; recursive or "
+        "frame-targeted content and interaction; redirect chains and loops; "
+        "typed loading-failure and truncation; downloads; MCP-network SSE/WS "
+        "detail; and generic or closed shadow-root access.",
+        "no evidence; no claim.",
+    ),
+    Limitation(
+        "W8 manual-QA parity",
+        "workstream not run",
+        "not run",
+        "MQ steps are not yet mapped to runtime evidence, so the ledger's "
+        "required-MQ set is empty and the manual protocol still governs.",
+        "the ledger enforces MQ ids structurally; W8 supplies the mapping.",
+    ),
+    Limitation(
+        "W9 performance",
+        "workstream not run",
+        "not run",
+        "No latency, memory, or large-payload budget is asserted.",
+        "no evidence; no claim.",
+    ),
+    Limitation(
+        "W10 resilience",
+        "workstream not run",
+        "not run",
+        "Crash, hang, tab-loss and network-fault recovery are unqualified.",
+        "no evidence; no claim.",
+    ),
+    Limitation(
+        "W11 executable docs",
+        "workstream not run",
+        "not run",
+        "Documentation examples are not executed, so a doc example may be stale.",
+        "no evidence; no claim.",
+    ),
+    Limitation(
+        "W12 security",
+        "workstream not run",
+        "not run",
+        "No filesystem, upload/export, redaction, or bind-address property is "
+        "verified.",
+        "no evidence; no claim.",
+    ),
+    Limitation(
+        "W13 wire semantics",
+        "workstream not run",
+        "not run",
+        "Concurrency, correlation, cancellation, disconnect and framing are "
+        "unqualified, and no independent MCP client has driven this server in "
+        "the gate.",
+        "no evidence; no claim.",
+    ),
+    Limitation(
+        "W14 upgrade / rollback",
+        "workstream not run",
+        "not run",
+        "NO upgrade, migration, or rollback claim of any kind is made — not from "
+        "the literal N-1 stable tag, not from any other version.",
+        "no evidence; no claim.",
+    ),
+    Limitation(
+        "W15 observability",
+        "workstream not run",
+        "not run",
+        "Failure diagnostics are not verified as actionable, bounded, or redacted.",
+        "no evidence; no claim.",
+    ),
+    Limitation(
+        "W16 state / PWA / i18n",
+        "workstream not run",
+        "not run",
+        "Workers, persistent state, PWA behaviour and Unicode/RTL round-trips "
+        "are unqualified.",
+        "no evidence; no claim.",
+    ),
+)
+
+
+def _e2e_manifest_names() -> tuple[frozenset[str], frozenset[str]]:
+    """Read ``E2E_COVERED`` / ``E2E_EXEMPT`` out of the ONE place they live.
+
+    This is a *descriptive annotation only*: it says which weaker evidence tier a
+    served-unqualified tool has. plan_RELEASE §2.5 forbids inferring any state
+    from this partition, and nothing here does — every tool outside
+    ``qualified`` is served-unqualified regardless of which tier it lands in.
+    """
+    tree = ast.parse(E2E_MANIFEST.read_text(encoding="utf-8"))
+    covered: set[str] = set()
+    exempt: set[str] = set()
+    for node in tree.body:
+        targets = getattr(node, "targets", []) or [getattr(node, "target", None)]
+        names = {t.id for t in targets if isinstance(t, ast.Name)}
+        value = getattr(node, "value", None)
+        if "E2E_COVERED" in names and isinstance(value, ast.Set):
+            covered = {e.value for e in value.elts if isinstance(e, ast.Constant)}
+        if "E2E_EXEMPT" in names and isinstance(value, ast.Dict):
+            exempt = {k.value for k in value.keys if isinstance(k, ast.Constant)}
+    return frozenset(covered), frozenset(exempt)
+
+
+@dataclass(frozen=True)
+class ToolRow:
+    """One row of the generated tool table."""
+
+    tool: str
+    section: str
+    state: str
+    tier: str
+    tracking_id: str
+    impact: str
+
+
+def tool_rows() -> tuple[ToolRow, ...]:
+    """The per-tool state table — the public API W11's docs checker imports."""
+    claims = release_evidence.load_claims()
+    qualified = {
+        str(row.get("tool", "")): row for row in release_evidence.claim_rows(claims)
+    }
+    notes = claims.get("served_unqualified_notes")
+    notes = notes if isinstance(notes, dict) else {}
+    default = claims.get("default_note")
+    default = default if isinstance(default, dict) else {}
+    covered, exempt = _e2e_manifest_names()
+    sections = release_evidence.registry_sections()
+    rows: list[ToolRow] = []
+    for section in sorted(sections):
+        for tool in sorted(sections[section]):
+            if tool in qualified:
+                claim = qualified[tool]
+                rows.append(
+                    ToolRow(
+                        tool,
+                        section,
+                        "release-qualified-success",
+                        f"{claim.get('transport')} — `{claim.get('node_id')}`",
+                        "—",
+                        str(claim.get("outcome", "")),
+                    )
+                )
+                continue
+            note = notes.get(tool)
+            note = note if isinstance(note, dict) else default
+            tier = EXEMPT_TIER if tool in exempt else DEFAULT_TIER
+            if tool not in covered and tool not in exempt:
+                tier = "**unknown** — absent from the coverage manifest"
+            rows.append(
+                ToolRow(
+                    tool,
+                    section,
+                    "served-unqualified",
+                    tier,
+                    str(note.get("tracking_id", "")),
+                    str(note.get("user_impact", "")),
+                )
+            )
+    return tuple(rows)
+
+
+def matrix_rows() -> tuple[release_evidence.CellSpec, ...]:
+    """The qualified matrix — exactly the cells the ledger requires."""
+    return release_evidence.REQUIRED_CELLS
+
+
+def _md_escape(text: str) -> str:
+    return text.replace("|", r"\|").replace("\n", " ")
+
+
+def _header(counts: dict[str, object]) -> str:
+    served = counts.get("served_total")
+    qualified = counts.get("release_qualified")
+    return "\n".join(
+        [
+            "<!-- GENERATED by tools/gen_release_contract.py — do not edit by "
+            "hand. -->",
+            "<!-- Regenerate: `uv run python tools/gen_release_contract.py "
+            "--write` -->",
+            "",
+            "# Release contract",
+            "",
+            "What a green `release-gate` check does and does not authorize. Every",
+            "number below is derived: the served-tool count from the live",
+            "`SECTION_TOOLS` registry, the qualified count from the per-tool claim",
+            "ledger, and the matrix from the required cells of the",
+            "`release-evidence/v1` aggregate. Nothing here is hand-typed, and no",
+            "prose document — plan, finding, or README — can qualify anything.",
+            "",
+            "> **At the release SHA recorded in the ledger, this gate qualifies "
+            f"{qualified} of the {served} served MCP tools.**",
+            "> That number is small on purpose: see F-776 in the limitations",
+            "> register. It is what the evidence supports, not what the suite",
+            "> touches.",
+            "",
+        ]
+    )
+
+
+def _matrix_section() -> str:
+    lines = [
+        "## 1. The qualified matrix",
+        "",
+        "Exactly these GitHub-hosted cells, and nothing else. Each one writes a",
+        "`release-evidence/v1` child record; the `release-evidence` job refuses to",
+        "aggregate unless every cell below is present, current, and successful.",
+        "",
+        "| Job | Matrix cell | Runner | Python | Chrome | What the cell proves |",
+        "|---|---|---|---|---|---|",
+    ]
+    for spec in matrix_rows():
+        if spec.expects_launched_chrome:
+            chrome = "launched + identity asserted"
+        elif spec.expects_chrome:
+            chrome = "resolved only (no launch)"
+        else:
+            chrome = "—"
+        lines.append(
+            f"| `{spec.job}` | `{spec.cell}` | {spec.label} | {spec.python_version} "
+            f"| {chrome} | {_md_escape(spec.proves)} |"
+        )
+    lines.extend(
+        [
+            "",
+            "The exact Chrome Stable executable path and version are **not** written",
+            "into this document: they are image-provided and change under us. They",
+            "are recorded per run in",
+            "`release-evidence/<release_sha>/integration/<cell>.json`, and the",
+            "integration cell asserts that production's own auto-discovery and the",
+            "CDP `Browser.getVersion` of the launched browser agree with them.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _exclusions_section() -> str:
+    return "\n".join(
+        [
+            "## 2. What the matrix explicitly excludes",
+            "",
+            "These are not 'probably fine'. They are **untested**:",
+            "",
+            "- untested Linux distributions (the gate runs the hosted Ubuntu image",
+            "  only) and any self-hosted runner;",
+            "- Windows ARM64 and Intel macOS;",
+            "- IPv6-only loopback;",
+            "- non-Stable Chrome channels (Beta, Dev, Canary, Chromium, Edge);",
+            "- future GitHub runner images — a qualification is a statement about",
+            "  the image identity recorded in that run's ledger, not a standing",
+            "  promise about `*-latest`.",
+            "",
+            "The phrase 'Linux, Windows and macOS' may only ever appear here with",
+            "those qualifiers attached: the qualified cells are **Ubuntu x64,",
+            "Windows x64 and macOS ARM64**, each as provided by the GitHub-hosted",
+            "image whose id the ledger records.",
+            "",
+        ]
+    )
+
+
+def _transport_section() -> str:
+    stdio_cells = [
+        spec.label
+        for spec in matrix_rows()
+        if spec.job in release_evidence.TRANSPORT_JOBS
+    ]
+    return "\n".join(
+        [
+            "## 3. Transport qualification",
+            "",
+            "### stdio (the transport a user actually gets)",
+            "",
+            "Qualified on: " + ", ".join(f"**{cell}**" for cell in stdio_cells) + ".",
+            "",
+            "The real-stdio lane spawns the installed console launcher, completes",
+            "the `initialize` handshake, lists tools, and drives one canonical",
+            "journey against real Chrome. macOS/ARM64 is **excluded** from this",
+            "lane under F-773 — excluded rather than xfailed, because an xfail",
+            "would let a green gate imply macOS coverage.",
+            "",
+            "That journey is a *representative* proof that the wire path works. It",
+            "is deliberately **not** per-tool evidence (plan_RELEASE §2.5), which is",
+            "why it qualifies the transport but no individual tool.",
+            "",
+            "### HTTP (described, not qualified)",
+            "",
+            "The server also supports `--transport http`. It is **unauthenticated**",
+            "by design and binds loopback by default. It is described here, not",
+            "qualified: no HTTP claim is derived from stdio evidence, and the gate",
+            "runs no live HTTP acceptance test. Anything able to reach that port",
+            "drives the browser with the caller's full privileges.",
+            "",
+            "## 4. Upgrade qualification",
+            "",
+            "**None.** W14 has not run: this contract makes no upgrade, migration,",
+            "or rollback claim from the literal N-1 stable tag or from any other",
+            "version. Installing over an existing installation is unqualified.",
+            "",
+        ]
+    )
+
+
+def _tool_section(counts: dict[str, object]) -> str:
+    rows = tool_rows()
+    lines = [
+        "## 5. The served tool surface",
+        "",
+        f"- served by the registry: **{counts.get('served_total')}**",
+        f"- `release-qualified-success`: **{counts.get('release_qualified')}**",
+        f"- `served-unqualified`: **{counts.get('served_unqualified')}**",
+        f"- `not-served`: **{counts.get('not_served')}**",
+        "",
+        "A tool is `release-qualified-success` only when a row names the precise",
+        "user outcome, a fully-qualified passing node, the required transport, the",
+        "fixture or site shape, and the required OS cells — and the ledger shows",
+        "each of them as current-run success evidence. A schema or type assertion,",
+        "a `.fn`-only call, the representative journey, an error-only test, an",
+        "exemption, or a characterization **cannot** satisfy that bar.",
+        "",
+        "`served-unqualified` does not mean broken. It means: the server serves the",
+        "tool, and the gate at this SHA does not prove the user-visible outcome",
+        "over the transport the user uses. The 'strongest current evidence' column",
+        "says what does exist, and is a description — never a claim.",
+        "",
+        "Unless a row names a specific defect, its tracking id is **F-776** and its",
+        "impact is the shared one: no per-tool real-transport success assertion",
+        "exists at this SHA.",
+        "",
+        "| Tool | Section | State | Strongest current evidence | Tracking id |",
+        "|---|---|---|---|---|",
+    ]
+    lines.extend(
+        f"| `{row.tool}` | {row.section} | {row.state} | {_md_escape(row.tier)} "
+        f"| {_md_escape(row.tracking_id)} |"
+        for row in rows
+    )
+    lines.extend(["", "### Tools whose row carries a specific defect", ""])
+    lines.append("| Tool | Tracking id | User impact |")
+    lines.append("|---|---|---|")
+    for row in rows:
+        if row.tracking_id in ("F-776", "—"):
+            continue
+        lines.append(
+            f"| `{row.tool}` | {_md_escape(row.tracking_id)} "
+            f"| {_md_escape(row.impact)} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _limitations_section() -> str:
+    lines = [
+        "## 6. Limitations register",
+        "",
+        "Everything a reader must know before trusting a green check. Rows are not",
+        "removed to shorten the document; a row leaves only when the thing it",
+        "describes actually closes.",
+        "",
+        "| Id | Area | Status | User impact | Evidence status |",
+        "|---|---|---|---|---|",
+    ]
+    lines.extend(
+        f"| {_md_escape(item.ident)} | {_md_escape(item.area)} "
+        f"| {_md_escape(item.status)} | {_md_escape(item.impact)} "
+        f"| {_md_escape(item.evidence)} |"
+        for item in LIMITATIONS
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _ceiling_section() -> str:
+    return "\n".join(
+        [
+            "## 7. The ceiling",
+            "",
+            "This contract does **not** promise that the server works on any site,",
+            "or that it will keep working. The open web and Chrome change",
+            "adversarially; a green gate is a statement about one SHA, one set of",
+            "recorded runner images, one recorded Chrome Stable build, and the",
+            "fixture shapes named above.",
+            "",
+            "It does **not** promise universal undetectability. The offline stealth",
+            "predicates passed their failing controls on all three cells — that is",
+            "sensitivity, not invisibility — and F-774 records a real residual",
+            "client-hint tell in the headless UA override.",
+            "",
+            "Live public sites and detector scores are read-only informational",
+            "observations. They never license a deterministic claim, and no such",
+            "observation runs in this gate.",
+            "",
+            "If a claim you need is not written above, the honest answer is that",
+            "this gate does not make it.",
+            "",
+        ]
+    )
+
+
+def render_contract() -> str:
+    """The full contract text — the public API tests and W11 both call."""
+    counts = release_evidence.tool_surface(release_evidence.load_claims())
+    return "".join(
+        [
+            _header(counts),
+            "\n",
+            _matrix_section(),
+            "\n",
+            _exclusions_section(),
+            "\n",
+            _transport_section(),
+            "\n",
+            _tool_section(counts),
+            "\n",
+            _limitations_section(),
+            "\n",
+            _ceiling_section(),
+        ]
+    )
+
+
+def check_contract() -> list[str]:
+    """Return the drift problems between the file on disk and a fresh render."""
+    rendered = render_contract()
+    if not CONTRACT_PATH.is_file():
+        return [f"{CONTRACT_PATH} does not exist"]
+    current = CONTRACT_PATH.read_text(encoding="utf-8")
+    if current == rendered:
+        return []
+    return [
+        f"{CONTRACT_PATH.name} is stale: regenerate with "
+        f"`uv run python tools/gen_release_contract.py --write`"
+    ]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--write", action="store_true", help="write the contract")
+    parser.add_argument("--check", action="store_true", help="fail on drift")
+    args = parser.parse_args(argv)
+    if args.write:
+        CONTRACT_PATH.write_text(render_contract(), encoding="utf-8", newline="\n")
+        print(f"wrote {CONTRACT_PATH}")
+        return 0
+    if args.check:
+        problems = check_contract()
+        for problem in problems:
+            print(f"::error::gen_release_contract: {problem}")
+        return 1 if problems else 0
+    print(render_contract(), end="")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
