@@ -1624,6 +1624,7 @@ test = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
+    { name = "pyyaml" },
 ]
 transpiler = [
     { name = "py2js" },
@@ -1644,6 +1645,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0" },
     { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.3" },
     { name = "python-dotenv", specifier = "==1.1.1" },
+    { name = "pyyaml", marker = "extra == 'test'", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32.0,<4" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.20" },
     { name = "sentry-sdk", marker = "extra == 'sentry'", specifier = "==2.64.0" },

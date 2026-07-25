@@ -3,8 +3,11 @@
 import ctypes
 import os
 import platform
+import re
 import shutil
+import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -183,10 +186,133 @@ def filter_stealth_args(user_args: list[str]) -> tuple:
     return clean, warnings
 
 
+# ── The masked default User-Agent (F-770) ───────────────────────────────────
+# Headless Chrome advertises itself in its own User-Agent:
+#     Mozilla/5.0 (...) HeadlessChrome/<major>.0.0.0 Safari/537.36
+# That single substring is the cheapest bot check in existence — one server-side
+# test, before a byte of JavaScript runs — so a default headless spawn must not
+# ship it.
+#
+# The mask is CONSTRUCTED rather than guessed because Chrome froze its
+# User-Agent in the reduced-UA rollout: the platform token, the WebKit build and
+# the Safari token are constants, and the only varying part is the browser's
+# MAJOR version, always rendered ``<major>.0.0.0``. The string built here is
+# therefore byte-identical to what the same binary emits headed — i.e. exactly
+# Chrome's own User-Agent with ``HeadlessChrome`` replaced by ``Chrome``. That
+# equality is pinned as a product-vs-control differential in tests/test_stealth.py:
+# consistency is itself a tell, and a UA that disagrees with ``sec-ch-ua`` or with
+# the real OS would be a WORSE signal than the honest headless one.
+_REDUCED_UA_PLATFORM_TOKEN = {
+    "Windows": "Windows NT 10.0; Win64; x64",
+    "Darwin": "Macintosh; Intel Mac OS X 10_15_7",
+    "Linux": "X11; Linux x86_64",
+}
+
+_USER_AGENT_ARG_PREFIX = "--user-agent="
+_BROWSER_VERSION_RE = re.compile(r"(\d+)\.\d+\.\d+\.\d+")
+_VERSION_PROBE_TIMEOUT_SECONDS = 10.0
+
+
+@lru_cache(maxsize=8)
+def resolve_browser_major_version(executable: str) -> str | None:
+    """Return the major version of a Chromium-family executable, or ``None``.
+
+    Cached per executable path: this runs on the spawn path, so an uncached
+    subprocess per spawn would be a real performance regression.
+
+    Windows deliberately does NOT shell out — ``chrome.exe --version`` hands the
+    argument to an already-running Chrome ("Opening in existing browser
+    session.") instead of printing anything, so the version is read from the
+    version-named directory every Chromium install keeps beside its binary.
+    Elsewhere ``<exe> --version`` prints e.g. ``Google Chrome 150.0.7871.186``.
+    """
+    if platform.system() == "Windows":
+        try:
+            names = [
+                entry.name
+                for entry in Path(executable).parent.iterdir()
+                if entry.is_dir()
+            ]
+        except OSError as error:
+            debug_logger.log_debug(
+                "platform_utils", "resolve_browser_major_version", str(error)
+            )
+            return None
+        majors = [m.group(1) for m in map(_BROWSER_VERSION_RE.fullmatch, names) if m]
+        return max(majors, key=int) if majors else None
+
+    try:
+        completed = subprocess.run(  # noqa: S603  RELEASE-FIX-D (F-770)
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_VERSION_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        debug_logger.log_debug(
+            "platform_utils", "resolve_browser_major_version", str(error)
+        )
+        return None
+    match = _BROWSER_VERSION_RE.search(completed.stdout or "")
+    return match.group(1) if match else None
+
+
+def build_reduced_user_agent(executable: str) -> str | None:
+    """Build this executable's own reduced User-Agent, without the headless token.
+
+    Returns ``None`` (meaning "do not mask") on an unrecognized platform or when
+    the version cannot be resolved — masking with a wrong version would be worse
+    than not masking at all.
+    """
+    platform_token = _REDUCED_UA_PLATFORM_TOKEN.get(platform.system())
+    if not platform_token:
+        return None
+    major = resolve_browser_major_version(executable)
+    if not major:
+        return None
+    agent = (
+        f"Mozilla/5.0 ({platform_token}) AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{major}.0.0.0 Safari/537.36"
+    )
+    if "edge" in Path(executable).name.lower():
+        # Edge appends its own token after Safari/537.36. Dropping it while
+        # sec-ch-ua still advertises the "Microsoft Edge" brand would be a
+        # sharper tell than the headless token this mask removes.
+        agent += f" Edg/{major}.0.0.0"
+    return agent
+
+
+def _apply_default_user_agent(args: list[str]) -> list[str]:
+    """Append the masked default ``--user-agent=`` unless the caller supplied one.
+
+    An explicit caller ``user_agent`` reaches here already rendered as a
+    ``--user-agent=`` arg, so the presence check is what makes an explicit value
+    win. The flag is process-wide: unlike a per-target CDP override it covers
+    every tab, worker and subresource of the launched browser — including tabs
+    the page itself opens — and it reaches the real HTTP request header, which is
+    the vector a server-side bot check reads first.
+    """
+    if any(arg.lower().startswith(_USER_AGENT_ARG_PREFIX) for arg in args):
+        return args
+    executable = check_browser_executable()
+    agent = build_reduced_user_agent(executable) if executable else None
+    if not agent:
+        debug_logger.log_warning(
+            "platform_utils",
+            "default_user_agent",
+            f"could not derive a masked User-Agent for {executable!r}; a headless "
+            "launch will advertise HeadlessChrome (F-770)",
+        )
+        return args
+    return [*args, f"{_USER_AGENT_ARG_PREFIX}{agent}"]
+
+
 def merge_browser_args(user_args: list[str] | None = None) -> tuple:
     """
     Merge user-provided browser arguments with platform-specific required arguments.
-    Strips any args that would compromise stealth detection.
+    Strips any args that would compromise stealth detection, and supplies the
+    masked default User-Agent (F-770) when the caller did not choose one.
 
     Args:
         user_args: User-provided browser arguments
@@ -204,7 +330,7 @@ def merge_browser_args(user_args: list[str] | None = None) -> tuple:
         if arg not in combined_args:
             combined_args.append(arg)
 
-    return combined_args, stealth_warnings
+    return _apply_default_user_agent(combined_args), stealth_warnings
 
 
 def get_platform_info() -> dict:
