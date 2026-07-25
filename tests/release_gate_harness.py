@@ -87,7 +87,8 @@ INIT_TIMEOUT = 60.0  # initialize handshake (answered locally by the proxy)
 LIST_TIMEOUT = 130.0  # first backend-bound call — covers backend cold start
 SPAWN_TIMEOUT = 120.0  # first real Chrome launch
 WARMUP_TIMEOUT = 150.0  # cold Chrome + master-profile bootstrap (best-effort)
-WARMUP_ATTEMPTS = 2  # the cold launch intermittently fails outright, not just slowly
+WARMUP_ATTEMPTS = 4  # the cold launch intermittently fails outright, not just slowly
+WARMUP_BACKOFF_SECONDS = 3.0  # multiplied by the attempt number; see _cold_start_warmup
 NAV_TIMEOUT = 60.0
 CALL_TIMEOUT = 45.0
 CLOSE_TIMEOUT = 45.0
@@ -675,6 +676,15 @@ async def _cold_start_warmup(
     record["cold_start_warmup"] = warmup
     for attempt in range(1, WARMUP_ATTEMPTS + 1):
         warmup["attempts"] = attempt
+        if attempt > 1:
+            # BACK OFF before retrying. "Failed to connect to browser" is a fast
+            # connect failure, not a timeout — a bigger WARMUP_TIMEOUT cannot fix
+            # it, and an immediate retry meets exactly the resource contention
+            # that just failed. Observed defeating both attempts on Linux/X64
+            # runners simultaneously across two PRs, taking `transport` and
+            # `install-smoke (wheel)` down with it. Same shape as the backoff
+            # e2e_helpers.warmup_once already uses for the in-process warmup.
+            await asyncio.sleep(WARMUP_BACKOFF_SECONDS * attempt)
         iid: str | None = None
         try:
             # Chrome's OWN log, into log_dir so the failure dump picks it up with
