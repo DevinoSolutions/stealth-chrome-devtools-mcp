@@ -862,7 +862,8 @@ class BrowserManager:
                 if hasattr(browser, "tabs") and browser.tabs:
                     for tab in browser.tabs[:]:
                         try:
-                            await asyncio.wait_for(tab.close(), timeout=2.0)
+                            close = uc.cdp.target.close_target(tab.target.target_id)
+                            await asyncio.wait_for(browser.connection.send(close), 2.0)
                         except Exception as tab_err:
                             debug_logger.log_warning(
                                 "browser_manager",
@@ -983,6 +984,18 @@ class BrowserManager:
         return str(target_id)
 
     @staticmethod
+    def _find_tab(browser: Browser, tab_id: str) -> Tab | None:
+        """Return the ``browser.tabs`` entry whose target id is ``tab_id``.
+
+        Callers drive it BY ID over ``browser.connection`` (F-775): the entry is
+        a ``Tab`` only if nodriver made it in-process, else a raw ``Connection``
+        with no ``close()``/``bring_to_front()``.
+        """
+        return next(
+            (t for t in browser.tabs if str(t.target.target_id) == tab_id), None
+        )
+
+    @staticmethod
     def _is_recoverable_navigation_error(error: Exception) -> bool:
         """Return whether a navigation error should trigger one stale-tab
         recovery attempt."""
@@ -1086,22 +1099,17 @@ class BrowserManager:
                 ),
             )
 
+        # F-775a: never await a browser.tabs entry, nor hand one to a caller that
+        # calls Tab-only methods on it (they are raw Connections after any
+        # rediscovery). The loop is a presence check on the target id and returns
+        # the caller's own live Tab; every other path takes _replace_main_tab.
         try:
             await browser.update_targets()
             tracked_target_id = self._get_tab_target_id(tracked_tab)
             if tracked_target_id:
                 for candidate_tab in browser.tabs:
                     if self._get_tab_target_id(candidate_tab) == tracked_target_id:
-                        await candidate_tab
-                        return candidate_tab
-
-            if browser.tabs:
-                fallback_tab = browser.tabs[0]
-                await fallback_tab
-                async with self._lock:
-                    if instance_id in self._instances:
-                        self._instances[instance_id]["tab"] = fallback_tab
-                return fallback_tab
+                        return tracked_tab
         except Exception as error:
             debug_logger.log_warning(
                 "browser_manager",
@@ -1332,17 +1340,13 @@ class BrowserManager:
 
         await browser.update_targets()
 
-        target_tab = None
-        for tab in browser.tabs:
-            if str(tab.target.target_id) == tab_id:
-                target_tab = tab
-                break
-
+        target_tab = self._find_tab(browser, tab_id)
         if not target_tab:
             return False
 
         try:
-            await target_tab.bring_to_front()
+            target_id = target_tab.target.target_id
+            await browser.connection.send(uc.cdp.target.activate_target(target_id))
             async with self._lock:
                 if instance_id in self._instances:
                     self._instances[instance_id]["tab"] = target_tab
@@ -1379,17 +1383,13 @@ class BrowserManager:
         if not browser:
             return False
 
-        target_tab = None
-        for tab in browser.tabs:
-            if str(tab.target.target_id) == tab_id:
-                target_tab = tab
-                break
-
+        target_tab = self._find_tab(browser, tab_id)
         if not target_tab:
             return False
 
         try:
-            await target_tab.close()
+            target_id = target_tab.target.target_id
+            await browser.connection.send(uc.cdp.target.close_target(target_id))
             return True
         except Exception as e:
             debug_logger.log_warning("browser_manager", "close_tab", str(e))
