@@ -278,6 +278,30 @@ def _isolated_env(
     return env
 
 
+def gate_work_dir(fallback: Path) -> Path:
+    """The throwaway workspace root for a gate journey (profiles, HOME, logs).
+
+    Prefers the CI runner's own temp when ``RUNNER_TEMP`` is set, falling back to
+    the caller's (usually pytest ``tmp_path``) everywhere else.
+
+    Why not just use pytest's tmp_path on CI: on macOS that resolves into
+    ``/private/var/folders/...``, the sandboxed per-user temp, and it is the one
+    concrete difference between the macOS cases that pass and the one that does
+    not — in-process integration runs its Chrome profile under ``RUNNER_TEMP``
+    (``/Users/runner/work/_temp``) and navigates fine, while this journey ran
+    under ``/private/var/folders`` and could not complete ANY network navigation
+    (a connection to a CLOSED port hung too, with Fetch interception proven off,
+    so nothing product-side was pausing it). Same OS, same Chrome, same code.
+
+    The caller still owns the directory's lifetime; W3's install smoke gets this
+    policy for free by calling the same helper.
+    """
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if runner_temp and Path(runner_temp).is_dir():
+        return Path(tempfile.mkdtemp(prefix="gate-", dir=runner_temp))
+    return fallback
+
+
 def _backend_logs(*dirs: Path) -> str:
     """The isolated backend's own logs, for failures the exception text alone
     cannot explain.

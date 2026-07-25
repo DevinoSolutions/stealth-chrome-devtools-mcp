@@ -14,6 +14,8 @@ unavailable (same guard as the other e2e modules).
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 from e2e_helpers import CAN_RUN
@@ -21,6 +23,7 @@ from release_gate_harness import (
     REGISTRY_TOOL_COUNT,
     RESULT_SCHEMA_VERSION,
     SERVER_NAME,
+    gate_work_dir,
     resolve_launcher,
     run_release_gate_journey,
 )
@@ -34,8 +37,13 @@ if not CAN_RUN:
 async def test_real_stdio_release_gate_journey(tmp_path):
     """Foundation proof + handshake/schema + canonical journey over real stdio."""
     launcher = resolve_launcher()  # this env's absolute installed console launcher
+    work_dir = gate_work_dir(tmp_path)  # RUNNER_TEMP on CI (see helper docstring)
 
-    record = await run_release_gate_journey(launcher=launcher, work_dir=tmp_path)
+    try:
+        record = await run_release_gate_journey(launcher=launcher, work_dir=work_dir)
+    finally:
+        if work_dir != tmp_path:  # pytest cleans its own; this one is ours
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     # Foundation proof: protocol, server identity, and the 94-tool registry.
     assert record["schema_version"] == RESULT_SCHEMA_VERSION
