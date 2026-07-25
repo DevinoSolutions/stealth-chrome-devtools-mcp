@@ -62,10 +62,20 @@ distinguishes the cause further.
 
 ## 4. Reproduction
 
-- **Reliable** on `macos-latest` (ARM64) GitHub-hosted runners, every run, 11/11.
+- **Reliable** on `macos-latest` (ARM64) GitHub-hosted runners, every run, 11/11
+  (13/13 including the two W3 cells below).
 - **Never** on Windows/X64 (local dev machine and CI) or Ubuntu/X64 CI.
 - CI job: `release-gate / transport (macOS/ARM64)`; test
   `tests/test_e2e_transport.py::test_real_stdio_release_gate_journey`.
+- **Also from a FRESH INSTALL of the built distribution** (plan_RELEASE W3, PR #48,
+  run 30161880495): `install-smoke (wheel macOS/ARM64)` and
+  `install-smoke (sdist macOS/ARM64)` both reproduced it after installing the
+  artifact into a brand-new venv — `about:blank` ok in 1.1s/3.1s, closed port
+  `127.0.0.1:1` hung 35.3s, fixture served nothing, network-service process alive,
+  workspace already under `RUNNER_TEMP`. This **rules out the editable/source-tree
+  install as a factor**: the same hang occurs through the exact wheel and sdist a
+  user would download. It narrows nothing about the mechanism, but it does mean a
+  packaging or install-layout explanation is no longer available.
 - Evidence lands in the failure text automatically: nav probe, fixture hit list,
   Chrome process snapshot, Chrome's log, and the backend's own logs.
 
@@ -105,3 +115,17 @@ uv run python -m pytest tests/test_e2e_transport.py -m transport -v
   release-blocking for a macOS claim and needs its own FIX plan.
 
 Until one of those runs, F-773 stays open and macOS navigation stays unclaimed.
+
+## 8. What the gate does claim on macOS (W3)
+
+W3 did not shrink macOS coverage to nothing. The two `install-smoke` macOS cells
+run as **declared partial cells** (`--stages handshake`): they install the exact
+built wheel/sdist into a fresh environment, resolve that environment's console
+launcher, and complete `initialize` → `tools/list` (94 tools) → `list_instances`
+over real stdio. They perform **no navigation**.
+
+So the qualified claim on macOS/ARM64 is: *the published artifacts install and
+serve*. It is **not**: *the published artifacts navigate*. These cells are not
+xfails — nothing failing is marked expected-to-fail; a strictly smaller thing is
+run and labelled, in the cell name, in the tool's stdout, in the result record's
+`stages`/`navigation_verified` fields, and in the `known-gaps` job.

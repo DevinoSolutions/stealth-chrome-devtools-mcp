@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import shutil
 import subprocess
@@ -44,6 +45,8 @@ for _extra_path in (REPO_ROOT, REPO_ROOT / "tests"):
 import package_verify  # noqa: E402  PERMANENT(sys.path bootstrap above must run first)
 
 from release_gate_harness import (  # noqa: E402  PERMANENT(sys.path bootstrap above must run first)
+    FULL_JOURNEY,
+    HANDSHAKE_ONLY,
     gate_work_dir,
     resolve_launcher,
     run_release_gate_journey,
@@ -218,16 +221,22 @@ def select_artifact(dist_dir: Path, kind: str) -> Path:
     return (wheel if kind == "wheel" else sdist).absolute()
 
 
-def smoke(
-    *,
-    dist_dir: Path,
-    manifest_path: Path,
-    kind: str,
-    work_dir: Path,
-    python_version: str,
-) -> dict[str, object]:
-    artifact = select_artifact(dist_dir, kind)
-    manifest = package_verify.load_manifest(manifest_path)
+@dataclasses.dataclass(frozen=True)
+class SmokeSpec:
+    """Everything that identifies ONE smoke cell: which artifact, how far."""
+
+    dist_dir: Path
+    manifest_path: Path
+    kind: str
+    work_dir: Path
+    python_version: str = "3.12"
+    stages: str = FULL_JOURNEY
+
+
+def smoke(spec: SmokeSpec) -> dict[str, object]:
+    artifact = select_artifact(spec.dist_dir, spec.kind)
+    manifest = package_verify.load_manifest(spec.manifest_path)
+    work_dir = spec.work_dir
 
     # (1) The downloaded bytes are the built bytes — the same precondition the
     # publish job re-runs before it uploads anything.
@@ -241,7 +250,7 @@ def smoke(
     probe_cwd.mkdir(exist_ok=True)
 
     # (2) fresh env + local install, caches off.
-    interpreter = create_fresh_env(venv_dir, python_version)
+    interpreter = create_fresh_env(venv_dir, spec.python_version)
     install_artifact(interpreter, artifact)
 
     # (3) what landed IS the artifact.
@@ -261,19 +270,23 @@ def smoke(
     journey_dir = gate_work_dir(work_dir / "gate")
     journey_dir.mkdir(parents=True, exist_ok=True)
     record = asyncio.run(
-        run_release_gate_journey(launcher=launcher, work_dir=journey_dir)
+        run_release_gate_journey(
+            launcher=launcher, work_dir=journey_dir, stages=spec.stages
+        )
     )
     return {
         "schema_version": RESULT_SCHEMA_VERSION,
         "artifact": artifact.name,
-        "artifact_kind": kind,
+        "artifact_kind": spec.kind,
+        "stages": spec.stages,
+        "navigation_verified": spec.stages == FULL_JOURNEY,
         "artifact_sha256": package_verify.sha256_file(artifact),
         "version": manifest["version"],
         "installed_version": probe.get("version"),
         "package_root": probe.get("package_root"),
         "launcher": str(launcher),
         "venv": str(venv_dir),
-        "python_version": python_version,
+        "python_version": spec.python_version,
         "journey": record,
     }
 
@@ -287,16 +300,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kind", choices=("wheel", "sdist"), required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--python", default="3.12")
+    parser.add_argument(
+        "--stages",
+        choices=(FULL_JOURNEY, HANDSHAKE_ONLY),
+        default=FULL_JOURNEY,
+        help=(
+            "how far W1's ONE journey runs. 'handshake' stops before any "
+            "navigation and therefore makes a strictly smaller claim "
+            "(installs and serves, NOT navigates)."
+        ),
+    )
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
 
     try:
         result = smoke(
-            dist_dir=args.dist_dir,
-            manifest_path=args.manifest,
-            kind=args.kind,
-            work_dir=args.work_dir,
-            python_version=args.python,
+            SmokeSpec(
+                dist_dir=args.dist_dir,
+                manifest_path=args.manifest,
+                kind=args.kind,
+                work_dir=args.work_dir,
+                python_version=args.python,
+                stages=args.stages,
+            )
         )
     except (SmokeError, package_verify.VerificationError) as exc:
         print(f"::error title=install-smoke::{exc}", file=sys.stderr)
@@ -307,7 +333,14 @@ def main(argv: list[str] | None = None) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(text + "\n", encoding="utf-8")
     print(text)
-    print(f"install-smoke {args.kind}: OK ({result['artifact']})")
+    if args.stages == FULL_JOURNEY:
+        print(f"install-smoke {args.kind}: OK ({result['artifact']}) — full journey")
+    else:
+        print(
+            f"install-smoke {args.kind}: OK ({result['artifact']}) — PARTIAL: "
+            f"install + launcher + handshake only. This cell verified NO "
+            f"navigation and must not be reported as full-journey coverage."
+        )
     return 0
 
 
