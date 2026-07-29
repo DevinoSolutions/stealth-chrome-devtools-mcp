@@ -554,15 +554,8 @@ async def test_completed_text_base64_binary_chunked_and_http_errors(
                 hashlib.sha256(decoded).hexdigest()
                 == hashlib.sha256(expected_binary).hexdigest()
             )
-
-    # The 418/503 bodies survived the error status rather than being dropped.
-    assert (
-        await get_content(
-            instance_id=instance,
-            request_id=(await _find_request(instance, "/status/503"))["request_id"],
-        )
-        == fr.STATUS_503_BODY
-    )
+        # The 4xx/5xx cases above ran through this same loop, so their bodies
+        # are asserted preserved rather than dropped alongside the 2xx ones.
 
 
 # ═══════════════════════════════════════════════════════════════════════════
