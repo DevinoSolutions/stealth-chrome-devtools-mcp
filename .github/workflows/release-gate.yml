@@ -349,6 +349,14 @@ jobs:
           --artifact "chrome-identity=chrome-identity.json"
           --artifact "junit=junit.xml"
           --artifact "runner-identity=runner-identity.json"
+          --mq "MQ-114"
+          --mq "MQ-115"
+          --mq "MQ-116"
+          --mq "MQ-117"
+          --mq "MQ-118"
+          --mq "MQ-119"
+          --mq "MQ-120"
+          --mq "MQ-121"
       - name: Upload this cell's release-evidence record
         if: always()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
