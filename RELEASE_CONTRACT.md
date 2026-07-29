@@ -323,7 +323,7 @@ describes actually closes.
 | F-776 | evidence / per-tool transport coverage | open (opened by W5) | Only the cookie round-trip tools have a per-tool real-transport success assertion. Every other served tool IS exercised against real Chrome — through the in-process seam, plus the representative journey and the in-memory client — but none of those may license a per-tool transport claim under §2.5. The gap is where the tests run, not whether they run. | See audit/stage2/finding_F776_no_per_tool_transport_evidence.md. Closing it means moving/adding per-tool assertions into the transport lane, not relabelling what exists. |
 | F-777 | test harness / `get_cookies` through the `.fn` seam | open (test infrastructure, not a user-facing defect) | Called through the in-process `.fn` seam the E2E suite uses, both CDP retrieval paths hang (~30s, no return) AND the tab's CDP connection is poisoned: the NEXT call on that tab dies with a 10s timeout. Measured on the same tool and the same Chrome that succeed over real stdio, so the blast radius is the seam, not the product. | The user-facing path is evidenced (the qualified cookie row). No E2E test may call `get_cookies` through the `.fn` seam; the tool's coverage lives in the transport lane. See audit/stage2/finding_F777_get_cookies_fn_seam_hang.md. |
 | F-778 | types / `get_cookies` return shape | open (cosmetic) | `get_cookies` is declared `-> list[dict[str, Any]]` but returns nodriver `cdp.network.Cookie` dataclasses. The WIRE shape is correct — pydantic serializes them into proper JSON objects in `structuredContent` — so a client sees real cookie objects; only fastmcp's `.data` reconstruction is opaque (`[Root()]`). | No user impact measured. See audit/stage2/finding_F778_get_cookies_return_type_mismatch.md. |
-| F-779 | gate reliability / macOS integration teardown | open, observed once then not reproduced | `integration (macOS/ARM64)` failed with `Event loop is closed` at teardown, reddening `release-evidence` and the `release-gate` aggregate with it. The gate was then re-run against a BYTE-IDENTICAL tree (an empty commit built from the same tree object) and returned 32/32 success, including that cell. Same code, same workflow, same runner image, two different conclusions. The mechanism is undiagnosed: job logs require admin rights, so only check-run annotations were available, and they carry the message but no traceback. | Unlike the Linux cold-spawn flake this one takes down the AGGREGATE check — the very check a ruleset is meant to require. plan_RELEASE §0.2 makes flake-freedom one of the three properties behind 'green ⇒ blindly pushable'; this is the second distinct gate flake on record, so that property is further from true, not closer. W8 owns flake quarantine and has not run. See audit/stage2/finding_F779_macos_integration_teardown_flake.md. |
+| F-779 | gate reliability / macOS integration teardown | open, MEASURED at 2 failures in 6 runs (~33%) | `integration (macOS/ARM64)` intermittently fails with `Event loop is closed` at teardown, reddening `release-evidence` and the `release-gate` aggregate with it. Code independence is established twice by different methods: (1) a re-run against a BYTE-IDENTICAL tree (an empty commit built from the same tree object) returned 32/32 success; (2) a later failure landed on a commit whose ENTIRE content is one markdown file. Across six consecutive runs on the W5 line the cell failed twice, with successes bracketing each failure. The mechanism is undiagnosed: job logs require admin rights, so only check-run annotations were available, and they carry the message but no traceback. | This is the decisive limitation on the release's headline goal. The aggregate requires EVERY edge green, so a ~33% failure on one cell puts the headline check red roughly one run in three regardless of the other 31 jobs. plan_RELEASE §0.2 makes flake-freedom one of the three properties behind 'green ⇒ blindly pushable' — so while this is open, a green check may be read as evidence about THIS run and nothing more, and a red one may not be read as evidence about your change at all. That is the exact ambiguity a release gate exists to remove. W8 owns flake quarantine and has not run. See audit/stage2/finding_F779_macos_integration_teardown_flake.md. |
 | Linux cold-spawn flake | gate reliability | open, observed repeatedly | Chrome intermittently refuses the first connect on the Linux runner (`Failed to connect to browser`) inside the canonical journey, and the harness's bounded warmup retry does not always absorb it. Observed in `install-smoke (sdist Linux/X64)`, and later in the SAME run in both `transport (Linux/X64)` and `install-smoke (wheel Linux/X64)` — while `transport (Windows/X64)` and every other cell passed, and the cookie test in the very same Linux transport job spawned Chrome successfully seconds later. It is a cold-start race, not a code defect, and it lands on a cell that carries a qualified claim. | This gate is therefore NOT proven flake-free, and the flake can hit a cell whose evidence a claim depends on. plan_RELEASE §0.2 makes flake-freedom one of the three properties behind 'green ⇒ blindly pushable'; W8 owns flake quarantine and has not run, so no flake-freedom claim is made here. |
 | missing interaction surface | tools / interaction census | excluded | There are no double-click, right-click, drag, or native-dialog tools. A workflow needing them cannot be automated by this server. | documented absence — plan_RELEASE §1.2 forbids building them here. |
 | HTTP transport | trust boundary / transport | excluded from qualification | `--transport http` is UNAUTHENTICATED by design and binds loopback by default. Anything that can reach the port drives the browser. | stdio evidence never licenses an HTTP claim; the gate qualifies stdio only. |
@@ -356,18 +356,25 @@ predicates passed their failing controls on all three cells — that is
 sensitivity, not invisibility — and F-774 records a real residual
 client-hint tell in the headless UA override.
 
-It does **not** claim the gate is flake-free. TWO distinct gate
-flakes are on record. A Chrome cold-spawn race on the Linux runner
-has failed first attempts in three different cells, including
+It does **not** claim the gate is flake-free — and on current
+measurement it is not close. TWO distinct gate flakes are on
+record. A Chrome cold-spawn race on the Linux runner has failed
+first attempts in three different cells, including
 `transport (Linux/X64)` — one of the two cells that carry the
 qualified stdio claims. And F-779: `integration (macOS/ARM64)`
-failed with `Event loop is closed` at teardown, then returned green
-on a byte-identical tree, taking the `release-gate` aggregate red
-and back with it. plan_RELEASE §0.2 makes flake-freedom one of the
-three properties behind 'green ⇒ blindly pushable', and the
-workstream that owns flake quarantine has not run. Read a green
-check as evidence about this run, not as a promise about the next
-one.
+fails at teardown with `Event loop is closed` in **2 of 6**
+consecutive runs, taking the `release-gate` aggregate down with it
+each time. Its code independence is settled — one failure landed on
+a commit containing nothing but a markdown file.
+
+Read that consequence carefully, because it is the honest headline
+of this release: **the aggregate check is currently red about one
+run in three for reasons that have nothing to do with the change
+under review.** plan_RELEASE §0.2 makes flake-freedom one of the
+three properties behind 'green ⇒ blindly pushable'. Until F-779 is
+closed, a green check is evidence about that run only, and a red
+check is not by itself evidence about your change. The workstream
+that owns flake quarantine has not run.
 
 A green check is also evidence about ONE run attempt. The evidence
 ledger binds every cell record to a single `run_id` + `run_attempt`,
