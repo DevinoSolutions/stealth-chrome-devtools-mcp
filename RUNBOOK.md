@@ -108,6 +108,14 @@ alive but bad", `kill-orphans` for "backend gone, browsers orphaned". `--force`
 overrides the guard.
 
 ### Disk filling up
+Look before you reclaim — neither of these changes anything on disk:
+
+<!-- doc-example: runnable -->
+```console
+stealth-chrome-devtools profiles
+stealth-chrome-devtools cleanup
+```
+
 `cleanup` (dry run) shows what it would delete/trim; `cleanup --apply` reclaims. It
 deletes idle auto-clones over the clone cap and trims regenerable data from idle named
 profiles over the browser-session cap — **logins are kept**. Override caps for one run

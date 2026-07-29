@@ -178,6 +178,14 @@ spawn_browser(headless=True, browser_args=["--enable-automation"])
 **94 tools** across 11 sections — the count is derived from the live tool registry,
 never hand-maintained. [See the full navigation map →](CLAUDE.md).
 
+That is what the server **serves**, which is not the same as what the release
+gate **proves**. At the release SHA in the evidence ledger, 3 of those 94 are
+release-qualified: asserted end-to-end over the real stdio transport a client
+actually speaks. The rest are driven against real Chrome by the E2E suite but
+through an in-process seam, so they are `served-unqualified` at the wire — tested,
+not proved there. [`RELEASE_CONTRACT.md`](RELEASE_CONTRACT.md) lists the state of
+each tool and is the only source for those numbers.
+
 ## Testing
 
 ```bash
@@ -223,13 +231,28 @@ Installs a `stealth-chrome-devtools` ops command for managing the server and its
 disk usage. (This is for *ops* — to drive a browser, use the MCP server or its
 HTTP backend.)
 
-```bash
-stealth-chrome-devtools status       # backend running? browser-session root + caps
-stealth-chrome-devtools profiles     # list profiles with size / role / in-use
-stealth-chrome-devtools cleanup      # preview reclaimable disk (DRY RUN)
+These four only read and preview — they change nothing, and the test suite runs
+them on every commit, so they are known to work:
+
+<!-- doc-example: runnable -->
+```console
+stealth-chrome-devtools status
+stealth-chrome-devtools profiles
+stealth-chrome-devtools cleanup
+stealth-chrome-devtools cleanup --browser-session-cap-gb 12
+```
+
+`status` reports whether the backend is up plus the browser-session root and both
+caps; `profiles` lists profiles with size / role / in-use; `cleanup` previews the
+reclaimable disk (dry run), and `--browser-session-cap-gb` previews it at a
+tighter cap.
+
+These are not auto-executed — `--apply` deletes, `serve` does not return, and
+`doctor` needs Chrome installed:
+
+```console
 stealth-chrome-devtools cleanup --apply               # actually reclaim
-stealth-chrome-devtools cleanup --browser-session-cap-gb 12  # preview at a tighter cap
-stealth-chrome-devtools doctor       # check Chrome / environment
+stealth-chrome-devtools doctor                        # check Chrome / environment
 stealth-chrome-devtools serve --http --port 19222     # start the server
 ```
 

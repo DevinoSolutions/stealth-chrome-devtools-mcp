@@ -200,13 +200,22 @@ def serve_fixture_app():
 # ---------------------------------------------------------------------------
 # Launcher resolver (standalone — W3 reuses it for each installed environment).
 # ---------------------------------------------------------------------------
-def resolve_launcher(interpreter: str | os.PathLike[str] | None = None) -> Path:
-    """Resolve the absolute installed ``stealth-chrome-devtools-mcp`` launcher.
+def resolve_launcher(
+    interpreter: str | os.PathLike[str] | None = None,
+    *,
+    name: str = "stealth-chrome-devtools-mcp",
+) -> Path:
+    """Resolve an absolute installed console launcher of this distribution.
+
+    ``name`` selects which of the two declared ``[project.scripts]`` entry points
+    to resolve; it defaults to the MCP server launcher this harness drives. W11's
+    doc-example runner passes the ops CLI name so that both console scripts are
+    resolved by this ONE resolver rather than a second copy of the rule.
 
     Given a target environment's interpreter (default: this process's), derive the
     console entry point from that environment's scripts directory —
-    ``Scripts/stealth-chrome-devtools-mcp.exe`` on Windows,
-    ``bin/stealth-chrome-devtools-mcp`` on POSIX — made absolute WITHOUT following
+    ``Scripts/<name>.exe`` on Windows, ``bin/<name>`` on POSIX — made absolute
+    WITHOUT following
     symlinks (``Path.absolute()``, never ``Path.resolve()``: on POSIX a venv's
     ``bin/python`` is a symlink to the base interpreter, so resolving it escapes
     the venv into a scripts dir that has no entry points — exactly what the first
@@ -218,17 +227,13 @@ def resolve_launcher(interpreter: str | os.PathLike[str] | None = None) -> Path:
         interpreter if interpreter is not None else _this_executable()
     ).absolute()
     scripts_dir = interp.parent
-    name = (
-        "stealth-chrome-devtools-mcp.exe"
-        if os.name == "nt"
-        else "stealth-chrome-devtools-mcp"
-    )
-    launcher = scripts_dir / name
+    exe_name = f"{name}.exe" if os.name == "nt" else name
+    launcher = scripts_dir / exe_name
     if not launcher.is_absolute():
         raise ValueError(f"resolved launcher is not absolute: {launcher}")
     if not launcher.exists() or not launcher.is_file():
         raise FileNotFoundError(
-            f"console launcher {name!r} not found in {scripts_dir} "
+            f"console launcher {exe_name!r} not found in {scripts_dir} "
             f"(resolved from interpreter {interp}); expected an installed entry point"
         )
     if os.name != "nt" and not os.access(launcher, os.X_OK):

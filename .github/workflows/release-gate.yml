@@ -173,6 +173,7 @@ jobs:
           --junit "junit.xml"
           --artifact "junit=junit.xml"
           --artifact "runner-identity=runner-identity.json"
+          --mq "MQ-130"
       - name: Upload this cell's release-evidence record
         if: always()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
