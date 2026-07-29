@@ -342,13 +342,74 @@ def test_the_blind_push_property_is_explicitly_not_claimed(contract: str):
 
 
 def test_unrun_workstreams_read_as_not_evidenced_not_as_a_roadmap(contract: str):
-    assert "NOT EVIDENCED in this release" in contract
-    assert contract.count("NOT EVIDENCED in this release") >= 11, (
+    """Derived from the register, not from a typed count.
+
+    The count was `>= 11` while every W6-W16 workstream was unrun. W12 landed
+    partially, so it left the NOT-EVIDENCED set and the constant went stale in
+    the direction that matters least (a floor that silently accepts fewer rows).
+    Counting the register instead means a row that stops saying NOT EVIDENCED
+    has to actually leave the register, which is the property worth policing.
+    """
+    unrun = [row for row in gen.LIMITATIONS if "NOT EVIDENCED" in row.area]
+    assert unrun, "no workstream is marked NOT EVIDENCED; verify that is true"
+    assert contract.count("NOT EVIDENCED in this release") == len(unrun), (
         "every workstream that produced no evidence must say so in its own row"
     )
-    for row in gen.LIMITATIONS:
-        if "NOT EVIDENCED" in row.area:
-            assert "may not infer" in row.evidence
+    for row in unrun:
+        assert "may not infer" in row.evidence
+
+
+def test_the_threat_contract_is_generated_from_the_policy(contract: str):
+    """§6 is a rendering of the typed policy, not prose someone wrote once."""
+    for row in re_mod.threat_rows():
+        assert row.dimension in contract, f"threat dimension {row.dimension!r} missing"
+    for rule in re_mod.redaction_rows():
+        assert rule.secret_class in contract, (
+            f"secret class {rule.secret_class!r} missing"
+        )
+
+
+def test_the_threat_contract_states_the_untrusted_client_is_out_of_scope(
+    contract: str,
+):
+    """plan_RELEASE §2.12 requires this said plainly, not left to inference."""
+    flat = " ".join(contract.split())
+    assert "untrusted MCP client is out of scope" in flat
+    assert (
+        "does not pretend an exec-capable local automation server is a sandbox" in flat
+    )
+
+
+def test_the_contract_asserts_a_literal_loopback_bind(contract: str):
+    assert f"binds the literal `{re_mod.DEFAULT_BIND_HOST}`" in contract
+    assert "remote exposure requires an explicit, deliberate user" in contract.lower()
+
+
+def test_the_threat_table_never_hides_an_untested_row(contract: str):
+    """The distinction the workstream exists to preserve.
+
+    A nine-row table of confident sentences reads as nine verified properties.
+    Rows that no test backs must say `documented`, and the ones that say
+    `TESTED` must be exactly the ones a test names.
+    """
+    documented = [r for r in re_mod.threat_rows() if "documented" in r.evidence]
+    assert documented, "no threat row is marked documented — verify that is true"
+    for row in documented:
+        assert "TESTED" not in row.evidence.replace("PARTIALLY TESTED", ""), (
+            f"threat row {row.dimension!r} claims both documented and TESTED"
+        )
+
+
+def test_no_security_property_is_claimed_for_the_exec_surface(contract: str):
+    """The one overclaim this section could plausibly drift into."""
+    for phrase in (
+        "sandboxed",
+        "is isolated",
+        "safely isolated",
+        "cannot escape",
+        "authenticated by default",
+    ):
+        assert phrase not in contract.lower(), f"contract overclaims: {phrase!r}"
 
 
 def test_the_contract_says_it_is_generated(contract: str):

@@ -284,7 +284,9 @@ LIMITATIONS: tuple[Limitation, ...] = (
         "excluded from qualification",
         "`--transport http` is UNAUTHENTICATED by design and binds loopback by "
         "default. Anything that can reach the port drives the browser.",
-        "stdio evidence never licenses an HTTP claim; the gate qualifies stdio only.",
+        "The loopback DEFAULT is tested (§6.1); the transport itself is not. "
+        "stdio evidence never licenses an HTTP claim, and the gate runs no "
+        "live HTTP acceptance test at all.",
     ),
     Limitation(
         "code-execution surface",
@@ -292,8 +294,12 @@ LIMITATIONS: tuple[Limitation, ...] = (
         "excluded from qualification",
         "`execute_script`, `inject_and_execute_script`, `call_javascript_"
         "function`, `execute_cdp_command`, `execute_python_in_browser` and "
-        "`create_python_binding` run caller-supplied code by design.",
-        "W12 (security/trust boundary) has NOT run; no security property is claimed.",
+        "`create_python_binding` run caller-supplied code by design. The last "
+        "of those, plus both hook-creation tools and `validate_hook_function`, "
+        "reach `exec`/`eval` IN THE SERVER PROCESS at the user's privileges.",
+        "The host-exec site INVENTORY is tested, so a new one cannot appear "
+        "unannounced (§6). No isolation or containment property is tested, "
+        "because none exists — this is a trust requirement, not a control.",
     ),
     Limitation(
         "architecture / channel",
@@ -372,11 +378,19 @@ LIMITATIONS: tuple[Limitation, ...] = (
     ),
     Limitation(
         "W12 security",
-        "NOT EVIDENCED in this release",
-        "no evidence exists",
-        "No filesystem, upload/export, redaction, or bind-address property is "
-        "verified.",
-        UNVERIFIED,
+        "trust boundary / partial",
+        "PARTIAL — see §6 for the row-by-row split",
+        "Tested: the loopback bind default and the absence of any env knob "
+        "that could change it; the host-Python exec-site inventory; the "
+        "absence of a download tool; the canonical redaction policy over all "
+        "eight secret classes; and the destination/overwrite semantics of the "
+        "three filesystem paths reachable without a browser. NOT tested: "
+        "browser-JS containment, `upload_file` bytes/name, and the seven "
+        "browser-backed `*_to_file` destinations.",
+        "Every §6 row states which of the two it is. The untested rows are "
+        "descriptions of intent and may not be read as properties; in "
+        "particular no isolation, sandboxing, or authentication claim is made "
+        "anywhere in this document.",
     ),
     Limitation(
         "W13 wire semantics",
@@ -738,9 +752,123 @@ def _tool_section(counts: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _threat_section() -> str:
+    """The W12 trust boundary — generated from the policy, never written prose.
+
+    The `Verified by` column is the point of the table. plan_RELEASE §2.12
+    forbids implying a stronger guarantee than exists, and the easiest way to
+    imply one is to print nine confident rows and let the reader assume a test
+    stands behind each. Every row says which it is.
+    """
+    lines = [
+        "## 6. Trust boundary and threat contract",
+        "",
+        "**This section tests the boundary that exists. It does not pretend an",
+        "exec-capable local automation server is a sandbox.**",
+        "",
+        "An **untrusted MCP client is out of scope for this release.** The",
+        "server is designed for a caller that already holds the user's",
+        "privileges: it runs caller-supplied Python in its own process, drives",
+        "the user's real logged-in browser profiles, and reads and writes files",
+        "as the user. There is no privilege boundary between the caller and the",
+        "host for this to defend, and this release does not add one.",
+        "",
+        "Run it the way it is designed to be run: as a child process of a client",
+        "you trust, on a machine you control.",
+        "",
+        "The `Verified by` column separates what a test actually checks from",
+        "what is merely written down. A row that reads *documented* has **not**",
+        "been tested — treat it as a description of intent, not as a property.",
+        "",
+        "| Dimension | stdio | HTTP | Verified by |",
+        "|---|---|---|---|",
+    ]
+    lines.extend(
+        f"| **{_md_escape(row.dimension)}** | {_md_escape(row.stdio)} "
+        f"| {_md_escape(row.http)} | {_md_escape(row.evidence)} |"
+        for row in release_evidence.threat_rows()
+    )
+    bind = release_evidence.DEFAULT_BIND_HOST
+    example = release_evidence.REDACTION_PLACEHOLDER.replace(
+        "{secret_class}", "<class>"
+    )
+    lines.extend(
+        [
+            "",
+            "### 6.1 The bind address, stated exactly",
+            "",
+            f"`--transport http` binds the literal `{bind}`",
+            "unless the user passes a different `--host` on the command line.",
+            "No environment variable, settings field, or config file can change",
+            "it — **remote exposure requires an explicit, deliberate user",
+            "action**. That is asserted against the real argument parser and the",
+            "real backend spawn arguments, not against this sentence.",
+            "",
+            "Loopback is the *only* thing standing between the port and full",
+            "control of the browser, because there is no authentication behind",
+            "it. If you pass `--host 0.0.0.0`, you have published an",
+            "unauthenticated remote-code-execution endpoint. The gate qualifies",
+            "no HTTP behaviour at all (§3).",
+            "",
+            "### 6.2 Canonical redaction policy",
+            "",
+            "One typed table, in `tools/release_evidence.py`, imported by every",
+            "diagnostic surface. `redact()` is the only redactor; a second rule",
+            "table would be a second definition of what counts as a secret.",
+            "",
+            "It applies to **diagnostics** — errors, logs, reproduction bundles.",
+            "It does **not** apply to tool results: those go back to the trusted",
+            "caller verbatim, which is the whole purpose of the tool.",
+            "",
+            "Replacements carry the class and nothing derived from the value —",
+            f"no length, no hash, no prefix — in the form `{example}`,",
+            "so the placeholder can never become the disclosure.",
+            "",
+            "**Its boundary, stated plainly.** The structural rules recognise a",
+            "secret by its POSITION — inside URL userinfo, after a `?k=`, under",
+            "a credential-shaped key. A token that has escaped that shape and",
+            "sits alone in a log line is indistinguishable from a request id,",
+            "and no rule can classify it. A caller that knows a value is secret",
+            "must register it as a literal; the policy then removes every",
+            "occurrence of it, wherever it surfaced. This is a limitation of",
+            "what redaction can do, not a defect, and it is pinned by a test so",
+            "the table below is never read as *any secret, anywhere*.",
+            "",
+            "| Secret class | Detected as | Action | Why |",
+            "|---|---|---|---|",
+        ]
+    )
+    lines.extend(
+        f"| `{_md_escape(rule.secret_class)}` | {_md_escape(rule.detects)} "
+        f"| **{_md_escape(rule.action)}** | {_md_escape(rule.rationale)} |"
+        for rule in release_evidence.redaction_rows()
+    )
+    preserved = ", ".join(
+        f"`{name}`" for name in sorted(release_evidence.PRESERVED_DIAGNOSTIC_FIELDS)
+    )
+    lines.extend(
+        [
+            "",
+            f"These fields survive redaction untouched: {preserved}. A",
+            "diagnostic that redacts its own error code is not safer, only",
+            "useless, so the tests assert both halves — every secret class gone,",
+            "every one of these intact.",
+            "",
+            "### 6.3 No download contract",
+            "",
+            "There is **no download tool**, and therefore no destination, no",
+            "completion signal, and no path guarantee for anything a page",
+            "downloads. Where a browser-initiated download lands is undefined by",
+            "this server. A test checks the live registry so this stays true.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _limitations_section() -> str:
     lines = [
-        "## 6. Limitations register",
+        "## 7. Limitations register",
         "",
         "Everything a reader must know before trusting a green check. Rows are not",
         "removed to shorten the document; a row leaves only when the thing it",
@@ -762,7 +890,7 @@ def _limitations_section() -> str:
 def _ceiling_section() -> str:
     return "\n".join(
         [
-            "## 7. The ceiling",
+            "## 8. The ceiling",
             "",
             "This contract does **not** promise that the server works on any site,",
             "or that it will keep working. The open web and Chrome change",
@@ -816,6 +944,8 @@ def render_contract() -> str:
             _transport_section(),
             "\n",
             _tool_section(counts),
+            "\n",
+            _threat_section(),
             "\n",
             _limitations_section(),
             "\n",
