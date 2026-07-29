@@ -332,6 +332,23 @@ jobs:
         # W5: `always()` so a RED cell still writes a record saying it was
         # red. The aggregate rejects any non-success terminal outcome, so
         # this edge can only ever make the gate redder, never greener.
+        #
+        # W7's `--mq` ids below are emitted by THIS cell because it is the one
+        # that runs them: `tests/test_e2e_dynamic_sites.py` is
+        # `integration`-marked, so the unit lane deselects all nine nodes and
+        # only this job's junit.xml carries their outcome.
+        #
+        # id -> node. Eight shapes, nine nodes: MQ-116 is deliberately split so
+        # a failure names which half broke, and it needs BOTH halves to pass.
+        #   MQ-114 test_spa_history_route_swap_and_requery
+        #   MQ-115 test_cross_origin_a_b_a_direct_metadata_and_limit
+        #   MQ-116 test_intersection_observer_lazy_load
+        #        + test_virtualized_and_finite_infinite_lists   <- both required
+        #   MQ-117 test_strict_csp_surface
+        #   MQ-118 test_auth_redirect_cors_preflight
+        #   MQ-119 test_completed_text_base64_binary_chunked_and_http_errors
+        #   MQ-120 test_sse_and_websocket_lifecycle
+        #   MQ-121 test_custom_elements_slots_and_popup_lifecycle
         if: always()
         shell: bash
         run: >-

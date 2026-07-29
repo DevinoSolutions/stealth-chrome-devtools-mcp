@@ -24,6 +24,29 @@ Scope honesty. These nodes drive the in-process ``.fn`` seam against real
 image-provided Chrome Stable, which is what puts them in the ``integration``
 lane on all three W2 runners. The stdio wire path is W1's separate claim
 (``tests/test_e2e_transport.py``); nothing here re-makes it.
+
+MQ binding. Eight shapes, nine nodes — MQ-116 is deliberately split so a
+failure names which half broke, and it needs BOTH halves to pass:
+
+===========  ================================================================
+MQ           node
+===========  ================================================================
+``MQ-114``   ``test_spa_history_route_swap_and_requery``
+``MQ-115``   ``test_cross_origin_a_b_a_direct_metadata_and_limit``
+``MQ-116``   ``test_intersection_observer_lazy_load`` **and**
+             ``test_virtualized_and_finite_infinite_lists``
+``MQ-117``   ``test_strict_csp_surface``
+``MQ-118``   ``test_auth_redirect_cors_preflight``
+``MQ-119``   ``test_completed_text_base64_binary_chunked_and_http_errors``
+``MQ-120``   ``test_sse_and_websocket_lifecycle``
+``MQ-121``   ``test_custom_elements_slots_and_popup_lifecycle``
+===========  ================================================================
+
+The ids are bound to runtime evidence by the ``--mq`` flags on the
+``integration`` cell's ``release_evidence.py emit`` step in
+``.github/workflows/release-gate.yml``. That ledger, not this docstring, is
+what W8 resolves against; this table exists so the two cannot silently
+disagree.
 """
 
 from __future__ import annotations
