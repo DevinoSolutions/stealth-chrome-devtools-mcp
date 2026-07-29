@@ -252,6 +252,26 @@ LIMITATIONS: tuple[Limitation, ...] = (
         "audit/stage2/finding_F778_get_cookies_return_type_mismatch.md.",
     ),
     Limitation(
+        "F-779",
+        "gate reliability / macOS integration teardown",
+        "open, observed once then not reproduced",
+        "`integration (macOS/ARM64)` failed with `Event loop is closed` at "
+        "teardown, reddening `release-evidence` and the `release-gate` aggregate "
+        "with it. The gate was then re-run against a BYTE-IDENTICAL tree (an "
+        "empty commit built from the same tree object) and returned 32/32 "
+        "success, including that cell. Same code, same workflow, same runner "
+        "image, two different conclusions. The mechanism is undiagnosed: job "
+        "logs require admin rights, so only check-run annotations were "
+        "available, and they carry the message but no traceback.",
+        "Unlike the Linux cold-spawn flake this one takes down the AGGREGATE "
+        "check — the very check a ruleset is meant to require. plan_RELEASE §0.2 "
+        "makes flake-freedom one of the three properties behind 'green ⇒ blindly "
+        "pushable'; this is the second distinct gate flake on record, so that "
+        "property is further from true, not closer. W8 owns flake quarantine and "
+        "has not run. See "
+        "audit/stage2/finding_F779_macos_integration_teardown_flake.md.",
+    ),
+    Limitation(
         "Linux cold-spawn flake",
         "gate reliability",
         "open, observed repeatedly",
@@ -775,14 +795,18 @@ def _ceiling_section() -> str:
             "sensitivity, not invisibility — and F-774 records a real residual",
             "client-hint tell in the headless UA override.",
             "",
-            "It does **not** claim the gate is flake-free. A Chrome cold-spawn",
-            "race on the Linux runner has failed first attempts in three",
-            "different cells, including `transport (Linux/X64)` — one of the two",
-            "cells that carry the qualified stdio claims. plan_RELEASE §0.2 makes",
-            "flake-freedom one of the three properties behind 'green ⇒ blindly",
-            "pushable', and the workstream that owns flake quarantine has not",
-            "run. Read a green check as evidence about this run, not as a promise",
-            "about the next one.",
+            "It does **not** claim the gate is flake-free. TWO distinct gate",
+            "flakes are on record. A Chrome cold-spawn race on the Linux runner",
+            "has failed first attempts in three different cells, including",
+            "`transport (Linux/X64)` — one of the two cells that carry the",
+            "qualified stdio claims. And F-779: `integration (macOS/ARM64)`",
+            "failed with `Event loop is closed` at teardown, then returned green",
+            "on a byte-identical tree, taking the `release-gate` aggregate red",
+            "and back with it. plan_RELEASE §0.2 makes flake-freedom one of the",
+            "three properties behind 'green ⇒ blindly pushable', and the",
+            "workstream that owns flake quarantine has not run. Read a green",
+            "check as evidence about this run, not as a promise about the next",
+            "one.",
             "",
             "A green check is also evidence about ONE run attempt. The evidence",
             "ledger binds every cell record to a single `run_id` + `run_attempt`,",
