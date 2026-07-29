@@ -2,10 +2,10 @@
 
 **Status:** open (gate reliability, not a user-facing product defect)
 **Opened by:** the W5 contract re-run, 2026-07-28
-**Severity:** **HIGH.** Measured failure rate is **2 of 7 runs (~29%)** on the
+**Severity:** **HIGH.** Measured failure rate is roughly **one run in four** on the
 macOS/ARM64 integration cell, and each failure reddens the aggregate
 `release-gate` check — the one check a repository ruleset is meant to require.
-A required check that fails a third of the time for reasons unrelated to the
+A required check that fails a quarter of the time for reasons unrelated to the
 change is not a gate; it is a coin flip with a retry button.
 
 > **Revision note (2026-07-29):** this finding originally said "observed once then
@@ -81,14 +81,29 @@ methods.
 | `a97c970` | F-779 doc + uv.lock one-liner | success |
 | `7c65374` | **one markdown file** | **failure** |
 | `7a3f546` | F-779 rate correction (docs) | success |
+| `3be448b` | F-779 mechanism (docs) | success |
 
-**2 failures / 7 runs ≈ 29%.** Both failures carry the same `Event loop is closed`
-teardown signature. Successes bracket each failure, so this is not a regression
-that landed and stayed.
+**2 failures in 8 consecutive runs (~25%), as of `3be448b`.**
 
-Note the compounding arithmetic: the aggregate needs *every* edge green, so a 33%
-failure on one cell puts the headline `release-gate` check red roughly one run in
-three no matter how healthy the other 31 jobs are.
+Both failures carry the same `Event loop is closed` teardown signature. Successes
+bracket each failure, so this is not a regression that landed and stayed.
+
+> **On the number itself.** This tally is *live*, and it has a self-invalidating
+> property worth naming: every commit that edits this file adds another sample to
+> the denominator. It read 2/6 when first written, then 2/7, now 2/8 — not because
+> anything changed, but because documenting it generates evidence about it. Do not
+> keep re-editing the percentage; it will always be slightly behind.
+>
+> **The durable claim, which none of that drift touches:** the macOS/ARM64
+> integration cell fails intermittently at an order of roughly **one run in four**,
+> the failures are provably independent of the code under test, and each one takes
+> the `release-gate` aggregate down with it. Anyone tempted to update the
+> fraction should instead spend that effort on the mechanism below.
+
+Note the compounding arithmetic: the aggregate needs *every* edge green, so a
+~25% failure on one cell puts the headline `release-gate` check red roughly one
+run in four no matter how healthy the other 31 jobs are — and that is a floor,
+since the Linux cold-spawn flake can independently redden the same aggregate.
 
 ## Probable mechanism — HYPOTHESIS, not a confirmed diagnosis
 
