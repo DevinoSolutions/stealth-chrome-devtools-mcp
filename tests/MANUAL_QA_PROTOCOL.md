@@ -489,14 +489,30 @@ ID belongs to the tab set, not that it is the focused target.
 **Evidence**: satisfied — pytest:
 `tests/test_e2e_interaction.py::test_cookies_lifecycle`.
 
-### MQ-53: Get cookies — returns set cookies
-**Manual**: call `get_cookies` after setting one.
-**Evidence**: blocked — `[KNOWN-BUG: get_cookies_hang]` prevents successful
-real-Chrome cookie retrieval; HEAD has no success-path acceptance target.
+### MQ-53: Get cookies — returns the exact value that was set
+**Rewritten by W5** (plan_RELEASE §2.5 option (a) — the hard block cleared). The
+former step was `blocked` on a `[KNOWN-BUG: get_cookies_hang]` that, measured,
+belongs to the in-process `.fn` seam and not to the served path (F-777): over
+real stdio against real Chrome, retrieval works and is now asserted.
+
+**Manual**: `set_cookie` a value on a real `http://` origin, then `get_cookies`
+and compare the returned value **byte for byte** with what you set. Presence, a
+non-empty list, or a type check is not this step; the VALUE is. Then
+`clear_cookies` and re-read to confirm it is gone.
+**Evidence**: satisfied — pytest:
+`tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip`.
+
+Bounds this step does **not** exceed: the node runs in the `transport` lane, so
+its evidence is **Linux/X64 and Windows/X64 only** — macOS/ARM64 is excluded
+under F-773, and no macOS cookie claim exists. It is a dedicated node, never the
+representative journey (§2.5 disqualifies that as per-tool evidence), and it is
+the row backing `get_cookies` in `tools/release_tool_claims.json`, which the
+`release-evidence` job re-verifies against every run's records.
 **Current support (non-acceptance)**: pytest:
 `tests/test_e2e_functions_hooks.py::test_e2e_coverage_manifest` records the
-exemption only. Schema and missing-instance checks are not behavioral coverage,
-and no fake unit success may clear this step.
+covered/exempt partition only — `get_cookies` moved into `E2E_COVERED` when the
+node above landed, and `E2E_EXEMPT` is now empty. Membership in that manifest is
+an inventory fact; it never converted, and cannot convert, into a success claim.
 
 ### MQ-54: Clear cookies
 **Manual**: `clear_cookies` → `get_cookies` (or `execute_script` reading
@@ -1007,14 +1023,29 @@ Chrome identity, and zero skipped/xfail/failed required nodes.
 
 ## Phase 18 — Tool Coverage Completeness
 
-### MQ-111: Every advertised tool has ≥1 E2E test
-**Manual**: compare `tools/list` output to the test manifest; no tool is untested.
-**Evidence**: blocked — MQ-53 leaves `get_cookies` without successful behavioral
-E2E coverage, so the every-tool claim is false at HEAD.
+### MQ-111: Every advertised tool has a visible state in the release contract
+**Rewritten by W5** (plan_RELEASE §2.5 — "these states are never inferred from
+F-108 set equality"). "Every tool has ≥1 E2E test" was an *inventory*
+requirement: set equality over a coverage manifest, which proves membership and
+not behaviour. W5 replaces it with the requirement a reader can act on — every
+served tool carries a **state**, and every claimed success is backed by ledger
+evidence that the run produced.
+
+**Manual**: compare `tools/list` output with `RELEASE_CONTRACT.md` §5. Every
+served tool appears exactly once with a state; every `release-qualified-success`
+row names a passing node, a transport, a site shape and its OS cells; every other
+row carries a tracking id and a user impact. No tool is silently absent, and no
+tool is qualified by exemption, by counting, or by membership in a manifest.
+**Evidence**: satisfied — pytest:
+`tests/test_release_contract.py::test_the_tool_table_covers_every_served_tool_exactly_once`.
 **Current support (non-acceptance)**: pytest:
-`tests/test_e2e_functions_hooks.py::test_e2e_coverage_manifest` proves a
-93-covered/one-exempt partition. The inventory node cannot convert its sole
-`get_cookies` exemption into coverage.
+`tests/test_release_contract.py::test_every_served_unqualified_row_carries_a_tracking_id_and_impact`
+proves the tracking-id/impact half, and
+`tests/test_e2e_functions_hooks.py::test_e2e_coverage_manifest` still proves the
+covered/exempt partition — an evidence *tier*, never a qualification. The number
+of release-qualified tools is derived from the claim ledger and re-verified
+against each run's records; every tool without its own per-tool transport
+assertion is bounded by F-776, not by this step.
 
 ### MQ-112: Every advertised tool has ≥1 transport-tier test OR explicit exemption
 **Manual**: same check through the real transport layer.

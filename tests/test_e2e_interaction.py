@@ -339,11 +339,17 @@ async def test_get_element_state_pins_current_shape(fixture_app_server):
 async def test_cookies_lifecycle(fixture_app_server):
     """set_cookie + clear_cookies, verified via the live ``document.cookie``.
 
-    get_cookies is deliberately NOT called here — it hangs (the CDP
-    Network.getCookies / deprecated getAllCookies never returns in the installed
-    nodriver) and, worse, poisons the tab's CDP connection so every subsequent
-    call times out. It is E2E_EXEMPT with that finding; cookies are read via
-    document.cookie (non-httpOnly) instead, which is exact ground truth.
+    get_cookies is deliberately NOT called here — through the in-process ``.fn``
+    seam this module uses, the CDP Network.getCookies / deprecated
+    getAllCookies never returns and, worse, poisons the tab's CDP connection so
+    every subsequent call times out. Cookies are read via document.cookie
+    (non-httpOnly) instead, which is exact ground truth.
+
+    That hang is specific to this seam, NOT to the product: over the real stdio
+    transport the same tool against the same Chrome sets, retrieves, and clears
+    cookies correctly. ``tests/test_e2e_transport_cookies.py`` is where
+    get_cookies is covered (plan_RELEASE W5 requires the retrieved value be
+    asserted), which is why it is E2E_COVERED rather than E2E_EXEMPT.
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")

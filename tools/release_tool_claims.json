@@ -1,0 +1,104 @@
+{
+  "schema": "release-evidence/v1#tool-claims",
+  "note": [
+    "The per-tool claim ledger read ONLY by tools/release_evidence.py (plan_RELEASE W5).",
+    "A tool is release-qualified ONLY by an entry in `qualified`, and every such entry is",
+    "re-checked against that run's release-evidence/v1 records by the `release-evidence`",
+    "job: the cited node must have executed AND passed on every cell it names, must not be",
+    "the representative journey, and a `stdio` claim must come from a job that drives the",
+    "real-stdio lane. A claim that cannot be verified makes the gate RED.",
+    "Every served tool absent from `qualified` is `served-unqualified`; its tracking id and",
+    "user impact come from `served_unqualified_notes` when it has a specific defect, and",
+    "from `default_note` otherwise. The tool NAMES are never listed here - they are derived",
+    "from SECTION_TOOLS so this file cannot drift from the registry."
+  ],
+  "qualified": [
+    {
+      "tool": "set_cookie",
+      "outcome": "Sets a cookie the browser really holds: the value is read back over the wire and cross-checked against document.cookie, so the assertion cannot be satisfied by the tool echoing its own input.",
+      "transport": "stdio",
+      "node_id": "tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip",
+      "site_shape": "local fixture app served over a real http:// origin (tests/fixture_app)",
+      "required_cells": ["transport/Linux-X64", "transport/Windows-X64"]
+    },
+    {
+      "tool": "get_cookies",
+      "outcome": "Returns the cookie's EXACT value - asserted from both CDP retrieval paths (scoped Network.getCookies and Network.getAllCookies), against a per-run unique value, not presence, type, or count.",
+      "transport": "stdio",
+      "node_id": "tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip",
+      "site_shape": "local fixture app served over a real http:// origin (tests/fixture_app)",
+      "required_cells": ["transport/Linux-X64", "transport/Windows-X64"]
+    },
+    {
+      "tool": "clear_cookies",
+      "outcome": "Removes the cookie, proved by RE-READING it afterwards rather than by trusting the tool's own return value.",
+      "transport": "stdio",
+      "node_id": "tests/test_e2e_transport_cookies.py::test_real_transport_cookie_round_trip",
+      "site_shape": "local fixture app served over a real http:// origin (tests/fixture_app)",
+      "required_cells": ["transport/Linux-X64", "transport/Windows-X64"]
+    }
+  ],
+  "default_note": {
+    "tracking_id": "F-776",
+    "user_impact": "Tested, not proved at the wire: the E2E suite drives this tool against REAL Chrome through the in-process seam, but no per-tool assertion exists over the stdio transport a user speaks. plan_RELEASE 2.5 does not let in-process evidence license a transport claim. Not a known defect - a question of where the test runs."
+  },
+  "served_unqualified_notes": {
+    "select_option": {
+      "tracking_id": "E8-1",
+      "user_impact": "A select whose page script re-declares a const swallows the change: the tool returns True while the option did not change. Silent wrong-success."
+    },
+    "click_element": {
+      "tracking_id": "E8-2",
+      "user_impact": "Clicking a disabled control returns True. The caller cannot distinguish 'clicked' from 'ignored by the browser'."
+    },
+    "type_text": {
+      "tracking_id": "E7-1/E8-3/E8-4",
+      "user_impact": "clear_first bypasses readonly (E8-3); contenteditable is not cleared before typing (E7-1); range/color/date inputs are not reachable through this path at all (E8-4)."
+    },
+    "get_element_state": {
+      "tracking_id": "E7-6",
+      "user_impact": "Reports HTML attributes, not live DOM properties, so a value changed by script is reported stale."
+    },
+    "modify_headers": {
+      "tracking_id": "F-165",
+      "user_impact": "Duplicate header names are mishandled in the rewrite loop."
+    },
+    "switch_tab": {
+      "tracking_id": "F-775c-residual",
+      "user_impact": "Activation is fixed (FIX-F), but the instance's main tab is still stored from the raw browser.tabs entry, which can be a Connection rather than a Tab. Loud if it fires, and it seeds the F-775a family."
+    },
+    "close_tab": {
+      "tracking_id": "F-775b/macOS-close-flake",
+      "user_impact": "Closing by target id is fixed (FIX-F). One macOS CI attempt returned True while the target survived a 10s poll; that observation is NOT reproducible and is NOT recorded as closed."
+    },
+    "close_instance": {
+      "tracking_id": "F-775d",
+      "user_impact": "Teardown uses the verified CDP call but has no dedicated pin - it is exercised only indirectly by integration teardown, so a regression here would surface as someone else's flake."
+    },
+    "execute_script": {
+      "tracking_id": "TRUST-BOUNDARY",
+      "user_impact": "Executes caller-supplied JavaScript in the page by design. The trust boundary is unverified: W12 has not run."
+    },
+    "inject_and_execute_script": {
+      "tracking_id": "TRUST-BOUNDARY",
+      "user_impact": "Injects and runs caller-supplied JavaScript by design. Trust boundary unverified (W12 not run)."
+    },
+    "call_javascript_function": {
+      "tracking_id": "TRUST-BOUNDARY",
+      "user_impact": "Invokes arbitrary page functions by design. Trust boundary unverified (W12 not run)."
+    },
+    "execute_python_in_browser": {
+      "tracking_id": "TRUST-BOUNDARY",
+      "user_impact": "Evaluates caller-supplied Python in the server process by design. Trust boundary unverified (W12 not run)."
+    },
+    "create_python_binding": {
+      "tracking_id": "TRUST-BOUNDARY",
+      "user_impact": "Exposes a Python callable to page JavaScript by design. Trust boundary unverified (W12 not run)."
+    },
+    "execute_cdp_command": {
+      "tracking_id": "TRUST-BOUNDARY",
+      "user_impact": "Sends arbitrary CDP commands by design - the widest surface in the server. Trust boundary unverified (W12 not run)."
+    }
+  },
+  "not_served": []
+}

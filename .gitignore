@@ -13,6 +13,13 @@ node_modules/
 htmlcov/
 .env
 
+# plan_RELEASE W5: the release-evidence/v1 ledger is CI OUTPUT for one run
+# (release-evidence/<release_sha>/...). It is uploaded as a run artifact and
+# re-read by the `release-evidence` job; a copy committed to the tree would be
+# stale evidence for a SHA that is no longer HEAD — exactly what the aggregate's
+# stale-SHA check exists to reject.
+release-evidence/
+
 # Clone / large-response artifacts. The default output dir is now
 # ~/.stealth-mcp/element_clones (outside the repo), but never commit any that
 # land in-tree via an explicit relative path or a stale pre-fix run.

@@ -213,3 +213,130 @@ def test_pr_caller_runs_the_same_reusable_gate():
     assert "paths" not in triggers["pull_request"], (
         "path filtering may not omit packaging-relevant changes"
     )
+
+
+# ---------------------------------------------------------------------------
+# W5: the evidence ledger is wired to the real jobs, not to a parallel list.
+# ---------------------------------------------------------------------------
+def test_w5_evidence_edge_is_present_and_required(gate_jobs):
+    assert "release-evidence" in gate_jobs, (
+        "W5's ledger job is missing; the aggregate would be green with no "
+        "acceptance evidence behind it"
+    )
+    assert "release-evidence" in gate_jobs[AGGREGATE]["needs"]
+    assert gate_jobs["release-evidence"]["if"] == "always()", (
+        "without always(), a failed edge SKIPS the ledger instead of failing it"
+    )
+
+
+def test_the_ledger_job_needs_every_evidence_producing_job(gate_jobs):
+    """It must validate every lane it aggregates — not a hand-picked subset."""
+    producers = {
+        name
+        for name, job in gate_jobs.items()
+        if name not in {AGGREGATE, "release-evidence"}
+    }
+    assert set(gate_jobs["release-evidence"]["needs"]) == producers
+
+
+def test_the_ledger_does_not_replace_a_single_direct_edge(gate_jobs):
+    """§2.5: `release-gate` needs the aggregate AND every child it validates."""
+    gate_needs = set(gate_jobs[AGGREGATE]["needs"])
+    for child in gate_jobs["release-evidence"]["needs"]:
+        assert child in gate_needs, (
+            f"{child!r} is only reachable through release-evidence; the gate must "
+            f"keep its own direct edge so the ledger can never soften a red job"
+        )
+
+
+def test_every_declared_required_cell_emits_its_record(gate_jobs):
+    """The ledger's required cells and the workflow's matrix cells are ONE set.
+
+    A cell that runs but emits nothing would make the aggregate fail (missing
+    child); a declared cell the workflow no longer has would too. This pins the
+    two together so the failure surfaces here, in a unit test, instead of in CI.
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import release_evidence
+
+    emitting_jobs = {
+        name
+        for name, job in gate_jobs.items()
+        for step in job.get("steps", [])
+        if "release_evidence.py emit" in step.get("run", "")
+    }
+    declared_jobs = {spec.job for spec in release_evidence.REQUIRED_CELLS}
+    assert emitting_jobs == declared_jobs, (
+        f"jobs that emit but are not declared: {sorted(emitting_jobs - declared_jobs)}; "
+        f"declared but never emit: {sorted(declared_jobs - emitting_jobs)}"
+    )
+
+    yaml_cells = {
+        f"unit-tests/{c['runner_os']}-{c['runner_arch']}-py{c['python-version']}"
+        for c in gate_jobs["unit-tests"]["strategy"]["matrix"]["include"]
+    }
+    for job in ("coverage", "integration", "transport", "offline-stealth"):
+        yaml_cells |= {
+            f"{job}/{c['runner_os']}-{c['runner_arch']}"
+            for c in gate_jobs[job]["strategy"]["matrix"]["include"]
+        }
+    smoke = gate_jobs["install-smoke"]["strategy"]["matrix"]
+    yaml_cells |= {
+        f"install-smoke/{kind}-{c['runner_os']}-{c['runner_arch']}"
+        for kind in smoke["kind"]
+        for c in smoke["cell"]
+    }
+    yaml_cells |= {
+        f"{job}/default"
+        for job in ("quality", "known-gaps", "build-dist", "package-verify")
+    }
+    assert yaml_cells == set(release_evidence.REQUIRED_KEYS), (
+        f"workflow cells not in the ledger: "
+        f"{sorted(yaml_cells - set(release_evidence.REQUIRED_KEYS))}; "
+        f"ledger cells not in the workflow: "
+        f"{sorted(set(release_evidence.REQUIRED_KEYS) - yaml_cells)}"
+    )
+
+
+def test_every_emitting_job_uploads_what_it_emitted(gate_jobs):
+    for name, job in gate_jobs.items():
+        steps = job.get("steps", [])
+        if not any("release_evidence.py emit" in s.get("run", "") for s in steps):
+            continue
+        uploads = [
+            s
+            for s in steps
+            if str(s.get("uses", "")).startswith("actions/upload-artifact")
+            and s.get("with", {}).get("path") == "release-evidence"
+        ]
+        assert uploads, f"job {name!r} emits a record but never uploads it"
+        assert uploads[0]["with"]["if-no-files-found"] == "error", (
+            f"job {name!r} would upload nothing silently"
+        )
+
+
+def test_the_contract_drift_check_runs_in_the_gate(gate_jobs):
+    script = "\n".join(_all_run_steps(gate_jobs["quality"]))
+    assert "gen_release_contract.py --check" in script, (
+        "a generated contract that nothing re-renders is a stale promise"
+    )
+
+
+def test_pytest_lanes_write_the_junit_the_ledger_hashes(gate_jobs):
+    for job in (
+        "unit-tests",
+        "coverage",
+        "integration",
+        "transport",
+        "offline-stealth",
+    ):
+        script = "\n".join(_all_run_steps(gate_jobs[job]))
+        assert "--junitxml=junit.xml" in script, (
+            f"{job!r} records pytest evidence but produces no JUnit report to hash"
+        )
+        assert "junit_family=xunit1" in script, (
+            f"{job!r} would write a report with no `file` attribute, so its node "
+            f"ids could only be guessed — the ledger rejects guesses"
+        )

@@ -358,9 +358,19 @@ E2E_COVERED = {
     "execute_script",
     "get_page_content",
     "take_screenshot",
-    # cookies-storage (2 of 3; get_cookies is exempt below) — test_e2e_interaction
+    # cookies-storage (3) — set_cookie/clear_cookies: test_e2e_interaction.py.
+    # get_cookies: tests/test_e2e_transport_cookies.py, which sets a cookie,
+    # retrieves it, and asserts its VALUE over real Chrome + real stdio
+    # (plan_RELEASE W5's option (a)). It is covered there rather than here
+    # because it is reachable only over the transport: through the in-process
+    # `.fn` seam these E2E modules use, Network.getCookies/getAllCookies never
+    # returns and poisons the tab's CDP connection. Same tool, same Chrome —
+    # only the seam differs, so this is a harness limitation, not a gap in the
+    # product's user-facing path. Routed as a finding; do NOT call get_cookies
+    # from a `.fn`-seam test (see test_e2e_interaction.test_cookies_lifecycle).
     "set_cookie",
     "clear_cookies",
+    "get_cookies",
     # tabs (5) — test_e2e_interaction.py
     "list_tabs",
     "switch_tab",
@@ -443,16 +453,16 @@ E2E_COVERED = {
 }
 
 # Tools intentionally left to another tier, each with a reason.
-E2E_EXEMPT: dict[str, str] = {
-    "get_cookies": (
-        "hangs against real Chrome — the CDP Network.getCookies/getAllCookies "
-        "command never returns in the installed nodriver (get_all_cookies is "
-        "deprecated since 1.3) and poisons the tab's CDP connection so every "
-        "later call times out. Exercising it in E2E would risk leaking a Chrome "
-        "tree; the finding is reported for routing. set_cookie and clear_cookies "
-        "ARE E2E-covered (asserted via document.cookie)."
-    ),
-}
+#
+# Empty as of plan_RELEASE W5-prep: `get_cookies` was the sole exemption, on the
+# grounds that it "hangs against real Chrome". That reason turned out to be
+# seam-specific rather than product-wide — it hangs through the in-process `.fn`
+# seam, but over the real stdio transport it sets, retrieves, and clears cookies
+# correctly (tests/test_e2e_transport_cookies.py asserts the retrieved VALUE).
+# So it moved to E2E_COVERED and nothing remains exempt. Keep this dict: it is
+# half of the partition tripwire below, and a future exemption belongs here WITH
+# a reason, never as a silent deletion from E2E_COVERED.
+E2E_EXEMPT: dict[str, str] = {}
 
 
 def test_e2e_coverage_manifest():
