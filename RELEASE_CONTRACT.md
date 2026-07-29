@@ -316,6 +316,17 @@ The `Verified by` column separates what a test actually checks from
 what is merely written down. A row that reads *documented* has **not**
 been tested — treat it as a description of intent, not as a property.
 
+**Where that evidence runs.** Every test behind a `TESTED` row is
+hermetic and belongs to the unit lane, which the gate runs on all three
+qualified cells across CPython 3.11-3.13. None of them launches a
+browser. That cuts both ways, and both directions matter: the §6
+evidence does not depend on the real-Chrome lane, so neither of that
+lane's two measured flakes — the Linux cold-spawn race, and F-779's
+macOS ARM64 teardown failure seen in 2 of 6 runs independently of the
+code under test — can turn a `TESTED` row falsely green or falsely
+red. But it is also precisely why the *documented* rows are still
+documented: answering them needs the lane this section never enters.
+
 | Dimension | stdio | HTTP | Verified by |
 |---|---|---|---|
 | **caller trust** | TRUSTED. The client spawns the server as a child process and already has the user's privileges; there is nothing to escalate. | TRUSTED. Anything that can reach the port is treated as the user. | documented — an untrusted MCP client is OUT OF SCOPE for this release. No test simulates a hostile caller, because the design grants a caller everything a hostile one would want. |
