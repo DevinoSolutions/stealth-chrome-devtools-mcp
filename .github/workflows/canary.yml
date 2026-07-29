@@ -1,0 +1,147 @@
+name: canary
+
+# plan_RELEASE W6 — scheduled INFORMATIONAL observation. Read this before you
+# cite a canary run for anything.
+#
+# WHAT THIS IS NOT, stated first because every misuse of this workflow starts by
+# forgetting one of these:
+#   * It is NOT a release gate. `release-gate / release-gate` (release-gate.yml,
+#     called by test.yml on PRs and publish.yml on tags) is the only gate. A red
+#     canary blocks nothing; a green canary licenses nothing.
+#   * It is NOT a permanent-coverage promise. The schedule below may be changed,
+#     disabled, or silently starved by GitHub (scheduled runs on a repository
+#     with no recent activity are disabled by GitHub automatically). Nothing here
+#     guarantees the job ever ran.
+#   * It is NOT a commitment to DETECT drift within any interval, nor to REPAIR
+#     it. There is no paging, no MTTR, and — by design (see permissions) — no
+#     notification of any kind. A red scheduled run is a signal a human MAY
+#     inspect, whenever they next look.
+#
+# WHAT IT IS: a repeatable read-only observation, in two halves with DIFFERENT
+# authority:
+#
+#   1. `deterministic` (RED MEANS RED) — calls the ONE reusable release gate.
+#      That call carries W1's real-stdio transport journey and W4's offline
+#      stealth-invariant probes, both driven against the LOCAL fixture, plus
+#      every other gate edge. Job semantics are NOT restated here: release-gate.yml
+#      is the single source of truth for them, exactly as test.yml and publish.yml
+#      treat it. A local deterministic failure makes this workflow red, and that
+#      redness is real: the fixture does not change under us, so a failure is a
+#      regression in this repository or in the runner image, not weather.
+#
+#   2. `live-observation` (INFORMATIONAL ONLY — CANNOT GATE OR LICENSE A CLAIM)
+#      — the approved live corpus/detectors (W4's `stealth and online` lane:
+#      CreepJS and bot.incolumitas). Its result is recorded in the log with an
+#      explicit INFORMATIONAL label and is structurally incapable of failing the
+#      run: the step captures the exit code instead of propagating it, AND the
+#      job is `continue-on-error`. Public-page reachability and vendor scoring
+#      change for reasons that have nothing to do with this commit; a change
+#      there is an observation to read, never evidence for or against a release
+#      claim, and never grounds for a stealth claim in any document.
+#
+# CHROME/UPSTREAM: a run records whichever image-provided Chrome Stable the
+# runner supplies AT THAT FUTURE RUN. That neither retroactively qualifies the
+# release SHA nor establishes support for any historical, future, or non-stable
+# Chrome version/channel. Those observations are informational too.
+#
+# NO EXTERNAL MUTATION OR NOTIFICATION: top-level `permissions: contents: read`,
+# and every job re-declares it. There is deliberately no issue, PR-comment,
+# webhook, email, chat, third-party upload, or write-token step anywhere in this
+# file, and `tests/test_release_workflows.py` pins that absence so a future edit
+# has to delete a test to add one.
+
+on:
+  schedule:
+    # Daily, off the hour to avoid GitHub's top-of-hour scheduling congestion.
+    # UTC. Drift observation only — see the header on what this does NOT promise.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Half 1: deterministic, local fixture. RED MEANS RED. ───────────────────
+  # Calls the one reusable gate rather than re-listing W1/W4 steps: a second
+  # copy of those job bodies would be a second source of truth that drifts from
+  # the gate the moment either side is edited (release-gate.yml's own header
+  # states this rule). The gate is a superset of W1+W4 — running the whole thing
+  # costs runner minutes and buys the guarantee that this lane can never assert
+  # something subtly different from what a PR asserts.
+  deterministic:
+    uses: ./.github/workflows/release-gate.yml
+
+  # ── Half 2: live corpus/detectors. INFORMATIONAL. CANNOT GATE. ─────────────
+  live-observation:
+    name: live-observation (informational, non-gating)
+    runs-on: ubuntu-latest
+    # Structural guarantee #1: even if a step below were changed to propagate a
+    # non-zero exit, a failed job here cannot fail the workflow run.
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install uv
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5.4.1
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --extra test --extra sentry
+      - name: Record the Chrome Stable this future run happened to get
+        # Informational identity capture only. It does not qualify the release
+        # SHA and does not extend support to this Chrome version.
+        shell: bash
+        run: uv run python tools/resolve_chrome.py --out chrome-identity.json
+      - name: Start Xvfb
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+          sleep 3
+      - name: Observe the approved live corpus (INFORMATIONAL)
+        # Structural guarantee #2: the exit code is CAPTURED, never propagated.
+        # `stealth and online` is W4's opt-in live tier — CreepJS and
+        # bot.incolumitas. Unreachable pages already self-skip inside the tests.
+        # `runner.*` is referenced at STEP level on purpose: the `runner` context
+        # is not available in job-level `env:` and would silently evaluate to
+        # empty there.
+        shell: bash
+        env:
+          DISPLAY: ":99"
+          STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
+        run: |
+          set +e
+          uv run pytest -m "stealth and online" -v --tb=short --timeout=600
+          status=$?
+          set -e
+          echo "live-observation pytest exit status: ${status}"
+          if [ "$status" -eq 0 ]; then
+            echo "::notice title=W6 INFORMATIONAL::Live detector observation completed with no reported invariant breach. This is an OBSERVATION, not evidence: it licenses no stealth claim and gates nothing."
+          else
+            echo "::warning title=W6 INFORMATIONAL::Live detector observation reported a change (exit ${status}). Causes include page unreachability, vendor scoring changes, and real regressions -- this lane CANNOT distinguish them. It gates nothing and disproves nothing. A human may inspect; the deterministic half above is the only red that means red."
+          fi
+          echo "Exiting 0 by design: this lane cannot fail the run."
+          exit 0
+
+  # ── The canary's own honesty surface ───────────────────────────────────────
+  # Mirrors release-gate.yml's `known-gaps` job: what this workflow does NOT do
+  # costs a visible line in the run log rather than living only in a comment.
+  # It reports; it does not judge.
+  canary-known-gaps:
+    name: canary-known-gaps
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: State what a canary run does and does not establish
+        run: |
+          echo "::warning title=W6::This workflow is NOT a release gate. The gate is 'release-gate / release-gate'. Nothing here may be cited to license a release claim."
+          echo "::warning title=W6::No notification exists. A red scheduled run pages nobody; discovery is whenever a human next looks at the Actions tab."
+          echo "::warning title=W6-GAP::The plan_RELEASE 2.6 NIGHTLY SOAK lane (>=1000 tool calls / fixed wall-clock, asserting no memory or handle growth and no latency drift) is NOT implemented at this SHA. No job in this file asserts endurance. An empty lane asserting nothing would be a false green, so none was added -- this line is the honest substitute until the soak workload lands."
+          echo "AUTHORITY OF EACH HALF:"
+          echo "  deterministic     : local fixture, RED MEANS RED (calls the one reusable gate)"
+          echo "  live-observation  : INFORMATIONAL ONLY, cannot gate or license a claim"
+          echo "  chrome identity   : whichever Stable the runner image supplied AT RUN TIME;"
+          echo "                      it does not qualify the release SHA, and says nothing"
+          echo "                      about historical, future, or non-stable channels."
