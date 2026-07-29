@@ -2,7 +2,7 @@
 
 **Status:** open (gate reliability, not a user-facing product defect)
 **Opened by:** the W5 contract re-run, 2026-07-28
-**Severity:** **HIGH.** Measured failure rate is **2 of 6 runs (~33%)** on the
+**Severity:** **HIGH.** Measured failure rate is **2 of 7 runs (~29%)** on the
 macOS/ARM64 integration cell, and each failure reddens the aggregate
 `release-gate` check — the one check a repository ruleset is meant to require.
 A required check that fails a third of the time for reasons unrelated to the
@@ -80,14 +80,81 @@ methods.
 | `6a8fa79` | *empty commit, identical tree* | success |
 | `a97c970` | F-779 doc + uv.lock one-liner | success |
 | `7c65374` | **one markdown file** | **failure** |
+| `7a3f546` | F-779 rate correction (docs) | success |
 
-**2 failures / 6 runs ≈ 33%.** Both failures carry the same `Event loop is closed`
-teardown signature. The two adjacent successes bracket each failure, so this is
-not a regression that landed and stayed.
+**2 failures / 7 runs ≈ 29%.** Both failures carry the same `Event loop is closed`
+teardown signature. Successes bracket each failure, so this is not a regression
+that landed and stayed.
 
 Note the compounding arithmetic: the aggregate needs *every* edge green, so a 33%
 failure on one cell puts the headline `release-gate` check red roughly one run in
 three no matter how healthy the other 31 jobs are.
+
+## Probable mechanism — HYPOTHESIS, not a confirmed diagnosis
+
+**Confidence: moderate-to-high on the mechanism, zero direct confirmation.** No
+macOS machine was available and job logs require admin rights, so nothing below
+was observed — it is derived from reading the teardown path. Treat it as the
+first place to look, not as the answer.
+
+`browser_manager.close_instance` Phase 3 (`browser_manager.py:923-940`):
+
+```python
+stop_coro = await asyncio.wait_for(
+    asyncio.to_thread(self._blocking_teardown, instance_id, browser),
+    timeout=self.CLOSE_KILL_TIMEOUT,          # settings default: 5.0s
+)
+except TimeoutError:
+    ... "worker thread continues in background, orphan will be reaped by process_cleanup"
+```
+
+The comment is correct and the code knows it: **`asyncio.wait_for` cancels the
+awaitable, but it cannot cancel the worker thread.** `asyncio.to_thread` dispatches
+to a `ThreadPoolExecutor`; on timeout the coroutine gives up while the thread keeps
+running. That leaves a thread alive, holding `browser`, after `close_instance` has
+returned and bookkeeping has moved on.
+
+Two ways that thread produces exactly `Event loop is closed` once the loop is gone:
+
+1. **Future resolution.** When the orphaned thread finishes, the executor resolves
+   its future via `loop.call_soon_threadsafe(...)`. Against a closed loop that is
+   `RuntimeError: Event loop is closed`, raised from the thread, outside anyone's
+   `try`.
+2. **`browser._process.terminate()` (`browser_manager.py:238`).** nodriver's
+   `_process` is an **asyncio** subprocess bound to the loop that created it. The
+   retry loop calls `.terminate()` / `.kill()` from the worker thread; once that
+   loop is closed, the transport's `_check_closed()` raises
+   `RuntimeError: Event loop is closed`. The surrounding `except Exception` then
+   falls through to `.kill()`, which fails the same way — which is a plausible
+   reading of why the annotation shows the message **twice**.
+
+Why this fits F-779's fingerprint specifically:
+
+- **Intermittent** — only bites when kill exceeds the 5s `CLOSE_KILL_TIMEOUT`.
+- **Teardown-only** — nothing before teardown touches this path.
+- **Code-independent** — any commit can lose the race, which is why a
+  markdown-only commit hit it.
+- **macOS-leaning** — macOS is already the anomalous cell here (F-773: Chrome under
+  the detached backend completes no network navigation on that runner). A cell where
+  Chrome/process behaviour is already known to differ is exactly where a 5s kill
+  budget would be tightest.
+
+### How to confirm it cheaply
+
+Get one admin-authenticated job log and check whether the `RuntimeError` traceback
+originates in a thread (`ThreadPoolExecutor-N_M`) rather than the main task. If it
+does, the hypothesis holds. If the traceback is in the main task, this section is
+wrong and should be deleted rather than argued for.
+
+### Note for whoever fixes it
+
+The tempting fix — widen `CLOSE_KILL_TIMEOUT` — only moves the race. The structural
+issue is that a thread which cannot be cancelled is abandoned while still holding
+loop-bound objects. Options worth weighing: join the orphaned thread at shutdown,
+make `_blocking_teardown` touch only OS-level primitives (`os.kill`, psutil) and
+never the asyncio `Process`, or keep a registry of abandoned threads that shutdown
+drains. **This is a `src/` change and plan_RELEASE forbids `src/` edits, so it
+belongs to a FIX plan, not here.**
 
 ## What is NOT yet known
 

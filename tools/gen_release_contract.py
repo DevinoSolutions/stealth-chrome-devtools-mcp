@@ -254,7 +254,7 @@ LIMITATIONS: tuple[Limitation, ...] = (
     Limitation(
         "F-779",
         "gate reliability / macOS integration teardown",
-        "open, MEASURED at 2 failures in 6 runs (~33%)",
+        "open, MEASURED at 2 failures in 7 runs (~29%)",
         "`integration (macOS/ARM64)` intermittently fails with `Event loop is "
         "closed` at teardown, reddening `release-evidence` and the "
         "`release-gate` aggregate with it. Code independence is established "
@@ -267,7 +267,7 @@ LIMITATIONS: tuple[Limitation, ...] = (
         "annotations were available, and they carry the message but no "
         "traceback.",
         "This is the decisive limitation on the release's headline goal. The "
-        "aggregate requires EVERY edge green, so a ~33% failure on one cell puts "
+        "aggregate requires EVERY edge green, so a ~29% failure on one cell puts "
         "the headline check red roughly one run in three regardless of the other "
         "31 jobs. plan_RELEASE §0.2 makes flake-freedom one of the three "
         "properties behind 'green ⇒ blindly pushable' — so while this is open, a "
@@ -807,7 +807,7 @@ def _ceiling_section() -> str:
             "first attempts in three different cells, including",
             "`transport (Linux/X64)` — one of the two cells that carry the",
             "qualified stdio claims. And F-779: `integration (macOS/ARM64)`",
-            "fails at teardown with `Event loop is closed` in **2 of 6**",
+            "fails at teardown with `Event loop is closed` in **2 of 7**",
             "consecutive runs, taking the `release-gate` aggregate down with it",
             "each time. Its code independence is settled — one failure landed on",
             "a commit containing nothing but a markdown file.",
