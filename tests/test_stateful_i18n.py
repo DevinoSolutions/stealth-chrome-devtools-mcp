@@ -720,13 +720,17 @@ async def test_indexed_db_index_and_transaction_results_match_the_oracle(
 @pytest.mark.xfail(
     sys.platform.startswith("linux"),
     reason=(
-        "F-801: on Linux the profile never reads as free after close_instance, so "
-        "the restart barrier below times out and the node cannot reach the "
-        "persistence assertions. The barrier is the correct product contract and "
-        "stays as written; only its known-red platform is scoped here. Remove this "
+        "F-801: on Linux the profile can fail to read as free after "
+        "close_instance, so the restart barrier below times out and the node "
+        "cannot reach the persistence assertions. The race lost twice on "
+        "byte-identical trees (runs 30512817900/30513555594) and then won once "
+        "(run 30515418157, an XPASS under the original strict marker), so the "
+        "outcome is load-dependent and strict would re-redden the gate on every "
+        "lucky run. The barrier is the correct product contract and stays as "
+        "written; only its known-red platform is scoped here. Remove this "
         "marker in the commit that closes F-801."
     ),
-    strict=True,
+    strict=False,
 )
 async def test_storage_and_cookies_survive_one_profile_and_no_other(
     fixture_app_server, browsers

@@ -21,19 +21,26 @@ tests/test_stateful_i18n.py:757: assert await browsers.await_profile_free(kept) 
 E   assert False is True
 ```
 
-**It is deterministic, not a flake.** Two gate runs on **byte-identical trees**
-produced the identical failure:
+**It is a heavily-loaded race, not a one-off flake — and not deterministic
+either.** Three gate runs settle the question from both sides:
 
-| run | commit | node | assertion | node time |
-|---|---|---|---|---|
-| 30512817900 | `c95b16c` | same | `assert False is True` | 62.12s |
-| 30513555594 | `031decf` (empty arbitration commit) | same | `assert False is True` | 62.07s |
+| run | commit | outcome | node time |
+|---|---|---|---|
+| 30512817900 | `c95b16c` | `assert False is True` at the barrier | 62.12s |
+| 30513555594 | `031decf` (empty arbitration commit) | `assert False is True` at the barrier | 62.07s |
+| 30515418157 | `e535a3f` (this finding's first landing) | **passed** — barrier cleared immediately (XPASS under the original `strict=True` marker) | 5.26s |
 
-`031decf` is an empty commit on top of `c95b16c`, so the two runs certify the
-same tree. Both junit files name **one** failure and it is the same one. This is
-the inverse of the F-779 pattern (identical tree, *different* conclusion): here
-the identical tree yields the identical conclusion twice, which is what
-determinism looks like.
+`031decf` is an empty commit on top of `c95b16c`, so the first two runs certify
+the same tree: the identical tree yielded the identical failure twice, with the
+node time pinned at the 30s `PROFILE_RELEASE_TIMEOUT` + fixed overhead — the
+losing side of the race is stable enough to look deterministic. The third run
+then **won** the race (5.26s means the profile read as free on an early poll),
+proving the lingering process *can* exit promptly. The defect is therefore a
+race the CI runner loses most of the time, not an invariant — which is exactly
+why the characterization marker is `strict=False`: a strict marker turned the
+lucky third run into a gate failure (`[XPASS(strict)]`). Note the third run is
+also the first containing the harness ownership filter (same landing); no
+causal link is claimed — the run is simply one more sample.
 
 Also proven by the same two runs:
 
@@ -137,12 +144,14 @@ entirely different repairs.
 ## Evidence in the tree
 
 `tests/test_stateful_i18n.py::test_storage_and_cookies_survive_one_profile_and_no_other`
-is marked `@pytest.mark.xfail(sys.platform.startswith("linux"), strict=True)`.
-`strict=True` is chosen **because determinism is proven** by the two
-byte-identical runs above: the moment F-801 is fixed the node passes on Linux,
-the strict xfail turns that pass into a failure, and the gate forces this finding
-to be closed and the marker removed in the same commit. A non-strict xfail would
-let the fix land silently and leave the marker rotting in the tree.
+is marked `@pytest.mark.xfail(sys.platform.startswith("linux"), strict=False)`.
+The first landing used `strict=True` on the strength of the two byte-identical
+failures; run 30515418157 then won the race and the strict marker converted
+that pass into a gate failure, so strictness was the wrong tool for a racy
+defect. The cost of `strict=False` is stated openly: the fix for F-801 can land
+without the gate forcing this marker out, so the commit that closes F-801 MUST
+remove the marker itself — the marker text says so, and this finding stays open
+until both happen.
 
 The Linux integration cell no longer emits `--mq "MQ-160"`
 (`.github/workflows/release-gate.yml`). `tools/release_evidence.py::verify_claims`
@@ -185,9 +194,12 @@ a FIX plan, not here.**
   false negative on success; F-801 is a false positive on "still in use" from the
   predicate that observes the same teardown. A fix that makes teardown-completion
   observable would plausibly settle both.
-- **Not F-779.** F-779 is a macOS/ARM64 teardown flake — identical tree, *different*
-  conclusion, ~1 run in 4. F-801 is Linux, deterministic, and reproduces on an
-  identical tree. Same subsystem (teardown), opposite reliability signature.
+- **Not F-779.** F-779 is a macOS/ARM64 teardown flake at ~1 run in 4 with no
+  stable failing node. F-801 is Linux-only, names one node, and loses its race
+  the large majority of runs (2 of 3 observed, with a stable 30s-timeout
+  signature when it loses). Same subsystem (teardown), but F-801 has a proven
+  mechanism boundary and a single pinned node; it is a characterized product
+  defect, not an instrument problem.
 - **Not F-773.** F-773 is why macOS makes no navigation claim; it does not touch
   the profile lifecycle.
 
