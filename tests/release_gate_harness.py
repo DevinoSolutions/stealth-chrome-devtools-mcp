@@ -1238,3 +1238,329 @@ async def run_release_gate_journey(
             f"child process(es) remained after teardown: {sorted(leftover)}"
         )
     return record
+
+
+# ---------------------------------------------------------------------------
+# plan_RELEASE W13 — the isolated workspace and the raw JSON-RPC wire driver.
+#
+# Both live HERE rather than in a second module because they are the SAME
+# mechanism this file already owns, exposed at a lower level:
+#
+# * :func:`gate_workspace` is the throwaway-HOME / free-port / backend-teardown
+#   block from :func:`run_release_gate_journey` above, made reusable. W13 needs
+#   several client sessions against ONE isolated backend, which the all-in-one
+#   journey cannot express. It reuses ``_isolated_env``/``_pick_free_port``/
+#   ``_backend_pid_from_state``/``_await_children_settle`` verbatim.
+#
+# * :class:`RawStdioWire` drives the same absolute installed launcher over the
+#   same stdio pipes, but at the *frame* level. Neither ``fastmcp.Client`` nor
+#   the official ``mcp`` SDK can express W13's questions — "was a MALFORMED
+#   line answered without killing the session", "did any NON-frame byte reach
+#   stdout", "did the response for request id 7 carry request 7's payload",
+#   "what happens to an in-flight id when stdin closes" — because both SDKs
+#   own the ids, hide the frames, and abort on a parse error. This is a
+#   different altitude on the one transport, not a second transport.
+# ---------------------------------------------------------------------------
+
+# stdout StreamReader buffer for a wire. Large enough that a big bounded tool
+# result is ONE readable line (the default 64 KiB is not), small enough that a
+# deliberately paused reader still reaches real OS pipe backpressure.
+WIRE_READ_LIMIT = 8 * 1024 * 1024
+WIRE_STDERR_CAP_BYTES = 256 * 1024
+WIRE_EXIT_TIMEOUT = 30.0
+# The wire's own bound on a single response. Never a product deadline: if THIS
+# fires the server did not answer, and the node fails by name instead of hanging.
+WIRE_RESPONSE_TIMEOUT = 150.0
+
+
+@contextlib.contextmanager
+def gate_workspace(
+    work_dir: str | os.PathLike[str], *, singleton_port: int | None = None
+):
+    """Yield an isolated backend workspace: throwaway HOME, state paths, port.
+
+    The yielded mapping carries ``env`` (the child environment), ``port`` (a
+    distinct free ``--singleton-port``), and the four state directories. Any
+    number of clients may be started against it; they all share ONE isolated
+    singleton backend, so its cold start is paid once.
+
+    On exit the detached backend recorded in the isolated ``server.json`` is
+    terminated and every child process this block spawned must be gone —
+    the same owned-cleanup guarantee ``run_release_gate_journey`` makes, and
+    the reason a W13 node can never leak a backend or a Chrome tree.
+    """
+    work_dir = Path(work_dir)
+    home_dir = work_dir / "home"
+    session_root = work_dir / "session-root"
+    log_dir = work_dir / "logs"
+    clone_dir = work_dir / "clone-output"
+    for directory in (home_dir, session_root, log_dir, clone_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    space: dict[str, Any] = {
+        "work_dir": work_dir,
+        "home_dir": home_dir,
+        "session_root": session_root,
+        "log_dir": log_dir,
+        "clone_dir": clone_dir,
+        "port": singleton_port or _pick_free_port(),
+    }
+    space["env"] = _isolated_env(
+        home_dir=home_dir,
+        session_root=session_root,
+        log_dir=log_dir,
+        clone_dir=clone_dir,
+    )
+
+    parent = psutil.Process()
+    children_before = _child_pids(parent)
+    try:
+        yield space
+    finally:
+        backend_pid = _backend_pid_from_state(home_dir)
+        if backend_pid is not None and _pid_running(backend_pid):
+            _terminate_process_tree(backend_pid, TERMINATE_TIMEOUT)
+        leftover = _await_children_settle(parent, children_before, CHILD_SETTLE_TIMEOUT)
+        for pid in leftover:
+            _terminate_process_tree(pid, 5.0)
+        space["leftover_children"] = sorted(leftover)
+
+
+def workspace_backend_logs(space: dict[str, Any]) -> str:
+    """The isolated backend's own logs for a failed W13 node (capped)."""
+    return _backend_logs(space["log_dir"], space["home_dir"])
+
+
+class RawStdioWire:
+    """A JSON-RPC-over-stdio driver for the absolute installed console launcher.
+
+    The client owns every request id, every byte written to the child's stdin,
+    and every byte read back — so a node can assert *frame* properties instead
+    of SDK-mediated ones. Nothing here re-implements the transport: it is the
+    same launcher, the same ``--singleton-port`` argument, and the same
+    isolated child environment :func:`run_release_gate_journey` uses.
+
+    Bounded by construction. stderr is accumulated behind a cap (and the
+    overflow is *counted*, so "stderr stays bounded" is a measurement rather
+    than an assumption), every response wait takes an explicit timeout, and
+    :meth:`aclose` always terminates the process tree.
+    """
+
+    def __init__(
+        self,
+        *,
+        launcher: str | os.PathLike[str],
+        env: dict[str, str],
+        port: int,
+        read_limit: int = WIRE_READ_LIMIT,
+        stderr_cap: int = WIRE_STDERR_CAP_BYTES,
+    ) -> None:
+        self.launcher = str(launcher)
+        self.env = dict(env)
+        self.port = int(port)
+        self.read_limit = read_limit
+        self.stderr_cap = stderr_cap
+        self.proc: asyncio.subprocess.Process | None = None
+        #: every parsed stdout JSON object, in arrival order
+        self.frames: list[dict[str, Any]] = []
+        #: any stdout line that was NOT a JSON object — must stay empty
+        self.non_frame_stdout: list[str] = []
+        self.stderr_total_bytes = 0
+        self.stderr_truncated = False
+        self._stderr_chunks: list[bytes] = []
+        self._responses: dict[Any, dict[str, Any]] = {}
+        self._events: dict[Any, asyncio.Event] = {}
+        self._tasks: list[asyncio.Task] = []
+        self._next_id = 0
+        self._reader_gate = asyncio.Event()
+        self._reader_gate.set()
+        self.stdout_eof = False
+
+    # ── lifecycle ──────────────────────────────────────────────────────────
+    async def start(self) -> RawStdioWire:
+        self.proc = await asyncio.create_subprocess_exec(
+            self.launcher,
+            "--singleton-port",
+            str(self.port),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self.env,
+            limit=self.read_limit,
+        )
+        self._tasks = [
+            asyncio.create_task(self._pump_stdout()),
+            asyncio.create_task(self._pump_stderr()),
+        ]
+        return self
+
+    async def __aenter__(self) -> RawStdioWire:
+        return await self.start()
+
+    async def __aexit__(self, *_exc) -> None:
+        await self.aclose()
+
+    async def aclose(self, *, timeout: float = WIRE_EXIT_TIMEOUT) -> int | None:
+        """Close stdin, wait bounded for exit, then terminate the tree."""
+        if self.proc is None:
+            return None
+        self._reader_gate.set()  # a paused reader must never block teardown
+        with contextlib.suppress(Exception):
+            await self.close_stdin()
+        code = await self.wait_exit(timeout)
+        if code is None:
+            _terminate_process_tree(self.proc.pid, TERMINATE_TIMEOUT)
+            code = await self.wait_exit(10.0)
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks = []
+        return code
+
+    async def close_stdin(self) -> None:
+        assert self.proc is not None and self.proc.stdin is not None
+        self.proc.stdin.close()
+        with contextlib.suppress(Exception):
+            await self.proc.stdin.wait_closed()
+
+    async def wait_exit(self, timeout: float) -> int | None:
+        """The child's exit code, or ``None`` if it outlived ``timeout``."""
+        assert self.proc is not None
+        try:
+            return await asyncio.wait_for(self.proc.wait(), timeout)
+        except TimeoutError:
+            return None
+
+    # ── pumps ──────────────────────────────────────────────────────────────
+    async def _pump_stdout(self) -> None:
+        assert self.proc is not None and self.proc.stdout is not None
+        while True:
+            await self._reader_gate.wait()  # the slow-reader / backpressure knob
+            try:
+                line = await self.proc.stdout.readline()
+            except (ValueError, asyncio.LimitOverrunError) as exc:
+                self.non_frame_stdout.append(f"<unreadable line: {exc}>")
+                return
+            if not line:
+                self.stdout_eof = True
+                return
+            text = line.decode("utf-8", "replace").strip()
+            if not text:
+                continue
+            try:
+                obj = json.loads(text)
+            except ValueError:
+                self.non_frame_stdout.append(text[:2000])
+                continue
+            if not isinstance(obj, dict):
+                self.non_frame_stdout.append(text[:2000])
+                continue
+            self.frames.append(obj)
+            rid = obj.get("id")
+            if rid is not None and ("result" in obj or "error" in obj):
+                self._responses[rid] = obj
+                event = self._events.get(rid)
+                if event is not None:
+                    event.set()
+
+    async def _pump_stderr(self) -> None:
+        assert self.proc is not None and self.proc.stderr is not None
+        while True:
+            chunk = await self.proc.stderr.read(4096)
+            if not chunk:
+                return
+            self.stderr_total_bytes += len(chunk)
+            if sum(len(c) for c in self._stderr_chunks) < self.stderr_cap:
+                self._stderr_chunks.append(chunk)
+            else:
+                self.stderr_truncated = True
+
+    @property
+    def stderr_text(self) -> str:
+        return b"".join(self._stderr_chunks).decode("utf-8", "replace")
+
+    def pause_reader(self) -> None:
+        """Stop draining stdout. The child's pipe fills and the OS applies real
+        backpressure once the StreamReader's ``read_limit`` buffer is full."""
+        self._reader_gate.clear()
+
+    def resume_reader(self) -> None:
+        self._reader_gate.set()
+
+    # ── frames ─────────────────────────────────────────────────────────────
+    async def send_raw(self, payload: str) -> None:
+        """Write one arbitrary line to the child's stdin — malformed included."""
+        assert self.proc is not None and self.proc.stdin is not None
+        self.proc.stdin.write(payload.encode("utf-8") + b"\n")
+        await self.proc.stdin.drain()
+
+    async def request(
+        self, method: str, params: Any = None, *, request_id: Any = None
+    ) -> Any:
+        """Send one JSON-RPC request; return the id it was sent under."""
+        if request_id is None:
+            self._next_id += 1
+            request_id = self._next_id
+        self._events[request_id] = asyncio.Event()
+        body: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        if params is not None:
+            body["params"] = params
+        await self.send_raw(json.dumps(body))
+        return request_id
+
+    async def notify(self, method: str, params: Any = None) -> None:
+        body: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            body["params"] = params
+        await self.send_raw(json.dumps(body))
+
+    async def call_tool(self, name: str, arguments: dict[str, Any] | None = None, **kw):
+        return await self.request(
+            "tools/call", {"name": name, "arguments": arguments or {}}, **kw
+        )
+
+    def answered(self, request_id: Any) -> bool:
+        return request_id in self._responses
+
+    def response_of(self, request_id: Any) -> dict[str, Any] | None:
+        return self._responses.get(request_id)
+
+    def frames_for(self, request_id: Any) -> list[dict[str, Any]]:
+        """Every RESPONSE frame carrying this id — the exactly-one-outcome oracle.
+
+        A frame with a ``method`` is a server→client *request* (this server sends
+        ``roots/list``; see F-790) and carries the server's own id space, which
+        can collide with ours. Excluding it is what keeps "exactly one response
+        for request N" from silently counting an unrelated inbound request.
+        """
+        return [
+            f
+            for f in self.frames
+            if f.get("id") == request_id
+            and "method" not in f
+            and ("result" in f or "error" in f)
+        ]
+
+    async def response(
+        self, request_id: Any, timeout: float = WIRE_RESPONSE_TIMEOUT
+    ) -> dict[str, Any]:
+        event = self._events[request_id]
+        await asyncio.wait_for(event.wait(), timeout)
+        return self._responses[request_id]
+
+    async def initialize(self, timeout: float = INIT_TIMEOUT) -> dict[str, Any]:
+        """The MCP opening handshake, written by hand: ``initialize`` then the
+        ``notifications/initialized`` notification."""
+        from mcp.types import LATEST_PROTOCOL_VERSION
+
+        rid = await self.request(
+            "initialize",
+            {
+                "protocolVersion": LATEST_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "release-gate-raw-wire", "version": "1"},
+            },
+        )
+        result = await self.response(rid, timeout)
+        await self.notify("notifications/initialized")
+        return result

@@ -67,6 +67,15 @@ test = [
     # forgets an edge). Test-only; already present transitively via
     # uvicorn[standard], declared here so the pin cannot vanish silently.
     "pyyaml>=6.0",
+    # plan_RELEASE W13: tests/test_wire_semantics.py drives the installed
+    # launcher with the OFFICIAL `mcp` SDK client (MQ-138) — a client library
+    # independent of the `fastmcp` one W1 uses, which is the whole point of an
+    # interoperability claim. TEST-ONLY: `mcp` is already installed as a
+    # transitive dependency of the pinned `fastmcp==2.11.2` (and `src/` imports
+    # `mcp.client.streamable_http` through it), so this adds NO runtime
+    # dependency — it declares the pin so the interoperability client cannot
+    # vanish silently if fastmcp's own dependency changes.
+    "mcp>=1.12",
 ]
 dev = [
     "ruff==0.15.20",
