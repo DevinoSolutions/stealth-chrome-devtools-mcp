@@ -377,6 +377,8 @@ jobs:
         #   MQ-158 test_cache_bytes_and_offline_reads_match_the_byte_oracle
         #   MQ-159 test_indexed_db_index_and_transaction_results_match_the_oracle
         #   MQ-160 test_storage_and_cookies_survive_one_profile_and_no_other
+        #        <- NOT emitted on Linux: F-801 makes that node xfail there, and
+        #           an xfail is not a pass, so Linux may not claim the step.
         #   MQ-161 test_unicode_round_trips_through_text_attributes_and_inputs
         #   MQ-162 test_the_synthesized_composition_sequence_is_exact
         #
@@ -420,7 +422,7 @@ jobs:
           --mq "MQ-156"
           --mq "MQ-158"
           --mq "MQ-159"
-          --mq "MQ-160"
+          ${{ runner.os != 'Linux' && '--mq "MQ-160"' || '' }}
           --mq "MQ-161"
           --mq "MQ-162"
       - name: Upload this cell's release-evidence record

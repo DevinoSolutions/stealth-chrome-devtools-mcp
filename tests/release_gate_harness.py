@@ -513,6 +513,17 @@ def _child_pids(parent: psutil.Process) -> set[int]:
         return set()
 
 
+def _pid_in_workspace(pid: int, work_dir: Path) -> bool:
+    """Whether *pid* is one this workspace created. A process we cannot inspect
+    is reported as ours: a "no orphan" claim must fail closed."""
+    try:
+        return any(str(work_dir) in arg for arg in psutil.Process(pid).cmdline())
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return False
+    except psutil.Error:
+        return True
+
+
 def _await_children_settle(
     parent: psutil.Process, before: set[int], timeout: float
 ) -> set[int]:
@@ -1320,7 +1331,17 @@ def gate_workspace(
         backend_pid = _backend_pid_from_state(home_dir)
         if backend_pid is not None and _pid_running(backend_pid):
             _terminate_process_tree(backend_pid, TERMINATE_TIMEOUT)
-        leftover = _await_children_settle(parent, children_before, CHILD_SETTLE_TIMEOUT)
+        # Ownership is decided by cmdline, not by descent: the integration cell
+        # spawns Chrome in-process, so a foreign renderer or crashpad helper is
+        # also a new descendant of this pytest process and must not be killed
+        # here nor counted against this workspace's own leftover claim.
+        leftover = {
+            pid
+            for pid in _await_children_settle(
+                parent, children_before, CHILD_SETTLE_TIMEOUT
+            )
+            if _pid_in_workspace(pid, work_dir)
+        }
         for pid in leftover:
             _terminate_process_tree(pid, 5.0)
         space["leftover_children"] = sorted(leftover)

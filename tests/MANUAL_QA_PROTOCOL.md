@@ -1845,6 +1845,13 @@ surviving cookie set is asserted as an exact string, so a session cookie that
 started persisting would fail rather than hide inside a substring check.
 Cleanup is asserted, not hoped for — `remove_profile` returns whether the tree is
 really gone and the step requires `True` for both profiles.
+Satisfied on the **Windows and macOS** integration cells only. On Linux the node
+is `xfail(strict=True)` and that cell emits no `--mq "MQ-160"`, because after
+`close_instance` the profile never reads as free (F-801) and the restart barrier
+times out before a single persistence assertion runs — an xfail is not a pass, so
+the Linux cell may not claim this step. The barrier itself is the correct
+contract and is unchanged; closing F-801 turns the xfail red and forces this
+qualification to be removed in the same commit.
 
 ### MQ-161: Internationalized text round-trips as exact code points
 **Manual**: on a page carrying a fixed NFC/NFD pair, stacked combining marks, an
