@@ -1064,6 +1064,33 @@ reject a `known-gap` without the characterization marker and identical
 `Current support (non-acceptance)` annotation is excluded from readiness. Mere
 presence of an `MQ-` heading is insufficient.
 
+### MQ-130: The documented examples run, and the README's claims match the code
+**Manual**: copy the marked command blocks out of `README.md` / `RUNBOOK.md` into
+a throwaway directory with `STEALTH_MCP_BROWSER_SESSION_ROOT` pointed inside it,
+run each one, and confirm every one exits 0 without touching the real
+browser-session root. Then confirm the README's `pip install` line names the
+published distribution and version, that the ops verbs are shown under
+`stealth-chrome-devtools` (not `stealth-chrome-devtools-mcp`), that every tool
+its table advertises is served by the live registry, and that its served and
+release-qualified counts are the ones in `RELEASE_CONTRACT.md`.
+**Evidence**: satisfied — pytest:
+`tests/test_doc_examples.py::test_documented_example_runs`,
+`tests/test_doc_examples.py::TestInstallClaims`,
+`tests/test_doc_examples.py::TestToolClaims`. The runnable half is a
+parametrized node per marked fence whose id carries the source file, the fence
+ordinal, and the exact command; the claims half derives both counts from W5's
+`tools/gen_release_contract.py::tool_rows` ledger API — no second source — and
+`TestToolClaims::test_the_overclaim_check_catches_a_planted_claim` is the
+control proving a served-unqualified tool cannot be advertised as qualified.
+Fence-execution sensitivity is proved by
+`tests/test_doc_examples.py::test_the_runner_would_fail_a_broken_example`.
+
+> **Contiguity note.** This step lands out of order: W11 is stacked directly on
+> W5, so `MQ-114..129` (W7, W9, W10) do not exist at this commit and the
+> `MQ-1..113` + `MQ-130` sequence has a hole. The contiguity rule below is
+> satisfied once those workstreams land; until then the parity tripwire must
+> treat `MQ-130` as present-but-non-contiguous rather than as a missing step.
+
 ---
 
 ## Reserved MQ ranges
@@ -1109,7 +1136,8 @@ The remaining ownership reservations are:
 
 - W9: `MQ-122..125` — performance/resource budgets.
 - W10: `MQ-126..129` — resilience/fault injection.
-- W11: `MQ-130` — documentation examples and claims sync.
+- ~~W11: `MQ-130` — documentation examples and claims sync.~~ **Landed** above as
+  a current step with its acceptance test; no longer a reservation.
 - W12: `MQ-131..137` — security/trust-boundary verification.
 - W13: `MQ-138..144` — concurrency, cancellation, framing, and independent
   protocol interoperability.
