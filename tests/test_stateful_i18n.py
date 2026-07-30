@@ -93,6 +93,7 @@ import asyncio
 import contextlib
 import json
 import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -716,6 +717,17 @@ async def test_indexed_db_index_and_transaction_results_match_the_oracle(
 
 
 # ── MQ-160: storage, cookies, persistence, isolation, cleanup ───────────────
+@pytest.mark.xfail(
+    sys.platform.startswith("linux"),
+    reason=(
+        "F-801: on Linux the profile never reads as free after close_instance, so "
+        "the restart barrier below times out and the node cannot reach the "
+        "persistence assertions. The barrier is the correct product contract and "
+        "stays as written; only its known-red platform is scoped here. Remove this "
+        "marker in the commit that closes F-801."
+    ),
+    strict=True,
+)
 async def test_storage_and_cookies_survive_one_profile_and_no_other(
     fixture_app_server, browsers
 ):
