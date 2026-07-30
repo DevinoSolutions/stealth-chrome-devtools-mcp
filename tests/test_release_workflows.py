@@ -340,3 +340,148 @@ def test_pytest_lanes_write_the_junit_the_ledger_hashes(gate_jobs):
             f"{job!r} would write a report with no `file` attribute, so its node "
             f"ids could only be guessed — the ledger rejects guesses"
         )
+
+
+# ---------------------------------------------------------------------------
+# W6: the scheduled canary observes; it never gates and never reaches outward.
+#
+# Every property below is one the plan states in prose and nothing else would
+# enforce. The dangerous direction of drift is uniform — a canary slowly
+# acquiring gate authority, or a notification step, or a duplicated copy of the
+# gate's job bodies — so each is pinned rather than trusted to a comment.
+# ---------------------------------------------------------------------------
+CANARY = WORKFLOWS / "canary.yml"
+
+#: Anything that mutates state outside the run or notifies a human/service. The
+#: plan's words: "no issue, PR-comment, webhook, email, chat, third-party upload,
+#: or write-token step".
+OUTWARD_TOKENS = (
+    "gh issue",
+    "gh pr",
+    "gh release",
+    "github-script",
+    "create-or-update-comment",
+    "create-issue",
+    "softprops/action-gh-release",
+    "slack",
+    "discord",
+    "webhook",
+    "mailto",
+    "curl -X POST",
+    "curl --request POST",
+    "pypi",
+    "codecov",
+    "git push",
+)
+
+
+@pytest.fixture(scope="module")
+def canary_jobs() -> dict:
+    return _jobs(CANARY)
+
+
+def test_the_canary_is_scheduled_and_manually_dispatchable():
+    doc = _load(CANARY)
+    # `on:` parses as the boolean True in YAML 1.1; accept either spelling.
+    triggers = doc.get("on", doc.get(True))
+    assert "schedule" in triggers, "a canary with no schedule observes nothing"
+    assert "workflow_dispatch" in triggers, (
+        "a human must be able to run the observation on demand"
+    )
+    assert "pull_request" not in triggers and "push" not in triggers, (
+        "the canary must not run on PRs or pushes — that is how an informational "
+        "lane silently becomes a de-facto gate"
+    )
+
+
+def test_the_canary_reuses_the_gate_instead_of_restating_it(canary_jobs):
+    """W1/W4 semantics live in release-gate.yml only — never a second copy."""
+    callers = {
+        name
+        for name, job in canary_jobs.items()
+        if str(job.get("uses", "")).endswith("release-gate.yml")
+    }
+    assert callers, (
+        "the canary's deterministic half must CALL the reusable gate; a local "
+        "re-implementation of W1/W4 would be a second source of truth"
+    )
+    for name, job in canary_jobs.items():
+        script = "\n".join(_all_run_steps(job))
+        for selector in ("-m transport", '-m "transport', "stealth and not online"):
+            assert selector not in script, (
+                f"canary job {name!r} re-selects a GATING lane ({selector!r}) in "
+                f"its own steps; those bodies belong to release-gate.yml alone"
+            )
+
+
+def test_the_canary_has_no_write_permission_anywhere():
+    doc = _load(CANARY)
+    assert doc["permissions"] == {"contents": "read"}, (
+        "the canary is read-only by construction, not by convention"
+    )
+    for name, job in doc["jobs"].items():
+        perms = job.get("permissions")
+        if perms is None:
+            continue
+        assert "write" not in str(perms), (
+            f"canary job {name!r} requests write permission: {perms}"
+        )
+
+
+def test_the_canary_never_reaches_outside_the_run():
+    text = CANARY.read_text(encoding="utf-8").lower()
+    # The header comment names these tokens to say they are absent; strip comment
+    # lines so the prose describing the rule cannot fail the rule.
+    body = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    for token in OUTWARD_TOKENS:
+        assert token not in body, (
+            f"canary.yml contains {token!r} — W6 forbids external mutation and "
+            f"notification of every kind, including a well-meant alert"
+        )
+
+
+def test_the_live_half_cannot_fail_the_run(canary_jobs):
+    live = [
+        (name, job)
+        for name, job in canary_jobs.items()
+        if "online" in "\n".join(_all_run_steps(job))
+    ]
+    assert live, "no job observes the live corpus — the informational half is missing"
+    for name, job in live:
+        assert job.get("continue-on-error") is True, (
+            f"canary job {name!r} observes live pages without continue-on-error; "
+            f"a vendor result change would then gate"
+        )
+        script = "\n".join(_all_run_steps(job))
+        assert "exit 0" in script, (
+            f"canary job {name!r} must capture the live exit code rather than "
+            f"propagate it — continue-on-error alone leaves the cell red-looking"
+        )
+        assert "INFORMATIONAL" in script, (
+            f"canary job {name!r} must LABEL its live result informational in the "
+            f"log; an unlabelled result gets cited as evidence"
+        )
+
+
+def test_the_deterministic_half_is_not_marked_non_gating(canary_jobs):
+    """Local fixture failures must stay red — that half is the honest signal."""
+    for name, job in canary_jobs.items():
+        if str(job.get("uses", "")).endswith("release-gate.yml"):
+            assert not job.get("continue-on-error"), (
+                f"canary job {name!r} calls the deterministic gate but absorbs its "
+                f"failure; plan_RELEASE 2.6 requires local failures to be red"
+            )
+
+
+def test_the_canary_is_not_wired_into_the_gate(gate_jobs):
+    """Nothing in the required check may depend on an observation lane."""
+    for name, job in gate_jobs.items():
+        assert "canary" not in str(job.get("uses", "")), (
+            f"gate job {name!r} calls the canary; an informational lane must "
+            f"never sit inside the required check"
+        )
+        assert "canary" not in str(job.get("needs", "")), (
+            f"gate job {name!r} needs the canary"
+        )

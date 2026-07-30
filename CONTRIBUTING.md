@@ -120,6 +120,24 @@ bare tool names (or `uv run …` on a clean checkout path).
 - **`ty` runs with `--exit-zero-on-warning`.** There is a tolerated baseline of typing
   warnings on pre-typing modules; *new* modules must be error-free.
 
+### The canary is not a gate
+
+`.github/workflows/canary.yml` (plan_RELEASE W6) runs on a schedule and on manual
+dispatch. It exists so a human can *look* at drift; it has no authority:
+
+- Its **deterministic** half calls the same reusable gate a PR calls, against the
+  local fixture. A failure there is red and real.
+- Its **live-observation** half drives the approved live detectors and is
+  **informational only** — it is structurally incapable of failing the run, and a
+  result from it may never be quoted as evidence for or against a release claim.
+- There is **no notification of any kind**, by design. Nothing pages anyone; a red
+  scheduled run is discovered whenever someone next looks.
+- It is not a promise of permanent coverage, and not a commitment to detect or
+  repair drift within any interval.
+
+`tests/test_release_workflows.py` pins those properties, so widening them means
+deleting a test on purpose rather than by accident.
+
 ---
 
 ## Golden discipline (two-tier)
