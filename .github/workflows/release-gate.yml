@@ -499,6 +499,31 @@ jobs:
         # W5: `always()` so a RED cell still writes a record saying it was
         # red. The aggregate rejects any non-success terminal outcome, so
         # this edge can only ever make the gate redder, never greener.
+        #
+        # W13's `--mq` ids are emitted by THIS cell, not the `integration` one,
+        # because `tests/test_wire_semantics.py` is `transport`-marked and the
+        # integration cell deselects `transport` on macOS (F-773). Only this
+        # job's junit.xml carries those nodes' outcome on every cell it runs.
+        #
+        # id -> node. Seven steps, five bound; MQ-139 and MQ-140 each need BOTH
+        # of their nodes to pass.
+        #   MQ-138 test_the_official_mcp_sdk_client_initializes_lists_calls_and_closes
+        #   MQ-139 test_concurrent_calls_on_one_instance_keep_their_own_answers
+        #        + test_two_named_instances_stay_isolated_under_interleaved_calls
+        #   MQ-140 test_reversed_completion_keeps_each_result_on_its_own_request
+        #        + test_duplicate_looking_payloads_are_told_apart_only_by_id
+        #   MQ-142 test_client_disconnect_with_a_request_in_flight_has_one_outcome
+        #   MQ-144 test_shutdown_with_an_in_flight_call_leaves_no_orphan
+        #
+        # MQ-141 and MQ-143 are deliberately NOT emitted. Their measurements
+        # found real defects in the half each step names — a cancelled request
+        # is answered with JSON-RPC code 0 and leaves its instance wedged
+        # (F-791, F-794), and malformed input gets no protocol reply at all
+        # (F-792) — so those steps are `planned` in tests/MANUAL_QA_PROTOCOL.md.
+        # Emitting their ids here would bind a passing characterization pin to a
+        # step it does not satisfy, which is exactly the "count declarations as
+        # behavior" cheat plan_RELEASE §8.1 refuses. Add them in the SAME commit
+        # that closes F-791/F-792/F-794 and promotes the steps.
         if: always()
         shell: bash
         run: >-
@@ -516,6 +541,11 @@ jobs:
           --artifact "chrome-identity=chrome-identity.json"
           --artifact "junit=junit.xml"
           --artifact "runner-identity=runner-identity.json"
+          --mq "MQ-138"
+          --mq "MQ-139"
+          --mq "MQ-140"
+          --mq "MQ-142"
+          --mq "MQ-144"
       - name: Upload this cell's release-evidence record
         if: always()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3

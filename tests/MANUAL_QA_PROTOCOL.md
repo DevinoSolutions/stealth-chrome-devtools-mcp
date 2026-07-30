@@ -1459,6 +1459,242 @@ by a raising stub, so a network attempt fails the test rather than succeeding
 quietly, and the no-external-mutation claim is asserted against the real CLI
 parser rather than left as a comment.
 
+## W13 — wire concurrency, cancellation, and interoperability (MQ-138..144)
+
+The steps a human runs with a protocol trace open. Every other section asks
+whether a tool computes the right answer; these ask whether the **wire** around
+that answer holds: does a client that is not ours speak it, does a response stay
+glued to its request when several are in flight, does a cancellation end a wait,
+and does a client that walks away leave a clean process table.
+
+Every step below is executed over the **absolute installed console launcher**
+speaking stdio JSON-RPC — the same launcher W1 canonicalizes — inside a
+throwaway HOME with its own `--singleton-port`. Nothing imports the server
+module: the in-process `.fn` seam the E2E suite uses has no frames, no request
+ids and no disconnects, so it cannot answer a single question here. MQ-127 (W10)
+says in words that it makes no claim about JSON-RPC framing for a single request
+id; this is the section that makes it, over real stdout frames the test itself
+wrote and parsed.
+
+Two disciplines make each node a measurement. *In flight* always means W7's
+fixture confirmed the request **arrived** (`/fault/arm` → poll `/fault/status`
+for `entered` → `/fault/release`), so a cancellation or a disconnect is injected
+into an operation that has demonstrably started and no sleep is ever a barrier.
+And every product deadline sits strictly inside a larger harness bound, so a
+request that never answers fails its step by name instead of hanging the suite.
+
+These landed while `MQ-122..129` (W9, W10) and `MQ-145..149` (W14) are still
+reserved, so the contiguity check stays `MQ-1..113` plus the landed blocks until
+those workstreams land.
+
+**Two of these seven steps are `planned`, and deliberately so.** The
+measurements were taken and each found a real defect in the half the step names:
+a cancelled request is answered with JSON-RPC `code: 0` and leaves its instance
+wedged (F-791, F-794), and malformed input is answered with nothing at all
+(F-792). All are characterization-pinned and routed, never fixed — `src/` edits
+are a plan_RELEASE non-goal — and a characterization can never satisfy a step.
+Three further findings own no step of their own and instead narrow the steps
+they were found under: F-790 (the auto-clone spawn waits forever on an
+unanswered `roots/list`) and F-793 (one instance serializes its calls, so a call
+behind a parked operation times out and blames a crash) bound MQ-139 and
+MQ-140; F-795 (`execute_script` reports `success: true` for a script that threw)
+was found incidentally and is routed rather than absorbed.
+
+**HTTP parity, stated exactly.** plan_RELEASE §2.13 asks for HTTP parity *where
+HTTP is contract-qualified*. It is not — `RELEASE_CONTRACT.md` files HTTP under
+"described, not qualified" — so **no step below has an HTTP column, and no stdio
+evidence is copied into one**. The intentional transport differences, listed so
+the absence is a decision rather than an oversight: HTTP has no stdin, so
+MQ-142's "close stdin mid-request" has no analogue there; HTTP has no private
+stdout pipe, so MQ-143's framing-purity property is not the same property; and
+the stdio path is a proxy in front of the same backend, so an HTTP run would
+exercise strictly less machinery. The exclusion is itself asserted by
+`tests/test_wire_semantics.py::test_the_http_column_is_out_of_scope_because_http_is_not_qualified`,
+which goes red the moment HTTP becomes qualified.
+
+### MQ-138: An independent MCP client drives the installed server
+**Manual**: with a client library that is not the one the product ships with,
+spawn the installed console launcher by absolute path, complete `initialize`,
+list the tool schemas, make one successful call and one call that must fail,
+then close. Confirm the server identity and protocol version are reported, that
+the listed schemas are usable enough to build a call from, that the failure is
+typed and carries the documented message, and that the client's own shutdown
+leaves no process behind.
+**Evidence**: satisfied — pytest:
+`tests/test_wire_semantics.py::test_the_official_mcp_sdk_client_initializes_lists_calls_and_closes`.
+The node imports **only** the official `mcp` SDK for the protocol — no `fastmcp`
+client, no `embedded/server.py` — so W1's FastMCP result cannot stand in for it:
+if the wire only answered our own client, this node could not pass. It asserts
+`serverInfo.name`, a non-empty version and protocol version, the full 94-tool
+registry, a real `inputSchema` on a representative tool, a successful
+`list_instances`, and the M6-pinned bytes `Instance not found: <id>` on the
+error path. The `mcp` pin is declared in `pyproject.toml`'s **test** extra only;
+it is already a transitive dependency of the pinned `fastmcp`, so no runtime
+dependency is added.
+
+### MQ-139: Concurrent calls on one instance, and isolation across two
+**Manual**: put several calls in flight against one instance at the same time
+and confirm each answer is the one its own call asked for. Then run two
+instances at once, interleave calls between them, and confirm no answer crosses
+over and no browser state leaks from one to the other.
+**Evidence**: satisfied — pytest:
+`tests/test_wire_semantics.py::test_concurrent_calls_on_one_instance_keep_their_own_answers`
+and
+`tests/test_wire_semantics.py::test_two_named_instances_stay_isolated_under_interleaved_calls`.
+The single-instance node gives each of four simultaneous calls a value only that
+call can produce, so an answer served to the wrong request is visible; the
+two-instance node interleaves A,B,A,B in one batch, checks each response carries
+its own page's sentinel, and separately proves a `localStorage` write in A is
+not readable from B. Each response id is also asserted to appear exactly once in
+the stdout frame stream.
+
+**Scope, stated exactly**: this claims concurrency for **short** calls on one
+instance, and isolation across instances whose profiles are **named**
+(`user_data_dir`). Two bounds are named rather than implied:
+
+- **F-790** — the default *unnamed* form cannot produce a second live instance
+  at all. With the master profile held, the auto-clone path sends a `roots/list`
+  request to the client and awaits the reply with no deadline, so a client that
+  does not implement MCP `roots` never gets an answer, an error, or a timeout.
+- **F-793** — a call issued behind a *parked* operation on the same instance
+  does not queue. It waits out its own CDP budget and fails with the
+  "browser may have crashed" timeout, although the instance is merely busy.
+
+**Current support (non-acceptance)**: pytest:
+`tests/test_wire_semantics.py::test_a_second_unnamed_spawn_blocks_on_an_unanswered_roots_list`
+is the characterization pin for F-790. It carries its own sensitivity control —
+the first spawn's latency is asserted to be a fraction of the bound, so a busy
+machine fails the control instead of manufacturing the finding — and it requires
+the `roots/list` request frame to actually be on the wire, so an unrelated stall
+cannot satisfy it.
+`tests/test_wire_semantics.py::test_a_parked_navigation_blocks_every_call_on_the_same_instance`
+is the pin for F-793: the parked navigation is barrier-confirmed in flight
+before the second call is issued, and the same call shape succeeds on a
+different instance at the same moment (MQ-140's node), so the failure is
+per-instance serialization rather than a broken call.
+`tests/test_wire_semantics.py::test_execute_script_reports_success_for_a_thrown_script`
+pins F-795, found while writing these nodes: a script that raises comes back as
+`success: true` with `error: null`, so the documented success flag cannot be
+trusted to mean the script ran.
+
+### MQ-140: Every result stays attached to its own request
+**Manual**: make the request you issued FIRST finish LAST, and separately put two
+requests in flight whose method and arguments are byte-identical. Confirm each
+response carries its own request's id and its own payload, that exactly one
+response is emitted per id, and that nothing is dropped.
+**Evidence**: satisfied — pytest:
+`tests/test_wire_semantics.py::test_reversed_completion_keeps_each_result_on_its_own_request`
+and
+`tests/test_wire_semantics.py::test_duplicate_looking_payloads_are_told_apart_only_by_id`.
+The reversal is caused rather than hoped for: the fixture holds the first
+navigation open until the test releases it, the barrier proves it reached the
+server, a second call is issued and answered while it is still parked, and the
+recorded frame order is asserted to be the reverse of the issue order. The
+duplicate-payload node is the narrowest possible correlation test — the id is
+the only thing distinguishing the two requests.
+
+**Scope, stated exactly**: the reversed-completion step runs the fast request on
+a **second** instance. That is F-793, not convenience: a call issued behind a
+parked operation on the same instance times out rather than queueing, so the
+honest cross-request-completion shape here is cross-instance. Same-instance
+correlation is still covered — by the duplicate-payload step, whose two requests
+are both short.
+
+### MQ-141: A confirmed in-flight request can be cancelled
+**Manual**: start an operation, wait until the server confirms it arrived, send
+the protocol's cancellation for that exact request id, and confirm the request
+reaches exactly one terminal outcome promptly, that the outcome is recognisable
+as a cancellation, that releasing the operation afterwards produces no second
+response, and that the session still works.
+**Evidence**: planned — planned-pytest:
+`tests/test_wire_semantics.py::test_cancelling_a_confirmed_in_flight_request_ends_it_with_code_zero`.
+Cancellation is genuinely supported — the wait ends in milliseconds and exactly
+once — but two halves of the step are false at HEAD. The terminal outcome is a
+JSON-RPC error whose `code` is `0` (F-791); zero is neither a reserved JSON-RPC
+code nor a documented product code, so a client can only recognise a
+cancellation by matching the English message. And the cancelled **instance** is
+left wedged (F-794): its next navigation burns the full CDP budget and returns
+the "browser may have crashed" timeout, so "the session still works" is true of
+the server and false of the instance the caller was using.
+**Current support (non-acceptance)**: the node above is a characterization pin
+for both findings. It asserts the halves that DO hold — the wait ends well
+inside the navigation deadline, exactly one frame is emitted for the id,
+releasing the still-parked route afterwards produces no second frame, the server
+lists instances normally, and a FRESH instance navigates and closes cleanly —
+and pins `error["code"] == 0` plus the exact CDP-timeout bytes of the wedged
+instance, so either a typed code or an instance that survives its own
+cancellation turns it red.
+`tests/test_wire_semantics.py::test_cancellation_control_the_same_route_completes_when_released`
+is its sensitivity control: the SAME held route, released instead of cancelled,
+completes successfully — without it, "the cancelled call stopped waiting" would
+be equally consistent with "this route never completes".
+
+### MQ-142: A client that disconnects mid-request leaves one outcome and no wedge
+**Manual**: with a request confirmed in flight, close the client's stdin.
+Confirm the server process exits within a bounded time rather than waiting for
+an answer nobody will read, that the in-flight request produced at most one
+terminal outcome and no partial frame, that nothing but protocol frames ever
+reached stdout, and that a freshly started client can immediately drive the same
+backend afterwards.
+**Evidence**: satisfied — pytest:
+`tests/test_wire_semantics.py::test_client_disconnect_with_a_request_in_flight_has_one_outcome`.
+The oracle is exactly-one-terminal-outcome per request id, asserted over the
+stdout frames the test parsed itself: either one response arrived before the
+stream ended or none did — never two, never a truncated frame. Recovery is
+proved by a second client that handshakes against the same backend, lists the
+full registry, and closes the instance the dead session owned.
+
+### MQ-143: Framing survives large results, a slow reader, and bad input
+**Manual**: return a large result, stall the reader while it is delivered, and
+send malformed input. Confirm the large result arrives as one parseable protocol
+frame, that a stalled reader deadlocks nothing, that no diagnostic byte ever
+appears on stdout, that stderr stays bounded, and that malformed input is
+answered — not silently swallowed — while the session survives.
+**Evidence**: planned — planned-pytest:
+`tests/test_wire_semantics.py::test_malformed_input_is_dropped_without_any_protocol_reply`.
+A non-JSON line and a syntactically valid request with no `method` both receive
+**no reply of any kind** — no `-32700`, no `-32600`, no frame (F-792). The
+session survives both, which is the half that matters most, but a client that
+sent a malformed frame has no protocol-level signal that it did and waits
+forever. A step whose scope includes answering bad input cannot be satisfied by
+silence.
+**Current support (non-acceptance)**: the node above is a characterization pin
+asserting BOTH halves — no reply frame, and a working call immediately after —
+so the moment either input earns an error frame it turns red.
+`tests/test_wire_semantics.py::test_a_large_bounded_result_is_one_parseable_frame_under_a_slow_reader`
+carries the rest of the surface as real, passing assertions: a screenshot
+(tens of KB of base64) arrives as ONE newline-delimited JSON object while the
+client's reader is deliberately paused, a second request issued into the stalled
+pipe survives it, nothing deadlocks, `non_frame_stdout` is empty across the whole
+session, and stderr never reaches its cap.
+
+**Scope, stated exactly** — two halves of plan_RELEASE §2.13's wording are NOT
+claimed here, and neither is quietly dropped:
+
+- *"simultaneous stderr diagnostics"*: none could be induced. Across every W13
+  session the launcher wrote **zero bytes** to stderr, because the proxy and the
+  backend both log to files under the isolated `HOME`, not to the terminal. The
+  boundedness assertion is therefore a measurement of a channel that stays
+  empty, not of a channel under load; a step that requires diagnostics competing
+  with framing cannot be satisfied until a surface exists that emits them.
+- *"memory stays within W9's ceiling"*: W9 (`MQ-122..125`) has not landed, so
+  there is no ceiling to check against. No memory claim is made or implied.
+
+### MQ-144: Shutdown with work in flight leaves no orphan
+**Manual**: shut the client down while a call is parked. Confirm shutdown is
+bounded rather than blocking on the parked call, that the shared backend is
+still healthy afterwards, that the browser the dying session owned can still be
+closed through the normal tool, and that no process from the session survives.
+**Evidence**: satisfied — pytest:
+`tests/test_wire_semantics.py::test_shutdown_with_an_in_flight_call_leaves_no_orphan`.
+Shutdown is asserted to complete inside the harness bound; a fresh client then
+lists the full registry against the same backend and closes the orphaned
+instance, after which `list_instances` no longer reports it. The
+no-surviving-process half is asserted globally rather than locally: every W13
+node runs inside `release_gate_harness.gate_workspace`, which terminates the
+detached backend recorded in the isolated `server.json` and fails the module if
+any child process spawned inside the block is still alive.
+
 ---
 
 ## W16 — stateful/PWA and internationalized site shapes (MQ-155..162)
@@ -1702,8 +1938,15 @@ The remaining ownership reservations are:
 - ~~W11: `MQ-130` — documentation examples and claims sync.~~ **Landed** above as
   a current step with its acceptance test; no longer a reservation.
 - ~~W12: `MQ-131..137`~~ — **landed**; the steps are headings above.
-- W13: `MQ-138..144` — concurrency, cancellation, framing, and independent
-  protocol interoperability.
+- ~~W13: `MQ-138..144` — concurrency, cancellation, framing, and independent
+  protocol interoperability.~~ **Landed** above as current steps; no longer a
+  reservation. `MQ-138`, `MQ-139`, `MQ-140`, `MQ-142` and `MQ-144` are
+  satisfied; `MQ-141` and `MQ-143` are `planned` behind F-791/F-794 and F-792,
+  with their characterization pins recorded as current support. F-790 (the
+  auto-clone spawn path waits forever on an unanswered `roots/list`), F-793 (one
+  instance serializes its calls) and F-795 (`execute_script` reports success for
+  a script that threw) own no step; they narrow MQ-139/MQ-140 and are pinned
+  there.
 - W14: `MQ-145..149` — literal immutable immediate N-1 upgrade, migration,
   rollback, and artifact identity. The human/admin selects and records the
   immutable immediately

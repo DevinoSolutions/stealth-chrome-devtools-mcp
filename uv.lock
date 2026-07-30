@@ -1620,6 +1620,7 @@ sentry = [
     { name = "sentry-sdk" },
 ]
 test = [
+    { name = "mcp" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -1634,6 +1635,7 @@ transpiler = [
 requires-dist = [
     { name = "fastmcp", specifier = "==2.11.2" },
     { name = "jsbeautifier", specifier = "==1.15.4" },
+    { name = "mcp", marker = "extra == 'test'", specifier = ">=1.12" },
     { name = "nodriver", specifier = "==0.47.0" },
     { name = "pillow", specifier = "==11.3.0" },
     { name = "psutil", specifier = "==7.0.0" },
