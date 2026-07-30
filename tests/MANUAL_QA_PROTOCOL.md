@@ -1195,6 +1195,144 @@ stated absence true against the live registry.
 
 ---
 
+## W15 — observability on failure (MQ-150..154)
+
+These steps ask what the product tells you when it breaks, and what that telling
+costs the operator. Read the `Evidence` lines literally: **two of the five are
+satisfied and three are `planned`**, and the three are planned because the
+capability itself is absent from `src/`, not because a test is missing. W15 is a
+zero-`src/` workstream, so each gap is a characterization pin plus a contract
+limitation (F-781..F-786 under `audit/stage2/`) and never a fix.
+
+The headline result is the one that would have blocked the release: **no secret
+canary was disclosed on any surface.** Eight canaries were planted in real
+failing tool calls and searched byte-for-byte across stdout, stderr, the backend
+log records, the debug-logger view, the policy-processed diagnostic and the
+local repro bundle. Note *why* the log surfaces are clean — F-782 means a failed
+call is never logged at all, so the argument-echoing messages never reach a log.
+That is a consequence of an observability gap, not a control, and MQ-151 must be
+re-run if F-782 is ever fixed.
+
+These landed while `MQ-122..129` (W9, W10) and `MQ-138..149` (W13, W14) are still
+reserved, so the contiguity check stays `MQ-1..113` plus the landed blocks until
+those workstreams land.
+
+### MQ-150: A failure names a stable type, exact bytes, and a correlated call
+**Manual**: drive a validation failure, an unknown-instance failure, a CDP
+timeout, a cancelled call and a filesystem failure. For each, confirm the error
+type is stable, the message is the documented one character-for-character, and
+that the client can tie the failure to a backend log line. Confirm nothing is
+written to stdout while the stdio transport is live.
+**Evidence**: planned — planned-pytest:
+`tests/test_observability.py::TestDiagnosticOracle::test_the_diagnostic_carries_code_phase_and_correlation`.
+The correlated half cannot be satisfied: a raised error carries no error code,
+no failed phase, no next step and no correlation id (F-781), and the failure is
+never logged at all (F-782), so there is nothing on either side to correlate.
+Covering only the type-and-bytes half cannot satisfy a step whose scope is a
+structured, correlated diagnostic.
+**Current support (non-acceptance)**: pytest:
+`tests/test_observability.py::TestDiagnosticOracle` pins the exact message bytes
+of the validation, instance-not-found, timeout and filesystem failures,
+`tests/test_observability.py::TestCorrelation::test_a_failing_call_still_stamps_one_id_on_its_log_pair`
+proves one 12-hex id spans the start/end pair of a failing call, and
+`tests/test_observability.py::TestStdoutPurity::test_a_burst_of_failures_writes_nothing_to_stdout`
+proves the framing channel stays uncontaminated. The gaps are pinned by
+`tests/test_observability.py::TestCorrelation::test_the_raised_error_carries_no_correlation_id`,
+`tests/test_observability.py::TestCorrelation::test_a_failed_call_logs_no_error_record`,
+`tests/test_observability.py::TestErrorConventionGaps::test_the_error_types_carry_no_code_phase_or_next_step`,
+`tests/test_observability.py::TestErrorConventionGaps::test_the_timeout_path_escapes_the_one_error_convention`
+and
+`tests/test_observability.py::TestErrorConventionGaps::test_filesystem_paths_leak_raw_stdlib_exceptions`.
+
+### MQ-151: No planted secret reaches any diagnostic surface
+**Manual**: put a unique value in URL credentials, a URL query value, an
+`Authorization` header, a cookie, an environment variable, a DOM/form value, a
+filesystem path component and a script argument. Drive failures that touch each
+one, then grep stdout, stderr, the backend log, the debug view, the repro bundle
+and the generated reproduction command for every value. Any hit is a release
+blocker.
+**Evidence**: satisfied — pytest:
+`tests/test_observability.py::TestSecretCanaries::test_no_canary_survives_the_canonical_policy`,
+`tests/test_observability.py::TestSecretCanaries::test_no_canary_reaches_stdout_stderr_or_the_backend_log`,
+`tests/test_observability.py::TestSecretCanaries::test_no_canary_reaches_the_written_bundle`,
+`tests/test_observability.py::TestSecretCanaries::test_the_bundle_writer_refuses_a_canary_bearing_value`,
+`tests/test_observability.py::TestSecretCanaries::test_the_actionable_fields_survive_the_policy`,
+`tests/test_observability.py::TestSecretCanaries::test_the_structural_rules_catch_the_url_classes_unregistered`,
+`tests/test_observability.py::TestSecretCanaries::test_credential_entries_are_dropped_entirely`.
+The redactor is W12's canonical policy API imported from
+`tools/release_evidence.py`; W15 adds no second redactor or policy table. The
+first node is parametrized over all eight secret classes, and
+`tests/test_observability.py::TestSecretCanaries::test_the_control_proves_the_search_can_fail`
+is the control that keeps the sweep from passing vacuously — it asserts every
+canary IS present before redaction.
+
+### MQ-152: Diagnostic capture is bounded, marked, and encoding-safe
+**Manual**: induce an oversized DOM/body/stderr failure. Confirm per-field and
+total limits hold, that a truncated value is explicitly marked as truncated,
+that the written bytes are valid UTF-8, that the write is atomic, and that
+replay leaves nothing behind.
+**Evidence**: planned — planned-pytest:
+`tests/test_observability.py::TestBoundedCapture::test_a_bounded_value_is_marked_and_checksummed`.
+Two halves cannot be satisfied: **no surface emits an inline truncation marker or
+a checksum of dropped content** (F-785), so a bounded value cannot be recognised
+as bounded from the value alone, and **no artifact write is atomic** (F-786) —
+there is no write-then-rename anywhere in the tree.
+**Current support (non-acceptance)**: pytest:
+`tests/test_observability.py::TestBoundedCapture::test_an_oversized_payload_is_replaced_by_a_bounded_envelope`
+pins the spill envelope and its exact `reason` string,
+`tests/test_observability.py::TestBoundedCapture::test_a_payload_within_budget_passes_through_untouched` pins the pass-through
+edge, `tests/test_observability.py::TestBoundedCapture::test_the_debug_view_reports_total_versus_returned` pins the counter pair
+that stands in for a marker, `tests/test_observability.py::TestBoundedCapture::test_the_spilled_bytes_are_valid_utf8` proves the
+one write site that declares its encoding round-trips real multibyte UTF-8, and
+`tests/test_observability.py::TestBoundedCapture::test_the_per_field_and_total_bundle_caps_are_enforced` pins W6's per-field and
+per-list refusals. The absences are pinned by
+`tests/test_observability.py::TestBoundedCapture::test_no_diagnostic_surface_emits_an_inline_truncation_marker`,
+`tests/test_observability.py::TestBoundedCapture::test_there_is_no_total_byte_budget_across_the_whole_record`,
+`tests/test_observability.py::TestBoundedCapture::test_the_json_exports_are_ascii_by_default_not_declared_utf8` and
+`tests/test_observability.py::TestBoundedCapture::test_no_local_artifact_write_is_atomic`. Per-cap enforcement itself is already
+covered by `tests/test_network_interceptor.py::TestBodyStoreByteCaps`,
+`tests/test_response_handler.py` and `tests/test_debug_logger.py::TestBufferCaps`;
+W15 does not restate them.
+
+### MQ-153: A failure tells the operator what to do next
+**Manual**: for each failure class, confirm the message names a concrete local
+action — a tool to call, a setting to change, or a file to inspect — and that the
+action it names actually exists.
+**Evidence**: planned — planned-pytest:
+`tests/test_observability.py::TestRecoveryGuidance::test_every_failure_class_names_a_next_step`.
+The three highest-traffic messages — `Instance not found`, `Invalid index value`
+and `Invalid JSON in extraction_options` — name no recovery action at all
+(F-781). A step whose scope is every failure class cannot be satisfied by the
+subset that happens to carry guidance.
+**Current support (non-acceptance)**: pytest:
+`tests/test_observability.py::TestRecoveryGuidance::test_the_timeout_names_a_local_recoverable_action`
+and
+`tests/test_observability.py::TestRecoveryGuidance::test_the_script_guard_names_the_tool_to_use_instead`
+prove the two guided messages name a tool that is actually served, and
+`tests/test_observability.py::TestRecoveryGuidance::test_the_export_timeout_names_its_alternative_format` pins the export-timeout
+string against the live source. `tests/test_observability.py::TestRecoveryGuidance::test_the_commonest_failures_offer_no_next_step`
+pins the gap so the unguided set cannot grow silently.
+
+### MQ-154: A sanitized transcript replays locally and mutates nothing external
+**Manual**: from a throwaway directory, replay a sanitized transcript against the
+deterministic fixture and confirm it reproduces the same typed failure. Confirm
+no DNS lookup or public request is made, no issue/comment/webhook is created, and
+nothing is written outside the destination.
+**Evidence**: satisfied — pytest:
+`tests/test_observability.py::TestLocalReplay::test_the_transcript_replays_to_the_same_typed_failure`,
+`tests/test_observability.py::TestLocalReplay::test_the_replay_resolves_no_name_and_opens_no_socket`,
+`tests/test_observability.py::TestLocalReplay::test_the_replay_writes_nothing_outside_the_destination`,
+`tests/test_observability.py::TestLocalReplay::test_the_destination_resolver_refuses_every_non_throwaway_target`,
+`tests/test_observability.py::TestLocalReplay::test_the_bundle_writer_exposes_no_upload_or_notification_flag`.
+The destination resolver and bundle writer are W6's, imported from
+`tools/canary_repro.py`; W15 adds no second resolver. The replay runs with
+`socket.socket`, `socket.create_connection` and `socket.getaddrinfo` all replaced
+by a raising stub, so a network attempt fails the test rather than succeeding
+quietly, and the no-external-mutation claim is asserted against the real CLI
+parser rather than left as a comment.
+
+---
+
 ## Reserved MQ ranges
 
 The current design-time manifest ends at `MQ-113`. The identifiers below are
@@ -1248,7 +1386,10 @@ The remaining ownership reservations are:
   immutable immediately
   preceding stable tag and artifact SHA-256; the executor verifies that exact
   identity. An arbitrary prior release or same-version reinstall is invalid.
-- W15: `MQ-150..154` — failure observability, redaction, and local repro integrity.
+- ~~W15: `MQ-150..154`~~ — **landed**; the steps are headings above. MQ-151 and
+  MQ-154 are satisfied; MQ-150, MQ-152 and MQ-153 are `planned` because the
+  capability they require is absent from `src/` (F-781..F-786), not because a
+  test is missing.
 - W16: `MQ-155..162` — stateful/PWA, dedicated/shared-worker, and
   international-text behavior.
 
