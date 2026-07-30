@@ -1933,7 +1933,7 @@ The remaining ownership reservations are:
 - W9: `MQ-122..125` — performance/resource budgets.
 - ~~W10: `MQ-126..129` — resilience/fault injection.~~ **Landed** above as
   current steps; no longer a reservation. `MQ-127` and `MQ-129` are satisfied;
-  `MQ-126` and `MQ-128` are `planned` behind F-783 and F-782, with their
+  `MQ-126` and `MQ-128` are `planned` behind F-789 and F-788, with their
   characterization pins recorded as current support.
 - ~~W11: `MQ-130` — documentation examples and claims sync.~~ **Landed** above as
   a current step with its acceptance test; no longer a reservation.
