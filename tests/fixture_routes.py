@@ -1,4 +1,4 @@
-"""plan_RELEASE W7 — the DYNAMIC half of the one fixture app.
+"""plan_RELEASE W7/W10 — the DYNAMIC half of the one fixture app.
 
 ``tests/fixture_app/`` holds the static pages the plan_E2E suite navigates to.
 This module holds the pages and API routes W7's eight adversarial shapes need
@@ -31,6 +31,17 @@ it. ``GET /e2e/reset`` clears it.
 Determinism: no route sleeps, blocks on a timer, or synchronizes on elapsed
 time. Streams emit their full declared content and end; every controller a page
 exposes is driven by an event (a click, a fetch resolution, a stream message).
+
+W10's fault routes are the one deliberate exception to "a route never blocks",
+and they keep the rule that matters: a blocked route is waiting on an **event**
+the test sets (``/fault/release``), never on elapsed time. Each is addressed by
+a ``?token=`` the test mints, exposes an ``entered`` barrier so a test can know
+the request really arrived before injecting its fault, and is bounded by
+:data:`FAULT_CEILING_SECONDS` — a *failure* bound so a test that dies mid-fault
+cannot wedge a server thread, never a synchronization point. Disconnects are
+expected during a fault and are recorded rather than raised, and
+:func:`release_all_faults` lets fixture finalization prove every handler left
+before the server is shut down.
 """
 
 from __future__ import annotations
@@ -38,7 +49,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import socket
+import struct
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -81,6 +95,19 @@ _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 POPUP_TARGET_TOKEN = "popup-target-token"
 
+# ── W10 fault controllers (MQ-126…129) ──────────────────────────────────────
+# The ceiling is a FAILURE bound, never a synchronization point: the only thing
+# that ends a fault wait in a passing run is the test's own /fault/release. It
+# exists so a test that dies before releasing cannot park a request thread past
+# the end of the session. A ceiling hit is recorded and is never a pass signal.
+FAULT_CEILING_SECONDS = 25.0
+FAULT_SLOW_SENTINEL = "fixture-fault-slow-page"
+FAULT_SLOW_BODY = "slow-success-body-e2e-w10"
+FAULT_PARTIAL_SENTINEL = "fixture-fault-partial-page"
+FAULT_PARTIAL_PREFIX = "partial-body-prefix-e2e-w10"
+FAULT_PARTIAL_SUFFIX = "completed-body-suffix-e2e-w10"
+FAULT_RELEASED_BODY = "fault-released-body-e2e-w10"
+
 
 def payload_binary_body() -> bytes:
     """The 4,096 seeded bytes ``/payload/binary`` returns.
@@ -114,6 +141,10 @@ def new_origin_state(role: str) -> dict[str, Any]:
         "peer_url": "",
         "lock": threading.Lock(),
         "ledger": _new_ledger(),
+        # W10's token -> fault controller registry. A SIBLING of the ledger, not
+        # a key inside it: ``/e2e/reset`` replaces the ledger wholesale, and a
+        # reset must never orphan an in-flight waiter.
+        "faults": {},
     }
 
 
@@ -895,6 +926,269 @@ def _r_popup_target(handler, query: str) -> None:
     _send_html(handler, popup_target_page())
 
 
+# ── W10 fault controllers: arm / observe / release, and the three phases ────
+def fault_slow_page() -> str:
+    """The exact page ``/fault/slow`` serves once its controller is released."""
+    return _page(
+        "fault-slow",
+        FAULT_SLOW_SENTINEL,
+        f"<p id='slow-body'>{FAULT_SLOW_BODY}</p>",
+    )
+
+
+def fault_partial_head() -> str:
+    """The first chunk of the after-headers phases: a committed, parseable, but
+    deliberately UNCLOSED document."""
+    return (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<title>fault-after-headers</title></head><body>"
+        f"<p id='sentinel'>{FAULT_PARTIAL_SENTINEL}</p>"
+        f"<p id='partial'>{FAULT_PARTIAL_PREFIX}</p>"
+    )
+
+
+def fault_partial_tail() -> str:
+    """The chunk that only a RELEASE produces — the completion oracle."""
+    return f"<p id='complete'>{FAULT_PARTIAL_SUFFIX}</p></body></html>"
+
+
+def _new_fault_controller(token: str) -> dict[str, Any]:
+    return {
+        "token": token,
+        "phase": "",
+        "entered": threading.Event(),  # the request really reached the server
+        "release": threading.Event(),  # the ONLY thing that ends a fault wait
+        "exited": threading.Event(),  # the handler thread left (no wedge)
+        "disconnected": False,  # peer went away mid-fault; expected, recorded
+        "ceiling_hit": False,  # the failure bound fired; never a pass signal
+    }
+
+
+def _fault_snapshot(controller: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "token": controller["token"],
+        "phase": controller["phase"],
+        "entered": controller["entered"].is_set(),
+        "released": controller["release"].is_set(),
+        "exited": controller["exited"].is_set(),
+        "disconnected": controller["disconnected"],
+        "ceiling_hit": controller["ceiling_hit"],
+    }
+
+
+def _query_value(query: str, key: str) -> str:
+    """The raw value of ``key`` in a ``a=1&b=2`` query string, or ``""``."""
+    prefix = f"{key}="
+    for part in query.split("&"):
+        if part.startswith(prefix):
+            return part[len(prefix) :]
+    return ""
+
+
+def _fault_lookup(handler, query: str) -> dict[str, Any] | None:
+    """Return the armed controller for ``?token=``, or ``None`` having answered.
+
+    A tokenless or unarmed request is answered IMMEDIATELY with a 4xx. That is
+    what lets the hermetic route-enumeration backstop call every ``ROUTES`` key
+    with no query string without ever parking a thread — and it makes "this
+    fault is live" an explicit act of the test rather than a side effect of a
+    URL being fetched.
+    """
+    token = _query_value(query, "token")
+    state = handler.origin_state
+    if not token:
+        _send_text(handler, "fault: missing ?token=", status=400)
+        return None
+    with state["lock"]:
+        controller = state["faults"].get(token)
+    if controller is None:
+        _send_text(handler, "fault: token is not armed", status=409)
+        return None
+    return controller
+
+
+def _await_release(controller: dict[str, Any], phase: str) -> bool:
+    """Publish the ``entered`` barrier, then block until the test releases.
+
+    Returns ``True`` only for a real release. The wait is on an event, never on
+    elapsed time; :data:`FAULT_CEILING_SECONDS` bounds it so an abandoned fault
+    cannot outlive the session, and a ceiling hit is recorded as the failure it
+    is rather than being reported as a release.
+    """
+    controller["phase"] = phase
+    controller["entered"].set()
+    released = controller["release"].wait(FAULT_CEILING_SECONDS)
+    if not released:
+        controller["ceiling_hit"] = True
+    return released
+
+
+def _write_partial_head(handler) -> None:
+    """Commit a chunked 200 and flush the first chunk, framing it ourselves.
+
+    ``BaseHTTPRequestHandler`` would append ``Content-Length`` and buffer, and
+    a partially-transferred body must be genuinely partial on the wire.
+    """
+    head = fault_partial_head().encode("utf-8")
+    handler.wfile.write(
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: text/html; charset=utf-8\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"Connection: close\r\n\r\n"
+        + f"{len(head):x}\r\n".encode("latin-1")
+        + head
+        + b"\r\n"
+    )
+    handler.wfile.flush()
+
+
+def _r_fault_arm(handler, query: str) -> None:
+    """Mint (idempotently) the controller a later fault request will find."""
+    token = _query_value(query, "token")
+    if not token:
+        _send_text(handler, "fault: missing ?token=", status=400)
+        return
+    state = handler.origin_state
+    with state["lock"]:
+        controller = state["faults"].setdefault(token, _new_fault_controller(token))
+    _send_json(handler, _fault_snapshot(controller))
+
+
+def _r_fault_status(handler, query: str) -> None:
+    """The barrier a test polls: has the request ARRIVED, has it left, was the
+    peer's disconnect seen? Served from a different thread than the parked
+    handler, which is why the fault routes must never hold ``state["lock"]``
+    while they wait."""
+    controller = _fault_lookup(handler, query)
+    if controller is None:
+        return
+    _send_json(handler, _fault_snapshot(controller))
+
+
+def _r_fault_release(handler, query: str) -> None:
+    controller = _fault_lookup(handler, query)
+    if controller is None:
+        return
+    controller["release"].set()
+    _send_json(handler, _fault_snapshot(controller))
+
+
+def _r_fault_slow(handler, query: str) -> None:
+    """Slow SUCCESS: withhold the entire response until released, then serve the
+    exact page.
+
+    This is the sensitivity control for every timeout node. Released inside the
+    product deadline it must COMPLETE — which is what proves a timeout assertion
+    elsewhere measured a real hang rather than a universally broken route.
+    """
+    controller = _fault_lookup(handler, query)
+    if controller is None:
+        return
+    try:
+        if not _await_release(controller, "slow"):
+            return
+        _send_html(handler, fault_slow_page())
+    except OSError:  # peer gave up first: expected during a fault, recorded
+        controller["disconnected"] = True
+    finally:
+        controller["exited"].set()
+
+
+def _r_fault_hang_before_headers(handler, query: str) -> None:
+    """Hang BEFORE headers: not one byte — no status line, no header — until
+    released. The navigation has nothing to commit, so only the product's own
+    deadline can end it."""
+    controller = _fault_lookup(handler, query)
+    if controller is None:
+        return
+    try:
+        if not _await_release(controller, "before-headers"):
+            return
+        _send_text(handler, FAULT_RELEASED_BODY)
+    except OSError:
+        controller["disconnected"] = True
+    finally:
+        controller["exited"].set()
+
+
+def _r_fault_hang_after_headers(handler, query: str) -> None:
+    """Hang AFTER headers with a partial body: a complete 200 head plus one
+    chunk, flushed, then nothing until released.
+
+    The navigation COMMITS and the document is partially parseable while the
+    transfer is demonstrably still in flight — the phase that separates
+    "committed" from "complete". The tail chunk exists only after a release, so
+    ``#complete`` is a fact about the transfer, not about timing.
+    """
+    controller = _fault_lookup(handler, query)
+    if controller is None:
+        return
+    try:
+        _write_partial_head(handler)
+        if not _await_release(controller, "after-headers"):
+            return
+        tail = fault_partial_tail().encode("utf-8")
+        handler.wfile.write(
+            f"{len(tail):x}\r\n".encode("latin-1") + tail + b"\r\n0\r\n\r\n"
+        )
+        handler.wfile.flush()
+    except OSError:
+        controller["disconnected"] = True
+    finally:
+        handler.close_connection = True
+        controller["exited"].set()
+
+
+def _r_fault_drop(handler, query: str) -> None:
+    """Mid-transfer DROP: the same committed 200 and partial body, then the
+    connection is ABORTED instead of finished.
+
+    ``SO_LINGER(on, 0)`` makes the eventual close emit an RST rather than a FIN,
+    so the peer observes a dropped connection rather than a clean end of stream
+    — a network failure that happens strictly after the operation started. The
+    socket is not closed here: socketserver owns that, and a double close would
+    only add noise.
+    """
+    controller = _fault_lookup(handler, query)
+    if controller is None:
+        return
+    try:
+        _write_partial_head(handler)
+        if not _await_release(controller, "drop"):
+            return
+        handler.connection.setsockopt(
+            socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+        )
+    except OSError:
+        controller["disconnected"] = True
+    finally:
+        handler.close_connection = True
+        controller["exited"].set()
+
+
+def release_all_faults(state: dict[str, Any], timeout: float = 10.0) -> list[str]:
+    """Release every armed controller and wait for its handler thread to leave.
+
+    Returns the tokens whose handler had ENTERED but did not exit inside
+    *timeout*; an empty list is the "no wedged handler" proof fixture
+    finalization asserts on. This must run BEFORE ``httpd.shutdown()``, which
+    only stops the accept loop and never interrupts an in-flight request.
+    """
+    with state["lock"]:
+        controllers = list(state["faults"].values())
+    for controller in controllers:
+        controller["release"].set()
+    deadline = time.monotonic() + timeout
+    stuck: list[str] = []
+    for controller in controllers:
+        if not controller["entered"].is_set():
+            continue
+        remaining = max(0.0, deadline - time.monotonic())
+        if not controller["exited"].wait(remaining):
+            stuck.append(controller["token"])
+    return stuck
+
+
 # ── The route table (W16 extends THIS; it does not add a second one) ────────
 Route = Callable[[Any, str], None]
 
@@ -932,6 +1226,15 @@ ROUTES: dict[tuple[str, str], Route] = {
     # MQ-121
     ("GET", "/popup_components.html"): _r_popup_components,
     ("GET", "/popup_target.html"): _r_popup_target,
+    # MQ-126…129 — the W10 fault controllers. Every one answers a tokenless
+    # request immediately, so enumerating ROUTES can never park a thread.
+    ("GET", "/fault/arm"): _r_fault_arm,
+    ("GET", "/fault/status"): _r_fault_status,
+    ("GET", "/fault/release"): _r_fault_release,
+    ("GET", "/fault/slow"): _r_fault_slow,
+    ("GET", "/fault/hang-before-headers"): _r_fault_hang_before_headers,
+    ("GET", "/fault/hang-after-headers"): _r_fault_hang_after_headers,
+    ("GET", "/fault/drop"): _r_fault_drop,
     # Shared driver page + the server-side oracle ledger.
     ("GET", "/dynamic_probe.html"): _r_dynamic_probe,
     ("GET", "/e2e/reset"): _r_reset,

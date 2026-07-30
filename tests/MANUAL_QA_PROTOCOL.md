@@ -1195,6 +1195,134 @@ stated absence true against the live registry.
 
 ---
 
+## W10 — resilience and fault injection (MQ-126..129)
+
+The steps a human runs by killing things. Each injects one **dynamic** fault
+into a live session and asks whether the tool fails in a typed, bounded,
+recoverable way — never a hang, never a raw `-32000`, never a silent wrong
+success — and whether the server is still usable afterwards.
+
+Two disciplines make every node below a measurement rather than a smoke test.
+The product's own deadline is set strictly inside a larger harness bound, so a
+tool that never answers fails the node by name instead of being cut off and
+counted; and the hanging routes have a **sensitivity control** — the same route,
+released in time, must complete — so "it timed out" can never be satisfied by a
+route that simply never works.
+
+These landed while `MQ-114..125` (W7, W9) are still reserved, so the contiguity
+check stays `MQ-1..113` plus the landed blocks until those workstreams land.
+
+**Two of these four steps are `planned`, and deliberately so.** The faults were
+injected, the measurements were taken, and two of them found real defects:
+`close_instance` reports failure for a browser that is already gone (F-783), and
+a navigation timeout leaves the instance's CDP connection permanently wedged
+(F-782). Both are characterization-pinned and routed, never fixed — `src/` edits
+are a plan_RELEASE non-goal — and a characterization can never satisfy a step.
+Read the `Current support (non-acceptance)` lines literally: they record real,
+passing, useful assertions that are nevertheless not acceptance.
+
+### MQ-126: The owned browser dies mid-session
+**Manual**: with a live instance on a page, kill the Chrome process tree the
+server says it owns. Confirm the next tool call returns a bounded, typed failure
+carrying an actionable message rather than hanging; then confirm
+`close_instance` still succeeds, no process from the killed tree survives, the
+dead instance's profile directory is removable, and a freshly spawned instance
+navigates and closes cleanly.
+**Evidence**: planned — planned-pytest:
+`tests/test_resilience.py::test_crash_recovery_after_the_owned_chrome_is_killed_and_close_succeeds`.
+The step cannot be satisfied while F-783 stands: the product's own error message
+tells the caller to run `close_instance`, and that call returns `False` for a
+browser that is provably gone.
+**Current support (non-acceptance)**: pytest:
+`tests/test_resilience.py::test_crash_recovery_after_the_owned_chrome_is_killed`
+is a characterization pin. It kills the tree enumerated from
+`process_cleanup`'s own tracking table and confirms its exit before the next
+call — so the fault is proved injected rather than raced — and it asserts that
+the four halves that DO hold (typed bounded failure with a message, no surviving
+process, removable profile, working fresh spawn) cannot silently regress behind
+the one that does not. It pins `close_instance is False`, so closing F-783 turns
+the pin red and forces this step to be promoted deliberately.
+
+Scope note for whoever promotes it: no claim is made anywhere here about
+automatic reconnection or session restoration. The contract in view is *fail
+typed, then respawn*.
+
+### MQ-127: A tab disappears under a running tool
+**Manual**: start an operation on a tab, wait until the server confirms the
+request really arrived, close that tab out of band, and confirm the operation
+reaches exactly one terminal outcome that is not a bare success claim for a tab
+that no longer exists. Then confirm another tab operation and a clean instance
+close still work.
+**Evidence**: satisfied — pytest:
+`tests/test_resilience.py::test_tab_closed_under_a_running_tool_has_one_terminal_outcome`.
+The barrier is the fixture's own `entered` event, so the tab is closed under an
+operation that has demonstrably started. "Exactly one terminal outcome" is
+asserted at the tool-call boundary; no claim is made about JSON-RPC response
+framing for a single request id, which is W13's surface.
+
+### MQ-128: Navigation deadlines under controlled hang phases
+**Manual**: point `navigate` at a route that accepts the connection and then
+sends nothing at all, once with `wait_until="load"` and once with
+`wait_until="networkidle"`. Confirm each fails on the tool's own deadline — not
+on the operator's patience — with the exact documented timeout message, and that
+a normal navigation works immediately afterwards. Then release the same route
+inside the deadline and confirm the navigation completes and serves its exact
+body.
+**Evidence**: planned — planned-pytest:
+`tests/test_resilience.py::test_navigation_deadlines_time_out_and_recover`.
+The timeout half is already proved (below); the recovery half cannot be claimed
+while F-782 stands — a timed-out navigation leaves the instance's CDP connection
+permanently wedged, so "a normal navigation works immediately afterwards" is
+false at HEAD.
+This step will qualify `networkidle` **only** as a wait condition that honours
+the navigation deadline. It makes NO claim that `networkidle` waits for network
+idleness — it does not, and F-781 records that.
+**Current support (non-acceptance)**: pytest:
+`tests/test_resilience.py::test_slow_success_control_completes_when_released`,
+`tests/test_resilience.py::test_load_wait_against_a_hang_times_out_with_the_pinned_message`,
+`tests/test_resilience.py::test_networkidle_wait_against_a_hang_times_out_with_the_pinned_message`.
+These are real assertions, not pins: the timeout message is asserted
+byte-for-byte as the M6 pin, each node asserts the failure took at least the
+product deadline so an unrelated early error cannot pass as a timeout, and the
+first is the sensitivity control — the same route, released in time, must
+complete and serve its exact body — without which "it timed out" would prove
+nothing. They are support only because the step also requires recovery.
+Two characterization pins carry the defects:
+`tests/test_resilience.py::test_a_navigation_timeout_wedges_the_instance_connection`
+(F-782) asserts the NEXT navigation fails with the generic CDP-operation-timeout
+message, and
+`tests/test_resilience.py::test_networkidle_returns_before_the_transfer_completes`
+(F-781) pins that against a route whose body is still mid-transfer,
+`networkidle` returns success in about two seconds while the release-only tail
+of the document is provably absent. Neither is bound to an `--mq` id and neither
+can satisfy this or any step.
+
+### MQ-129: Connectivity is cut mid-operation
+**Manual**: with a navigation that has demonstrably started, abort the
+connection from the server after the response was committed but before the body
+finished. Confirm the call reaches one terminal outcome inside the outer bound,
+that a success (if any) does not claim content that never arrived, and that a
+normal navigation, a clean close, and a fresh spawn all work afterwards.
+**Evidence**: satisfied — pytest:
+`tests/test_resilience.py::test_route_abort_mid_navigation_is_bounded_and_recoverable`.
+The fixture commits a chunked `200`, flushes a partial body, waits on its own
+`entered` barrier, and then resets the socket with `SO_LINGER(0)`, so the peer
+observes a dropped connection rather than a slow one. The node asserts the
+completion marker — a node that only exists in the release-only tail chunk — is
+absent, so a success can never be credited with the body it did not receive.
+The route-abort mechanism is one of the two plan_RELEASE §2.10 names for this
+fault; the CDP `Network.emulateNetworkConditions(offline=True)` alternative is
+**not** used and no offline-emulation coverage should be inferred. Issued
+against a tab parked in an in-flight `Page.navigate`, that command never
+returns — nodriver's connection listener dies while resolving an earlier
+transaction and no future on that connection resolves again (the same F-782
+mechanism), so it wedges the injection rather than measuring the product.
+No claim is made that a dropped transfer is *reported* as a distinct error
+class — only that it is bounded, recoverable, and never credited with content
+it did not receive.
+
+---
+
 ## Reserved MQ ranges
 
 The current design-time manifest ends at `MQ-113`. The identifiers below are
@@ -1237,7 +1365,10 @@ W7 owns eight deterministic site-shape behaviors:
 The remaining ownership reservations are:
 
 - W9: `MQ-122..125` — performance/resource budgets.
-- W10: `MQ-126..129` — resilience/fault injection.
+- ~~W10: `MQ-126..129` — resilience/fault injection.~~ **Landed** above as
+  current steps; no longer a reservation. `MQ-127` and `MQ-129` are satisfied;
+  `MQ-126` and `MQ-128` are `planned` behind F-783 and F-782, with their
+  characterization pins recorded as current support.
 - ~~W11: `MQ-130` — documentation examples and claims sync.~~ **Landed** above as
   a current step with its acceptance test; no longer a reservation.
 - ~~W12: `MQ-131..137`~~ — **landed**; the steps are headings above.

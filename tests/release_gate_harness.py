@@ -216,8 +216,16 @@ def _bind_origin(origin_state: dict) -> tuple[ThreadingHTTPServer, str]:
 
 
 @contextlib.contextmanager
-def _serving(servers: list[ThreadingHTTPServer]):
-    """Run each bound server on a daemon thread; shut all of them down on exit."""
+def _serving(servers: list[ThreadingHTTPServer], states: list[dict]):
+    """Run each bound server on a daemon thread; shut all of them down on exit.
+
+    Finalization releases every W10 fault controller FIRST. ``shutdown()`` only
+    stops the accept loop — it never interrupts an in-flight request — so a test
+    that failed while a fault route was parked would otherwise leave a handler
+    thread holding a connection past ``server_close()``. Releasing first, then
+    asserting every entered handler actually left, is what makes a failed test
+    unable to wedge pytest.
+    """
     threads = [
         threading.Thread(target=httpd.serve_forever, daemon=True) for httpd in servers
     ]
@@ -226,11 +234,20 @@ def _serving(servers: list[ThreadingHTTPServer]):
     try:
         yield
     finally:
+        stuck = [
+            token
+            for state in states
+            for token in fixture_routes.release_all_faults(state)
+        ]
         for httpd in servers:
             httpd.shutdown()
             httpd.server_close()
         for thread in threads:
             thread.join(timeout=5)
+        if stuck:
+            raise AssertionError(
+                f"fixture fault handler(s) never terminated after release: {stuck}"
+            )
 
 
 @contextlib.contextmanager
@@ -247,7 +264,7 @@ def serve_fixture_app():
     state = fixture_routes.new_origin_state("a")
     httpd, base_url = _bind_origin(state)
     state["self_url"] = base_url
-    with _serving([httpd]):
+    with _serving([httpd], [state]):
         yield base_url
 
 
@@ -273,7 +290,7 @@ def serve_fixture_origin_pair():
     for index, state in enumerate(states):
         state["self_url"] = urls[index]
         state["peer_url"] = urls[1 - index]
-    with _serving([httpd for httpd, _ in bound]):
+    with _serving([httpd for httpd, _ in bound], states):
         yield urls[0], urls[1]
 
 
