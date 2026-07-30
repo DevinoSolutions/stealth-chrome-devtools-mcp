@@ -1224,7 +1224,17 @@ async def run_release_gate_journey(
         backend_pid = _backend_pid_from_state(home_dir)
         if backend_pid is not None and _pid_running(backend_pid):
             _terminate_process_tree(backend_pid, TERMINATE_TIMEOUT)
-        leftover = _await_children_settle(parent, children_before, CHILD_SETTLE_TIMEOUT)
+        # Ownership is decided by cmdline, not by descent: the integration cell
+        # spawns Chrome in-process, so a foreign renderer or crashpad helper is
+        # also a new descendant of this pytest process and must not be killed
+        # here nor counted against this journey's own no-child claim.
+        leftover = {
+            pid
+            for pid in _await_children_settle(
+                parent, children_before, CHILD_SETTLE_TIMEOUT
+            )
+            if _pid_in_workspace(pid, work_dir)
+        }
         for pid in leftover:
             _terminate_process_tree(pid, 5.0)
 
