@@ -196,3 +196,18 @@ def fixture_app_server():
 
     with serve_fixture_app() as base_url:
         yield base_url
+
+
+@pytest.fixture(scope="session")
+def fixture_origin_pair():
+    """Yield ``(origin_a, origin_b)`` for plan_RELEASE W7's cross-origin shapes.
+
+    Delegates to the same one mechanism as ``fixture_app_server`` above — the
+    pair form simply binds two independent ephemeral loopback ports and links
+    each to the other before either serves. Session-scoped so the eight W7
+    nodes share one pair.
+    """
+    from release_gate_harness import serve_fixture_origin_pair
+
+    with serve_fixture_origin_pair() as origins:
+        yield origins

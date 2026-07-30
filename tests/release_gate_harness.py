@@ -70,6 +70,8 @@ import psutil
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
+import fixture_routes
+
 _log = logging.getLogger("release_gate_harness")
 
 # ── Contract constants ──────────────────────────────────────────────────────
@@ -120,7 +122,21 @@ _FIXTURE_HITS_CAP = 50
 
 
 class _FixtureHandler(SimpleHTTPRequestHandler):
-    """Static file server for tests/fixture_app + the plan_E2E §2.2 API routes."""
+    """Static file server for tests/fixture_app + the plan_E2E §2.2 API routes
+    + W7's dynamic routes (``tests/fixture_routes.py``).
+
+    The W7 shapes need pages that name their *peer* origin, exact response
+    headers, redirects, chunked and event-stream bodies, and a WebSocket
+    upgrade — none of which a file on disk can be. They dispatch through
+    :func:`fixture_routes.dispatch` FIRST and fall through to the static tree
+    when the path is not one of theirs, so there is still exactly one handler,
+    one server, and one fixture mechanism.
+    """
+
+    def __init__(self, *args, origin_state=None, **kwargs):
+        # Set before super().__init__, which handles the whole request inline.
+        self.origin_state = origin_state or fixture_routes.new_origin_state("a")
+        super().__init__(*args, **kwargs)
 
     def log_message(self, *args, **kwargs):
         """Silence per-request stderr logging (keeps test output clean)."""
@@ -145,6 +161,8 @@ class _FixtureHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802  stdlib override, PERMANENT(interface)
+        if fixture_routes.dispatch(self, "GET"):
+            return
         if self.path == "/api/json":
             self._send_json({"ok": True, "value": 42, "source": "fixture"})
             return
@@ -163,6 +181,8 @@ class _FixtureHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):  # noqa: N802  stdlib override, PERMANENT(interface)
+        if fixture_routes.dispatch(self, "POST"):
+            return
         if self.path == "/api/echo":
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
@@ -171,6 +191,46 @@ class _FixtureHandler(SimpleHTTPRequestHandler):
             return
         self.send_response(404)
         self.end_headers()
+
+    def do_OPTIONS(self):  # noqa: N802  stdlib override, PERMANENT(interface)
+        """CORS preflight (W7 MQ-118). Only dynamic routes answer OPTIONS."""
+        if fixture_routes.dispatch(self, "OPTIONS"):
+            return
+        self.send_response(404)
+        self.end_headers()
+
+
+def _bind_origin(origin_state: dict) -> tuple[ThreadingHTTPServer, str]:
+    """Bind one ephemeral literal-IPv4 loopback origin (not yet serving).
+
+    Binding is separated from serving because a cross-linked PAIR cannot know
+    either base URL until BOTH sockets have a port — so both bind, both learn
+    the other's URL, and only then does either accept a request.
+    """
+    handler = functools.partial(
+        _FixtureHandler, directory=str(FIXTURE_APP_DIR), origin_state=origin_state
+    )
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    host, port = httpd.server_address
+    return httpd, f"http://{host}:{port}"
+
+
+@contextlib.contextmanager
+def _serving(servers: list[ThreadingHTTPServer]):
+    """Run each bound server on a daemon thread; shut all of them down on exit."""
+    threads = [
+        threading.Thread(target=httpd.serve_forever, daemon=True) for httpd in servers
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        yield
+    finally:
+        for httpd in servers:
+            httpd.shutdown()
+            httpd.server_close()
+        for thread in threads:
+            thread.join(timeout=5)
 
 
 @contextlib.contextmanager
@@ -184,17 +244,37 @@ def serve_fixture_app():
     ``finally``.
     """
     _FIXTURE_HITS.clear()
-    handler = functools.partial(_FixtureHandler, directory=str(FIXTURE_APP_DIR))
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    host, port = httpd.server_address
-    try:
-        yield f"http://{host}:{port}"
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-        thread.join(timeout=5)
+    state = fixture_routes.new_origin_state("a")
+    httpd, base_url = _bind_origin(state)
+    state["self_url"] = base_url
+    with _serving([httpd]):
+        yield base_url
+
+
+@contextlib.contextmanager
+def serve_fixture_origin_pair():
+    """Yield ``(origin_a, origin_b)`` — two INDEPENDENT ``127.0.0.1:0`` servers.
+
+    plan_RELEASE W7 needs a genuine second origin (cross-origin frames, a
+    cross-origin CSP ``connect-src`` violation, a redirect that leaves A, and a
+    real CORS preflight); two ephemeral loopback ports differ in port and so are
+    distinct web origins. Each server learns its peer's base URL after both
+    sockets bind and before either accepts, so no request can observe a
+    half-linked pair. Same handler, same fixture tree, same shutdown discipline
+    as the single-origin form above.
+    """
+    _FIXTURE_HITS.clear()
+    states = [
+        fixture_routes.new_origin_state("a"),
+        fixture_routes.new_origin_state("b"),
+    ]
+    bound = [_bind_origin(state) for state in states]
+    urls = [url for _, url in bound]
+    for index, state in enumerate(states):
+        state["self_url"] = urls[index]
+        state["peer_url"] = urls[1 - index]
+    with _serving([httpd for httpd, _ in bound]):
+        yield urls[0], urls[1]
 
 
 # ---------------------------------------------------------------------------
