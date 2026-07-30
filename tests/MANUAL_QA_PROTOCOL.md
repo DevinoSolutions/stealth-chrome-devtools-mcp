@@ -1093,6 +1093,108 @@ Fence-execution sensitivity is proved by
 
 ---
 
+## W12 — security and trust-boundary verification (MQ-131..137)
+
+These steps test the boundary that exists. **They do not pretend an exec-capable
+local automation server is a sandbox**, and an untrusted MCP client is out of
+scope for this release. Read every `Evidence` line literally: five of the seven
+steps are `planned`, because the halves that need real Chrome are not verified.
+Their `Current support (non-acceptance)` lines record what IS proved without
+letting it satisfy the step.
+
+These landed while `MQ-114..130` (W7, W9, W10, W11) are still reserved, so the
+contiguity check stays `MQ-1..113` plus this block until those workstreams land.
+
+### MQ-131: Transport, bind exposure, and the threat contract
+**Manual**: read `RELEASE_CONTRACT.md` §6. Confirm the table names all nine
+dimensions for both stdio and HTTP, that each row states whether a test or only
+a description stands behind it, and that the untrusted-client exclusion is
+stated in words. Start the server with `--transport http` and confirm it listens
+on `127.0.0.1` only, and that no `STEALTH_MCP_*` variable changes that.
+**Evidence**: satisfied — pytest:
+`tests/test_security_boundary.py::test_http_bind_defaults_to_literal_loopback`,
+`tests/test_security_boundary.py::test_backend_spawn_argv_pins_the_loopback_host`,
+`tests/test_security_boundary.py::test_no_environment_knob_can_change_the_bind_host`,
+`tests/test_release_contract.py::test_the_threat_contract_is_generated_from_the_policy`,
+`tests/test_release_contract.py::test_the_threat_contract_states_the_untrusted_client_is_out_of_scope`.
+
+### MQ-132: Browser-JavaScript and host-Python execution boundaries
+**Manual**: with a harmless canary value, confirm that JavaScript submitted to
+`execute_script` stays in browser execution contexts, and that
+`create_python_binding` code runs with the host server's privileges.
+**Evidence**: planned — planned-pytest:
+`tests/test_e2e_transport.py::test_browser_js_canary_stays_in_the_page`. The
+browser-side half needs real Chrome and is NOT verified.
+**Current support (non-acceptance)**: pytest:
+`tests/test_security_boundary.py::test_host_python_execution_sites_are_exactly_the_declared_set`
+pins the host-`exec`/`eval` INVENTORY so a new site cannot appear unannounced.
+It is not an isolation result: host execution at the user's privileges is
+intended behaviour and is recorded as a trust requirement, never as a control.
+
+### MQ-133: The complete normal `*_to_file` / import / export matrix
+**Manual**: drive every filesystem tool to a throwaway directory and confirm
+exact bytes and exact destination for each.
+**Evidence**: planned — planned-pytest:
+`tests/test_e2e_transport.py::test_every_to_file_tool_writes_its_declared_bytes`.
+Ten of the twelve filesystem paths need a live browser and are NOT verified.
+**Current support (non-acceptance)**: pytest:
+`tests/test_security_boundary.py::TestFilesystemDestinationMatrix` covers the
+three paths reachable without a browser (`export_network_data`,
+`import_network_data`, `export_debug_logs`), and
+`tests/test_security_boundary.py::test_every_to_file_tool_is_in_the_filesystem_inventory`
+keeps the inventory itself from going stale.
+
+### MQ-134: Traversal, absolute, and platform path semantics
+**Manual**: for each filesystem tool, pass a relative path, an absolute path, a
+`..` traversal, and a mixed-separator path; record where each actually lands.
+**Evidence**: planned — planned-pytest:
+`tests/test_e2e_transport.py::test_to_file_path_semantics_matrix`. Covering only
+the hermetic subset cannot satisfy a step whose scope is every filesystem tool.
+**Current support (non-acceptance)**: pytest:
+`tests/test_security_boundary.py::TestFilesystemDestinationMatrix::test_dot_dot_traversal_is_accepted_and_escapes_the_given_directory`
+and its siblings pin the exact resolved destination for the hermetic paths.
+Traversal and absolute paths are ACCEPTED — an intended capability under the
+trusted-caller model, recorded so it is never mistaken for containment.
+
+### MQ-135: Symlink, junction, and reparse-point semantics
+**Manual**: point a filesystem tool through a directory link on each OS and
+record whether it follows the link to its real target.
+**Evidence**: planned — planned-pytest:
+`tests/test_e2e_transport.py::test_to_file_link_semantics`. The one current probe
+skips where a runner cannot create a link, and a skip is an absent measurement.
+**Current support (non-acceptance)**: pytest:
+`tests/test_security_boundary.py::TestFilesystemDestinationMatrix::test_a_symlinked_directory_is_followed_to_its_real_target`.
+
+### MQ-136: Overwrite, collision, and cleanup
+**Manual**: write twice to one destination and confirm the documented overwrite
+behaviour; confirm cleanup removes what it claims to.
+**Evidence**: planned — planned-pytest:
+`tests/test_e2e_transport.py::test_clone_file_overwrite_and_cleanup`. The
+`cleanup_clone_files` half is NOT verified.
+**Current support (non-acceptance)**: pytest:
+`tests/test_security_boundary.py::TestFilesystemDestinationMatrix::test_an_existing_target_is_overwritten_without_warning`
+and
+`tests/test_security_boundary.py::TestFilesystemDestinationMatrix::test_two_exports_to_the_same_name_leave_one_file`.
+The pinned behaviour is
+that there is no overwrite policy: no refusal, no backup, no signal.
+
+### MQ-137: Uploads, the redaction matrix, and the no-download limitation
+**Manual**: upload a canary file and confirm exact bytes and name reach the page;
+confirm every secret class is absent from diagnostics while error type, code and
+correlation survive; confirm the contract states that no download tool exists.
+**Evidence**: planned — planned-pytest:
+`tests/test_e2e_transport.py::test_upload_file_delivers_exact_bytes_and_name`.
+The upload half needs real Chrome and is NOT verified.
+**Current support (non-acceptance)**: pytest:
+`tests/test_security_boundary.py::TestRedactionPolicy` proves all eight secret
+classes absent and the actionable fields intact,
+`tests/test_security_boundary.py::TestRedactionPolicy::test_a_bare_token_outside_its_structure_is_not_redacted`
+pins the policy's real boundary, and
+`tests/test_security_boundary.py::test_no_download_tool_is_served` keeps the
+stated absence true against the live registry.
+
+---
+
 ## Reserved MQ ranges
 
 The current design-time manifest ends at `MQ-113`. The identifiers below are
@@ -1138,7 +1240,7 @@ The remaining ownership reservations are:
 - W10: `MQ-126..129` — resilience/fault injection.
 - ~~W11: `MQ-130` — documentation examples and claims sync.~~ **Landed** above as
   a current step with its acceptance test; no longer a reservation.
-- W12: `MQ-131..137` — security/trust-boundary verification.
+- ~~W12: `MQ-131..137`~~ — **landed**; the steps are headings above.
 - W13: `MQ-138..144` — concurrency, cancellation, framing, and independent
   protocol interoperability.
 - W14: `MQ-145..149` — literal immutable immediate N-1 upgrade, migration,

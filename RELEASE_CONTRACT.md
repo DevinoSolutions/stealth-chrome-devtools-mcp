@@ -297,7 +297,111 @@ exists at this SHA.
 | `close_tab` | F-775b/macOS-close-flake | Closing by target id is fixed (FIX-F). One macOS CI attempt returned True while the target survived a 10s poll; that observation is NOT reproducible and is NOT recorded as closed. |
 | `switch_tab` | F-775c-residual | Activation is fixed (FIX-F), but the instance's main tab is still stored from the raw browser.tabs entry, which can be a Connection rather than a Tab. Loud if it fires, and it seeds the F-775a family. |
 
-## 6. Limitations register
+## 6. Trust boundary and threat contract
+
+**This section tests the boundary that exists. It does not pretend an
+exec-capable local automation server is a sandbox.**
+
+An **untrusted MCP client is out of scope for this release.** The
+server is designed for a caller that already holds the user's
+privileges: it runs caller-supplied Python in its own process, drives
+the user's real logged-in browser profiles, and reads and writes files
+as the user. There is no privilege boundary between the caller and the
+host for this to defend, and this release does not add one.
+
+Run it the way it is designed to be run: as a child process of a client
+you trust, on a machine you control.
+
+The `Verified by` column separates what a test actually checks from
+what is merely written down. A row that reads *documented* has **not**
+been tested — treat it as a description of intent, not as a property.
+
+**Where that evidence runs.** Every test behind a `TESTED` row is
+hermetic and belongs to the unit lane, which the gate runs on all three
+qualified cells across CPython 3.11-3.13. None of them launches a
+browser. That cuts both ways, and both directions matter: the §6
+evidence does not depend on the real-Chrome lane, so neither of that
+lane's two measured flakes — the Linux cold-spawn race, and F-779's
+macOS ARM64 teardown failure seen in 2 of 6 runs independently of the
+code under test — can turn a `TESTED` row falsely green or falsely
+red. But it is also precisely why the *documented* rows are still
+documented: answering them needs the lane this section never enters.
+
+| Dimension | stdio | HTTP | Verified by |
+|---|---|---|---|
+| **caller trust** | TRUSTED. The client spawns the server as a child process and already has the user's privileges; there is nothing to escalate. | TRUSTED. Anything that can reach the port is treated as the user. | documented — an untrusted MCP client is OUT OF SCOPE for this release. No test simulates a hostile caller, because the design grants a caller everything a hostile one would want. |
+| **bind exposure** | No socket. stdin/stdout of the child process only. | Loopback: the `--host` default is the literal `127.0.0.1`, and the backend is spawned with that literal host. Remote exposure requires the user to pass `--host 0.0.0.0` themselves. | TESTED — `tests/test_security_boundary.py::test_http_bind_defaults_to_literal_loopback` and `::test_backend_spawn_argv_pins_the_loopback_host` read the real argparse default and the real spawn argv; `::test_no_environment_knob_can_change_the_bind_host` proves no `STEALTH_MCP_*` setting reaches the host. |
+| **authentication** | NONE, and none is meaningful: the caller owns the process. | NONE. There is no token, no session auth, no allow-list. The port is the only boundary, and loopback is the only thing enforcing it. | documented — the gate runs no live HTTP acceptance test at all, so HTTP stays DESCRIBED, never qualified. |
+| **host-code execution** | YES, by design. `create_python_binding`, the two hook-creation tools and `validate_hook_function` run caller-supplied Python through `exec`/`eval` IN THE SERVER PROCESS, at the user's privileges. | Identical, reachable by anything that reaches the port. | TESTED as an INVENTORY, not as isolation — `::test_host_python_execution_sites_are_exactly_the_declared_set` AST-scans `src/` so a new host-exec site cannot appear unannounced. No test claims the execution is contained, because it is not. |
+| **browser-code execution** | YES, by design: six tools run caller JavaScript (or Python transpiled to JavaScript) in page contexts, and `execute_cdp_command` reaches the raw CDP surface. | Identical. | documented — the browser-side containment question needs real Chrome and is NOT answered here. No isolation property is claimed. |
+| **filesystem reads/writes** | UNRESTRICTED within the user's own permissions. Ten tools write to a caller-chosen destination and two read from a caller-chosen source; absolute paths and `..` traversal are accepted, not rejected. | Identical. | PARTIALLY TESTED — `::TestFilesystemDestinationMatrix` pins the exact resolved destination and overwrite behaviour of the three hermetic paths (`export_network_data`, `import_network_data`, `export_debug_logs`) across relative, absolute, `..`, mixed-separator and symlink/junction-escape forms. The seven browser-backed `*_to_file` tools are NOT covered. |
+| **uploads** | `upload_file` hands host files to a page's file input by absolute path. The page then receives their bytes. | Identical. | documented — needs real Chrome; NOT tested here. Exact-bytes and exact-name verification remain unproven. |
+| **downloads** | NO download tool exists. There is no destination contract, no completion signal, and no path guarantee for a browser-initiated download. | Identical. | TESTED — `::test_no_download_tool_is_served` keeps the ABSENCE true by checking the live registry, so a future download tool cannot land while the contract still promises there is none. |
+| **secrets** | The server holds no credential of its own, but it drives the user's real logged-in browser profiles and can read anything they can. | Identical, without even a loopback caller check. | TESTED for the DIAGNOSTIC path only — `::TestRedactionPolicy` proves every one of the eight secret classes is absent from policy-processed output while error type/code/correlation survive. It says nothing about what a tool RESULT may contain: results are returned to the trusted caller verbatim, by design. |
+
+### 6.1 The bind address, stated exactly
+
+`--transport http` binds the literal `127.0.0.1`
+unless the user passes a different `--host` on the command line.
+No environment variable, settings field, or config file can change
+it — **remote exposure requires an explicit, deliberate user
+action**. That is asserted against the real argument parser and the
+real backend spawn arguments, not against this sentence.
+
+Loopback is the *only* thing standing between the port and full
+control of the browser, because there is no authentication behind
+it. If you pass `--host 0.0.0.0`, you have published an
+unauthenticated remote-code-execution endpoint. The gate qualifies
+no HTTP behaviour at all (§3).
+
+### 6.2 Canonical redaction policy
+
+One typed table, in `tools/release_evidence.py`, imported by every
+diagnostic surface. `redact()` is the only redactor; a second rule
+table would be a second definition of what counts as a secret.
+
+It applies to **diagnostics** — errors, logs, reproduction bundles.
+It does **not** apply to tool results: those go back to the trusted
+caller verbatim, which is the whole purpose of the tool.
+
+Replacements carry the class and nothing derived from the value —
+no length, no hash, no prefix — in the form `[redacted:<class>]`,
+so the placeholder can never become the disclosure.
+
+**Its boundary, stated plainly.** The structural rules recognise a
+secret by its POSITION — inside URL userinfo, after a `?k=`, under
+a credential-shaped key. A token that has escaped that shape and
+sits alone in a log line is indistinguishable from a request id,
+and no rule can classify it. A caller that knows a value is secret
+must register it as a literal; the policy then removes every
+occurrence of it, wherever it surfaced. This is a limitation of
+what redaction can do, not a defect, and it is pinned by a test so
+the table below is never read as *any secret, anywhere*.
+
+| Secret class | Detected as | Action | Why |
+|---|---|---|---|
+| `url-userinfo` | the `user:password@` span of any absolute URL | **replace** | A proxy or basic-auth URL carries the credential in the host part, so the URL is unusable as-is but its scheme/host/path are what make the failure diagnosable. |
+| `url-query-value` | every `?k=v` / `&k=v` VALUE; keys are kept | **replace** | Tokens ride in query values. Keeping the key names preserves the shape a reader needs without preserving what the value was. |
+| `authorization-header` | `authorization` / `proxy-authorization` mapping entries | **drop** | There is no diagnosable content in a credential header, so the entry goes rather than being echoed as a placeholder. |
+| `cookie-header` | `cookie` / `set-cookie` mapping entries | **drop** | Session cookies for the user's real logged-in profiles. Same reasoning as the authorization header. |
+| `environment-canary` | caller-registered literal values from the process environment | **replace** | Environment values cannot be recognised structurally; the caller that knows a value is a secret registers it, and the policy removes every occurrence wherever it surfaced. |
+| `dom-form-value` | mapping entries holding DOM/form input values | **drop** | Whatever the user typed into the page — passwords, card numbers, message bodies. The field NAME is diagnostic; the value never is. |
+| `script-argument` | mapping entries holding caller-supplied script/code arguments | **drop** | `execute_script`/`create_python_binding` arguments routinely carry credentials the caller pasted into the code it asked us to run. |
+| `sensitive-path-component` | the host home directory and account name, in either separator form | **replace** | A path is the most common accidental identity leak in a stack trace, and the interesting part of a path is its tail, not its prefix. |
+
+These fields survive redaction untouched: `correlation_id`, `error_code`, `error_type`, `next_step`, `phase`, `tool`. A
+diagnostic that redacts its own error code is not safer, only
+useless, so the tests assert both halves — every secret class gone,
+every one of these intact.
+
+### 6.3 No download contract
+
+There is **no download tool**, and therefore no destination, no
+completion signal, and no path guarantee for anything a page
+downloads. Where a browser-initiated download lands is undefined by
+this server. A test checks the live registry so this stays true.
+
+## 7. Limitations register
 
 Everything a reader must know before trusting a green check. Rows are not
 removed to shorten the document; a row leaves only when the thing it
@@ -326,8 +430,8 @@ describes actually closes.
 | F-779 | gate reliability / macOS integration teardown | open, MEASURED at ~1 run in 4 (2 failures in 8 consecutive runs) | `integration (macOS/ARM64)` intermittently fails with `Event loop is closed` at teardown, reddening `release-evidence` and the `release-gate` aggregate with it. Code independence is established twice by different methods: (1) a re-run against a BYTE-IDENTICAL tree (an empty commit built from the same tree object) returned 32/32 success; (2) a later failure landed on a commit whose ENTIRE content is one markdown file. Across six consecutive runs on the W5 line the cell failed twice, with successes bracketing each failure. The mechanism is undiagnosed: job logs require admin rights, so only check-run annotations were available, and they carry the message but no traceback. | This is the decisive limitation on the release's headline goal. The aggregate requires EVERY edge green, so a ~25% failure on one cell puts the headline check red roughly one run in three regardless of the other 31 jobs. plan_RELEASE §0.2 makes flake-freedom one of the three properties behind 'green ⇒ blindly pushable' — so while this is open, a green check may be read as evidence about THIS run and nothing more, and a red one may not be read as evidence about your change at all. That is the exact ambiguity a release gate exists to remove. W8 owns flake quarantine and has not run. See audit/stage2/finding_F779_macos_integration_teardown_flake.md. |
 | Linux cold-spawn flake | gate reliability | open, observed repeatedly | Chrome intermittently refuses the first connect on the Linux runner (`Failed to connect to browser`) inside the canonical journey, and the harness's bounded warmup retry does not always absorb it. Observed in `install-smoke (sdist Linux/X64)`, and later in the SAME run in both `transport (Linux/X64)` and `install-smoke (wheel Linux/X64)` — while `transport (Windows/X64)` and every other cell passed, and the cookie test in the very same Linux transport job spawned Chrome successfully seconds later. It is a cold-start race, not a code defect, and it lands on a cell that carries a qualified claim. | This gate is therefore NOT proven flake-free, and the flake can hit a cell whose evidence a claim depends on. plan_RELEASE §0.2 makes flake-freedom one of the three properties behind 'green ⇒ blindly pushable'; W8 owns flake quarantine and has not run, so no flake-freedom claim is made here. |
 | missing interaction surface | tools / interaction census | excluded | There are no double-click, right-click, drag, or native-dialog tools. A workflow needing them cannot be automated by this server. | documented absence — plan_RELEASE §1.2 forbids building them here. |
-| HTTP transport | trust boundary / transport | excluded from qualification | `--transport http` is UNAUTHENTICATED by design and binds loopback by default. Anything that can reach the port drives the browser. | stdio evidence never licenses an HTTP claim; the gate qualifies stdio only. |
-| code-execution surface | trust boundary / exec | excluded from qualification | `execute_script`, `inject_and_execute_script`, `call_javascript_function`, `execute_cdp_command`, `execute_python_in_browser` and `create_python_binding` run caller-supplied code by design. | W12 (security/trust boundary) has NOT run; no security property is claimed. |
+| HTTP transport | trust boundary / transport | excluded from qualification | `--transport http` is UNAUTHENTICATED by design and binds loopback by default. Anything that can reach the port drives the browser. | The loopback DEFAULT is tested (§6.1); the transport itself is not. stdio evidence never licenses an HTTP claim, and the gate runs no live HTTP acceptance test at all. |
+| code-execution surface | trust boundary / exec | excluded from qualification | `execute_script`, `inject_and_execute_script`, `call_javascript_function`, `execute_cdp_command`, `execute_python_in_browser` and `create_python_binding` run caller-supplied code by design. The last of those, plus both hook-creation tools and `validate_hook_function`, reach `exec`/`eval` IN THE SERVER PROCESS at the user's privileges. | The host-exec site INVENTORY is tested, so a new one cannot appear unannounced (§6). No isolation or containment property is tested, because none exists — this is a trust requirement, not a control. |
 | architecture / channel | matrix | excluded | Untested Linux distributions, self-hosted runners, Windows ARM64, Intel macOS, IPv6-only loopback, non-Stable Chrome channels and future runner images are all outside the qualified matrix. | no evidence exists for any of them; a runner without a GitHub-hosted image identity is rejected by the ledger. |
 | native IME | input / internationalization | excluded | Native IME/composition UI is not driven; only synthetic input is. | W16 has NOT run. |
 | live public web | site shapes | informational only | All deterministic evidence uses the local fixture app. No public site, detector score, or arbitrary-site behaviour is qualified. | the live tier is read-only observation and is not part of the gate. |
@@ -337,13 +441,13 @@ describes actually closes.
 | W9 performance | NOT EVIDENCED in this release | no evidence exists | No latency, memory, or large-payload budget is asserted. | Nothing in this release verifies it; the reader may not infer that it was checked. |
 | W10 resilience | NOT EVIDENCED in this release | no evidence exists | Crash, hang, tab-loss and network-fault recovery are unqualified. | Nothing in this release verifies it; the reader may not infer that it was checked. |
 | W11 executable docs | NOT EVIDENCED in this release | no evidence exists | Documentation examples are not executed, so a doc example may be stale. | Nothing in this release verifies it; the reader may not infer that it was checked. |
-| W12 security | NOT EVIDENCED in this release | no evidence exists | No filesystem, upload/export, redaction, or bind-address property is verified. | Nothing in this release verifies it; the reader may not infer that it was checked. |
+| W12 security | trust boundary / partial | PARTIAL — see §6 for the row-by-row split | Tested: the loopback bind default and the absence of any env knob that could change it; the host-Python exec-site inventory; the absence of a download tool; the canonical redaction policy over all eight secret classes; and the destination/overwrite semantics of the three filesystem paths reachable without a browser. NOT tested: browser-JS containment, `upload_file` bytes/name, and the seven browser-backed `*_to_file` destinations. | Every §6 row states which of the two it is. The untested rows are descriptions of intent and may not be read as properties; in particular no isolation, sandboxing, or authentication claim is made anywhere in this document. |
 | W13 wire semantics | NOT EVIDENCED in this release | no evidence exists | Concurrency, correlation, cancellation, disconnect and framing are unqualified, and no independent MCP client has driven this server in the gate. | Nothing in this release verifies it; the reader may not infer that it was checked. |
 | W14 upgrade / rollback | NOT EVIDENCED in this release | no evidence exists | NO upgrade, migration, or rollback claim of any kind is made — not from the literal N-1 stable tag, not from any other version. | Nothing in this release verifies it; the reader may not infer that it was checked. |
 | W15 observability | NOT EVIDENCED in this release | no evidence exists | Failure diagnostics are not verified as actionable, bounded, or redacted. | Nothing in this release verifies it; the reader may not infer that it was checked. |
 | W16 state / PWA / i18n | NOT EVIDENCED in this release | no evidence exists | Workers, persistent state, PWA behaviour and Unicode/RTL round-trips are unqualified. | Nothing in this release verifies it; the reader may not infer that it was checked. |
 
-## 7. The ceiling
+## 8. The ceiling
 
 This contract does **not** promise that the server works on any site,
 or that it will keep working. The open web and Chrome change
