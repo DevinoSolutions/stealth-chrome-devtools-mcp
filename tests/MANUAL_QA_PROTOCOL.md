@@ -1461,6 +1461,198 @@ parser rather than left as a comment.
 
 ---
 
+## W16 — stateful/PWA and internationalized site shapes (MQ-155..162)
+
+The steps a human runs on a site that keeps state and speaks more than ASCII:
+workers that outlive a message, a service worker that has to survive a reload,
+caches and databases that have to hold exactly the bytes they were given, a
+profile that has to remember some things and forget others, and text that has
+to come back with the same code points it went in with.
+
+Four disciplines make each step below a measurement rather than a demo. Every
+oracle is computed **twice** — once in the page or worker in JavaScript, once in
+`tests/fixture_routes.py` in Python — and the step asserts the two agree, so a
+fixture cannot pass by reporting whatever it just stored. Worker lifecycle is
+observed from the **server**: a shared worker's last client is gone by the time
+the worker has none, so the teardown sentinel is reported to the fixture and
+read back from its ledger. Offline is proved by **absence** — a cached read
+counts only when the ledger shows the network was never touched, and the
+offline read is taken after the fixture server has actually been shut down, not
+after an emulated-offline toggle (W10 established that
+`Network.emulateNetworkConditions` wedges the connection it is issued on,
+F-788). And text is compared as **code points** only: the NFC and NFD strings
+are canonically equivalent and deliberately unequal, so a layer that normalized
+would be caught rather than excused.
+
+These landed while `MQ-122..129` (W9, W10) and `MQ-138..149` (W13, W14) are
+still reserved, so the contiguity check stays `MQ-1..113` plus the landed blocks
+until those workstreams land.
+
+**One of these eight steps is `planned`.** The PWA shape found a real defect:
+`reload_page` reloads a page out from under its own service worker, so the
+reloaded document is uncontrolled (F-800). It is characterization-pinned and
+routed, never fixed — `src/` edits are a plan_RELEASE non-goal — and a
+characterization can never satisfy a step.
+
+Three scope limits apply to every step here and are not repeated under each.
+Nothing enumerates browser *targets*: `execute_cdp_command` is a raw
+**Runtime**-domain escape hatch by design and documentation, so "no worker
+remains" is asserted as the observable contract and never as a claim about
+renderer threads. Cookies are read through `document.cookie` rather than
+`get_cookies`, which does not settle on this seam (F-777) and whose real
+claim belongs to `tests/test_e2e_transport_cookies.py`. And every step spawns
+an explicit throwaway `user_data_dir` and deletes it afterwards — a service
+worker, a cache and an IndexedDB database persist in whatever profile they land
+in, so no step may use an ambient one.
+
+### MQ-155: A dedicated worker answers in order, closes, and stays closed
+**Manual**: load a page that starts a versioned dedicated worker, post ids 1, 2
+and 3, and confirm the three replies arrive in order carrying the transform and
+hash you predicted independently — not an echo of what you sent. Post the close
+request, confirm the exact close sentinel, then post a further message and
+terminate the worker. Confirm no later message is ever delivered.
+**Evidence**: satisfied — pytest:
+`tests/test_stateful_i18n.py::test_dedicated_worker_answers_in_order_then_closes`.
+The expected replies come from `fixture_routes.w16_worker_replies()`, computed
+in Python before the browser runs, so a worker that echoed its input cannot
+pass. The late message is posted after `self.close()` and the log must still be
+exactly four entries. No claim is made about the worker's renderer thread or
+target — only that no further message is delivered and the handle is terminated.
+
+### MQ-156: One shared worker serves two tabs and reports its own teardown
+**Manual**: open the shared-worker page in two tabs of one browser, confirm the
+fixed port ids 1 and 2 and that a counter incremented from either tab is
+observed by the other. Say goodbye from the second port, confirm the worker does
+NOT report teardown while the first is still connected, close that tab, then say
+goodbye from the first and confirm the exact zero-client sentinel and final
+counter arrive at the server. Separately, with two browsers on separate profiles
+live at the same time, confirm the second gets its own worker and its own
+counter.
+**Evidence**: satisfied — pytest:
+`tests/test_stateful_i18n.py::test_shared_worker_is_shared_across_tabs_then_reports_zero`,
+`tests/test_stateful_i18n.py::test_a_separate_profile_gets_its_own_shared_worker_state`.
+The shared counter is the proof of sharing: port 2's tick returns 1 and port 1's
+returns 2, which one worker per tab could not produce. The teardown sentinel is
+read from the fixture ledger, not from a page, because no page is left to report
+it. The isolation node keeps **both** instances live at once — sequencing them
+would prove nothing, since the first worker would already be gone.
+
+### MQ-157: A service worker installs, activates, controls, and unregisters
+**Manual**: from a throwaway profile, load a PWA served from loopback, register
+its service worker, and confirm the exact install and activate sentinels reach
+the server and that the document ends up controlled. Reload the page and confirm
+it is still controlled. Then unregister the worker, delete its caches, and
+confirm both are empty.
+**Evidence**: planned — planned-pytest:
+`tests/test_stateful_i18n.py::test_service_worker_reload_stays_controlled`.
+The step cannot be satisfied while F-800 stands: `reload_page` discards its
+`ignore_cache` argument, so nodriver's `ignore_cache=True` default makes every
+reload a hard reload and Chrome loads the main resource without the service
+worker. A page that works on first load behaves as if it had no service worker
+after a reload, and "controlled reload" is one of this step's named halves.
+**Current support (non-acceptance)**: pytest:
+`tests/test_stateful_i18n.py::test_service_worker_installs_activates_controls_and_unregisters`
+is a real assertion, not a pin: it proves the exact install/activate sentinels
+and version arrive at the **server** in order, that the scope is the exact
+registered scope, that `clients.claim()` leaves the first-load document
+controlled, that install populated the cache from the network exactly once, and
+that unregister plus cache deletion leave zero registrations and zero caches.
+The defect is carried by
+`tests/test_stateful_i18n.py::test_reload_page_leaves_the_service_worker_page_uncontrolled`
+(F-800), a characterization pin that first proves the control case — a fresh
+`navigate` to the identical URL IS controlled — and then pins the reloaded
+document as uncontrolled while the registration is still active. Closing F-800
+turns the pin red and forces this step to be promoted deliberately. Neither node
+is bound to an `--mq` id.
+
+### MQ-158: Cached bytes and offline reads match an independent oracle
+**Manual**: seed a cache directly from the page and confirm its entry count,
+keys and per-entry hashes match values you computed yourself. Let a service
+worker populate a second cache from the network, re-read the cached resource,
+and confirm the server never saw the second request. Then shut the origin down
+and confirm the cached resource still returns its exact bytes and that an
+uncached in-scope request returns the deterministic offline response.
+**Evidence**: satisfied — pytest:
+`tests/test_stateful_i18n.py::test_cache_bytes_and_offline_reads_match_the_byte_oracle`.
+Two caches are involved deliberately: one the page seeds with no network at all
+and one the service worker fills from the network, so a byte oracle that only
+worked for synthesized responses would be caught. The cached read is credited
+only because the fixture ledger stays empty across it, and the offline reads are
+taken after `serve_fixture_app` has exited — the socket is gone, not flagged.
+
+### MQ-159: IndexedDB index queries and a rolled-back transaction
+**Manual**: seed a fixed record set through one transaction, then deliberately
+abort a second transaction that wrote another record. Query the store by its
+secondary index for every group, read every primary key, hash the payloads, and
+confirm all of it matches values computed independently — including that the
+aborted record is absent.
+**Evidence**: satisfied — pytest:
+`tests/test_stateful_i18n.py::test_indexed_db_index_and_transaction_results_match_the_oracle`.
+The expected index results come from `fixture_routes.w16_idb_group()` and the
+payload hash from `fixture_routes.w16_hash()`, both computed before the browser
+runs. The aborted transaction is what makes this a transaction test rather than
+a storage test: a store that committed the write anyway fails the step.
+
+### MQ-160: What survives a same-profile restart, and what must not
+**Manual**: on a named throwaway profile, seed local storage, session storage, a
+`max-age` cookie, a session cookie, an IndexedDB database and a cache. Close the
+browser, spawn a new one on the same profile, and confirm local storage, the
+`max-age` cookie, the database and the cache came back while session storage and
+the session cookie did not. Spawn a third browser on a different profile and
+confirm it sees none of it. Then delete both profiles and confirm nothing is
+left on disk.
+**Evidence**: satisfied — pytest:
+`tests/test_stateful_i18n.py::test_storage_and_cookies_survive_one_profile_and_no_other`.
+The step asserts both directions on purpose: asserting only the survivors would
+pass on a browser that persisted everything, which is a different product. The
+surviving cookie set is asserted as an exact string, so a session cookie that
+started persisting would fail rather than hide inside a substring check.
+Cleanup is asserted, not hoped for — `remove_profile` returns whether the tree is
+really gone and the step requires `True` for both profiles.
+
+### MQ-161: Internationalized text round-trips as exact code points
+**Manual**: on a page carrying a fixed NFC/NFD pair, stacked combining marks, an
+emoji ZWJ sequence, non-BMP characters, RTL text, bidi isolates and a
+mixed-direction attribute, read each string back from DOM text and from an
+attribute, then paste each into an input and type the keystroke-synthesizable
+ones. Compare code points, never rendering.
+**Evidence**: satisfied — pytest:
+`tests/test_stateful_i18n.py::test_unicode_round_trips_through_text_attributes_and_inputs`.
+Every comparison is a code-point list; nothing looks at glyphs, layout or bidi
+ordering, and no normalization is applied anywhere. The NFC/NFD pair is the
+load-bearing case — the step first asserts the two are unequal, so a layer that
+normalized on the way through collapses them and fails. The page's own action
+log is the independent witness that the values were not set behind the page's
+back. The strings themselves are pinned to literal code points by
+`tests/test_fixture_dynamic_routes.py::test_every_i18n_string_has_its_exact_declared_code_points`,
+so a re-encoding of the fixture file cannot corrupt oracle and fixture together.
+
+### MQ-162: The composition sequence the tool can synthesize — and the IME it cannot
+**Manual**: drive a full DOM composition — `compositionstart`, three
+`compositionupdate`s with their interleaved `insertCompositionText` input
+events, then `compositionend` — and confirm the recorded sequence, the `data` on
+every event, and the committed value are exact. Separately confirm what the real
+input tools emit.
+**Evidence**: satisfied — pytest:
+`tests/test_stateful_i18n.py::test_the_synthesized_composition_sequence_is_exact`.
+**This step makes no claim about native IME.** The events are synthetic
+`CompositionEvent`s dispatched through `execute_script`. A real OS IME —
+candidate window, conversion, selection — is not automatable on a hosted
+headless runner, no product tool synthesizes one, and nothing here may be cited
+as evidence about one. That limitation is W5's to carry in the contract; this
+step exists so the DOM-level half is proved rather than assumed.
+**Current support (non-acceptance)**: pytest:
+`tests/test_stateful_i18n.py::test_the_real_input_tools_emit_no_composition_at_all`
+is the honesty control. `type_text` emits `beforeinput`/`input` per character and
+`paste_text` emits one `beforeinput`/`input` for the whole string; **neither
+emits any composition event at all**. Without it, the node above could be
+misread as "the product speaks IME". `type_text`'s separate missing
+`keydown`/`keyup` half is already pinned by
+`tests/test_e2e_interaction_fidelity.py::test_keyboard_fidelity_and_enter_submit`
+and is not re-measured here.
+
+---
+
 ## Reserved MQ ranges
 
 The current design-time manifest ends at `MQ-113`. The identifiers below are
@@ -1521,8 +1713,13 @@ The remaining ownership reservations are:
   MQ-154 are satisfied; MQ-150, MQ-152 and MQ-153 are `planned` because the
   capability they require is absent from `src/` (F-781..F-786), not because a
   test is missing.
-- W16: `MQ-155..162` — stateful/PWA, dedicated/shared-worker, and
-  international-text behavior.
+- ~~W16: `MQ-155..162` — stateful/PWA, dedicated/shared-worker, and
+  international-text behavior.~~ **Landed** above as current steps; no longer a
+  reservation. `MQ-155`, `MQ-156`, `MQ-158`, `MQ-159`, `MQ-160`, `MQ-161` and
+  `MQ-162` are satisfied; `MQ-157` is `planned` behind F-800 (`reload_page`
+  discards `ignore_cache`, so a hard reload leaves the document uncontrolled by
+  its own service worker), with its characterization pin recorded as current
+  support.
 
 Each reserved step must be appended in the **same commit** as its live acceptance
 test and W5-ledger/parity update. No workstream may predeclare a reserved MQ as

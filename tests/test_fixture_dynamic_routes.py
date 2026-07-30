@@ -286,7 +286,18 @@ def test_reset_clears_the_server_side_ledger(origins):
     }
     assert requests.get(f"{origin_a}/e2e/ledger", timeout=TIMEOUT).json() == json.loads(
         json.dumps(
-            {"feed_pages": [], "auth_headers": [], "cors_methods": [], "streams": []}
+            {
+                "feed_pages": [],
+                "auth_headers": [],
+                "cors_methods": [],
+                "streams": [],
+                # W16's three. Listed literally, not derived from
+                # ``_new_ledger()``: a derived expectation would assert that
+                # reset returns whatever reset returns.
+                "w16_shared": [],
+                "w16_sw": [],
+                "w16_asset": [],
+            }
         )
     )
 
@@ -501,3 +512,182 @@ def test_release_all_faults_names_a_handler_that_never_left():
     idle = fr._new_fault_controller("idle-token")
     state["faults"].update({"wedged-token": wedged, "idle-token": idle})
     assert fr.release_all_faults(state, timeout=0.2) == ["wedged-token"]
+
+
+# ── W16 (MQ-155…162): the fixture half of the stateful/PWA/i18n shapes ──────
+# The integration nodes cross-check a JavaScript oracle against the Python one.
+# These tests protect the Python side: if this file were ever re-encoded, or
+# `w16_hash` refactored, both sides of that cross-check could move together and
+# the integration node would still pass. Literal expectations are the only
+# thing that can catch that.
+W16_EXPECTED_CODE_POINTS: dict[str, list[int]] = {
+    "nfc": [0xE9],
+    "nfd": [0x65, 0x301],
+    "combining": [0x61, 0x301, 0x328],
+    "emoji": [0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467],
+    "nonbmp": [0x1D11E, 0x20BB7],
+    "rtl": [0x5D0, 0x5D1, 0x5D2, 0x20, 0x627, 0x644, 0x639, 0x631, 0x628, 0x64A, 0x629],
+    "isolate": [
+        0x2066, 0x4C, 0x54, 0x52, 0x2069,
+        0x2067, 0x52, 0x54, 0x4C, 0x2069,
+        0x2068, 0x61, 0x75, 0x74, 0x6F, 0x2069,
+    ],
+    "mixed": [
+        0x61, 0x62, 0x63, 0x20,
+        0x5D0, 0x5D1, 0x5D2, 0x20,
+        0x31, 0x32, 0x33, 0x20,
+        0x627, 0x644, 0x639, 0x631, 0x628,
+    ],
+}  # fmt: skip
+
+
+def test_every_i18n_string_has_its_exact_declared_code_points():
+    """MQ-161's oracle, pinned literally.
+
+    ``fixture_routes`` holds these as real characters, which is what makes the
+    served markup and the assertion share one source. The cost is that a tool
+    that re-encoded the file would corrupt fixture and oracle in step, and a
+    round-trip test comparing one to the other would still be green. This pin
+    is the only thing standing between that and a silent pass.
+    """
+    assert set(fr.I18N_STRINGS) == set(W16_EXPECTED_CODE_POINTS)
+    for key, expected in W16_EXPECTED_CODE_POINTS.items():
+        assert fr.code_points(fr.I18N_STRINGS[key]) == expected, key
+    assert [fr.code_points(step) for step in fr.COMPOSITION_STEPS] == [
+        [0x304B],
+        [0x304B, 0x3093],
+        [0x6F22],
+    ]
+    assert fr.code_points(fr.COMPOSITION_FINAL) == [0x6F22, 0x5B57]
+
+
+def test_the_shared_hash_is_fnv1a32_over_utf16_code_units():
+    """The digest both languages must agree on, pinned to literal values.
+
+    The non-BMP case is the one that matters: JavaScript's ``charCodeAt``
+    yields UTF-16 code units, so hashing Python code points instead would
+    agree on every ASCII input and disagree only where W16 is looking.
+    """
+    assert fr.w16_hash("") == "811c9dc5"
+    assert fr.w16_hash("abc") == "1a47e90b"
+    assert fr.w16_hash(fr.I18N_NON_BMP) == "d2ddbe38"
+    surrogates = fr.I18N_NON_BMP.encode("utf-16-le")
+    assert len(surrogates) == 8, "the non-BMP oracle must be two surrogate pairs"
+
+
+def test_the_dedicated_worker_replies_are_predicted_not_echoed():
+    replies = fr.w16_worker_replies()
+    assert [reply["id"] for reply in replies] == list(fr.W16_WORKER_IDS)
+    assert replies[0]["echo"] == f"{fr.W16_WORKER_VERSION}:1"
+    assert replies[0]["hash"] == fr.w16_hash(f"{fr.W16_WORKER_SALT}:1")
+    assert len({reply["hash"] for reply in replies}) == len(replies)
+
+
+def test_the_worker_and_service_worker_scripts_carry_their_version(origins):
+    origin_a, _ = origins
+    dedicated = requests.get(f"{origin_a}/workers/dedicated.js", timeout=TIMEOUT)
+    assert dedicated.headers["Content-Type"].startswith("text/javascript")
+    assert fr.W16_WORKER_VERSION in dedicated.text
+    assert fr.W16_WORKER_CLOSED in dedicated.text
+
+    shared = requests.get(f"{origin_a}/workers/shared.js", timeout=TIMEOUT)
+    assert fr.W16_SHARED_VERSION in shared.text
+    assert fr.W16_SHARED_ZERO_CLIENTS in shared.text
+
+    worker = requests.get(f"{origin_a}/pwa/sw.js", timeout=TIMEOUT)
+    assert worker.headers["Service-Worker-Allowed"] == "/"
+    assert worker.headers["Cache-Control"] == "no-store"
+    for token in (
+        fr.W16_SW_VERSION,
+        fr.W16_SW_CACHE,
+        fr.W16_SW_INSTALLED,
+        fr.W16_SW_ACTIVATED,
+        fr.W16_SW_OFFLINE_BODY,
+    ):
+        assert token in worker.text, token
+
+
+def test_the_cached_asset_records_every_network_read(origins):
+    """MQ-158's offline oracle depends on this ledger being exact: a cached
+    read is proved by the ABSENCE of an entry, so a route that under- or
+    over-records would make the offline claim unfalsifiable."""
+    origin_a, _ = origins
+    requests.get(f"{origin_a}/e2e/reset", timeout=TIMEOUT)
+    first = requests.get(f"{origin_a}{fr.W16_SW_ASSET_PATH}", timeout=TIMEOUT)
+    assert first.text == fr.W16_SW_ASSET_BODY
+    requests.get(f"{origin_a}{fr.W16_SW_ASSET_PATH}", timeout=TIMEOUT)
+    ledger = requests.get(f"{origin_a}/e2e/ledger", timeout=TIMEOUT).json()
+    assert ledger["w16_asset"] == [fr.W16_SW_ASSET_PATH] * 2
+
+    uncached = requests.get(f"{origin_a}{fr.W16_SW_UNCACHED_PATH}", timeout=TIMEOUT)
+    assert uncached.text == fr.W16_SW_UNCACHED_BODY
+
+
+def test_the_worker_report_routes_record_only_a_real_report(origins):
+    """Both report routes answer a tokenless GET (the enumeration backstop
+    walks every route with no query) and must record nothing when they do."""
+    origin_a, _ = origins
+    requests.get(f"{origin_a}/e2e/reset", timeout=TIMEOUT)
+    for path in ("/workers/shared-report", "/pwa/report"):
+        assert requests.get(f"{origin_a}{path}", timeout=TIMEOUT).json() == {
+            "recorded": False
+        }
+    ledger = requests.get(f"{origin_a}/e2e/ledger", timeout=TIMEOUT).json()
+    assert ledger["w16_shared"] == []
+    assert ledger["w16_sw"] == []
+
+    requests.get(
+        f"{origin_a}/workers/shared-report"
+        f"?sentinel={fr.W16_SHARED_ZERO_CLIENTS}&counter=3&token=t1",
+        timeout=TIMEOUT,
+    )
+    requests.get(
+        f"{origin_a}/pwa/report"
+        f"?phase=install&sentinel={fr.W16_SW_INSTALLED}&version={fr.W16_SW_VERSION}",
+        timeout=TIMEOUT,
+    )
+    ledger = requests.get(f"{origin_a}/e2e/ledger", timeout=TIMEOUT).json()
+    assert ledger["w16_shared"] == [
+        {"sentinel": fr.W16_SHARED_ZERO_CLIENTS, "counter": 3, "token": "t1"}
+    ]
+    assert ledger["w16_sw"] == [
+        {
+            "phase": "install",
+            "sentinel": fr.W16_SW_INSTALLED,
+            "version": fr.W16_SW_VERSION,
+        }
+    ]
+
+
+def test_the_i18n_page_serves_every_string_as_text_and_attribute(origins):
+    """Served as numeric character references so the bytes on the wire are
+    ASCII: the browser is what must reconstitute the code points, and the
+    integration node is what checks that it did."""
+    origin_a, _ = origins
+    markup = requests.get(f"{origin_a}/i18n/text.html", timeout=TIMEOUT).text
+    assert markup.isascii(), "the i18n page must not depend on wire encoding"
+    for key, value in fr.I18N_STRINGS.items():
+        reference = fr._ncr(value)
+        assert f"id='text-{key}'" in markup, key
+        assert f"data-label='{reference}'" in markup, key
+        assert f">{reference}</p>" in markup, key
+        assert f"id='input-{key}'" in markup, key
+
+
+def test_the_indexed_db_and_cache_oracles_are_computed_not_read_back():
+    """MQ-158/159's expectations exist BEFORE the browser runs — they are a
+    prediction, not a recording of whatever the page happened to produce."""
+    cache = fr.w16_cache_oracle(fr.W16_STATE_CACHE, fr.W16_CACHE_ENTRIES)
+    assert cache["count"] == len(fr.W16_CACHE_ENTRIES) == 3
+    assert [item["path"] for item in cache["items"]] == sorted(
+        path for path, _ in fr.W16_CACHE_ENTRIES
+    )
+    assert cache["items"][0]["hash"] == fr.w16_hash(fr.W16_CACHE_ENTRIES[0][1])
+
+    groups = {record[2] for record in fr.W16_IDB_RECORDS}
+    assert groups == {"g1", "g2", "g3"}
+    assert [row["id"] for row in fr.w16_idb_group("g2")] == [3, 4, 5]
+    assert fr.w16_idb_group("g3") == [
+        {"id": 6, "name": "foxtrot", "group": "g3", "payload": "payload-foxtrot"}
+    ]
+    assert fr.W16_IDB_ABORT_ID not in {record[0] for record in fr.W16_IDB_RECORDS}
