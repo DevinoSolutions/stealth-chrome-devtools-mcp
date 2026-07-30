@@ -334,10 +334,11 @@ jobs:
         # red. The aggregate rejects any non-success terminal outcome, so
         # this edge can only ever make the gate redder, never greener.
         #
-        # W7's `--mq` ids below are emitted by THIS cell because it is the one
-        # that runs them: `tests/test_e2e_dynamic_sites.py` is
-        # `integration`-marked, so the unit lane deselects all nine nodes and
-        # only this job's junit.xml carries their outcome.
+        # W7's and W10's `--mq` ids below are emitted by THIS cell because it is
+        # the one that runs them: `tests/test_e2e_dynamic_sites.py` and
+        # `tests/test_resilience.py` are both `integration`-marked, so the unit
+        # lane deselects every one of those nodes and only this job's junit.xml
+        # carries their outcome.
         #
         # id -> node. Eight shapes, nine nodes: MQ-116 is deliberately split so
         # a failure names which half broke, and it needs BOTH halves to pass.
@@ -350,6 +351,22 @@ jobs:
         #   MQ-119 test_completed_text_base64_binary_chunked_and_http_errors
         #   MQ-120 test_sse_and_websocket_lifecycle
         #   MQ-121 test_custom_elements_slots_and_popup_lifecycle
+        #
+        # W10 (tests/test_resilience.py). Four faults, eight nodes — but only
+        # TWO ids are bound, because only two of the four contracts hold:
+        #   MQ-127 test_tab_closed_under_a_running_tool_has_one_terminal_outcome
+        #   MQ-129 test_route_abort_mid_navigation_is_bounded_and_recoverable
+        #
+        # MQ-126 and MQ-128 are deliberately NOT emitted. Their faults found
+        # real defects — close_instance returns False for a browser that is
+        # already gone (F-783), and a navigation timeout permanently wedges the
+        # instance's CDP connection (F-782) — so their recovery halves are
+        # false at HEAD. Both are characterization-pinned and routed, and the
+        # steps are `planned` in tests/MANUAL_QA_PROTOCOL.md. Emitting their ids
+        # here would bind a passing pin to a step it does not satisfy, which is
+        # exactly the "count declarations as behavior" cheat plan_RELEASE §8.1
+        # refuses. Add them in the SAME commit that closes F-782/F-783 and
+        # promotes the steps.
         if: always()
         shell: bash
         run: >-
@@ -375,6 +392,8 @@ jobs:
           --mq "MQ-119"
           --mq "MQ-120"
           --mq "MQ-121"
+          --mq "MQ-127"
+          --mq "MQ-129"
       - name: Upload this cell's release-evidence record
         if: always()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3

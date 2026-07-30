@@ -19,6 +19,8 @@ import hashlib
 import json
 import re
 import socket
+import threading
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -287,3 +289,215 @@ def test_reset_clears_the_server_side_ledger(origins):
             {"feed_pages": [], "auth_headers": [], "cors_methods": [], "streams": []}
         )
     )
+
+
+# ── MQ-126…129: W10's fault controllers, proved without a browser ───────────
+# The integration tier can only tell "the product mishandled the fault" from
+# "the fixture never injected it" if the server half is proved here first.
+FAULT_ROUTE_PATHS = (
+    "/fault/arm",
+    "/fault/status",
+    "/fault/release",
+    "/fault/slow",
+    "/fault/hang-before-headers",
+    "/fault/hang-after-headers",
+    "/fault/drop",
+)
+
+
+def _await_entered(origin: str, token: str, timeout: float = TIMEOUT) -> dict:
+    """Bounded poll on the fixture's own ``entered`` barrier (never a sleep)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snapshot = requests.get(
+            f"{origin}/fault/status?token={token}", timeout=TIMEOUT
+        ).json()
+        if snapshot["entered"]:
+            return snapshot
+        time.sleep(0.02)
+    raise AssertionError(f"the fixture never entered fault {token!r}")
+
+
+def _fault_request_head(origin: str, path: str, token: str) -> bytes:
+    parsed = urlparse(origin)
+    return (
+        f"GET {path}?token={token} HTTP/1.1\r\n"
+        f"Host: {parsed.hostname}:{parsed.port}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+
+
+def test_every_fault_route_answers_a_tokenless_request_immediately(origins):
+    """``test_every_route_is_reachable_and_none_falls_through`` calls every
+    ``ROUTES`` key with no query string. A fault route that parked on that would
+    wedge the unit lane, so refusing a tokenless request is load-bearing."""
+    origin_a, _ = origins
+    for path in FAULT_ROUTE_PATHS:
+        response = requests.get(f"{origin_a}{path}", timeout=TIMEOUT)
+        assert response.status_code == 400, path
+    assert set(FAULT_ROUTE_PATHS) == {
+        path for _, path in fr.ROUTES if path.startswith("/fault/")
+    }
+
+
+def test_an_unarmed_token_is_refused_rather_than_waited_on(origins):
+    origin_a, _ = origins
+    for path in FAULT_ROUTE_PATHS:
+        if path == "/fault/arm":
+            continue
+        response = requests.get(f"{origin_a}{path}?token=never-armed", timeout=TIMEOUT)
+        assert response.status_code == 409, path
+
+
+def test_the_slow_route_withholds_everything_until_it_is_released(origins):
+    """(a) slow-success: nothing is served before the release, the exact body is
+    served after it, and the handler thread leaves."""
+    origin_a, _ = origins
+    token = "w10-hermetic-slow"
+    armed = requests.get(f"{origin_a}/fault/arm?token={token}", timeout=TIMEOUT).json()
+    assert armed == {
+        "token": token,
+        "phase": "",
+        "entered": False,
+        "released": False,
+        "exited": False,
+        "disconnected": False,
+        "ceiling_hit": False,
+    }
+
+    captured: list = []
+
+    def _fetch():
+        captured.append(
+            requests.get(f"{origin_a}/fault/slow?token={token}", timeout=TIMEOUT)
+        )
+
+    worker = threading.Thread(target=_fetch, daemon=True)
+    worker.start()
+    assert _await_entered(origin_a, token)["phase"] == "slow"
+    assert captured == [], "the slow route answered before it was released"
+
+    released = requests.get(
+        f"{origin_a}/fault/release?token={token}", timeout=TIMEOUT
+    ).json()
+    assert released["released"] is True
+    worker.join(timeout=TIMEOUT)
+    assert not worker.is_alive()
+    assert captured[0].status_code == 200
+    assert fr.FAULT_SLOW_BODY in captured[0].text
+    final = requests.get(f"{origin_a}/fault/status?token={token}", timeout=TIMEOUT)
+    assert final.json()["exited"] is True
+    assert final.json()["ceiling_hit"] is False
+
+
+def test_the_hang_before_headers_route_writes_no_byte_until_released(origins):
+    """(b) hang-before-headers: not even a status line reaches the peer."""
+    origin_a, _ = origins
+    token = "w10-hermetic-before"
+    requests.get(f"{origin_a}/fault/arm?token={token}", timeout=TIMEOUT)
+    parsed = urlparse(origin_a)
+    with socket.create_connection((parsed.hostname, parsed.port), timeout=TIMEOUT) as s:
+        s.sendall(_fault_request_head(origin_a, "/fault/hang-before-headers", token))
+        assert _await_entered(origin_a, token)["phase"] == "before-headers"
+        s.settimeout(0.5)
+        with pytest.raises(TimeoutError):
+            s.recv(4096)  # a committed response would have arrived by now
+        requests.get(f"{origin_a}/fault/release?token={token}", timeout=TIMEOUT)
+        s.settimeout(TIMEOUT)
+        received = b""
+        while fr.FAULT_RELEASED_BODY.encode() not in received:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            received += chunk
+    assert received.startswith(b"HTTP/1.")
+    assert fr.FAULT_RELEASED_BODY.encode() in received
+
+
+def test_the_after_headers_route_commits_then_completes_only_on_release(origins):
+    """(c) hang-after-headers: the head and first chunk are on the wire while the
+    body is demonstrably incomplete; the tail exists only after a release."""
+    origin_a, _ = origins
+    token = "w10-hermetic-after"
+    requests.get(f"{origin_a}/fault/arm?token={token}", timeout=TIMEOUT)
+    parsed = urlparse(origin_a)
+    with socket.create_connection((parsed.hostname, parsed.port), timeout=TIMEOUT) as s:
+        s.sendall(_fault_request_head(origin_a, "/fault/hang-after-headers", token))
+        committed = b""
+        while fr.FAULT_PARTIAL_PREFIX.encode() not in committed:
+            chunk = s.recv(4096)
+            assert chunk, "the route closed before committing its head"
+            committed += chunk
+        assert b"Transfer-Encoding: chunked" in committed
+        assert fr.FAULT_PARTIAL_SUFFIX.encode() not in committed
+        assert b"0\r\n\r\n" not in committed
+        assert _await_entered(origin_a, token)["phase"] == "after-headers"
+
+        requests.get(f"{origin_a}/fault/release?token={token}", timeout=TIMEOUT)
+        rest = b""
+        while b"0\r\n\r\n" not in rest:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            rest += chunk
+    assert fr.FAULT_PARTIAL_SUFFIX.encode() in rest
+
+
+def test_the_drop_route_aborts_the_transfer_after_committing(origins):
+    """(d) mid-transfer drop: the peer never receives the terminating chunk."""
+    origin_a, _ = origins
+    token = "w10-hermetic-drop"
+    requests.get(f"{origin_a}/fault/arm?token={token}", timeout=TIMEOUT)
+    parsed = urlparse(origin_a)
+    rest = b""
+    with socket.create_connection((parsed.hostname, parsed.port), timeout=TIMEOUT) as s:
+        s.sendall(_fault_request_head(origin_a, "/fault/drop", token))
+        committed = b""
+        while fr.FAULT_PARTIAL_PREFIX.encode() not in committed:
+            chunk = s.recv(4096)
+            assert chunk, "the route closed before committing its head"
+            committed += chunk
+        assert _await_entered(origin_a, token)["phase"] == "drop"
+        requests.get(f"{origin_a}/fault/release?token={token}", timeout=TIMEOUT)
+        try:
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                rest += chunk
+        except OSError:
+            pass  # RST: the abort we asked for, and the point of the route
+    assert b"0\r\n\r\n" not in committed + rest
+    assert fr.FAULT_PARTIAL_SUFFIX.encode() not in committed + rest
+
+
+def test_release_all_faults_unblocks_every_handler_and_reports_none_stuck():
+    """Fixture finalization's own proof, exercised without a server: releasing
+    ends the wait, the ceiling never fires, and the handler is seen to leave."""
+    state = fr.new_origin_state("a")
+    controller = fr._new_fault_controller("unit-token")
+    state["faults"]["unit-token"] = controller
+    left = threading.Event()
+
+    def _handler():
+        fr._await_release(controller, "unit")
+        controller["exited"].set()
+        left.set()
+
+    threading.Thread(target=_handler, daemon=True).start()
+    assert controller["entered"].wait(TIMEOUT)
+    assert fr.release_all_faults(state, timeout=TIMEOUT) == []
+    assert left.wait(TIMEOUT)
+    assert controller["ceiling_hit"] is False
+
+
+def test_release_all_faults_names_a_handler_that_never_left():
+    """The wedge detector has to be able to FAIL, or its empty list proves
+    nothing. An ENTERED controller that never exits is reported by token; one
+    that was armed but never entered is not a handler and is not reported."""
+    state = fr.new_origin_state("a")
+    wedged = fr._new_fault_controller("wedged-token")
+    wedged["entered"].set()
+    idle = fr._new_fault_controller("idle-token")
+    state["faults"].update({"wedged-token": wedged, "idle-token": idle})
+    assert fr.release_all_faults(state, timeout=0.2) == ["wedged-token"]
