@@ -359,13 +359,13 @@ jobs:
         #
         # MQ-126 and MQ-128 are deliberately NOT emitted. Their faults found
         # real defects — close_instance returns False for a browser that is
-        # already gone (F-783), and a navigation timeout permanently wedges the
-        # instance's CDP connection (F-782) — so their recovery halves are
+        # already gone (F-789), and a navigation timeout permanently wedges the
+        # instance's CDP connection (F-788) — so their recovery halves are
         # false at HEAD. Both are characterization-pinned and routed, and the
         # steps are `planned` in tests/MANUAL_QA_PROTOCOL.md. Emitting their ids
         # here would bind a passing pin to a step it does not satisfy, which is
         # exactly the "count declarations as behavior" cheat plan_RELEASE §8.1
-        # refuses. Add them in the SAME commit that closes F-782/F-783 and
+        # refuses. Add them in the SAME commit that closes F-788/F-789 and
         # promotes the steps.
         if: always()
         shell: bash

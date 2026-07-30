@@ -1,11 +1,11 @@
-# F-782 — a timed-out navigation permanently wedges the instance's CDP connection
+# F-788 — a timed-out navigation permanently wedges the instance's CDP connection
 
 **Status: OPEN.** Opened by RELEASE-10 (W10) from the controlled
 hang-before-headers fault the new fixture routes made possible.
 **Severity: HIGH** — this is the fault class W10 exists to find: a recoverable
 error that is not actually recoverable. One navigation timeout costs the caller
 the whole instance, and nothing in the response says so. The product's own
-error message advises a recovery path that does not work (see also F-783).
+error message advises a recovery path that does not work (see also F-789).
 
 ---
 
@@ -108,5 +108,5 @@ scope for a test workstream.
   step says so in words.
 - No `--mq` id in `release-gate.yml` is bound to the pin.
 - W5 should carry this as a limitation: a navigation timeout is not a
-  recoverable error today — the caller must close and respawn (and see F-783
+  recoverable error today — the caller must close and respawn (and see F-789
   for what `close_instance` returns when they do).

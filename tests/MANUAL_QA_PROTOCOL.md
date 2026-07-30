@@ -1214,9 +1214,9 @@ check stays `MQ-1..113` plus the landed blocks until those workstreams land.
 
 **Two of these four steps are `planned`, and deliberately so.** The faults were
 injected, the measurements were taken, and two of them found real defects:
-`close_instance` reports failure for a browser that is already gone (F-783), and
+`close_instance` reports failure for a browser that is already gone (F-789), and
 a navigation timeout leaves the instance's CDP connection permanently wedged
-(F-782). Both are characterization-pinned and routed, never fixed — `src/` edits
+(F-788). Both are characterization-pinned and routed, never fixed — `src/` edits
 are a plan_RELEASE non-goal — and a characterization can never satisfy a step.
 Read the `Current support (non-acceptance)` lines literally: they record real,
 passing, useful assertions that are nevertheless not acceptance.
@@ -1230,7 +1230,7 @@ dead instance's profile directory is removable, and a freshly spawned instance
 navigates and closes cleanly.
 **Evidence**: planned — planned-pytest:
 `tests/test_resilience.py::test_crash_recovery_after_the_owned_chrome_is_killed_and_close_succeeds`.
-The step cannot be satisfied while F-783 stands: the product's own error message
+The step cannot be satisfied while F-789 stands: the product's own error message
 tells the caller to run `close_instance`, and that call returns `False` for a
 browser that is provably gone.
 **Current support (non-acceptance)**: pytest:
@@ -1240,7 +1240,7 @@ is a characterization pin. It kills the tree enumerated from
 call — so the fault is proved injected rather than raced — and it asserts that
 the four halves that DO hold (typed bounded failure with a message, no surviving
 process, removable profile, working fresh spawn) cannot silently regress behind
-the one that does not. It pins `close_instance is False`, so closing F-783 turns
+the one that does not. It pins `close_instance is False`, so closing F-789 turns
 the pin red and forces this step to be promoted deliberately.
 
 Scope note for whoever promotes it: no claim is made anywhere here about
@@ -1271,12 +1271,12 @@ body.
 **Evidence**: planned — planned-pytest:
 `tests/test_resilience.py::test_navigation_deadlines_time_out_and_recover`.
 The timeout half is already proved (below); the recovery half cannot be claimed
-while F-782 stands — a timed-out navigation leaves the instance's CDP connection
+while F-788 stands — a timed-out navigation leaves the instance's CDP connection
 permanently wedged, so "a normal navigation works immediately afterwards" is
 false at HEAD.
 This step will qualify `networkidle` **only** as a wait condition that honours
 the navigation deadline. It makes NO claim that `networkidle` waits for network
-idleness — it does not, and F-781 records that.
+idleness — it does not, and F-787 records that.
 **Current support (non-acceptance)**: pytest:
 `tests/test_resilience.py::test_slow_success_control_completes_when_released`,
 `tests/test_resilience.py::test_load_wait_against_a_hang_times_out_with_the_pinned_message`,
@@ -1289,10 +1289,10 @@ complete and serve its exact body — without which "it timed out" would prove
 nothing. They are support only because the step also requires recovery.
 Two characterization pins carry the defects:
 `tests/test_resilience.py::test_a_navigation_timeout_wedges_the_instance_connection`
-(F-782) asserts the NEXT navigation fails with the generic CDP-operation-timeout
+(F-788) asserts the NEXT navigation fails with the generic CDP-operation-timeout
 message, and
 `tests/test_resilience.py::test_networkidle_returns_before_the_transfer_completes`
-(F-781) pins that against a route whose body is still mid-transfer,
+(F-787) pins that against a route whose body is still mid-transfer,
 `networkidle` returns success in about two seconds while the release-only tail
 of the document is provably absent. Neither is bound to an `--mq` id and neither
 can satisfy this or any step.
@@ -1315,7 +1315,7 @@ fault; the CDP `Network.emulateNetworkConditions(offline=True)` alternative is
 **not** used and no offline-emulation coverage should be inferred. Issued
 against a tab parked in an in-flight `Page.navigate`, that command never
 returns — nodriver's connection listener dies while resolving an earlier
-transaction and no future on that connection resolves again (the same F-782
+transaction and no future on that connection resolves again (the same F-788
 mechanism), so it wedges the injection rather than measuring the product.
 No claim is made that a dropped transfer is *reported* as a distinct error
 class — only that it is bounded, recoverable, and never credited with content

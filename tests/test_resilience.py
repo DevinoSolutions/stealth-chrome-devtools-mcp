@@ -46,11 +46,11 @@ pass:
   hold the full contract, including recovery, and are `satisfied`.
 * **MQ-126** (the browser is killed) fails on one point: the very call the
   product's own error message tells you to make, ``close_instance``, returns
-  ``False`` for a browser that is provably gone (F-783). Everything else — no
+  ``False`` for a browser that is provably gone (F-789). Everything else — no
   orphan, removable profile, working fresh spawn — does hold.
 * **MQ-128** (navigation deadlines) times out exactly as specified, on the
   product's own deadline, with the M6-pinned message. But a timed-out
-  navigation leaves the instance's CDP connection permanently wedged (F-782),
+  navigation leaves the instance's CDP connection permanently wedged (F-788),
   so the "then prove a normal navigation succeeds" half cannot be claimed.
 
 Both are pinned as characterizations and routed, never fixed: `src/` edits are
@@ -77,10 +77,10 @@ disagree.
 The other six nodes are current support, not acceptance:
 ``test_slow_success_control_completes_when_released`` and the two
 ``..._times_out_with_the_pinned_message`` nodes are real assertions that MQ-128
-will rest on once F-782 closes;
-``test_crash_recovery_after_the_owned_chrome_is_killed`` (F-783),
-``test_a_navigation_timeout_wedges_the_instance_connection`` (F-782) and
-``test_networkidle_returns_before_the_transfer_completes`` (F-781) are
+will rest on once F-788 closes;
+``test_crash_recovery_after_the_owned_chrome_is_killed`` (F-789),
+``test_a_navigation_timeout_wedges_the_instance_connection`` (F-788) and
+``test_networkidle_returns_before_the_transfer_completes`` (F-787) are
 characterization pins. Each pin asserts in the direction that makes a FIX go
 red, so closing any of these findings forces a deliberate test update.
 """
@@ -286,7 +286,7 @@ async def _assert_recovered(iid: str, base: str) -> None:
 async def _reap(iid: str) -> None:
     """Close *iid* best-effort, then make sure no Chrome from it survives.
 
-    Used by the nodes that deliberately leave the instance wedged (F-782): the
+    Used by the nodes that deliberately leave the instance wedged (F-788): the
     product cannot be relied on to tear it down, and a resilience suite that
     leaked a Chrome tree per node would be its own worst finding. The final
     assertion is unconditional, so a leak still fails the node.
@@ -310,7 +310,7 @@ async def _reap(iid: str) -> None:
 async def test_crash_recovery_after_the_owned_chrome_is_killed(
     instance, fixture_app_server
 ):
-    """PINS CURRENT BEHAVIOR incl. known quirk F-783; update deliberately when
+    """PINS CURRENT BEHAVIOR incl. known quirk F-789; update deliberately when
     it lands. Killing the owned Chrome tree mid-session, then calling the next
     tool, gives a bounded typed failure with an actionable message — and that
     message tells the caller to "close the instance with close_instance and
@@ -361,14 +361,14 @@ async def test_crash_recovery_after_the_owned_chrome_is_killed(
     assert isinstance(value, Exception)
     assert str(value), "the failure carried no message for the caller to act on"
 
-    # F-783: the documented recovery call reports failure for a browser that is
+    # F-789: the documented recovery call reports failure for a browser that is
     # provably gone. Pinned, not fixed — src edits are a plan_RELEASE non-goal.
     closed_outcome, closed, _ = await _terminal(
         close(instance_id=instance), f"close({instance}) after the crash"
     )
     assert closed_outcome == "returned", closed
     assert closed is False, (
-        "close_instance now reports success for a crashed browser — F-783 is "
+        "close_instance now reports success for a crashed browser — F-789 is "
         "fixed and MQ-126 can be promoted from planned to satisfied"
     )
 
@@ -566,7 +566,7 @@ async def test_load_wait_against_a_hang_times_out_with_the_pinned_message(
     M6-pinned message byte-for-byte.
 
     Recovery is NOT asserted here: a timed-out navigation wedges the instance's
-    CDP connection (F-782), which
+    CDP connection (F-788), which
     ``test_a_navigation_timeout_wedges_the_instance_connection`` pins. That is
     why MQ-128 is `planned` rather than satisfied at HEAD.
     """
@@ -583,7 +583,7 @@ async def test_networkidle_wait_against_a_hang_times_out_with_the_pinned_message
     Scope: this qualifies ``networkidle`` only as a wait CONDITION that honours
     the navigation deadline. It makes no claim that ``networkidle`` waits for
     network idleness — see ``test_networkidle_returns_before_the_transfer_
-    completes``, which pins that it does not (F-781).
+    completes``, which pins that it does not (F-787).
     """
     base = fixture_app_server
     await _assert_hang_times_out(instance, base, "networkidle")
@@ -594,7 +594,7 @@ async def test_networkidle_wait_against_a_hang_times_out_with_the_pinned_message
 async def test_a_navigation_timeout_wedges_the_instance_connection(
     instance, fixture_app_server
 ):
-    """PINS CURRENT BEHAVIOR incl. known quirk F-782; update deliberately when
+    """PINS CURRENT BEHAVIOR incl. known quirk F-788; update deliberately when
     it lands. After a navigation times out at a route that never answered, the
     instance is permanently unusable: the NEXT navigation does not succeed, it
     fails with the generic CDP-operation-timeout message after the full
@@ -619,7 +619,7 @@ async def test_a_navigation_timeout_wedges_the_instance_connection(
         "the navigation AFTER a timed-out navigation",
     )
     assert outcome == "raised", (
-        "a normal navigation succeeded after a timeout — F-782 is fixed and "
+        "a normal navigation succeeded after a timeout — F-788 is fixed and "
         "MQ-128 can be promoted from planned to satisfied"
     )
     assert str(value).startswith("CDP operation timed out after "), str(value)
@@ -633,7 +633,7 @@ async def test_a_navigation_timeout_wedges_the_instance_connection(
 async def test_networkidle_returns_before_the_transfer_completes(
     instance, fixture_app_server
 ):
-    """PINS CURRENT BEHAVIOR incl. known quirk F-781; update deliberately when
+    """PINS CURRENT BEHAVIOR incl. known quirk F-787; update deliberately when
     it lands. ``wait_until='networkidle'`` is implemented as a fixed short
     sleep, not as a network-quiescence wait: against a route whose body is
     still mid-transfer it returns SUCCESS while the document is provably
@@ -732,7 +732,7 @@ async def test_route_abort_mid_navigation_is_bounded_and_recoverable(
 # Issued against a tab that is parked in an in-flight `Page.navigate`, it never
 # returns: nodriver's single connection listener dies with `InvalidStateError`
 # while resolving an earlier command's generator, after which no future on that
-# connection is ever resolved again (F-782). That wedges the *injection*, so it
+# connection is ever resolved again (F-788). That wedges the *injection*, so it
 # cannot measure the product — and the harness bound correctly reported it
 # rather than letting it hang. The route-abort node above is the plan's other
 # named mechanism and is what MQ-129 rests on; the exclusion is stated in the

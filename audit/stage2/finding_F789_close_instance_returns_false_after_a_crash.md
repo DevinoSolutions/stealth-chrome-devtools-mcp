@@ -1,4 +1,4 @@
-# F-783 — `close_instance` returns `False` for a browser that has already died
+# F-789 — `close_instance` returns `False` for a browser that has already died
 
 **Status: OPEN.** Opened by RELEASE-10 (W10) from the crash-recovery fault
 injection.
@@ -67,7 +67,7 @@ and a plan_RELEASE non-goal here.
 - MQ-126 in `tests/MANUAL_QA_PROTOCOL.md` is `planned`, with this node recorded
   as current support (non-acceptance).
 - No `--mq` id in `release-gate.yml` is bound to the pin.
-- Related: F-782 (a navigation timeout wedges the connection) is the other half
+- Related: F-788 (a navigation timeout wedges the connection) is the other half
   of "the advertised recovery path does not fully work". Together they are the
   argument for W5 stating plainly that instance-level recovery today means
   *respawn*, not *repair*.

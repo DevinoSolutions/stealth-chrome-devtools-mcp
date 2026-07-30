@@ -1,4 +1,4 @@
-# F-781 — `wait_until="networkidle"` is a fixed 2-second sleep, not a network-quiescence wait
+# F-787 — `wait_until="networkidle"` is a fixed 2-second sleep, not a network-quiescence wait
 
 **Status: OPEN.** Opened by RELEASE-10 (W10) from the fault-injection
 measurements the new controlled hang routes made possible.
