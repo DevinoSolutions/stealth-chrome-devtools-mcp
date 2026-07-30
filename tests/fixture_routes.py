@@ -1,4 +1,4 @@
-"""plan_RELEASE W7/W10 — the DYNAMIC half of the one fixture app.
+"""plan_RELEASE W7/W10/W16 — the DYNAMIC half of the one fixture app.
 
 ``tests/fixture_app/`` holds the static pages the plan_E2E suite navigates to.
 This module holds the pages and API routes W7's eight adversarial shapes need
@@ -13,10 +13,20 @@ dispatches here before falling through to static files, and
 ``127.0.0.1:0`` servers W7 needs. This module owns *what* the routes are; the
 harness owns *how* they are served.
 
-Composition (W16 adds PWA/worker fixtures here): a route is one entry in
-:data:`ROUTES` keyed by ``(method, path)``, whose value takes the live
-``BaseHTTPRequestHandler`` and writes the response. Adding a shape means adding
-entries and page builders — never a second handler, server, or dispatch.
+Composition: a route is one entry in :data:`ROUTES` keyed by ``(method, path)``,
+whose value takes the live ``BaseHTTPRequestHandler`` and writes the response.
+Adding a shape means adding entries and page builders — never a second handler,
+server, or dispatch. W16's dedicated/shared/service workers, PWA cache, state
+stores and internationalized pages all landed under exactly that rule.
+
+W16's two structural additions to the pattern. First, a **worker outlives the
+page that can report on it**, so every worker milestone that matters (the
+shared worker's zero-client teardown, the service worker's install/activate) is
+reported to the SERVER and read back from the ledger — a page-side assertion
+could not observe it at all. Second, every W16 oracle is computed twice: the
+page or worker computes it in JavaScript, this module computes it in Python
+(:func:`w16_hash` and friends), and the test asserts they agree. A fixture that
+graded its own homework would pass whatever it produced.
 
 Per-origin state
 ----------------
@@ -108,6 +118,160 @@ FAULT_PARTIAL_PREFIX = "partial-body-prefix-e2e-w10"
 FAULT_PARTIAL_SUFFIX = "completed-body-suffix-e2e-w10"
 FAULT_RELEASED_BODY = "fault-released-body-e2e-w10"
 
+# ── W16 workers / PWA / state / i18n (MQ-155…162) ───────────────────────────
+# Every W16 oracle is computed TWICE — once in the page or worker (JavaScript)
+# and once here (Python) — and the test asserts the two agree. FNV-1a/32 is the
+# shared transform because it reproduces exactly in both languages with no
+# library, no float, and no platform-dependent digest: ``crypto.subtle`` is a
+# promise API, and the product's ``execute_script`` evaluates a *synchronous*
+# expression, so a page can never hand a test an awaited digest directly.
+W16_WORKER_VERSION = "w16-dedicated-v1"
+W16_WORKER_IDS = (1, 2, 3)
+W16_WORKER_SALT = "w16-dedicated-salt"
+W16_WORKER_CLOSED = "w16-dedicated-closed"
+W16_WORKER_LATE_ID = 99  # posted AFTER self.close(); must never be answered
+
+W16_SHARED_VERSION = "w16-shared-v1"
+W16_SHARED_ZERO_CLIENTS = "w16-shared-zero-clients"
+
+W16_SW_VERSION = "w16-sw-v1"
+W16_SW_SCOPE = "/pwa/"
+W16_SW_CACHE = "w16-pwa-cache-v1"
+W16_SW_INSTALLED = "w16-sw-installed"
+W16_SW_ACTIVATED = "w16-sw-activated"
+W16_SW_ASSET_PATH = "/pwa/asset.txt"
+W16_SW_ASSET_BODY = "w16-pwa-asset-body-0123456789"
+W16_SW_OFFLINE_BODY = "w16-pwa-offline-deterministic-body"
+W16_SW_UNCACHED_PATH = "/pwa/never-cached.txt"
+W16_SW_UNCACHED_BODY = "w16-pwa-never-cached-online-body"
+
+W16_STATE_CACHE = "w16-state-cache-v1"
+W16_CACHE_ENTRIES = (
+    ("/state/cache-a.txt", "w16-cache-entry-alpha"),
+    ("/state/cache-b.txt", "w16-cache-entry-beta"),
+    ("/state/cache-c.txt", "w16-cache-entry-gamma"),
+)
+
+W16_IDB_NAME = "w16-idb-v1"
+W16_IDB_STORE = "records"
+W16_IDB_INDEX = "by_group"
+# (id, name, group, payload) — the index is on ``group``, so the oracle below
+# can predict every index cursor result without asking the page.
+W16_IDB_RECORDS = (
+    (1, "alpha", "g1", "payload-alpha"),
+    (2, "bravo", "g1", "payload-bravo"),
+    (3, "charlie", "g2", "payload-charlie"),
+    (4, "delta", "g2", "payload-delta"),
+    (5, "echo", "g2", "payload-echo"),
+    (6, "foxtrot", "g3", "payload-foxtrot"),
+)
+W16_IDB_ABORT_ID = 99  # written then aborted; must never be readable
+
+W16_LOCAL_KEY = "w16-local-key"
+W16_LOCAL_VALUE = "w16-local-value-persist"
+W16_SESSION_KEY = "w16-session-key"
+W16_SESSION_VALUE = "w16-session-value-ephemeral"
+W16_COOKIE_PERSISTENT = "w16_persistent"
+W16_COOKIE_PERSISTENT_VALUE = "w16-cookie-persistent-value"
+W16_COOKIE_SESSION = "w16_session"
+W16_COOKIE_SESSION_VALUE = "w16-cookie-session-value"
+W16_COOKIE_MAX_AGE = 3600
+
+# ── The internationalization oracle (MQ-161) ────────────────────────────────
+# These constants are the only place the exact strings exist, and the whole MQ
+# is an assertion about their CODE POINTS — so a tool, editor, or diff that
+# re-encoded this file would corrupt the oracle and the fixture at once, and
+# the test would still pass. ``test_fixture_dynamic_routes`` therefore pins
+# every one of them to a literal code-point list; nothing here is trusted to
+# have survived transport just because it renders.
+I18N_NFC = "é"  # LATIN SMALL LETTER E WITH ACUTE (precomposed)
+I18N_NFD = "é"  # e + COMBINING ACUTE — canonically equivalent, NOT equal
+I18N_COMBINING = "ą́"  # stacked combining acute + ogonek
+I18N_EMOJI_ZWJ = "\U0001f468‍\U0001f469‍\U0001f467"  # family, 5 cp
+I18N_NON_BMP = "\U0001d11e\U00020bb7"  # G-CLEF + CJK ext-B (surrogate pairs)
+I18N_RTL = "אבג العربية"
+I18N_BIDI_ISOLATE = (  # LRI/RLI/FSI + PDI, escaped: PLE2502 bans the literals
+    "\u2066LTR\u2069\u2067RTL\u2069\u2068auto\u2069"
+)
+I18N_MIXED_ATTR = "abc אבג 123 العرب"
+# id -> string. The page renders each one as a text node AND as an attribute,
+# and offers one input per string, so a single table drives all three round
+# trips and no round trip can be silently dropped from the fixture.
+I18N_STRINGS: dict[str, str] = {
+    "nfc": I18N_NFC,
+    "nfd": I18N_NFD,
+    "combining": I18N_COMBINING,
+    "emoji": I18N_EMOJI_ZWJ,
+    "nonbmp": I18N_NON_BMP,
+    "rtl": I18N_RTL,
+    "isolate": I18N_BIDI_ISOLATE,
+    "mixed": I18N_MIXED_ATTR,
+}
+I18N_TYPED_KEYS = ("nfc", "nfd", "combining", "rtl")  # keystroke-synthesizable
+COMPOSITION_STEPS = ("か", "かん", "漢")  # ka -> kan -> kanji
+COMPOSITION_FINAL = "漢字"  # the committed string the page must hold
+
+
+def w16_hash(text: str) -> str:
+    """FNV-1a/32 over UTF-16 code units — the JS ``charCodeAt`` domain.
+
+    The page-side twin XORs ``s.charCodeAt(i)``, which yields UTF-16 *code
+    units* (so a non-BMP character contributes its two surrogates). Hashing
+    Python's code points instead would silently disagree on exactly the
+    non-BMP inputs W16 cares about, so the units are reconstructed explicitly.
+    """
+    data = text.encode("utf-16-le")
+    h = 0x811C9DC5
+    for index in range(0, len(data), 2):
+        h ^= data[index] | (data[index + 1] << 8)
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return f"{h:08x}"
+
+
+def w16_worker_replies() -> list[dict[str, Any]]:
+    """The exact ordered replies ``/workers/dedicated.js`` must post for ids 1..3."""
+    return [
+        {
+            "id": message_id,
+            "echo": f"{W16_WORKER_VERSION}:{message_id}",
+            "hash": w16_hash(f"{W16_WORKER_SALT}:{message_id}"),
+        }
+        for message_id in W16_WORKER_IDS
+    ]
+
+
+def w16_cache_oracle(name: str, entries) -> dict[str, Any]:
+    """The independently computed count/keys/hashes for one seeded cache."""
+    items = [
+        {
+            "path": path,
+            "status": 200,
+            "length": len(body),
+            "hash": w16_hash(body),
+        }
+        for path, body in sorted(entries)
+    ]
+    return {"name": name, "count": len(items), "items": items}
+
+
+def w16_idb_group(group: str) -> list[dict[str, Any]]:
+    """Every record the ``by_group`` index must yield for *group*, in key order."""
+    return [
+        {"id": rid, "name": name, "group": grp, "payload": payload}
+        for rid, name, grp, payload in W16_IDB_RECORDS
+        if grp == group
+    ]
+
+
+def code_points(text: str) -> list[int]:
+    """The exact code points of *text* — the one i18n comparison currency."""
+    return [ord(character) for character in text]
+
+
+def _ncr(text: str) -> str:
+    """Numeric character references for *text* (ASCII-safe served markup)."""
+    return "".join(f"&#x{ord(character):x};" for character in text)
+
 
 def payload_binary_body() -> bytes:
     """The 4,096 seeded bytes ``/payload/binary`` returns.
@@ -154,6 +318,14 @@ def _new_ledger() -> dict[str, Any]:
         "auth_headers": [],  # every Authorization value /auth/basic received
         "cors_methods": [],  # every method /cors/* received (preflight order)
         "streams": [],  # "sse" / "ws" as each stream is served
+        # W16. These three are the reason the workers and the service worker
+        # are believable at all: a worker's lifecycle is invisible from the
+        # page it outlived, so each milestone is reported to the SERVER and
+        # read back from here. ``w16_asset`` is the offline oracle — a cached
+        # read must not add an entry.
+        "w16_shared": [],  # the shared worker's zero-client teardown report
+        "w16_sw": [],  # service-worker install/activate reports
+        "w16_asset": [],  # every NETWORK hit on the service-worker-cached asset
     }
 
 
@@ -1192,6 +1364,709 @@ def release_all_faults(state: dict[str, Any], timeout: float = 10.0) -> list[str
 # ── The route table (W16 extends THIS; it does not add a second one) ────────
 Route = Callable[[Any, str], None]
 
+# ── W16 pages, workers, and the service worker (MQ-155…162) ─────────────────
+# Shared by every page and worker below so the Python oracle and the JS twin
+# can never drift apart in more than one place.
+_W16_HASH_JS = (
+    "function w16h(s){let x=0x811c9dc5>>>0;"
+    "for(let i=0;i<s.length;i+=1){x^=s.charCodeAt(i);"
+    "x=Math.imul(x,0x01000193)>>>0;}"
+    "return x.toString(16).padStart(8,'0');}"
+)
+
+_DEDICATED_WORKER_JS = """
+__HASH__
+const CFG = __CFG__;
+self.onmessage = (event) => {
+  const message = event.data || {};
+  if (message.op === 'close') {
+    self.postMessage({sentinel: CFG.closed, version: CFG.version});
+    self.close();
+    return;
+  }
+  if (message.op === 'echo') {
+    self.postMessage({
+      id: message.id,
+      echo: CFG.version + ':' + message.id,
+      hash: w16h(CFG.salt + ':' + message.id)
+    });
+  }
+};
+"""
+
+_DEDICATED_HOST_JS = """
+const CFG = __CFG__;
+window.__w16d = {log: [], errors: [], terminated: false};
+const worker = new Worker(CFG.script);
+worker.onmessage = (event) => { window.__w16d.log.push(event.data); };
+worker.onerror = (event) => {
+  window.__w16d.errors.push(String(event.message || event));
+};
+window.w16Send = (ids) => {
+  for (const id of ids) { worker.postMessage({op: 'echo', id: id}); }
+  return ids.length;
+};
+window.w16Close = () => { worker.postMessage({op: 'close'}); return true; };
+window.w16Late = () => {
+  worker.postMessage({op: 'echo', id: CFG.lateId});
+  return true;
+};
+window.w16Terminate = () => {
+  worker.terminate();
+  window.__w16d.terminated = true;
+  return true;
+};
+window.w16Log = () => JSON.stringify(window.__w16d);
+"""
+
+_SHARED_WORKER_JS = """
+const CFG = __CFG__;
+let counter = 0;
+let clients = 0;
+let nextPortId = 1;
+self.onconnect = (event) => {
+  const port = event.ports[0];
+  const portId = nextPortId;
+  nextPortId += 1;
+  clients += 1;
+  port.onmessage = (message) => {
+    const data = message.data || {};
+    if (data.op === 'tick') {
+      counter += 1;
+      port.postMessage({portId: portId, counter: counter});
+      return;
+    }
+    if (data.op === 'bye') {
+      clients -= 1;
+      port.postMessage({portId: portId, bye: true, clients: clients});
+      if (clients === 0) {
+        fetch(CFG.report + '?sentinel=' + encodeURIComponent(CFG.zero) +
+              '&counter=' + counter +
+              '&token=' + encodeURIComponent(data.token || ''));
+      }
+    }
+  };
+  port.start();
+  port.postMessage({hello: true, portId: portId, version: CFG.version});
+};
+"""
+
+_SHARED_HOST_JS = """
+const CFG = __CFG__;
+window.__w16s = {log: [], portId: null, version: null};
+const shared = new SharedWorker(CFG.script);
+shared.port.onmessage = (event) => {
+  const data = event.data;
+  window.__w16s.log.push(data);
+  if (data.hello) {
+    window.__w16s.portId = data.portId;
+    window.__w16s.version = data.version;
+  }
+};
+shared.port.start();
+window.w16Tick = () => { shared.port.postMessage({op: 'tick'}); return true; };
+window.w16Bye = (token) => {
+  shared.port.postMessage({op: 'bye', token: token});
+  return true;
+};
+window.w16Log = () => JSON.stringify(window.__w16s);
+"""
+
+_SERVICE_WORKER_JS = """
+const CFG = __CFG__;
+self.addEventListener('install', (event) => {
+  event.waitUntil((async () => {
+    const cache = await caches.open(CFG.cache);
+    await cache.addAll([CFG.asset]);
+    await fetch(CFG.report + '?phase=install&sentinel=' +
+                encodeURIComponent(CFG.installed) + '&version=' + CFG.version);
+    await self.skipWaiting();
+  })());
+});
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    await fetch(CFG.report + '?phase=activate&sentinel=' +
+                encodeURIComponent(CFG.activated) + '&version=' + CFG.version);
+    await self.clients.claim();
+  })());
+});
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  const mine = url.origin === self.location.origin &&
+               url.pathname.startsWith(CFG.scope) &&
+               url.pathname !== CFG.report;
+  if (!mine) { return; }
+  event.respondWith((async () => {
+    const cached = await caches.match(event.request);
+    if (cached) { return cached; }
+    try {
+      return await fetch(event.request);
+    } catch (error) {
+      return new Response(CFG.offline, {
+        status: 200,
+        headers: {'Content-Type': 'text/plain; charset=utf-8'}
+      });
+    }
+  })());
+});
+"""
+
+_PWA_APP_JS = """
+__HASH__
+const CFG = __CFG__;
+window.__w16p = {
+  state: 'init',
+  error: null,
+  scope: null,
+  controllerAtLoad: navigator.serviceWorker.controller ? 'controlled'
+                                                       : 'uncontrolled',
+  fetches: {},
+  cacheReport: null,
+  cleanup: null
+};
+window.w16Register = () => {
+  window.__w16p.state = 'registering';
+  navigator.serviceWorker.register(CFG.script, {scope: CFG.scope})
+    .then(async (registration) => {
+      window.__w16p.scope = registration.scope;
+      await navigator.serviceWorker.ready;
+      window.__w16p.state = 'ready';
+    })
+    .catch((error) => {
+      window.__w16p.state = 'error';
+      window.__w16p.error = String(error);
+    });
+  return true;
+};
+window.w16Controller = () =>
+  navigator.serviceWorker.controller ? 'controlled' : 'uncontrolled';
+window.w16Fetch = (path) => {
+  window.__w16p.fetches[path] = null;
+  fetch(path)
+    .then((response) => response.text().then((body) => {
+      window.__w16p.fetches[path] = {status: response.status, body: body};
+    }))
+    .catch((error) => {
+      window.__w16p.fetches[path] = {status: -1, body: String(error)};
+    });
+  return true;
+};
+window.w16Fetched = (path) => JSON.stringify(window.__w16p.fetches[path]);
+window.w16CacheReport = () => {
+  window.__w16p.cacheReport = null;
+  (async () => {
+    const names = (await caches.keys()).sort();
+    const report = {names: names, caches: {}};
+    for (const name of names) {
+      const cache = await caches.open(name);
+      const items = [];
+      for (const request of await cache.keys()) {
+        const response = await cache.match(request);
+        const body = await response.text();
+        items.push({
+          path: new URL(request.url).pathname,
+          status: response.status,
+          length: body.length,
+          hash: w16h(body)
+        });
+      }
+      items.sort((a, b) => (a.path < b.path ? -1 : 1));
+      report.caches[name] = {count: items.length, items: items};
+    }
+    window.__w16p.cacheReport = report;
+  })();
+  return true;
+};
+window.w16Cleanup = () => {
+  window.__w16p.cleanup = null;
+  (async () => {
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    for (const registration of registrations) { await registration.unregister(); }
+    for (const name of await caches.keys()) { await caches.delete(name); }
+    window.__w16p.cleanup = {
+      registrations: (await navigator.serviceWorker.getRegistrations()).length,
+      caches: (await caches.keys()).length
+    };
+  })();
+  return true;
+};
+window.w16CleanupReport = () => JSON.stringify(window.__w16p.cleanup);
+window.w16Report = () => JSON.stringify({
+  state: window.__w16p.state,
+  error: window.__w16p.error,
+  scope: window.__w16p.scope,
+  controllerAtLoad: window.__w16p.controllerAtLoad,
+  controller: window.w16Controller(),
+  cacheReport: window.__w16p.cacheReport
+});
+"""
+
+_STATE_STORE_JS = """
+__HASH__
+const CFG = __CFG__;
+window.__w16t = {cache: null, idb: null, storage: null};
+window.w16SeedCache = () => {
+  window.__w16t.cache = null;
+  (async () => {
+    const cache = await caches.open(CFG.cacheName);
+    for (const entry of CFG.cacheEntries) {
+      await cache.put(entry[0], new Response(entry[1], {
+        status: 200,
+        headers: {'Content-Type': 'text/plain; charset=utf-8'}
+      }));
+    }
+    window.__w16t.cache = {seeded: CFG.cacheEntries.length};
+  })();
+  return true;
+};
+window.w16ReadCache = () => {
+  window.__w16t.cache = null;
+  (async () => {
+    const cache = await caches.open(CFG.cacheName);
+    const items = [];
+    for (const request of await cache.keys()) {
+      const response = await cache.match(request);
+      const body = await response.text();
+      items.push({
+        path: new URL(request.url).pathname,
+        status: response.status,
+        length: body.length,
+        hash: w16h(body)
+      });
+    }
+    items.sort((a, b) => (a.path < b.path ? -1 : 1));
+    window.__w16t.cache = {
+      name: CFG.cacheName,
+      count: items.length,
+      items: items
+    };
+  })();
+  return true;
+};
+function w16OpenDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(CFG.dbName, 1);
+    request.onupgradeneeded = () => {
+      const store = request.result.createObjectStore(CFG.storeName,
+                                                     {keyPath: 'id'});
+      store.createIndex(CFG.indexName, 'group', {unique: false});
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+window.w16SeedIdb = () => {
+  window.__w16t.idb = null;
+  (async () => {
+    const db = await w16OpenDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(CFG.storeName, 'readwrite');
+      const store = tx.objectStore(CFG.storeName);
+      for (const record of CFG.records) { store.put(record); }
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    let aborted = 'no';
+    await new Promise((resolve) => {
+      const tx = db.transaction(CFG.storeName, 'readwrite');
+      tx.objectStore(CFG.storeName).put({
+        id: CFG.abortId, name: 'rolled-back', group: 'g9', payload: 'discarded'
+      });
+      tx.onabort = () => { aborted = 'yes'; resolve(); };
+      tx.oncomplete = () => { aborted = 'committed'; resolve(); };
+      tx.abort();
+    });
+    db.close();
+    window.__w16t.idb = {seeded: CFG.records.length, aborted: aborted};
+  })();
+  return true;
+};
+window.w16QueryIdb = () => {
+  window.__w16t.idb = null;
+  (async () => {
+    const db = await w16OpenDb();
+    const tx = db.transaction(CFG.storeName, 'readonly');
+    const store = tx.objectStore(CFG.storeName);
+    const index = store.index(CFG.indexName);
+    const groups = {};
+    for (const group of CFG.groups) {
+      groups[group] = await new Promise((resolve, reject) => {
+        const request = index.getAll(group);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+    const all = await new Promise((resolve, reject) => {
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const rolledBack = await new Promise((resolve, reject) => {
+      const request = store.get(CFG.abortId);
+      request.onsuccess = () => resolve(request.result === undefined);
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    window.__w16t.idb = {
+      groups: groups,
+      keys: all.map((row) => row.id),
+      payloadHash: w16h(all.map((row) => row.payload).join('|')),
+      abortedRecordAbsent: rolledBack
+    };
+  })();
+  return true;
+};
+window.w16SeedStorage = () => {
+  localStorage.setItem(CFG.localKey, CFG.localValue);
+  sessionStorage.setItem(CFG.sessionKey, CFG.sessionValue);
+  document.cookie = CFG.persistentCookie + '=' + CFG.persistentValue +
+                    '; path=/; max-age=' + CFG.cookieMaxAge + '; SameSite=Lax';
+  document.cookie = CFG.sessionCookie + '=' + CFG.sessionCookieValue +
+                    '; path=/; SameSite=Lax';
+  return true;
+};
+window.w16ReadStorage = () => JSON.stringify({
+  local: localStorage.getItem(CFG.localKey),
+  session: sessionStorage.getItem(CFG.sessionKey),
+  cookie: document.cookie,
+  localCount: localStorage.length,
+  dbs: null
+});
+window.w16ClearStorage = () => {
+  localStorage.clear();
+  sessionStorage.clear();
+  document.cookie = CFG.persistentCookie + '=; path=/; max-age=0';
+  document.cookie = CFG.sessionCookie + '=; path=/; max-age=0';
+  return true;
+};
+window.w16ClearState = () => {
+  window.__w16t.cleared = null;
+  (async () => {
+    for (const name of await caches.keys()) { await caches.delete(name); }
+    await new Promise((resolve) => {
+      const request = indexedDB.deleteDatabase(CFG.dbName);
+      request.onsuccess = resolve;
+      request.onerror = resolve;
+      request.onblocked = resolve;
+    });
+    window.__w16t.cleared = {
+      caches: (await caches.keys()).length,
+      cookie: document.cookie,
+      local: localStorage.length,
+      session: sessionStorage.length
+    };
+  })();
+  return true;
+};
+window.w16State = (key) => JSON.stringify(window.__w16t[key]);
+"""
+
+# The one code-point reader. Both i18n pages expose it, because comparing
+# rendered strings is exactly the mistake MQ-161 exists to avoid and a page
+# that lacked the reader would tempt a node into comparing them.
+#
+# Both i18n page scripts below are deliberately pure ASCII (no em dashes in the
+# comments). The served page must carry its strings as numeric character
+# references and nothing else, so the browser is what reconstitutes the code
+# points; a stray non-ASCII byte anywhere in the markup would make the page
+# depend on wire encoding, and the hermetic backstop asserts ``isascii()``.
+_W16_POINTS_JS = (
+    "window.w16Points = (text) => "
+    "JSON.stringify(Array.from(text).map((c) => c.codePointAt(0)));"
+)
+
+_I18N_TEXT_JS = """
+__POINTS__
+window.__w16i = {actions: []};
+// Delegated, and bound on DOMContentLoaded: this script is in <head>, so the
+// inputs do not exist yet and a querySelectorAll here would silently bind to
+// nothing, leaving an action log that is empty for the honest reason and the
+// dishonest one alike.
+document.addEventListener('DOMContentLoaded', () => {
+  document.body.addEventListener('input', (event) => {
+    window.__w16i.actions.push(event.target.id + '=' + event.target.value);
+  });
+});
+window.w16Text = (id) => document.getElementById(id).textContent;
+window.w16Value = (id) => document.getElementById(id).value;
+window.w16Attr = (id) => document.getElementById(id).getAttribute('data-label');
+window.w16Dir = (id) => document.getElementById(id).getAttribute('dir');
+window.w16Actions = () => JSON.stringify(window.__w16i.actions);
+"""
+
+_I18N_COMPOSITION_JS = """
+__POINTS__
+window.__w16c = {events: []};
+const w16Composer = () => document.getElementById('composer');
+const kinds = ['keydown', 'keyup', 'compositionstart', 'compositionupdate',
+               'compositionend', 'beforeinput', 'input'];
+// Bound on DOMContentLoaded - this script is in <head> and #composer does not
+// exist yet. Resolving it eagerly would throw and take every w16Comp* helper
+// down with it.
+document.addEventListener('DOMContentLoaded', () => {
+  for (const kind of kinds) {
+    w16Composer().addEventListener(kind, (event) => {
+      window.__w16c.events.push({
+        type: kind,
+        data: (event.data === undefined || event.data === null) ? '' : event.data,
+        inputType: event.inputType || '',
+        isComposing: event.isComposing === true,
+        value: w16Composer().value
+      });
+    });
+  }
+});
+window.w16CompReset = () => {
+  window.__w16c.events = [];
+  w16Composer().value = '';
+  return true;
+};
+window.w16CompEvents = () =>
+  JSON.stringify(window.__w16c.events.map((e) => e.type + ':' + e.data));
+window.w16CompDetail = () => JSON.stringify(window.__w16c.events);
+window.w16CompValue = () => w16Composer().value;
+"""
+
+
+def dedicated_worker_script() -> str:
+    """MQ-155: the versioned dedicated worker. Answers ids in order, then closes."""
+    config = {
+        "version": W16_WORKER_VERSION,
+        "salt": W16_WORKER_SALT,
+        "closed": W16_WORKER_CLOSED,
+    }
+    return _fill(_DEDICATED_WORKER_JS, hash=_W16_HASH_JS, cfg=json.dumps(config))
+
+
+def dedicated_host_page() -> str:
+    config = {"script": "/workers/dedicated.js", "lateId": W16_WORKER_LATE_ID}
+    return _page(
+        "w16 dedicated worker",
+        "fixture-w16-dedicated-host",
+        "",
+        head="<script>"
+        + _fill(_DEDICATED_HOST_JS, cfg=json.dumps(config))
+        + "</script>",
+    )
+
+
+def shared_worker_script() -> str:
+    """MQ-156: the versioned shared worker.
+
+    The zero-client teardown sentinel is reported to the SERVER, not to a port:
+    by the time the last client leaves there is no page left to tell, so a
+    page-side assertion would be structurally unable to observe it.
+    """
+    config = {
+        "version": W16_SHARED_VERSION,
+        "zero": W16_SHARED_ZERO_CLIENTS,
+        "report": "/workers/shared-report",
+    }
+    return _fill(_SHARED_WORKER_JS, cfg=json.dumps(config))
+
+
+def shared_host_page() -> str:
+    config = {"script": "/workers/shared.js"}
+    return _page(
+        "w16 shared worker",
+        "fixture-w16-shared-host",
+        "",
+        head="<script>" + _fill(_SHARED_HOST_JS, cfg=json.dumps(config)) + "</script>",
+    )
+
+
+def service_worker_script() -> str:
+    """MQ-157/158: the PWA service worker. Cache-first inside its own scope."""
+    config = {
+        "version": W16_SW_VERSION,
+        "scope": W16_SW_SCOPE,
+        "cache": W16_SW_CACHE,
+        "asset": W16_SW_ASSET_PATH,
+        "installed": W16_SW_INSTALLED,
+        "activated": W16_SW_ACTIVATED,
+        "offline": W16_SW_OFFLINE_BODY,
+        "report": "/pwa/report",
+    }
+    return _fill(_SERVICE_WORKER_JS, cfg=json.dumps(config))
+
+
+def pwa_app_page() -> str:
+    config = {"script": "/pwa/sw.js", "scope": W16_SW_SCOPE}
+    return _page(
+        "w16 pwa",
+        "fixture-w16-pwa-app",
+        "",
+        head="<script>"
+        + _fill(_PWA_APP_JS, hash=_W16_HASH_JS, cfg=json.dumps(config))
+        + "</script>",
+    )
+
+
+def state_store_page() -> str:
+    """MQ-158/159/160: separately seeded CacheStorage, IndexedDB, and storage."""
+    config = {
+        "cacheName": W16_STATE_CACHE,
+        "cacheEntries": [list(entry) for entry in W16_CACHE_ENTRIES],
+        "dbName": W16_IDB_NAME,
+        "storeName": W16_IDB_STORE,
+        "indexName": W16_IDB_INDEX,
+        "records": [
+            {"id": rid, "name": name, "group": group, "payload": payload}
+            for rid, name, group, payload in W16_IDB_RECORDS
+        ],
+        "groups": sorted({record[2] for record in W16_IDB_RECORDS}),
+        "abortId": W16_IDB_ABORT_ID,
+        "localKey": W16_LOCAL_KEY,
+        "localValue": W16_LOCAL_VALUE,
+        "sessionKey": W16_SESSION_KEY,
+        "sessionValue": W16_SESSION_VALUE,
+        "persistentCookie": W16_COOKIE_PERSISTENT,
+        "persistentValue": W16_COOKIE_PERSISTENT_VALUE,
+        "sessionCookie": W16_COOKIE_SESSION,
+        "sessionCookieValue": W16_COOKIE_SESSION_VALUE,
+        "cookieMaxAge": W16_COOKIE_MAX_AGE,
+    }
+    return _page(
+        "w16 state",
+        "fixture-w16-state-store",
+        "",
+        head="<script>"
+        + _fill(_STATE_STORE_JS, hash=_W16_HASH_JS, cfg=json.dumps(config))
+        + "</script>",
+    )
+
+
+def i18n_text_page() -> str:
+    """MQ-161: every fixed string as a text node, an attribute, and an input."""
+    rows = []
+    for key, value in I18N_STRINGS.items():
+        reference = _ncr(value)
+        rows.append(
+            f"<p id='text-{key}' dir='auto' data-label='{reference}'>"
+            f"{reference}</p>"
+            f"<input id='input-{key}' dir='auto' value=''>"
+        )
+    return _page(
+        "w16 i18n",
+        "fixture-w16-i18n-text",
+        "".join(rows),
+        head="<script>" + _fill(_I18N_TEXT_JS, points=_W16_POINTS_JS) + "</script>",
+    )
+
+
+def i18n_composition_page() -> str:
+    """MQ-162: records the DOM composition/input sequence, synthesizes nothing."""
+    return _page(
+        "w16 composition",
+        "fixture-w16-i18n-composition",
+        "<input id='composer' value=''>",
+        head="<script>"
+        + _fill(_I18N_COMPOSITION_JS, points=_W16_POINTS_JS)
+        + "</script>",
+    )
+
+
+# ── W16 route implementations ───────────────────────────────────────────────
+def _send_js(handler, source: str) -> None:
+    """Serve worker source. ``Service-Worker-Allowed`` widens the SW scope so a
+    script under ``/pwa/`` could claim ``/`` — declared once here rather than
+    left to a default a browser upgrade could change."""
+    _send(
+        handler,
+        200,
+        [
+            ("Content-Type", "text/javascript; charset=utf-8"),
+            ("Cache-Control", "no-store"),
+            ("Service-Worker-Allowed", "/"),
+        ],
+        source.encode("utf-8"),
+    )
+
+
+def _r_dedicated_worker(handler, query: str) -> None:
+    _send_js(handler, dedicated_worker_script())
+
+
+def _r_dedicated_host(handler, query: str) -> None:
+    _send_html(handler, dedicated_host_page())
+
+
+def _r_shared_worker(handler, query: str) -> None:
+    _send_js(handler, shared_worker_script())
+
+
+def _r_shared_host(handler, query: str) -> None:
+    _send_html(handler, shared_host_page())
+
+
+def _r_shared_report(handler, query: str) -> None:
+    """The shared worker's zero-client teardown report.
+
+    A tokenless request records nothing and still answers 200 — the hermetic
+    enumeration backstop walks every route with no query, and a route that
+    404s or writes a phantom entry there would corrupt the oracle it exists
+    to protect.
+    """
+    sentinel = _query_value(query, "sentinel")
+    if sentinel:
+        _record(
+            handler,
+            "w16_shared",
+            {
+                "sentinel": sentinel,
+                "counter": int(_query_value(query, "counter") or 0),
+                "token": _query_value(query, "token"),
+            },
+        )
+    _send_json(handler, {"recorded": bool(sentinel)})
+
+
+def _r_sw_script(handler, query: str) -> None:
+    _send_js(handler, service_worker_script())
+
+
+def _r_pwa_app(handler, query: str) -> None:
+    _send_html(handler, pwa_app_page())
+
+
+def _r_pwa_report(handler, query: str) -> None:
+    phase = _query_value(query, "phase")
+    if phase:
+        _record(
+            handler,
+            "w16_sw",
+            {
+                "phase": phase,
+                "sentinel": _query_value(query, "sentinel"),
+                "version": _query_value(query, "version"),
+            },
+        )
+    _send_json(handler, {"recorded": bool(phase)})
+
+
+def _r_pwa_asset(handler, query: str) -> None:
+    """The one asset the service worker caches. Every NETWORK read lands here,
+    so a cached read is proved by this ledger entry NOT appearing."""
+    _record(handler, "w16_asset", W16_SW_ASSET_PATH)
+    _send_text(handler, W16_SW_ASSET_BODY)
+
+
+def _r_pwa_uncached(handler, query: str) -> None:
+    _send_text(handler, W16_SW_UNCACHED_BODY)
+
+
+def _r_i18n_text(handler, query: str) -> None:
+    _send_html(handler, i18n_text_page())
+
+
+def _r_i18n_composition(handler, query: str) -> None:
+    _send_html(handler, i18n_composition_page())
+
+
+def _r_state_store(handler, query: str) -> None:
+    _send_html(handler, state_store_page())
+
+
 ROUTES: dict[tuple[str, str], Route] = {
     # MQ-114
     ("GET", "/spa_history.html"): _r_spa,
@@ -1235,6 +2110,24 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/fault/hang-before-headers"): _r_fault_hang_before_headers,
     ("GET", "/fault/hang-after-headers"): _r_fault_hang_after_headers,
     ("GET", "/fault/drop"): _r_fault_drop,
+    # MQ-155
+    ("GET", "/workers/dedicated_host.html"): _r_dedicated_host,
+    ("GET", "/workers/dedicated.js"): _r_dedicated_worker,
+    # MQ-156
+    ("GET", "/workers/shared_host.html"): _r_shared_host,
+    ("GET", "/workers/shared.js"): _r_shared_worker,
+    ("GET", "/workers/shared-report"): _r_shared_report,
+    # MQ-157…158
+    ("GET", "/pwa/app.html"): _r_pwa_app,
+    ("GET", "/pwa/sw.js"): _r_sw_script,
+    ("GET", "/pwa/report"): _r_pwa_report,
+    ("GET", W16_SW_ASSET_PATH): _r_pwa_asset,
+    ("GET", W16_SW_UNCACHED_PATH): _r_pwa_uncached,
+    # MQ-158…160
+    ("GET", "/state/store.html"): _r_state_store,
+    # MQ-161…162
+    ("GET", "/i18n/text.html"): _r_i18n_text,
+    ("GET", "/i18n/composition.html"): _r_i18n_composition,
     # Shared driver page + the server-side oracle ledger.
     ("GET", "/dynamic_probe.html"): _r_dynamic_probe,
     ("GET", "/e2e/reset"): _r_reset,
@@ -1256,6 +2149,12 @@ DYNAMIC_PAGES: dict[str, str] = {
     "/events_page.html": "fixture-events-page",
     "/popup_components.html": "fixture-popup-components-page",
     "/popup_target.html": "fixture-popup-target-page",
+    "/workers/dedicated_host.html": "fixture-w16-dedicated-host",
+    "/workers/shared_host.html": "fixture-w16-shared-host",
+    "/pwa/app.html": "fixture-w16-pwa-app",
+    "/state/store.html": "fixture-w16-state-store",
+    "/i18n/text.html": "fixture-w16-i18n-text",
+    "/i18n/composition.html": "fixture-w16-i18n-composition",
 }
 
 

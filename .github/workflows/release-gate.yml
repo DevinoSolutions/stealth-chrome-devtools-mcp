@@ -367,6 +367,28 @@ jobs:
         # exactly the "count declarations as behavior" cheat plan_RELEASE §8.1
         # refuses. Add them in the SAME commit that closes F-788/F-789 and
         # promotes the steps.
+        #
+        # W16 (tests/test_stateful_i18n.py). Eight shapes, eleven nodes; seven
+        # ids are bound:
+        #   MQ-155 test_dedicated_worker_answers_in_order_then_closes
+        #   MQ-156 test_shared_worker_is_shared_across_tabs_then_reports_zero
+        #        + test_a_separate_profile_gets_its_own_shared_worker_state
+        #                                                  <- both required
+        #   MQ-158 test_cache_bytes_and_offline_reads_match_the_byte_oracle
+        #   MQ-159 test_indexed_db_index_and_transaction_results_match_the_oracle
+        #   MQ-160 test_storage_and_cookies_survive_one_profile_and_no_other
+        #   MQ-161 test_unicode_round_trips_through_text_attributes_and_inputs
+        #   MQ-162 test_the_synthesized_composition_sequence_is_exact
+        #
+        # MQ-157 is deliberately NOT emitted. reload_page discards its
+        # ignore_cache argument, so nodriver's ignore_cache=True default makes
+        # every reload a hard reload and the reloaded document is uncontrolled
+        # by its own service worker (F-800) — and "controlled reload" is one of
+        # that step's named halves. Its pin
+        # (test_reload_page_leaves_the_service_worker_page_uncontrolled) passes
+        # today precisely BECAUSE the defect is present; binding it would bind a
+        # green pin to a step it contradicts. Add MQ-157 in the SAME commit that
+        # closes F-800 and promotes the step.
         if: always()
         shell: bash
         run: >-
@@ -394,6 +416,13 @@ jobs:
           --mq "MQ-121"
           --mq "MQ-127"
           --mq "MQ-129"
+          --mq "MQ-155"
+          --mq "MQ-156"
+          --mq "MQ-158"
+          --mq "MQ-159"
+          --mq "MQ-160"
+          --mq "MQ-161"
+          --mq "MQ-162"
       - name: Upload this cell's release-evidence record
         if: always()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
