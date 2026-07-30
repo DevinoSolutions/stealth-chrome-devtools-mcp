@@ -36,7 +36,7 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -238,10 +238,16 @@ def screen_command(command: str) -> list[str]:
             problems.append(f"flag {arg!r} waits for a human")
         if arg.startswith("-"):
             continue
-        candidate = Path(arg)
-        if candidate.is_absolute() or arg.startswith("~"):
+        # A doc example is read on every platform, so a path is "absolute" if
+        # EITHER convention says so — Path(arg).is_absolute() alone would let
+        # C:/foo through the screen on POSIX runners.
+        if (
+            PureWindowsPath(arg).is_absolute()
+            or PurePosixPath(arg).is_absolute()
+            or arg.startswith("~")
+        ):
             problems.append(f"absolute path {arg!r}: an undeclared write/read target")
-        if ".." in candidate.parts:
+        if ".." in PurePosixPath(arg).parts or ".." in PureWindowsPath(arg).parts:
             problems.append(f"path {arg!r} escapes the throwaway directory")
     return problems
 
