@@ -42,7 +42,7 @@ and teardown live in the backend and are reused from the eviction path.
 backend     : running (responsive) on port 19222
 pid         : 12345
 log         : C:\Users\you\.stealth-mcp\logs\backend-12345.log
-version     : 2.0.0
+version     : 2.0.2
 browser-session root: C:\stealth-mcp-browser-sessions  (exists: True)
 clone cap   : 10.0 GB  [STEALTH_MCP_CLONE_STORAGE_CAP_GB]
 browser-session cap : 20.0 GB  [STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB]
@@ -92,6 +92,25 @@ together.
 lock a cold start uses. `restart` reports honestly: `responsive` (good), `wedged`
 (came up but still not answering — run it again or let the next session evict it), or
 `down`/`none` (did not come up — check `backend-boot.log`).
+
+Eviction by "the next session" is not instant: a cold-start lock-holder retries a
+**same-identity** backend for up to 60 s before it may terminate it (see "Many
+sessions starting at once" below), so a wedged-but-ours backend is replaced about a
+minute into the next cold start, not on its first failed probe. `restart` is the way
+to un-jam it now.
+
+### Many sessions starting at once
+Expected and safe — nothing to do. One session wins the exclusive cold-start lock and
+spawns the backend; every other session proxies to that one. The winner holds the lock
+until the backend answers a real MCP `initialize`, **not** merely until its socket
+binds, and any lock-holder gives a **same-identity** backend (version *and* source
+fingerprint both match) up to 60 s of retried probes before it is allowed to evict —
+so a backend that is simply busy absorbing the herd is never terminated out from under
+the sessions using it. A version- or source-stale record gets no such grace and evicts
+immediately (an upgrade or code edit still takes effect now), and a dead record (no
+socket, no live process) skips the wait, so crash-recovery cold starts stay fast.
+`tests/test_startup_herd.py` is the gate: 40 concurrent sessions, one logical backend,
+all usable inside 30 s.
 
 ### Port already in use
 The backend prefers `singleton.DEFAULT_PORT` (`19222`) but binds the **chosen** port:

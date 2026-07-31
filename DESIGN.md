@@ -77,6 +77,18 @@ eviction/respawn/orphan-reap machine (`restart`, or a source-change eviction). M
 added **no new kill code** — it added the honest state that tells the operator which
 recovery to run.
 
+**One failed probe is not a licence to kill (F-807).** On the cold-start path "not
+answering" means *terminate*, so the verdict there is deliberately patient: the
+winner of the startup lock holds it until the backend answers a real `initialize` —
+not merely until its socket binds — and any lock-holder gives a **same-identity**
+backend (version AND source fingerprint both match) up to `REUSE_PATIENCE_SECONDS`
+(60 s) of retried probes before it may evict. Identity gates the grace on purpose: a
+stale record still evicts immediately so an upgrade takes effect now, and a dead one
+(no socket, no live process) fails the first probe so crash recovery stays fast.
+Discovery's hot path stays single-shot (`patience=0`) and the watchdog's 2 s
+`LIVENESS_PROBE_TIMEOUT` is untouched; `tests/test_startup_herd.py` proves the result
+at scale — 40 simultaneous real stdio sessions, exactly one logical backend.
+
 ### 2.2 The port is the CHOSEN port — never re-hardcode it
 
 `singleton.DEFAULT_PORT` is `19222`, but the backend runs on whatever port
@@ -97,7 +109,9 @@ re-hardcode `19222`** anywhere in the path — the port is data, not a constant.
 ### 2.3 Source-fingerprint reuse, and an always-fresh dev backend
 
 A running backend is reused **only** if it matches on two independent checks, ANDed
-at the reuse gate in `singleton._find_running_server`:
+at the one reuse gate `singleton._same_identity_backend_ready` — which discovery's
+`_find_running_server` calls single-shot and the cold-start lock calls with the §2.1
+patience window, so identity and readiness have exactly one home:
 
 1. `state["version"] == _server_version()`, and
 2. `state["source_fingerprint"] == _source_fingerprint()`.
