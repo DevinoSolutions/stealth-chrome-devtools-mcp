@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — multi-session cold start can no longer evict the backend it is racing (F-807)
+
+The singleton's cold-start lock used to be released when the backend's socket
+bound, while the reuse gate demands an answered MCP `initialize` on a single 2s
+probe. A session acquiring the freed lock inside that gap — or while the backend
+was busy absorbing a fleet of simultaneous startups — concluded "not reusable",
+**terminated** the healthy backend everyone else was using, and double-spawned.
+The winner now holds the lock until the backend is genuinely MCP-ready, and a
+lock-holder gives a same-identity backend (version AND source fingerprint both
+match) up to 60s of retried probes before it may evict. A stale record still
+evicts immediately (upgrades take effect now), and a dead one (no socket, no
+live process) skips the wait entirely, so crash-recovery cold starts stay fast.
+
+### Added — startup-herd scale test
+
+`tests/test_startup_herd.py` starts **40 real stdio launcher processes at
+once** against a cold isolated workspace and requires every session to finish
+`initialize` + `tools/list` within 30s, with exactly one logical backend
+spawned, plus a warm-join bound for a 41st session. Measured on a Windows
+workstation: full 40-session cold herd usable in **7.9s**, warm join **1.0s**.
+
 ## 2.0.1
 
 ### Fixed — two tools no longer report success for an operation that failed

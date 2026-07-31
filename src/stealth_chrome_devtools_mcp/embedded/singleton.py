@@ -63,6 +63,20 @@ BACKEND_READY_TIMEOUT = 120.0
 # failures_before_teardown=3) - preserves the existing watchdog hysteresis
 # tests. Not a decision to re-open in a later plan.
 LIVENESS_PROBE_TIMEOUT = 2.0
+# F-807: a lock-holder's grace for a SAME-identity backend (version AND source
+# fingerprint both match) that is busy or mid-boot. Two ways one short probe
+# verdict could kill a healthy backend: the winner used to release the lock at
+# socket-bind while the reuse gate demands MCP-ready, so a thread acquiring
+# inside that gap saw "not reusable" and evicted the newborn; and a backend
+# absorbing a 40-session startup herd can miss a 2s probe while serving
+# everyone. Sized to outlast a herd peak: waiting costs nothing (proxies sit
+# in their own 120s _await_backend_http window), a genuinely wedged backend is
+# still evicted well inside that window, and dead ones skip the wait entirely.
+REUSE_PATIENCE_SECONDS = 60.0
+# Per-attempt probe budget on the PATIENT path only, matching the httpx
+# timeout _await_backend_http already uses. The watchdog and the single-shot
+# discovery probe keep the human-pinned LIVENESS_PROBE_TIMEOUT unchanged.
+REUSE_PROBE_TIMEOUT = 10.0
 
 
 def _ensure_state_dir():
@@ -180,42 +194,57 @@ def _probe_backend_status() -> tuple[str, int | None]:
     return "responsive", port
 
 
+def _same_identity_backend_ready(port: int, patience: float | None = None) -> bool:
+    """True iff ``server.json`` records OUR identity on ``port`` — package
+    version AND source fingerprint both match (issue #14 / F-206: a stale,
+    legacy, or edited-source backend is never reused, so upgrades take effect;
+    an empty computed fingerprint fails closed) — and that backend answers a
+    real ``initialize`` within the patience window (F-301/F-501: a wedged
+    backend holds its socket open, so only the app-level probe counts).
+
+    ``patience`` is F-807's anti-fratricide grace, used by the cold-start lock
+    path: a backend absorbing a many-session startup herd can miss a single 2s
+    probe while perfectly healthy — and a lock-holder that trusts that one miss
+    "evicts" (kills) the backend everyone else is using, then double-spawns.
+    Identity-gated on purpose: a version- or source-stale record gets NO
+    patience and is evicted immediately. ``patience=0.0`` (discovery's
+    single-shot probe) probes exactly once and never sleeps. ``None`` means
+    ``REUSE_PATIENCE_SECONDS`` (read at call time, so tests can shrink it).
+    """
+    state = _read_server_state() or {}
+    if state.get("port") != port or state.get("version") != _server_version():
+        return False
+    fp = _source_fingerprint()
+    if not fp or state.get("source_fingerprint") != fp:
+        return False
+    patience = REUSE_PATIENCE_SECONDS if patience is None else patience
+    # Busy backends answer slowly, so the patient path probes with the wider
+    # per-attempt budget; the single-shot hot path keeps the pinned 2s.
+    per_attempt = REUSE_PROBE_TIMEOUT if patience else LIVENESS_PROBE_TIMEOUT
+    deadline = time.monotonic() + patience
+    while not _backend_http_ready(port, timeout=per_attempt):
+        if not _server_is_healthy(port) and not _is_our_backend(state.get("pid")):
+            return False  # no socket and no live process: dead, not busy
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+    return True
+
+
 def _find_running_server() -> int | None:
     """Return the port of a *reusable* backend, or None.
 
-    A backend is reusable only when we can confirm it is the SAME version as
-    the running package AND it answers a real MCP `initialize` (F-301/F-501:
-    a bare socket connect cannot tell a wedged backend - dispatch loop dead,
-    port still open - from a healthy one, so a wedged same-version backend
-    used to be "reusable" forever). A stale (older-version), legacy
-    (version-unknown), or wedged backend is deliberately NOT reused: the
-    former so an upgrade actually takes effect instead of silently proxying to
-    old backend code (issue #14); the latter so this same guard - which
-    `_clear_stale_backend`'s eviction and both cold-start callers all route
-    through - un-blocks the existing eviction+respawn machine on a wedge
-    instead of gating it shut.
+    The one reuse gate (`_clear_stale_backend`'s eviction and both cold-start
+    callers all route through it): same version, same source fingerprint, and
+    a live `initialize` answer — the full contract, with its history, lives in
+    :func:`_same_identity_backend_ready`. Single-shot on purpose: this runs on
+    every proxy start's hot path and must never sleep.
     """
     state = _read_server_state()
-    if state is None:
-        return None
-    port = state.get("port")
+    port = state.get("port") if state else None
     if not isinstance(port, int):
         return None
-    if state.get("version") != _server_version():
-        return None
-    # M2 (F-206/F-120): reuse also requires the backend's SOURCE to match, not
-    # just its packaged version (frozen at 1.2.0 on this editable install, so a
-    # source edit is invisible to the version key). Fail-closed: an empty
-    # computed fingerprint (transient read error) never matches, so a
-    # possibly-stale backend is respawned rather than falsely reused; and a real
-    # digest never equals a legacy record's missing key or an empty recorded
-    # value, so those evict here too.
-    fp = _source_fingerprint()
-    if not fp or state.get("source_fingerprint") != fp:
-        return None
-    if not _backend_http_ready(port):
-        return None
-    return port
+    return port if _same_identity_backend_ready(port, patience=0.0) else None
 
 
 def _is_our_backend(pid) -> bool:
@@ -507,6 +536,8 @@ def _start_backend_holding_lock(port: int) -> None:
                 return  # another session owns startup; just proxy to it
             if _find_running_server() is not None:
                 return  # already up (same version)
+            if _same_identity_backend_ready(port):
+                return  # ours, merely busy or mid-boot — never evict it (F-807)
             # M2-3: surface WHY a fresh backend is about to spawn when the cause
             # is a source change (version matches, fingerprint differs) - the
             # eviction is otherwise silent. Logged once per spawn HERE rather
@@ -528,7 +559,11 @@ def _start_backend_holding_lock(port: int) -> None:
             # the old backend and the upgrade would silently not take effect.
             _clear_stale_backend(port)
             _start_server_process(port)
-            _wait_for_server(port)  # keep the lock until the socket is bound
+            _wait_for_server(port)
+            # Keep the lock past socket-bind, until the backend answers a real
+            # initialize: release only when the reuse gate itself would pass,
+            # so no thread can acquire inside the bind→ready gap (F-807).
+            _same_identity_backend_ready(port)
     except Exception:
         # Best-effort; the proxy still answers initialize and retries. Before
         # M3 this was silent (F-183's primary handler) - a cold-start failure
@@ -571,40 +606,24 @@ def stop_backend() -> tuple[str, int | None]:
 
 def restart_backend() -> tuple[str, int | None]:
     """Restart the shared backend (CLI `restart` verb): the manual escape
-    hatch for a `wedged` backend (M1's diagnosis) or a stale same-version
-    backend (M2's still-open pain) that works today — terminate whatever is
-    on the target port, then run the exact cold-start spawn sequence under
-    the same lock cold start uses.
+    hatch for a wedged (M1) or stale same-version (M2) backend — terminate
+    whatever is on the target port, then run the exact cold-start spawn
+    sequence under the same lock, with the SAME primitives (plan_M8 SS2.1-B:
+    no second spawn path, no new kill logic). Unconditional by design, so a
+    "down"/"none" backend also ends up running, not merely evicted. The
+    terminate target is the port recorded in `server.json`, else
+    `DEFAULT_PORT`; the spawn port then routes through
+    `_select_backend_port()` (F-509 Amendment A1) so a squatter on the dead
+    backend's port forces a fresh `_free_port()` pick instead of a repeat
+    120s outage — and the fallback port then stays recorded across restarts
+    (SSA1.5); `stop` clears `server.json`, the reset path to `DEFAULT_PORT`.
+    Lock contention reports "busy" so the operator retries instead of racing.
+    The post-restart state is reported via `_probe_backend_status()` (binding
+    ruling: ONE liveness vocabulary) — a restart that comes back wedged or
+    down must be visible, not assumed "responsive".
 
-    Mirrors `_start_backend_holding_lock`'s discipline (terminate -> spawn ->
-    wait) using the SAME primitives (plan_M8 SS2.1-B) — no second spawn path,
-    no new kill logic. Unlike `stop_backend`, this does not consult
-    `_probe_backend_status()` up front to short-circuit: restart's job is
-    unconditional — evict whatever is on the target port (nothing, if it is
-    already down) and bring a fresh backend up, so a "down"/"none" backend
-    also ends up running, not merely evicted. The TERMINATE target is the
-    port recorded in `server.json`, else `DEFAULT_PORT`. After the terminate,
-    the SPAWN port routes through `_select_backend_port()` (F-509 Amendment
-    A1, squatter-survival symmetry with cold start): the common case
-    (recorded port is ours) is unchanged — once `_terminate_backend` frees
-    it, selection returns that same port and rebinds it — but a squatter
-    that moved onto the now-dead backend's port during the outage forces a
-    fresh `_free_port()` pick instead of a repeat 120s outage. A restart
-    that falls back stays on the new port across further restarts (recorded-
-    port stability, SSA1.5); `stop` clears `server.json`, which is the reset
-    path back to `DEFAULT_PORT`. Lock contention (a concurrent cold start/
-    stop/restart already holding it) reports "busy" so the operator can
-    retry instead of racing it.
-
-    After the spawn, reports the TRUE post-restart state via M1's
-    `_probe_backend_status()` (binding ruling: one liveness vocabulary, no
-    new health check anywhere) — a restart that comes back wedged or down
-    must be visible, not assumed "responsive".
-
-    Returns ``(status, pid)``: ``status`` is one of `_probe_backend_status`'s
-    "responsive" | "wedged" | "down" | "none", or "busy" on lock contention.
-    ``pid`` is the freshly recorded pid (``server.json``, rewritten by the
-    spawn) once the lock is acquired, else None.
+    Returns ``(status, pid)``: `_probe_backend_status`'s status or "busy";
+    ``pid`` is the freshly recorded pid once the lock is acquired, else None.
     """
     state = _read_server_state()
     recorded_port = state.get("port") if state else None
