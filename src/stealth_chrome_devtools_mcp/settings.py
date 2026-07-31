@@ -64,6 +64,18 @@ class Settings(BaseSettings):
     # logging setup must never be the reason the server won't boot.
     log_level: str = "INFO"
 
+    # -- Client round trips (F-790) ------------------------------------------
+    # Deadline for the ONE server->client request this product makes:
+    # ``roots/list``, sent by clone_storage._client_session_seed() to name a
+    # per-client profile clone. MCP ``roots`` is an OPTIONAL client capability,
+    # so a conforming client may simply never answer; without a bound, the
+    # default (auto-clone) spawn_browser path parked forever (measured to 420s
+    # by hand, with no result, no error and no timeout). On expiry the seed
+    # falls back to the same local chain an unsupported client already takes
+    # (codex_workspace / claude_project_dir / pwd / cwd). 0 disables the round
+    # trip entirely; a client that answers is unaffected.
+    client_roots_timeout_seconds: float = Field(5.0, ge=0)
+
     # -- Response-body capture (F-605) ---------------------------------------
     # Body capture is OFF by default (metadata is always captured); when on, the
     # response-body store is byte-bounded. 0 on either byte cap = unbounded.

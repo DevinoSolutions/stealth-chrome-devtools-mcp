@@ -1494,10 +1494,10 @@ wedged (F-791, F-794), and malformed input is answered with nothing at all
 (F-792). All are characterization-pinned and routed, never fixed — `src/` edits
 are a plan_RELEASE non-goal — and a characterization can never satisfy a step.
 Three further findings own no step of their own and instead narrow the steps
-they were found under: F-790 (the auto-clone spawn waits forever on an
-unanswered `roots/list`) and F-793 (one instance serializes its calls, so a call
-behind a parked operation times out and blames a crash) bound MQ-139 and
-MQ-140; F-795 (`execute_script` reports `success: true` for a script that threw)
+they were found under: F-790 (the auto-clone spawn waited forever on an
+unanswered `roots/list` — RESOLVED in 2.0.1, now bounded) and F-793 (one
+instance serializes its calls, so a call behind a parked operation times out and
+blames a crash) bound MQ-139 and MQ-140; F-795 (`execute_script` reports `success: true` for a script that threw)
 was found incidentally and is routed rather than absorbed.
 
 **HTTP parity, stated exactly.** plan_RELEASE §2.13 asks for HTTP parity *where
@@ -1552,21 +1552,27 @@ the stdout frame stream.
 instance, and isolation across instances whose profiles are **named**
 (`user_data_dir`). Two bounds are named rather than implied:
 
-- **F-790** — the default *unnamed* form cannot produce a second live instance
-  at all. With the master profile held, the auto-clone path sends a `roots/list`
-  request to the client and awaits the reply with no deadline, so a client that
-  does not implement MCP `roots` never gets an answer, an error, or a timeout.
+- **F-790** — RESOLVED in 2.0.1. With the master profile held, the auto-clone
+  path sends a `roots/list` request to the client; that await had no deadline,
+  so a client that does not implement MCP `roots` never got an answer, an error,
+  or a timeout. It is now bounded by `STEALTH_MCP_CLIENT_ROOTS_TIMEOUT_SECONDS`
+  (default `5`) and falls back to a local clone seed on expiry. The *unnamed*
+  form is therefore no longer excluded from this step by protocol; naming the
+  profile stays the cheaper form because it skips the round trip entirely.
 - **F-793** — a call issued behind a *parked* operation on the same instance
   does not queue. It waits out its own CDP budget and fails with the
   "browser may have crashed" timeout, although the instance is merely busy.
 
 **Current support (non-acceptance)**: pytest:
-`tests/test_wire_semantics.py::test_a_second_unnamed_spawn_blocks_on_an_unanswered_roots_list`
-is the characterization pin for F-790. It carries its own sensitivity control —
-the first spawn's latency is asserted to be a fraction of the bound, so a busy
-machine fails the control instead of manufacturing the finding — and it requires
-the `roots/list` request frame to actually be on the wire, so an unrelated stall
-cannot satisfy it.
+`tests/test_wire_semantics.py::test_a_second_unnamed_spawn_is_bounded_when_roots_list_is_never_answered`
+is the regression oracle for F-790 (it replaced the characterization pin in the
+same change that bounded the await). Its client *advertises* MCP `roots` at
+`initialize` and then answers no `roots/list` at all, and the spawn must still
+reply. It keeps the original sensitivity control — the first spawn's latency is
+asserted to be a fraction of the bound, so a busy machine fails the control
+instead of deciding the node — and still requires the `roots/list` request frame
+to be on the wire and the backend's `_client_session_seed` fallback warning to
+be in its log, so a reply that arrived for some other reason cannot satisfy it.
 `tests/test_wire_semantics.py::test_a_parked_navigation_blocks_every_call_on_the_same_instance`
 is the pin for F-793: the parked navigation is barrier-confirmed in flight
 before the second call is issued, and the same call shape succeeds on a
@@ -1952,10 +1958,10 @@ The remaining ownership reservations are:
   reservation. `MQ-138`, `MQ-139`, `MQ-140`, `MQ-142` and `MQ-144` are
   satisfied; `MQ-141` and `MQ-143` are `planned` behind F-791/F-794 and F-792,
   with their characterization pins recorded as current support. F-790 (the
-  auto-clone spawn path waits forever on an unanswered `roots/list`), F-793 (one
-  instance serializes its calls) and F-795 (`execute_script` reports success for
-  a script that threw) own no step; they narrow MQ-139/MQ-140 and are pinned
-  there.
+  auto-clone spawn path waited forever on an unanswered `roots/list`; RESOLVED
+  in 2.0.1), F-793 (one instance serializes its calls) and F-795
+  (`execute_script` reports success for a script that threw) own no step; they
+  narrow MQ-139/MQ-140 and are pinned there.
 - W14: `MQ-145..149` — literal immutable immediate N-1 upgrade, migration,
   rollback, and artifact identity. The human/admin selects and records the
   immutable immediately

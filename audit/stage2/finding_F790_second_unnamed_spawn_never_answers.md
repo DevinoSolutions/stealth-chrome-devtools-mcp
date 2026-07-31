@@ -1,6 +1,9 @@
 # F-790 — the auto-clone spawn path blocks forever on an unanswered `roots/list`
 
-**Status:** OPEN — characterized by plan_RELEASE W13, not fixed (W13 is zero-`src/`).
+**Status:** RESOLVED for 2.0.1 — the `list_roots()` await is bounded and falls
+back to the local seed chain; the W13 characterization node was promoted to a
+regression oracle in the same change. Fix: §The fix, below. (Originally OPEN,
+characterized by plan_RELEASE W13, which is zero-`src/`.)
 **Severity:** HIGH. An unbounded **server→client** round trip sits on the
 default `spawn_browser` path. A client that does not implement MCP `roots` gets
 no result, no error, and no timeout — ever.
@@ -37,6 +40,11 @@ Measured over the raw wire, with one instance already holding master:
 | unnamed | **no** | **no answer at all** — observed to 420 s: no result, no error, no timeout |
 | unnamed | yes (4 requests answered: 1 + 3 spawn retries) | typed failure: `Error calling tool 'spawn_browser': Failed to spawn browser: …` |
 | named (`user_data_dir="…"`) | n/a — this branch never asks | **ok, 0.9 s** |
+
+Post-fix, the first row is what changed: the unnamed spawn with an unanswered
+`roots/list` now answers within one cold-Chrome budget (18 s for the whole node
+including its control spawn), because the await expires and the local seed chain
+names the clone. The other two rows are unchanged.
 
 The first spawn, on the same machine, in the same backend, over the same wire,
 answers in **0.7 s** — so slowness is not the explanation. The backend log shows
@@ -79,10 +87,11 @@ an open observation, **not** as part of this finding. The finding is the
 unbounded wait, which reproduces regardless of Chrome's state because it never
 reaches Chrome.
 
-## Evidence
+## Evidence (as measured while OPEN)
 
 `tests/test_wire_semantics.py::test_a_second_unnamed_spawn_blocks_on_an_unanswered_roots_list`
-(`@pytest.mark.characterization`, route:F-790). Three things make it a
+(`@pytest.mark.characterization`, route:F-790) — since replaced by the
+regression node named under §The regression test. Three things made it a
 measurement rather than a flake:
 
 * a **sensitivity control in the same node** — the first spawn's latency is
@@ -101,29 +110,120 @@ nothing else shares.
 is the positive half: two instances DO coexist and stay isolated when both name
 their profiles.
 
-## What closing it requires
+## What closing it required
 
 Bound the `list_roots()` await (or drop the round trip and seed the clone name
 from something local — the function already falls back to
-`codex_workspace` / `claude_project_dir` / `pwd` / `os.getcwd()`), and make the
-failure typed. The fallback chain is already there; only the unbounded await
-stands between it and a working default path.
+`codex_workspace` / `claude_project_dir` / `pwd` / `os.getcwd()`). The fallback
+chain was already there; only the unbounded await stood between it and a working
+default path.
 
-## Contract limitation wording (for W5 §Limitations)
+## The fix (2.0.1)
 
-> When one instance already holds the master profile, a `spawn_browser` call
+The await is bounded and the existing fallback absorbs the expiry. Nothing else
+about the path changed, so a client that DOES answer is byte-for-byte unaffected.
+
+`src/stealth_chrome_devtools_mcp/settings.py` — the new typed knob (settings.py
+is THE env home, so the deadline is not a literal in the caller):
+
+```python
+client_roots_timeout_seconds: float = Field(5.0, ge=0)
+#   -> STEALTH_MCP_CLIENT_ROOTS_TIMEOUT_SECONDS; 0 disables the round trip.
+```
+
+`src/stealth_chrome_devtools_mcp/embedded/clone_storage.py` —
+`_client_session_seed()`:
+
+```python
+        # F-790: bound this OPTIONAL server->client round trip (see settings.py).
+        bound = get_settings().client_roots_timeout_seconds
+        listed = await asyncio.wait_for(get_context().list_roots(), bound)
+        roots = [path for path in (_root_to_path(r) for r in listed) if path]
+    except Exception as e:
+        message = str(e) or f"{type(e).__name__} awaiting roots/list"
+        debug_logger.log_warning("server", "_client_session_seed", message)
+        roots = []
+```
+
+Three properties of the shape are deliberate:
+
+* **No new error surface.** `asyncio.TimeoutError` *is* `TimeoutError` on 3.11+,
+  so the pre-existing `except Exception` catches it and the function returns the
+  same local seed an unsupported client already produced. CLAUDE.md convention 2
+  is untouched: there is no failure to raise, because falling back is the
+  documented behavior for a client without `roots` — it just now also covers the
+  client that has `roots` and stays silent.
+* **The expiry is audible.** `TimeoutError` stringifies to `""`, which would have
+  logged a blank warning; the message names the mechanism instead
+  (`TimeoutError awaiting roots/list`). The wire regression asserts that line is
+  in the backend log, which is what proves the deadline released the call rather
+  than luck.
+* **`asyncio.wait_for` is the codebase's one timeout idiom** (~15 sites in
+  `browser_manager` / `cdp_function_executor` / `proxy_forwarder`), and the MCP
+  SDK's `BaseSession.send_request` pops its response stream in a `finally`, so
+  cancelling the await leaves no dangling request state.
+
+The edit is **net-zero LOC** in `clone_storage.py` (1057/1057, its grandfathered
+cap): the per-root `for`/`if`/`append` block collapses into one comprehension,
+which pays for the bound and the comment.
+
+## The regression test
+
+`tests/test_wire_semantics.py::test_a_second_unnamed_spawn_is_bounded_when_roots_list_is_never_answered`
+— the same node, flipped. It is real stdio against the installed console
+launcher in its own `gate_workspace`, and it strengthens the original client:
+this one **advertises** `{"roots": {"listChanged": false}}` at `initialize` and
+then answers no `roots/list` at all, which is the worst *conforming* client, not
+merely a lazy one. (`RawStdioWire.initialize()` grew an optional `capabilities`
+argument for it — extended in place, not forked.) The workspace pins
+`STEALTH_MCP_CLIENT_ROOTS_TIMEOUT_SECONDS=2.0` so the node measures the bound
+rather than the default's patience.
+
+Four assertions, each load-bearing:
+
+* the second (auto-clone) `spawn_browser` **answers** inside `SPAWN_BOUND` — a
+  full cold-Chrome budget, versus the 420 s of nothing measured by hand;
+* **exactly one** response frame carries that id;
+* `roots/list` is on the wire, is a request (not a notification), and is still
+  unanswered when the reply lands — so the spawn did not simply take another
+  route;
+* the backend's own log carries the `_client_session_seed` fallback warning.
+
+The original sensitivity control is kept: the first (master-profile) spawn is
+measured on the same machine seconds earlier and must not itself have asked for
+roots.
+
+Verified RED/GREEN on the same tree: with only `clone_storage.py` reverted the
+node fails (136 s, no reply); with the fix it passes in 18 s.
+
+Unit half: `tests/test_clone_storage.py::TestClientRootsRoundTripIsBounded` —
+a silent client falls back within the bound; a client that answers still seeds
+from its roots (preserved behavior); `0` never waits; and the bound is a typed
+`Settings` field with a `5.0` default, readable from
+`STEALTH_MCP_CLIENT_ROOTS_TIMEOUT_SECONDS`.
+
+## Contract limitation wording (for W5 §Limitations) — WITHDRAWN
+
+The clause below was drafted while the finding was open. It no longer describes
+the product and must NOT be added to `RELEASE_CONTRACT.md`:
+
+> ~~When one instance already holds the master profile, a `spawn_browser` call
 > that does not set `user_data_dir` asks the client for its roots and waits
 > without a deadline for the reply. A client that does not implement MCP `roots`
 > receives no result, no error, and no timeout. Concurrent instances require an
-> explicit `user_data_dir` per instance.
+> explicit `user_data_dir` per instance.~~
 
 ## Routing
 
-- MQ-139 in `tests/MANUAL_QA_PROTOCOL.md` is **satisfied for the named-profile
-  form only**; the step says so, and names this finding as why the unnamed form
-  is excluded.
+- MQ-139 in `tests/MANUAL_QA_PROTOCOL.md` named this finding as why the unnamed
+  form was excluded from the step; that exclusion is now withdrawn there, and the
+  step records the regression node as its support. Naming a profile remains the
+  cheaper form — it skips the round trip entirely — but it is no longer required.
 - No `--mq` id in `release-gate.yml` is bound to this pin.
+- **Still open, and NOT claimed fixed here**: the "What is NOT claimed" section
+  above. A second unnamed spawn can still fail on Chrome's side; this change owns
+  the hang only.
 - Related: F-788 (a navigation timeout wedges the CDP connection) and F-789
   (`close_instance` returns `False` after a crash) are the other two places
   where the instance lifecycle's advertised behavior and its real behavior part
-  company.
+  company. Both remain OPEN.

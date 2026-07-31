@@ -1579,16 +1579,28 @@ class RawStdioWire:
         await asyncio.wait_for(event.wait(), timeout)
         return self._responses[request_id]
 
-    async def initialize(self, timeout: float = INIT_TIMEOUT) -> dict[str, Any]:
+    async def initialize(
+        self,
+        timeout: float = INIT_TIMEOUT,
+        *,
+        capabilities: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """The MCP opening handshake, written by hand: ``initialize`` then the
-        ``notifications/initialized`` notification."""
+        ``notifications/initialized`` notification.
+
+        ``capabilities`` declares what this hand-written client claims to
+        support. The default is ``{}`` — the minimum the protocol allows. Pass
+        ``{"roots": {"listChanged": False}}`` to advertise MCP ``roots`` without
+        ever answering ``roots/list``: the worst-case-but-conforming client that
+        F-790 is about.
+        """
         from mcp.types import LATEST_PROTOCOL_VERSION
 
         rid = await self.request(
             "initialize",
             {
                 "protocolVersion": LATEST_PROTOCOL_VERSION,
-                "capabilities": {},
+                "capabilities": capabilities if capabilities is not None else {},
                 "clientInfo": {"name": "release-gate-raw-wire", "version": "1"},
             },
         )
