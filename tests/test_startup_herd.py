@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import time
 from typing import TYPE_CHECKING
@@ -100,8 +101,36 @@ def _summary(times: list[dict]) -> str:
     )
 
 
+# Per-boot backend logs are ``backend-{pid}.log``; ``backend-{pid}-fault.log``
+# and ``backend-boot.log`` are other files and must not inflate the census.
+_BACKEND_LOG_RE = re.compile(r"^backend-\d+\.log$")
+
+
+def _booted_backend_logs(space: dict) -> list[str]:
+    """Names of the per-boot backend logs in the workspace — the spawn census.
+
+    THE primary "exactly one backend" oracle, because it is the workspace's
+    own durable evidence: every backend interpreter writes exactly one
+    ``backend-{pid}.log`` when it boots, so a double spawn leaves two files
+    regardless of which processes are still alive — it even counts a backend
+    that was evicted (killed) after booting, the exact fratricide this module
+    exists to catch. Chosen over a process census as the load-bearing check
+    after a hosted Windows runner showed psutil the detached backend's pid
+    but not its cmdline: the live census saw NOTHING while the backend was
+    demonstrably serving twelve sessions.
+    """
+    return sorted(
+        p.name
+        for p in space["log_dir"].glob("backend-*.log")
+        if _BACKEND_LOG_RE.match(p.name)
+    )
+
+
 def _our_backends_on_port(port: int) -> list[int]:
-    """Pids of OUR *logical* backends for ``port`` — must be exactly one.
+    """Pids of OUR *logical* live backends for ``port`` — the UPPER-BOUND
+    supplement to :func:`_booted_backend_logs` (it can see a just-spawned
+    duplicate that has not written its log yet, so it may only ever be ≤ 1;
+    zero is "census blind on this platform", not "no backend").
 
     Identified by cmdline (module + ``--transport http`` + the workspace's own
     port), the same identity ``singleton._is_our_backend`` uses, so a
@@ -176,13 +205,19 @@ async def test_forty_cold_sessions_are_all_usable_within_30s(tmp_path):
             )
             herd_seconds = time.monotonic() - herd_t0
             results = [slot[0] for slot in slots]
-            backends = _our_backends_on_port(space["port"])
+            booted = _booted_backend_logs(space)
+            live = _our_backends_on_port(space["port"])
 
-            # Exactly one backend survived the 40-way lock race. Counted while
-            # the workspace is still alive; teardown below then owns its exit.
-            assert len(backends) == 1, (
-                f"expected exactly one backend for port {space['port']}, "
-                f"found pids {backends}\n{workspace_backend_logs(space)}"
+            # Exactly one backend EVER booted in this workspace (durable file
+            # census), and the live process census — where the platform lets
+            # it see anything at all — never shows a second one.
+            assert len(booted) == 1, (
+                f"expected exactly one booted backend, found {booted}\n"
+                f"{workspace_backend_logs(space)}"
+            )
+            assert len(live) <= 1, (
+                f"live census found {live} for port {space['port']}\n"
+                f"{workspace_backend_logs(space)}"
             )
 
             # Every session is genuinely usable — the full registry answered,
