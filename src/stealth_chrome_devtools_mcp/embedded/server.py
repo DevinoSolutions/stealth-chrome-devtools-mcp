@@ -1138,9 +1138,13 @@ async def list_network_requests(
     """
     List captured network requests.
 
+    Browser-internal traffic (chrome://, chrome-extension://, devtools://, about:)
+    is excluded from capture by default — see set_network_capture_filters.
+
     Args:
         instance_id (str): Browser instance ID.
-        filter_type (Optional[str]): Filter by resource type (e.g., 'image', 'script', 'xhr').
+        filter_type (Optional[str]): Filter by CDP resource type, matched
+            case-insensitively (e.g., 'document', 'image', 'script', 'xhr').
 
     Returns:
         Union[List[Dict[str, Any]], Dict[str, Any]]: List of network requests, or file metadata if response too large.
@@ -1329,6 +1333,7 @@ async def set_network_capture_filters(
     include_types: list[str] | None = None,
     exclude_types: list[str] | None = None,
     capture_bodies: bool | None = None,
+    capture_internal_urls: bool | None = None,
 ) -> bool:
     """
     Set resource type filters for network capture to reduce memory usage.
@@ -1340,14 +1345,23 @@ async def set_network_capture_filters(
         capture_bodies (Optional[bool]): Enable/disable response-body capture for this
             instance (default off; overrides STEALTH_MCP_NETWORK_CAPTURE_BODIES). Each
             argument is merged — passing only capture_bodies keeps include/exclude.
+        capture_internal_urls (Optional[bool]): Capture Chrome's own traffic —
+            chrome://, chrome-extension://, chrome-error://, devtools://, about: —
+            which is EXCLUDED by default so the page's requests are not drowned out
+            (overrides STEALTH_MCP_NETWORK_CAPTURE_INTERNAL_URLS).
 
+    Type matching is case-insensitive, so 'document' and 'Document' behave alike.
     Common resource types: Document, Stylesheet, Image, Media, Font, Script, XHR, Fetch, WebSocket, Manifest, Other
 
     Returns:
         bool: True if successful.
     """
     await network_interceptor.set_capture_filters(
-        instance_id, include_types, exclude_types, capture_bodies
+        instance_id,
+        include_types,
+        exclude_types,
+        capture_bodies,
+        capture_internal_urls,
     )
     return True
 
@@ -1362,8 +1376,8 @@ async def get_network_capture_filters(instance_id: str) -> dict[str, Any]:
 
     Returns:
         Dict[str, Any]: 'include'/'exclude' lists, the resolved 'capture_bodies'
-        flag, and body-store usage ('body_store_bytes', 'body_store_max_bytes',
-        'body_max_bytes').
+        and 'capture_internal_urls' flags, and body-store usage
+        ('body_store_bytes', 'body_store_max_bytes', 'body_max_bytes').
     """
     return await network_interceptor.get_capture_filters(instance_id)
 

@@ -291,6 +291,25 @@ These are enforced at the single write chokepoint
 JSON import route through it). `0` on either cap means unbounded. All five knobs are
 typed fields on `Settings` (§4) — not hand-rolled `os.getenv`.
 
+**What is captured is the page's traffic, not the browser's** (F-803). Chrome emits
+its own non-web requests on every launch — `chrome://new-tab-page/*`, extensions,
+`devtools://`, error pages — which outnumbered the real page requests 24-to-1 in a
+live 2.0.0 measurement. Requests whose URL uses a browser-internal scheme
+(`chrome:`, `chrome-error:`, `chrome-extension:`, `chrome-native:`, `chrome-search:`,
+`chrome-untrusted:`, `devtools:`, `about:`) are therefore **dropped at capture time**,
+by the one predicate `network_interceptor.is_internal_url`. To debug the browser
+itself, set `STEALTH_MCP_NETWORK_CAPTURE_INTERNAL_URLS=1` globally or pass
+`set_network_capture_filters(capture_internal_urls=True)` for one instance — the same
+per-instance-overrides-global vocabulary as `capture_bodies`, deliberately **not** a
+second filter mechanism.
+
+Each captured row's `resource_type` (`Document`, `XHR`, `Script`, …) is read off the
+CDP event by the one helper `network_interceptor.resource_type_of`, which exists
+because nodriver's generated dataclasses spell the field `type_`, not `type` — the
+pre-fix `hasattr(event, "type")` probe was permanently False, so every row carried
+`resource_type=None` and `list_network_requests(filter_type=…)` could never match
+(F-803). `ResponseReceived` backfills the type when `RequestWillBeSent` omitted it.
+
 ---
 
 ## 7. Dynamic hooks are first-match-by-priority, not a chain
