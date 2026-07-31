@@ -47,13 +47,17 @@ not, and each of them was found by asking a question only a wire lane can ask:
   method-less request both vanish: no ``-32700``, no ``-32600``, no frame at
   all. The session survives — which is the half that matters most — but a client
   that sends a bad frame waits forever for a reply that is never coming.
-* **A second concurrent auto-clone spawn blocks on the client** (F-790). While
-  one instance holds the master profile, a second ``spawn_browser`` with no
-  ``user_data_dir`` sends a ``roots/list`` request *to the client* and awaits it
-  with no deadline. A client that does not implement MCP ``roots`` — which the
-  protocol permits — gets no result, no error and no timeout, ever. Only a wire
-  lane could have found this, because the defect IS a frame; every node here
-  that needs two instances therefore names its profiles.
+* **A second concurrent auto-clone spawn blocked on the client** (F-790, now
+  FIXED). While one instance holds the master profile, a second
+  ``spawn_browser`` with no ``user_data_dir`` sends a ``roots/list`` request *to
+  the client* and awaits it. That await had no deadline, so a client that does
+  not implement MCP ``roots`` — which the protocol permits — got no result, no
+  error and no timeout, ever. Only a wire lane could have found this, because
+  the defect IS a frame. The await is now bounded by
+  ``STEALTH_MCP_CLIENT_ROOTS_TIMEOUT_SECONDS`` and falls back to a local clone
+  seed, and the node below is the regression oracle: a client that advertises
+  ``roots`` and then answers nothing still gets its spawn reply. Nodes here that
+  need two instances still name their profiles — that is cheaper, not required.
 * **One instance serializes its calls** (F-793). Short calls run together
   happily, but a call issued behind a *parked* operation on the same instance
   does not queue — it times out and blames a crash. MQ-140's reversed-completion
@@ -87,8 +91,10 @@ typed outcome and instance recovery (F-791, F-794) and malformed input's
 protocol reply (F-792). All of these are characterization-pinned and routed,
 never fixed: ``src/`` edits are a plan_RELEASE non-goal (§1.2) and a
 characterization can never satisfy a step (§0.2). Their ids are NOT bound to any
-``--mq`` flag. F-790, F-793 and F-795 own no step; they narrow MQ-139/MQ-140 and
-are pinned inside them.
+``--mq`` flag. F-793 and F-795 own no step; they narrow MQ-139/MQ-140 and are
+pinned inside them. F-790 is the one exception to "never fixed" — it was fixed
+for 2.0.1 (the unbounded ``roots/list`` await), and its node here was flipped
+from a characterization to the regression oracle in that same change.
 
 HTTP parity, stated exactly: ``RELEASE_CONTRACT.md`` puts HTTP under
 *"HTTP (described, not qualified)"*. plan_RELEASE §2.13 asks for HTTP parity
@@ -154,11 +160,15 @@ HELD_NAV_TIMEOUT_MS = 40_000  # a route held open on purpose; released by the te
 
 HTTP_TIMEOUT = 10
 
-# F-790's bound. The working spawn path answers in under a second on the same
-# machine and in the same session (the control in that node measures it and
-# fails if it did not), so a spawn still unanswered after 30x that has not
-# merely been slow. Measured by hand to 420s; bounded here to keep the gate fast.
+# F-790's control bound. The working (master-profile) spawn path answers in
+# under a second on the same machine and in the same session, so a control spawn
+# slower than 30x that means the machine cannot decide the node at all.
 CLONE_HANG_BOUND = 30.0
+# F-790's product deadline, pinned into the node's workspace via
+# STEALTH_MCP_CLIENT_ROOTS_TIMEOUT_SECONDS: how long the auto-clone path may wait
+# on the CLIENT's roots/list reply before falling back to a local clone seed.
+# Small on purpose — the node measures the bound, not the default's patience.
+ROOTS_BOUND = 2.0
 
 # M6-pinned bytes. Preserved verbatim; a fix must turn these red deliberately.
 INSTANCE_NOT_FOUND = "Instance not found: {instance_id}"
@@ -288,9 +298,13 @@ async def _navigate(wire: RawStdioWire, instance_id: str, url: str, **extra):
     )
 
 
-async def _handshake(wire: RawStdioWire) -> dict:
-    """``initialize`` + ``notifications/initialized`` + one ``tools/list``."""
-    init = await wire.initialize()
+async def _handshake(wire: RawStdioWire, *, capabilities: dict | None = None) -> dict:
+    """``initialize`` + ``notifications/initialized`` + one ``tools/list``.
+
+    ``capabilities`` is forwarded verbatim; the F-790 node uses it to advertise
+    MCP ``roots`` and then never answer a single ``roots/list``.
+    """
+    init = await wire.initialize(capabilities=capabilities)
     listed = await wire.request("tools/list")
     tools = await wire.response(listed, HANDSHAKE_BOUND)
     return {"init": init, "tools": _tool_result(tools)["tools"]}
@@ -1110,49 +1124,60 @@ def test_the_http_column_is_out_of_scope_because_http_is_not_qualified():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# F-790 — the auto-clone spawn path cannot produce a SECOND live instance
+# F-790 — the auto-clone spawn path is bounded against a silent client
 # ═══════════════════════════════════════════════════════════════════════════
-@pytest.mark.characterization
-async def test_a_second_unnamed_spawn_blocks_on_an_unanswered_roots_list(
+async def test_a_second_unnamed_spawn_is_bounded_when_roots_list_is_never_answered(
     launcher, tmp_path
 ):
-    """F-790: with one instance holding the master profile, a second
-    ``spawn_browser`` that names no ``user_data_dir`` never answers — because it
-    is waiting on the CLIENT.
+    """F-790 (RESOLVED): with one instance already holding the master profile, a
+    second ``spawn_browser`` that names no ``user_data_dir`` must still ANSWER —
+    even though it asks this client a question this client never replies to.
 
-    The mechanism is visible on the wire, which is why W13 is where it surfaced.
-    The auto-clone branch of ``clone_storage.resolve_profile_selection`` derives
-    its clone name from ``_client_session_seed()``, which awaits
-    ``context.list_roots()`` — a **server→client** ``roots/list`` request. This
-    node records that request frame arriving while the spawn is parked. Nothing
-    bounds that await, so a client that does not implement ``roots`` waits for
-    an answer forever (measured to 420 s by hand; bounded here to keep the gate
-    fast).
+    The mechanism is a frame, which is why only a wire lane can assert it. The
+    auto-clone branch of ``clone_storage.resolve_profile_selection`` derives its
+    clone name from ``_client_session_seed()``, which awaits
+    ``context.list_roots()`` — a **server→client** ``roots/list`` request. MCP
+    ``roots`` is OPTIONAL, so a conforming client may never answer; before the
+    fix nothing bounded that await and the tool parked forever (measured by hand
+    to 420 s: no result, no error, no timeout; the predecessor characterization
+    of this node asserted ``answered is False`` at 30 s and passed).
 
-    Three assertions make this a measurement rather than a flake:
+    The client written here is the worst conforming case, not merely a lazy one:
+    it **advertises** the ``roots`` capability at ``initialize`` and then never
+    answers a single ``roots/list``. A server that trusted the advertisement
+    would wait the longest exactly here.
 
-    * **A sensitivity control in the same node.** The FIRST spawn — same
-      machine, same backend, same wire, seconds earlier — must answer in a
-      fraction of the bound. A busy machine fails the control instead of
-      inventing an F-790.
-    * **The named mechanism.** ``roots/list`` must actually be on the wire; a
-      spawn that stalled for some other reason does not satisfy this pin.
-    * **The pipe is fine.** While the second spawn is parked, the first instance
-      still answers ``list_instances`` and closes cleanly — so the stall is that
-      one code path, not the transport.
+    Four things make this a regression oracle rather than a smoke test:
 
-    Own workspace on purpose: the abandoned call must die with a backend nothing
-    else is using.
+    * **The reply is the assertion.** ``spawn_browser`` answers inside
+      :data:`SPAWN_BOUND` — a full cold-Chrome budget, and a fraction of the
+      420 s the unbounded path was measured at.
+    * **Exactly one outcome.** One response frame carries that id, so a bounded
+      answer is not a duplicate or a stray inbound request being miscounted.
+    * **The named mechanism ran.** ``roots/list`` must actually be on the wire
+      and must still be unanswered when the reply lands — otherwise the spawn
+      took some other route and this node would pass for the wrong reason. The
+      backend's own log must carry the ``_client_session_seed`` fallback
+      warning, which is what proves the deadline (not luck) released it.
+    * **A sensitivity control in the same node.** The FIRST spawn — master
+      profile, no round trip — is measured on the same machine seconds earlier,
+      and must not itself have asked for roots.
 
-    Pinned in the direction that makes a fix red — ``answered is False``. Bound
-    the await, or seed the clone name without a client round-trip, and this node
-    fails so MQ-139's unnamed-profile half can be promoted deliberately.
+    ``STEALTH_MCP_CLIENT_ROOTS_TIMEOUT_SECONDS`` is pinned small in this
+    workspace so the node measures the *bound* rather than the default's
+    patience. Own workspace on purpose: the backend that fields the abandoned
+    round trip is shared with nothing else.
     """
     with gate_workspace(gate_work_dir(tmp_path)) as space:
-        wire = RawStdioWire(launcher=launcher, env=space["env"], port=space["port"])
+        env = {
+            **space["env"],
+            "STEALTH_MCP_CLIENT_ROOTS_TIMEOUT_SECONDS": str(ROOTS_BOUND),
+        }
+        wire = RawStdioWire(launcher=launcher, env=env, port=space["port"])
         await wire.start()
         try:
-            await _handshake(wire)
+            # Advertise roots, then answer nothing: the F-790 client.
+            await _handshake(wire, capabilities={"roots": {"listChanged": False}})
 
             control_started = time.monotonic()
             first_id = await wire.call_tool(
@@ -1171,25 +1196,37 @@ async def test_a_second_unnamed_spawn_blocks_on_an_unanswered_roots_list(
                 "(only the auto-clone branch does) no longer holds"
             )
 
+            # The regression: the auto-clone spawn answers, bounded, without us
+            # ever replying to the roots/list it is about to send.
             second_id = await wire.call_tool(
                 "spawn_browser", {"headless": True, "sandbox": False}
             )
-            with pytest.raises((TimeoutError, asyncio.TimeoutError)):
-                await wire.response(second_id, CLONE_HANG_BOUND)
-            assert wire.answered(second_id) is False
-            assert wire.frames_for(second_id) == []
+            second = await wire.response(second_id, SPAWN_BOUND)
+            assert len(wire.frames_for(second_id)) == 1, wire.frames_for(second_id)
 
             asked = [f for f in wire.frames if f.get("method") == "roots/list"]
             assert asked, (
-                "the second spawn stalled without asking the client for roots — "
-                "F-790's mechanism has changed and this pin must be re-derived"
+                "the second spawn never asked the client for roots — F-790's "
+                "mechanism has changed and this pin must be re-derived"
             )
             assert asked[0].get("id") is not None, (
                 f"roots/list arrived as a notification, not a request: {asked[0]}"
             )
+            logs = workspace_backend_logs(space)
+            assert "_client_session_seed" in logs, (
+                "the bounded await did not log its fallback; the reply may have "
+                f"come from somewhere other than the F-790 deadline:\n{logs}"
+            )
 
-            # The wire itself is fine: the FIRST instance is still drivable and
-            # closes cleanly, so the stall is the auto-clone path, not the pipe.
+            # Whichever way the clone spawn landed, it landed TYPED and bounded.
+            # A failure here is Chrome's, not the protocol's (see the finding's
+            # "What is NOT claimed"); the hang is what this node owns.
+            if _tool_result(second).get("isError") is True:
+                assert _tool_text(second).strip(), "errored with an empty message"
+            else:
+                await _close(wire, _tool_payload(second)["instance_id"])
+
+            # The pipe was never the question, and still is not.
             await _call(wire, "list_instances", {})
             await _close(wire, instance_id)
         finally:

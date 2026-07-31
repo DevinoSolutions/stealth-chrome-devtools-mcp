@@ -824,13 +824,13 @@ async def _client_session_seed() -> str:
     try:
         from fastmcp.server.dependencies import get_context
 
-        context = get_context()
-        for root in await context.list_roots():
-            path = _root_to_path(root)
-            if path:
-                roots.append(path)
+        # F-790: bound this OPTIONAL server->client round trip (see settings.py).
+        bound = get_settings().client_roots_timeout_seconds
+        listed = await asyncio.wait_for(get_context().list_roots(), bound)
+        roots = [path for path in (_root_to_path(r) for r in listed) if path]
     except Exception as e:
-        debug_logger.log_warning("server", "_client_session_seed", str(e))
+        message = str(e) or f"{type(e).__name__} awaiting roots/list"
+        debug_logger.log_warning("server", "_client_session_seed", message)
         roots = []
 
     if roots:
