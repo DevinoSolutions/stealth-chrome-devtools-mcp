@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.2
 
 ### Fixed — multi-session cold start can no longer evict the backend it is racing (F-807)
 
