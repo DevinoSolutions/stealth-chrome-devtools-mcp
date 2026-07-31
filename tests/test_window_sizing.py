@@ -19,6 +19,8 @@ is a real assertion and not a screen-size lottery.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from e2e_helpers import CAN_RUN, eval_js, get_fn, sandbox_kwargs, warmup_once
@@ -33,6 +35,15 @@ OVERSIZED_W, OVERSIZED_H = 9000, 7000
 # CDP window bounds vs. window.outerWidth can round apart by a pixel on a
 # fractional-DPI display; anything beyond this is a genuine disagreement.
 TOLERANCE_PX = 2
+
+# Both headed premises need a real desktop. The Linux gate cell runs Chrome
+# under a WM-less Xvfb, where nothing clamps (a 9000x7000 request is granted
+# verbatim) and headed launch itself is unreliable; the headed contract is
+# exercised by the Windows and macOS integration cells instead (F-804).
+_HEADED_NEEDS_DESKTOP = pytest.mark.skipif(
+    sys.platform.startswith("linux"),
+    reason="headed sizing needs a window manager; Linux CI runs a bare Xvfb",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +157,7 @@ class TestRealChromeWindowSize:
         await warmup_once()
         yield
 
+    @_HEADED_NEEDS_DESKTOP
     async def test_headed_spawn_honours_a_size_that_fits(self, tmp_path):
         """A headed window asked for a size the desktop can hold must GET it."""
         close = get_fn("close_instance")
@@ -166,6 +178,7 @@ class TestRealChromeWindowSize:
         finally:
             await close(instance_id=iid)
 
+    @_HEADED_NEEDS_DESKTOP
     async def test_headed_spawn_reports_a_clamped_size_truthfully(self, tmp_path):
         """THE F-804 pin: an unhonourable request is not echoed back as applied.
 
