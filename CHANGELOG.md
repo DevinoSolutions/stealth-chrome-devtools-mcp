@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (2.0.1)
+## 2.0.1
 
 ### Fixed — two tools no longer report success for an operation that failed
 
