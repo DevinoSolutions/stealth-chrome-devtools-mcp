@@ -23,6 +23,49 @@ said it worked.
 Callers that branched on `result["success"]` will now see a raised tool error where they
 previously saw a success they could not act on.
 
+### Fixed — spawn can no longer hang forever on a silent client (F-790)
+
+The default (unnamed) `spawn_browser` path sends a `roots/list` request to the MCP
+client and awaited the answer with no deadline. MCP roots is an *optional* client
+capability, so a conforming client that never answers parked the tool call forever.
+The round trip is now bounded by `STEALTH_MCP_CLIENT_ROOTS_TIMEOUT_SECONDS`
+(default 5 s, `0` = never ask); on expiry the spawn falls back to the same local
+seed chain an unsupported client already used. Clients that answer are unaffected.
+
+### Fixed — network capture rows are typed, filterable, and free of browser noise (F-803)
+
+- `resource_type` was `null` on every captured request in every prior release:
+  nodriver's CDP dataclasses spell the field `type_`, and the interceptor read
+  `event.type` behind a `hasattr` guard that turned the permanent miss into `None`.
+  It is now populated (Document, XHR, Fetch, Script, …).
+- Consequently `list_network_requests(filter_type=…)` could never match anything;
+  it now works, case-insensitively.
+- Browser-internal traffic (`chrome://`, `chrome-extension://`, `devtools://`,
+  `chrome-error://`, `about:`) is no longer captured by default — it drowned real
+  requests 24-to-1 on an ordinary page load. Opt back in per instance via
+  `set_network_capture_filters(capture_internal_urls=True)` or process-wide via
+  `STEALTH_MCP_NETWORK_CAPTURE_INTERNAL_URLS`.
+
+### Fixed — window size is reported truthfully (F-804)
+
+Headed Chrome clamps its window to the desktop work area; the spawn result echoed
+the *requested* size as if applied (1920x1080 requested, ~1028x617 delivered).
+Spawn diagnostics now report `requested`, measured `actual`, the real inner
+viewport, and a `clamped` flag; `instance.viewport` is the measured size.
+Headless remains unclamped and exact.
+
+### Added — real-transport soak coverage
+
+A 62-operation soak journey (`tests/test_soak_stability.py`) drives one instance
+over real stdio with a hard per-call deadline: navigations (including deliberately
+unresolvable hosts), throwing scripts, tab churn, screenshots, cookies. Any overdue
+reply fails the suite by name; the journey ends with a clean close and a
+no-leftover-Chrome-children assertion. It also characterized **F-805** (a selector
+that never resolves costs nodriver's default 10 s regardless of the caller's
+timeout) as a strict xfail pending its fix.
+
+## 2.0.0
+
 The first release since the foundational audit. It carries ~85 commits since 1.2.0 and
 fixes four defects that were present in every prior release and invisible to the old
 test suite, because none of them can be reproduced through the in-process test seam —

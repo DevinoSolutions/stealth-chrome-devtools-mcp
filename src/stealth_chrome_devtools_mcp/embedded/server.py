@@ -641,9 +641,8 @@ async def navigate(
         timeout=outer_timeout,
         instance_id=instance_id,
     )
-    # The instance's own bookkeeping is already complete above, so raising here
-    # reports the failure without leaving the tab or the state table behind
-    # (F-802).
+    # Bookkeeping completed above, so raising here cannot leave the tab or the
+    # state table behind (F-802).
     return _require_navigation_ok(url, result)
 
 
