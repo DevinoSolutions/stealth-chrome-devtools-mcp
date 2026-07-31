@@ -73,6 +73,7 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | `element_resolution.py` | selector resolution that survives CDP document-node invalidation (route ALL selector resolution through here — never `tab.select`/`find` directly) |
 | `proxy_forwarder.py` | authenticated egress-proxy forwarding + `_free_port` |
 | `proxy_utils.py` | proxy string parsing + Chrome launch-arg helpers |
+| `window_sizing.py` | **the one home for a spawn's requested window size** — the `--window-size` launch arg, the CDP `setWindowBounds` apply, and the post-launch measurement that makes the reported size truthful (F-804) |
 
 **Cloner subsystem** (one engine + thin adapters + disk storage)
 | File | Owns |

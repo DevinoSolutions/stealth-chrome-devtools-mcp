@@ -13,6 +13,7 @@ import nodriver as uc
 import psutil
 from nodriver import Browser, Tab
 
+from stealth_chrome_devtools_mcp.embedded import window_sizing
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
@@ -504,6 +505,7 @@ class BrowserManager:
 
         caller_args = list(options.browser_args or [])
         caller_args = self._append_user_agent_arg(caller_args, options.user_agent)
+        caller_args = window_sizing.append_size_arg(caller_args, options)
         caller_args = merge_proxy_server_arg(
             caller_args,
             launch_proxy_server,
@@ -555,13 +557,13 @@ class BrowserManager:
         instance_id: str,
         actual_user_data_dir: str | None,
         uses_custom_data_dir: bool,
-    ) -> str | None:
+    ) -> tuple[str | None, window_sizing.WindowSizeMetrics]:
         """Register the process for cleanup and apply the per-instance CDP
-        overrides (extra headers, viewport, timezone).
+        overrides (extra headers, window size, timezone).
 
-        Returns the applied IANA timezone id (or ``None``). Runs after the browser
-        is orchestrator-owned, so a failure here still routes through the spawn
-        cleanup path."""
+        Returns ``(applied IANA timezone id or None, window-size metrics)``. Runs
+        after the browser is orchestrator-owned, so a failure here still routes
+        through the spawn cleanup path."""
         if hasattr(browser, "_process") and browser._process:
             process_cleanup.track_browser_process(
                 instance_id,
@@ -582,22 +584,13 @@ class BrowserManager:
                 uc.cdp.network.set_extra_http_headers(headers=options.extra_headers)
             )
 
-        await tab.set_window_size(
-            left=0,
-            top=0,
-            width=options.viewport_width,
-            height=options.viewport_height,
-        )
-        debug_logger.log_info(
-            "browser_manager",
-            "spawn_browser",
-            f"Set viewport to {options.viewport_width}x{options.viewport_height}",
-        )
+        window_metrics = await window_sizing.apply_and_measure(tab, options)
 
-        return await self._apply_timezone_override(
+        applied_timezone_id = await self._apply_timezone_override(
             tab=tab,
             timezone_id=options.timezone_id,
         )
+        return applied_timezone_id, window_metrics
 
     async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)
         """
@@ -650,7 +643,7 @@ class BrowserManager:
                 bool(options.user_data_dir),
             )
 
-            applied_timezone_id = await self._apply_post_launch(
+            applied_timezone_id, window_metrics = await self._apply_post_launch(
                 browser,
                 tab,
                 options,
@@ -675,6 +668,8 @@ class BrowserManager:
                 headless=options.headless,
                 user_data_dir=actual_user_data_dir,
             )
+            spawn_diagnostics["window_size"] = window_metrics
+            instance.viewport = window_metrics["actual"] or instance.viewport
             if stealth_warnings:
                 spawn_diagnostics["stealth_args_stripped"] = stealth_warnings
             self._spawn_diagnostics[instance_id] = spawn_diagnostics
