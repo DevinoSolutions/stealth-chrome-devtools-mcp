@@ -309,6 +309,7 @@ class FakeBrowserManager:
         browsers: dict[str, Any] | None = None,
         spawn_instance: Any = None,
         spawn_diagnostics: dict[str, Any] | None = None,
+        navigate_result: Any = None,
     ) -> None:
         self._instances = list(instances or [])
         self._tabs = dict(tabs or {})
@@ -317,7 +318,9 @@ class FakeBrowserManager:
         self._spawn_diagnostics = (
             spawn_diagnostics if spawn_diagnostics is not None else {}
         )
+        self._navigate_result = navigate_result
         self.spawn_calls: list[Any] = []
+        self.navigate_calls: list[dict[str, Any]] = []
 
     async def list_instances(self) -> list[Any]:
         return list(self._instances)
@@ -337,6 +340,17 @@ class FakeBrowserManager:
                 "seed spawn_instance to use FakeBrowserManager.spawn_browser"
             )
         return self._spawn_instance
+
+    async def navigate(self, **kwargs: Any) -> Any:
+        """Record the navigation the tool requested and return the seeded
+        result verbatim — the seam for pinning what ``navigate`` does with a
+        manager payload it cannot influence (e.g. an error-page URL, F-802)."""
+        self.navigate_calls.append(kwargs)
+        if self._navigate_result is None:
+            raise AssertionError(
+                "seed navigate_result to use FakeBrowserManager.navigate"
+            )
+        return self._navigate_result
 
     async def get_spawn_diagnostics(self, instance_id: str) -> dict[str, Any]:
         return dict(self._spawn_diagnostics)

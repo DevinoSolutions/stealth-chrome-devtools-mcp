@@ -1497,8 +1497,9 @@ Three further findings own no step of their own and instead narrow the steps
 they were found under: F-790 (the auto-clone spawn waits forever on an
 unanswered `roots/list`) and F-793 (one instance serializes its calls, so a call
 behind a parked operation times out and blames a crash) bound MQ-139 and
-MQ-140; F-795 (`execute_script` reports `success: true` for a script that threw)
-was found incidentally and is routed rather than absorbed.
+MQ-140; F-795 (`execute_script` reported `success: true` for a script that threw)
+was found incidentally, routed rather than absorbed, and **fixed in 2.0.1** — its
+node now asserts the raised failure.
 
 **HTTP parity, stated exactly.** plan_RELEASE §2.13 asks for HTTP parity *where
 HTTP is contract-qualified*. It is not — `RELEASE_CONTRACT.md` files HTTP under
@@ -1572,10 +1573,11 @@ is the pin for F-793: the parked navigation is barrier-confirmed in flight
 before the second call is issued, and the same call shape succeeds on a
 different instance at the same moment (MQ-140's node), so the failure is
 per-instance serialization rather than a broken call.
-`tests/test_wire_semantics.py::test_execute_script_reports_success_for_a_thrown_script`
-pins F-795, found while writing these nodes: a script that raises comes back as
-`success: true` with `error: null`, so the documented success flag cannot be
-trusted to mean the script ran.
+`tests/test_wire_semantics.py::test_execute_script_reports_failure_for_a_script_that_threw`
+covers F-795, found while writing these nodes: a script that raised used to come
+back as `success: true` with `error: null`, so the documented success flag could
+not be trusted to mean the script ran. Fixed in 2.0.1 — the node now asserts the
+error frame and that the same tab still runs a valid script afterwards.
 
 ### MQ-140: Every result stays attached to its own request
 **Manual**: make the request you issued FIRST finish LAST, and separately put two
@@ -1953,9 +1955,9 @@ The remaining ownership reservations are:
   satisfied; `MQ-141` and `MQ-143` are `planned` behind F-791/F-794 and F-792,
   with their characterization pins recorded as current support. F-790 (the
   auto-clone spawn path waits forever on an unanswered `roots/list`), F-793 (one
-  instance serializes its calls) and F-795 (`execute_script` reports success for
-  a script that threw) own no step; they narrow MQ-139/MQ-140 and are pinned
-  there.
+  instance serializes its calls) and F-795 (`execute_script` reported success for
+  a script that threw — fixed in 2.0.1) own no step; they narrow MQ-139/MQ-140
+  and are covered there.
 - W14: `MQ-145..149` — literal immutable immediate N-1 upgrade, migration,
   rollback, and artifact identity. The human/admin selects and records the
   immutable immediately
