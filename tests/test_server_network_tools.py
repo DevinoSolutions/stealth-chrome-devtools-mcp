@@ -5,11 +5,20 @@ fresh, synthetically-seeded one and the ``@section_tool`` functions are invoked
 through their FastMCP ``.fn`` (the real tool body, minus the transport layer).
 """
 
+import json
+
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import server
 from stealth_chrome_devtools_mcp.embedded.models import NetworkResponse
 from stealth_chrome_devtools_mcp.embedded.network_interceptor import NetworkInterceptor
+
+# Real CDP event builders live once, in the interceptor's own test module
+# (tests/ is on sys.path via conftest) — F-803 pins must not fork a second
+# hand-rolled event shape, which is how the original defect stayed invisible.
+from test_network_interceptor import (  # noqa: E402  PERMANENT(import follows the sys.path comment above)
+    _cdp_request_event,
+)
 
 
 @pytest.fixture()
@@ -63,3 +72,74 @@ class TestCaptureBodiesRoundTrip:
         filters = await server.get_network_capture_filters.fn(instance_id="i1")
         assert filters["capture_bodies"] is True
         assert filters["include"] == ["XHR"]
+
+
+class TestResourceTypeSurfacing:
+    """F-803 at the tool layer: the rows agents actually read carry the type,
+    and ``filter_type`` is a working feature rather than a dead parameter."""
+
+    async def test_list_network_requests_surfaces_resource_type(
+        self, fresh_interceptor
+    ):
+        await fresh_interceptor._on_request(
+            _cdp_request_event("r1", "https://example.com/", "Document"), "i1"
+        )
+        rows = await server.list_network_requests.fn(instance_id="i1")
+        assert [r["resource_type"] for r in rows] == ["Document"]
+
+    async def test_filter_type_lowercase_document_matches(self, fresh_interceptor):
+        await fresh_interceptor._on_request(
+            _cdp_request_event("r1", "https://example.com/", "Document"), "i1"
+        )
+        await fresh_interceptor._on_request(
+            _cdp_request_event("r2", "https://example.com/a.css", "Stylesheet"), "i1"
+        )
+        rows = await server.list_network_requests.fn(
+            instance_id="i1", filter_type="document"
+        )
+        assert [r["url"] for r in rows] == ["https://example.com/"]
+
+    async def test_get_request_details_and_export_carry_resource_type(
+        self, fresh_interceptor, tmp_path
+    ):
+        await fresh_interceptor._on_request(
+            _cdp_request_event("r1", "https://example.com/", "Document"), "i1"
+        )
+        details = await server.get_request_details.fn(request_id="r1")
+        assert details["resource_type"] == "Document"
+
+        fp = tmp_path / "net.json"
+        await server.export_network_data.fn(instance_id="i1", filepath=str(fp))
+        exported = json.loads(fp.read_text())
+        assert exported["requests"][0]["resource_type"] == "Document"
+
+
+class TestInternalUrlExclusionAtToolLayer:
+    async def test_chrome_internal_rows_never_reach_list(self, fresh_interceptor):
+        for i, url in enumerate(
+            ("chrome://new-tab-page/", "chrome-error://chromewebdata/", "about:blank")
+        ):
+            await fresh_interceptor._on_request(
+                _cdp_request_event(f"c{i}", url, "Document"), "i1"
+            )
+        await fresh_interceptor._on_request(
+            _cdp_request_event("r1", "https://example.com/", "Document"), "i1"
+        )
+        rows = await server.list_network_requests.fn(instance_id="i1")
+        assert [r["url"] for r in rows] == ["https://example.com/"]
+
+    async def test_capture_internal_urls_round_trips_through_the_tools(
+        self, fresh_interceptor
+    ):
+        filters = await server.get_network_capture_filters.fn(instance_id="i1")
+        assert filters["capture_internal_urls"] is False  # default: excluded
+        await server.set_network_capture_filters.fn(
+            instance_id="i1", capture_internal_urls=True
+        )
+        filters = await server.get_network_capture_filters.fn(instance_id="i1")
+        assert filters["capture_internal_urls"] is True
+        await fresh_interceptor._on_request(
+            _cdp_request_event("c0", "chrome://new-tab-page/", "Document"), "i1"
+        )
+        rows = await server.list_network_requests.fn(instance_id="i1")
+        assert [r["url"] for r in rows] == ["chrome://new-tab-page/"]

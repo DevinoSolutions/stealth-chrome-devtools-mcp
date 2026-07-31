@@ -10,8 +10,14 @@ relies on to find the one request that matters among thousands.
 import base64
 import json
 
+import nodriver as uc
+
 from stealth_chrome_devtools_mcp.embedded.models import NetworkRequest, NetworkResponse
-from stealth_chrome_devtools_mcp.embedded.network_interceptor import NetworkInterceptor
+from stealth_chrome_devtools_mcp.embedded.network_interceptor import (
+    NetworkInterceptor,
+    is_internal_url,
+    resource_type_of,
+)
 
 
 def _req(rid, url, method="GET", post_data=None, resource_type="XHR", iid="i1"):
@@ -124,12 +130,74 @@ class _FakeRequestObj:
 
 
 class _FakeReqEvent:
-    """Minimal ``RequestWillBeSent`` double for ``_on_request``."""
+    """Minimal ``RequestWillBeSent`` double for ``_on_request``.
+
+    F-803: the attribute is ``type_``, matching nodriver's generated CDP
+    dataclass (``type`` is a builtin, so the generator suffixes it). The double
+    said ``type`` before the fix and so agreed with the *bug*, not with Chrome;
+    ``TestResourceTypeCapture`` below drives real ``from_json``-built events so
+    a divergence like that cannot hide again.
+    """
 
     def __init__(self, request_id, request, rtype="XHR"):
         self.request_id = request_id
         self.request = request
-        self.type = _FakeReqType(rtype)
+        self.type_ = _FakeReqType(rtype)
+
+
+# ── Real CDP event builders (F-803) ────────────────────────────────────────────
+# Built through nodriver's own ``from_json`` from realistic CDP payloads, so the
+# handlers under test see the exact object shape Chrome produces. No hand-rolled
+# attribute names: that is what let resource_type read None for the whole 2.0.0
+# release.
+
+
+def _cdp_request_event(request_id, url, rtype="Document", method="GET"):
+    """A real ``uc.cdp.network.RequestWillBeSent``. ``rtype=None`` omits the type."""
+    payload = {
+        "requestId": request_id,
+        "loaderId": "L1",
+        "documentURL": url,
+        "request": {
+            "url": url,
+            "method": method,
+            "headers": {},
+            "initialPriority": "High",
+            "referrerPolicy": "no-referrer",
+        },
+        "timestamp": 1.0,
+        "wallTime": 1.0,
+        "initiator": {"type": "other"},
+        "redirectHasExtraInfo": False,
+    }
+    if rtype is not None:
+        payload["type"] = rtype
+    return uc.cdp.network.RequestWillBeSent.from_json(payload)
+
+
+def _cdp_response_event(request_id, url, rtype="Document", status=200):
+    """A real ``uc.cdp.network.ResponseReceived``."""
+    return uc.cdp.network.ResponseReceived.from_json(
+        {
+            "requestId": request_id,
+            "loaderId": "L1",
+            "timestamp": 1.0,
+            "type": rtype,
+            "response": {
+                "url": url,
+                "status": status,
+                "statusText": "OK",
+                "headers": {},
+                "mimeType": "text/html",
+                "charset": "utf-8",
+                "connectionReused": False,
+                "connectionId": 1.0,
+                "encodedDataLength": 10.0,
+                "securityState": "secure",
+            },
+            "hasExtraInfo": False,
+        }
+    )
 
 
 class TestCaptureFilters:
@@ -428,3 +496,157 @@ class TestCaptureOptIn:
         assert tab.send_count == 1
         assert any("boom" in str(a) for a in calls), "expected M10a-7b debug log"
         assert (await ni.get_response("r1")).body is None  # metadata still stored
+
+
+class TestResourceTypeCapture:
+    """F-803: every captured row carries the CDP resource type.
+
+    Released 2.0.0 read ``event.type`` while nodriver's generated dataclass
+    names the field ``type_``, so the probe was permanently False, every row
+    stored ``resource_type=None``, and ``filter_type`` could never match
+    anything. These drive REAL ``from_json``-built CDP events.
+    """
+
+    async def test_real_cdp_event_populates_resource_type(self):
+        ni = NetworkInterceptor()
+        await ni._on_request(_cdp_request_event("r1", "https://x/", "Document"), "i1")
+        assert ni._requests["r1"].resource_type == "Document"  # not None
+
+    async def test_lowercase_filter_type_matches_cdp_casing(self):
+        ni = NetworkInterceptor()
+        await ni._on_request(_cdp_request_event("r1", "https://x/", "Document"), "i1")
+        await ni._on_request(_cdp_request_event("r2", "https://x/a.js", "Script"), "i1")
+        rows = await ni.list_requests("i1", filter_type="document")
+        assert [r.request_id for r in rows] == ["r1"]
+
+    async def test_lowercase_search_resource_type_matches_cdp_casing(self):
+        ni = NetworkInterceptor()
+        await ni._on_request(_cdp_request_event("r1", "https://x/", "Document"), "i1")
+        result = await ni.search_requests("i1", resource_type="document")
+        assert [r["request_id"] for r in result["results"]] == ["r1"]
+        assert result["results"][0]["resource_type"] == "Document"
+
+    async def test_missing_type_is_backfilled_from_the_response_event(self):
+        # RequestWillBeSent.type_ is OPTIONAL (absent on some redirects and
+        # preflights); ResponseReceived.type_ is not, so it closes the gap.
+        ni = NetworkInterceptor()
+        await ni._on_request(
+            _cdp_request_event("r1", "https://x/api", rtype=None), "i1"
+        )
+        assert ni._requests["r1"].resource_type is None
+        await ni._on_response(_cdp_response_event("r1", "https://x/api", "XHR"), "i1")
+        assert ni._requests["r1"].resource_type == "XHR"
+
+    async def test_backfill_does_not_clobber_an_existing_type(self):
+        ni = NetworkInterceptor()
+        await ni._on_request(_cdp_request_event("r1", "https://x/", "Document"), "i1")
+        await ni._on_response(_cdp_response_event("r1", "https://x/", "Other"), "i1")
+        assert ni._requests["r1"].resource_type == "Document"
+
+    def test_resource_type_of_reads_both_spellings_and_bare_strings(self):
+        assert resource_type_of(_cdp_request_event("r1", "https://x/", "Image")) == (
+            "Image"
+        )
+        assert resource_type_of(_FakeReqEvent("r1", None, "XHR")) == "XHR"
+        assert resource_type_of(type("E", (), {"type": "Fetch"})()) == "Fetch"
+        assert resource_type_of(type("E", (), {})()) is None
+
+
+class TestInternalUrlExclusion:
+    """F-803: Chrome's own traffic is not the page's traffic.
+
+    A live 2.0.0 capture of one page load returned 30 rows, 24 of them
+    ``chrome://new-tab-page/*``. Non-web schemes are dropped at capture time
+    unless explicitly opted back in.
+    """
+
+    def test_scheme_predicate(self):
+        for url in (
+            "chrome://new-tab-page/",
+            "CHROME://New-Tab-Page/",  # case-insensitive
+            "chrome-extension://abc/background.js",
+            "chrome-error://chromewebdata/",
+            "chrome-untrusted://foo",
+            "chrome-search://local-ntp",
+            "devtools://devtools/bundled/inspector.html",
+            "about:blank",
+        ):
+            assert is_internal_url(url) is True, url
+        for url in (
+            "https://example.com/",
+            "http://127.0.0.1:8000/network.html",
+            "file:///tmp/page.html",
+            "data:text/html,hi",
+            "blob:https://example.com/1234",
+            "https://example.com/chrome://not-a-scheme",
+            None,
+            "",
+            object(),  # a non-str must never cause traffic to be DROPPED
+        ):
+            assert is_internal_url(url) is False, url
+
+    async def test_internal_requests_are_dropped_by_default(self):
+        ni = NetworkInterceptor()
+        await ni._on_request(
+            _cdp_request_event("r1", "chrome://new-tab-page/", "Document"), "i1"
+        )
+        await ni._on_request(_cdp_request_event("r2", "about:blank", "Document"), "i1")
+        await ni._on_request(
+            _cdp_request_event("r3", "https://example.com/", "Document"), "i1"
+        )
+        rows = await ni.list_requests("i1")
+        assert [r.url for r in rows] == ["https://example.com/"]
+
+    async def test_internal_responses_are_dropped_by_default(self):
+        ni = NetworkInterceptor()
+        await ni._on_response(
+            _cdp_response_event("r1", "chrome://new-tab-page/"), "i1", None
+        )
+        assert await ni.get_response("r1") is None
+
+    async def test_per_instance_opt_in_captures_internal_traffic(self):
+        ni = NetworkInterceptor()
+        await ni.set_capture_filters("i1", capture_internal_urls=True)
+        await ni._on_request(
+            _cdp_request_event("r1", "chrome://new-tab-page/", "Document"), "i1"
+        )
+        assert [r.url for r in await ni.list_requests("i1")] == [
+            "chrome://new-tab-page/"
+        ]
+
+    async def test_global_env_opt_in_captures_internal_traffic(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_CAPTURE_INTERNAL_URLS", "1")
+        ni = NetworkInterceptor()
+        await ni._on_request(
+            _cdp_request_event("r1", "chrome://new-tab-page/", "Document"), "i1"
+        )
+        assert len(await ni.list_requests("i1")) == 1
+
+    async def test_per_instance_off_overrides_global_on(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NETWORK_CAPTURE_INTERNAL_URLS", "1")
+        ni = NetworkInterceptor()
+        await ni.set_capture_filters("i1", capture_internal_urls=False)
+        await ni._on_request(
+            _cdp_request_event("r1", "chrome://new-tab-page/", "Document"), "i1"
+        )
+        assert await ni.list_requests("i1") == []
+
+    async def test_get_capture_filters_reports_resolved_flag(self):
+        ni = NetworkInterceptor()
+        assert (await ni.get_capture_filters("i1"))["capture_internal_urls"] is False
+        await ni.set_capture_filters("i1", capture_internal_urls=True)
+        assert (await ni.get_capture_filters("i1"))["capture_internal_urls"] is True
+
+    async def test_opt_in_merges_with_existing_filter_entry(self):
+        # One filter vocabulary, not a parallel mechanism: the new key merges
+        # into the same per-instance entry as include/exclude/capture_bodies.
+        ni = NetworkInterceptor()
+        await ni.set_capture_filters(
+            "i1", include_types=["XHR"], exclude_types=["Image"], capture_bodies=True
+        )
+        await ni.set_capture_filters("i1", capture_internal_urls=True)
+        filters = await ni.get_capture_filters("i1")
+        assert filters["include"] == ["XHR"]
+        assert filters["exclude"] == ["Image"]
+        assert filters["capture_bodies"] is True
+        assert filters["capture_internal_urls"] is True

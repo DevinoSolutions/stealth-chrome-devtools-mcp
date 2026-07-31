@@ -15,6 +15,58 @@ from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.models import NetworkRequest, NetworkResponse
 from stealth_chrome_devtools_mcp.settings import get_settings
 
+# URL schemes Chrome uses for its OWN traffic, not the page's (F-803). A fresh
+# launch emits dozens of chrome://new-tab-page/* requests before the first
+# navigation, so capturing them buries the page's real requests. Matched as a
+# case-insensitive prefix on the raw URL — `about:` and friends have no `//`
+# authority, so a prefix test is the correct shape here, not urlsplit().
+INTERNAL_URL_SCHEMES: tuple[str, ...] = (
+    "chrome:",
+    "chrome-error:",
+    "chrome-extension:",
+    "chrome-native:",
+    "chrome-search:",
+    "chrome-untrusted:",
+    "devtools:",
+    "about:",
+)
+
+
+def is_internal_url(url: str | None) -> bool:
+    """True when ``url`` is browser-internal traffic rather than page traffic.
+
+    The one home for the F-803 scheme test; both capture handlers call it.
+    Anything that is not a non-empty ``str`` is not an internal URL — a capture
+    handler must never DROP traffic because a URL arrived in an odd shape.
+    """
+    if not url or not isinstance(url, str):
+        return False
+    lowered = url.lower()
+    return any(lowered.startswith(scheme) for scheme in INTERNAL_URL_SCHEMES)
+
+
+def resource_type_of(event) -> str | None:
+    """Read the CDP resource type off a Network event as a plain string.
+
+    THE one home for this read (F-803). nodriver's generated CDP dataclasses
+    name the field ``type_`` — ``type`` is a builtin — so the pre-fix
+    ``hasattr(event, "type")`` probe was always False and every captured row
+    carried ``resource_type=None``, which in turn made ``filter_type`` match
+    nothing. Both spellings are accepted so neither a nodriver rename nor a
+    hand-built event double can silently reintroduce the null.
+
+    Returns the CDP-cased value (``"Document"``, ``"XHR"``, ...) or None when
+    the event carries no type (``RequestWillBeSent.type_`` is optional).
+    """
+    raw = getattr(event, "type_", None)
+    if raw is None:
+        raw = getattr(event, "type", None)
+    if raw is None:
+        return None
+    # ResourceType is an enum.Enum in nodriver; tolerate a bare string too.
+    value = getattr(raw, "value", raw)
+    return str(value) if value is not None else None
+
 
 class NetworkInterceptor:
     """Intercepts and manages network traffic for browser instances."""
@@ -125,7 +177,12 @@ class NetworkInterceptor:
         try:
             request_id = event.request_id
             request = event.request
-            resource_type = event.type.value if hasattr(event, "type") else None
+            resource_type = resource_type_of(event)
+
+            if not await self._capture_internal_urls(instance_id) and is_internal_url(
+                request.url
+            ):
+                return
 
             async with self._lock:
                 filters = self._instance_filters.get(instance_id, {})
@@ -184,7 +241,18 @@ class NetworkInterceptor:
             request_id = event.request_id
             response = event.response
 
+            if not await self._capture_internal_urls(instance_id) and is_internal_url(
+                getattr(response, "url", None)
+            ):
+                return
+
+            # Backfill the request's resource type from the response event
+            # (F-803): RequestWillBeSent.type_ is optional and is absent for
+            # some redirects/preflights, while ResponseReceived.type_ is not.
             async with self._lock:
+                stored_request = self._requests.get(request_id)
+                if stored_request is not None and not stored_request.resource_type:
+                    stored_request.resource_type = resource_type_of(event)
                 capture_bodies = self._instance_filters.get(instance_id, {}).get(
                     "capture_bodies"
                 )
@@ -341,12 +409,29 @@ class NetworkInterceptor:
                 f"count cap {max_count}",
             )
 
+    async def _capture_internal_urls(self, instance_id: str) -> bool:
+        """Resolve whether browser-internal URLs are captured for an instance.
+
+        Same resolution order as ``capture_bodies``: the per-instance filter when
+        set, else the ``STEALTH_MCP_NETWORK_CAPTURE_INTERNAL_URLS`` default
+        (False — exclude). Takes ``self._lock`` itself, so callers must NOT hold
+        it.
+        """
+        async with self._lock:
+            value = self._instance_filters.get(instance_id, {}).get(
+                "capture_internal_urls"
+            )
+        if value is None:
+            value = get_settings().network_capture_internal_urls
+        return bool(value)
+
     async def set_capture_filters(
         self,
         instance_id: str,
         include_types: list[str] | None = None,
         exclude_types: list[str] | None = None,
         capture_bodies: bool | None = None,
+        capture_internal_urls: bool | None = None,
     ):
         """
         Set resource type filters for network capture.
@@ -357,6 +442,10 @@ class NetworkInterceptor:
         exclude_types: Optional[List[str]] - Exclude these types from capture.
         capture_bodies: Optional[bool] - Enable/disable response-body capture for
         this instance (overrides the STEALTH_MCP_NETWORK_CAPTURE_BODIES default).
+        capture_internal_urls: Optional[bool] - Capture browser-internal traffic
+        (chrome://, chrome-extension://, devtools://, about:) for this instance
+        (overrides the STEALTH_MCP_NETWORK_CAPTURE_INTERNAL_URLS default, which
+        excludes it).
 
         Each argument is merged into the existing entry; passing None leaves that
         field unchanged (a capture_bodies-only update keeps include/exclude).
@@ -371,6 +460,8 @@ class NetworkInterceptor:
                 entry["exclude"] = exclude_types
             if capture_bodies is not None:
                 entry["capture_bodies"] = capture_bodies
+            if capture_internal_urls is not None:
+                entry["capture_internal_urls"] = capture_internal_urls
 
     async def get_capture_filters(self, instance_id: str) -> dict[str, Any]:
         """
@@ -378,7 +469,8 @@ class NetworkInterceptor:
 
         instance_id: str - The browser instance identifier.
         Returns: Dict[str, Any] - include/exclude lists, the resolved
-        capture_bodies flag, and body-store byte usage vs the configured caps.
+        capture_bodies and capture_internal_urls flags, and body-store byte usage
+        vs the configured caps.
         """
         async with self._lock:
             entry = self._instance_filters.get(instance_id, {})
@@ -386,10 +478,14 @@ class NetworkInterceptor:
             capture_bodies = entry.get("capture_bodies")
             if capture_bodies is None:
                 capture_bodies = settings.network_capture_bodies
+            capture_internal_urls = entry.get("capture_internal_urls")
+            if capture_internal_urls is None:
+                capture_internal_urls = settings.network_capture_internal_urls
             return {
                 "include": entry.get("include", []),
                 "exclude": entry.get("exclude", []),
                 "capture_bodies": capture_bodies,
+                "capture_internal_urls": capture_internal_urls,
                 "body_store_bytes": self._body_bytes,
                 "body_store_max_bytes": settings.network_body_store_max_bytes,
                 "body_max_bytes": settings.network_body_max_bytes,

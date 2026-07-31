@@ -79,6 +79,14 @@ class Settings(BaseSettings):
     network_request_max_count: int = Field(10_000, ge=0)
     network_post_data_max_bytes: int = Field(5 * 1024 * 1024, ge=0)
 
+    # -- Browser-internal traffic (F-803) ------------------------------------
+    # Chrome emits its own non-web traffic on every launch (the new-tab page,
+    # extensions, devtools, error pages). Capturing it drowned the real page
+    # requests 24-to-1 in a live 2.0.0 measurement, so it is EXCLUDED by
+    # default; flip this on (or pass capture_internal_urls=True to
+    # set_network_capture_filters for one instance) to debug the browser itself.
+    network_capture_internal_urls: bool = False
+
     # -- Legacy unprefixed config (names preserved verbatim via alias) -------
     # 0 = idle reaping disabled (never auto-close): the correct default for a
     # persistent server. The old server.py forced BROWSER_IDLE_TIMEOUT=0 via an
