@@ -349,8 +349,11 @@ async def spawn_browser(
     Args:
         headless (bool): Run in headless mode.
         user_agent (Optional[str]): Custom user agent string.
-        viewport_width (int): Viewport width in pixels.
-        viewport_height (int): Viewport height in pixels.
+        viewport_width (int): Requested browser WINDOW width in pixels (outer, not
+            the CSS viewport). Best-effort: a headed window is clamped to the
+            desktop work area, so a request larger than the screen lands smaller.
+        viewport_height (int): Requested browser WINDOW height in pixels, same
+            best-effort clamping as viewport_width.
         proxy (Optional[str]): Proxy server URL.
         browser_args (List[str]): Additional browser launch args.
         timezone_id (Optional[str]): IANA timezone ID applied via CDP timezone override.
@@ -374,7 +377,11 @@ async def spawn_browser(
     live-refetches a body on demand regardless of this setting.
 
     Returns:
-        Dict[str, Any]: Instance information including instance_id.
+        Dict[str, Any]: Instance information including instance_id. ``viewport`` is
+        the window size Chrome ACTUALLY produced (measured post-launch, F-804), not
+        an echo of the request; ``spawn_diagnostics["window_size"]`` carries
+        ``requested``/``actual``/``inner_viewport``/``clamped`` so a size the OS
+        overrode is visible rather than silent.
     """
     try:
         from stealth_chrome_devtools_mcp.embedded.platform_utils import (
