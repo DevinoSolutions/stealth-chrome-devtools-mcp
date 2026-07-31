@@ -62,8 +62,9 @@ not, and each of them was found by asking a question only a wire lane can ask:
   happily, but a call issued behind a *parked* operation on the same instance
   does not queue — it times out and blames a crash. MQ-140's reversed-completion
   node is cross-instance for exactly this reason, stated rather than dodged.
-* **A thrown script is reported as a success** (F-795), found incidentally when
-  this module's first probe script used an illegal ``return``.
+* **A thrown script was reported as a success** (F-795), found incidentally when
+  this module's first probe script used an illegal ``return``. FIXED in 2.0.1:
+  the eval path now raises, and the node that found it asserts the failure.
 
 MQ binding. The ids below are bound to runtime evidence by the ``--mq`` flags on
 the ``transport`` cell's ``release_evidence.py emit`` step in
@@ -91,10 +92,12 @@ typed outcome and instance recovery (F-791, F-794) and malformed input's
 protocol reply (F-792). All of these are characterization-pinned and routed,
 never fixed: ``src/`` edits are a plan_RELEASE non-goal (§1.2) and a
 characterization can never satisfy a step (§0.2). Their ids are NOT bound to any
-``--mq`` flag. F-793 and F-795 own no step; they narrow MQ-139/MQ-140 and are
-pinned inside them. F-790 is the one exception to "never fixed" — it was fixed
-for 2.0.1 (the unbounded ``roots/list`` await), and its node here was flipped
-from a characterization to the regression oracle in that same change.
+``--mq`` flag. F-790, F-793 and F-795 own no step; they narrow MQ-139/MQ-140 and
+are pinned inside them. Two of those three have since been FIXED for 2.0.1 —
+F-790 (the unbounded ``roots/list`` await; its node here was flipped from a
+characterization to the regression oracle in that same change) and F-795 (its
+node asserts the fix rather than pinning the defect). F-793 remains
+characterization-pinned.
 
 HTTP parity, stated exactly: ``RELEASE_CONTRACT.md`` puts HTTP under
 *"HTTP (described, not qualified)"*. plan_RELEASE §2.13 asks for HTTP parity
@@ -186,9 +189,9 @@ def _echo(value: str) -> str:
     """A JS **expression** that evaluates to ``value``.
 
     ``execute_script`` evaluates an expression, not a function body: a
-    ``return`` statement raises ``SyntaxError: Illegal return statement`` — and
-    the tool reports that as ``success: true`` (F-795), so getting this wrong is
-    silent. Every script in this module goes through here.
+    ``return`` statement raises ``SyntaxError: Illegal return statement``. That
+    used to be reported as ``success: true`` (F-795, now fixed), which made
+    getting it wrong silent. Every script in this module goes through here.
     """
     return json.dumps(value)
 
@@ -562,39 +565,48 @@ async def test_two_named_instances_stay_isolated_under_interleaved_calls(
     assert not ({alpha, beta} & remaining), "closed instances still listed"
 
 
-@pytest.mark.characterization
-async def test_execute_script_reports_success_for_a_script_that_threw(
+async def test_execute_script_reports_failure_for_a_script_that_threw(
     wire, named_instance, fixture_app_server
 ):
-    """F-795: a script that raises comes back as ``success: true``.
+    """F-795 (FIXED): a script that raises is an ERROR on the wire.
 
     Found incidentally: the first draft of MQ-139 above used ``return 'x';``,
     which is a ``SyntaxError: Illegal return statement`` for an expression
-    evaluator — and the tool reported it as a success whose ``result`` happened
-    to be an exception record. Nothing in the envelope says the script failed:
-    ``success`` is ``true``, ``error`` is ``null``, ``isError`` is false. A
-    caller that checks the documented success flag (as ``e2e_helpers.eval_js``
-    does) reads a thrown script as a working one.
+    evaluator — and the tool used to report it as a success whose ``result``
+    happened to be an exception record, with ``success: true``, ``error: null``
+    and ``isError`` false.
 
-    Routed here rather than fixed, and pinned in the direction that makes a fix
-    red: the moment a throwing script reports failure, this node must be
-    updated deliberately.
+    ``nodriver``'s ``Tab.evaluate`` RETURNS the CDP ``ExceptionDetails`` in the
+    value's place instead of raising, so the fix is one guard
+    (``tool_errors._require_js_value``) on the eval path. This node is the wire
+    half of that fix: what a caller sees is ``isError: true`` carrying the
+    exception text — and the SAME tab still runs a valid script afterwards, so
+    the failure is reported without wedging anything.
     """
     await _navigate(wire, named_instance, f"{fixture_app_server}/index.html")
 
-    frame = await _call(
-        wire,
+    request_id = await wire.call_tool(
         "execute_script",
         {"instance_id": named_instance, "script": "return 'illegal-here';"},
     )
-    payload = _tool_payload(frame)
-    assert payload["success"] is True, (
-        "a throwing script now reports failure — F-795 is closed; update this pin"
+    frame = await wire.response(request_id, OUTER_BOUND)
+    result = _tool_result(frame)
+    assert result.get("isError") is True, (
+        f"a throwing script still reports success — F-795 is open again: {result}"
     )
-    assert payload["error"] is None
-    exception = payload["result"]["exception"]
-    assert exception["class_name"] == "SyntaxError"
-    assert exception["description"] == "SyntaxError: Illegal return statement"
+    text = result["content"][0]["text"]
+    assert text.startswith(
+        "Error calling tool 'execute_script': Script raised an exception: "
+    ), text
+    assert "SyntaxError: Illegal return statement" in text, text
+
+    # The tab is not wedged by its own script's exception.
+    ok = await _call(
+        wire,
+        "execute_script",
+        {"instance_id": named_instance, "script": _echo("after-the-throw")},
+    )
+    assert _tool_payload(ok)["result"] == "after-the-throw"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

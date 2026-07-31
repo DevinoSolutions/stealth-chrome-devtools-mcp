@@ -17,6 +17,8 @@ The remaining operation-specific handlers (G2-G5) are C3b; the deliberate
 KEEP contracts (G6/G7) are C3b guards. This file grows in C3b.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from fakes import FakeBrowserManager, FakeTab
@@ -25,6 +27,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     InstanceNotFoundError,
     ToolError,
     _require_browser,
+    _require_js_value,
     _require_tab,
 )
 
@@ -279,3 +282,94 @@ class TestC3bAddendum:
         )
         with pytest.raises(ToolError, match=r"At least one of"):
             await call_tool(srv, "set_cookie", instance_id="i1", name="n", value="v")
+
+
+#: The payload ``BrowserManager.navigate`` builds when Chrome commits its
+#: network-error page: every Python-side step succeeded, so ``success`` is True.
+ERROR_PAGE_RESULT = {
+    "url": "chrome-error://chromewebdata/",
+    "title": "",
+    "success": True,
+}
+
+
+class TestTruthfulSuccessGuards:
+    """F-802 / F-795: an operation that failed **at the browser** must not be
+    reported as a success.
+
+    Both guards live in this module (the one guard home) and are pinned here at
+    the hermetic tier: the *decision* is pure, so it is provable without Chrome.
+    What only a real browser can prove — that Chrome really commits an error
+    page for an unresolvable host, and that ``Tab.evaluate`` really returns the
+    exception record — is pinned in
+    ``tests/test_truthful_success_flags.py`` and in W13's wire node.
+    """
+
+    async def test_navigate_onto_a_chrome_error_page_raises(
+        self, call_tool, patched_server
+    ):
+        srv = patched_server(
+            browser_manager=FakeBrowserManager(navigate_result=dict(ERROR_PAGE_RESULT))
+        )
+        with pytest.raises(ToolError, match=r"chrome-error://chromewebdata/"):
+            await call_tool(
+                srv, "navigate", instance_id="i1", url="https://nope.invalid/"
+            )
+
+    async def test_navigate_error_names_the_requested_url_too(
+        self, call_tool, patched_server
+    ):
+        # "Which navigation failed" is half of what a caller needs to act.
+        srv = patched_server(
+            browser_manager=FakeBrowserManager(navigate_result=dict(ERROR_PAGE_RESULT))
+        )
+        with pytest.raises(ToolError, match=r"https://nope\.invalid/"):
+            await call_tool(
+                srv, "navigate", instance_id="i1", url="https://nope.invalid/"
+            )
+
+    @pytest.mark.parametrize(
+        "final_url",
+        [
+            "https://fake.test/missing",  # a 404 LOADED
+            "https://fake.test/redirect/final",  # a redirect's final URL
+            "data:text/html,<h1>x</h1>",
+            "about:blank",
+        ],
+    )
+    async def test_navigate_onto_a_loaded_page_is_returned_verbatim(
+        self, call_tool, patched_server, final_url
+    ):
+        payload = {"url": final_url, "title": "t", "success": True}
+        srv = patched_server(
+            browser_manager=FakeBrowserManager(navigate_result=dict(payload))
+        )
+        result = await call_tool(
+            srv, "navigate", instance_id="i1", url="https://fake.test/requested"
+        )
+        assert result == payload
+
+    @pytest.mark.parametrize(
+        "value",
+        ["a string", 42, None, {"text": "a dict has no attributes"}, [1, 2, 3]],
+    )
+    def test_require_js_value_passes_ordinary_values_through(self, value):
+        assert _require_js_value(value) == value
+
+    def test_require_js_value_raises_on_an_exception_details_record(self):
+        details = SimpleNamespace(
+            exception_id=1,
+            text="Uncaught",
+            exception=SimpleNamespace(
+                class_name="SyntaxError",
+                description="SyntaxError: Illegal return statement",
+            ),
+        )
+        with pytest.raises(ToolError, match=r"SyntaxError: Illegal return statement"):
+            _require_js_value(details)
+
+    def test_require_js_value_falls_back_to_the_top_level_text(self):
+        # Not every ExceptionDetails carries a described `exception` object.
+        details = SimpleNamespace(exception_id=1, text="Uncaught", exception=None)
+        with pytest.raises(ToolError, match=r"Uncaught"):
+            _require_js_value(details)

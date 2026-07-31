@@ -1,6 +1,27 @@
 # Changelog
 
-## 2.0.0
+## Unreleased (2.0.1)
+
+### Fixed — two tools no longer report success for an operation that failed
+
+Both defects had the same shape: the operation failed *at the browser* while every
+Python-side step around it succeeded, so the tool assembled a payload whose `success`
+said it worked.
+
+- **`navigate` raises instead of reporting a Chrome error page as a success (F-802).**
+  Navigating to a host that does not resolve (or refuses the connection, or fails the
+  TLS handshake) used to return `{"url": "chrome-error://chromewebdata/", "success":
+  true}`. It now raises a `ToolError` naming the requested URL and the error page. A
+  page that merely answered 404/500, a redirect to a different final URL, `about:blank`
+  and `data:` URLs are **not** failures and are unaffected.
+- **`execute_script` raises when the script throws (F-795).** `nodriver`'s
+  `Tab.evaluate` returns the CDP `ExceptionDetails` record *in the value's place*
+  instead of raising, so a throwing script came back as `{"success": true, "error":
+  null}` with the exception nested inside `result`. It now raises a `ToolError`
+  carrying the exception text. The success envelope is unchanged.
+
+Callers that branched on `result["success"]` will now see a raised tool error where they
+previously saw a success they could not act on.
 
 The first release since the foundational audit. It carries ~85 commits since 1.2.0 and
 fixes four defects that were present in every prior release and invisible to the old

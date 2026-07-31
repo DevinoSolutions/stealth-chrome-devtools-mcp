@@ -15,7 +15,10 @@ from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     resolve_elements,
 )
 from stealth_chrome_devtools_mcp.embedded.models import ElementInfo
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_errors import (
+    ToolError,
+    _require_js_value,
+)
 
 
 class DOMHandler:
@@ -694,10 +697,13 @@ class DOMHandler:
             else:
                 result = await tab.evaluate(script)
 
-            return result
-
         except Exception as e:
             raise Exception(f"Failed to execute script: {e!s}")
+
+        # Outside the except on purpose: a script that THREW is a failure of the
+        # script, not of the CDP call, so it must not be re-wrapped in the
+        # "Failed to execute script" (operational) message. F-795.
+        return _require_js_value(result)
 
     @staticmethod
     async def get_page_content(

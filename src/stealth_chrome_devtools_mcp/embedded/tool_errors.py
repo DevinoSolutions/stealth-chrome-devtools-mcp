@@ -17,6 +17,11 @@ way). The former dict/json instance-not-found shapes are converted to raises.
   ``server`` (that would re-arm the runpy double-registration hazard the
   package is built to avoid — see ``embedded/__init__.py``). This keeps
   ``tool_errors`` a dependency-free leaf and the guards trivially hermetic.
+* :func:`_require_js_value` / :func:`_require_navigation_ok` — the two
+  *truthfulness* guards (F-795, F-802). Both turn an operation that FAILED at
+  the browser into a raised :class:`ToolError` instead of a payload whose
+  ``success`` says it worked. They are duck-typed rather than typed against the
+  nodriver CDP classes, which is what keeps this module a dependency-free leaf.
 """
 
 from __future__ import annotations
@@ -60,3 +65,53 @@ async def _require_browser(
     if not browser:
         raise InstanceNotFoundError(f"Instance not found: {instance_id}")
     return browser
+
+
+#: Every Chrome navigation-failure page (DNS miss, refused connection, TLS
+#: failure, …) commits to a URL under this scheme. A page that merely answered
+#: with an HTTP error status (404/500) does NOT — it keeps its own URL.
+CHROME_ERROR_SCHEME = "chrome-error://"
+
+
+def _require_js_value(value: object) -> object:
+    """Return an evaluated script's value, or raise if the page threw (F-795).
+
+    ``nodriver``'s ``Tab.evaluate`` does not raise when the evaluated script
+    throws: it RETURNS the CDP ``Runtime.ExceptionDetails`` record *in the
+    value's place*. A caller that trusts the value therefore reports a thrown
+    script as a working one. This is the ONE place that converts that record
+    into the error convention; every eval path that wants the truth calls it
+    rather than growing its own ``hasattr`` check.
+
+    Duck-typed on ``exception_id`` + ``text`` (the two fields every
+    ``ExceptionDetails`` carries and no ordinary JS value does) so this module
+    keeps importing nothing.
+    """
+    if not (hasattr(value, "exception_id") and hasattr(value, "text")):
+        return value
+    exception = getattr(value, "exception", None)
+    detail = getattr(exception, "description", None) or getattr(value, "text", None)
+    raise ToolError(f"Script raised an exception: {detail}")
+
+
+def _require_navigation_ok(url: str, result: object) -> object:
+    """Return a navigation result, or raise if Chrome landed on an error page
+    (F-802).
+
+    A navigation that Chrome could not perform — the host does not resolve, the
+    connection is refused, the TLS handshake fails — still *completes*: Chrome
+    commits an error page and the tool's own bookkeeping succeeds, so the
+    payload used to say ``success: true`` with a ``chrome-error://`` URL.
+
+    Only a Chrome-level navigation failure is one: a page answering 404/500, a
+    redirect to a different final URL, ``about:blank`` and ``data:`` URLs all
+    keep their own scheme and pass through untouched.
+    """
+    final_url = result.get("url") if isinstance(result, dict) else None
+    if isinstance(final_url, str) and final_url.startswith(CHROME_ERROR_SCHEME):
+        raise ToolError(
+            f"Navigation to {url} failed: Chrome loaded an error page "
+            f"({final_url}). The host may not resolve, the connection may have "
+            "been refused, or the TLS handshake may have failed."
+        )
+    return result

@@ -50,6 +50,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     InstanceNotFoundError,
     ToolError,
     _require_browser,
+    _require_navigation_ok,
     _require_tab,
 )
 from stealth_chrome_devtools_mcp.embedded.tool_registry import (
@@ -614,10 +615,15 @@ async def navigate(
 
     Returns:
         Dict[str, Any]: Navigation result with final URL and title.
+
+    Raises:
+        ToolError: the navigation failed at the browser — Chrome committed an
+            error page (unresolvable host, refused connection, TLS failure).
+            An HTTP error status (404/500) is a loaded page, not a failure.
     """
     timeout = _clamp_timeout(timeout, default=30_000)
     outer_timeout = max(timeout / 1000 + 5, CDP_OPERATION_TIMEOUT)
-    return await _with_cdp_timeout(
+    result = await _with_cdp_timeout(
         browser_manager.navigate(
             instance_id=instance_id,
             url=url,
@@ -628,6 +634,10 @@ async def navigate(
         timeout=outer_timeout,
         instance_id=instance_id,
     )
+    # The instance's own bookkeeping is already complete above, so raising here
+    # reports the failure without leaving the tab or the state table behind
+    # (F-802).
+    return _require_navigation_ok(url, result)
 
 
 @section_tool("browser-management")
