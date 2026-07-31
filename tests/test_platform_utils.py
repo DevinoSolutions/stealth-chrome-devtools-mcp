@@ -8,6 +8,7 @@ stealth-blocked. Sandbox detection is monkeypatched so the tests are
 deterministic across CI environments.
 """
 
+import os
 import subprocess
 
 import pytest
@@ -19,6 +20,9 @@ from stealth_chrome_devtools_mcp.embedded.platform_utils import (
     get_platform_info,
     get_required_sandbox_args,
     merge_browser_args,
+    reconcile_launched_browser_version,
+    record_launched_browser_major_version,
+    reset_browser_version_memo,
     resolve_browser_major_version,
 )
 
@@ -130,12 +134,12 @@ _REDUCED_UA_CELLS = [
 
 
 @pytest.fixture(autouse=True)
-def _clear_version_cache():
-    """``resolve_browser_major_version`` is lru_cached (it runs on the spawn
-    path); clear it around every test so a fake never bleeds between them."""
-    resolve_browser_major_version.cache_clear()
+def _clear_version_memo():
+    """The browser-version probe is memoized (it runs on the spawn path); clear
+    the memo around every test so a fake never bleeds between them."""
+    reset_browser_version_memo()
     yield
-    resolve_browser_major_version.cache_clear()
+    reset_browser_version_memo()
 
 
 class TestReducedUserAgent:
@@ -246,3 +250,293 @@ class TestDefaultUserAgentInMergeBrowserArgs:
         monkeypatch.setattr(platform_utils, "check_browser_executable", lambda: None)
         combined, _ = merge_browser_args(["--lang=en-US"])
         assert combined == ["--lang=en-US"]
+
+
+# ---------------------------------------------------------------------------
+# F-806 — the masked User-Agent must describe the browser that ACTUALLY runs.
+#
+# The mask is built from a version probe that is memoized because it sits on the
+# spawn path. Memoized on the executable PATH alone, that probe is a snapshot
+# taken once per process: Chrome auto-updates in place, so a long-lived backend
+# kept advertising `Chrome/<old>` while the browser it launched — and the
+# `sec-ch-ua` client hints Chrome derives from its real version — said `<new>`.
+# A UA that contradicts its own client hints is a SHARPER tell than the honest
+# `HeadlessChrome` token the mask exists to remove, so this is a stealth defect,
+# not a cosmetic one. It turned the 2.0.1 macOS gate red (control 151 vs product
+# 150) with byte-identical product code.
+#
+# Two layers are pinned below:
+#   1. the memo is keyed on the executable's on-disk identity, so an in-place
+#      upgrade expires it (and only a real change costs a fresh subprocess);
+#   2. `Browser.getVersion().product` — measured NOT to be rewritten by
+#      `--user-agent=` — is read back after launch and wins over the probe.
+# ---------------------------------------------------------------------------
+def _install_chrome(root, version: str):
+    """Lay down a Windows-shaped Chrome install: launcher stub + version dir.
+
+    The stub's length tracks the major so an "upgrade" changes the executable's
+    SIZE as well as its mtime — timestamp granularity varies by filesystem, and
+    a freshness test must not depend on it.
+    """
+    exe = root / "chrome.exe"
+    exe.write_bytes(b"x" * (int(version.split(".", maxsplit=1)[0]) * 8))
+    (root / version).mkdir(exist_ok=True)
+    return exe
+
+
+class TestBrowserVersionMemoFreshness:
+    """The memo must expire when the binary on disk changes — and only then."""
+
+    def test_an_in_place_upgrade_expires_the_memo(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+        exe = _install_chrome(tmp_path, "150.0.7871.129")
+        assert resolve_browser_major_version(str(exe)) == "150"
+
+        # Chrome's updater lands a new version directory beside the binary and
+        # rewrites the launcher stub — while THIS process stays alive. That is
+        # the whole F-806 mechanism.
+        _install_chrome(tmp_path, "151.0.7900.1")
+
+        assert resolve_browser_major_version(str(exe)) == "151", (
+            "the memoized version survived an in-place upgrade (F-806)"
+        )
+
+    def test_the_masked_user_agent_follows_the_upgrade(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+        exe = _install_chrome(tmp_path, "150.0.7871.129")
+        assert build_reduced_user_agent(str(exe)).endswith(
+            "Chrome/150.0.0.0 Safari/537.36"
+        )
+
+        _install_chrome(tmp_path, "151.0.7900.1")
+
+        assert build_reduced_user_agent(str(exe)).endswith(
+            "Chrome/151.0.0.0 Safari/537.36"
+        ), "the mask kept advertising a version the browser no longer has (F-806)"
+
+    def test_a_new_version_directory_alone_expires_the_memo(
+        self, monkeypatch, tmp_path
+    ):
+        # The Windows branch reads the version from the sibling directories, and
+        # the updater creates the new one BEFORE it swaps the launcher stub — so
+        # the parent directory's mtime has to participate in the memo key.
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+        exe = tmp_path / "chrome.exe"
+        exe.write_bytes(b"stub")
+        (tmp_path / "150.0.7871.129").mkdir()
+        assert resolve_browser_major_version(str(exe)) == "150"
+
+        (tmp_path / "151.0.7900.1").mkdir()
+        # Bump the directory mtime explicitly: some filesystems keep 1s
+        # granularity, and this test is about the KEY, not about timestamp
+        # resolution.
+        bumped = tmp_path.stat().st_mtime_ns + 5_000_000_000
+        os.utime(tmp_path, ns=(bumped, bumped))
+
+        assert resolve_browser_major_version(str(exe)) == "151"
+
+    def test_an_unchanged_executable_is_never_reprobed(self, monkeypatch, tmp_path):
+        # The memo exists because the probe runs on the spawn path; deleting it
+        # would trade a stealth defect for a per-spawn subprocess. Pin that the
+        # freshness key did NOT cost us the memo.
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Linux")
+        exe = tmp_path / "google-chrome"
+        exe.write_bytes(b"stub")
+        probes = []
+
+        def _run(*_a, **_k):
+            probes.append(1)
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="Google Chrome 150.0.7871.186\n"
+            )
+
+        monkeypatch.setattr(platform_utils.subprocess, "run", _run)
+        assert [resolve_browser_major_version(str(exe)) for _ in range(5)] == [
+            "150"
+        ] * 5
+        assert len(probes) == 1, f"one subprocess per spawn is the regression: {probes}"
+
+    def test_a_changed_executable_is_reprobed(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Linux")
+        exe = tmp_path / "google-chrome"
+        exe.write_bytes(b"stub")
+        outputs = iter(
+            ["Google Chrome 150.0.7871.186\n", "Google Chrome 151.0.7900.1\n"]
+        )
+
+        monkeypatch.setattr(
+            platform_utils.subprocess,
+            "run",
+            lambda *_a, **_k: subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=next(outputs)
+            ),
+        )
+        assert resolve_browser_major_version(str(exe)) == "150"
+        exe.write_bytes(b"stub-after-the-upgrade")
+        assert resolve_browser_major_version(str(exe)) == "151"
+
+    def test_an_unresolvable_probe_is_memoized_too(self, monkeypatch, tmp_path):
+        # A browser whose version cannot be read must not re-pay for a failed
+        # subprocess on every spawn (masking is already disabled for it).
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Linux")
+        exe = tmp_path / "google-chrome"
+        exe.write_bytes(b"stub")
+        probes = []
+
+        def _run(*_a, **_k):
+            probes.append(1)
+            return subprocess.CompletedProcess(args=[], returncode=1, stdout="")
+
+        monkeypatch.setattr(platform_utils.subprocess, "run", _run)
+        assert [resolve_browser_major_version(str(exe)) for _ in range(3)] == [None] * 3
+        assert len(probes) == 1
+
+
+class TestRecordLaunchedBrowserVersion:
+    """``Browser.getVersion().product`` is the post-launch truth, and it wins.
+
+    Measured on Chrome 150.0.7871.186 (Windows, headless): launching with
+    ``--user-agent=...Chrome/1.0.0.0...SKEW-PROBE`` returned
+    ``product: "Chrome/150.0.7871.186"`` with ``userAgent`` carrying the
+    override — so ``product`` is NOT rewritten by the mask and is a usable
+    reading of what is really running.
+    """
+
+    def _armed(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+        return _install_chrome(tmp_path, "150.0.7871.129")
+
+    def test_the_launched_browser_corrects_a_wrong_memo(self, monkeypatch, tmp_path):
+        exe = self._armed(monkeypatch, tmp_path)
+        assert resolve_browser_major_version(str(exe)) == "150"
+
+        assert (
+            record_launched_browser_major_version(str(exe), "Chrome/151.0.7900.1")
+            == "151"
+        )
+
+        # The next spawn masks as the browser that actually ran, not as the probe.
+        assert resolve_browser_major_version(str(exe)) == "151"
+        assert build_reduced_user_agent(str(exe)).endswith(
+            "Chrome/151.0.0.0 Safari/537.36"
+        )
+
+    def test_a_headless_product_string_is_parsed(self, monkeypatch, tmp_path):
+        exe = self._armed(monkeypatch, tmp_path)
+        assert (
+            record_launched_browser_major_version(
+                str(exe), "HeadlessChrome/151.0.7900.1"
+            )
+            == "151"
+        )
+
+    def test_skew_is_logged_not_silently_repaired(self, monkeypatch, tmp_path):
+        exe = self._armed(monkeypatch, tmp_path)
+        resolve_browser_major_version(str(exe))
+        warnings = []
+        monkeypatch.setattr(
+            platform_utils.debug_logger,
+            "log_warning",
+            lambda *args: warnings.append(args),
+        )
+
+        record_launched_browser_major_version(str(exe), "Chrome/151.0.7900.1")
+
+        assert len(warnings) == 1, warnings
+        message = warnings[0][2]
+        assert "150" in message and "151" in message and "F-806" in message
+
+    def test_agreement_is_silent(self, monkeypatch, tmp_path):
+        exe = self._armed(monkeypatch, tmp_path)
+        resolve_browser_major_version(str(exe))
+        warnings = []
+        monkeypatch.setattr(
+            platform_utils.debug_logger,
+            "log_warning",
+            lambda *args: warnings.append(args),
+        )
+
+        record_launched_browser_major_version(str(exe), "Chrome/150.0.7871.129")
+
+        assert warnings == []
+
+    def test_an_unprobed_executable_is_seeded_without_warning(
+        self, monkeypatch, tmp_path
+    ):
+        # A caller-supplied user_agent short-circuits the mask, so the version is
+        # never probed pre-launch. Seeding the memo from the launch is a gain,
+        # not a skew — it must not warn.
+        exe = self._armed(monkeypatch, tmp_path)
+        warnings = []
+        monkeypatch.setattr(
+            platform_utils.debug_logger,
+            "log_warning",
+            lambda *args: warnings.append(args),
+        )
+
+        assert (
+            record_launched_browser_major_version(str(exe), "Chrome/151.0.7900.1")
+            == "151"
+        )
+        assert warnings == []
+        assert resolve_browser_major_version(str(exe)) == "151"
+
+    def test_an_unparseable_product_changes_nothing(self, monkeypatch, tmp_path):
+        exe = self._armed(monkeypatch, tmp_path)
+        assert resolve_browser_major_version(str(exe)) == "150"
+        assert record_launched_browser_major_version(str(exe), "Chrome/dev") is None
+        assert record_launched_browser_major_version(str(exe), None) is None
+        assert resolve_browser_major_version(str(exe)) == "150"
+
+
+class _FakeTab:
+    """Minimal ``tab.send`` seam: returns a canned Browser.getVersion tuple."""
+
+    def __init__(self, version=None, error=None):
+        self._version = version
+        self._error = error
+
+    async def send(self, command):
+        command.close()
+        if self._error is not None:
+            raise self._error
+        return self._version
+
+
+class TestReconcileLaunchedBrowserVersion:
+    async def test_it_reads_product_over_cdp_and_reconciles(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+        exe = _install_chrome(tmp_path, "150.0.7871.129")
+        assert resolve_browser_major_version(str(exe)) == "150"
+
+        tab = _FakeTab(
+            version=(
+                "1.3",
+                "HeadlessChrome/151.0.7900.1",
+                "@abcdef",
+                "Mozilla/5.0 ... Chrome/150.0.0.0 Safari/537.36",
+                "15.1",
+            )
+        )
+        assert await reconcile_launched_browser_version(tab, str(exe)) == "151"
+        assert resolve_browser_major_version(str(exe)) == "151"
+
+    async def test_a_cdp_failure_degrades_to_none(self, monkeypatch, tmp_path):
+        # A spawn must not die because a diagnostic probe did.
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+        exe = _install_chrome(tmp_path, "150.0.7871.129")
+        assert resolve_browser_major_version(str(exe)) == "150"
+
+        tab = _FakeTab(error=ConnectionError("target closed"))
+        assert await reconcile_launched_browser_version(tab, str(exe)) is None
+        assert resolve_browser_major_version(str(exe)) == "150"
+
+    async def test_a_short_version_tuple_is_tolerated(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+        exe = _install_chrome(tmp_path, "150.0.7871.129")
+        assert (
+            await reconcile_launched_browser_version(_FakeTab(version=()), str(exe))
+            is None
+        )

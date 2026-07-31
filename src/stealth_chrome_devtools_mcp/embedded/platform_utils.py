@@ -1,5 +1,7 @@
 """Platform-specific utility functions for browser automation."""
 
+from __future__ import annotations
+
 import ctypes
 import os
 import platform
@@ -7,11 +9,16 @@ import re
 import shutil
 import subprocess
 import sys
-from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from nodriver import cdp
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.settings import get_settings
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from nodriver import Tab
 
 
 def is_running_as_root() -> bool:
@@ -211,14 +218,68 @@ _REDUCED_UA_PLATFORM_TOKEN = {
 _USER_AGENT_ARG_PREFIX = "--user-agent="
 _BROWSER_VERSION_RE = re.compile(r"(\d+)\.\d+\.\d+\.\d+")
 _VERSION_PROBE_TIMEOUT_SECONDS = 10.0
+_VERSION_MEMO_MAX_ENTRIES = 8
+
+# ── The browser-version memo (F-806) ────────────────────────────────────────
+# The mask above is only coherent while the version it was built from is the
+# version that actually launches. The probe is memoized because it runs on the
+# spawn path — but keyed on the executable's on-disk IDENTITY, never on its path
+# alone: Chrome auto-updates IN PLACE, so a path-keyed memo in a long-lived
+# backend keeps advertising the version the machine had when the process started.
+# That is how a masked UA ends up claiming Chrome/150 while the browser (and its
+# `sec-ch-ua` client hints) say 151 — a self-contradicting UA, i.e. exactly the
+# WORSE tell this mask exists to avoid.
+#
+# ``None`` is memoized too: an executable whose version cannot be resolved must
+# not re-pay for a failed subprocess on every spawn.
+_ExecutableIdentity = tuple[int, int, int]
+_BROWSER_VERSION_MEMO: dict[tuple[str, _ExecutableIdentity | None], str | None] = {}
 
 
-@lru_cache(maxsize=8)
-def resolve_browser_major_version(executable: str) -> str | None:
-    """Return the major version of a Chromium-family executable, or ``None``.
+def _executable_identity(executable: str) -> _ExecutableIdentity | None:
+    """The executable's on-disk identity: ``(mtime_ns, size, parent dir mtime_ns)``.
 
-    Cached per executable path: this runs on the spawn path, so an uncached
-    subprocess per spawn would be a real performance regression.
+    Two ``stat`` calls, no subprocess — microseconds, so it can run on every
+    spawn where the version probe itself cannot. The parent directory is part of
+    the identity because that is where the Windows branch reads the version
+    from: an update drops a new version-named directory beside ``chrome.exe``
+    before it swaps the launcher stub, so the directory's mtime moves first. An
+    unstattable executable yields ``None``, which degrades to the old
+    path-only memo rather than failing the spawn.
+    """
+    try:
+        path = Path(executable)
+        exe_stat = path.stat()
+        parent_stat = path.parent.stat()
+    except OSError as error:
+        debug_logger.log_debug("platform_utils", "_executable_identity", str(error))
+        return None
+    return (exe_stat.st_mtime_ns, exe_stat.st_size, parent_stat.st_mtime_ns)
+
+
+def _remember_browser_major_version(
+    key: tuple[str, _ExecutableIdentity | None], major: str | None
+) -> None:
+    """Write *major* into the memo, evicting the oldest entry past the bound."""
+    if (
+        key not in _BROWSER_VERSION_MEMO
+        and len(_BROWSER_VERSION_MEMO) >= _VERSION_MEMO_MAX_ENTRIES
+    ):
+        _BROWSER_VERSION_MEMO.pop(next(iter(_BROWSER_VERSION_MEMO)))
+    _BROWSER_VERSION_MEMO[key] = major
+
+
+def reset_browser_version_memo() -> None:
+    """Forget every memoized browser version.
+
+    THE way to invalidate by hand (tests, and ops after an out-of-band swap).
+    Routine in-place upgrades need no call: the identity key expires itself.
+    """
+    _BROWSER_VERSION_MEMO.clear()
+
+
+def _probe_browser_major_version(executable: str) -> str | None:
+    """Ask the executable on disk what version it is. Uncached — see the memo.
 
     Windows deliberately does NOT shell out — ``chrome.exe --version`` hands the
     argument to an already-running Chrome ("Opening in existing browser
@@ -235,7 +296,7 @@ def resolve_browser_major_version(executable: str) -> str | None:
             ]
         except OSError as error:
             debug_logger.log_debug(
-                "platform_utils", "resolve_browser_major_version", str(error)
+                "platform_utils", "_probe_browser_major_version", str(error)
             )
             return None
         majors = [m.group(1) for m in map(_BROWSER_VERSION_RE.fullmatch, names) if m]
@@ -251,11 +312,89 @@ def resolve_browser_major_version(executable: str) -> str | None:
         )
     except (OSError, subprocess.SubprocessError) as error:
         debug_logger.log_debug(
-            "platform_utils", "resolve_browser_major_version", str(error)
+            "platform_utils", "_probe_browser_major_version", str(error)
         )
         return None
     match = _BROWSER_VERSION_RE.search(completed.stdout or "")
     return match.group(1) if match else None
+
+
+def resolve_browser_major_version(executable: str) -> str | None:
+    """Return the major version of a Chromium-family executable, or ``None``.
+
+    The probe runs on the spawn path, so it is memoized — but on the
+    executable's on-disk identity, so an in-place upgrade expires the memo
+    instead of surviving it (F-806). Cost per spawn is two ``stat`` calls on the
+    hit path and one subprocess only when the binary has actually changed.
+    """
+    key = (executable, _executable_identity(executable))
+    if key in _BROWSER_VERSION_MEMO:
+        return _BROWSER_VERSION_MEMO[key]
+    major = _probe_browser_major_version(executable)
+    _remember_browser_major_version(key, major)
+    return major
+
+
+def record_launched_browser_major_version(
+    executable: str, product: str | None
+) -> str | None:
+    """Reconcile the memo against the browser that ACTUALLY launched (F-806).
+
+    ``Browser.getVersion``'s ``product`` field reports the running binary's own
+    version and is NOT rewritten by ``--user-agent=`` — measured on Chrome 150:
+    launching with ``--user-agent=…Chrome/1.0.0.0…`` still reported
+    ``product: "Chrome/150.0.7871.186"`` while ``userAgent`` carried the
+    override. It is therefore the one authoritative post-launch reading, and the
+    only way to *know* — rather than predict — which browser the mask is
+    describing.
+
+    A disagreement means the pre-launch probe was wrong for this executable: an
+    upgrade that landed between probe and launch, a second install, or a
+    launcher that chose a different binary. Whatever the cause, the launched
+    browser is the truth, so it is written back and every later spawn masks
+    correctly. The disagreement is logged rather than silently repaired: the
+    instance already running kept the flag it launched with, and a UA that
+    contradicts its own ``sec-ch-ua`` is a stealth defect, not a cosmetic one.
+    """
+    match = _BROWSER_VERSION_RE.search(product or "")
+    if not match:
+        return None
+    major = match.group(1)
+    key = (executable, _executable_identity(executable))
+    previous = _BROWSER_VERSION_MEMO.get(key)
+    if previous and previous != major:
+        debug_logger.log_warning(
+            "platform_utils",
+            "record_launched_browser_major_version",
+            f"version skew: the masked User-Agent was built for Chrome/{previous} "
+            f"but {executable!r} launched as {product!r}, so this instance "
+            f"advertises {previous} while running {major} — later spawns will use "
+            f"{major} (F-806)",
+        )
+    _remember_browser_major_version(key, major)
+    return major
+
+
+async def reconcile_launched_browser_version(tab: Tab, executable: str) -> str | None:
+    """Read the launched browser's real version over CDP and reconcile the memo.
+
+    Guarded the way ``window_sizing`` guards its measurement: a spawn must not
+    fail because a diagnostic probe did, so a failure degrades to ``None``
+    (leaving the memo exactly as the pre-launch probe left it) rather than
+    taking the browser down with it.
+    """
+    try:
+        version = await tab.send(cdp.browser.get_version())
+    except Exception as error:  # noqa: BLE001  PERMANENT(a diagnostic probe must never fail a spawn - F-806)
+        debug_logger.log_warning(
+            "platform_utils",
+            "reconcile_launched_browser_version",
+            f"Browser.getVersion failed ({type(error).__name__}: {error}); the "
+            "masked User-Agent could not be checked against the running browser",
+        )
+        return None
+    product = version[1] if version and len(version) > 1 else None
+    return record_launched_browser_major_version(executable, product)
 
 
 def build_reduced_user_agent(executable: str) -> str | None:

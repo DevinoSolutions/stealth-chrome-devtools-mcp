@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — the masked User-Agent no longer advertises a Chrome version the browser no longer has (F-806)
+
+The stealth mask renders the browser's major version into a `--user-agent=`
+launch flag, and that version was probed once and cached on the executable's
+**path**. Chrome updates in place, so under the long-lived singleton backend the
+cache could not see an upgrade: the mask kept claiming `Chrome/150` while the
+browser it was masking — and the `sec-ch-ua` client hints Chrome generates from
+its own build — said `151`. A User-Agent that contradicts its own client hints
+is a sharper tell than the headless token the mask exists to remove. It turned
+the 2.0.1 macOS stealth-gate cell red against byte-identical product code.
+
+Two defenses now: the version memo is keyed on the executable's on-disk identity
+(mtime, size, and the parent directory's mtime — Chrome's Windows updater lands
+the new version directory before it swaps the launcher stub), so an in-place
+upgrade expires it while an unchanged binary is still probed only once; and
+every spawn reads CDP `Browser.getVersion` after launch and writes the *actual*
+launched version back, so a version that changed between probe and launch
+corrects every later spawn. `Browser.getVersion`'s `product` field is not
+rewritten by `--user-agent=`, which is what makes it authoritative — the
+regression test re-measures that on every run rather than assuming it.
+
 ## 2.0.2
 
 ### Fixed — multi-session cold start can no longer evict the backend it is racing (F-807)
