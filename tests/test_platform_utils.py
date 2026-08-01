@@ -9,7 +9,9 @@ deterministic across CI environments.
 """
 
 import os
+import platform
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -183,11 +185,12 @@ class TestReducedUserAgent:
 
 
 class TestResolveBrowserMajorVersion:
-    def test_windows_reads_the_version_named_sibling_directory(
+    def test_windows_falls_back_to_the_version_named_sibling_directory(
         self, monkeypatch, tmp_path
     ):
         # Windows must NOT shell out: `chrome.exe --version` hands the flag to a
-        # running Chrome instead of printing anything.
+        # running Chrome instead of printing anything. A stub with no version
+        # resource (as written here) therefore lands on the directory scan.
         monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
 
         def _explode(*_args, **_kwargs):
@@ -265,10 +268,13 @@ class TestDefaultUserAgentInMergeBrowserArgs:
 # not a cosmetic one. It turned the 2.0.1 macOS gate red (control 151 vs product
 # 150) with byte-identical product code.
 #
-# Two layers are pinned below:
-#   1. the memo is keyed on the executable's on-disk identity, so an in-place
+# Three layers are pinned below:
+#   1. the Windows probe reads the BINARY's own version resource, so a staged
+#      update sitting in a sibling directory cannot answer for a browser that
+#      is not running yet;
+#   2. the memo is keyed on the executable's on-disk identity, so an in-place
 #      upgrade expires it (and only a real change costs a fresh subprocess);
-#   2. `Browser.getVersion().product` — measured NOT to be rewritten by
+#   3. `Browser.getVersion().product` — measured NOT to be rewritten by
 #      `--user-agent=` — is read back after launch and wins over the probe.
 # ---------------------------------------------------------------------------
 def _install_chrome(root, version: str):
@@ -282,6 +288,88 @@ def _install_chrome(root, version: str):
     exe.write_bytes(b"x" * (int(version.split(".", maxsplit=1)[0]) * 8))
     (root / version).mkdir(exist_ok=True)
     return exe
+
+
+class TestWindowsProbeReadsTheBinaryNotItsNeighbours:
+    """The launched version, not the newest one staged beside it (F-806).
+
+    Chrome's updater lands the new version-named directory long before it swaps
+    the launcher stub, and that window stays open until the browser is next
+    restarted — days on a workstation. A probe that takes ``max()`` over those
+    directories therefore reports a version the browser will not run, and the
+    first spawn of every fresh backend ships a UA whose ``sec-ch-ua`` disagrees
+    with it. Neither the identity re-key nor the post-launch reconciliation can
+    close that: the executable's bytes do not move while the update is pending,
+    and a launch flag is fixed for the life of the process.
+    """
+
+    def test_the_version_resource_wins_over_a_newer_sibling_directory(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(
+            platform_utils, "_windows_file_version", lambda _exe: "150.0.7871.186"
+        )
+        exe = tmp_path / "chrome.exe"
+        exe.write_bytes(b"stub")
+        (tmp_path / "150.0.7871.186").mkdir()
+        # Staged by the updater; the stub still runs 150 until Chrome restarts.
+        (tmp_path / "151.0.7922.72").mkdir()
+
+        assert resolve_browser_major_version(str(exe)) == "150", (
+            "the probe followed a staged update instead of the binary that will "
+            "actually launch (F-806)"
+        )
+
+    @pytest.mark.skipif(
+        platform.system() != "Windows",
+        reason="reads a real Win32 file-version resource",
+    )
+    def test_a_real_binarys_version_resource_beats_a_planted_directory(self, tmp_path):
+        # Nothing is patched and no code under test supplies the expectation: a
+        # real PE that really carries a version resource is copied in as
+        # `chrome.exe`, and a version-named directory that disagrees with it is
+        # planted alongside — the shape a staged Chrome update leaves on disk.
+        # `cmd.exe` is the stand-in because it is present on every Windows and
+        # its file-version resource IS the OS build, so `platform.version()`
+        # yields the expected major independently.
+        source = Path(os.environ.get("COMSPEC") or r"C:\Windows\System32\cmd.exe")
+        if not source.is_file():  # pragma: no cover - defensive
+            pytest.skip(f"{source} not present")
+        exe = tmp_path / "chrome.exe"
+        exe.write_bytes(source.read_bytes())
+        (tmp_path / "9999.0.0.0").mkdir()
+
+        expected_major = platform.version().split(".", maxsplit=1)[0]
+        assert resolve_browser_major_version(str(exe)) == expected_major, (
+            "the planted 9999.0.0.0 directory beat the binary's own version "
+            "resource — a staged Chrome update does exactly this, and the "
+            "browser keeps running the old build until it restarts (F-806)"
+        )
+
+    def test_an_unreadable_resource_still_falls_back_to_the_directories(
+        self, monkeypatch, tmp_path
+    ):
+        # The old behaviour is the floor: no machine may get a worse answer than
+        # it had before, so a binary with no readable resource is still probed.
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(platform_utils, "_windows_file_version", lambda _exe: None)
+        exe = tmp_path / "chrome.exe"
+        exe.write_bytes(b"stub")
+        (tmp_path / "150.0.7871.186").mkdir()
+        assert resolve_browser_major_version(str(exe)) == "150"
+
+    def test_a_zeroed_resource_is_treated_as_unreadable(self, monkeypatch, tmp_path):
+        # A stripped/repacked binary reports 0.0.0.0. Masking as `Chrome/0.0.0.0`
+        # would be a louder tell than not masking at all.
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(
+            platform_utils, "_windows_file_version", lambda _exe: "0.0.0.0"
+        )
+        exe = tmp_path / "chrome.exe"
+        exe.write_bytes(b"stub")
+        (tmp_path / "150.0.7871.186").mkdir()
+        assert resolve_browser_major_version(str(exe)) == "150"
 
 
 class TestBrowserVersionMemoFreshness:
@@ -314,12 +402,16 @@ class TestBrowserVersionMemoFreshness:
             "Chrome/151.0.0.0 Safari/537.36"
         ), "the mask kept advertising a version the browser no longer has (F-806)"
 
-    def test_a_new_version_directory_alone_expires_the_memo(
+    def test_a_staged_version_directory_alone_does_not_move_the_answer(
         self, monkeypatch, tmp_path
     ):
-        # The Windows branch reads the version from the sibling directories, and
-        # the updater creates the new one BEFORE it swaps the launcher stub — so
-        # the parent directory's mtime has to participate in the memo key.
+        # The updater lands the new directory BEFORE it swaps the launcher stub,
+        # and the browser keeps running the old build until it restarts. So a new
+        # directory on its own must change nothing: the answer is the binary's,
+        # and the binary has not moved. (An earlier revision put the parent
+        # directory's mtime in the memo key precisely to re-probe here — which
+        # only re-derived the staged guess sooner, and cost a subprocess on every
+        # unrelated write to /usr/bin off Windows.)
         monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
         exe = tmp_path / "chrome.exe"
         exe.write_bytes(b"stub")
@@ -327,13 +419,24 @@ class TestBrowserVersionMemoFreshness:
         assert resolve_browser_major_version(str(exe)) == "150"
 
         (tmp_path / "151.0.7900.1").mkdir()
-        # Bump the directory mtime explicitly: some filesystems keep 1s
-        # granularity, and this test is about the KEY, not about timestamp
-        # resolution.
+        # Bump the directory mtime explicitly: this test is about the KEY, not
+        # about the filesystem's timestamp granularity.
         bumped = tmp_path.stat().st_mtime_ns + 5_000_000_000
         os.utime(tmp_path, ns=(bumped, bumped))
 
-        assert resolve_browser_major_version(str(exe)) == "151"
+        assert resolve_browser_major_version(str(exe)) == "150"
+
+    def test_the_identity_key_is_the_binarys_own_bytes(self, tmp_path):
+        # Stated directly, because it is what makes the line above true: nothing
+        # outside the executable participates in the freshness key.
+        exe = tmp_path / "chrome.exe"
+        exe.write_bytes(b"stub")
+        before = platform_utils._executable_identity(str(exe))
+        assert before == (exe.stat().st_mtime_ns, exe.stat().st_size)
+
+        bumped = tmp_path.stat().st_mtime_ns + 5_000_000_000
+        os.utime(tmp_path, ns=(bumped, bumped))
+        assert platform_utils._executable_identity(str(exe)) == before
 
     def test_an_unchanged_executable_is_never_reprobed(self, monkeypatch, tmp_path):
         # The memo exists because the probe runs on the spawn path; deleting it
@@ -540,3 +643,23 @@ class TestReconcileLaunchedBrowserVersion:
             await reconcile_launched_browser_version(_FakeTab(version=()), str(exe))
             is None
         )
+
+    async def test_a_failing_write_back_does_not_escape_the_guard(
+        self, monkeypatch, tmp_path
+    ):
+        # "A spawn must not fail because a diagnostic probe did" has to cover the
+        # WHOLE reconciliation, not just the CDP call: the write-back stats the
+        # executable (swallowing only OSError) and logs the skew warning
+        # unguarded, and it runs inside `_apply_post_launch_setup`, so anything
+        # escaping here takes the spawn down with it.
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+        exe = _install_chrome(tmp_path, "150.0.7871.129")
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("the debug logger fell over")
+
+        monkeypatch.setattr(
+            platform_utils, "record_launched_browser_major_version", _boom
+        )
+        tab = _FakeTab(version=("1.3", "Chrome/151.0.7900.1", "@abc", "UA", "15.1"))
+        assert await reconcile_launched_browser_version(tab, str(exe)) is None

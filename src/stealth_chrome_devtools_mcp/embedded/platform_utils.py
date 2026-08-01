@@ -222,39 +222,54 @@ _VERSION_MEMO_MAX_ENTRIES = 8
 
 # ── The browser-version memo (F-806) ────────────────────────────────────────
 # The mask above is only coherent while the version it was built from is the
-# version that actually launches. The probe is memoized because it runs on the
-# spawn path — but keyed on the executable's on-disk IDENTITY, never on its path
-# alone: Chrome auto-updates IN PLACE, so a path-keyed memo in a long-lived
-# backend keeps advertising the version the machine had when the process started.
-# That is how a masked UA ends up claiming Chrome/150 while the browser (and its
-# `sec-ch-ua` client hints) say 151 — a self-contradicting UA, i.e. exactly the
-# WORSE tell this mask exists to avoid.
+# version that actually launches. Two things have to hold for that, and F-806
+# was each of them failing in turn:
+#
+#   * the PROBE must read the binary that will run — not something beside it.
+#     See `_windows_file_version`: guessing from the newest version-named
+#     sibling directory answers with a staged update days before the browser
+#     will run it.
+#   * the MEMO must expire when that binary changes. The probe is memoized
+#     because it runs on the spawn path, so it is keyed on the executable's
+#     on-disk IDENTITY, never on its path alone: Chrome auto-updates IN PLACE,
+#     so a path-keyed memo in a long-lived backend keeps advertising the version
+#     the machine had when the process started.
+#
+# Either failure ends the same way: a masked UA claiming Chrome/150 while the
+# browser (and its `sec-ch-ua` client hints) say 151 — a self-contradicting UA,
+# i.e. exactly the WORSE tell this mask exists to avoid.
 #
 # ``None`` is memoized too: an executable whose version cannot be resolved must
 # not re-pay for a failed subprocess on every spawn.
-_ExecutableIdentity = tuple[int, int, int]
+_ExecutableIdentity = tuple[int, int]
 _BROWSER_VERSION_MEMO: dict[tuple[str, _ExecutableIdentity | None], str | None] = {}
 
 
 def _executable_identity(executable: str) -> _ExecutableIdentity | None:
-    """The executable's on-disk identity: ``(mtime_ns, size, parent dir mtime_ns)``.
+    """The executable's on-disk identity: ``(mtime_ns, size)``.
 
-    Two ``stat`` calls, no subprocess — microseconds, so it can run on every
-    spawn where the version probe itself cannot. The parent directory is part of
-    the identity because that is where the Windows branch reads the version
-    from: an update drops a new version-named directory beside ``chrome.exe``
-    before it swaps the launcher stub, so the directory's mtime moves first. An
-    unstattable executable yields ``None``, which degrades to the old
+    One ``stat`` call, no subprocess — microseconds, so it can run on every spawn
+    where the version probe itself cannot. The executable's own bytes are the
+    WHOLE key because every branch of the probe answers from the executable
+    itself: POSIX runs ``<exe> --version``, Windows reads ``<exe>``'s version
+    resource. An earlier revision also hashed the parent directory's mtime, to
+    chase the Windows sibling-directory scan; that scan is now only the fallback,
+    and even there the directory component bought nothing but re-probes. During a
+    pending update the staged directory is a version the browser will not run
+    until its launcher stub is swapped — and swapping the stub moves this key
+    anyway — so re-probing on the directory could only re-derive the same wrong
+    guess, sooner. Off Windows it was pure cost: ``/usr/bin`` changes mtime on any
+    package install, putting a blocking subprocess back on the spawn path.
+
+    An unstattable executable yields ``None``, which degrades to the old
     path-only memo rather than failing the spawn.
     """
     try:
-        path = Path(executable)
-        exe_stat = path.stat()
-        parent_stat = path.parent.stat()
+        exe_stat = Path(executable).stat()
     except OSError as error:
         debug_logger.log_debug("platform_utils", "_executable_identity", str(error))
         return None
-    return (exe_stat.st_mtime_ns, exe_stat.st_size, parent_stat.st_mtime_ns)
+    return (exe_stat.st_mtime_ns, exe_stat.st_size)
 
 
 def _remember_browser_major_version(
@@ -278,29 +293,114 @@ def reset_browser_version_memo() -> None:
     _BROWSER_VERSION_MEMO.clear()
 
 
+class _VsFixedFileInfo(ctypes.Structure):
+    """The fixed (numeric) part of a Win32 ``VS_VERSIONINFO`` resource.
+
+    Only the ``dwFileVersion*`` words are wanted, so nothing here has to touch
+    the string table or its code pages.
+    """
+
+    _fields_ = (
+        ("dwSignature", ctypes.c_uint32),
+        ("dwStrucVersion", ctypes.c_uint32),
+        ("dwFileVersionMS", ctypes.c_uint32),
+        ("dwFileVersionLS", ctypes.c_uint32),
+        ("dwProductVersionMS", ctypes.c_uint32),
+        ("dwProductVersionLS", ctypes.c_uint32),
+        ("dwFileFlagsMask", ctypes.c_uint32),
+        ("dwFileFlags", ctypes.c_uint32),
+        ("dwFileOS", ctypes.c_uint32),
+        ("dwFileType", ctypes.c_uint32),
+        ("dwFileSubtype", ctypes.c_uint32),
+        ("dwFileDateMS", ctypes.c_uint32),
+        ("dwFileDateLS", ctypes.c_uint32),
+    )
+
+
+_VS_FFI_SIGNATURE = 0xFEEF04BD
+
+
+def _windows_file_version(executable: str) -> str | None:
+    """Read ``executable``'s own embedded file-version resource, e.g.
+    ``"150.0.7871.186"`` — or ``None`` if it has none / cannot be read.
+
+    This is the executable answering for ITSELF, which is the whole point: it is
+    the one Windows reading that tracks the binary that will actually run rather
+    than what happens to be lying next to it (F-806). Non-Windows raises
+    ``AttributeError`` on ``ctypes.windll`` and degrades to ``None``.
+    """
+    try:
+        version_dll = ctypes.windll.version
+        size = version_dll.GetFileVersionInfoSizeW(ctypes.c_wchar_p(executable), None)
+        if not size:
+            return None
+        block = ctypes.create_string_buffer(size)
+        loaded = version_dll.GetFileVersionInfoW(
+            ctypes.c_wchar_p(executable), 0, size, block
+        )
+        fixed = ctypes.c_void_p()
+        fixed_size = ctypes.c_uint()
+        if not loaded or not version_dll.VerQueryValueW(
+            block,
+            ctypes.c_wchar_p("\\"),
+            ctypes.byref(fixed),
+            ctypes.byref(fixed_size),
+        ):
+            return None
+        if fixed_size.value < ctypes.sizeof(_VsFixedFileInfo):
+            return None
+        info = ctypes.cast(fixed, ctypes.POINTER(_VsFixedFileInfo)).contents
+        if info.dwSignature != _VS_FFI_SIGNATURE:
+            return None
+        high, low = info.dwFileVersionMS, info.dwFileVersionLS
+    except (AttributeError, OSError, ValueError) as error:
+        debug_logger.log_debug("platform_utils", "_windows_file_version", str(error))
+        return None
+    return f"{high >> 16}.{high & 0xFFFF}.{low >> 16}.{low & 0xFFFF}"
+
+
+def _windows_newest_sibling_version_directory(executable: str) -> str | None:
+    """FALLBACK: the newest version-named directory beside the binary.
+
+    Every Chromium install keeps its build in a version-named directory next to
+    the launcher stub, so this answers when the version resource cannot be read.
+    It is a GUESS, and a knowably wrong one during an update: Chrome's updater
+    lands the new directory days before it swaps the stub, so this reports a
+    version the browser will not run until it next restarts. That is exactly the
+    F-806 skew ``_windows_file_version`` exists to close — but it is kept as the
+    floor so no machine gets a worse answer than it had before.
+    """
+    try:
+        names = [
+            entry.name for entry in Path(executable).parent.iterdir() if entry.is_dir()
+        ]
+    except OSError as error:
+        debug_logger.log_debug(
+            "platform_utils", "_windows_newest_sibling_version_directory", str(error)
+        )
+        return None
+    majors = [m.group(1) for m in map(_BROWSER_VERSION_RE.fullmatch, names) if m]
+    return max(majors, key=int) if majors else None
+
+
 def _probe_browser_major_version(executable: str) -> str | None:
     """Ask the executable on disk what version it is. Uncached — see the memo.
 
     Windows deliberately does NOT shell out — ``chrome.exe --version`` hands the
     argument to an already-running Chrome ("Opening in existing browser
-    session.") instead of printing anything, so the version is read from the
-    version-named directory every Chromium install keeps beside its binary.
-    Elsewhere ``<exe> --version`` prints e.g. ``Google Chrome 150.0.7871.186``.
+    session.") instead of printing anything — so it reads the binary's embedded
+    version resource, falling back to the sibling-directory scan only when that
+    resource is unreadable. Elsewhere ``<exe> --version`` prints e.g.
+    ``Google Chrome 150.0.7871.186``, which likewise reports the binary that
+    will actually run.
     """
     if platform.system() == "Windows":
-        try:
-            names = [
-                entry.name
-                for entry in Path(executable).parent.iterdir()
-                if entry.is_dir()
-            ]
-        except OSError as error:
-            debug_logger.log_debug(
-                "platform_utils", "_probe_browser_major_version", str(error)
-            )
-            return None
-        majors = [m.group(1) for m in map(_BROWSER_VERSION_RE.fullmatch, names) if m]
-        return max(majors, key=int) if majors else None
+        match = _BROWSER_VERSION_RE.fullmatch(_windows_file_version(executable) or "")
+        # A zeroed resource is a stripped or repacked binary, not a browser
+        # anyone ships — treat it as unreadable rather than mask as Chrome/0.
+        if match and match.group(1) != "0":
+            return match.group(1)
+        return _windows_newest_sibling_version_directory(executable)
 
     try:
         completed = subprocess.run(  # noqa: S603  RELEASE-FIX-D (F-770)
@@ -381,20 +481,23 @@ async def reconcile_launched_browser_version(tab: Tab, executable: str) -> str |
     Guarded the way ``window_sizing`` guards its measurement: a spawn must not
     fail because a diagnostic probe did, so a failure degrades to ``None``
     (leaving the memo exactly as the pre-launch probe left it) rather than
-    taking the browser down with it.
+    taking the browser down with it. The guard covers the WRITE-BACK as well as
+    the CDP call, because the write-back can raise too — ``_executable_identity``
+    only swallows ``OSError`` and the skew warning is not guarded at all — and a
+    contract that says "never fails a spawn" has to mean the whole reconciliation.
     """
     try:
         version = await tab.send(cdp.browser.get_version())
+        product = version[1] if version and len(version) > 1 else None
+        return record_launched_browser_major_version(executable, product)
     except Exception as error:  # noqa: BLE001  PERMANENT(a diagnostic probe must never fail a spawn - F-806)
         debug_logger.log_warning(
             "platform_utils",
             "reconcile_launched_browser_version",
-            f"Browser.getVersion failed ({type(error).__name__}: {error}); the "
+            f"reconciliation failed ({type(error).__name__}: {error}); the "
             "masked User-Agent could not be checked against the running browser",
         )
         return None
-    product = version[1] if version and len(version) > 1 else None
-    return record_launched_browser_major_version(executable, product)
 
 
 def build_reduced_user_agent(executable: str) -> str | None:

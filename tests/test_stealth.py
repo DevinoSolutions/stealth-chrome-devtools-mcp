@@ -64,6 +64,9 @@ from e2e_helpers import (
     server_mod,
     warmup_once,
 )
+from stealth_chrome_devtools_mcp.embedded.platform_utils import (
+    reset_browser_version_memo as _reset_browser_version_memo,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -688,6 +691,12 @@ async def _collect_ua_facts(base_url: str, *, user_agent: str | None) -> dict:
     """Spawn once, then read the User-Agent from the spawn tab AND from a tab
     created afterwards through the product's own ``new_tab`` tool."""
     await warmup_once()
+    # F-806: the warmup performs a real spawn, and that spawn RECONCILES the
+    # version memo against the browser it launched. Reading the UA after it would
+    # measure the repaired value and never the pre-launch probe's — i.e. the one
+    # thing the first spawn of a fresh backend actually ships. Clearing the memo
+    # puts the spawn below back in the cold-first-spawn state the warmup absorbs.
+    _reset_browser_version_memo()
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
     open_tab = get_fn("new_tab")
@@ -1226,6 +1235,13 @@ def test_f806_masked_ua_major_is_the_launched_browsers_major(ua_default_facts):
     ``Browser.getVersion().product`` is the browser reporting itself, so this is
     an equality between the mask and its subject — not between two readings of
     the same string.
+
+    The fixture clears the version memo before its spawn, so what is measured
+    here is the PRE-LAUNCH PROBE's answer — the first spawn of a fresh backend —
+    and not a value the warmup spawn already reconciled. That is the spawn the
+    Windows directory-scan probe used to get wrong. It still cannot fail on a
+    machine whose Chrome is not mid-update; the teeth are in the node below and
+    in ``TestWindowsProbeReadsTheBinaryNotItsNeighbours``.
     """
     facts = ua_default_facts
     ua_major = _ua_major(facts["spawn_tab_ua"])
