@@ -144,11 +144,14 @@ def _format_backend_status() -> str:
 def _recorded_backend_pid() -> int | None:
     """The pid singleton last recorded for the backend (server.json), or None
     if there is no record. Independent of liveness — status/doctor combine
-    this with `_format_backend_status()`'s liveness read separately (F-305)."""
-    from stealth_chrome_devtools_mcp.embedded import singleton
+    this with `_format_backend_status()`'s liveness read separately (F-305).
 
-    state = singleton._read_server_state()
-    return state.get("pid") if state else None
+    The FIRST recorded backend: the record can now hold one per display context
+    (F-808), and naming them all is Task 6's job, not this line's."""
+    from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
+
+    entry = backend_registry.first_backend(singleton._read_server_state())
+    return entry.get("pid") if entry else None
 
 
 def _backend_log_location(pid: int | None) -> str:
@@ -165,12 +168,12 @@ def _doctor_port_occupant_line() -> str:
     """F-509 visibility: is the target port free, ours, or a NON-stealth
     process squatting it (which would otherwise silently block a backend
     from binding)? Uses only existing helpers — no new port logic."""
-    from stealth_chrome_devtools_mcp.embedded import singleton
+    from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
-    state = singleton._read_server_state()
+    entry = backend_registry.first_backend(singleton._read_server_state()) or {}
     port = (
-        state.get("port")
-        if state and isinstance(state.get("port"), int)
+        entry.get("port")
+        if isinstance(entry.get("port"), int)
         else (singleton.DEFAULT_PORT)
     )
     our_pid = singleton._backend_pid_on_port(port)

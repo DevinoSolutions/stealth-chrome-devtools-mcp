@@ -23,7 +23,19 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import (
+    backend_registry,
+    display_context,
+    singleton,
+)
+
+
+def _recorded_backend():
+    """The one backend the isolated record holds, read the way production
+    reads it. F-808 made server.json a per-context map, so the raw record is
+    no longer the entry; these pins are about WHAT gets recorded, not about
+    the file's layout (which test_backend_registry.py owns)."""
+    return backend_registry.first_backend(singleton._read_server_state())
 
 
 def _listening_socket():
@@ -299,11 +311,16 @@ class TestServerStatePersistence:
         singleton._write_server_state(
             port=12345, version="9.9.9", pid=4242, source_fingerprint="deadbeef"
         )
-        assert singleton._read_server_state() == {
+        # SOFT golden updated with F-808's schema v2 (same commit): the four
+        # identity fields still round-trip verbatim, and the writer now also
+        # stamps the display context it recorded them under - which is the
+        # whole point of the new schema, so it is asserted, not ignored.
+        assert _recorded_backend() == {
             "port": 12345,
             "version": "9.9.9",
             "pid": 4242,
             "source_fingerprint": "deadbeef",
+            "display_context": display_context.display_context(),
         }
 
     def test_written_state_makes_backend_reusable(self, isolated_state, monkeypatch):
@@ -341,11 +358,13 @@ class TestServerStatePersistence:
 
         singleton._start_server_process(4321)
 
-        state = singleton._read_server_state()
-        assert state["port"] == 4321
-        assert state["version"] == "1.2.1"
-        assert state["pid"] == 4242
-        assert state["source_fingerprint"] == "test-fp"
+        entry = _recorded_backend()
+        assert entry["port"] == 4321
+        assert entry["version"] == "1.2.1"
+        assert entry["pid"] == 4242
+        assert entry["source_fingerprint"] == "test-fp"
+        # F-808: a real spawn also records WHERE its windows could appear.
+        assert entry["display_context"] == display_context.display_context()
 
 
 class TestBackendIdentity:

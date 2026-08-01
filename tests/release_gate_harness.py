@@ -487,7 +487,15 @@ def _backend_logs(*dirs: Path) -> str:
 
 
 def _backend_pid_from_state(home_dir: Path) -> int | None:
-    """Read the isolated backend's recorded pid from its ``server.json``."""
+    """Read the isolated backend's recorded pid from its ``server.json``.
+
+    Parses BOTH record schemas — the flat v1 shape and F-808's v2
+    ``{"schema": 2, "backends": {ctx: entry}}`` — because this harness drives
+    the INSTALLED artifact as a black box and restates the contract rather than
+    importing the package under test (the same reason ``REGISTRY_TOOL_COUNT``
+    is a literal here). The isolated HOME holds exactly one backend, so "some
+    recorded entry" and "the one we spawned" are the same thing.
+    """
     state_file = home_dir / ".stealth-mcp" / "server.json"
     try:
         state = json.loads(state_file.read_text(encoding="utf-8"))
@@ -495,6 +503,9 @@ def _backend_pid_from_state(home_dir: Path) -> int | None:
         return None
     if not isinstance(state, dict):
         return None
+    if isinstance(state.get("backends"), dict):
+        entries = [e for e in state["backends"].values() if isinstance(e, dict)]
+        state = entries[0] if entries else {}
     pid = state.get("pid")
     return pid if isinstance(pid, int) else None
 

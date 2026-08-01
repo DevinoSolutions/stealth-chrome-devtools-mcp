@@ -31,7 +31,7 @@ from unittest.mock import MagicMock
 import psutil
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
 
 @pytest.fixture()
@@ -572,7 +572,11 @@ class TestRestartPortSelection:
             singleton.restart_backend()
 
             assert spawned_on["port"] != squatted_port
-            assert singleton._read_server_state()["port"] == spawned_on["port"]
+            # SOFT golden updated with F-808's schema v2 (same commit): same
+            # claim - the record ends up naming the NEW port, not the squatted
+            # one - read off the recorded backend instead of the raw record.
+            recorded = backend_registry.first_backend(singleton._read_server_state())
+            assert recorded["port"] == spawned_on["port"]
         finally:
             squatter.close()
 

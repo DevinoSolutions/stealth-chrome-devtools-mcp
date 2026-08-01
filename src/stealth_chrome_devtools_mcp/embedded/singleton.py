@@ -125,14 +125,32 @@ def _server_is_healthy(port: int) -> bool:
 # module owns and pass them in. Keeping the names here keeps the one call and
 # patch surface the rest of the tree (cli.py, the tests) already targets.
 def _read_server_state() -> dict | None:
+    """The RAW record — v1 flat or v2 per-context (F-808) — not a backend.
+
+    Kept raw because it is a patch surface: test_cli / test_cli_status_wedged
+    stub it with v1-flat dicts. Every consumer therefore reads backends out of
+    it through backend_registry's normalizers (`first_backend` /
+    `backend_on_port`), which accept both shapes, rather than indexing it.
+    """
     return backend_registry.read_record(SERVER_STATE_FILE)
 
 
 def _write_server_state(
     port: int, version: str, pid: int, source_fingerprint: str
 ) -> None:
-    backend_registry.write_record(
-        SERVER_STATE_FILE, port, version, pid, source_fingerprint
+    # Lazy, at the ONE site that needs it (the _free_port precedent below), so
+    # singleton's module-top imports keep naming only what its own lifecycle
+    # logic depends on. Costs nothing: backend_registry already imports
+    # display_context, so the module is loaded by the time we get here.
+    from stealth_chrome_devtools_mcp.embedded import display_context
+
+    backend_registry.record_backend(
+        SERVER_STATE_FILE,
+        port=port,
+        version=version,
+        pid=pid,
+        source_fingerprint=source_fingerprint,
+        display_context=display_context.display_context(),
     )
 
 
@@ -153,10 +171,10 @@ def _probe_backend_status() -> tuple[str, int | None]:
         ("wedged", port)       - socket open, but no real MCP initialize answer
         ("responsive", port)  - socket open AND initialize answers 200
     """
-    state = _read_server_state()
-    if state is None:
+    entry = backend_registry.first_backend(_read_server_state())
+    if entry is None:
         return "none", None
-    port = state.get("port")
+    port = entry.get("port")
     if not isinstance(port, int):
         return "none", None
     if not _server_is_healthy(port):
@@ -183,8 +201,11 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     single-shot probe) probes exactly once and never sleeps. ``None`` means
     ``REUSE_PATIENCE_SECONDS`` (read at call time, so tests can shrink it).
     """
-    state = _read_server_state() or {}
-    if state.get("port") != port or state.get("version") != _server_version():
+    # The entry recorded ON THIS PORT, not merely the first one: with a
+    # per-context record (F-808) another desktop's backend can be recorded
+    # alongside ours, and it says nothing about whether `port` is reusable.
+    state = backend_registry.backend_on_port(_read_server_state(), port) or {}
+    if state.get("version") != _server_version():
         return False
     fp = _source_fingerprint()
     if not fp or state.get("source_fingerprint") != fp:
@@ -212,8 +233,8 @@ def _find_running_server() -> int | None:
     :func:`_same_identity_backend_ready`. Single-shot on purpose: this runs on
     every proxy start's hot path and must never sleep.
     """
-    state = _read_server_state()
-    port = state.get("port") if state else None
+    entry = backend_registry.first_backend(_read_server_state())
+    port = entry.get("port") if entry else None
     if not isinstance(port, int):
         return None
     return port if _same_identity_backend_ready(port, patience=0.0) else None
@@ -271,8 +292,8 @@ def _terminate_backend(port: int) -> bool:
     """
     pid = _backend_pid_on_port(port)
     if pid is None:
-        state = _read_server_state()
-        recorded = state.get("pid") if state else None
+        entry = backend_registry.backend_on_port(_read_server_state(), port)
+        recorded = entry.get("pid") if entry else None
         if _is_our_backend(recorded):
             pid = recorded
     if pid is None:
@@ -518,11 +539,11 @@ def _start_backend_holding_lock(port: int) -> None:
             # deliberately NOT a second reuse gate (that stays single-homed in
             # _find_running_server). Source-only: a version-change eviction
             # (issue #14) must not emit this line.
-            state = _read_server_state()
+            entry = backend_registry.backend_on_port(_read_server_state(), port)
             if (
-                state is not None
-                and state.get("version") == _server_version()
-                and state.get("source_fingerprint") != _source_fingerprint()
+                entry is not None
+                and entry.get("version") == _server_version()
+                and entry.get("source_fingerprint") != _source_fingerprint()
             ):
                 _logger.info("backend stale (source changed), evicting")
             # A stale/legacy backend (different or unknown version) may still be
@@ -567,8 +588,8 @@ def stop_backend() -> tuple[str, int | None]:
     with _exclusive_lock() as got:
         if not got:
             return ("busy", None)
-        state = _read_server_state()
-        recorded_pid = state.get("pid") if state else None
+        entry = backend_registry.backend_on_port(_read_server_state(), port)
+        recorded_pid = entry.get("pid") if entry else None
         terminated = _terminate_backend(port) if port is not None else False
         _clear_server_state()
         if terminated:
@@ -597,8 +618,8 @@ def restart_backend() -> tuple[str, int | None]:
     Returns ``(status, pid)``: `_probe_backend_status`'s status or "busy";
     ``pid`` is the freshly recorded pid once the lock is acquired, else None.
     """
-    state = _read_server_state()
-    recorded_port = state.get("port") if state else None
+    entry = backend_registry.first_backend(_read_server_state())
+    recorded_port = entry.get("port") if entry else None
     port = recorded_port if isinstance(recorded_port, int) else DEFAULT_PORT
 
     with _exclusive_lock() as got:
@@ -610,8 +631,8 @@ def restart_backend() -> tuple[str, int | None]:
         _wait_for_server(port)
 
     status, _ = _probe_backend_status()
-    new_state = _read_server_state()
-    new_pid = new_state.get("pid") if new_state else None
+    new_entry = backend_registry.first_backend(_read_server_state())
+    new_pid = new_entry.get("pid") if new_entry else None
     return (status, new_pid)
 
 
@@ -640,8 +661,8 @@ def _select_backend_port(preferred: int = DEFAULT_PORT) -> int:
     # lazy; no module-top cycle
     from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import _free_port
 
-    state = _read_server_state()
-    recorded = state.get("port") if state else None
+    entry = backend_registry.first_backend(_read_server_state())
+    recorded = entry.get("port") if entry else None
     target = recorded if isinstance(recorded, int) else preferred
     return _free_port() if _port_is_foreign_held(target) else target
 

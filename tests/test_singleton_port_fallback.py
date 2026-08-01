@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
 
 @pytest.fixture()
@@ -180,6 +180,11 @@ class TestStartServerProcessRecordsSelectedPort:
 
             cmd_args = captured_popen.call_args.args[0]
             assert cmd_args[cmd_args.index("--port") + 1] == str(fallback)
-            assert singleton._read_server_state()["port"] == fallback
+            # SOFT golden updated with F-808's schema v2 (same commit): the
+            # claim is unchanged - server.json is the single source of truth
+            # for the chosen port - but the port now lives on a recorded
+            # backend entry rather than at the record's top level.
+            recorded = backend_registry.first_backend(singleton._read_server_state())
+            assert recorded["port"] == fallback
         finally:
             squatter.close()
