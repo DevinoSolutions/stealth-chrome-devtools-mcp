@@ -21,7 +21,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fakes import FakeBrowser, FakeBrowserManager, FakeStorage
+from fakes import (
+    FakeBrowser,
+    FakeBrowserManager,
+    FakeStorage,
+    pretend_display_context,
+)
 from stealth_chrome_devtools_mcp.embedded import browser_manager as _bm
 from stealth_chrome_devtools_mcp.embedded import clone_storage
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
@@ -97,6 +102,8 @@ class TestSpawnBrowserSeam:
             return {"user_data_dir": "/fake/dir", "profile_role": "clone"}
 
         monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        # Headed spawn: say so, rather than inheriting the runner's desktop (F-808).
+        pretend_display_context(monkeypatch, "test-desktop")
         srv = patched_server(browser_manager=fbm)
         result = await call_tool(srv, "spawn_browser", sandbox=False)
 

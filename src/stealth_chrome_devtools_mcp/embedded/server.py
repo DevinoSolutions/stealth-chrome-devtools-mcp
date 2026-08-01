@@ -14,7 +14,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from stealth_chrome_devtools_mcp.embedded import clone_storage
+from stealth_chrome_devtools_mcp.embedded import clone_storage, display_context
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import cdp_element_cloner
 from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
@@ -350,8 +350,10 @@ async def spawn_browser(
         headless (bool): Run in headless mode.
         user_agent (Optional[str]): Custom user agent string.
         viewport_width (int): Requested browser WINDOW width in pixels (outer, not
-            the CSS viewport). Best-effort: a headed window is clamped to the
-            desktop work area, so a request larger than the screen lands smaller.
+            the CSS viewport). Best-effort: a headed window is clamped to the work
+            area of the LAUNCHING context's desktop — the user's monitor only when
+            the backend runs on it (F-808), not the caller's screen — so a request
+            larger than that desktop lands smaller.
         viewport_height (int): Requested browser WINDOW height in pixels, same
             best-effort clamping as viewport_width.
         proxy (Optional[str]): Proxy server URL.
@@ -383,6 +385,16 @@ async def spawn_browser(
         ``requested``/``actual``/``inner_viewport``/``clamped`` so a size the OS
         overrode is visible rather than silent.
     """
+    # BEFORE any other work, and outside the try so it is not re-wrapped (F-808):
+    # a spawn nobody could ever see must not first clone a profile dir onto disk.
+    if not headless and not display_context.can_show_windows():
+        raise ToolError(
+            f"This backend runs in a context that cannot display a window "
+            f"({display_context.display_context()}), so a headed browser would launch "
+            "invisibly (F-808). Start the backend from a desktop session and this "
+            "session will use it automatically, or pass headless=True. Run "
+            "`stealth-chrome-devtools doctor` to see which contexts have a backend."
+        )
     try:
         from stealth_chrome_devtools_mcp.embedded.platform_utils import (
             is_running_as_root,

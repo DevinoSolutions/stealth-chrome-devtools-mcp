@@ -54,6 +54,21 @@ async def call_tool(server_mod: Any, name: str, /, **kwargs: Any) -> Any:
     return result
 
 
+def pretend_display_context(monkeypatch: Any, token: str) -> None:
+    """State a test's display premise instead of inheriting the runner's desktop.
+
+    ``spawn_browser`` refuses a headed spawn from a context that cannot show a
+    window (F-808), so without this ANY hermetic headed-spawn test would pass on
+    a developer's desktop and fail on a DISPLAY-less CI cell — the same test
+    asserting two different things. Patch the one source token: everything else
+    (``can_show_windows``) derives from it, so a test can never pin an impossible
+    pair. Use ``display_context.HEADLESS`` / ``UNVERIFIED`` for the named cases.
+    """
+    from stealth_chrome_devtools_mcp.embedded import display_context
+
+    monkeypatch.setattr(display_context, "display_context", lambda: token)
+
+
 # ---------------------------------------------------------------------------
 # Fake DOM tab — covers BOTH cloner seams (JS-eval + CDP)
 # ---------------------------------------------------------------------------

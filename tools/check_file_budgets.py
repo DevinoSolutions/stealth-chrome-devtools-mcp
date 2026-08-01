@@ -19,7 +19,15 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # its actual 3389 LOC (measured after ruff format). Ratcheted DOWN per the
     # no-grow discipline; the prior M3/M10a except-surface bumps are folded into
     # this post-extraction baseline. Owner string unchanged.
-    "embedded/server.py": (3389, "plan_M4ph1 + plan_M3 + plan_M10a"),
+    # + 12 (plan_F808 step 5: spawn_browser's headed-visibility guard — 10 lines
+    # for the pre-try refusal + its message, 2 for the F-804 docstring clamp
+    # correction). Correctness code with no home to move to: the OBSERVATION
+    # lives in display_context.py (a leaf), but the REFUSAL is this tool's
+    # policy and its ordering — before profile selection — is the contract, so
+    # hiding it behind a helper would launder the lines and lose the guarantee.
+    # Same minimal-bump rationale as the M10a rows below. Cap == actual
+    # ruff-clean LOC, no padding; no-grow applies from this commit forward.
+    "embedded/server.py": (3401, "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808"),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
     # irreducibly ~1024-line contiguous block, landing this module over the
     # 1000-LOC budget. GRANDFATHERED at its actual post-ruff-format LOC per the

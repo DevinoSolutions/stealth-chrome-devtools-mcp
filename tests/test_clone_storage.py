@@ -25,7 +25,7 @@ from unittest.mock import patch
 
 import pytest
 
-from fakes import FakeBrowserManager
+from fakes import FakeBrowserManager, pretend_display_context
 from stealth_chrome_devtools_mcp.embedded import clone_storage, server
 from stealth_chrome_devtools_mcp.settings import Settings, get_settings
 
@@ -103,6 +103,8 @@ class TestSpawnBrowserDelegates:
             return {"user_data_dir": "/fake/dir", "profile_role": "clone"}
 
         monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        # Headed spawn: say so, rather than inheriting the runner's desktop (F-808).
+        pretend_display_context(monkeypatch, "test-desktop")
         fake_instance = SimpleNamespace(
             instance_id="i1",
             state="active",
