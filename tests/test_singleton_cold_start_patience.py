@@ -16,11 +16,19 @@ version AND source fingerprint match ours gets up to
 evict it; a version- or source-stale record gets NO patience (upgrades must
 still take effect immediately, issue #14). Everything runs against fakes —
 no processes, no sockets; the probe and spawn seams are recorded functions.
+
+issue #56 is the other side of the same coin and lives here too: patience must
+be spent on a backend that MIGHT still come up, never on one that is provably
+gone. ``TestSpawnedBackendDeathEndsTheWait`` pins that a child which exited
+nonzero ends ``_wait_for_server`` on its first pass carrying the boot log's
+tail as the cause — while a clean exit (the uv trampoline shim) and a
+slow-but-healthy boot both keep the full wait, which is the anti-F-807 half.
 """
 
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -178,7 +186,7 @@ class TestWinnerHoldsLockUntilReady:
         monkeypatch.setattr(
             singleton,
             "_wait_for_server",
-            lambda port, timeout=30: events.append("socket-bound") or True,
+            lambda port, **kw: events.append("socket-bound") or True,
         )
         monkeypatch.setattr(
             singleton,
@@ -190,3 +198,149 @@ class TestWinnerHoldsLockUntilReady:
         singleton._start_backend_holding_lock(PORT)
 
         assert events == ["spawn", "socket-bound", "ready-probe"]
+
+
+class FakeProc:
+    """Stands in for the ``Popen`` ``_start_server_process`` now returns. Only
+    ``poll()`` is consumed: None = still running, 0 = clean exit (which the uv
+    trampoline shim can produce while the real backend lives on), nonzero =
+    crashed."""
+
+    def __init__(self, *codes):
+        self._codes = list(codes)
+
+    def poll(self):
+        return self._codes.pop(0) if len(self._codes) > 1 else self._codes[0]
+
+
+@pytest.fixture
+def no_stale_spawn_failure():
+    """`singleton._spawn_failure` is a module global by design (it crosses from
+    the cold-start thread to the proxy's readiness wait). Clear it around every
+    test so one test's recorded death can never short-circuit another's wait."""
+    singleton._spawn_failure.clear()
+    yield singleton._spawn_failure
+    singleton._spawn_failure.clear()
+
+
+class TestSpawnedBackendDeathEndsTheWait:
+    """issue #56: waiting on a process that has already died is pure latency —
+    the live report was a full 120s of silence for a backend that was gone in
+    under a second."""
+
+    def test_crashed_child_ends_the_wait_on_the_first_pass(
+        self, isolated_state, no_stale_spawn_failure, monkeypatch
+    ):
+        health = Recorder(False)
+        monkeypatch.setattr(singleton, "_server_is_healthy", health)
+        monkeypatch.setattr(singleton, "_backend_http_ready", Recorder(False))
+        monkeypatch.setattr(singleton, "_backend_failure_reason", lambda: "boom")
+
+        started = time.monotonic()
+        result = singleton._wait_for_server(PORT, timeout=30, proc=FakeProc(1))
+        elapsed = time.monotonic() - started
+
+        assert result is False
+        # ONE socket check == it bailed on the first pass, not at the deadline.
+        assert health.calls == 1
+        assert elapsed < 2.0, f"burned {elapsed:.1f}s on an already-dead child"
+
+    def test_the_cause_reported_is_the_backend_log_tail(
+        self, isolated_state, no_stale_spawn_failure, monkeypatch, tmp_path
+    ):
+        """The whole point of failing fast is having something to SAY. The
+        reason must be the child's own error text (issue #56's live case was a
+        settings ValidationError), read from the boot log the Popen redirect
+        writes — and bounded, because that log grows without limit."""
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "backend-boot.log").write_text(
+            "".join(f"line-from-a-boot-long-ago-{i}\n" for i in range(500))
+            + "pydantic_core.ValidationError: 2 validation errors for Settings\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("STEALTH_MCP_LOG_DIR", str(logs))
+        monkeypatch.setattr(singleton, "_server_is_healthy", Recorder(False))
+        monkeypatch.setattr(singleton, "_backend_http_ready", Recorder(False))
+
+        assert singleton._wait_for_server(PORT, timeout=5, proc=FakeProc(1)) is False
+
+        reason = singleton._spawn_failure["reason"]
+        assert "pydantic_core.ValidationError: 2 validation errors" in reason
+        assert "backend-boot.log" in reason
+        assert "line-from-a-boot-long-ago-499" in reason  # the tail is there
+        assert "line-from-a-boot-long-ago-100" not in reason  # but not the lot
+        assert len(reason) < 10_000  # a multi-MB boot log is never slurped whole
+
+    def test_a_slow_but_healthy_boot_is_still_awaited(
+        self, isolated_state, no_stale_spawn_failure, monkeypatch
+    ):
+        """The anti-F-807 half: a live child that has not bound its socket yet
+        must keep the full patience. ``poll()`` is None, so nothing here may
+        conclude "dead" no matter how many probes miss."""
+        health = Recorder(False, False, False, True)
+        monkeypatch.setattr(singleton, "_server_is_healthy", health)
+        monkeypatch.setattr(singleton, "_backend_http_ready", Recorder(False))
+
+        assert singleton._wait_for_server(PORT, timeout=30, proc=FakeProc(None)) is True
+        assert health.calls == 4
+        assert singleton._spawn_failure == {}  # nothing was declared dead
+
+    def test_a_clean_exit_is_not_death_the_trampoline_shim_exits_zero(
+        self, isolated_state, no_stale_spawn_failure, monkeypatch
+    ):
+        """On Windows ``sys.executable`` is a uv trampoline: a shim whose
+        identically-named child does the work, so the handle we hold is the
+        shim's. Measured 2026-08-01 it blocks for the child's whole life and
+        forwards its exit code, but this pins the conservative reading anyway —
+        exit code 0 is NEVER death, so a launcher that returned early could not
+        make us kill a backend that is still coming up (the F-807 class)."""
+        health = Recorder(False, False, True)
+        monkeypatch.setattr(singleton, "_server_is_healthy", health)
+        monkeypatch.setattr(singleton, "_backend_http_ready", Recorder(False))
+
+        assert singleton._wait_for_server(PORT, timeout=30, proc=FakeProc(0)) is True
+        assert singleton._spawn_failure == {}
+
+    def test_an_answering_backend_outvotes_a_nonzero_exit(
+        self, isolated_state, no_stale_spawn_failure, monkeypatch
+    ):
+        """Third reading of the three: even a nonzero exit does not mean dead
+        while the MCP probe still answers. Nothing may be declared dead that is
+        demonstrably serving."""
+        monkeypatch.setattr(singleton, "_server_is_healthy", Recorder(False, True))
+        monkeypatch.setattr(singleton, "_backend_http_ready", Recorder(True))
+
+        assert singleton._wait_for_server(PORT, timeout=30, proc=FakeProc(1)) is True
+        assert singleton._spawn_failure == {}
+
+    def test_no_proc_handle_keeps_the_old_contract(
+        self, isolated_state, no_stale_spawn_failure, monkeypatch
+    ):
+        """Callers that pass no ``proc`` (and the pre-#56 shape) must behave
+        exactly as before: poll to the deadline, then report False."""
+        health = Recorder(False)
+        monkeypatch.setattr(singleton, "_server_is_healthy", health)
+
+        assert singleton._wait_for_server(PORT, timeout=0) is False
+        assert health.calls == 0  # timeout=0 -> the loop never runs, as before
+
+
+class TestProxyDoesNotWaitOutAProvenDeath:
+    """The cold-start thread and the proxy's own 120s readiness wait live in
+    the same process; without the shared record the proxy still burned the full
+    window on a backend the thread had already buried (issue #56)."""
+
+    def test_await_backend_http_returns_at_once_when_the_spawn_is_known_dead(
+        self, no_stale_spawn_failure
+    ):
+        import anyio
+
+        singleton._spawn_failure["reason"] = "backend-boot.log: ValidationError"
+
+        started = time.monotonic()
+        ready = anyio.run(singleton._await_backend_http, "http://127.0.0.1:1/mcp/")
+        elapsed = time.monotonic() - started
+
+        assert ready is False
+        assert elapsed < 2.0, f"waited {elapsed:.1f}s on a backend known to be dead"
