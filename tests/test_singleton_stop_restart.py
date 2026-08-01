@@ -671,14 +671,19 @@ class TestRestartPortSelection:
 
 
 class TestRestartIsPerDisplayContext:
-    """F-808 step 4c: restart's two halves must agree on ONE port.
+    """F-808 steps 4c/4d: restart's two halves must agree on ONE port.
 
-    The spawn half asks `port_for_context` (our own display context). A
-    terminate half reading `first_backend` therefore split-brains on a
-    two-context machine: it kills whichever backend happens to be recorded
-    first — a sibling desktop's, and every browser session on it — and then
-    respawns ours somewhere else entirely, so the operator's restart both
-    destroys someone else's work and does not restart what they asked for.
+    A terminate half that resolved its own target split-brained on a
+    two-context machine: it killed whichever backend some other read named — a
+    sibling desktop's, and every browser session on it — and then respawned
+    ours somewhere else, so the operator's restart both destroyed someone
+    else's work and did not restart what they asked for.
+
+    Step 4d closes it structurally instead of by keeping two reads in step:
+    selection runs FIRST under the lock and the terminate targets exactly the
+    port it returned. There is now no second resolution to diverge, including
+    on the fallback path where selection DIVERTS (below) — which a matching
+    pair of reads could not have covered.
     """
 
     def test_restart_terminates_our_own_context_and_leaves_the_sibling_alone(
@@ -745,3 +750,71 @@ class TestRestartIsPerDisplayContext:
             for e in backend_registry.read_backends(record)
         }
         assert surviving["win-session-OTHER"] == sibling_port
+
+    def test_restart_with_no_entry_of_our_own_diverts_instead_of_killing_a_sibling(
+        self, isolated_state, monkeypatch
+    ):
+        """The fallback path, which the 4c fix did NOT cover and which the
+        reorder does. Our context has no entry at all, so the pre-lock guess
+        falls back to the sibling's port; selection then refuses that port
+        (a proven foreign context recorded it) and diverts to a free one.
+
+        With terminate resolving its own target that meant killing the sibling
+        and spawning ours elsewhere — the exact split-brain, just reached by a
+        different route. Selecting first makes the terminate target the
+        diverted port by construction, so the sibling is never touched.
+        """
+        from stealth_chrome_devtools_mcp.embedded import (
+            display_context,
+            proxy_forwarder,
+        )
+
+        sibling_port = _free_closed_port()
+        diverted_port = _free_closed_port()
+        record = isolated_state / "server.json"
+        backend_registry.record_backend(
+            record,
+            port=sibling_port,
+            version="1.2.1",
+            pid=1111,
+            source_fingerprint="",
+            display_context="headless",  # PROVEN, and not ours
+        )
+        monkeypatch.setattr(
+            display_context, "display_context", lambda: "win-session-OURS"
+        )
+        # Nothing is probed for real: not foreign-held, and the picker is fixed.
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: False)
+        monkeypatch.setattr(proxy_forwarder, "_free_port", lambda: diverted_port)
+
+        terminated: list[int] = []
+        monkeypatch.setattr(
+            singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
+        )
+        monkeypatch.setattr(
+            singleton, "_terminate_backend", lambda port: terminated.append(port)
+        )
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
+        monkeypatch.setattr(
+            singleton, "_probe_backend_status", lambda: ("responsive", diverted_port)
+        )
+
+        spawned: list[int] = []
+
+        def _fake_spawn(port):
+            spawned.append(port)
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=4242, source_fingerprint=""
+            )
+
+        monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
+
+        singleton.restart_backend()
+
+        assert terminated == [diverted_port]  # NOT the sibling's port
+        assert spawned == [diverted_port]
+        surviving = {
+            e["display_context"]: e["port"]
+            for e in backend_registry.read_backends(record)
+        }
+        assert surviving["headless"] == sibling_port

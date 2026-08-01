@@ -613,12 +613,12 @@ def restart_backend() -> tuple[str, int | None]:
     whatever is on the target port, then run the exact cold-start spawn
     sequence under the same lock, with the SAME primitives (plan_M8 SS2.1-B:
     no second spawn path, no new kill logic). Unconditional by design, so a
-    "down"/"none" backend also ends up running, not merely evicted. The
-    terminate target is OUR OWN context's port, else the one recorded backend's,
-    else `DEFAULT_PORT`, and MUST agree with the spawn half (F-808), which
-    routes through `_select_backend_port()` (F-509 A1) so a squatter on the dead
-    backend's port forces a fresh `_free_port()` pick instead of a repeat
-    120s outage — and the fallback port then stays recorded across restarts
+    "down"/"none" backend also ends up running, not merely evicted. The spawn
+    port is chosen FIRST — `_select_backend_port()` (F-509 A1) — and terminate
+    then targets exactly it, so both halves agree BY CONSTRUCTION (F-808), not
+    via two reads that can diverge onto a sibling desktop's backend. Selection
+    means a squatter on the dead backend's port forces a fresh `_free_port()`
+    pick instead of a repeat 120s outage — the fallback port stays recorded
     (SSA1.5); `stop` clears `server.json`, the reset path to `DEFAULT_PORT`.
     Lock contention reports "busy" so the operator retries instead of racing.
     The post-restart state is reported via `_probe_backend_status()` (binding
@@ -628,15 +628,15 @@ def restart_backend() -> tuple[str, int | None]:
     Returns ``(status, pid)``: `_probe_backend_status`'s status or "busy";
     ``pid`` is the freshly recorded pid once the lock is acquired, else None.
     """
+    # A PREFERENCE only: selection re-derives our own context's port itself.
     own = display_context.display_context()
-    recorded = backend_registry.own_or_first_port(SERVER_STATE_FILE, own)
-    port = DEFAULT_PORT if recorded is None else recorded
+    port = backend_registry.own_or_first_port(SERVER_STATE_FILE, own) or DEFAULT_PORT
 
     with _exclusive_lock() as got:
         if not got:
             return ("busy", None)
-        _terminate_backend(port)
         port = _select_backend_port(port)
+        _terminate_backend(port)
         _start_server_process(port)
         _wait_for_server(port)
 

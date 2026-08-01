@@ -264,12 +264,13 @@ def port_conflict(path: Path, port: int, own_context: str) -> bool:
     """True iff *port* is claimed by an entry whose display context is PROVEN
     and different from ``own_context``.
 
-    The sibling this protects is a backend we REFUSED to adopt, and with
-    :func:`adoption_candidates` excluding every foreign PROVEN context, the two
-    rules now line up exactly: what a proven client will not adopt is precisely
-    what it will not bind on top of. The one deliberate exception is the
-    UNVERIFIED *client*, which adopts anything yet still yields here — see
-    below. Binding on such a port would be self-defeating:
+    The sibling this protects is a backend we REFUSED to adopt. For a
+    PROVEN-CAPABLE client — and only for one — that description is now exact:
+    :func:`adoption_candidates` excludes every foreign proven context, so what
+    such a client will not adopt is precisely what it will not bind on top of.
+    A client that CANNOT prove it has a desktop (HEADLESS or UNVERIFIED) adopts
+    anything and yet still yields here; that is the one deliberate mismatch,
+    described below. Binding on such a port would be self-defeating:
     :func:`record_backend` supersedes by port, and a spawn records itself at
     Popen time — BEFORE the new backend is ready — so that entry would be
     dropped the instant we start, leaving a live backend on another desktop
@@ -294,11 +295,13 @@ def port_conflict(path: Path, port: int, own_context: str) -> bool:
     naming both. "Only a PROVEN verdict moves anything" holds here exactly as it
     does for adoption.
 
-    The exception promised above, stated as a rule rather than left to fall out
-    of the code: an UNVERIFIED CLIENT still conflicts with a proven entry (it
-    adopts anything, but it does not get to bind on top of one). This is
-    deliberate — a client that could not prove it has a desktop has not earned
-    the right to evict a sibling that may be alive and serving. It has two
+    The mismatch promised above, stated as a rule rather than left to fall out
+    of the code: a CLIENT that cannot prove it has a desktop — HEADLESS or
+    UNVERIFIED alike — still conflicts with a proven entry (it adopts anything,
+    but it does not get to bind on top of one). This is deliberate: such a
+    client has not earned the right to evict a sibling that may be alive and
+    serving, and the rule is about what the CLIENT can prove, not which of the
+    two unproven tokens it happens to carry. It has two
     known costs, both accepted. An old backend on that port can linger, because
     nobody claims the port that would supersede its record. And on this one
     path adoption and selection disagree: discovery may adopt the entry on that

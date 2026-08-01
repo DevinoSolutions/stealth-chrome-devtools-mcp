@@ -759,22 +759,27 @@ class TestPortConflict:
 
         assert reg.port_conflict(p, 19222, "win-session-1") is False
 
-    def test_an_unverified_client_still_conflicts_with_a_proven_entry(self, tmp_path):
-        """The asymmetry's other side, pinned so it cannot drift silently: an
-        UNVERIFIED client adopts anything, but does not get to BIND on top of a
-        proven sibling. A client that could not prove it has a desktop has not
-        earned the right to evict a backend that may be alive and serving.
+    @pytest.mark.parametrize("client", [HEADLESS, UNVERIFIED])
+    def test_a_client_that_cannot_prove_a_desktop_still_conflicts(
+        self, tmp_path, client
+    ):
+        """The asymmetry's other side, pinned so it cannot drift silently. Both
+        unproven client tokens behave the same, which is the point: the rule is
+        about what the CLIENT can prove, not which token it carries. Such a
+        client adopts anything, but does not get to BIND on top of a proven
+        sibling — it has not earned the right to evict a backend that may be
+        alive and serving.
 
         Two costs are accepted here and named in the docstring: an old backend
         on that port can linger, and on this one path adoption and selection
         disagree (harmless — discovery runs first and returns). The argument
         for revisiting is that the same soundness reasoning that makes an
-        UNVERIFIED ENTRY safe to evict applies to an UNVERIFIED CLIENT too.
+        UNVERIFIED ENTRY safe to evict applies to an unproven CLIENT too.
         """
         p = tmp_path / "server.json"
-        _record(p, 19222, HEADLESS)
+        _record(p, 19222, "win-session-1")
 
-        assert reg.port_conflict(p, 19222, UNVERIFIED) is True
+        assert reg.port_conflict(p, 19222, client) is True
 
     def test_an_unrecorded_port_never_conflicts(self, tmp_path):
         p = tmp_path / "server.json"
