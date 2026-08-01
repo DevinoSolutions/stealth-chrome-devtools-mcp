@@ -518,7 +518,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    # Ship errors to Sentry when SENTRY_DSN is set (no-op otherwise).
+    # Ship errors to Sentry (on by default; no-op under
+    # STEALTH_MCP_NO_ERROR_REPORTING, and never raises).
     sentry_init()
     parser = build_parser()
     args = parser.parse_args(argv)

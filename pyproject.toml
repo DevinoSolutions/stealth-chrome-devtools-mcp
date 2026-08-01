@@ -37,6 +37,10 @@ dependencies = [
     "pillow==11.3.0",
     "requests>=2.32.0,<4",
     "uvicorn[standard]==0.35.0",
+    # Error reporting is ON by default against a hardcoded DSN (observability.py),
+    # so the SDK is a first-class dependency rather than an extra: a default-on
+    # feature that only works when you remember to install something is not on.
+    "sentry-sdk==2.64.0",
 ]
 
 [project.urls]
@@ -52,11 +56,11 @@ stealth-chrome-devtools = "stealth_chrome_devtools_mcp.cli:main"
 transpiler = [
     "py2js>=1.2.1",
 ]
-# Opt-in error shipping: `pip install stealth-chrome-devtools-mcp[sentry]` and set
-# SENTRY_DSN. observability.sentry_init() is a no-op unless the DSN is configured.
-sentry = [
-    "sentry-sdk==2.64.0",
-]
+# DEPRECATED, deliberately empty. sentry-sdk moved into the main `dependencies`
+# list when error reporting became on-by-default; this extra is kept only so the
+# `pip install stealth-chrome-devtools-mcp[sentry]` command lines already in the
+# wild (and in .github/workflows/*.yml) keep resolving instead of warning.
+sentry = []
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

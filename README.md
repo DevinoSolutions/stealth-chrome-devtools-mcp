@@ -211,7 +211,14 @@ A comprehensive suite covers stealth arg filtering, profile resolution, orphan r
 
 ## Environment Variables
 
-All optional. Defaults work for normal use.
+All optional. Defaults work for normal use. Set them in your shell, or in
+`~/.stealth-mcp/.env` — every key is documented in [`.env.example`](./.env.example).
+
+A `.env` in your **project** directory is deliberately ignored. The backend is a
+single shared process launched with whatever folder your MCP client had open, so
+reading the project's `.env` meant reading someone else's application config —
+which crashed the server outright on an ordinary `DATABASE_URL` and silently
+adopted that app's `PORT`, `DEBUG`, and `SENTRY_DSN` as the server's own.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -228,6 +235,7 @@ All optional. Defaults work for normal use.
 | `STEALTH_CHROME_PROFILE_KEY` | unset | Force a stable clone key |
 | `STEALTH_MCP_CLIENT_ROOTS_TIMEOUT_SECONDS` | `5` | Deadline for the `roots/list` request the auto-clone path sends to the MCP client to name a clone. MCP `roots` is optional, so a client may never answer; on expiry the clone name falls back to `CODEX_WORKSPACE`/`CLAUDE_PROJECT_DIR`/`PWD`/cwd (`0` = never ask). |
 | `STEALTH_BROWSER_DEBUG` | `false` | Enable debug logging |
+| `STEALTH_MCP_NO_ERROR_REPORTING` | `false` | Set to `true` to disable [error reporting](#error-reporting) |
 
 ## CLI
 
@@ -278,21 +286,24 @@ uses the same selectors as the automatic sweep, so the preview matches `--apply`
 - Chrome, Chromium, or Microsoft Edge
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
-## Error Reporting (opt-in)
+## Error Reporting
 
-Error reporting via [Sentry](https://sentry.io) is available but **off by default**.
-No data is collected unless you explicitly enable it.
+Crashes and errors are reported to [Sentry](https://sentry.io) **by default**, so
+that a failure you hit is a failure we can see and fix. There is nothing to
+install and nothing to configure: the SDK ships with the package and the
+destination is built in.
 
-To opt in (helps us diagnose issues when you need support):
+To turn it off, set one variable in your shell or in `~/.stealth-mcp/.env`:
 
 ```bash
-pip install stealth-chrome-devtools-mcp[sentry]
-
-# Add to your .env or export in your shell:
-SENTRY_DSN=https://3206541bdab9246f00d7099e692e2ee2@sentry.devino.ca/34
+STEALTH_MCP_NO_ERROR_REPORTING=true
 ```
 
-To disable, simply unset `SENTRY_DSN` or remove it from your `.env`.
+Earlier releases read `SENTRY_DSN` from the environment. They no longer do —
+that variable belongs to *your* application, and a shared backend launched from
+your project folder was picking it up. See
+[Environment Variables](#environment-variables) for why this tool ignores your
+project's `.env` entirely.
 
 ## Development setup
 

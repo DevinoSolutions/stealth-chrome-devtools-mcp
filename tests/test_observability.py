@@ -3,7 +3,8 @@
 Two halves, one home (the conventions lens — there is no second observability
 test module):
 
-1. the DSN-gated Sentry error shipper (`src/…/observability.py`), off by default;
+1. the Sentry error shipper (`src/…/observability.py`) — on by default, aimed at
+   a hardcoded DSN, and forbidden to raise (issue #55);
 2. **plan_RELEASE §2.15 (W15)** — what the product actually says, writes, and
    leaks when a call fails.
 
@@ -71,21 +72,14 @@ import release_evidence as policy  # noqa: E402  PERMANENT(same: tools/ is a scr
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-_FAKE_DSN = "https://public@o0.ingest.sentry.io/123"
-
 
 # ===========================================================================
-# The Sentry error shipper (pre-existing; off by default, DSN-gated)
+# The Sentry error shipper — ON by default, hardcoded DSN, never raises (#55)
 # ===========================================================================
-def test_sentry_init_is_noop_without_dsn(monkeypatch):
-    monkeypatch.delenv("SENTRY_DSN", raising=False)
-    # No DSN configured -> Sentry stays OFF (the default for this local tool).
-    assert observability.sentry_init() is False
-
-
-def test_sentry_init_initializes_when_dsn_set(monkeypatch):
+def test_sentry_init_ships_to_the_hardcoded_dsn_by_default(monkeypatch):
+    """No env var, no `.env`, no extra to install: reporting still works."""
     pytest.importorskip("sentry_sdk")
-    monkeypatch.setenv("SENTRY_DSN", _FAKE_DSN)
+    monkeypatch.delenv("STEALTH_MCP_NO_ERROR_REPORTING", raising=False)
     captured = {}
 
     def _fake_init(**kwargs):
@@ -94,15 +88,49 @@ def test_sentry_init_initializes_when_dsn_set(monkeypatch):
     with patch("sentry_sdk.init", _fake_init):
         assert observability.sentry_init() is True
 
-    assert captured["dsn"] == _FAKE_DSN
+    assert captured["dsn"] == observability._DSN
     assert captured["release"] is not None
     names = {type(i).__name__ for i in captured["integrations"]}
     assert "LoggingIntegration" in names
     assert "AsyncioIntegration" in names
 
 
-def test_sentry_init_raises_if_dsn_set_but_sdk_missing(monkeypatch):
-    monkeypatch.setenv("SENTRY_DSN", _FAKE_DSN)
+def test_the_host_projects_sentry_dsn_is_never_read(monkeypatch):
+    """Issue #55: a product repo's own `SENTRY_DSN` is not our configuration.
+
+    The shared backend is launched with the host project's cwd, so reading this
+    variable meant shipping THIS tool's errors into somebody else's app project.
+    """
+    pytest.importorskip("sentry_sdk")
+    monkeypatch.setenv("SENTRY_DSN", "https://host-project@example.test/9")
+    captured = {}
+
+    with patch("sentry_sdk.init", lambda **kwargs: captured.update(kwargs)):
+        assert observability.sentry_init() is True
+    assert captured["dsn"] == observability._DSN
+
+
+def test_the_namespaced_opt_out_disables_initialization(monkeypatch):
+    monkeypatch.setenv("STEALTH_MCP_NO_ERROR_REPORTING", "true")
+
+    def _must_not_run(**kwargs):
+        raise AssertionError("sentry_sdk.init ran despite the opt-out")
+
+    with patch("sentry_sdk.init", _must_not_run):
+        assert observability.sentry_init() is False
+
+
+def test_sentry_init_returns_false_instead_of_raising_when_the_sdk_is_missing(
+    monkeypatch,
+):
+    """The old contract raised ``RuntimeError`` here and refused to boot.
+
+    Its rationale — "opting in and getting silence is worse than a loud error" —
+    died with the opt-in: reporting is now on by default with a bundled SDK, so
+    there is no user choice left to betray, only a server that would take itself
+    down over its own telemetry.
+    """
+    monkeypatch.delenv("STEALTH_MCP_NO_ERROR_REPORTING", raising=False)
     real_import = builtins.__import__
 
     def _blocked_import(name, *args, **kwargs):
@@ -110,13 +138,8 @@ def test_sentry_init_raises_if_dsn_set_but_sdk_missing(monkeypatch):
             raise ImportError("no sentry_sdk")
         return real_import(name, *args, **kwargs)
 
-    # Opting into error reporting and then getting silence is worse than a loud,
-    # actionable failure -> a set DSN without the extra installed must raise.
-    with (
-        patch("builtins.__import__", _blocked_import),
-        pytest.raises(RuntimeError, match="sentry"),
-    ):
-        observability.sentry_init()
+    with patch("builtins.__import__", _blocked_import):
+        assert observability.sentry_init() is False
 
 
 # ===========================================================================

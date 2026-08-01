@@ -49,7 +49,7 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | `__main__.py` | `python -m stealth_chrome_devtools_mcp` → `server.main()` |
 | `cli.py` | the `stealth-chrome-devtools` ops CLI verbs (`status`/`doctor`/`stop`/`restart`/`cleanup`/`kill-orphans`/`serve`) |
 | `settings.py` | **the one env home** — pydantic `Settings` + `get_settings()`; every `STEALTH_MCP_*` knob is a typed field here |
-| `observability.py` | optional Sentry error shipping (no-op unless `SENTRY_DSN` set) |
+| `observability.py` | Sentry error shipping — hardcoded DSN, on by default, never raises (no-op under `STEALTH_MCP_NO_ERROR_REPORTING`) |
 
 ### `embedded/` — the backend
 

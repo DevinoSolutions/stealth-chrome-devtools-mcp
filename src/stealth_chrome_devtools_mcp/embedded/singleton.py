@@ -38,6 +38,9 @@ else:
 # no handlers - a safe no-op, same fail-open contract as logging_setup itself.
 _logger = logging.getLogger("stealth.proxy")
 
+# THE definition of the state dir. settings.py recomputes this one path (as
+# _STATE_DIR_ENV_FILE) because it is a leaf module that may not import the
+# package; keep the two in step. Nothing else may fork it.
 STATE_DIR = Path.home() / ".stealth-mcp"
 LOCK_FILE = STATE_DIR / "singleton.lock"
 PORT_FILE = STATE_DIR / "server.port"
