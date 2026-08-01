@@ -3376,7 +3376,7 @@ if __name__ == "__main__":
             f"Disabled tool sections: {', '.join(sorted(DISABLED_SECTIONS))}",
         )
 
-    # Ship errors to Sentry when SENTRY_DSN is set (no-op otherwise).
+    # Ship errors to Sentry (on by default; opt out: STEALTH_MCP_NO_ERROR_REPORTING).
     sentry_init()
 
     # B1: bind app_lifespan's teardown policy to the serve transport. HTTP runs

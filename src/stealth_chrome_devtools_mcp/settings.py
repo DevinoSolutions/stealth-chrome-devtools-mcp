@@ -20,7 +20,9 @@ Design invariants:
   the one M14+A1 (X-HARD) field rename below (no back-compat alias):
   ``STEALTH_MCP_SESSION_STORAGE_CAP_GB`` becomes
   ``STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB``.
-* ``extra="forbid"`` rejects unknown keys found in the ``.env`` FILE. pydantic's
+* The ``.env`` FILE is read from OUR state dir, never from the cwd (see
+  ``_STATE_DIR_ENV_FILE`` below).
+* ``extra="forbid"`` rejects unknown keys found in that file. pydantic's
   env-var source only reads known-field names, so unknown ``STEALTH_MCP_*`` env
   VARS are rejected by ``_reject_unknown_prefixed_env`` below instead.
 * ``get_settings()`` is process-cached; tests clear it via
@@ -29,11 +31,28 @@ Design invariants:
 
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_PREFIX = "STEALTH_MCP_"
+
+# The backend is a SHARED singleton, and MCP clients launch it with cwd set to
+# whatever project folder the user happened to open. A cwd-relative ``.env``
+# therefore made this server absorb the HOST PROJECT's configuration (issues
+# #55/#56): under ``extra="forbid"`` an ordinary Next.js ``.env`` holding
+# ``DATABASE_URL`` killed the backend outright for every connected session, and
+# a host ``PORT=3000`` / ``DEBUG=true`` was silently adopted as ours. Operator
+# config now comes from our own state dir only — which is also what makes
+# ``extra="forbid"`` correct again: strictness protects the operator from typos
+# in a file they wrote, instead of punishing them for a file they did not.
+#
+# ``embedded/singleton.py``'s ``STATE_DIR`` is the CANONICAL definition of this
+# path. It is duplicated here rather than imported because this module is a
+# leaf (see the invariants above) and importing the package from it would break
+# that constraint and risk the runpy import cycle. Keep the two in step.
+_STATE_DIR_ENV_FILE = Path.home() / ".stealth-mcp" / ".env"
 
 
 class Settings(BaseSettings):
@@ -41,7 +60,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix=_ENV_PREFIX,
-        env_file=".env",
+        env_file=_STATE_DIR_ENV_FILE,
         extra="forbid",
         case_sensitive=False,
     )
@@ -161,8 +180,13 @@ class Settings(BaseSettings):
     claude_project_dir: str | None = Field(None, validation_alias="CLAUDE_PROJECT_DIR")
     pwd: str | None = Field(None, validation_alias="PWD")
 
-    # -- Observability (default OFF; local single-user tool) -----------------
-    sentry_dsn: str | None = Field(None, validation_alias="SENTRY_DSN")
+    # -- Observability (default ON; namespaced opt-out) ----------------------
+    # Error reporting ships to the project's own hardcoded Sentry DSN (see
+    # observability.py). There is deliberately NO ``sentry_dsn`` field: reading
+    # ``SENTRY_DSN`` meant the shared backend adopted the host project's app
+    # DSN as its own opt-in (issue #55). Negative-form flag to match the house
+    # opt-out idiom above (``no_auto_recovery``).
+    no_error_reporting: bool = False
 
     @classmethod
     def _known_env_names(cls) -> set[str]:
@@ -197,7 +221,8 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return the process-wide :class:`Settings`, built once from ``.env`` + env.
+    """Return the process-wide :class:`Settings`, built once from
+    ``~/.stealth-mcp/.env`` + the environment.
 
     Cached: tests that mutate the environment call ``get_settings.cache_clear()``
     (see the autouse conftest fixture) so the change is re-read.

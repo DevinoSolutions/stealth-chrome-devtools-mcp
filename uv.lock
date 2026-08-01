@@ -1605,6 +1605,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "requests" },
+    { name = "sentry-sdk" },
     { name = "strbuilder" },
     { name = "strinpy" },
     { name = "uvicorn", extra = ["standard"] },
@@ -1615,9 +1616,6 @@ dev = [
     { name = "ruff" },
     { name = "ty" },
     { name = "vulture" },
-]
-sentry = [
-    { name = "sentry-sdk" },
 ]
 test = [
     { name = "mcp" },
@@ -1650,7 +1648,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'test'", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32.0,<4" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.20" },
-    { name = "sentry-sdk", marker = "extra == 'sentry'", specifier = "==2.64.0" },
+    { name = "sentry-sdk", specifier = "==2.64.0" },
     { name = "strbuilder", specifier = "==1.1.3" },
     { name = "strinpy", specifier = "==0.0.4" },
     { name = "ty", marker = "extra == 'dev'", specifier = "==0.0.56" },

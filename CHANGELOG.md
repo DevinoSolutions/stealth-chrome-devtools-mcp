@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — the shared backend no longer absorbs the host project's `.env` (#56)
+
+`Settings` read `.env` from the **current working directory**, and MCP clients
+launch this server with cwd set to whatever project folder the user opened. The
+backend therefore configured itself from that project's application config. Under
+the model's `extra="forbid"` schema this was fatal, not merely wrong: a folder
+whose `.env` held nothing but `DATABASE_URL` and `NEXT_PUBLIC_*` killed the
+backend at startup with a `ValidationError`, for **every** session connected to
+it — an ordinary Next.js repo was enough. The same read silently adopted a host
+`PORT=3000` or `DEBUG=true` as this server's own.
+
+The `.env` file is now read from `~/.stealth-mcp/.env` — the state dir that
+already holds the logs, the port file and `server.json`. A project-local `.env`
+is never read. `extra="forbid"` is kept deliberately: with the file scoped to our
+own state dir, strictness protects the operator from typos in a file they wrote
+instead of punishing them for one they did not. Operators who had put keys in a
+project `.env` must move them to `~/.stealth-mcp/.env` (see `.env.example`).
+
+### Changed — error reporting is on by default and reads no `SENTRY_DSN` (#55)
+
+`SENTRY_DSN` is the single most common key in a product repo's `.env`, so the
+opt-in knob for *our* error reporting was in practice a switch the host project
+flipped: the backend adopted the app's DSN and shipped this tool's crashes into
+someone else's project. There is no `sentry_dsn` setting any more.
+
+Reporting now goes to this project's own hardcoded DSN — the one previously
+published in the README, and public by design, since a DSN is an ingest address
+and not a credential. `sentry-sdk` moved from the `[sentry]` extra into the
+package's dependencies (a default-on feature that only works if you remembered to
+install something is not on), and the extra is kept, empty, so existing
+`pip install stealth-chrome-devtools-mcp[sentry]` command lines keep resolving.
+`sentry_init()` can no longer raise: a missing SDK degrades to a logged warning,
+where it used to abort startup with a `RuntimeError`. Opt out with
+`STEALTH_MCP_NO_ERROR_REPORTING=true`.
+
 ## 2.0.2
 
 ### Fixed — multi-session cold start can no longer evict the backend it is racing (F-807)

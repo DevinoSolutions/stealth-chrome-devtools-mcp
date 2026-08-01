@@ -194,6 +194,18 @@ model, read once via the process-cached `get_settings()`. It is the Python equiv
 of a strict schema for `.env`: typed coercion, and **loud rejection of unknown
 `STEALTH_MCP_*` keys** (a typo fails at startup rather than being silently ignored).
 
+That `.env` is `~/.stealth-mcp/.env`, never the cwd's. The backend is a shared
+singleton and MCP clients launch it with cwd set to whatever project the user
+opened, so a cwd-relative env file made this server read the *host project's*
+application config — fatal under the strict schema (an ordinary `DATABASE_URL`
+took the backend down for every connected session), and silently wrong when the
+key happened to be one of ours (`PORT`, `DEBUG`, `SENTRY_DSN`). Scoping the file
+to our own state dir is also what keeps `extra="forbid"` honest: it now guards a
+file the operator wrote. `settings.py` is a leaf module and may not import the
+package, so it recomputes the state-dir path that `embedded/singleton.py`'s
+`STATE_DIR` canonically defines — the one deliberate duplication, commented at
+both ends.
+
 This replaced a scatter of ad-hoc `parse_bool_env` / `parse_float_env` /
 `_parse_nonnegative_int_env` helpers with divergent truthiness rules (F-720/F-763).
 `os.getenv` and `os.environ` are **banned APIs** repo-wide (see `pyproject.toml`
