@@ -14,7 +14,6 @@ Race condition handling:
 from __future__ import annotations
 
 import inspect
-import json
 import logging
 import os
 import socket
@@ -22,10 +21,17 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from pathlib import Path
 
 import psutil
+
+from stealth_chrome_devtools_mcp.embedded import backend_registry
+from stealth_chrome_devtools_mcp.embedded.backend_registry import (
+    PORT_FILE,
+    SERVER_STATE_FILE,
+    STATE_DIR,
+)
 
 if sys.platform == "win32":
     import msvcrt
@@ -38,16 +44,7 @@ else:
 # no handlers - a safe no-op, same fail-open contract as logging_setup itself.
 _logger = logging.getLogger("stealth.proxy")
 
-# THE definition of the state dir. settings.py recomputes this one path (as
-# _STATE_DIR_ENV_FILE) because it is a leaf module that may not import the
-# package; keep the two in step. Nothing else may fork it.
-STATE_DIR = Path.home() / ".stealth-mcp"
 LOCK_FILE = STATE_DIR / "singleton.lock"
-PORT_FILE = STATE_DIR / "server.port"
-# Records {port, version, pid} for the backend we started, so discovery can
-# confirm a running backend is the SAME version before reusing it. Without this
-# an upgraded session silently reuses a stale old-version backend (issue #14).
-SERVER_STATE_FILE = STATE_DIR / "server.json"
 DEFAULT_PORT = 19222
 # The installed package tree (the .../stealth_chrome_devtools_mcp dir this file
 # lives under). _source_fingerprint() hashes every *.py below it so a backend
@@ -124,51 +121,23 @@ def _server_is_healthy(port: int) -> bool:
         return False
 
 
+# The record itself lives in backend_registry; these three name the paths this
+# module owns and pass them in. Keeping the names here keeps the one call and
+# patch surface the rest of the tree (cli.py, the tests) already targets.
 def _read_server_state() -> dict | None:
-    """Return the recorded ``{port, version, pid}`` for the backend we started.
-
-    None if there is no state file or it is missing/corrupt. This is the record
-    written by :func:`_write_server_state`; a backend started by an older release
-    (<= 1.2.0) has no such file and is therefore treated as version-unknown.
-    """
-    try:
-        state = json.loads(SERVER_STATE_FILE.read_text())
-    except (OSError, ValueError, TypeError):
-        return None
-    return state if isinstance(state, dict) else None
+    return backend_registry.read_record(SERVER_STATE_FILE)
 
 
 def _write_server_state(
     port: int, version: str, pid: int, source_fingerprint: str
 ) -> None:
-    """Record the running backend's identity: its port, the package version that
-    started it, its pid, and a fingerprint of the source it is running. Discovery
-    reuses the backend only when BOTH the version AND the source fingerprint still
-    match (and it answers a live probe); the pid is used to evict a stale backend
-    (mismatched version or source).
-    """
-    _ensure_state_dir()
-    SERVER_STATE_FILE.write_text(
-        json.dumps(
-            {
-                "port": port,
-                "version": version,
-                "pid": pid,
-                "source_fingerprint": source_fingerprint,
-            }
-        )
+    backend_registry.write_record(
+        SERVER_STATE_FILE, port, version, pid, source_fingerprint
     )
 
 
 def _clear_server_state() -> None:
-    """Remove the recorded backend identity (server.json) and the legacy
-    write-only port file, best-effort. Used by `stop_backend()` so a stale
-    record can never make a later `_find_running_server` believe a stopped
-    backend is still there to reuse.
-    """
-    for path in (SERVER_STATE_FILE, PORT_FILE):
-        with suppress(OSError):
-            path.unlink(missing_ok=True)
+    backend_registry.clear_record(SERVER_STATE_FILE, PORT_FILE)
 
 
 def _probe_backend_status() -> tuple[str, int | None]:
