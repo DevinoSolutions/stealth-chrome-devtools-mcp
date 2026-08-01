@@ -29,10 +29,22 @@ can pick the one that can actually show a window::
 A v1 record — the flat ``{port, version, pid, source_fingerprint}`` every
 release up to 2.0.3 wrote — still reads, as ONE backend classified
 ``UNVERIFIED`` (treated as window-capable). Dropping it instead would evict a
-perfectly healthy backend the moment a user upgrades. There is no migration
-step: the next :func:`record_backend` rewrites the file as v2, and because the
-v1 entry is keyed by the same UNVERIFIED token it is replaced rather than
-doubled.
+perfectly healthy backend the moment a user upgrades.
+
+There is no migration step; instead :func:`record_backend` **supersedes by
+port**. The upgraded client writes under its REAL context (``win-session-1``,
+``x11-:0``, …), which is a different key from the ``UNVERIFIED`` one the v1
+record reads as — so without this rule the v1 entry would survive next to the
+new one, sort first, and be handed to every reader forever. That is not a
+cosmetic duplicate: the stale entry's version can never match the running
+package, so the reuse gate would kill and respawn the shared backend on every
+single proxy start. Hence: recording a backend also drops any ``UNVERIFIED``
+entry on the SAME port. Sound because the v1 format is only ever written by
+<= 2.0.3, so such an entry is always version-stale to the client doing the
+write, and same-port means it is this very backend being re-recorded under its
+real identity after the intended one-shot upgrade eviction. An ``UNVERIFIED``
+entry on a DIFFERENT port is left alone — it may be a live backend on a
+platform we genuinely cannot classify, or one whose probe failed.
 
 A leaf module: stdlib plus ``display_context`` (itself a leaf). Never
 ``singleton``, never ``server``.
@@ -161,8 +173,18 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
     fingerprint of the source it is running: discovery reuses a backend only
     when BOTH the version AND the source fingerprint still match (and it answers
     a live probe); the pid is used to evict a stale one.
+
+    Also supersedes by port: a v1 (<= 2.0.3) record on THIS port is the same
+    backend being re-recorded under its real identity, so it is dropped rather
+    than left to shadow this entry forever. The module docstring carries the
+    full argument; an UNVERIFIED entry on a different port survives.
     """
-    entries = {e["display_context"]: e for e in read_backends(path)}
+    entries = {}
+    for recorded in read_backends(path):
+        ctx = recorded["display_context"]
+        if ctx == UNVERIFIED and recorded.get("port") == port:
+            continue
+        entries[ctx] = recorded
     entries[display_context] = {
         "port": port,
         "version": version,

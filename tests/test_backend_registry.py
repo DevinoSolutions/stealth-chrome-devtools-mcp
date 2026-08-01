@@ -98,23 +98,92 @@ class TestSchemaV1Compatibility:
         assert entries[0]["port"] == 19222
         assert entries[0]["display_context"] == "unverified"
 
-    def test_v1_record_is_replaced_in_place_by_its_own_context(self, tmp_path):
-        """Recording over a v1 record keyed as UNVERIFIED must REPLACE it, not
-        leave a phantom second backend behind - otherwise the first write after
-        an upgrade doubles the record."""
+    def test_v1_record_is_superseded_by_a_classified_write_on_its_port(self, tmp_path):
+        """THE upgrade path. A real client writes its REAL context token, which
+        is a DIFFERENT key from the UNVERIFIED one the v1 record reads as - so
+        the v1 entry must be superseded by port, not merely replaced by key.
+
+        Deliberately NOT parametrized over UNVERIFIED: writing under UNVERIFIED
+        would pass on key-replacement alone and prove nothing about the rule
+        this test exists to pin.
+        """
+        p = tmp_path / "server.json"
+        p.write_text(
+            '{"port": 19222, "version": "2.0.3", "pid": 42, '
+            '"source_fingerprint": "OLD"}'
+        )
+
+        reg.record_backend(
+            p,
+            port=19222,
+            version="2.0.4",
+            pid=999,
+            source_fingerprint="NEW",
+            display_context="win-session-1",
+        )
+
+        assert reg.read_backends(p) == [
+            {
+                "port": 19222,
+                "version": "2.0.4",
+                "pid": 999,
+                "source_fingerprint": "NEW",
+                "display_context": "win-session-1",
+            }
+        ]
+
+    def test_an_unverified_backend_on_another_port_survives(self, tmp_path):
+        """The boundary of supersede-by-port. UNVERIFIED is not only the v1
+        marker - it is also what a live backend on an unclassifiable platform
+        (or one whose probe failed) records for itself. On a DIFFERENT port it
+        is a different backend and must never be collected."""
+        p = tmp_path / "server.json"
+        reg.record_backend(
+            p,
+            port=5000,
+            version="v",
+            pid=50,
+            source_fingerprint="fp",
+            display_context=UNVERIFIED,
+        )
+
+        reg.record_backend(
+            p,
+            port=6000,
+            version="v",
+            pid=60,
+            source_fingerprint="fp",
+            display_context="win-session-1",
+        )
+
+        assert {e["display_context"]: e["port"] for e in reg.read_backends(p)} == {
+            UNVERIFIED: 5000,
+            "win-session-1": 6000,
+        }
+
+    def test_upgraded_backend_is_what_both_normalizers_return(self, tmp_path):
+        """Regression pin for the shadowing defect (F-808 step 3b): the stale
+        v1 entry sorted FIRST, so first_backend and backend_on_port both handed
+        every caller a <=2.0.3 record whose version can never match the running
+        package. _same_identity_backend_ready then refused reuse forever and
+        every proxy start kill-respawned the shared backend."""
         p = tmp_path / "server.json"
         p.write_text('{"port": 19222, "version": "2.0.3", "pid": 42}')
 
         reg.record_backend(
             p,
-            port=7,
-            version="v",
-            pid=70,
-            source_fingerprint="fp",
-            display_context=UNVERIFIED,
+            port=19222,
+            version="2.0.4",
+            pid=999,
+            source_fingerprint="NEW",
+            display_context="win-session-1",
         )
 
-        assert [e["port"] for e in reg.read_backends(p)] == [7]
+        state = reg.read_record(p)
+        assert reg.first_backend(state)["version"] == "2.0.4"
+        assert reg.first_backend(state)["pid"] == 999
+        assert reg.backend_on_port(state, 19222)["version"] == "2.0.4"
+        assert reg.backend_on_port(state, 19222)["pid"] == 999
 
 
 class TestUnreadableRecords:
