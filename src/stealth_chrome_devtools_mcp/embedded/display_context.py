@@ -9,15 +9,20 @@ Deliberately observational: it reports OUR OWN context and never tries to pick o
 enter someone else's session. On the machine F-808 was found on, the active
 console session (2) was NOT the session holding the user's desktop (1), so any
 "find the interactive session" heuristic is wrong somewhere.
+
+Leaf contract: this module imports no embedded module except ``debug_logger``,
+and never ``server``. ``debug_logger`` is the spine every other embedded module
+reports through — a bare ``logging.getLogger(__name__)`` record would reach no
+log file, because handlers are attached to ``stealth.backend``/``stealth.proxy``.
 """
 
 from __future__ import annotations
 
-import logging
 import os
 import sys
+from functools import lru_cache
 
-_log = logging.getLogger(__name__)
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 # No desktop: a window launched here can never be displayed. PROVEN, not guessed.
 HEADLESS = "headless"
@@ -34,29 +39,42 @@ def _windows_session_id() -> int | None:
     import ctypes
 
     try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         session = ctypes.c_ulong()
-        ok = ctypes.windll.kernel32.ProcessIdToSessionId(
-            ctypes.windll.kernel32.GetCurrentProcessId(), ctypes.byref(session)
-        )
-        return int(session.value) if ok else None
+        if not kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)):
+            # A BOOL-0 refusal is a real answer we cannot read - say so rather
+            # than folding it into the same silent None as "no windll at all".
+            debug_logger.log_warning(
+                "display_context",
+                "_windows_session_id",
+                f"ProcessIdToSessionId refused (WinError {ctypes.get_last_error()}); "
+                "treating display context as unverified",
+            )
+            return None
+        return int(session.value)
     except Exception:  # noqa: BLE001  PERMANENT(probe must never raise)
-        # Every failure shape here - no windll, a missing symbol, an OS refusal -
-        # means the same thing: we do not know. None becomes UNVERIFIED, which is
-        # treated as capable, so a broken probe can never block headed browsing.
-        # Warn rather than swallow: "unverified" means we are about to allow a
-        # headed spawn we could NOT confirm is visible, which is worth a line.
-        _log.warning(
-            "Windows session probe failed; display context is unverified",
-            exc_info=True,
+        # Every remaining failure shape - no WinDLL, a missing symbol, an OS
+        # refusal - means the same thing: we do not know. None becomes
+        # UNVERIFIED, which is treated as capable, so a broken probe can never
+        # block headed browsing.
+        debug_logger.log_warning(
+            "display_context",
+            "_windows_session_id",
+            "Windows session probe raised; treating display context as unverified",
         )
         return None
 
 
+@lru_cache(maxsize=1)
 def _macos_context() -> str:
     """macOS GUI access. A process in an SSH session belongs to a Background
     launchd domain and cannot own a window; an "Aqua" manager means it can.
     Any probe failure is UNVERIFIED (capable), never HEADLESS: macOS headed
     browsing works today and must not regress on an unrecognized launchctl.
+
+    Cached: a process cannot change its launchd domain, so the subprocess is
+    worth running exactly once. ``display_context`` itself is deliberately NOT
+    cached — the Linux branch reads the environment live.
     """
     import subprocess
 
@@ -71,10 +89,18 @@ def _macos_context() -> str:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
+        debug_logger.log_warning(
+            "display_context",
+            "_macos_context",
+            "launchctl managername failed; treating display context as unverified",
+        )
         return UNVERIFIED
     name = (out.stdout or "").strip()
     if name == "Aqua":
-        return f"aqua-{os.getuid()}"
+        # getattr guard: os.getuid does not exist on Windows, and a bare
+        # reference trips static analysis there even though this branch is
+        # darwin-only (platform_utils.py:354 sets the precedent).
+        return f"aqua-{getattr(os, 'getuid', lambda: 'N-A')()}"
     return HEADLESS if name else UNVERIFIED
 
 
