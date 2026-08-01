@@ -37,6 +37,43 @@ install something is not on), and the extra is kept, empty, so existing
 where it used to abort startup with a `RuntimeError`. Opt out with
 `STEALTH_MCP_NO_ERROR_REPORTING=true`.
 
+### Fixed — the masked User-Agent no longer advertises a Chrome version the browser no longer has (F-806)
+
+The stealth mask renders the browser's major version into a `--user-agent=`
+launch flag, and that version was probed once and cached on the executable's
+**path**. Chrome updates in place, so under the long-lived singleton backend the
+cache could not see an upgrade: the mask kept claiming `Chrome/150` while the
+browser it was masking — and the `sec-ch-ua` client hints Chrome generates from
+its own build — said `151`. A User-Agent that contradicts its own client hints
+is a sharper tell than the headless token the mask exists to remove. It turned
+the 2.0.1 macOS stealth-gate cell red against byte-identical product code.
+
+Three defenses now.
+
+**The Windows probe reads the binary.** It used to list the version-named
+directories beside `chrome.exe` and take the newest. Chrome's updater lands that
+directory long before it swaps the launcher stub, and the browser keeps running
+the old build until it next restarts — days on a workstation — so during that
+whole window the probe answered with a version Chrome would not run, and the
+first spawn of every fresh backend shipped a skewed UA. It now reads
+`chrome.exe`'s own embedded file-version resource, which is the executable
+answering for itself; the directory scan remains as the fallback for a binary
+whose resource cannot be read, so no machine gets a worse answer than before.
+(Windows still does not shell out: `chrome.exe --version` hands the flag to an
+already-running Chrome instead of printing.)
+
+**The memo expires with the binary.** The version probe is memoized on the
+executable's on-disk identity — `(mtime_ns, size)` — rather than on its path, so
+an in-place upgrade expires it while an unchanged binary is still probed only
+once.
+
+**The launched browser has the last word.** Every spawn reads CDP
+`Browser.getVersion` after launch and writes the *actual* launched version back,
+so a version that changed between probe and launch corrects every later spawn.
+`Browser.getVersion`'s `product` field is not rewritten by `--user-agent=`,
+which is what makes it authoritative — the regression test re-measures that on
+every run rather than assuming it.
+
 ## 2.0.2
 
 ### Fixed — multi-session cold start can no longer evict the backend it is racing (F-807)

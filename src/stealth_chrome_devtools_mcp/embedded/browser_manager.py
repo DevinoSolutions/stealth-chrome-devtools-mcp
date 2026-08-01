@@ -27,6 +27,7 @@ from stealth_chrome_devtools_mcp.embedded.platform_utils import (
     check_browser_executable,
     get_platform_info,
     merge_browser_args,
+    reconcile_launched_browser_version,
 )
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import (
@@ -557,8 +558,10 @@ class BrowserManager:
         instance_id: str,
         actual_user_data_dir: str | None,
         uses_custom_data_dir: bool,
+        browser_executable: str,
     ) -> tuple[str | None, window_sizing.WindowSizeMetrics]:
-        """Register the process for cleanup and apply the per-instance CDP
+        """Register the process, reconcile the masked User-Agent against the
+        browser that actually launched (F-806), then apply the per-instance CDP
         overrides (extra headers, window size, timezone).
 
         Returns ``(applied IANA timezone id or None, window-size metrics)``. Runs
@@ -578,6 +581,8 @@ class BrowserManager:
                 "spawn_browser",
                 f"Browser {instance_id} has no process to track",
             )
+
+        await reconcile_launched_browser_version(tab, browser_executable)
 
         if options.extra_headers:
             await tab.send(
@@ -650,6 +655,7 @@ class BrowserManager:
                 instance_id,
                 actual_user_data_dir,
                 uses_custom_data_dir,
+                browser_executable,
             )
 
             await self._setup_dynamic_hooks(tab, instance_id)
