@@ -64,9 +64,6 @@ from e2e_helpers import (
     server_mod,
     warmup_once,
 )
-from stealth_chrome_devtools_mcp.embedded.platform_utils import (
-    reset_browser_version_memo as _reset_browser_version_memo,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -672,31 +669,10 @@ async def _read_tab_http_ua(tab, base_url: str) -> str:
     return raw[0].value if (raw and raw[0]) else ""
 
 
-async def _read_browser_product(tab) -> str:
-    """The running browser's own version string (``Browser.getVersion``'s
-    ``product``) — NOT the User-Agent, and not rewritten by ``--user-agent=``.
-
-    That last property is what makes it the authoritative reading of which
-    browser actually launched, and therefore the yardstick F-806 is measured
-    against. It is measured, not assumed: see
-    :func:`test_f806_a_stale_version_memo_is_repaired_by_the_launched_browser`,
-    which reads it out of a browser launched with a deliberately wrong
-    ``--user-agent=`` and requires it to still report the real version.
-    """
-    version = await tab.send(uc.cdp.browser.get_version())
-    return version[1] if (version and len(version) > 1) else ""
-
-
 async def _collect_ua_facts(base_url: str, *, user_agent: str | None) -> dict:
     """Spawn once, then read the User-Agent from the spawn tab AND from a tab
     created afterwards through the product's own ``new_tab`` tool."""
     await warmup_once()
-    # F-806: the warmup performs a real spawn, and that spawn RECONCILES the
-    # version memo against the browser it launched. Reading the UA after it would
-    # measure the repaired value and never the pre-launch probe's — i.e. the one
-    # thing the first spawn of a fresh backend actually ships. Clearing the memo
-    # puts the spawn below back in the cold-first-spawn state the warmup absorbs.
-    _reset_browser_version_memo()
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
     open_tab = get_fn("new_tab")
@@ -724,8 +700,6 @@ async def _collect_ua_facts(base_url: str, *, user_agent: str | None) -> dict:
             "spawn_tab_ua": await _read_tab_ua(spawn_tab),
             "new_tab_ua": await _read_tab_ua(later_tab),
             "new_tab_http_ua": await _read_tab_http_ua(later_tab, base_url),
-            # F-806: what the browser this UA is supposed to describe really is.
-            "browser_product": await _read_browser_product(spawn_tab),
         }
     finally:
         if iid is not None:
@@ -1213,125 +1187,6 @@ def test_f770_product_masks_ua_while_control_still_leaks(product_probe, control_
         )
         == product_probe["observations"]["http_user_agent"]
     )
-
-
-# ===========================================================================
-# F-806 — the masked User-Agent must describe the browser that ACTUALLY launched.
-#
-# The mask is built from a version probed BEFORE launch. Chrome auto-updates in
-# place, so under a long-lived backend the version the mask was built from and
-# the version that launches can differ — and then the UA claims Chrome/150 while
-# the browser's own ``sec-ch-ua`` says 151. That is a self-contradicting UA:
-# strictly a WORSE tell than the headless token the mask exists to remove. It
-# turned the 2.0.1 macOS gate red (CI run 30607810053).
-#
-# The invariant below is what the skew broke, and it is pinned against a real
-# browser because both halves of it are real-browser facts: the flag Chrome
-# actually launched with, and the version Chrome actually is.
-# ===========================================================================
-def test_f806_masked_ua_major_is_the_launched_browsers_major(ua_default_facts):
-    """F-806: the masked UA's Chrome major == the running browser's own major.
-
-    ``Browser.getVersion().product`` is the browser reporting itself, so this is
-    an equality between the mask and its subject — not between two readings of
-    the same string.
-
-    The fixture clears the version memo before its spawn, so what is measured
-    here is the PRE-LAUNCH PROBE's answer — the first spawn of a fresh backend —
-    and not a value the warmup spawn already reconciled. That is the spawn the
-    Windows directory-scan probe used to get wrong. It still cannot fail on a
-    machine whose Chrome is not mid-update; the teeth are in the node below and
-    in ``TestWindowsProbeReadsTheBinaryNotItsNeighbours``.
-    """
-    facts = ua_default_facts
-    ua_major = _ua_major(facts["spawn_tab_ua"])
-    product_major = _ua_major(facts["browser_product"])
-    print(
-        f"[F-806] {_os_family()}/{_platform.machine()} "
-        f"masked UA major={ua_major} product={facts['browser_product']!r}"
-    )
-    assert ua_major, f"no Chrome major in the masked User-Agent: {facts!r}"
-    assert product_major, f"Browser.getVersion reported no version: {facts!r}"
-    assert ua_major == product_major, (
-        "the masked User-Agent describes a different browser than the one "
-        "running it (F-806) — a UA that contradicts its own sec-ch-ua is a "
-        f"sharper tell than the headless token the mask removes\n"
-        f"  masked UA: {facts['spawn_tab_ua']!r} (major {ua_major})\n"
-        f"  launched : {facts['browser_product']!r} (major {product_major})"
-    )
-
-
-async def test_f806_a_stale_version_memo_is_repaired_by_the_launched_browser(
-    monkeypatch, ua_default_facts
-):
-    """F-806: reproduce the skew against a live browser, then pin the repair.
-
-    The test above cannot fail on a machine whose Chrome did not update mid-run,
-    so on its own it would have no teeth against either defense being deleted.
-    This one supplies them by forcing the state an in-place upgrade produces —
-    a pre-launch probe answering with a major the browser no longer has — and
-    then requiring three things of a real spawn:
-
-    1. the skew is genuinely reachable: a stale probe really does put a wrong
-       major on the wire, so the invariant above is guarding something;
-    2. ``Browser.getVersion().product`` still reports the REAL version even
-       though this browser launched under a wrong ``--user-agent=``. The whole
-       reconciliation rests on that, and here it is measured rather than cited;
-    3. the post-launch reconciliation wrote the truth back, so the NEXT spawn
-       masks correctly — the memo now answers with the launched major even
-       though the (still-patched) probe would answer stale.
-    """
-    from stealth_chrome_devtools_mcp.embedded import platform_utils as _pu
-
-    real_major = _ua_major(ua_default_facts["browser_product"])
-    assert real_major, ua_default_facts
-    # A stale major is one the machine has genuinely left behind — the shape an
-    # in-place upgrade leaves in a path-keyed memo.
-    stale_major = str(int(real_major) - 1)
-
-    spawn = get_fn("spawn_browser")
-    close = get_fn("close_instance")
-    bm = server_mod.browser_manager
-
-    _pu.reset_browser_version_memo()
-    monkeypatch.setattr(_pu, "_probe_browser_major_version", lambda _exe: stale_major)
-    iid = None
-    try:
-        spawned = await spawn(headless=True, **sandbox_kwargs())
-        iid = spawned["instance_id"]
-        tab = await bm.get_tab(iid)
-        skewed_ua = await _read_tab_ua(tab)
-        launched_product = await _read_browser_product(tab)
-        print(
-            f"[F-806:forced-stale] masked UA major={_ua_major(skewed_ua)} "
-            f"(forced {stale_major}) product={launched_product!r}"
-        )
-
-        assert _ua_major(skewed_ua) == stale_major, (
-            "a stale version could not be forced onto the wire, so this test is "
-            f"not exercising the F-806 mechanism: {skewed_ua!r}"
-        )
-        assert _ua_major(launched_product) == real_major, (
-            "Browser.getVersion().product followed the --user-agent= override, "
-            "which would make it useless as the reconciliation's yardstick "
-            f"(F-806): {launched_product!r}"
-        )
-        assert _pu.resolve_browser_major_version(_pu.check_browser_executable()) == (
-            real_major
-        ), (
-            "the post-launch reconciliation did not write the launched browser's "
-            "version back, so every later spawn would keep masking as "
-            f"{stale_major} while running {real_major} (F-806)"
-        )
-    finally:
-        if iid is not None:
-            try:
-                await close(instance_id=iid)
-            except Exception:  # teardown best-effort
-                pass
-        # The memo is process-global: leaving a forced value in it would leak
-        # into any later test that builds a User-Agent.
-        _pu.reset_browser_version_memo()
 
 
 # ===========================================================================

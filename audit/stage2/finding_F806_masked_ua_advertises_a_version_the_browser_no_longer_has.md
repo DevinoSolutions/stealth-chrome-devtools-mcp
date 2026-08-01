@@ -1,6 +1,17 @@
 # F-806 — the masked User-Agent keeps advertising a Chrome version the browser no longer has
 
-**Status: RESOLVED** on branch `fix/ua-version-skew` (2.0.2 stabilization).
+**Status: FIXED, NOT YET SHIPPED — targeted at 2.0.4.** The fix landed on `main`
+(merge `ca63b77`) and was then reverted back out of the 2.0.3 release, so the
+defect described below is still present in every published version. Reason for
+the revert: the fix adds `reconcile_launched_browser_version` — an **unbounded**
+CDP `Browser.getVersion` — to *every* spawn, first in the post-launch sequence.
+The `integration (Windows/X64)` gate cell failed three times running with three
+different spawn-path symptoms (an F-801 cookie race, "Failed to connect to
+browser", then a job-level hang producing no pytest report at all), having
+passed on 2.0.2. That is suspicion, not proof — it was never reproduced off CI —
+but 2.0.3 exists to fix a backend-killing config bug, so the release was reduced
+to the smallest diff that does it. Before this re-lands, bound that CDP call.
+The work itself is preserved on branch `fix/ua-version-skew`.
 **Severity: MEDIUM-HIGH (stealth)** — the mask exists to remove one tell and
 this replaces it with a sharper one. A UA reading `Chrome/150` on a browser
 whose own `sec-ch-ua` says `151` is not a version anyone's browser reports; it

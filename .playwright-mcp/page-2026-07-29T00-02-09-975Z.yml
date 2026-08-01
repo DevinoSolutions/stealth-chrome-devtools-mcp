@@ -1,0 +1,163 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner [ref=e6]:
+      - heading "Navigation Menu" [level=2] [ref=e7]
+      - generic [ref=e9]:
+        - button "Toggle navigation" [ref=e11] [cursor=pointer]
+        - link "Homepage" [ref=e17] [cursor=pointer]:
+          - /url: /
+        - generic [ref=e20]:
+          - link "Sign in" [ref=e21] [cursor=pointer]:
+            - /url: /login?return_to=https%3A%2F%2Fgithub.com%2FDevinoSolutions%2Fstealth-chrome-devtools-mcp%2Factions%2Fruns%2F30177961852%2Fjob%2F89729746978
+          - button "Appearance settings" [disabled] [ref=e24]
+  - main [ref=e28]:
+    - generic [ref=e29]:
+      - generic [ref=e30]:
+        - generic [ref=e31]:
+          - generic [ref=e33]:
+            - link "DevinoSolutions" [ref=e37] [cursor=pointer]:
+              - /url: /DevinoSolutions
+            - generic [ref=e38]: /
+            - strong [ref=e39]:
+              - link "stealth-chrome-devtools-mcp" [ref=e40] [cursor=pointer]:
+                - /url: /DevinoSolutions/stealth-chrome-devtools-mcp
+            - generic [ref=e41]: Public
+          - generic [ref=e42]:
+            - list:
+              - listitem [ref=e43]:
+                - link "You must be signed in to change notification settings" [ref=e44] [cursor=pointer]:
+                  - /url: /login?return_to=%2FDevinoSolutions%2Fstealth-chrome-devtools-mcp
+                  - text: Notifications
+              - listitem [ref=e47]:
+                - link "Fork 2" [ref=e48] [cursor=pointer]:
+                  - /url: /login?return_to=%2FDevinoSolutions%2Fstealth-chrome-devtools-mcp
+                  - text: Fork
+                  - generic "2" [ref=e51]
+              - listitem [ref=e52]:
+                - link "You must be signed in to star a repository" [ref=e54] [cursor=pointer]:
+                  - /url: /login?return_to=%2FDevinoSolutions%2Fstealth-chrome-devtools-mcp
+                  - text: Star
+                  - generic "17 users starred this repository" [ref=e57]: "17"
+        - navigation "Repository" [ref=e58]:
+          - list [ref=e59]:
+            - listitem [ref=e60]:
+              - link "Code" [ref=e61] [cursor=pointer]:
+                - /url: /DevinoSolutions/stealth-chrome-devtools-mcp
+            - listitem [ref=e65]:
+              - link "Issues 5" [ref=e66] [cursor=pointer]:
+                - /url: /DevinoSolutions/stealth-chrome-devtools-mcp/issues
+                - generic [ref=e70]: Issues
+                - generic "5" [ref=e71]
+            - listitem [ref=e72]:
+              - link "Pull requests 13" [ref=e73] [cursor=pointer]:
+                - /url: /DevinoSolutions/stealth-chrome-devtools-mcp/pulls
+                - generic [ref=e76]: Pull requests
+                - generic "13" [ref=e77]
+            - listitem [ref=e78]:
+              - link "Actions" [ref=e79] [cursor=pointer]:
+                - /url: /DevinoSolutions/stealth-chrome-devtools-mcp/actions
+            - listitem [ref=e83]:
+              - link "Projects" [ref=e84] [cursor=pointer]:
+                - /url: /DevinoSolutions/stealth-chrome-devtools-mcp/projects
+            - listitem [ref=e88]:
+              - link "Security and quality" [ref=e89] [cursor=pointer]:
+                - /url: /DevinoSolutions/stealth-chrome-devtools-mcp/security
+            - listitem [ref=e93]:
+              - link "Insights" [ref=e94] [cursor=pointer]:
+                - /url: /DevinoSolutions/stealth-chrome-devtools-mcp/pulse
+      - generic [ref=e102]:
+        - generic [ref=e105]:
+          - link "CI" [ref=e108] [cursor=pointer]:
+            - /url: /DevinoSolutions/stealth-chrome-devtools-mcp/actions/workflows/test.yml
+          - generic [ref=e112]:
+            - generic [ref=e113]:
+              - img "failed:" [ref=e117]
+              - 'heading "RELEASE-5 W5: generated qualified release contract and tool evidence ledger #163" [level=1] [ref=e119]'
+            - link "Sign in to view logs" [ref=e123] [cursor=pointer]:
+              - /url: /login?return_to=https%3A%2F%2Fgithub.com%2FDevinoSolutions%2Fstealth-chrome-devtools-mcp%2Factions%2Fruns%2F30177961852%2Fjob%2F89729746978
+        - generic [ref=e124]:
+          - navigation "Workflow run" [ref=e130]:
+            - list [ref=e131]:
+              - listitem [ref=e132]:
+                - link "Summary" [ref=e133] [cursor=pointer]:
+                  - /url: /DevinoSolutions/stealth-chrome-devtools-mcp/actions/runs/30177961852
+              - generic [ref=e136]:
+                - heading "All jobs" [level=4] [ref=e137]
+                - button "Filter by job status" [ref=e138] [cursor=pointer]
+              - listitem [ref=e141]
+              - listitem:
+                - list
+              - listitem [ref=e142]
+              - listitem [ref=e143]:
+                - heading "Run details" [level=3] [ref=e145]
+                - list "Run details" [ref=e146]:
+                  - listitem [ref=e147]:
+                    - link "Usage" [ref=e148] [cursor=pointer]:
+                      - /url: /DevinoSolutions/stealth-chrome-devtools-mcp/actions/runs/30177961852/usage
+                  - listitem [ref=e151]:
+                    - link "Workflow file" [ref=e152] [cursor=pointer]:
+                      - /url: /DevinoSolutions/stealth-chrome-devtools-mcp/actions/runs/30177961852/workflow
+          - region "Check run summary" [ref=e156]:
+            - generic [ref=e157]:
+              - region "Annotations" [ref=e159]:
+                - generic [ref=e163]:
+                  - button "Open job annotations" [ref=e165] [cursor=pointer]
+                  - generic [ref=e170]:
+                    - heading "Annotations" [level=2] [ref=e171]
+                    - generic [ref=e172]: 3 errors and 3 warnings
+              - generic [ref=e174]:
+                - generic [ref=e176]:
+                  - link "release-gate / integration (macOS/ARM64)" [ref=e179] [cursor=pointer]:
+                    - /url: "#logs"
+                  - generic [ref=e181]: failed Jul 25, 20263 days ago in 5m 57s
+                - generic [ref=e183]:
+                  - generic [ref=e184]:
+                    - group:
+                      - generic "Set up job"
+                  - generic [ref=e185]:
+                    - group:
+                      - generic "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+                  - generic [ref=e186]:
+                    - group:
+                      - generic "Install uv"
+                  - generic [ref=e187]:
+                    - group:
+                      - generic "Set up Python 3.12"
+                  - generic [ref=e188]:
+                    - group:
+                      - generic "Install dependencies"
+                  - generic [ref=e189]:
+                    - group:
+                      - generic "Assert qualified runner + record identity"
+                  - generic [ref=e190]:
+                    - group:
+                      - generic "Resolve image Chrome Stable identity"
+                  - generic [ref=e191]:
+                    - group:
+                      - generic "Start Xvfb (Linux headed cases only)"
+                  - generic [ref=e192]:
+                    - group:
+                      - 'generic "KNOWN GAP: macOS excludes the transport journey (F-773)"'
+                  - generic [ref=e193]:
+                    - group:
+                      - generic "Run integration + Chrome-identity tests"
+                  - generic [ref=e194]:
+                    - group:
+                      - generic "Upload Chrome + runner identity"
+                  - generic [ref=e195]:
+                    - group:
+                      - generic "Emit this cell's release-evidence record"
+                  - generic [ref=e196]:
+                    - group:
+                      - generic "Upload this cell's release-evidence record"
+                  - generic [ref=e197]:
+                    - group:
+                      - generic "Post Install uv"
+                  - generic [ref=e198]:
+                    - group:
+                      - generic "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+                  - generic [ref=e199]:
+                    - group:
+                      - generic "Complete job"

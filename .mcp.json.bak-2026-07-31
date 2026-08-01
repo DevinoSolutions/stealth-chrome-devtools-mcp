@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "stealth-local": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "C:/Users/amind/OneDrive/Desktop/Projects/CUSTOM MCPs & PRODUCTIVITY/stealth-chrome-devtools-mcp",
+        "run",
+        "python",
+        "-m",
+        "stealth_chrome_devtools_mcp",
+        "--singleton-port",
+        "19223"
+      ]
+    }
+  }
+}
