@@ -412,7 +412,7 @@ class TestRestartBackend:
 
         monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
         monkeypatch.setattr(
-            singleton, "_wait_for_server", lambda port, **kw: calls.append("wait")
+            singleton, "_wait_for_server", lambda port: calls.append("wait")
         )
         monkeypatch.setattr(
             singleton, "_probe_backend_status", lambda: ("responsive", 19222)
@@ -467,7 +467,7 @@ class TestRestartBackend:
             )
 
         monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
-        monkeypatch.setattr(singleton, "_wait_for_server", lambda port, **kw: None)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
         # The backend comes back wedged - restart_backend must report that,
         # not the "responsive" the ordering test above pinned.
         monkeypatch.setattr(
@@ -511,7 +511,7 @@ class TestRestartPortSelection:
             singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
         )
         monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
-        monkeypatch.setattr(singleton, "_wait_for_server", lambda port, **kw: None)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
         monkeypatch.setattr(
             singleton, "_probe_backend_status", lambda: ("responsive", recorded_port)
         )
@@ -554,7 +554,7 @@ class TestRestartPortSelection:
             # _terminate_backend is stubbed regardless - nothing real is
             # touched by this test.
             monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
-            monkeypatch.setattr(singleton, "_wait_for_server", lambda port, **kw: None)
+            monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
             monkeypatch.setattr(
                 singleton, "_probe_backend_status", lambda: ("responsive", 0)
             )
@@ -594,7 +594,7 @@ class TestRestartPortSelection:
             singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
         )
         monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
-        monkeypatch.setattr(singleton, "_wait_for_server", lambda port, **kw: None)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
         monkeypatch.setattr(
             singleton, "_probe_backend_status", lambda: ("responsive", recorded_port)
         )

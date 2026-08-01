@@ -236,51 +236,6 @@ def bootstrap_backend_process_logging() -> Path:
     return log_path
 
 
-_LOG_TAIL_LINES = 12
-_LOG_TAIL_BYTES = 8192
-_NO_BACKEND_LOG = "no backend log output"
-
-
-def _tail_lines(path: Path) -> str:
-    """Last ``_LOG_TAIL_LINES`` non-blank lines of ``path``, read from the END
-    within ``_LOG_TAIL_BYTES``; ``""`` when absent or unreadable."""
-    try:
-        with path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            handle.seek(max(0, handle.tell() - _LOG_TAIL_BYTES))
-            blob = handle.read()
-    except OSError:
-        return ""
-    lines = [ln.strip() for ln in blob.decode("utf-8", "replace").splitlines()]
-    return " / ".join([ln for ln in lines if ln][-_LOG_TAIL_LINES:])
-
-
-def backend_log_tail(pid: int | None = None) -> str:
-    """The bounded tail of what a backend last printed — the cause a caller
-    needs when a backend never became ready (issue #56).
-
-    Reads ``backend-boot.log`` (``singleton``'s ``Popen`` stdout/stderr
-    redirect, and the ONLY record of a crash at import/settings time, which
-    dies before :func:`configure_logging` can install anything) plus this
-    module's own ``backend-<pid>.log`` when the caller knows the pid. Bounded
-    on purpose and seeked from the end: the boot log is appended to by every
-    spawn and reaches megabytes, so reading it whole would be worse than the
-    missing diagnostic it replaces. Never raises — an unresolvable log dir
-    (a bad ``STEALTH_MCP_*`` env makes ``get_settings()`` raise) or an
-    unreadable file degrades to a fixed phrase, because every caller is
-    already on a failing path.
-    """
-    try:
-        log_dir = resolve_log_dir()
-    except (OSError, ValueError):
-        return _NO_BACKEND_LOG
-    names = ["backend-boot.log"]
-    if isinstance(pid, int):
-        names.append(f"backend-{pid}.log")
-    tails = [f"{n}: {tail}" for n in names if (tail := _tail_lines(log_dir / n))]
-    return " | ".join(tails) or _NO_BACKEND_LOG
-
-
 def prune_old_logs(
     log_dir: Path | None = None, keep_days: int = 7, keep_files: int = 50
 ) -> None:
