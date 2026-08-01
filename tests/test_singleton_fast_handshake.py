@@ -127,6 +127,59 @@ class TestEnsureServerRunningNonBlocking:
         assert elapsed < 0.5, f"ensure_server_running blocked {elapsed:.2f}s on startup"
 
 
+class TestStartupFailureReachesTheClient:
+    """issue #56: when the backend never comes up, the proxy tears down and the
+    client renders the bare transport close as "MCP error -32000: Connection
+    closed" — a message that names no cause. The real cause is on disk in
+    backend-boot.log, which nobody knew to read. It must ride out on the
+    client's own pending requests instead.
+    """
+
+    @pytest.mark.asyncio
+    async def test_pending_request_is_answered_with_the_cause(self, monkeypatch):
+        from mcp.types import JSONRPCError
+
+        from stealth_chrome_devtools_mcp.embedded import singleton
+
+        reason = "backend-boot.log: pydantic_core.ValidationError: 2 errors"
+        monkeypatch.setitem(singleton._spawn_failure, "reason", reason)
+
+        # Hold the readiness verdict until the client's tools/list is buffered,
+        # so the drain has something to answer (no timing assumption).
+        gate = anyio.Event()
+
+        async def _never_ready(url, deadline_seconds=None):
+            await gate.wait()
+            return False
+
+        monkeypatch.setattr(singleton, "_await_backend_http", _never_ready)
+
+        c2p_tx, c2p_rx = anyio.create_memory_object_stream(10)
+        p2c_tx, p2c_rx = anyio.create_memory_object_stream(10)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_proxy_streams, c2p_rx, p2c_tx, _free_port())
+
+            await c2p_tx.send(_initialize_msg(1, "2025-03-26"))
+            with anyio.fail_after(5):
+                first = await p2c_rx.receive()  # local initialize, as always
+            await c2p_tx.send(_tools_list_msg(2))
+            await anyio.sleep(0.2)  # let pump_client buffer it
+            gate.set()
+
+            with anyio.fail_after(5):
+                second = await p2c_rx.receive()
+            tg.cancel_scope.cancel()
+
+        assert isinstance(first.message.root, JSONRPCResponse)  # unchanged
+        failure = second.message.root
+        assert isinstance(failure, JSONRPCError)
+        assert failure.id == 2  # the request the client was actually waiting on
+        assert failure.error.code == -32000
+        assert reason in failure.error.message
+        assert "ValidationError" in failure.error.message
+
+
 def _initialized_notification():
     from mcp.types import JSONRPCNotification
 

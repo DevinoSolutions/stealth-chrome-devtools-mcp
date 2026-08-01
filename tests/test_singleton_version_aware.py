@@ -491,7 +491,7 @@ class TestStartBackendHoldingLockEvicts:
             "_start_server_process",
             lambda port: calls.append(("start", port)),
         )
-        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: True)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port, **kw: True)
 
         singleton._start_backend_holding_lock(19222)
 
@@ -544,7 +544,7 @@ class TestStartBackendHoldingLockEvicts:
         )
         monkeypatch.setattr(singleton, "_clear_stale_backend", lambda port: None)
         monkeypatch.setattr(singleton, "_start_server_process", lambda port: None)
-        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: True)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port, **kw: True)
 
         with caplog.at_level(logging.INFO, logger="stealth.proxy"):
             singleton._start_backend_holding_lock(19222)

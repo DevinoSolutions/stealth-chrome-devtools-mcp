@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a backend that dies at startup now says why, in seconds (issue #56)
+
+When the freshly spawned backend crashed before it could serve — a settings
+`ValidationError`, an import error, anything fatal in the first second — the
+stdio proxy waited out its full 120s readiness window and then handed the client
+a bare `-32000`. The cause was on disk the whole time, in
+`~/.stealth-mcp/logs/backend-boot.log`, but nothing pointed there; diagnosing it
+required already knowing that file existed.
+
+- **The cold start stops waiting on a process that is gone.**
+  `_start_server_process` now returns its `Popen`, and `_wait_for_server` polls
+  it. A child is declared dead only when three readings agree — it exited
+  **nonzero**, nothing is listening on the port, and the MCP probe is silent —
+  because a false "dead" is precisely the F-807 failure the 2.0.2 patience gate
+  exists to prevent. A clean exit is never death: on Windows `sys.executable` is
+  a uv trampoline whose identically-named child does the real work, so the
+  handle we hold is the shim's. (Measured: the shim blocks for the child's whole
+  life and forwards its exit code, but the conservative reading stands anyway.)
+- **The reason reaches the client, not just the log.** The proxy's failure now
+  carries the tail of `backend-boot.log` (and `backend-<pid>.log`), read from
+  the *end* under a fixed byte cap — that boot log is appended to by every spawn
+  and reaches megabytes. It goes into the proxy's error line *and* is sent back
+  as the JSON-RPC error on whatever request the client was waiting on, so the
+  exception text appears in the client instead of "Connection closed".
+
+The `initialize` handshake is still answered locally and instantly, and a
+slow-but-healthy backend is still awaited in full. `restart_backend` gets the
+same fail-fast wait.
+
 ## 2.0.2
 
 ### Fixed — multi-session cold start can no longer evict the backend it is racing (F-807)
