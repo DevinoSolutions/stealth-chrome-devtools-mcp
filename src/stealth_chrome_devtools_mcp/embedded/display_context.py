@@ -2,8 +2,9 @@
 
 THE one home for that question. Chrome inherits its parent's window station, so
 whether a headed browser is visible is decided by the process that launches it —
-never by the caller and never by the ``headless`` flag (F-808). ``singleton.py``
-records this token per backend so discovery can prefer a window-capable one.
+never by the caller and never by the ``headless`` flag (F-808).
+``backend_registry.py`` records this token per backend so discovery can prefer a
+window-capable one.
 
 Deliberately observational: it reports OUR OWN context and never tries to pick or
 enter someone else's session. On the machine F-808 was found on, the active

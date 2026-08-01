@@ -202,7 +202,7 @@ took the backend down for every connected session), and silently wrong when the
 key happened to be one of ours (`PORT`, `DEBUG`, `SENTRY_DSN`). Scoping the file
 to our own state dir is also what keeps `extra="forbid"` honest: it now guards a
 file the operator wrote. `settings.py` is a leaf module and may not import the
-package, so it recomputes the state-dir path that `embedded/singleton.py`'s
+package, so it recomputes the state-dir path that `embedded/backend_registry.py`'s
 `STATE_DIR` canonically defines — the one deliberate duplication, commented at
 both ends.
 

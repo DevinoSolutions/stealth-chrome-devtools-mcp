@@ -14,7 +14,12 @@ the developer's live ``~/.stealth-mcp`` record) still reaches every read and
 write. A function that closed over this module's own global would silently
 ignore that redirection.
 
-A leaf module: stdlib only, no back edge to ``singleton``.
+Corollary: no function here may take a default path. This module's own
+``SERVER_STATE_FILE`` names the real file; a default would bind it at def-time
+and bypass every caller's redirection. ``test_backend_registry.py`` pins this.
+
+A leaf module: stdlib only today; it may come to import other leaf embedded
+modules, but never ``singleton`` and never ``server``.
 """
 
 from __future__ import annotations
@@ -71,10 +76,13 @@ def write_record(
 
 
 def clear_record(*paths: Path) -> None:
-    """Remove the recorded backend identity (server.json) and the legacy
-    write-only port file, best-effort. Used by `stop_backend()` so a stale
-    record can never make a later `_find_running_server` believe a stopped
-    backend is still there to reuse.
+    """Best-effort unlink of the given files; a path that is absent or that the
+    OS refuses is skipped, never raised.
+
+    `stop_backend()` calls this with the server.json record and the legacy
+    write-only port file, so a stale record can never make a later
+    `_find_running_server` believe a stopped backend is still there to reuse —
+    but that pair is the example, not the contract.
     """
     for path in paths:
         with suppress(OSError):
