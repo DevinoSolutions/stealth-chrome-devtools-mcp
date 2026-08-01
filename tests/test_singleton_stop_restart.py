@@ -314,6 +314,61 @@ class TestStopBackend:
         assert pid is None
         assert singleton._read_server_state() is None
 
+    def test_stop_forgets_only_the_stopped_context(self, isolated_state, monkeypatch):
+        """F-808: `stop` used to unlink the whole record, which would make a
+        LIVE backend on another display context undiscoverable - the next proxy
+        start would spawn a second one beside it. It must forget only the
+        backend it actually stopped, and clear the file only once nothing is
+        left recorded.
+
+        Termination is stubbed on purpose: this pins the record bookkeeping,
+        not the kill (which TestStopBackend's marked-sleeper cases cover).
+        """
+        monkeypatch.setattr(singleton, "_terminate_backend", lambda port: True)
+        # Mirror the real _probe_backend_status: it reports the FIRST recorded
+        # backend's port, so a constant stub would not move between the two
+        # stops this test performs.
+        monkeypatch.setattr(
+            singleton,
+            "_probe_backend_status",
+            lambda: (
+                "responsive",
+                (
+                    backend_registry.first_backend(singleton._read_server_state()) or {}
+                ).get("port"),
+            ),
+        )
+        backend_registry.record_backend(
+            singleton.SERVER_STATE_FILE,
+            port=5000,
+            version="1.2.1",
+            pid=1111,
+            source_fingerprint="fp",
+            display_context="headless",
+        )
+        backend_registry.record_backend(
+            singleton.SERVER_STATE_FILE,
+            port=6000,
+            version="1.2.1",
+            pid=2222,
+            source_fingerprint="fp",
+            display_context="win-session-1",
+        )
+
+        result, pid = singleton.stop_backend()
+
+        assert (result, pid) == ("stopped", 1111)
+        assert [
+            (e["display_context"], e["port"])
+            for e in backend_registry.read_backends(singleton.SERVER_STATE_FILE)
+        ] == [("win-session-1", 6000)]
+
+        result, pid = singleton.stop_backend()
+
+        assert (result, pid) == ("stopped", 2222)
+        assert singleton._read_server_state() is None
+        assert not singleton.SERVER_STATE_FILE.exists()
+
     def test_none_reports_not_running(self, isolated_state, monkeypatch):
         monkeypatch.setattr(singleton, "_probe_backend_status", lambda: ("none", None))
 

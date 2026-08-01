@@ -170,12 +170,9 @@ def _doctor_port_occupant_line() -> str:
     from binding)? Uses only existing helpers — no new port logic."""
     from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
-    entry = backend_registry.first_backend(singleton._read_server_state()) or {}
-    port = (
-        entry.get("port")
-        if isinstance(entry.get("port"), int)
-        else (singleton.DEFAULT_PORT)
-    )
+    entry = backend_registry.first_backend(singleton._read_server_state())
+    recorded = entry.get("port") if entry else None
+    port = recorded if isinstance(recorded, int) else singleton.DEFAULT_PORT
     our_pid = singleton._backend_pid_on_port(port)
     if our_pid is not None:
         return f"port {port} held by our backend (pid {our_pid})"

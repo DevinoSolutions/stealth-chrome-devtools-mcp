@@ -306,8 +306,21 @@ class TestSourceFingerprintReuse:
         assert singleton._source_fingerprint() != second
 
 
+@pytest.fixture
+def stubbed_context(monkeypatch):
+    """Pin the recorded display context to a token production can never
+    produce, so the assertions below compare the writer against a KNOWN value
+    instead of against display_context.display_context() - which would be
+    production checking itself and would pass even if the writer stamped the
+    wrong thing. _write_server_state imports the module lazily and reads the
+    attribute at call time, so patching the attribute lands.
+    """
+    monkeypatch.setattr(display_context, "display_context", lambda: "ctx-sentinel")
+    return "ctx-sentinel"
+
+
 class TestServerStatePersistence:
-    def test_write_then_read_roundtrips(self, isolated_state):
+    def test_write_then_read_roundtrips(self, isolated_state, stubbed_context):
         singleton._write_server_state(
             port=12345, version="9.9.9", pid=4242, source_fingerprint="deadbeef"
         )
@@ -320,7 +333,7 @@ class TestServerStatePersistence:
             "version": "9.9.9",
             "pid": 4242,
             "source_fingerprint": "deadbeef",
-            "display_context": display_context.display_context(),
+            "display_context": stubbed_context,
         }
 
     def test_written_state_makes_backend_reusable(self, isolated_state, monkeypatch):
@@ -344,7 +357,7 @@ class TestServerStatePersistence:
             sock.close()
 
     def test_start_server_process_records_current_version_pid_and_fingerprint(
-        self, isolated_state, monkeypatch
+        self, isolated_state, monkeypatch, stubbed_context
     ):
         from unittest.mock import MagicMock
 
@@ -364,7 +377,7 @@ class TestServerStatePersistence:
         assert entry["pid"] == 4242
         assert entry["source_fingerprint"] == "test-fp"
         # F-808: a real spawn also records WHERE its windows could appear.
-        assert entry["display_context"] == display_context.display_context()
+        assert entry["display_context"] == stubbed_context
 
 
 class TestBackendIdentity:

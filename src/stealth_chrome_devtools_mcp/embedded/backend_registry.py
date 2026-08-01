@@ -31,20 +31,19 @@ release up to 2.0.3 wrote — still reads, as ONE backend classified
 ``UNVERIFIED`` (treated as window-capable). Dropping it instead would evict a
 perfectly healthy backend the moment a user upgrades.
 
-There is no migration step; instead :func:`record_backend` **supersedes by
-port**. The upgraded client writes under its REAL context (``win-session-1``,
-``x11-:0``, …), which is a different key from the ``UNVERIFIED`` one the v1
-record reads as — so without this rule the v1 entry would survive next to the
-new one, sort first, and be handed to every reader forever. That is not a
-cosmetic duplicate: the stale entry's version can never match the running
-package, so the reuse gate would kill and respawn the shared backend on every
-single proxy start. Hence: recording a backend also drops any ``UNVERIFIED``
-entry on the SAME port. Sound because the v1 format is only ever written by
-<= 2.0.3, so such an entry is always version-stale to the client doing the
-write, and same-port means it is this very backend being re-recorded under its
-real identity after the intended one-shot upgrade eviction. An ``UNVERIFIED``
-entry on a DIFFERENT port is left alone — it may be a live backend on a
-platform we genuinely cannot classify, or one whose probe failed.
+**Supersede by port.** Recording a backend drops every other entry claiming the
+same port, whatever context it is filed under, before filing this one. The port
+is the discriminator because only one process can hold a loopback listener: a
+second entry naming that port cannot describe a live backend, so it is by
+construction a leftover. Two ways to produce one, both real — a v1 record
+(which reads as ``UNVERIFIED``, never the real token the upgraded client
+writes), and a context token that changed under a backend that did not (a
+Windows session id is reassigned across an RDP reconnect). Without the rule the
+leftover survives, sorts first, and is handed to every reader forever; because
+its version or fingerprint can no longer match, the reuse gate kills and
+respawns the shared backend on every single proxy start. Entries on OTHER ports
+are untouched — including ``UNVERIFIED`` ones, which may be live backends on a
+platform we genuinely cannot classify.
 
 A leaf module: stdlib plus ``display_context`` (itself a leaf). Never
 ``singleton``, never ``server``.
@@ -54,10 +53,20 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from contextlib import suppress
 from pathlib import Path
 
 from stealth_chrome_devtools_mcp.embedded.display_context import HEADLESS, UNVERIFIED
+
+# One recorded backend, and equally the raw record that holds them: both are
+# str-keyed JSON objects whose values are deliberately heterogeneous. `object`
+# rather than a precise union or a model on purpose - this record is a
+# never-raise cache that must keep reading two schemas and tolerate a
+# hand-edited file, so every consumer already re-checks the field it wants
+# (`isinstance(port, int)`), which a validating model would replace with an
+# exception at exactly the moment discovery must not fail.
+BackendEntry = dict[str, object]
 
 # THE definition of the state dir. settings.py recomputes this one path (as
 # _STATE_DIR_ENV_FILE) because it is a leaf module that may not import the
@@ -72,8 +81,13 @@ SERVER_STATE_FILE = STATE_DIR / "server.json"
 
 SCHEMA_VERSION = 2
 
+# Windows refuses an atomic replace while another process holds the target open
+# (see _commit); a few short retries outlast that window.
+_COMMIT_ATTEMPTS = 5
+_COMMIT_RETRY_SECONDS = 0.02
 
-def read_record(path: Path) -> dict | None:
+
+def read_record(path: Path) -> BackendEntry | None:
     """Return the raw record as written, or None if absent/corrupt.
 
     The RAW shape — v1 flat or v2 — because ``singleton._read_server_state`` is
@@ -89,7 +103,7 @@ def read_record(path: Path) -> dict | None:
     return state if isinstance(state, dict) else None
 
 
-def backends_in(state: dict | None) -> list[dict]:
+def backends_in(state: BackendEntry | None) -> list[BackendEntry]:
     """THE schema reader: a raw record (either version) → its backend entries.
 
     Every other accessor here is derived from this one, so "how a record is
@@ -109,7 +123,7 @@ def backends_in(state: dict | None) -> list[dict]:
         if not isinstance(backends, dict):
             return []
         return [
-            {**entry, "display_context": ctx}
+            {**entry, "display_context": str(ctx)}
             for ctx, entry in backends.items()
             if isinstance(entry, dict)
         ]
@@ -118,7 +132,7 @@ def backends_in(state: dict | None) -> list[dict]:
     return []
 
 
-def first_backend(state: dict | None) -> dict | None:
+def first_backend(state: BackendEntry | None) -> BackendEntry | None:
     """The first recorded backend in a raw record, or None.
 
     "First" preserves the pre-v2 single-backend behaviour exactly (a v1 record
@@ -128,7 +142,9 @@ def first_backend(state: dict | None) -> dict | None:
     return next(iter(backends_in(state)), None)
 
 
-def backend_on_port(state: dict | None, port: int | None) -> dict | None:
+def backend_on_port(
+    state: BackendEntry | None, port: int | None
+) -> BackendEntry | None:
     """The recorded backend listening on ``port``, or None.
 
     For the callers that already hold a port and want THAT backend's fields —
@@ -138,12 +154,12 @@ def backend_on_port(state: dict | None, port: int | None) -> dict | None:
     return next((e for e in backends_in(state) if e.get("port") == port), None)
 
 
-def read_backends(path: Path) -> list[dict]:
+def read_backends(path: Path) -> list[BackendEntry]:
     """Every backend recorded in the file at ``path``, in recorded order."""
     return backends_in(read_record(path))
 
 
-def window_capable_first(path: Path) -> list[dict]:
+def window_capable_first(path: Path) -> list[BackendEntry]:
     """Recorded backends, those that can show a window before those that cannot.
 
     The search order discovery follows, so an SSH or service-session client
@@ -174,17 +190,16 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
     when BOTH the version AND the source fingerprint still match (and it answers
     a live probe); the pid is used to evict a stale one.
 
-    Also supersedes by port: a v1 (<= 2.0.3) record on THIS port is the same
-    backend being re-recorded under its real identity, so it is dropped rather
-    than left to shadow this entry forever. The module docstring carries the
-    full argument; an UNVERIFIED entry on a different port survives.
+    Also supersedes by port: any OTHER entry claiming this port is a leftover
+    (only one process can hold a loopback listener) and is dropped rather than
+    left to shadow this one forever. The module docstring carries the full
+    argument; entries on other ports, UNVERIFIED included, survive.
     """
-    entries = {}
+    entries: dict[str, BackendEntry] = {}
     for recorded in read_backends(path):
-        ctx = recorded["display_context"]
-        if ctx == UNVERIFIED and recorded.get("port") == port:
+        if recorded.get("port") == port:
             continue
-        entries[ctx] = recorded
+        entries[str(recorded["display_context"])] = recorded
     entries[display_context] = {
         "port": port,
         "version": version,
@@ -196,24 +211,52 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
 
 
 def forget_backend(path: Path, display_context: str) -> None:
-    """Drop one context's entry, keeping the rest. Forgetting the last one
-    leaves a readable empty record rather than removing the file — only
-    :func:`clear_record` (the ``stop`` verb) deletes it.
+    """Drop one context's entry, keeping every other context's.
+
+    Forgetting the last one leaves a readable EMPTY record rather than removing
+    the file; deleting it is :func:`clear_record`'s job. ``singleton.stop_backend``
+    composes the two — forget the stopped backend's own context, then clear only
+    once nothing is left recorded — so stopping one backend cannot make another
+    display context's live backend undiscoverable.
     """
     entries = {
-        e["display_context"]: e
+        str(e["display_context"]): e
         for e in read_backends(path)
         if e["display_context"] != display_context
     }
     _write(path, entries)
 
 
-def _write(path: Path, entries: dict[str, dict]) -> None:
+def _commit(tmp: Path, path: Path) -> None:
+    """Move ``tmp`` onto ``path``, retrying briefly on a Windows sharing refusal.
+
+    ``Path.replace`` is atomic on both platforms, but on Windows it raises
+    PermissionError (WinError 5/32) while ANOTHER process has the target open —
+    Python's ``open()`` does not pass FILE_SHARE_DELETE, so a concurrent reader
+    (a second stdio proxy in ``read_record``) is enough to make the rename lose
+    a race it would win on POSIX. The window is microseconds, so a few short
+    retries convert a spurious hard failure into a slightly later success.
+
+    Do NOT delete this loop as redundant: on POSIX it costs one iteration and
+    never sleeps, and the failure it prevents only ever appears under the
+    concurrency a herd of proxy starts produces — never in a single-process test.
+    """
+    for attempt in range(_COMMIT_ATTEMPTS):
+        try:
+            tmp.replace(path)
+        except PermissionError:
+            if attempt == _COMMIT_ATTEMPTS - 1:
+                raise
+            time.sleep(_COMMIT_RETRY_SECONDS)
+        else:
+            return
+
+
+def _write(path: Path, entries: dict[str, BackendEntry]) -> None:
     """Write the v2 record atomically: stage into a sibling temp file, then
-    ``Path.replace`` (i.e. ``os.replace``) — atomic on both Windows and POSIX,
-    so a reader concurrent with a write sees the whole old record or the whole
-    new one, never a truncated file, and a crash mid-write cannot leave the
-    record unparseable.
+    ``Path.replace`` (i.e. ``os.replace``) — so a reader concurrent with a write
+    sees the whole old record or the whole new one, never a truncated file, and
+    a crash mid-write cannot leave the record unparseable.
 
     No locking here on purpose. Every production writer already runs under
     singleton's cold-start file lock, so what this module owes is atomicity of
@@ -225,8 +268,12 @@ def _write(path: Path, entries: dict[str, dict]) -> None:
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(json.dumps({"schema": SCHEMA_VERSION, "backends": entries}))
-        tmp.replace(path)
+        _commit(tmp, path)
     except BaseException:
+        # ACCEPTED GAP: this cleans up a failed write, but a process killed
+        # between write_text and the replace leaves a .tmp that nothing sweeps.
+        # Bounded and harmless - one small file per killed writer, in a
+        # directory the reader only ever looks up server.json by name in.
         with suppress(OSError):
             tmp.unlink(missing_ok=True)
         raise

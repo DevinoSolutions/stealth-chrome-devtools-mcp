@@ -204,11 +204,11 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     # The entry recorded ON THIS PORT, not merely the first one: with a
     # per-context record (F-808) another desktop's backend can be recorded
     # alongside ours, and it says nothing about whether `port` is reusable.
-    state = backend_registry.backend_on_port(_read_server_state(), port) or {}
-    if state.get("version") != _server_version():
+    entry = backend_registry.backend_on_port(_read_server_state(), port) or {}
+    if entry.get("version") != _server_version():
         return False
     fp = _source_fingerprint()
-    if not fp or state.get("source_fingerprint") != fp:
+    if not fp or entry.get("source_fingerprint") != fp:
         return False
     patience = REUSE_PATIENCE_SECONDS if patience is None else patience
     # Busy backends answer slowly, so the patient path probes with the wider
@@ -216,7 +216,7 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     per_attempt = REUSE_PROBE_TIMEOUT if patience else LIVENESS_PROBE_TIMEOUT
     deadline = time.monotonic() + patience
     while not _backend_http_ready(port, timeout=per_attempt):
-        if not _server_is_healthy(port) and not _is_our_backend(state.get("pid")):
+        if not _server_is_healthy(port) and not _is_our_backend(entry.get("pid")):
             return False  # no socket and no live process: dead, not busy
         if time.monotonic() >= deadline:
             return False
@@ -591,7 +591,16 @@ def stop_backend() -> tuple[str, int | None]:
         entry = backend_registry.backend_on_port(_read_server_state(), port)
         recorded_pid = entry.get("pid") if entry else None
         terminated = _terminate_backend(port) if port is not None else False
-        _clear_server_state()
+        # F-808: forget ONLY the backend we stopped. Unlinking the whole record
+        # (what this used to do) would make a live backend on another display
+        # context undiscoverable, and the next proxy start would spawn a second
+        # one beside it. Clear the file only once nothing is left recorded, so
+        # the single-backend case still ends with no record on disk at all.
+        ctx = entry.get("display_context") if entry else None
+        if ctx is not None:
+            backend_registry.forget_backend(SERVER_STATE_FILE, str(ctx))
+        if not backend_registry.read_backends(SERVER_STATE_FILE):
+            _clear_server_state()
         if terminated:
             return ("stopped", recorded_pid)
         return ("already stopped", None)

@@ -96,11 +96,25 @@ at scale — 40 simultaneous real stdio sessions, exactly one logical backend.
 is free or held by our own backend, and only when a **foreign** process occupies the
 target does it fall back to an OS-assigned free port (`_free_port`, from
 `proxy_forwarder`). The chosen port, plus the version, pid, and source fingerprint,
-are handed off through `~/.stealth-mcp/server.json` with exactly these keys:
+are handed off through `~/.stealth-mcp/server.json`, which records one backend
+per **display context** (F-808) so a headless and a desktop backend can coexist:
 
 ```json
-{ "port": 19222, "version": "...", "pid": 12345, "source_fingerprint": "..." }
+{
+  "schema": 2,
+  "backends": {
+    "win-session-1": {
+      "port": 19222, "version": "...", "pid": 12345,
+      "source_fingerprint": "...", "display_context": "win-session-1"
+    }
+  }
+}
 ```
+
+The flat `{port, version, pid, source_fingerprint}` record every release up to
+2.0.3 wrote still reads, as one backend classified `unverified`. Read entries out
+of the record through `backend_registry`'s accessors — nothing outside that module
+branches on `schema`.
 
 Discovery and reuse **read the recorded port**; they never assume `19222`. `stop`
 clears `server.json`, so the next start falls back to `DEFAULT_PORT`. **Never

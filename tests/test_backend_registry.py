@@ -10,6 +10,8 @@ import inspect
 import json
 from pathlib import Path
 
+import pytest
+
 from stealth_chrome_devtools_mcp.embedded import backend_registry as reg
 from stealth_chrome_devtools_mcp.embedded.display_context import HEADLESS, UNVERIFIED
 
@@ -131,6 +133,45 @@ class TestSchemaV1Compatibility:
                 "display_context": "win-session-1",
             }
         ]
+
+    def test_a_reused_port_supersedes_whatever_context_claimed_it(self, tmp_path):
+        """Supersede-by-port is not a v1 rule. A context token can change under
+        a backend that did not - a Windows session id is reassigned across an
+        RDP reconnect - and the old key would then keep a dead entry on the live
+        backend's port forever, resurrecting the kill-respawn loop. Only one
+        process can hold a loopback listener, so the newest write on a port is
+        by construction the only entry that can describe a live backend."""
+        p = tmp_path / "server.json"
+        reg.record_backend(
+            p,
+            port=19222,
+            version="v",
+            pid=42,
+            source_fingerprint="fp",
+            display_context="win-session-1",
+        )
+
+        reg.record_backend(
+            p,
+            port=19222,
+            version="v",
+            pid=999,
+            source_fingerprint="fp",
+            display_context="win-session-3",
+        )
+
+        assert reg.read_backends(p) == [
+            {
+                "port": 19222,
+                "version": "v",
+                "pid": 999,
+                "source_fingerprint": "fp",
+                "display_context": "win-session-3",
+            }
+        ]
+        state = reg.read_record(p)
+        assert reg.first_backend(state)["pid"] == 999
+        assert reg.backend_on_port(state, 19222)["pid"] == 999
 
     def test_an_unverified_backend_on_another_port_survives(self, tmp_path):
         """The boundary of supersede-by-port. UNVERIFIED is not only the v1
@@ -450,6 +491,86 @@ class TestAtomicWrite:
         except OSError:
             pass
 
+        assert [e["port"] for e in reg.read_backends(p)] == [1]
+        assert sorted(f.name for f in tmp_path.iterdir()) == ["server.json"]
+
+    def test_a_transient_windows_sharing_refusal_is_retried(
+        self, tmp_path, monkeypatch
+    ):
+        """On Windows, replacing a file another process has OPEN raises
+        PermissionError - Python readers do not pass FILE_SHARE_DELETE, so a
+        concurrent read_record is enough to lose the rename. The window is
+        microseconds, so the commit retries rather than failing the write.
+        """
+        p = tmp_path / "server.json"
+        reg.record_backend(
+            p,
+            port=1,
+            version="v",
+            pid=10,
+            source_fingerprint="fp",
+            display_context="headless",
+        )
+
+        real_replace = reg.Path.replace
+        attempts = []
+
+        def _busy_twice(self, target):
+            attempts.append(1)
+            if len(attempts) <= 2:
+                raise PermissionError(5, "used by another process")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(reg.Path, "replace", _busy_twice)
+
+        reg.record_backend(
+            p,
+            port=2,
+            version="v",
+            pid=20,
+            source_fingerprint="fp",
+            display_context="headless",
+        )
+
+        assert len(attempts) == 3  # two refusals, then the write lands
+        assert [e["port"] for e in reg.read_backends(p)] == [2]
+        assert sorted(f.name for f in tmp_path.iterdir()) == ["server.json"]
+
+    def test_a_permanent_sharing_refusal_still_fails_and_cleans_up(
+        self, tmp_path, monkeypatch
+    ):
+        """The retry is a bounded grace, not an infinite one: a target that is
+        never releasable must surface as an error, with the previous record
+        whole and no staged temp left behind."""
+        p = tmp_path / "server.json"
+        reg.record_backend(
+            p,
+            port=1,
+            version="v",
+            pid=10,
+            source_fingerprint="fp",
+            display_context="headless",
+        )
+
+        attempts = []
+
+        def _always_busy(self, target):
+            attempts.append(1)
+            raise PermissionError(5, "used by another process")
+
+        monkeypatch.setattr(reg.Path, "replace", _always_busy)
+
+        with pytest.raises(PermissionError):
+            reg.record_backend(
+                p,
+                port=2,
+                version="v",
+                pid=20,
+                source_fingerprint="fp",
+                display_context="headless",
+            )
+
+        assert len(attempts) == reg._COMMIT_ATTEMPTS
         assert [e["port"] for e in reg.read_backends(p)] == [1]
         assert sorted(f.name for f in tmp_path.iterdir()) == ["server.json"]
 
