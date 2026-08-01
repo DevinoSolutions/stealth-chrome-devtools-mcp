@@ -217,16 +217,37 @@ def port_for_context(path: Path, display_context: str) -> int | None:
 
 
 def port_conflict(path: Path, port: int, own_context: str) -> bool:
-    """True iff *port* is recorded by a DIFFERENT context's entry.
+    """True iff *port* is claimed by an entry whose display context is PROVEN
+    and different from ``own_context``.
 
-    Binding there would be self-defeating: :func:`record_backend` supersedes by
-    port, and a spawn records itself at Popen time — BEFORE the new backend is
-    ready — so the sibling context's entry would be dropped the instant we
-    start, leaving a live backend on another desktop undiscoverable and its
-    sessions orphaned. Picking a different port instead costs nothing.
+    The sibling this protects is a backend we REFUSED to adopt. Binding on its
+    port would be self-defeating: :func:`record_backend` supersedes by port, and
+    a spawn records itself at Popen time — BEFORE the new backend is ready — so
+    that entry would be dropped the instant we start, leaving a live backend on
+    another desktop undiscoverable and its sessions orphaned. Picking a
+    different port instead costs nothing.
+
+    An UNVERIFIED entry is therefore NEVER a conflict, and the soundness
+    argument is what makes that safe rather than merely convenient:
+    :func:`adoption_candidates` offers UNVERIFIED entries to EVERY client, so a
+    healthy same-identity backend recorded that way was already adopted and we
+    never reached port selection at all. Reaching here proves that entry is
+    version-stale or dead, and evicting it — then superseding its record by
+    port — is exactly the intended upgrade flow. A proven-HEADLESS entry is the
+    opposite case: a window-capable client refuses to adopt it *while it may
+    still be alive* serving SSH sessions, so "we got here" proves nothing about
+    it, and that is precisely the sibling worth stepping around.
+
+    Getting this wrong is not theoretical. Treating UNVERIFIED as a conflict
+    diverts the spawn to a random free port, which sends ``_clear_stale_backend``
+    at the WRONG port — so the live <= 2.0.3 backend on the target and its
+    Chrome processes are never evicted and leak for good, with the record left
+    naming both. "Only a PROVEN verdict moves anything" holds here exactly as it
+    does for adoption.
     """
     return any(
-        e.get("port") == port and e.get("display_context") != own_context
+        e.get("port") == port
+        and e.get("display_context") not in (own_context, UNVERIFIED)
         for e in read_backends(path)
     )
 

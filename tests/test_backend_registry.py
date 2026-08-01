@@ -709,8 +709,21 @@ class TestPortConflict:
     """A spawn must not bind a port another display context has recorded:
     `record_backend` supersedes by port, and the record happens at Popen time
     (before the new backend is even ready), so binding there would drop a live
-    sibling's entry and make it undiscoverable.
+    sibling's entry and make it undiscoverable. Only a PROVEN context counts —
+    an UNVERIFIED entry we would already have adopted if it were healthy.
     """
+
+    def test_an_unverified_entry_is_never_a_conflict(self, tmp_path):
+        """The missing pin (F-808 step 4b). UNVERIFIED is what every <= 2.0.3
+        record reads as, and adoption offers it to EVERY client — so reaching
+        port selection at all proves this entry is stale or dead. Calling it a
+        conflict diverts the spawn to a random port, aims the eviction at the
+        WRONG one, and leaks the live old backend and its Chrome forever.
+        """
+        p = tmp_path / "server.json"
+        _record(p, 19222, UNVERIFIED)
+
+        assert reg.port_conflict(p, 19222, "win-session-1") is False
 
     def test_a_port_recorded_by_another_context_conflicts(self, tmp_path):
         p = tmp_path / "server.json"

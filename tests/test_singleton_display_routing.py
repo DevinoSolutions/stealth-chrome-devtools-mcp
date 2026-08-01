@@ -34,6 +34,8 @@ time), the same sentinel-token idiom `test_singleton_version_aware.py`'s
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import (
@@ -189,7 +191,9 @@ class TestPortSelectionKeepsContextsApart:
         holds DEFAULT_PORT must pick a different port. Binding there would
         record OUR backend on that port at Popen time, and `record_backend`
         supersedes by port — silently evicting the live sibling's entry before
-        our own backend was even ready."""
+        our own backend was even ready. PROVEN-headless is the case that
+        matters: a capable client refuses to adopt it while it may still be
+        alive, so getting here says nothing about whether it is dead."""
         _record(state_file, singleton.DEFAULT_PORT, HEADLESS)
         client_context(DESKTOP)
         # Only the CONFLICT may cause the fallback here: the port is not
@@ -198,6 +202,39 @@ class TestPortSelectionKeepsContextsApart:
         monkeypatch.setattr(proxy_forwarder, "_free_port", lambda: 54321)
 
         assert singleton._select_backend_port(singleton.DEFAULT_PORT) == 54321
+
+    def test_a_v1_record_does_not_divert_the_upgrade_off_its_port(
+        self, state_file, client_context, monkeypatch
+    ):
+        """THE upgrade path (F-808 step 4b regression pin). A <= 2.0.3 backend
+        is recorded flat, which reads as UNVERIFIED, and the upgraded client's
+        own context is proven. It must spawn on 19222 anyway, so
+        `_clear_stale_backend` is aimed at the port the stale backend is
+        actually holding.
+
+        Diverting to a free port instead looks harmless and is not: the
+        eviction then runs against the WRONG port, so the live 2.0.3 backend
+        and every Chrome it owns survive with nothing left pointing at them,
+        and the record ends up naming both. Adoption already gave this entry to
+        us and we did not take it, which is what proves it evictable.
+        """
+        state_file.write_text(
+            json.dumps(
+                {
+                    "port": singleton.DEFAULT_PORT,
+                    "version": "2.0.3",
+                    "pid": 4242,
+                    "source_fingerprint": "old-fp",
+                }
+            )
+        )
+        client_context(DESKTOP)
+        monkeypatch.setattr(singleton, "_port_is_foreign_held", lambda port: False)
+        monkeypatch.setattr(proxy_forwarder, "_free_port", lambda: 54321)
+
+        selected = singleton._select_backend_port(singleton.DEFAULT_PORT)
+
+        assert selected == singleton.DEFAULT_PORT
 
     def test_own_context_port_is_preferred(
         self, state_file, client_context, monkeypatch
