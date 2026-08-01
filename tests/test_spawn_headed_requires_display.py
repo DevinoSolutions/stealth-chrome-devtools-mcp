@@ -7,13 +7,14 @@ from a service context, an SSH session, or a macOS Background domain. The
 integration twin (task 8) proves the guard reads the REAL machine; THIS file owns
 the message contract and the ordering contract.
 
-Every test here states its display premise through ``fakes.pretend_display_context``
+Tests here state their display premise through ``fakes.pretend_display_context``
 rather than patching ``can_show_windows`` directly: the guard consults
 ``can_show_windows()``, which DERIVES from that one token, so patching the source
 exercises the real derivation and cannot pin an impossible pair (a "capable"
 token that reports itself invisible). It also makes each test say the same thing
 on every runner — Session 0 Windows, a DISPLAY-less Linux CI cell, or an Aqua
-desktop.
+desktop. Exactly one test breaks that rule, deliberately and with its reasons
+written down: ``test_the_message_reports_the_token_rather_than_the_word_headless``.
 """
 
 from types import SimpleNamespace
@@ -89,13 +90,41 @@ async def test_headed_spawn_raises_when_no_window_can_be_shown(
         await call_tool(server_mod, "spawn_browser", headless=False)
     msg = str(err.value)
     assert "cannot display a window" in msg
-    assert "headless" in msg  # names the actual context token
+    # The context token VERBATIM, parenthesised. A bare `"headless" in msg` is
+    # subsumed by the `headless=True` assert below, so deleting the parenthetical
+    # from the message would leave every other assert here green.
+    assert f"({display_context.HEADLESS})" in msg
     assert "headless=True" in msg  # the honest alternative
     assert "stealth-chrome-devtools doctor" in msg  # where to see the diagnosis
     assert "F-808" in msg  # the finding, for greppability
     # Raised on its own terms, NOT re-wrapped by the tool's blanket handler: the
     # guard sits outside the try, so the user reads the diagnosis first.
     assert not msg.startswith("Failed to spawn browser")
+
+
+async def test_the_message_reports_the_token_rather_than_the_word_headless(
+    monkeypatch, call_tool, doomed_spawn
+):
+    """The message INTERPOLATES ``display_context()``; it does not hardcode the
+    word "headless".
+
+    This is the only test in the file that patches ``can_show_windows``
+    separately, and it does so to build a pair production cannot reach:
+    ``can_show_windows()`` is defined as ``display_context() != HEADLESS``, so a
+    firing guard ALWAYS has the HEADLESS token to print. That makes the
+    contract "names the actual context token" untestable from a reachable state
+    — a hardcoded literal and a correct interpolation are indistinguishable. So
+    the pair is forced here on purpose. If display_context.py ever grows a
+    second proven-invisible token (say, one that distinguishes a Windows
+    service session from an SSH login), this test is what already guarantees
+    the user is told WHICH one.
+    """
+    monkeypatch.setattr(display_context, "can_show_windows", lambda: False)
+    pretend_display_context(monkeypatch, "win-session-0-service")
+    server_mod, _ = doomed_spawn
+    with pytest.raises(tool_errors.ToolError) as err:
+        await call_tool(server_mod, "spawn_browser", headless=False)
+    assert "(win-session-0-service)" in str(err.value)
 
 
 async def test_the_guard_precedes_every_side_effect(

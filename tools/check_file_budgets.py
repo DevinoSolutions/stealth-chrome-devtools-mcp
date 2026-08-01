@@ -21,12 +21,16 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # this post-extraction baseline. Owner string unchanged.
     # + 12 (plan_F808 step 5: spawn_browser's headed-visibility guard — 10 lines
     # for the pre-try refusal + its message, 2 for the F-804 docstring clamp
-    # correction). Correctness code with no home to move to: the OBSERVATION
-    # lives in display_context.py (a leaf), but the REFUSAL is this tool's
-    # policy and its ordering — before profile selection — is the contract, so
-    # hiding it behind a helper would launder the lines and lose the guarantee.
-    # Same minimal-bump rationale as the M10a rows below. Cap == actual
-    # ruff-clean LOC, no padding; no-grow applies from this commit forward.
+    # correction). The two candidate homes are documented leaves whose stated
+    # contracts a ToolError-raising display guard would violate:
+    # display_context.py declares "imports no embedded module except
+    # debug_logger" and is deliberately observational; tool_errors.py declares
+    # itself dependency-free three times over (it is why _require_* take
+    # browser_manager as an argument). The ~7 lines a tool_errors._require_*-
+    # style helper would save do not justify amending one. Same minimal-bump
+    # rationale as the M10a rows below. Cap == actual ruff-clean LOC, no
+    # padding; no-grow applies from this commit forward. CAP RAISE 3389->3401
+    # PENDING HUMAN RATIFICATION in the F-808 PR.
     "embedded/server.py": (3401, "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808"),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
     # irreducibly ~1024-line contiguous block, landing this module over the
