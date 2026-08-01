@@ -162,11 +162,13 @@ def read_backends(path: Path) -> list[BackendEntry]:
 def window_capable_first(path: Path) -> list[BackendEntry]:
     """Recorded backends, those that can show a window before those that cannot.
 
-    The search order discovery follows, so an SSH or service-session client
-    converges on the desktop backend already running instead of starting a
-    second, blind one. Only a PROVEN-invisible context sorts last; ``UNVERIFIED``
-    stays with the capable group, matching ``display_context.can_show_windows``.
-    The sort is stable, so recorded order breaks ties.
+    A pure ORDERING over every recorded backend, kept whole for callers that
+    must name them all — doctor's per-context listing, most-useful first. It is
+    NOT discovery's order: :func:`adoption_candidates` is, and it filters this
+    list rather than merely reading it, so nothing here decides what a client
+    may reuse. Only a PROVEN-invisible context sorts last; ``UNVERIFIED`` stays
+    with the capable group, matching ``display_context.can_show_windows``. The
+    sort is stable, so recorded order breaks ties.
     """
     return sorted(
         read_backends(path), key=lambda e: e.get("display_context") == HEADLESS
@@ -176,27 +178,38 @@ def window_capable_first(path: Path) -> list[BackendEntry]:
 def adoption_candidates(path: Path, own_context: str) -> list[BackendEntry]:
     """Recorded backends in the order discovery should try them (F-808).
 
-    Window-capable and UNVERIFIED entries first, HEADLESS last — an SSH or
-    service-session client adopting the desktop backend is exactly what makes
-    its headed spawns visible, so display context is a PREFERENCE here, never
-    an equality test.
+    Adoption is deliberately ASYMMETRIC, and the two halves answer different
+    questions.
 
-    Adoption is deliberately ASYMMETRIC: when *our own* context can show
-    windows, proven-HEADLESS entries are excluded outright rather than merely
-    demoted. Adopting one would strand this desktop session's headed browsing
-    on a blind backend — F-808 again with the roles swapped — and the cost of
-    refusing is only a cold start of our own.
+    A client that CANNOT prove it has a desktop — HEADLESS, or UNVERIFIED —
+    adopts anything, window-capable entries first. This is THE F-808 fix: an
+    SSH or service-session client converging on the desktop backend is exactly
+    what makes its headed spawns visible, so for it display context is a
+    PREFERENCE, never an equality test.
 
-    UNVERIFIED is always adoptable, on both sides of that rule: it is what
-    every record written up to 2.0.3 reads as, and what an unclassifiable
-    platform reports for itself. Refusing it would evict a healthy backend on
-    upgrade; applying the exclusion *because of* it would do the same wherever
-    the probe cannot answer. Only a PROVEN verdict moves anything.
+    A client that CAN prove it has a desktop adopts only its OWN context's
+    entry, plus UNVERIFIED ones. Every other proven context is excluded, not
+    merely demoted — and that means foreign desktops as well as HEADLESS.
+    Identity cannot separate them (a sibling desktop runs the same install, so
+    version and fingerprint both match), yet a browser spawned on that backend
+    renders on a window station THIS user cannot see: the F-808 headline
+    symptom, and one Task 5 cannot guard, because that backend's own
+    ``can_show_windows()`` is perfectly True. The plan's invariant is one
+    backend per (source fingerprint, display context); adopting a foreign
+    desktop's backend simply violates it. Refusing costs one cold start.
+
+    UNVERIFIED is adoptable on BOTH sides. It is what every record written up
+    to 2.0.3 reads as, and what an unclassifiable platform reports for itself.
+    Refusing it would evict a healthy backend on upgrade; applying the
+    capable-client exclusion *because of* it would do the same wherever the
+    probe cannot answer. Only a PROVEN verdict moves anything.
     """
     candidates = window_capable_first(path)
     if own_context in (HEADLESS, UNVERIFIED):
         return candidates
-    return [e for e in candidates if e.get("display_context") != HEADLESS]
+    return [
+        e for e in candidates if e.get("display_context") in (own_context, UNVERIFIED)
+    ]
 
 
 def port_for_context(path: Path, display_context: str) -> int | None:
@@ -212,20 +225,56 @@ def port_for_context(path: Path, display_context: str) -> int | None:
         (e for e in read_backends(path) if e.get("display_context") == display_context),
         None,
     )
-    port = entry.get("port") if entry else None
-    return port if isinstance(port, int) else None
+    return recorded_int(entry, "port")
+
+
+def recorded_int(entry: BackendEntry | None, key: str) -> int | None:
+    """One integer field off a recorded entry, or None when the entry is
+    missing, the key is absent, or the value is not an ``int``.
+
+    THE one home for that narrowing. The record tolerates hand-editing and two
+    schema versions, so every field read must re-check its own type; without a
+    shared helper each caller spells it slightly differently and the annotation
+    drifts away from the truth (``cli._recorded_backend_pid`` claimed
+    ``int | None`` while returning whatever the file said). ``port`` and
+    ``pid`` are the only two such fields today.
+    """
+    value = entry.get(key) if entry else None
+    return value if isinstance(value, int) else None
+
+
+def own_or_first_port(path: Path, own_context: str) -> int | None:
+    """The port to act on when a caller must pick exactly ONE recorded backend:
+    our own context's, else whatever single backend is recorded, else None.
+
+    ``singleton.restart_backend`` needs this. Its terminate half and its spawn
+    half must name the SAME port — the spawn half asks
+    :func:`port_for_context`, so a terminate half reading ``first_backend``
+    would, on a two-context machine, kill a sibling desktop's backend and then
+    respawn ours somewhere else entirely. The ``first_backend`` fallback keeps
+    the single-backend and pre-v2 cases behaving exactly as they did.
+    """
+    own = port_for_context(path, own_context)
+    if own is not None:
+        return own
+    return recorded_int(first_backend(read_record(path)), "port")
 
 
 def port_conflict(path: Path, port: int, own_context: str) -> bool:
     """True iff *port* is claimed by an entry whose display context is PROVEN
     and different from ``own_context``.
 
-    The sibling this protects is a backend we REFUSED to adopt. Binding on its
-    port would be self-defeating: :func:`record_backend` supersedes by port, and
-    a spawn records itself at Popen time — BEFORE the new backend is ready — so
-    that entry would be dropped the instant we start, leaving a live backend on
-    another desktop undiscoverable and its sessions orphaned. Picking a
-    different port instead costs nothing.
+    The sibling this protects is a backend we REFUSED to adopt, and with
+    :func:`adoption_candidates` excluding every foreign PROVEN context, the two
+    rules now line up exactly: what a proven client will not adopt is precisely
+    what it will not bind on top of. The one deliberate exception is the
+    UNVERIFIED *client*, which adopts anything yet still yields here — see
+    below. Binding on such a port would be self-defeating:
+    :func:`record_backend` supersedes by port, and a spawn records itself at
+    Popen time — BEFORE the new backend is ready — so that entry would be
+    dropped the instant we start, leaving a live backend on another desktop
+    undiscoverable and its sessions orphaned. Picking a different port instead
+    costs nothing.
 
     An UNVERIFIED entry is therefore NEVER a conflict, and the soundness
     argument is what makes that safe rather than merely convenient:
@@ -244,6 +293,23 @@ def port_conflict(path: Path, port: int, own_context: str) -> bool:
     Chrome processes are never evicted and leak for good, with the record left
     naming both. "Only a PROVEN verdict moves anything" holds here exactly as it
     does for adoption.
+
+    The exception promised above, stated as a rule rather than left to fall out
+    of the code: an UNVERIFIED CLIENT still conflicts with a proven entry (it
+    adopts anything, but it does not get to bind on top of one). This is
+    deliberate — a client that could not prove it has a desktop has not earned
+    the right to evict a sibling that may be alive and serving. It has two
+    known costs, both accepted. An old backend on that port can linger, because
+    nobody claims the port that would supersede its record. And on this one
+    path adoption and selection disagree: discovery may adopt the entry on that
+    port while selection steps around it. That is harmless in practice —
+    discovery runs first and returns, so selection is never reached in the case
+    where they differ — but it is a real asymmetry, not an oversight. The
+    argument for revisiting: the same soundness reasoning used just above
+    applies to an UNVERIFIED client too (it refuses nothing, so arriving at
+    selection proves the entry stale), which would make this branch False and
+    the two rules identical. It is left conservative because "may still be
+    alive" is the more expensive thing to get wrong.
     """
     return any(
         e.get("port") == port

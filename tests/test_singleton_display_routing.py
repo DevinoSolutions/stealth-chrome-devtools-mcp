@@ -63,10 +63,8 @@ def state_file(tmp_path, monkeypatch):
     registry's own globals would be inert.
     """
     monkeypatch.setattr(singleton, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(
-        singleton, "SERVER_STATE_FILE", tmp_path / "server.json", raising=False
-    )
-    monkeypatch.setattr(singleton, "PORT_FILE", tmp_path / "server.port", raising=False)
+    monkeypatch.setattr(singleton, "SERVER_STATE_FILE", tmp_path / "server.json")
+    monkeypatch.setattr(singleton, "PORT_FILE", tmp_path / "server.port")
     return tmp_path / "server.json"
 
 
@@ -148,6 +146,20 @@ class TestDiscoveryPrefersAWindowCapableBackend:
 
         assert singleton._find_running_server() == 1111
 
+    def test_capable_client_never_adopts_a_foreign_desktop(
+        self, state_file, our_identity, client_context
+    ):
+        """The F-808 headline symptom, and the case identity cannot catch: a
+        sibling desktop's backend runs the SAME install, so version and
+        fingerprint both match and it passes every gate — yet a browser spawned
+        on it renders on a window station this user cannot see. Task 5 cannot
+        guard it either (that backend's own can_show_windows() is True), so
+        discovery has to refuse and cold-start our own."""
+        _record(state_file, 1111, OTHER_DESKTOP)
+        client_context(DESKTOP)
+
+        assert singleton._find_running_server() is None
+
 
 class TestCandidateIterationIsNotSingleShot:
     def test_a_stale_entry_does_not_shadow_a_live_one(
@@ -155,9 +167,22 @@ class TestCandidateIterationIsNotSingleShot:
     ):
         """Recorded FIRST and version-stale, so the old read-one-entry
         discovery would have stopped here and returned None — evicting and
-        respawning over a perfectly live backend recorded behind it."""
-        _record(state_file, 1111, DESKTOP, version="0.0.1-stale")
-        _record(state_file, 2222, OTHER_DESKTOP)
+        respawning over a perfectly live backend recorded behind it. The stale
+        entry is UNVERIFIED because that (with our own) is what a proven client
+        may adopt at all, which is what makes two candidates possible."""
+        _record(state_file, 1111, UNVERIFIED, version="0.0.1-stale")
+        _record(state_file, 2222, DESKTOP)
+        client_context(DESKTOP)
+
+        assert singleton._find_running_server() == 2222
+
+    def test_our_own_entry_is_found_behind_a_foreign_one(
+        self, state_file, our_identity, client_context
+    ):
+        """Recorded order does not decide: a foreign desktop's entry sits
+        first and is filtered out entirely, so ours is still reached."""
+        _record(state_file, 1111, OTHER_DESKTOP)
+        _record(state_file, 2222, DESKTOP)
         client_context(DESKTOP)
 
         assert singleton._find_running_server() == 2222
@@ -173,14 +198,35 @@ class TestCandidateIterationIsNotSingleShot:
         monkeypatch.setattr(
             singleton,
             "_backend_http_ready",
-            lambda port, **kw: bool(probed.append(port)) or True,
+            lambda port, **kw: probed.append(port) or True,
         )
-        _record(state_file, 1111, DESKTOP)
-        _record(state_file, 2222, OTHER_DESKTOP)
+        _record(state_file, 1111, UNVERIFIED)
+        _record(state_file, 2222, DESKTOP)
         client_context(DESKTOP)
 
         assert singleton._find_running_server() == 2222
         assert 1111 not in probed
+
+    def test_all_candidates_dead_costs_no_http_probe_at_all(
+        self, state_file, our_identity, client_context, monkeypatch
+    ):
+        """The pre-filter's payoff on the common cold-start path: nothing is
+        listening, so discovery must fall through to None on socket checks
+        alone. One 2s HTTP timeout per stale record here would be paid by
+        every proxy start on the machine."""
+        probed: list[int] = []
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: False)
+        monkeypatch.setattr(
+            singleton,
+            "_backend_http_ready",
+            lambda port, **kw: probed.append(port) or True,
+        )
+        _record(state_file, 1111, UNVERIFIED)
+        _record(state_file, 2222, DESKTOP)
+        client_context(DESKTOP)
+
+        assert singleton._find_running_server() is None
+        assert probed == []
 
 
 class TestPortSelectionKeepsContextsApart:

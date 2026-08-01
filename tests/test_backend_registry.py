@@ -667,15 +667,35 @@ class TestAdoptionCandidates:
             1111
         ]
 
-    def test_recorded_order_breaks_ties_among_capable_entries(self, tmp_path):
-        """No preference between two desktops we can both see: the sort is
-        stable, so the record's own order decides and discovery is
-        deterministic."""
+    def test_a_capable_client_is_never_offered_a_foreign_desktop(self, tmp_path):
+        """PIN MOVED, deliberately (F-808 step 4c): this case previously
+        asserted both desktops were offered, recorded order deciding. That was
+        wrong, and identity cannot catch it — a sibling desktop runs the same
+        install, so version and fingerprint both match and the backend is
+        adopted. A browser spawned on it then renders on a window station THIS
+        user cannot see, which is the F-808 headline symptom, and Task 5 cannot
+        guard it either because that backend's own can_show_windows() is True.
+        The invariant is one backend per (fingerprint, display context); the
+        only safe answer for a proven client is its OWN context.
+        """
         p = tmp_path / "server.json"
         _record(p, 1111, "win-session-1")
         _record(p, 2222, "win-session-2")
 
         ports = [e["port"] for e in reg.adoption_candidates(p, "win-session-2")]
+        assert ports == [2222]
+
+    def test_a_capable_client_gets_its_own_entry_and_unverified_ones(self, tmp_path):
+        """What survives the filter, in order. UNVERIFIED stays adoptable (a
+        pre-2.0.4 record reads as exactly that), so a proven client can see two
+        entries — and among survivors the stable sort keeps recorded order, so
+        discovery stays deterministic."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, UNVERIFIED)
+        _record(p, 2222, "win-session-1")
+        _record(p, 3333, "win-session-9")
+
+        ports = [e["port"] for e in reg.adoption_candidates(p, "win-session-1")]
         assert ports == [1111, 2222]
 
     def test_an_absent_record_offers_no_candidates(self, tmp_path):
@@ -739,6 +759,23 @@ class TestPortConflict:
 
         assert reg.port_conflict(p, 19222, "win-session-1") is False
 
+    def test_an_unverified_client_still_conflicts_with_a_proven_entry(self, tmp_path):
+        """The asymmetry's other side, pinned so it cannot drift silently: an
+        UNVERIFIED client adopts anything, but does not get to BIND on top of a
+        proven sibling. A client that could not prove it has a desktop has not
+        earned the right to evict a backend that may be alive and serving.
+
+        Two costs are accepted here and named in the docstring: an old backend
+        on that port can linger, and on this one path adoption and selection
+        disagree (harmless — discovery runs first and returns). The argument
+        for revisiting is that the same soundness reasoning that makes an
+        UNVERIFIED ENTRY safe to evict applies to an UNVERIFIED CLIENT too.
+        """
+        p = tmp_path / "server.json"
+        _record(p, 19222, HEADLESS)
+
+        assert reg.port_conflict(p, 19222, UNVERIFIED) is True
+
     def test_an_unrecorded_port_never_conflicts(self, tmp_path):
         p = tmp_path / "server.json"
         _record(p, 19222, HEADLESS)
@@ -747,3 +784,53 @@ class TestPortConflict:
 
     def test_an_absent_record_never_conflicts(self, tmp_path):
         assert reg.port_conflict(tmp_path / "server.json", 19222, HEADLESS) is False
+
+
+class TestOwnOrFirstPort:
+    """`restart_backend`'s terminate target. Its two halves must name the same
+    port: the spawn half asks port_for_context, so a terminate half reading
+    first_backend would kill a sibling desktop's backend on a two-context
+    machine and respawn ours somewhere else.
+    """
+
+    def test_our_own_context_wins_over_an_entry_recorded_first(self, tmp_path):
+        p = tmp_path / "server.json"
+        _record(p, 1111, HEADLESS)
+        _record(p, 2222, "win-session-1")
+
+        assert reg.own_or_first_port(p, "win-session-1") == 2222
+
+    def test_falls_back_to_the_first_backend_when_our_context_is_absent(self, tmp_path):
+        """Keeps the single-backend and pre-v2 cases behaving exactly as they
+        did — restart must still find something to terminate."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, HEADLESS)
+
+        assert reg.own_or_first_port(p, "win-session-1") == 1111
+
+    def test_an_absent_record_has_no_port(self, tmp_path):
+        assert reg.own_or_first_port(tmp_path / "server.json", HEADLESS) is None
+
+
+class TestRecordedInt:
+    def test_reads_an_integer_field(self, tmp_path):
+        p = tmp_path / "server.json"
+        _record(p, 1111, HEADLESS)
+        entry = reg.first_backend(reg.read_record(p))
+
+        assert reg.recorded_int(entry, "pid") == 1111
+
+    @pytest.mark.parametrize(
+        ("entry", "key"),
+        [
+            (None, "pid"),
+            ({}, "pid"),
+            ({"pid": "4242"}, "pid"),
+            ({"pid": None}, "pid"),
+        ],
+    )
+    def test_absent_or_ill_typed_reads_as_none(self, entry, key):
+        """The record tolerates hand-editing and two schemas, so a field that
+        is missing or the wrong type must narrow to None rather than reach a
+        caller that annotated it `int | None` and believed itself."""
+        assert reg.recorded_int(entry, key) is None

@@ -528,8 +528,8 @@ def _start_backend_holding_lock(port: int) -> None:
         with _exclusive_lock() as got_lock:
             if not got_lock:
                 return  # another session owns startup; just proxy to it
-            if _find_running_server() is not None:
-                return  # already up (same version)
+            if _find_running_server() == port:
+                return  # already up (same version) ON THE PORT WE WERE HANDED
             if _same_identity_backend_ready(port):
                 return  # ours, merely busy or mid-boot — never evict it (F-807)
             # M2-3: surface WHY a fresh backend is about to spawn when the cause
@@ -590,7 +590,7 @@ def stop_backend() -> tuple[str, int | None]:
         if not got:
             return ("busy", None)
         entry = backend_registry.backend_on_port(_read_server_state(), port)
-        recorded_pid = entry.get("pid") if entry else None
+        recorded_pid = backend_registry.recorded_int(entry, "pid")
         terminated = _terminate_backend(port) if port is not None else False
         # F-808: forget ONLY the backend we stopped. Unlinking the whole record
         # (what this used to do) would make a live backend on another display
@@ -614,9 +614,9 @@ def restart_backend() -> tuple[str, int | None]:
     sequence under the same lock, with the SAME primitives (plan_M8 SS2.1-B:
     no second spawn path, no new kill logic). Unconditional by design, so a
     "down"/"none" backend also ends up running, not merely evicted. The
-    terminate target is the port recorded in `server.json`, else
-    `DEFAULT_PORT`; the spawn port then routes through
-    `_select_backend_port()` (F-509 Amendment A1) so a squatter on the dead
+    terminate target is OUR OWN context's port, else the one recorded backend's,
+    else `DEFAULT_PORT`, and MUST agree with the spawn half (F-808), which
+    routes through `_select_backend_port()` (F-509 A1) so a squatter on the dead
     backend's port forces a fresh `_free_port()` pick instead of a repeat
     120s outage — and the fallback port then stays recorded across restarts
     (SSA1.5); `stop` clears `server.json`, the reset path to `DEFAULT_PORT`.
@@ -628,9 +628,9 @@ def restart_backend() -> tuple[str, int | None]:
     Returns ``(status, pid)``: `_probe_backend_status`'s status or "busy";
     ``pid`` is the freshly recorded pid once the lock is acquired, else None.
     """
-    entry = backend_registry.first_backend(_read_server_state())
-    recorded_port = entry.get("port") if entry else None
-    port = recorded_port if isinstance(recorded_port, int) else DEFAULT_PORT
+    own = display_context.display_context()
+    recorded = backend_registry.own_or_first_port(SERVER_STATE_FILE, own)
+    port = DEFAULT_PORT if recorded is None else recorded
 
     with _exclusive_lock() as got:
         if not got:
@@ -641,9 +641,9 @@ def restart_backend() -> tuple[str, int | None]:
         _wait_for_server(port)
 
     status, _ = _probe_backend_status()
-    new_entry = backend_registry.first_backend(_read_server_state())
-    new_pid = new_entry.get("pid") if new_entry else None
-    return (status, new_pid)
+    # The port WE spawned on, not first_backend's - same agree-on-one-port rule.
+    fresh = backend_registry.backend_on_port(_read_server_state(), port)
+    return (status, backend_registry.recorded_int(fresh, "pid"))
 
 
 def _port_is_foreign_held(port: int) -> bool:

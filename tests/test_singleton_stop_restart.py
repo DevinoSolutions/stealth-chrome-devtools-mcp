@@ -668,3 +668,80 @@ class TestRestartPortSelection:
         result = singleton.restart_backend()
 
         assert result == ("responsive", 4242)
+
+
+class TestRestartIsPerDisplayContext:
+    """F-808 step 4c: restart's two halves must agree on ONE port.
+
+    The spawn half asks `port_for_context` (our own display context). A
+    terminate half reading `first_backend` therefore split-brains on a
+    two-context machine: it kills whichever backend happens to be recorded
+    first — a sibling desktop's, and every browser session on it — and then
+    respawns ours somewhere else entirely, so the operator's restart both
+    destroys someone else's work and does not restart what they asked for.
+    """
+
+    def test_restart_terminates_our_own_context_and_leaves_the_sibling_alone(
+        self, isolated_state, monkeypatch
+    ):
+        from stealth_chrome_devtools_mcp.embedded import display_context
+
+        sibling_port = _free_closed_port()
+        our_port = _free_closed_port()
+        record = isolated_state / "server.json"
+        # The sibling is recorded FIRST, so `first_backend` would name it.
+        backend_registry.record_backend(
+            record,
+            port=sibling_port,
+            version="1.2.1",
+            pid=1111,
+            source_fingerprint="",
+            display_context="win-session-OTHER",
+        )
+        backend_registry.record_backend(
+            record,
+            port=our_port,
+            version="1.2.1",
+            pid=2222,
+            source_fingerprint="",
+            display_context="win-session-OURS",
+        )
+        monkeypatch.setattr(
+            display_context, "display_context", lambda: "win-session-OURS"
+        )
+
+        terminated: list[int] = []
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: False)
+        monkeypatch.setattr(
+            singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
+        )
+        monkeypatch.setattr(
+            singleton, "_terminate_backend", lambda port: terminated.append(port)
+        )
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
+        monkeypatch.setattr(
+            singleton, "_probe_backend_status", lambda: ("responsive", our_port)
+        )
+
+        spawned: list[int] = []
+
+        def _fake_spawn(port):
+            spawned.append(port)
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=4242, source_fingerprint=""
+            )
+
+        monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
+
+        status, pid = singleton.restart_backend()
+
+        assert terminated == [our_port]  # never the sibling's
+        assert spawned == [our_port]  # and both halves agree
+        assert (status, pid) == ("responsive", 4242)
+        # The sibling's entry survives untouched: restart must not make another
+        # desktop's live backend undiscoverable.
+        surviving = {
+            e["display_context"]: e["port"]
+            for e in backend_registry.read_backends(record)
+        }
+        assert surviving["win-session-OTHER"] == sibling_port
