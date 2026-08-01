@@ -26,7 +26,7 @@ from pathlib import Path
 
 import psutil
 
-from stealth_chrome_devtools_mcp.embedded import backend_registry
+from stealth_chrome_devtools_mcp.embedded import backend_registry, display_context
 from stealth_chrome_devtools_mcp.embedded.backend_registry import (
     PORT_FILE,
     SERVER_STATE_FILE,
@@ -138,12 +138,6 @@ def _read_server_state() -> dict | None:
 def _write_server_state(
     port: int, version: str, pid: int, source_fingerprint: str
 ) -> None:
-    # Lazy, at the ONE site that needs it (the _free_port precedent below), so
-    # singleton's module-top imports keep naming only what its own lifecycle
-    # logic depends on. Costs nothing: backend_registry already imports
-    # display_context, so the module is loaded by the time we get here.
-    from stealth_chrome_devtools_mcp.embedded import display_context
-
     backend_registry.record_backend(
         SERVER_STATE_FILE,
         port=port,
@@ -227,17 +221,22 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
 def _find_running_server() -> int | None:
     """Return the port of a *reusable* backend, or None.
 
-    The one reuse gate (`_clear_stale_backend`'s eviction and both cold-start
-    callers all route through it): same version, same source fingerprint, and
-    a live `initialize` answer — the full contract, with its history, lives in
-    :func:`_same_identity_backend_ready`. Single-shot on purpose: this runs on
-    every proxy start's hot path and must never sleep.
+    The one reuse gate (both cold-start callers route through it): same
+    version, same source fingerprint, a live `initialize` — full contract in
+    :func:`_same_identity_backend_ready`. Candidates come in adoption order
+    (F-808; the policy and its asymmetry live in
+    :func:`backend_registry.adoption_candidates`), but IDENTITY, never display
+    context, is the gate. Single-shot per candidate on the proxy's hot path,
+    behind a socket pre-filter: a dead record then costs ms, not a 2s timeout.
     """
-    entry = backend_registry.first_backend(_read_server_state())
-    port = entry.get("port") if entry else None
-    if not isinstance(port, int):
-        return None
-    return port if _same_identity_backend_ready(port, patience=0.0) else None
+    own = display_context.display_context()
+    for entry in backend_registry.adoption_candidates(SERVER_STATE_FILE, own):
+        port = entry.get("port")
+        if not isinstance(port, int) or not _server_is_healthy(port):
+            continue
+        if _same_identity_backend_ready(port, patience=0.0):
+            return port
+    return None
 
 
 def _is_our_backend(pid) -> bool:
@@ -322,9 +321,11 @@ def _clear_stale_backend(port: int) -> None:
     """Terminate a stale/legacy backend of ours squatting ``port`` so a
     correctly-versioned backend can bind on it.
 
-    No-op when the port already holds a reusable same-version backend.
+    No-op when THIS port already holds a reusable same-identity backend —
+    asked of the port, not of `_find_running_server`, which under F-808's
+    adoption order may name another display context's backend, on another port.
     """
-    if _find_running_server() == port:
+    if _same_identity_backend_ready(port, patience=0.0):
         return  # a reusable same-version backend is already there
     _terminate_backend(port)
 
@@ -659,21 +660,22 @@ def _port_is_foreign_held(port: int) -> bool:
 
 def _select_backend_port(preferred: int = DEFAULT_PORT) -> int:
     """Port to spawn the backend on (F-509 auto-fallback, plan_M8 Amendment
-    A1). Prefers the port recorded in ``server.json`` (so eviction/restart
-    land where a prior backend ran), else ``preferred``. Keeps that target
-    when it is free or held by OUR OWN backend (eviction rebinds it there);
-    only a FOREIGN occupant forces an OS-assigned fallback via
+    A1). Prefers the port recorded for OUR OWN display context (so
+    eviction/restart land where a prior backend ran), else ``preferred``. Keeps
+    that target when free or held by OUR OWN backend; a FOREIGN occupant — or
+    one another display context recorded, whose entry our spawn's own record
+    would supersede-evict (F-808) — forces an OS-assigned fallback via
     ``proxy_forwarder._free_port()`` (the one existing port-picker — no new
-    convention), so a port collision is recoverable instead of a silent
-    120s outage.
+    convention), so a collision is recoverable, not a silent 120s outage.
     """
     # lazy; no module-top cycle
     from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import _free_port
 
-    entry = backend_registry.first_backend(_read_server_state())
-    recorded = entry.get("port") if entry else None
-    target = recorded if isinstance(recorded, int) else preferred
-    return _free_port() if _port_is_foreign_held(target) else target
+    own = display_context.display_context()
+    recorded = backend_registry.port_for_context(SERVER_STATE_FILE, own)
+    target = preferred if recorded is None else recorded
+    taken = backend_registry.port_conflict(SERVER_STATE_FILE, target, own)
+    return _free_port() if taken or _port_is_foreign_held(target) else target
 
 
 def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:

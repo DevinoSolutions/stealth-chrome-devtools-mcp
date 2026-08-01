@@ -151,7 +151,8 @@ def _recorded_backend_pid() -> int | None:
     from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
     entry = backend_registry.first_backend(singleton._read_server_state())
-    return entry.get("pid") if entry else None
+    pid = entry.get("pid") if entry else None
+    return pid if isinstance(pid, int) else None
 
 
 def _backend_log_location(pid: int | None) -> str:

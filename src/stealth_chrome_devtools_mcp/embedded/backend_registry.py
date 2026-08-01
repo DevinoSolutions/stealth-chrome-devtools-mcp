@@ -173,6 +173,64 @@ def window_capable_first(path: Path) -> list[BackendEntry]:
     )
 
 
+def adoption_candidates(path: Path, own_context: str) -> list[BackendEntry]:
+    """Recorded backends in the order discovery should try them (F-808).
+
+    Window-capable and UNVERIFIED entries first, HEADLESS last — an SSH or
+    service-session client adopting the desktop backend is exactly what makes
+    its headed spawns visible, so display context is a PREFERENCE here, never
+    an equality test.
+
+    Adoption is deliberately ASYMMETRIC: when *our own* context can show
+    windows, proven-HEADLESS entries are excluded outright rather than merely
+    demoted. Adopting one would strand this desktop session's headed browsing
+    on a blind backend — F-808 again with the roles swapped — and the cost of
+    refusing is only a cold start of our own.
+
+    UNVERIFIED is always adoptable, on both sides of that rule: it is what
+    every record written up to 2.0.3 reads as, and what an unclassifiable
+    platform reports for itself. Refusing it would evict a healthy backend on
+    upgrade; applying the exclusion *because of* it would do the same wherever
+    the probe cannot answer. Only a PROVEN verdict moves anything.
+    """
+    candidates = window_capable_first(path)
+    if own_context in (HEADLESS, UNVERIFIED):
+        return candidates
+    return [e for e in candidates if e.get("display_context") != HEADLESS]
+
+
+def port_for_context(path: Path, display_context: str) -> int | None:
+    """The port recorded for ONE context, or None when that context has no
+    entry (or its entry names nothing usable as a port).
+
+    ``singleton._select_backend_port`` asks with its own context: a spawn
+    should land back on the port ITS desktop last used. "Whichever entry comes
+    first" is the wrong answer once the record holds one per context — first
+    can easily be a sibling backend that is still alive on that port.
+    """
+    entry = next(
+        (e for e in read_backends(path) if e.get("display_context") == display_context),
+        None,
+    )
+    port = entry.get("port") if entry else None
+    return port if isinstance(port, int) else None
+
+
+def port_conflict(path: Path, port: int, own_context: str) -> bool:
+    """True iff *port* is recorded by a DIFFERENT context's entry.
+
+    Binding there would be self-defeating: :func:`record_backend` supersedes by
+    port, and a spawn records itself at Popen time — BEFORE the new backend is
+    ready — so the sibling context's entry would be dropped the instant we
+    start, leaving a live backend on another desktop undiscoverable and its
+    sessions orphaned. Picking a different port instead costs nothing.
+    """
+    return any(
+        e.get("port") == port and e.get("display_context") != own_context
+        for e in read_backends(path)
+    )
+
+
 def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
     path: Path,
     *,

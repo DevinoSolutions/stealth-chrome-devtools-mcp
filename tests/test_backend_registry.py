@@ -590,3 +590,147 @@ class TestClearRecord:
         reg.clear_record(p, port_file)  # port_file never existed
         assert not p.exists()
         assert reg.read_backends(p) == []
+
+
+def _record(path, port, ctx, version="v"):
+    """One recorded backend. The F-808 adoption and conflict rules read only
+    the port and the display context, so the identity fields are fixed noise
+    here — `version` is exposed only for the one pin that needs two identities.
+    """
+    reg.record_backend(
+        path,
+        port=port,
+        version=version,
+        pid=port,
+        source_fingerprint="fp",
+        display_context=ctx,
+    )
+
+
+class TestAdoptionCandidates:
+    """plan_F808 Task 4: the adoption POLICY — which recorded backends a client
+    in a given display context may reuse, and in what order. It lives here
+    rather than in singleton so the rule is stated once, as a pure function of
+    the record, and `_find_running_server` stays a probe loop.
+    """
+
+    def test_a_headless_client_is_offered_the_desktop_backend_first(self, tmp_path):
+        """THE F-808 fix at the policy level: an SSH/service-session client
+        adopting the desktop backend is exactly what makes its headed spawns
+        visible, so the window-capable entry must come first even though the
+        headless one matches the client's own context exactly."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, HEADLESS)
+        _record(p, 2222, "win-session-1")
+
+        assert [e["port"] for e in reg.adoption_candidates(p, HEADLESS)] == [2222, 1111]
+
+    def test_a_headless_client_still_falls_back_to_a_headless_backend(self, tmp_path):
+        """Preference, not requirement: with no desktop backend recorded, the
+        headless one is still adoptable — refusing it would spawn a second
+        blind backend beside a perfectly good one."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, HEADLESS)
+
+        assert [e["port"] for e in reg.adoption_candidates(p, HEADLESS)] == [1111]
+
+    def test_a_capable_client_is_never_offered_a_proven_headless_backend(
+        self, tmp_path
+    ):
+        """The asymmetry. Adopting a proven-blind backend would strand THIS
+        desktop session's headed browsing on it — F-808 again with the roles
+        swapped — so a proven-capable client is offered nothing here and cold
+        starts its own instead."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, HEADLESS)
+
+        assert reg.adoption_candidates(p, "win-session-7") == []
+
+    def test_an_unverified_client_is_offered_everything(self, tmp_path):
+        """UNVERIFIED means "we could not classify this platform", not "we can
+        show windows". Applying the capable-client exclusion on that basis
+        would evict healthy backends on platforms we simply cannot read, so an
+        unverified client keeps maximal continuity and adopts anything."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, HEADLESS)
+
+        assert [e["port"] for e in reg.adoption_candidates(p, UNVERIFIED)] == [1111]
+
+    def test_an_unverified_entry_survives_the_capable_clients_filter(self, tmp_path):
+        """The exclusion is on PROVEN-headless entries only. An UNVERIFIED
+        entry is what every <= 2.0.3 record reads as, so dropping it would make
+        a capable client evict the running backend on the first upgrade."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, UNVERIFIED)
+
+        assert [e["port"] for e in reg.adoption_candidates(p, "win-session-1")] == [
+            1111
+        ]
+
+    def test_recorded_order_breaks_ties_among_capable_entries(self, tmp_path):
+        """No preference between two desktops we can both see: the sort is
+        stable, so the record's own order decides and discovery is
+        deterministic."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, "win-session-1")
+        _record(p, 2222, "win-session-2")
+
+        ports = [e["port"] for e in reg.adoption_candidates(p, "win-session-2")]
+        assert ports == [1111, 2222]
+
+    def test_an_absent_record_offers_no_candidates(self, tmp_path):
+        assert reg.adoption_candidates(tmp_path / "server.json", HEADLESS) == []
+
+
+class TestPortForContext:
+    def test_returns_the_port_recorded_for_that_context(self, tmp_path):
+        p = tmp_path / "server.json"
+        _record(p, 1111, HEADLESS)
+        _record(p, 2222, "win-session-1")
+
+        assert reg.port_for_context(p, "win-session-1") == 2222
+
+    def test_an_unrecorded_context_has_no_port(self, tmp_path):
+        p = tmp_path / "server.json"
+        _record(p, 1111, HEADLESS)
+
+        assert reg.port_for_context(p, "win-session-1") is None
+
+    def test_a_record_naming_no_usable_port_has_no_port(self, tmp_path):
+        """Hand-edited or truncated records must read as "no port", never as a
+        string that a caller would then try to bind."""
+        p = tmp_path / "server.json"
+        p.write_text(json.dumps({"schema": 2, "backends": {"ctx": {"port": "nope"}}}))
+
+        assert reg.port_for_context(p, "ctx") is None
+
+
+class TestPortConflict:
+    """A spawn must not bind a port another display context has recorded:
+    `record_backend` supersedes by port, and the record happens at Popen time
+    (before the new backend is even ready), so binding there would drop a live
+    sibling's entry and make it undiscoverable.
+    """
+
+    def test_a_port_recorded_by_another_context_conflicts(self, tmp_path):
+        p = tmp_path / "server.json"
+        _record(p, 19222, HEADLESS)
+
+        assert reg.port_conflict(p, 19222, "win-session-1") is True
+
+    def test_our_own_recorded_port_never_conflicts(self, tmp_path):
+        """Rebinding the port our own context last used is the normal
+        eviction/restart path — our record supersedes only itself."""
+        p = tmp_path / "server.json"
+        _record(p, 19222, "win-session-1")
+
+        assert reg.port_conflict(p, 19222, "win-session-1") is False
+
+    def test_an_unrecorded_port_never_conflicts(self, tmp_path):
+        p = tmp_path / "server.json"
+        _record(p, 19222, HEADLESS)
+
+        assert reg.port_conflict(p, 20000, "win-session-1") is False
+
+    def test_an_absent_record_never_conflicts(self, tmp_path):
+        assert reg.port_conflict(tmp_path / "server.json", 19222, HEADLESS) is False

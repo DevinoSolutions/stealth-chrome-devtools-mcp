@@ -476,10 +476,20 @@ class TestBackendPidOnPort:
 
 
 class TestClearStaleBackend:
+    """The no-op guard is asked of THE PORT (`_same_identity_backend_ready`),
+    not of `_find_running_server`. Updated deliberately with F-808 Task 4 (same
+    commit): under adoption ordering `_find_running_server` legitimately
+    returns ANOTHER display context's port, so `== port` would have started
+    terminating live same-identity backends whenever a preferred sibling
+    existed. The claims below are unchanged — only the stubbed seam moves.
+    """
+
     def test_no_op_when_reusable_backend_present(self, monkeypatch):
         # If the port already holds a reusable same-version backend, nothing may
         # be terminated (must not even look up a pid to kill).
-        monkeypatch.setattr(singleton, "_find_running_server", lambda: 19222)
+        monkeypatch.setattr(
+            singleton, "_same_identity_backend_ready", lambda port, **kw: port == 19222
+        )
         looked_up = []
         monkeypatch.setattr(
             singleton, "_backend_pid_on_port", lambda port: looked_up.append(port)
@@ -488,7 +498,9 @@ class TestClearStaleBackend:
         assert looked_up == []
 
     def test_terminates_stale_backend_on_port(self, monkeypatch):
-        monkeypatch.setattr(singleton, "_find_running_server", lambda: None)
+        monkeypatch.setattr(
+            singleton, "_same_identity_backend_ready", lambda port, **kw: False
+        )
         monkeypatch.setattr(singleton, "_backend_pid_on_port", lambda port: 4242)
         proc = MagicMock()
         monkeypatch.setattr(singleton.psutil, "Process", MagicMock(return_value=proc))
@@ -497,7 +509,9 @@ class TestClearStaleBackend:
         proc.terminate.assert_called_once()
 
     def test_no_op_when_nothing_to_kill(self, monkeypatch):
-        monkeypatch.setattr(singleton, "_find_running_server", lambda: None)
+        monkeypatch.setattr(
+            singleton, "_same_identity_backend_ready", lambda port, **kw: False
+        )
         monkeypatch.setattr(singleton, "_backend_pid_on_port", lambda port: None)
         monkeypatch.setattr(singleton, "_read_server_state", lambda: None)
         # Must not raise even when there is nothing on the port.
