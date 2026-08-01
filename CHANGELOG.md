@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.3
 
 ### Fixed — the shared backend no longer absorbs the host project's `.env` (#56)
 
