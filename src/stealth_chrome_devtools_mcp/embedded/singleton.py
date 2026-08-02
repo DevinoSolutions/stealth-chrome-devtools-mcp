@@ -154,10 +154,10 @@ def _clear_server_state() -> None:
 
 def _probe_backend_status() -> tuple[str, int | None]:
     """Report the recorded backend's actual state for display (CLI status/
-    doctor), distinguishing the three states `_find_running_server`'s
-    binary reuse-or-not answer collapses: not running at all, running but
-    socket-dead, and running-but-wedged (the F-301 state a bare socket check
-    cannot see). Read-only: never evicts, never spawns.
+    doctor), distinguishing what `_find_running_server`'s binary answer
+    collapses: not running, socket-dead, and wedged (the F-301 state a bare
+    socket check cannot see). Read-only: never evicts, never spawns. Doctor
+    runs this same ladder per-entry in `cli._probe_recorded_backend`.
 
     Returns one of:
         ("none", None)        - no recorded backend

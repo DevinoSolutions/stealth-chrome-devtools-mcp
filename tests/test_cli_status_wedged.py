@@ -24,6 +24,16 @@ from stealth_chrome_devtools_mcp import cli
 from stealth_chrome_devtools_mcp.embedded import singleton
 
 
+@pytest.fixture(autouse=True)
+def _state_file_in_tmp(tmp_path, monkeypatch):
+    """Every test here runs against a tmp record. `_doctor_backend_lines` reads
+    `singleton.SERVER_STATE_FILE` directly (via `backend_registry.window_capable_
+    first`), a path `_read_server_state` patches do not cover — without this,
+    any `_cmd_doctor` test would list, and port-probe, whatever the developer's
+    real `~/.stealth-mcp/server.json` happens to record."""
+    monkeypatch.setattr(singleton, "SERVER_STATE_FILE", tmp_path / "server.json")
+
+
 @pytest.fixture()
 def fake_server(tmp_path):
     server = MagicMock()
@@ -519,7 +529,7 @@ class TestCliDoctorDisplayContexts:
 
         assert "backend  unverified  port 19222  pid 909  version 2.0.3" in out
         assert "(can show windows)" in out
-        assert "no backend can display a window" not in out
+        assert "no live backend can display a window" not in out
 
     def test_no_record_says_none_recorded_without_a_remedy(
         self, fake_server, recorded_backends, capsys
@@ -532,4 +542,4 @@ class TestCliDoctorDisplayContexts:
         out = capsys.readouterr().out
 
         assert "backend  (none recorded)" in out
-        assert "no backend can display a window" not in out
+        assert "no live backend can display a window" not in out

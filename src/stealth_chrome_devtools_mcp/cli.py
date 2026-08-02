@@ -241,10 +241,10 @@ def _doctor_backend_lines() -> list[str]:
     if not serviceable:
         # "no LIVE backend": the lines above may well show a capable one that
         # is down, and a remedy contradicting the list it follows is worse than
-        # no remedy. The instruction itself is deliberately the spawn refusal's
-        # own words (embedded/server.py's headed-visibility guard) — an operator
-        # who arrives here from that error must recognise it, not re-interpret
-        # a paraphrase.
+        # no remedy. The instruction deliberately echoes the spawn refusal's
+        # advice (embedded/server.py's headed-visibility guard) so an operator
+        # who arrives here from that error recognises it — a close paraphrase,
+        # not a shared constant; keep the two saying the same thing.
         lines.append(
             "no live backend can display a window: headed spawns will fail — "
             "start one from a desktop session and any session will use it "
