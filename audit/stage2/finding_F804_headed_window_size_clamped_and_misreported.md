@@ -52,6 +52,11 @@ Three things fall out of that table:
    had been cold-started from a non-interactive session, and that is also why the
    browser was invisible. See
    `finding_F808_headed_spawn_is_invisible_when_the_backend_was_cold_started_from_a_non_interactive_session.md`.
+   *Provenance:* that measurement was taken ad hoc during the F-808 Task-10 prep
+   session (2026-08-02) and lives only in that session's transcript. No repo
+   artifact reproduces it — there is no test or script that measures the Session 0
+   desktop, so treat the exact 1024x768 as a one-time observation rather than a
+   standing, re-checkable claim.
    The remedy below (report requested/actual/clamped truthfully) is unchanged and
    still correct; only the stated cause was wrong.
 3. **Headless does not clamp**, because there is no window manager to clamp

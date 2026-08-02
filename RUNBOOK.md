@@ -25,7 +25,7 @@ console script is not on PATH. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for th
 | `doctor` | environment check: Python, platform, browser-session root, backend, port occupant, **one line per recorded backend with its display context and whether it can show a window**, Chrome |
 | `profiles` | list on-disk profiles with size, role, and in-use flag |
 | `cleanup` | reclaim disk — delete idle auto-clones over the clone cap and trim idle named profiles over the browser-session cap (**dry run** unless `--apply`) |
-| `stop` | terminate the shared backend (kills all live browser sessions) |
+| `stop` | stop the first recorded backend — its live browser sessions die with it; another desktop's backend keeps running and stays recorded |
 | `restart` | terminate + fresh cold-start spawn (the recovery for a **wedged** backend) |
 | `kill-orphans` | reap browser processes orphaned by a dead backend (refuses against a live backend unless `--force`) |
 | `serve` | start the MCP server yourself (stdio by default, or `--http`) |
@@ -117,10 +117,11 @@ contexts    :
   backend  headless  port 19223  pid 12346  version 2.0.4  down  (headless only)
 ```
 
-The liveness word is the same vocabulary `status` uses (`responsive` / `wedged` /
-`down` / `no port recorded`). The note in parentheses describes where that
-backend's windows *would* appear, which stays true whether or not it is currently
-answering. With nothing recorded the block reads `backend  (none recorded)`.
+The liveness word is one of the same three words `_probe_backend_status` produces
+(`responsive` / `wedged` / `down`), plus `no port recorded` for an entry naming no
+usable port. The note in parentheses describes where that backend's windows *would*
+appear, which stays true whether or not it is currently answering. With nothing
+recorded the block reads `backend  (none recorded)`.
 
 Two things it deliberately does not tell you. It does not distinguish a **proven**
 desktop from an unclassifiable one: a context recorded by 2.0.3 or earlier reads
