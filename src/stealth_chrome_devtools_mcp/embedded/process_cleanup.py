@@ -2,8 +2,6 @@
 
 import atexit
 import contextlib
-import json
-import os
 import shutil
 import signal
 import sys
@@ -12,13 +10,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32":
-    import msvcrt
-else:
-    import fcntl
-
 import psutil
 
+from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.singleton import STATE_DIR
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -53,18 +47,8 @@ class ProcessCleanup:
 
     @staticmethod
     def _normalize_path(path: str | None) -> str | None:
-        """
-        Normalize a filesystem path for safe comparison.
-
-        Args:
-            path (Optional[str]): Path to normalize.
-
-        Returns:
-            Optional[str]: Normalized path string or None.
-        """
-        if not path:
-            return None
-        return os.path.normcase(os.path.normpath(str(path)))
+        """Normalize a filesystem path for safe comparison (registry leaf)."""
+        return browser_pid_registry.normalize_path(path)
 
     @staticmethod
     def _is_browser_process_name(process_name: str) -> bool:
@@ -109,45 +93,9 @@ class ProcessCleanup:
         cls,
         raw_processes: dict[str, Any],
     ) -> dict[str, dict[str, Any]]:
-        """
-        Normalize old and new PID-file formats into the current metadata shape.
-
-        Args:
-            raw_processes (Dict[str, Any]): Raw metadata loaded from disk.
-
-        Returns:
-            Dict[str, Dict[str, Any]]: Normalized process metadata keyed by instance id.
-        """
-        normalized: dict[str, dict[str, Any]] = {}
-        for instance_id, raw_value in raw_processes.items():
-            if isinstance(raw_value, int):
-                metadata = {
-                    "pid": raw_value,
-                    "create_time": None,
-                    "user_data_dir": None,
-                    "uses_custom_data_dir": None,
-                    "auto_clone": False,
-                    "timestamp": 0,
-                }
-            elif isinstance(raw_value, dict):
-                pid = raw_value.get("pid")
-                if not isinstance(pid, int):
-                    continue
-                metadata = {
-                    "pid": pid,
-                    "create_time": raw_value.get("create_time"),
-                    "user_data_dir": raw_value.get("user_data_dir"),
-                    "uses_custom_data_dir": raw_value.get("uses_custom_data_dir"),
-                    "auto_clone": bool(raw_value.get("auto_clone", False)),
-                    "timestamp": raw_value.get("timestamp", 0),
-                }
-            else:
-                continue
-
-            metadata["user_data_dir"] = cls._normalize_path(metadata["user_data_dir"])
-            normalized[instance_id] = metadata
-
-        return normalized
+        """Normalize old and new PID-file formats into the current metadata
+        shape (registry leaf, which owns the record's schema)."""
+        return browser_pid_registry.normalize_entries(raw_processes)
 
     def _setup_cleanup_handlers(self):
         """
@@ -185,76 +133,57 @@ class ProcessCleanup:
         self._cleanup_all_tracked()
         sys.exit(0)
 
-    _LOCK_RETRIES = 4
-    _LOCK_RETRY_DELAY = 0.05
-
-    @staticmethod
-    @contextlib.contextmanager
-    def _file_lock(file_handle):
-        """Acquire an exclusive file lock with bounded retry, or raise."""
-        for attempt in range(ProcessCleanup._LOCK_RETRIES + 1):
-            try:
-                if sys.platform == "win32":
-                    msvcrt.locking(file_handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    fcntl.flock(file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
-                if attempt == ProcessCleanup._LOCK_RETRIES:
-                    raise
-                time.sleep(ProcessCleanup._LOCK_RETRY_DELAY)
-        try:
-            yield
-        finally:
-            try:
-                if sys.platform == "win32":
-                    file_handle.seek(0)
-                    msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    fcntl.flock(file_handle, fcntl.LOCK_UN)
-            except OSError:
-                pass
-
     def _load_tracked_pids(self) -> dict[str, dict[str, Any]]:
-        """
-        Load tracked browser metadata from disk with file locking.
-
-        Returns:
-            Dict[str, Dict[str, Any]]: Tracked browser metadata keyed by instance id.
-        """
-        try:
-            if not self.pid_file.exists():
-                return {}
-            with self.pid_file.open() as file_handle, self._file_lock(file_handle):
-                data = json.load(file_handle)
-            return self._normalize_process_metadata(data.get("browser_processes", {}))
-        except Exception as error:
-            debug_logger.log_warning(
-                "process_cleanup",
-                "load_pids",
-                f"Failed to load PID file: {error}",
-            )
-            return {}
+        """Every browser recorded in the shared PID file, ours and other
+        backends' alike, keyed by instance id."""
+        return browser_pid_registry.read_entries(self.pid_file)
 
     def _save_tracked_pids(self):
-        """
-        Persist tracked browser metadata to disk with file locking.
+        """Persist this process's tracked browsers, merging into whatever the
+        other backends on this machine have recorded.
 
-        Returns:
-            None
+        Merging is the point. The PID file is shared by every backend, so a
+        writer may only replace the entries it is writing; serialising the whole
+        in-memory table over the file — what this did before F-808 — erased the
+        other backends' tracking and leaked their browsers. Entries this process
+        has stopped tracking are removed by name in
+        :meth:`untrack_browser_process`, never by omission here.
         """
         try:
-            data = {
-                "browser_processes": self.browser_processes,
-                "timestamp": time.time(),
-            }
-            with self.pid_file.open("w") as file_handle, self._file_lock(file_handle):
-                json.dump(data, file_handle)
+            browser_pid_registry.update_entries(
+                self.pid_file,
+                lambda recorded: {**recorded, **self.browser_processes},
+            )
         except Exception as error:
             debug_logger.log_warning(
                 "process_cleanup",
                 "save_pids",
                 f"Failed to save PID file: {error}",
+            )
+
+    def _drop_recorded(self, instance_ids: set[str]) -> None:
+        """Remove the named entries from the shared PID file, keeping the rest.
+
+        The rest is the other backends' tracking, which is why this takes ids
+        rather than deleting the file: an unlink here reads as "nothing is
+        running anywhere" to the next backend that starts.
+        """
+        if not instance_ids:
+            return
+        try:
+            browser_pid_registry.update_entries(
+                self.pid_file,
+                lambda recorded: {
+                    instance_id: metadata
+                    for instance_id, metadata in recorded.items()
+                    if instance_id not in instance_ids
+                },
+            )
+        except Exception as error:
+            debug_logger.log_warning(
+                "process_cleanup",
+                "drop_pids",
+                f"Failed to update PID file: {error}",
             )
 
     def _get_active_browser_profile_dirs(self) -> set[str]:
@@ -622,8 +551,10 @@ class ProcessCleanup:
         """
         saved_processes = self._load_tracked_pids()
         recovered_count = 0
+        reaped: set[str] = set()
 
         for instance_id, metadata in saved_processes.items():
+            reaped.add(instance_id)
             try:
                 if self._kill_processes_for_metadata(
                     instance_id, metadata, recovery=True
@@ -644,7 +575,7 @@ class ProcessCleanup:
                 f"Killed {recovered_count} orphaned browser processes",
             )
 
-        self._clear_pid_file()
+        self._drop_recorded(reaped)
         self._sweep_orphaned_temp_profiles()
 
     def track_browser_process(
@@ -734,11 +665,7 @@ class ProcessCleanup:
             if isinstance(pid, int):
                 self.tracked_pids.discard(pid)
             del self.browser_processes[instance_id]
-
-            if self.browser_processes:
-                self._save_tracked_pids()
-            else:
-                self._clear_pid_file()
+            self._drop_recorded({instance_id})
 
             debug_logger.log_info(
                 "process_cleanup",
@@ -991,27 +918,12 @@ class ProcessCleanup:
             f"Cleaned up {cleaned_count} tracked browser process entries",
         )
 
+        # Whatever survived is still running and stays recorded; everything that
+        # was cleaned up already dropped its own entry through untrack. There is
+        # no wipe here for the same reason there is none in recovery — the file
+        # also holds other backends' browsers.
         if self.browser_processes:
             self._save_tracked_pids()
-        else:
-            self._clear_pid_file()
-
-    def _clear_pid_file(self):
-        """
-        Remove the persisted PID metadata file.
-
-        Returns:
-            None
-        """
-        try:
-            if self.pid_file.exists():
-                self.pid_file.unlink()
-        except Exception as error:
-            debug_logger.log_warning(
-                "process_cleanup",
-                "clear_pid_file",
-                f"Failed to clear PID file: {error}",
-            )
 
     def get_tracked_processes(self) -> dict[str, int]:
         """
