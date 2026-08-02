@@ -14,6 +14,7 @@ keeping a test run off the developer's live ~/.stealth-mcp/browser_pids.json.
 import inspect
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -271,7 +272,7 @@ class TestFailedLockLeavesTheRecordIntact:
         def refuse(_handle):
             raise OSError("lock held elsewhere")
 
-        monkeypatch.setattr(registry, "_LOCK_RETRY_DELAY", 0)
+        monkeypatch.setattr(registry, "_LOCK_TIMEOUT", 0)
         monkeypatch.setattr(registry, "_acquire", refuse)
 
         pc._save_tracked_pids()
@@ -285,13 +286,45 @@ class TestFailedLockLeavesTheRecordIntact:
         Its callers log and degrade, so raising turns a silent race into a
         skipped write.
         """
-        monkeypatch.setattr(registry, "_LOCK_RETRY_DELAY", 0)
+        monkeypatch.setattr(registry, "_LOCK_TIMEOUT", 0)
         monkeypatch.setattr(
             registry, "_acquire", MagicMock(side_effect=OSError("held"))
         )
 
         with pytest.raises(OSError):
             registry.update_entries(tmp_path / "pids.json", lambda entries: entries)
+
+    def test_a_writer_waits_out_a_concurrent_holder_instead_of_giving_up(
+        self, tmp_path
+    ):
+        """Contention is the normal case — several backends spawn and close
+        browsers at once — and a writer that gave up would silently skip its
+        entry, leaving that browser untracked. Three real processes hammering
+        one record lost two thirds of their writes to the fixed 4 x 50ms budget
+        this replaced, because the lock now spans a whole read-merge-write.
+        """
+        record = tmp_path / "pids.json"
+        _seed(record, {"theirs": _entry(303)})
+        holding = threading.Event()
+        hold_for = 0.4
+
+        def hold_the_lock():
+            with registry._hold_lock(record):
+                holding.set()
+                time.sleep(hold_for)
+
+        holder = threading.Thread(target=hold_the_lock)
+        holder.start()
+        try:
+            assert holding.wait(timeout=5)
+            started = time.monotonic()
+            registry.update_entries(record, lambda cur: {**cur, "mine": _entry(101)})
+            waited = time.monotonic() - started
+        finally:
+            holder.join(timeout=5)
+
+        assert waited >= hold_for / 2, "returned without waiting on the holder"
+        assert set(registry.read_entries(record)) == {"theirs", "mine"}
 
 
 class TestRecordParentDir:

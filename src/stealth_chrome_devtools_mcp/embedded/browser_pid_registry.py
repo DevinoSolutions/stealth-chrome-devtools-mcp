@@ -74,8 +74,18 @@ OWNER_CREATE_TIME = "owner_create_time"
 # Bounded non-blocking acquire, then raise (F-607): never yield as if the lock
 # were held. Both callers already log and degrade, so raising turns a silent
 # cross-process race into a logged skipped write.
-_LOCK_RETRIES = 4
-_LOCK_RETRY_DELAY = 0.05
+#
+# A DEADLINE rather than a fixed handful of tries, because a skipped write is
+# not a cheap failure here: the browser it was recording goes untracked, which
+# is the leak this module exists to prevent. The lock spans a read, a merge and
+# an atomic replace — milliseconds — but several backends spawn and close
+# browsers at once, so waiting out a normal collision has to be the common case
+# and only a genuinely stuck holder may exhaust the budget. Measured, not
+# guessed: the inherited 4 x 50ms was sized for a critical section that was one
+# json.dump long, and three processes writing this record concurrently lost 120
+# of 180 entries to it.
+_LOCK_TIMEOUT = 5.0
+_LOCK_RETRY_DELAY = 0.01
 # Windows refuses an atomic replace while another process holds the target open;
 # a few short retries outlast that window. See _replace.
 _COMMIT_ATTEMPTS = 5
@@ -259,13 +269,21 @@ def _hold_lock(path: Path) -> Iterator[None]:
     """Hold the record's exclusive lock for the duration of the block, or raise."""
     lock_file = _lock_path(path)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
-    with lock_file.open("w") as handle:
-        for attempt in range(_LOCK_RETRIES + 1):
+    # "a" creates the file without truncating it. Nothing is ever written here
+    # so the file stays empty and "w" would behave identically today; "a" is
+    # simply the honest mode for a handle we open only to lock. (singleton's
+    # cold-start lock uses "w" — same idea, no difference in effect.)
+    with lock_file.open("a") as handle:
+        # The lock is one byte at offset 0, so the position must be 0 whatever
+        # append mode opened it at.
+        handle.seek(0)
+        deadline = time.monotonic() + _LOCK_TIMEOUT
+        while True:
             try:
                 _acquire(handle)
                 break
             except OSError:
-                if attempt == _LOCK_RETRIES:
+                if time.monotonic() >= deadline:
                     raise
                 time.sleep(_LOCK_RETRY_DELAY)
         try:
