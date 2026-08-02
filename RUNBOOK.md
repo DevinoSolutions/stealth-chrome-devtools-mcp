@@ -42,7 +42,7 @@ and teardown live in the backend and are reused from the eviction path.
 backend     : running (responsive) on port 19222
 pid         : 12345
 log         : C:\Users\you\.stealth-mcp\logs\backend-12345.log
-version     : 2.0.3
+version     : 2.0.4
 browser-session root: C:\stealth-mcp-browser-sessions  (exists: True)
 clone cap   : 10.0 GB  [STEALTH_MCP_CLONE_STORAGE_CAP_GB]
 browser-session cap : 20.0 GB  [STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB]
