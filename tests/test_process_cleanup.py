@@ -2,7 +2,7 @@
 
 Validates that:
 - _init_time is set before recovery runs
-- _normalize_process_metadata handles legacy (int) and current (dict) formats
+- browser_pid_registry.normalize_entries handles legacy (int) and dict formats
 - Recovery filtering respects create_time vs _init_time
 - _extract_profile_dir_from_cmdline parses both --flag=value and --flag value
 - _is_browser_process_name matches Chrome/Edge/Chromium/Brave
@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 # ---------------------------------------------------------------------------
@@ -48,14 +49,14 @@ class TestProcessCleanupInit:
 
 
 # ---------------------------------------------------------------------------
-# _normalize_process_metadata
+# browser_pid_registry.normalize_entries
 # ---------------------------------------------------------------------------
 
 
 class TestNormalizeProcessMetadata:
     def test_legacy_int_format(self):
         raw = {"instance-1": 12345}
-        result = ProcessCleanup._normalize_process_metadata(raw)
+        result = browser_pid_registry.normalize_entries(raw)
         assert "instance-1" in result
         meta = result["instance-1"]
         assert meta["pid"] == 12345
@@ -72,7 +73,7 @@ class TestNormalizeProcessMetadata:
                 "timestamp": 1700000001.0,
             }
         }
-        result = ProcessCleanup._normalize_process_metadata(raw)
+        result = browser_pid_registry.normalize_entries(raw)
         meta = result["instance-2"]
         assert meta["pid"] == 9999
         assert meta["create_time"] == 1700000000.0
@@ -80,12 +81,12 @@ class TestNormalizeProcessMetadata:
 
     def test_dict_without_pid_skipped(self):
         raw = {"bad": {"no_pid": True}}
-        result = ProcessCleanup._normalize_process_metadata(raw)
+        result = browser_pid_registry.normalize_entries(raw)
         assert len(result) == 0
 
     def test_non_int_non_dict_skipped(self):
         raw = {"bad": "string-value", "also-bad": [1, 2, 3]}
-        result = ProcessCleanup._normalize_process_metadata(raw)
+        result = browser_pid_registry.normalize_entries(raw)
         assert len(result) == 0
 
     def test_mixed_formats(self):
@@ -94,7 +95,7 @@ class TestNormalizeProcessMetadata:
             "modern": {"pid": 2222, "create_time": 1700000000.0},
             "bad": "skip",
         }
-        result = ProcessCleanup._normalize_process_metadata(raw)
+        result = browser_pid_registry.normalize_entries(raw)
         assert len(result) == 2
         assert result["legacy"]["pid"] == 1111
         assert result["modern"]["pid"] == 2222
@@ -483,12 +484,12 @@ class TestAutoCloneMetadata:
 
     def test_normalize_preserves_auto_clone(self):
         raw = {"i": {"pid": 1, "auto_clone": True, "user_data_dir": "/x"}}
-        out = ProcessCleanup._normalize_process_metadata(raw)
+        out = browser_pid_registry.normalize_entries(raw)
         assert out["i"]["auto_clone"] is True
 
     def test_normalize_defaults_auto_clone_false(self):
         raw = {"modern": {"pid": 1, "user_data_dir": "/x"}, "legacy": 999}
-        out = ProcessCleanup._normalize_process_metadata(raw)
+        out = browser_pid_registry.normalize_entries(raw)
         assert out["modern"]["auto_clone"] is False
         assert out["legacy"]["auto_clone"] is False
 

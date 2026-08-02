@@ -8,12 +8,14 @@ import signal
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import psutil
 
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry, singleton
+from stealth_chrome_devtools_mcp.embedded.browser_pid_registry import Entries
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.singleton import STATE_DIR
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -109,15 +111,6 @@ class ProcessCleanup:
                 return cls._normalize_path(cmdline[index + 1])
         return None
 
-    @classmethod
-    def _normalize_process_metadata(
-        cls,
-        raw_processes: dict[str, Any],
-    ) -> dict[str, dict[str, Any]]:
-        """Normalize old and new PID-file formats into the current metadata
-        shape (registry leaf, which owns the record's schema)."""
-        return browser_pid_registry.normalize_entries(raw_processes)
-
     def _setup_cleanup_handlers(self):
         """
         Register process cleanup hooks for normal interpreter shutdown and signals.
@@ -196,7 +189,9 @@ class ProcessCleanup:
             },
         )
 
-    def _rewrite_record(self, action, mutate) -> None:
+    def _rewrite_record(
+        self, action: str, mutate: Callable[[Entries], Entries]
+    ) -> None:
         """Apply *mutate* to the shared PID file, degrading to a logged skip.
 
         The one place a record write is attempted, so the two callers cannot
@@ -596,24 +591,30 @@ class ProcessCleanup:
         right now" — the distinction the old create_time guard could not draw,
         since every already-running backend's browsers predate our import. See
         :mod:`browser_pid_registry` for the record's side of the rule.
-
-        Returns:
-            None
         """
         saved_processes = self._load_tracked_pids()
         recovered_count = 0
         reaped: set[str] = set()
 
         for instance_id, metadata in saved_processes.items():
-            if not force and not browser_pid_registry.is_reapable(
-                metadata, self._owner_backend_alive
-            ):
-                continue
-            # Reaped before the attempt, not after: a failed kill or a locked
-            # profile dir must still drop the entry, exactly as the previous
-            # unconditional wipe did. The temp-profile sweep is the retry.
-            reaped.add(instance_id)
+            # The ownership check is INSIDE the try because it can raise: it
+            # reaches psutil through an injected callable, and a recorded pid
+            # psutil rejects outright (a negative one) raises ValueError that
+            # neither predicate converts. Escaping would abandon the remaining
+            # entries and fail backend STARTUP through activate(); landing in
+            # the except leaves the entry un-reaped instead — fail toward a
+            # leak, never toward killing what we could not classify.
             try:
+                if not force and not browser_pid_registry.is_reapable(
+                    metadata, self._owner_backend_alive
+                ):
+                    continue
+                # Recorded as reaped BEFORE the attempt, so a failed kill or a
+                # locked profile dir still drops the entry, as the previous
+                # unconditional wipe did. Retries: _sweep_orphaned_temp_profiles
+                # for gettempdir profiles, clone_storage.enforce_session_storage
+                # for session-root ones.
+                reaped.add(instance_id)
                 if self._kill_processes_for_metadata(
                     instance_id, metadata, recovery=True
                 ):
@@ -677,14 +678,13 @@ class ProcessCleanup:
                 OSError,
             ):
                 create_time = psutil.Process(pid).create_time()
-            metadata = {
-                "pid": pid,
-                "create_time": create_time,
-                "user_data_dir": self._normalize_path(user_data_dir),
-                "uses_custom_data_dir": uses_custom_data_dir,
-                "auto_clone": bool(auto_clone),
-                "timestamp": time.time(),
-            }
+            metadata = browser_pid_registry.new_entry(
+                pid,
+                create_time=create_time,
+                user_data_dir=user_data_dir,
+                uses_custom_data_dir=uses_custom_data_dir,
+                auto_clone=auto_clone,
+            )
             self.browser_processes[instance_id] = metadata
             self.tracked_pids.add(pid)
             self._save_tracked_pids()

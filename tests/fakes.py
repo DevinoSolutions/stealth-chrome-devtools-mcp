@@ -29,10 +29,74 @@ from __future__ import annotations
 
 import inspect
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import nodriver.cdp.target as cdp_target
+
+# ---------------------------------------------------------------------------
+# Module signature guards (shared by the on-disk record modules)
+# ---------------------------------------------------------------------------
+
+
+def _public_functions(module: Any) -> list[tuple[str, Any]]:
+    """Every function *module* defines itself, excluding privates and imports."""
+    return [
+        (name, obj)
+        for name, obj in vars(module).items()
+        if not name.startswith("_")
+        and inspect.isfunction(obj)
+        and obj.__module__ == module.__name__
+    ]
+
+
+def _takes_a_path(func: Any) -> bool:
+    return any(
+        param.name in ("path", "paths")
+        for param in inspect.signature(func).parameters.values()
+    )
+
+
+def assert_no_default_paths(module: Any) -> None:
+    """Assert no public function of *module* defaults a path parameter.
+
+    Both on-disk record modules (``backend_registry``, ``browser_pid_registry``)
+    state the same corollary in their docstrings, so the check belongs here
+    rather than copied into each test file. The caller's binding is what selects
+    the file: redirecting it at runtime is what the hermetic fixtures do, and it
+    is the only thing keeping a test run from editing the developer's live
+    ``~/.stealth-mcp``. A function that defaulted its path would bind its own
+    module global at def-time and silently ignore that redirection.
+
+    Two ways to offend, both caught: naming the parameter ``path``/``paths`` and
+    giving it a default, and defaulting ANY parameter to a Path (a future
+    ``record=SERVER_STATE_FILE`` would escape a name-only check).
+
+    The companion assertion is that the sweep actually visited a path-taking
+    function — a renamed module, a broken ``__module__`` filter, or an API that
+    stopped taking paths would otherwise leave this passing vacuously.
+    """
+    functions = _public_functions(module)
+    offenders = [
+        f"{name}({param})"
+        for name, func in functions
+        for param in inspect.signature(func).parameters.values()
+        if (
+            param.name in ("path", "paths")
+            and param.default is not inspect.Parameter.empty
+        )
+        or isinstance(param.default, Path)
+    ]
+    assert offenders == [], (
+        f"path parameters must stay required, but {offenders} default theirs"
+    )
+    visited = [name for name, func in functions if _takes_a_path(func)]
+    assert visited, (
+        f"vacuous guard: no public function of {module.__name__} takes a path "
+        "parameter — has the module been renamed or its API changed?"
+    )
+
 
 # ---------------------------------------------------------------------------
 # In-process tool invoker (THE one way to drive a tool in a test)

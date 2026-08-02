@@ -104,14 +104,44 @@ def normalize_path(path: str | None) -> str | None:
     return os.path.normcase(os.path.normpath(str(path)))
 
 
+def new_entry(
+    pid: int,
+    *,
+    create_time: float | None,
+    user_data_dir: str | None,
+    uses_custom_data_dir: bool | None,
+    auto_clone: bool,
+) -> Entry:
+    """One tracked browser as it is first recorded.
+
+    Building an entry lives here, next to :func:`normalize_entries` that reads
+    one back, because the two are the same schema seen from either end and a
+    disagreement between them is silent: the normalizer drops every key it does
+    not know, so a field added at a tracking site would survive one process
+    lifetime and vanish on the next load with nothing red.
+
+    The owner is deliberately NOT set here. :func:`with_owner` stamps it at
+    write time, which is the only moment that knows which process is writing.
+    """
+    return {
+        "pid": pid,
+        "create_time": create_time,
+        "user_data_dir": normalize_path(user_data_dir),
+        "uses_custom_data_dir": uses_custom_data_dir,
+        "auto_clone": bool(auto_clone),
+        "timestamp": time.time(),
+    }
+
+
 def normalize_entries(raw: object) -> Entries:
     """Normalize a raw recorded table — legacy or current — into today's shape.
 
     The key set is fixed and everything unrecognised is dropped, so a field only
-    survives a round trip if this function knows it by name. That is why the
-    owner keys are copied explicitly: adding them at the write site alone would
-    have them vanish on the very next load, and the owner check would then
-    silently never fire.
+    survives a round trip if this function knows it by name — which is why
+    :func:`new_entry` is its neighbour, and why a pin asserts the two agree on
+    the key set. That is also why the owner keys are copied explicitly: adding
+    them at the write site alone would have them vanish on the very next load,
+    and the owner check would then silently never fire.
 
     A legacy entry keeps NO owner keys rather than gaining null ones. The
     distinction is load-bearing: :func:`is_reapable` decides on the key's
@@ -315,12 +345,22 @@ def _release(handle: TextIO) -> None:
 
 
 def _write(path: Path, entries: Entries) -> None:
-    """Write the record atomically: stage into a sibling temp file, then replace.
+    """Write the record atomically: stage into a sibling temp file, then commit.
 
     So a reader concurrent with a write sees the whole old record or the whole
     new one, and a crash mid-write cannot leave the tracking table unparseable —
     which, for this record, would mean every backend's browsers untracked at
     once.
+
+    DUPLICATION, stated rather than implied: this function and
+    ``backend_registry._write`` are the same function apart from the payload
+    they serialise, and :func:`_commit` and ``backend_registry._commit`` are the
+    same function outright — same mkdir, same pid-suffixed temp name, same
+    retrying replace, same BaseException cleanup, same two constants. What
+    genuinely differs is only the caller's concurrency: this record is merged
+    under :func:`_hold_lock` per write, that one is written whole under
+    singleton's cold-start lock. Deliberately NOT extracted here — two
+    occurrences is not yet a home, and the rule of three is the trigger.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     # pid-suffixed so two processes staging at once cannot collide on the temp
@@ -331,7 +371,7 @@ def _write(path: Path, entries: Entries) -> None:
             json.dumps({"browser_processes": entries, "timestamp": time.time()}),
             encoding="utf-8",
         )
-        _replace(tmp, path)
+        _commit(tmp, path)
     except BaseException:
         # ACCEPTED GAP: cleans up a failed write, but a process killed between
         # write_text and the replace leaves a .tmp nothing sweeps. Bounded and
@@ -342,7 +382,7 @@ def _write(path: Path, entries: Entries) -> None:
         raise
 
 
-def _replace(tmp: Path, path: Path) -> None:
+def _commit(tmp: Path, path: Path) -> None:
     """Move *tmp* onto *path*, retrying briefly on a Windows sharing refusal.
 
     ``Path.replace`` is atomic on both platforms, but on Windows it raises
@@ -352,11 +392,9 @@ def _replace(tmp: Path, path: Path) -> None:
     failure into a slightly later success. On POSIX this costs one iteration and
     never sleeps.
 
-    Same idiom, for the same reason, as ``backend_registry._commit``. Left
-    unshared because that is the whole overlap between the two writers — this
-    one merges under its own lock, that one writes whole under singleton's
-    cold-start lock — and a third record is the point at which extracting one
-    home would pay for itself.
+    Named to match ``backend_registry._commit``, which it duplicates line for
+    line, so a grep for either lands on both. See :func:`_write` for why the
+    pair is left unshared for now.
     """
     for attempt in range(_COMMIT_ATTEMPTS):
         try:

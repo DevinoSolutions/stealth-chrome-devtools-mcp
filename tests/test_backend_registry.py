@@ -6,56 +6,21 @@ an EXPLICIT path - no monkeypatching of the module's own globals - which is the
 same property TestNoDefaultPaths enforces on the production signatures.
 """
 
-import inspect
 import json
-from pathlib import Path
 
 import pytest
 
+from fakes import assert_no_default_paths
 from stealth_chrome_devtools_mcp.embedded import backend_registry as reg
 from stealth_chrome_devtools_mcp.embedded.display_context import HEADLESS, UNVERIFIED
 
 
-def _public_functions():
-    for name, obj in vars(reg).items():
-        if name.startswith("_") or not inspect.isfunction(obj):
-            continue
-        if obj.__module__ == reg.__name__:
-            yield name, obj
-
-
 class TestNoDefaultPaths:
     def test_no_public_function_defaults_its_path_parameter(self):
-        """The module docstring's corollary, enforced: the caller's binding is
-        what selects the file. A default would bind this module's own
-        SERVER_STATE_FILE at def-time and silently ignore the redirection the
-        hermetic fixtures rely on - which is the only thing keeping a test run
-        off the developer's live ~/.stealth-mcp record.
-
-        Two ways to offend, both caught: naming the parameter path/paths, and
-        defaulting ANY parameter to a Path (a future `record=SERVER_STATE_FILE`
-        would escape a name-only check).
+        """This module's docstring states the corollary; fakes.py enforces it
+        for both record modules, including the companion non-vacuity assertion.
         """
-        offenders = [
-            f"{name}({param})"
-            for name, func in _public_functions()
-            for param in inspect.signature(func).parameters.values()
-            if (
-                param.name in ("path", "paths")
-                and param.default is not inspect.Parameter.empty
-            )
-            or isinstance(param.default, Path)
-        ]
-        assert offenders == [], (
-            f"path parameters must stay required, but {offenders} default theirs"
-        )
-
-    def test_guard_is_not_vacuous(self):
-        # Confirms the sweep actually visits this module's functions rather
-        # than an empty iterator (a renamed module or a broken __module__
-        # filter would silently pass the guard above) - matches
-        # test_no_silent_excepts.py:147's companion-assertion convention.
-        assert len(list(_public_functions())) >= 3
+        assert_no_default_paths(reg)
 
 
 class TestRecordParentDir:

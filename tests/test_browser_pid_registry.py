@@ -11,7 +11,6 @@ TestNoDefaultPaths enforces on the production signatures, and the only thing
 keeping a test run off the developer's live ~/.stealth-mcp/browser_pids.json.
 """
 
-import inspect
 import json
 import os
 import threading
@@ -21,8 +20,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from fakes import assert_no_default_paths
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import process_cleanup, singleton
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 
@@ -85,36 +85,13 @@ def _cleanup(tmp_path: Path, name: str = "browser_pids.json") -> ProcessCleanup:
 # ---------------------------------------------------------------------------
 
 
-def _public_functions():
-    for name, obj in vars(registry).items():
-        if name.startswith("_") or not inspect.isfunction(obj):
-            continue
-        if obj.__module__ == registry.__name__:
-            yield name, obj
-
-
 class TestNoDefaultPaths:
     def test_no_public_function_defaults_its_path_parameter(self):
-        """The module docstring's corollary, enforced: the caller's binding is
-        what selects the file. A default would bind a module global at def-time
-        and silently ignore the pid_file redirection every pin here relies on.
+        """Shared with test_backend_registry.py through fakes.py: every pin here
+        redirects pid_file, and a defaulted path would ignore the redirection —
+        writing to the developer's live ~/.stealth-mcp/browser_pids.json.
         """
-        offenders = [
-            f"{name}({param})"
-            for name, func in _public_functions()
-            for param in inspect.signature(func).parameters.values()
-            if (
-                param.name in ("path", "paths")
-                and param.default is not inspect.Parameter.empty
-            )
-            or isinstance(param.default, Path)
-        ]
-        assert offenders == [], (
-            f"path parameters must stay required, but {offenders} default theirs"
-        )
-
-    def test_guard_is_not_vacuous(self):
-        assert len(list(_public_functions())) >= 3
+        assert_no_default_paths(registry)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +128,41 @@ class TestOwnerFieldsRoundTrip:
         normalized = registry.normalize_entries(raw)["legacy"]
 
         assert "owner_pid" not in normalized
+
+    def test_construction_and_normalization_agree_on_the_key_set(self):
+        """new_entry and normalize_entries are the same schema from either end,
+        and a disagreement is SILENT: the normalizer drops what it does not
+        know, so a field added to the constructor alone would survive one
+        process lifetime and vanish on the next load with nothing red. They live
+        beside each other for this reason; this pin is what actually holds them
+        together, since neither calls the other.
+        """
+        built = registry.new_entry(
+            1234,
+            create_time=99.5,
+            user_data_dir="/x",
+            uses_custom_data_dir=True,
+            auto_clone=True,
+        )
+
+        survived = registry.normalize_entries({"inst": built})["inst"]
+
+        assert set(survived) == set(built)
+
+    def test_a_tracked_entry_survives_a_round_trip_whole(self, tmp_path):
+        """The same agreement end to end through the real writer and reader,
+        owner stamp included — the shape recovery actually meets on disk.
+        """
+        pc = _cleanup(tmp_path)
+        pc.pid_file = tmp_path / "pids.json"
+        process = MagicMock()
+        process.pid = 5555
+        pc.track_browser_process("inst", process, user_data_dir=str(tmp_path / "c"))
+
+        written = pc.browser_processes["inst"]
+        loaded = registry.read_entries(pc.pid_file)["inst"]
+
+        assert set(loaded) == set(written) | {"owner_pid", "owner_create_time"}
 
 
 # ---------------------------------------------------------------------------
@@ -358,10 +370,10 @@ def _recovery_harness(pc, monkeypatch, *, owner_alive: bool):
     """Point recovery at a fake machine: one live browser pid on the profile,
     a kill recorder, and a decided verdict for the recorded owner.
 
-    The verdict is composed the way production composes it — singleton's
-    backend-identity check AND this module's existing create_time tolerance —
-    rather than by stubbing the adapter itself, so the pins fail if either half
-    is dropped.
+    Both halves of the real composition are stubbed to the SAME verdict, so
+    these pins exercise what recovery does with an answer, not how the answer is
+    reached. That the two halves must agree — and that neither alone decides —
+    is pinned separately by TestOwnerLivenessComposition.
     """
     killed: list[int] = []
     monkeypatch.setattr(pc, "_get_browser_pids_for_profile", lambda _dir: {9999})
@@ -497,6 +509,58 @@ class TestRecoverySparesLiveOwners:
         pc._recover_orphaned_processes()
 
         assert set(registry.read_entries(record)) == {"live"}
+
+
+class TestOwnershipCheckCannotFailStartup:
+    def test_an_owner_check_that_raises_skips_only_that_entry(
+        self, tmp_path, monkeypatch
+    ):
+        """A recorded owner_pid psutil rejects outright — a negative one — makes
+        psutil.Process raise ValueError, which neither half of the composition
+        converts. Recovery runs from activate() inside app_lifespan, so an
+        escape here does not merely lose the sweep: a hand-edited or corrupt
+        record fails BACKEND STARTUP. The raise must be contained per entry.
+        """
+        record = tmp_path / "pids.json"
+        _seed(
+            record,
+            {
+                "poisoned": _entry(501, owner_pid=-1, owner_create_time=7.0),
+                "orphan": _entry(502),
+            },
+        )
+        pc = _cleanup(tmp_path)
+        pc.pid_file = record
+        # No stubbed verdict here: the REAL composition must meet the -1, which
+        # is what makes psutil raise. Only the machine-touching calls are faked.
+        monkeypatch.setattr(pc, "_get_browser_pids_for_profile", lambda _dir: set())
+        monkeypatch.setattr(pc, "_get_active_browser_profile_dirs", lambda: set())
+        monkeypatch.setattr(pc, "_kill_process_by_pid", lambda pid, iid: True)
+
+        pc._recover_orphaned_processes()
+
+        # The poisoned entry survives un-reaped (fail toward a leak); the
+        # unowned entry beside it was still processed and dropped, proving the
+        # raise did not abandon the rest of the sweep.
+        assert set(registry.read_entries(record)) == {"poisoned"}
+
+    def test_the_skipped_entry_is_logged_rather_than_silently_dropped(
+        self, tmp_path, monkeypatch
+    ):
+        record = tmp_path / "pids.json"
+        _seed(record, {"poisoned": _entry(501, owner_pid=-1)})
+        pc = _cleanup(tmp_path)
+        pc.pid_file = record
+        warnings = []
+        monkeypatch.setattr(
+            process_cleanup.debug_logger,
+            "log_warning",
+            lambda *args: warnings.append(args),
+        )
+
+        pc._recover_orphaned_processes()
+
+        assert any("poisoned" in str(warning) for warning in warnings)
 
 
 class TestOwnerLivenessComposition:
