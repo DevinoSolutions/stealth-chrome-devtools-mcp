@@ -247,12 +247,24 @@ def own_or_first_port(path: Path, own_context: str) -> int | None:
     """The port to act on when a caller must pick exactly ONE recorded backend:
     our own context's, else whatever single backend is recorded, else None.
 
-    ``singleton.restart_backend`` needs this. Its terminate half and its spawn
-    half must name the SAME port — the spawn half asks
-    :func:`port_for_context`, so a terminate half reading ``first_backend``
-    would, on a two-context machine, kill a sibling desktop's backend and then
-    respawn ours somewhere else entirely. The ``first_backend`` fallback keeps
-    the single-backend and pre-v2 cases behaving exactly as they did.
+    ``singleton.restart_backend`` is the one caller, and it uses the answer only
+    to SEED ``_select_backend_port``. So the own-context half is now
+    production-inert: selection re-reads :func:`port_for_context` itself and
+    discards the seed whenever our own context has an entry. The half that still
+    decides anything is the ``first_backend`` fallback — the seed selection
+    actually uses, when our context has no entry — which keeps the
+    single-backend and pre-v2 cases landing exactly where they did.
+
+    The own-context branch stays because it is the honest statement of this
+    function's contract, not because restart depends on it; it was load-bearing
+    before plan_F808 Task 4d reordered restart to terminate the port SELECTION
+    returned. Until then restart terminated the port read here directly, and a
+    terminate half reading ``first_backend`` would, on a two-context machine,
+    have killed a sibling desktop's backend and respawned ours somewhere else.
+
+    "No answer" is ``None`` and only ``None``. A caller that tests the result
+    for truthiness reaches its fallback for a recorded ``0`` as well; that is
+    harmless (0 names no listener) but it is not what the signature says.
     """
     own = port_for_context(path, own_context)
     if own is not None:
