@@ -46,6 +46,11 @@ The fix has two halves, and the first is the one that closes the report.
 display context and whether that context can show a window, plus an explicit remedy
 line when none of them can.
 
+Fixes `STEALTH-CHROME-DEVTOOLS-MCP-K` — 66 nodriver "Failed to connect to browser"
+events on 2.0.3, all from headed spawns driven over the magent/psmux SSH path
+against a backend that had no desktop to put a window on. That is F-808's signature
+seen from the other end, and it is closed by the adoption fix above.
+
 ### Changed — `server.json` is schema v2, and your existing record is not evicted
 
 The record grew from a flat `{port, version, pid, source_fingerprint}` to
@@ -85,10 +90,11 @@ that absence is exactly what makes it a reclaimable orphan after an upgrade.
 2.0.1 reported window sizes truthfully but explained the clamp as headed Chrome
 fitting "the desktop work area", read as an ordinary monitor limit. That reasoning
 concluded a workstation driving an RTX 3080 had a ~1024x768 screen. The real clamp
-was **Session 0's small default desktop** — the same root cause as F-808. The remedy is unchanged (`spawn_diagnostics.window_size` still
-reports `requested`, `actual`, `inner_viewport` and `clamped`); the docstrings on
-`spawn_browser` and `window_sizing` now say the clamp is to the **launching**
-context's desktop, which is the user's monitor only when the backend runs on it.
+was **Session 0's small default desktop** — the same root cause as F-808. The
+remedy is unchanged (`spawn_diagnostics.window_size` still reports `requested`,
+`actual`, `inner_viewport` and `clamped`); the docstrings on `spawn_browser` and
+`window_sizing` now say the clamp is to the **launching** context's desktop,
+which is the user's monitor only when the backend runs on it.
 
 ### Fixed — test runs no longer ship injected failures to the real Sentry
 
@@ -100,11 +106,6 @@ existing env guards, and because the singleton strips only
 `STEALTH_MCP_NO_AUTO_RECOVERY` from a spawned backend's environment, real-Chrome
 integration backends inherit the mute too. An explicitly-set value still wins, so a
 CI cell that *wants* reporting keeps it.
-
-Fixes `STEALTH-CHROME-DEVTOOLS-MCP-K` — 66 nodriver "Failed to connect to browser"
-events on 2.0.3, all from headed spawns driven over the magent/psmux SSH path
-against a backend that had no desktop to put a window on. That is F-808's signature
-seen from the other end, and it is closed by the adoption fix above.
 
 ### Known gaps
 

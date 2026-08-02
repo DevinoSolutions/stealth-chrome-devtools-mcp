@@ -35,8 +35,8 @@ https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
 - **Stealth arg filtering** — automatically strips 30+ detectable Chrome flags (Puppeteer/Playwright signatures, automation markers)
 - **Multi-instance support** — spawn and manage multiple browsers simultaneously
 - **A shared backend across sessions** — every client session proxies to a shared
-  backend process rather than starting its own, one per desktop so a headed window
-  opens where you are; simultaneous cold start is scale-tested at 40 concurrent
+  backend process rather than starting its own, one per desktop so a headed spawn
+  lands on a real screen; simultaneous cold start is scale-tested at 40 concurrent
   sessions, all usable in seconds against one backend
 - **Auto-suffix busy profiles** — `github-session` auto-becomes `github-session-2` when occupied
 - **Orphan recovery** — safely cleans up leaked browser processes without killing live ones

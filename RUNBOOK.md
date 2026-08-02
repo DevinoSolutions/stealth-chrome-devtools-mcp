@@ -100,9 +100,8 @@ the whole directory while no backend runs costs you nothing but a cold start.
 | `browser_pids.json.lock` | the sibling lock every writer of `browser_pids.json` takes so two backends cannot clobber each other's entries; empty and persistent, like `singleton.lock` |
 | `logs/` | see "Where the logs are" above |
 
-Anything else in the directory is a leftover. Development against 2.0.4 left hand-made
-copies such as `server.json.f808task6.bak` and `server.json.f808-task4.bak` on some
-machines; nothing in `src/` writes or reads a `.bak` file, so delete any you find.
+Anything else in the directory is a leftover. Nothing in `src/` writes or reads a
+`.bak` file, so delete any you find.
 
 ---
 
