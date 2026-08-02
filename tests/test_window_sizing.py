@@ -24,7 +24,7 @@ import sys
 import pytest
 
 from e2e_helpers import CAN_RUN, eval_js, get_fn, sandbox_kwargs, warmup_once
-from stealth_chrome_devtools_mcp.embedded import window_sizing
+from stealth_chrome_devtools_mcp.embedded import display_context, window_sizing
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
 
 # A size that fits every plausible desktop work area (the smallest Chrome is
@@ -36,13 +36,32 @@ OVERSIZED_W, OVERSIZED_H = 9000, 7000
 # fractional-DPI display; anything beyond this is a genuine disagreement.
 TOLERANCE_PX = 2
 
-# Both headed premises need a real desktop. The Linux gate cell runs Chrome
-# under a WM-less Xvfb, where nothing clamps (a 9000x7000 request is granted
-# verbatim) and headed launch itself is unreliable; the headed contract is
-# exercised by the Windows and macOS integration cells instead (F-804).
+
+def _headed_needs_desktop(platform: str, can_show_windows: bool) -> bool:
+    """Whether the two headed sizing premises are unrunnable here — THE one gate.
+
+    Two independent reasons, both of which must keep gating:
+
+    * a context that cannot display a window now REFUSES a headed spawn outright
+      (F-808's guard in ``spawn_browser``), so these nodes would die on a
+      ``ToolError`` rather than on a sizing disagreement. A Session-0 Windows CI
+      runner is exactly such a context — and the pre-F-808 gate, which read the
+      platform alone, let those nodes run there and redden;
+    * the Linux gate cell runs Chrome under a WM-less Xvfb, where nothing clamps
+      (a 9000x7000 request is granted verbatim) and headed launch itself is
+      unreliable (F-804), even though ``DISPLAY=:99`` reports it as capable.
+
+    The headed contract is exercised by the Windows and macOS integration cells.
+    Split out of the marker on purpose: a condition evaluated inline at import
+    time can only be re-derived by a test, never asserted.
+    """
+    return not can_show_windows or platform.startswith("linux")
+
+
 _HEADED_NEEDS_DESKTOP = pytest.mark.skipif(
-    sys.platform.startswith("linux"),
-    reason="headed sizing needs a window manager; Linux CI runs a bare Xvfb",
+    _headed_needs_desktop(sys.platform, display_context.can_show_windows()),
+    reason="headed sizing needs a desktop this process can display on, and a "
+    "window manager to clamp against; Linux CI runs a bare Xvfb",
 )
 
 
@@ -102,6 +121,36 @@ class TestWindowSizeLaunchArg:
             {"system": "Linux", "is_root": False, "is_container": False},
         )
         assert "--window-size=1200,800" in launch_args
+
+
+class TestHeadedGateIsCapabilityDerived:
+    """The gate on the two headed nodes follows display CAPABILITY, not platform.
+
+    Asserted rather than merely used: the marker's condition is frozen at import
+    time, so without these rows the only "test" of the gate is the gate itself.
+    """
+
+    def test_a_context_that_cannot_show_windows_skips_even_on_windows(self):
+        """THE regate pin (F-808). Under the old platform-only gate this row was
+        False — the headed nodes ran on a Session-0 Windows runner, where the
+        visibility guard now refuses the spawn, and died on its ToolError."""
+        assert _headed_needs_desktop("win32", can_show_windows=False) is True
+
+    def test_linux_still_skips_even_with_a_display(self):
+        """The F-804 half must survive the regate: ``DISPLAY=:99`` on the Linux
+        cell classifies as capable, but has no window manager to clamp against."""
+        assert _headed_needs_desktop("linux", can_show_windows=True) is True
+
+    def test_a_capable_desktop_runs_the_headed_nodes(self):
+        assert _headed_needs_desktop("win32", can_show_windows=True) is False
+        assert _headed_needs_desktop("darwin", can_show_windows=True) is False
+
+    def test_the_marker_is_wired_to_the_gate(self):
+        """The truth table above proves nothing if the ``skipif`` still carries
+        its own copy of the old condition, so pin the wiring too."""
+        assert _HEADED_NEEDS_DESKTOP.mark.args[0] == _headed_needs_desktop(
+            sys.platform, display_context.can_show_windows()
+        )
 
 
 # ---------------------------------------------------------------------------
