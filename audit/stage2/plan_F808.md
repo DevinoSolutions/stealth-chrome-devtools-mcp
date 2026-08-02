@@ -643,7 +643,18 @@ correction in Task 7).
 
 ---
 
-### Task 6: `doctor` and `status` show the contexts
+### Task 6: `doctor` shows the contexts
+
+> *Corrected 2026-08-02, after the task landed (`172e014`, `60e48da`, `69e48ad`,
+> `d84323e`).* This heading read "`doctor` **and** `status` show the contexts".
+> Only `doctor` does, deliberately: `status`'s `backend :` line answers "is the
+> backend up" and stays one value, while naming every recorded context belongs to
+> `_doctor_backend_lines` (the decision is recorded at `cli.py:148-151`). The
+> remedy string below is also a draft — the landed wording is "no **live** backend
+> can display a window: headed spawns will fail — start one from a desktop session
+> **and any session will use it automatically**", and the suppression rule is
+> narrower than this draft: only a window-capable backend that is *responsive*
+> silences it.
 
 **Files:**
 - Modify: `src/stealth_chrome_devtools_mcp/cli.py`

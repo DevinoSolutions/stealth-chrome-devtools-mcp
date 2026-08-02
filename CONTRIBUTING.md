@@ -140,6 +140,19 @@ deleting a test on purpose rather than by accident.
 
 ---
 
+## The release contract is generated
+
+`RELEASE_CONTRACT.md` is output, never hand-edited — every count in it derives from
+the live tool registry, the claim ledger, and the evidence aggregate. Regenerate it
+in the **same commit** as whatever changed those:
+
+    PYTHONUTF8=1 uv run python tools/gen_release_contract.py --write
+
+`tests/test_release_contract.py::test_the_contract_is_regenerated_not_edited` runs
+`--check` in the unit gate on all three OSes, so drift is a red test.
+
+---
+
 ## Golden discipline (two-tier)
 
 Schema/shape tests compare against goldens in `tests/goldens/`. Two tiers:

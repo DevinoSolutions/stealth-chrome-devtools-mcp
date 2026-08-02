@@ -22,7 +22,7 @@ console script is not on PATH. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for th
 | Verb | What it does |
 |---|---|
 | `status` | backend state (`responsive`/`wedged`/`down`/not running), pid, log path, version, browser-session root, and the two disk caps |
-| `doctor` | environment check: Python, platform, browser-session root, backend, port occupant, Chrome |
+| `doctor` | environment check: Python, platform, browser-session root, backend, port occupant, **one line per recorded backend with its display context and whether it can show a window**, Chrome |
 | `profiles` | list on-disk profiles with size, role, and in-use flag |
 | `cleanup` | reclaim disk — delete idle auto-clones over the clone cap and trim idle named profiles over the browser-session cap (**dry run** unless `--apply`) |
 | `stop` | terminate the shared backend (kills all live browser sessions) |
@@ -85,6 +85,72 @@ together.
 
 ---
 
+## What is in `~/.stealth-mcp`
+
+The state dir (`backend_registry.STATE_DIR`) is the only place the tool writes
+outside your browser-session root and log dir. Nothing in it is precious — deleting
+the whole directory while no backend runs costs you nothing but a cold start.
+
+| Entry | What |
+|---|---|
+| `server.json` | the **backend registry**: one entry per display context, naming that backend's port, pid, version, and source fingerprint. This is what discovery reads to decide which backend to talk to |
+| `server.port` | legacy, write-only — kept for a reader that no longer exists (see the `DESIGN.md` §10 ledger) |
+| `singleton.lock` | the cold-start mutex; an empty file that persists between runs |
+| `browser_pids.json` | the **browser-pid registry**: which browser processes are tracked, and which backend owns each one (`owner_pid`, `owner_create_time`) |
+| `browser_pids.json.lock` | the sibling lock every writer of `browser_pids.json` takes so two backends cannot clobber each other's entries; empty and persistent, like `singleton.lock` |
+| `logs/` | see "Where the logs are" above |
+
+Anything else in the directory is a leftover. Development against 2.0.4 left hand-made
+copies such as `server.json.f808task6.bak` and `server.json.f808-task4.bak` on some
+machines; nothing in `src/` writes or reads a `.bak` file, so delete any you find.
+
+---
+
+## Reading `doctor`'s `contexts` block
+
+`doctor` prints one line per **recorded** backend, ordered the way discovery
+prefers them:
+
+```
+contexts    :
+  backend  win-session-1  port 19222  pid 12345  version 2.0.4  responsive  (can show windows)
+  backend  headless  port 19223  pid 12346  version 2.0.4  down  (headless only)
+```
+
+The liveness word is the same vocabulary `status` uses (`responsive` / `wedged` /
+`down` / `no port recorded`). The note in parentheses describes where that
+backend's windows *would* appear, which stays true whether or not it is currently
+answering. With nothing recorded the block reads `backend  (none recorded)`.
+
+Two things it deliberately does not tell you. It does not distinguish a **proven**
+desktop from an unclassifiable one: a context recorded by 2.0.3 or earlier reads
+as `unverified`, which every client treats as capable, so it prints
+`(can show windows)` too. And a listed backend is not necessarily one you can use
+— identity (version and source fingerprint) still has to match before your session
+will adopt it.
+
+When no backend is **both** window-capable **and** responsive, `doctor` appends a
+remedy line saying headed spawns will fail and to start one from a desktop session.
+A recorded-but-dead desktop backend does not silence it, because in that state a
+headed spawn is still refused.
+
+**Do not diagnose display context from `validate_browser_environment_tool`.** Its
+`platform_info.environment_vars.DISPLAY` is a `Settings` read of the `DISPLAY`
+variable, and it is **not** the input that decided your display context. On Windows
+and macOS it is `None` on a perfectly good desktop, because neither platform uses
+`DISPLAY` at all — Windows context comes from the Win32 session id and macOS from
+the console-owner check. Reading `DISPLAY: None` there as "this backend has no
+display" is precisely the wrong turn F-808 invites. `doctor`'s `contexts` block is
+the answer; that field is a Linux-only hint.
+
+> **Windows console encoding.** CLI output contains em dashes, so redirecting it to
+> a file or pipe under an OEM code page (`chcp 437`, `chcp 850`) raises
+> `UnicodeEncodeError` — the default `cp1252` and any UTF-8 console are fine. Set
+> `PYTHONUTF8=1` if you hit it. This is not new in 2.0.4; the `chrome :` line has
+> always been exposed to it.
+
+---
+
 ## Recovery playbooks
 
 ### Backend is `wedged` (socket open, not answering)
@@ -117,14 +183,30 @@ The backend prefers `singleton.DEFAULT_PORT` (`19222`) but binds the **chosen** 
 if a **foreign** process holds `19222`, it falls back to an OS-assigned free port and
 records it in `~/.stealth-mcp/server.json`. `status`/`doctor` show the actual port and
 the port occupant. You do not need to free `19222` — discovery reads the recorded
-port. `stop` clears `server.json`, so the next start returns to `19222` if it is free.
+port. `stop` forgets the stopped backend's own display-context entry and clears
+`server.json` only once nothing else is recorded, so the next start returns to
+`19222` if it is free — and stopping one backend never makes another desktop's live
+backend undiscoverable.
 
 ### Orphaned browsers after a crash
-If the backend died and left Chrome processes behind, `kill-orphans` reaps them (and
-clears the pid-tracking file). It **refuses** to run against a `responsive`/`wedged`
-backend (that would kill the live backend's own browsers) — use `restart` for "backend
-alive but bad", `kill-orphans` for "backend gone, browsers orphaned". `--force`
-overrides the guard.
+If the backend died and left Chrome processes behind, `kill-orphans` reaps them. It
+reaps only browsers whose **owner backend is dead**: every entry in
+`browser_pids.json` carries the identity of the backend that started it, and one
+belonging to a living owner is skipped. Entries it did reap are dropped from the
+record by id; every other backend's entries are left exactly as they were, and the
+record itself stays on disk (empty if nothing is left). Browsers tracked by 2.0.3 or
+earlier carry no owner stamp, so they are orphans by construction and get reclaimed
+on upgrade.
+
+It **refuses** to run against a `responsive`/`wedged` backend (that would kill the
+live backend's own browsers) — use `restart` for "backend alive but bad",
+`kill-orphans` for "backend gone, browsers orphaned".
+
+`--force` is a bigger hammer than it looks: it passes through to the reaper, so it
+bypasses **both** gates — the live-backend refusal *and* the per-entry ownership
+check. Under `--force`, browsers a healthy backend is actively using are killed too.
+That reach is deliberate, because it is what makes `--force` work against the wedged
+backend it exists for, but it means `--force` is never the casual option.
 
 ### Disk filling up
 Look before you reclaim — neither of these changes anything on disk:
@@ -146,6 +228,31 @@ There is no live reload. A source edit changes the **source fingerprint**, so th
 client connection evicts the stale backend and spawns a fresh one automatically. If you
 want it now: `restart`. (`hot_reload`/`reload_status` were removed — a fresh backend is
 the one code path.)
+
+### Headed spawn fails: "cannot display a window"
+
+`spawn_browser(headless=False)` raises a `ToolError` naming a display context
+(`headless`, or a desktop token) when the backend serving your session runs
+somewhere a window could never be seen — a Windows service session (Session 0), or
+an SSH login with no `DISPLAY`/`WAYLAND_DISPLAY`. This is deliberate: before 2.0.4
+the same spawn returned `state: "ready"`, `headless: false` and a browser that was
+fully driveable over CDP and permanently invisible (F-808).
+
+Run `doctor`. It lists one line per recorded backend with its display context and
+whether that context can show a window. Two outcomes:
+
+- **A window-capable backend is listed.** Your session should already be using it —
+  discovery prefers a window-capable backend, and a client that cannot prove it has
+  a desktop adopts any of them. If it is not, the entry is version- or
+  source-stale; `restart` or let the next cold start evict it.
+- **No backend can display a window.** `doctor` says so explicitly. Start one from
+  a desktop session — open a Claude Code window on the physical desktop and let it
+  cold-start a backend, or run `stealth-chrome-devtools serve --http` there. Every
+  other session, SSH included, then converges on it and headed spawns become
+  visible on the real desktop.
+
+If you only need automation and not a visible window, pass `headless=True`; that
+path is unaffected by display context and is what CI uses.
 
 ---
 

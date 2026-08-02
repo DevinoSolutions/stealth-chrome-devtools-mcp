@@ -1,6 +1,7 @@
 # F-808 — a headed spawn is invisible when the singleton backend was cold-started from a non-interactive Windows session
 
-**Status: OPEN. Severity: HIGH. Regression from 1.0.0.**
+**Status: FIXED** in 2.0.4 on branch `fix/F808-headed-visibility`.
+**Severity: HIGH. Regression from 1.0.0.**
 `spawn_browser(headless=False)` returns `state: "ready"`, `headless: false`,
 `window_size.measured: true` — and produces a browser the user **cannot see and
 never will**. Chrome is running and fully driveable over CDP; its window is on a
@@ -93,8 +94,35 @@ should cite this finding.
 3. Headless spawns are unaffected and must keep working from Session 0 — CI
    depends on exactly that.
 
-## Workaround available today
+## Workaround before 2.0.4
 
 Stop the Session 0 backend and let one cold-start from a client in the
 interactive session; every session then shares a backend whose windows are
 visible on the real desktop, SSH-driven spawns included.
+
+## The fix (2.0.4)
+
+Both halves of "Proposed fix" landed, and the shape changed in one deliberate way:
+display context did **not** join the reuse gate as an equality test, because that
+would have refused the desktop backend to the very SSH client that needs it.
+
+| Commit | What |
+|---|---|
+| `a1b3075`, `8a78561` | `embedded/display_context.py` — the observational token and `can_show_windows()` |
+| `efed9d0`, `663da1a` | `embedded/backend_registry.py` — the `server.json` record moved out of `singleton.py` (pure refactor) |
+| `7989dee`, `32b3185`, `62d4813` | schema v2: one backend per display context; v1 records still read as `unverified`; supersede-by-port |
+| `85f7fe6`, `09433a0`, `f02334c`, `4e2ede3` | discovery prefers a window-capable backend; asymmetric adoption; `unverified` is never a port conflict; restart terminates only the port it is about to bind |
+| `2b22fe1`, `d209b46` | `spawn_browser(headless=False)` raises in a non-capable context instead of returning a ghost; the F-804 docstring clamp correction |
+| `172e014`, `60e48da`, `69e48ad`, `d84323e` | `doctor` reports one line per recorded backend with its display context, and an explicit remedy when no live backend can show a window |
+| `29f02a0` | test runs no longer ship injected failures to the real Sentry |
+| `f437cab`, `38aa897`, `f4e58f3`, `22529ad`, `3aea184`, `977566c` | `browser_pids.json` gets one home, owner identity per entry, and a read-merge-write protocol, so concurrent backends stop erasing each other's tracked browsers |
+| `3fe6b37`, `9c539d3`, `7d08c5d`, `08002f3` | the tests stop assuming a platform implies a desktop: F-804's headed nodes gate on display capability, and an integration twin asks the machine (via `EnumWindows`) whether a headed spawn is really visible — the one assertion the pre-2.0.4 signals could not make |
+
+The reported symptom is closed by the **adoption** half, not the refusal half: an
+SSH client now converges on the desktop backend and its headed spawn opens a
+visible window. The refusal is the floor under the case where no such backend
+exists anywhere.
+
+**Acceptance** (plan_F808 Task 8 step 5): on the reporting machine, with a backend
+cold-started from the desktop session, an SSH-driven `spawn_browser(headless=False)`
+puts a visible window on the physical desktop.

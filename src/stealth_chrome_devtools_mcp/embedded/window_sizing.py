@@ -11,11 +11,13 @@ request. Two transports carry that one fact, deliberately (DESIGN §5's
   the launch arg).
 
 Neither transport can *promise* the result. Headed Chrome clamps a window to the
-desktop work area, so a 1920x1080 request on a 1024x768 desktop lands at about
-1044x788 — while headless, having no window manager, honours the request
-exactly. That asymmetry is F-804: before this module the spawn result echoed the
-*request* back as though it had been applied, so a clamped headed window
-reported a size it never had.
+work area of the desktop the **launching process** can draw on — which is the
+user's monitor only when the backend runs there, and is Session 0's 1024x768
+default desktop when it does not (F-808). A 1920x1080 request against such a
+desktop lands at about 1044x788, while headless, having no window manager,
+honours the request exactly. That asymmetry is F-804: before this module the
+spawn result echoed the *request* back as though it had been applied, so a
+clamped headed window reported a size it never had.
 
 So this module also **measures**, and the measurement — never the request — is
 what spawn reports. :func:`apply_and_measure` returns both, plus a ``clamped``

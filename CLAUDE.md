@@ -57,7 +57,10 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | File | Owns |
 |---|---|
 | `server.py` | the real MCP server — all 94 tool bodies + `app_lifespan` |
-| `singleton.py` | **backend lifecycle + the stdio proxy** — liveness (`_backend_http_ready`, `_probe_backend_status`), port selection (`_select_backend_port`, `DEFAULT_PORT`, `server.json`), the one identity+readiness reuse gate (`_same_identity_backend_ready`, `_source_fingerprint`, `REUSE_PATIENCE_SECONDS`), cold-start lock (`_start_backend_holding_lock`), `run_stdio_proxy` |
+| `singleton.py` | **backend lifecycle + the stdio proxy** — liveness (`_backend_http_ready`, `_probe_backend_status`), port selection (`_select_backend_port`, `DEFAULT_PORT`), the one identity+readiness reuse gate (`_same_identity_backend_ready`, `_source_fingerprint`, `REUSE_PATIENCE_SECONDS`), cold-start lock (`_start_backend_holding_lock`), `run_stdio_proxy`. The `server.json` record moved to `backend_registry.py` (path names re-exported here for legacy callers) |
+| `backend_registry.py` | **THE one home for the `server.json` record** — schema v2 (`SCHEMA_VERSION`, one entry per display context), read/write/clear (`read_backends`, `record_backend`, `forget_backend`, `clear_record`), the adoption order (`adoption_candidates`, `window_capable_first`), per-context port lookup (`port_for_context`, `own_or_first_port`, `port_conflict`), the entry normalizers (`read_record`, `first_backend`, `backend_on_port`, `recorded_int`), plus `STATE_DIR`/`SERVER_STATE_FILE`/`PORT_FILE` |
+| `display_context.py` | **THE one home for "can a window launched by THIS process be seen, and on which desktop"** — the opaque token (`display_context()`: `headless` / `unverified` / `win-session-N` / `wayland-…` / `x11-…` / `aqua-<uid>`) and `can_show_windows()`. Observational only: it never picks or enters another session (F-808) |
+| `browser_pid_registry.py` | **THE one home for `browser_pids.json`** — its schema, the owner stamp on every entry (`owner_pid`, `owner_create_time`), and the read-merge-write protocol every writer shares |
 | `tool_registry.py` | `SECTION_TOOLS` + `ToolRegistry.section_tool` (registration, section gating, correlation-id stamping) + the canonical **verb taxonomy** (module docstring) |
 | `tool_errors.py` | the error convention — `ToolError`, `InstanceNotFoundError`, `_require_tab`, `_require_browser` |
 | `logging_setup.py` | the observability spine — `resolve_log_dir`, `configure_logging`, `with_correlation_id`, `CorrelationIdFilter` |
@@ -116,7 +119,7 @@ distinct qualified name; the bare word is retired from ambiguous surfaces.
 
 | Term | THE one meaning | Not to be confused with |
 |---|---|---|
-| **backend** | the single shared detached `python -m … --transport http` process running FastMCP + all 94 tools | the stdio proxy; "the server" (ambiguous — avoid) |
+| **backend** | the shared detached `python -m … --transport http` process running FastMCP + all 94 tools — **one per (source fingerprint, display context)**: in practice one on a headless box, at most two on a desktop box that is also SSH'd into (F-808) | the stdio proxy; "the server" (ambiguous — avoid); the pre-2.0.4 "exactly one process per machine" reading |
 | **stdio proxy** | the short-lived per-Claude-Code-session process bridging stdio ↔ the backend's HTTP | the backend |
 | **MCP session** | FastMCP's `mcp-session-id` handshake token (created by `initialize`, discarded by the liveness probe) | a browser session; a Claude Code session |
 | **Claude Code session** | one client connection = one stdio proxy instance | an MCP session; a browser session |
@@ -128,6 +131,10 @@ distinct qualified name; the bare word is retired from ambiguous surfaces.
 | **in-memory storage** | the deliberately non-durable `InMemoryStorage` cross-check (M15 rename of `persistent_storage`) | durable disk state (there is none for instances) |
 | **clone storage** | `clone_storage.py`: the on-disk profile/clone quota + GC subsystem | in-memory storage; the cloner *engine* |
 | **cloner engine** | `CDPElementCloner`: the one canonical DOM-extraction engine (post-M5b) | clone storage (disk); a profile clone |
+| **display context** | the opaque token from `display_context.display_context()` naming the desktop a window launched by THIS process would appear on (`win-session-N`, `wayland-…`, `x11-…`, `aqua-<uid>`), or `headless` (PROVEN invisible) / `unverified` (unclassifiable, treated as capable) | the `headless=` spawn argument (a caller's request); a browser session; the `DISPLAY` env var (one input to the Linux branch only) |
+| **adoption** | a client's decision to reuse a recorded backend, ordered by `backend_registry.adoption_candidates`. Deliberately **asymmetric**: a client that cannot prove it has a desktop (`headless`/`unverified`) adopts any backend, window-capable first; a client that CAN prove one adopts only its own context's entry plus `unverified` ones | reuse *identity* (version + source fingerprint, at `singleton._same_identity_backend_ready`) — adoption picks WHICH record to test, identity decides whether it passes |
+| **backend registry** | `backend_registry.py` + the schema-v2 record at `~/.stealth-mcp/server.json`: `{"schema": 2, "backends": {"<display context>": {port, version, pid, source_fingerprint, display_context}}}` — **which backend to talk to**. A v1 flat record still reads, as one entry classified `unverified` | the **browser-pid registry** (below); `server.port` (`PORT_FILE`) — write-only legacy with no reader in `src/`; `singleton.lock`; the in-memory storage |
+| **browser-pid registry** | `browser_pid_registry.py` + `~/.stealth-mcp/browser_pids.json`: **which browsers are tracked and by whom** — every entry carries its owner backend's identity (`owner_pid`, `owner_create_time`), and every writer read-merge-writes under the sibling `browser_pids.json.lock` | the **backend registry** (above); the in-memory storage; clone storage |
 
 ---
 
