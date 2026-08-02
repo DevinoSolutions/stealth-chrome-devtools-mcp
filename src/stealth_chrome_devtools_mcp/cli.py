@@ -167,7 +167,10 @@ def _backend_log_location(pid: int | None) -> str:
 
 def _probe_recorded_backend(port: int | None) -> str:
     """One recorded backend's liveness on a port the caller already holds, in
-    `_probe_backend_status`'s exact vocabulary: down / wedged / responsive.
+    `_probe_backend_status`'s exact vocabulary: down / wedged / responsive —
+    plus "no port recorded" for an entry naming nothing usable as a port, a
+    state that function cannot reach (it reports such a record as no backend
+    at all, and so has no word for it).
 
     Same two primitives in the same order producing the same three words as
     `singleton._probe_backend_status` (ONE liveness vocabulary, plan_M8
@@ -200,23 +203,34 @@ def _doctor_backend_lines() -> list[str]:
     only, cannot. Ordering is `backend_registry.window_capable_first`'s, so
     doctor presents the same preference discovery applies rather than
     re-deriving one.
+
+    The remedy is suppressed only by a window-capable backend that is actually
+    RESPONSIVE. A desktop backend recorded but dead — the desktop logged out —
+    would otherwise hide the advice in precisely the state that needs it: an
+    SSH session's headed spawn still gets refused, because discovery finds no
+    live capable backend to adopt, and "start one from a desktop session" is
+    still the fix. A wedged one is no better: it cannot serve the spawn either.
+    The per-line "(can show windows)" note stays token-driven — it describes
+    where that backend's windows WOULD appear, which is true whether or not it
+    is currently answering.
     """
     from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
     from stealth_chrome_devtools_mcp.embedded.display_context import HEADLESS
 
     lines: list[str] = []
-    capable = False
+    serviceable = False
     for entry in backend_registry.window_capable_first(singleton.SERVER_STATE_FILE):
         context = str(entry.get("display_context"))
         port = backend_registry.recorded_int(entry, "port")
         pid = backend_registry.recorded_int(entry, "pid")
         version = entry.get("version")
-        capable = capable or context != HEADLESS
+        status = _probe_recorded_backend(port)
+        serviceable = serviceable or (context != HEADLESS and status == "responsive")
         lines.append(
             f"backend  {context}  port {port if port is not None else '-'}  "
             f"pid {pid if pid is not None else '-'}  "
             f"version {version if isinstance(version, str) else '-'}  "
-            f"{_probe_recorded_backend(port)}  "
+            f"{status}  "
             f"({'headless only' if context == HEADLESS else 'can show windows'})"
         )
     if not lines:
@@ -224,13 +238,17 @@ def _doctor_backend_lines() -> list[str]:
         # session cold-starts a backend in whatever context it runs in, so
         # there is no remedy to give yet.
         return ["backend  (none recorded)"]
-    if not capable:
-        # Deliberately the spawn refusal's own words (embedded/server.py's
-        # headed-visibility guard): an operator who arrives here from that
-        # error must recognise the instruction, not re-interpret a paraphrase.
+    if not serviceable:
+        # "no LIVE backend": the lines above may well show a capable one that
+        # is down, and a remedy contradicting the list it follows is worse than
+        # no remedy. The instruction itself is deliberately the spawn refusal's
+        # own words (embedded/server.py's headed-visibility guard) — an operator
+        # who arrives here from that error must recognise it, not re-interpret
+        # a paraphrase.
         lines.append(
-            "no backend can display a window: headed spawns will fail — start "
-            "one from a desktop session and any session will use it automatically"
+            "no live backend can display a window: headed spawns will fail — "
+            "start one from a desktop session and any session will use it "
+            "automatically"
         )
     return lines
 

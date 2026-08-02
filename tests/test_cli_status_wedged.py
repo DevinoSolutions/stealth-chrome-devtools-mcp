@@ -430,12 +430,12 @@ class TestCliDoctorDisplayContexts:
             cli._cmd_doctor(None)
         out = capsys.readouterr().out
 
-        assert "no backend can display a window" in out
+        assert "no live backend can display a window" in out
         assert "headed spawns will fail" in out
         assert "desktop session" in out
         assert "automatically" in out
 
-    def test_no_remedy_line_when_a_window_capable_backend_is_recorded(
+    def test_no_remedy_line_when_a_window_capable_backend_is_responsive(
         self, fake_server, recorded_backends, capsys
     ):
         recorded_backends(
@@ -444,7 +444,9 @@ class TestCliDoctorDisplayContexts:
                 win_session_1={"port": 55296, "pid": 4242, "version": "2.0.4"},
             )
         )
-        with _doctor_probes(fake_server):
+        # Explicitly responsive: it is the LIVENESS, not the recorded token,
+        # that is allowed to suppress the remedy.
+        with _doctor_probes(fake_server, healthy=True, ready=True):
             cli._cmd_doctor(None)
         out = capsys.readouterr().out
 
@@ -452,7 +454,58 @@ class TestCliDoctorDisplayContexts:
         # suppresses the remedy (asserting only the absence would pass against
         # a doctor that prints nothing at all).
         assert "backend  win-session-1" in out
-        assert "no backend can display a window" not in out
+        assert "responsive  (can show windows)" in out
+        assert "no live backend can display a window" not in out
+
+    def test_a_dead_window_capable_backend_does_not_suppress_the_remedy(
+        self, fake_server, recorded_backends, capsys
+    ):
+        """The desktop logged out. The entry survives, so a token-only judgment
+        would hide the advice in exactly the state that needs it — the SSH
+        operator's headed spawn is still refused, because discovery finds no
+        LIVE capable backend to adopt."""
+        recorded_backends(
+            _v2(win_session_1={"port": 55296, "pid": 4242, "version": "2.0.4"})
+        )
+        with _doctor_probes(fake_server, healthy=False):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        # The note stays token-driven: that is still where its windows WOULD go.
+        assert "down  (can show windows)" in out
+        assert "no live backend can display a window" in out
+
+    def test_a_wedged_window_capable_backend_does_not_suppress_the_remedy(
+        self, fake_server, recorded_backends, capsys
+    ):
+        """Same ruling's other half: a wedged backend holds its socket open but
+        cannot serve a spawn either."""
+        recorded_backends(
+            _v2(win_session_1={"port": 55296, "pid": 4242, "version": "2.0.4"})
+        )
+        with _doctor_probes(fake_server, healthy=True, ready=False):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        assert "wedged  (can show windows)" in out
+        assert "no live backend can display a window" in out
+
+    def test_an_entry_with_no_usable_port_says_so(
+        self, fake_server, recorded_backends, capsys
+    ):
+        """The record tolerates hand-editing, so `port` can be a string. There
+        is nothing to probe, and claiming "down" would assert a liveness we
+        never tested."""
+        recorded_backends(
+            _v2(win_session_1={"port": "55296", "pid": 4242, "version": "2.0.4"})
+        )
+        with _doctor_probes(fake_server):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        assert "backend  win-session-1  port -  pid 4242" in out
+        assert "no port recorded  (can show windows)" in out
+        assert "no live backend can display a window" in out
 
     def test_a_v1_record_reads_as_one_unverified_window_capable_backend(
         self, fake_server, recorded_backends, capsys
