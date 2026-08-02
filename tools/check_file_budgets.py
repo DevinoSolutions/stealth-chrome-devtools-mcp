@@ -29,8 +29,8 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # browser_manager as an argument). The ~7 lines a tool_errors._require_*-
     # style helper would save do not justify amending one. Same minimal-bump
     # rationale as the M10a rows below. Cap == actual ruff-clean LOC, no
-    # padding; no-grow applies from this commit forward. CAP RAISE 3389->3401
-    # PENDING HUMAN RATIFICATION in the F-808 PR.
+    # padding; no-grow applies from this commit forward. Cap raise 3389->3401
+    # RATIFIED per the human gate ruling 2026-08-02 (PR #57 merge).
     "embedded/server.py": (3401, "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808"),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
     # irreducibly ~1024-line contiguous block, landing this module over the
@@ -72,8 +72,9 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # through to the reaper, which that gate would otherwise have turned into a
     # no-op against the very wedged backend the flag exists for. Net -31 from
     # the pre-task cap; every number is the actual post-ruff-format LOC
-    # (cap == actual, no padding), per the C1 discipline. CAP RAISE 966->1023
-    # PENDING HUMAN RATIFICATION in the F-808 PR. No-grow applies from here.
+    # (cap == actual, no padding), per the C1 discipline. Cap raise 966->1023
+    # RATIFIED per the human gate ruling 2026-08-02 (PR #57 merge). No-grow
+    # applies from here.
     "embedded/process_cleanup.py": (1023, "plan_M11a_M15 + plan_M7 + plan_F808"),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
     # + honest message + debug_logger.log_info on failure) + 1 (plan_M4ph1
