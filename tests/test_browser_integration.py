@@ -22,17 +22,17 @@ import pytest
 # the rest of it — not in src/, where display_context.py already owns the
 # production question and a second Win32 probe would be a second way.
 #
-# Importing e2e_helpers here means embedded/server.py is exec'd twice when THIS
-# file runs alone (both modules importlib-load it under their own module object).
-# That is safe, and the three reasons are worth recording so nobody "tidies" this
-# into a lazy import: (a) ToolRegistry.section_tool records each tool name at most
-# once per section, so a second registration pass cannot accumulate — this is the
-# runpy double-load idempotency that already had to hold; (b) each exec builds its
-# own FastMCP app, registry and managers, so there is no shared mutable app object
-# for the second pass to corrupt; (c) the module body does no I/O — logging setup
-# and process_cleanup.activate() both sit at the serve boundary, not at import.
-# In any lane where test_window_sizing.py is also collected there is no second
-# load at all: it already imports e2e_helpers, and Python caches the module.
+# Importing e2e_helpers here means embedded/server.py is exec'd twice. That is
+# safe, and the three reasons are worth recording so nobody "tidies" this into a
+# lazy import: (a) ToolRegistry.section_tool records each tool name at most once
+# per section, so a second registration pass cannot accumulate — measured, the
+# total across SECTION_TOOLS is 94 after both execs, not 188; (b) each exec builds
+# its own FastMCP app, registry and managers, so there is no shared mutable app
+# object for the second pass to corrupt; (c) the module body does no I/O — logging
+# setup and process_cleanup.activate() both sit at the serve boundary, not at
+# import. The second exec is unconditional — both modules load server.py under
+# their own module object in every lane; what this import changed is that it now
+# also happens when this file runs alone.
 from e2e_helpers import await_visible_window
 
 # We need to import server.py as a module (it uses bare imports internally)
