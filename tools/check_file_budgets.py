@@ -59,16 +59,19 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
         1532,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1",
     ),
-    # plan_F808 Task 10 (F-808 fratricide): the browser_pids.json schema, its
-    # lock and its read-merge-write protocol moved out to the new
-    # browser_pid_registry.py leaf, which is where the record's one home
-    # belongs — this file keeps the reaping policy and passes the path in.
-    # Ratcheted DOWN from the 1054 grandfathered cap to the actual post-ruff-
-    # format LOC (cap == actual, no padding), per the C1 discipline. The move
-    # was the ENABLING step: at 1054/1054 there was zero headroom for the owner
-    # identity the fix needs, so it lands first and the owner wiring follows
-    # against this lower cap. No-grow applies from this commit forward.
-    "embedded/process_cleanup.py": (966, "plan_M11a_M15 + plan_M7 + plan_F808"),
+    # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
+    # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
+    # read-merge-write protocol moved out to the new browser_pid_registry.py
+    # leaf, which is the record's one home; this file keeps the reaping policy
+    # and passes the path in. 966 -> 1017 (step 10b) for the owner identity that
+    # fix needs: _owner_identity, the _owner_backend_alive adapter composing the
+    # two EXISTING predicates, the one _rewrite_record write path, and the
+    # recovery gate that spares a live owner's browsers. The move was sequenced
+    # first precisely because 1054/1054 left zero headroom for any of it. Net
+    # -37 from the pre-task cap; both numbers are the actual post-ruff-format
+    # LOC (cap == actual, no padding), per the C1 discipline. CAP RAISE 966->1017
+    # PENDING HUMAN RATIFICATION in the F-808 PR. No-grow applies from here.
+    "embedded/process_cleanup.py": (1017, "plan_M11a_M15 + plan_M7 + plan_F808"),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
     # + honest message + debug_logger.log_info on failure) + 1 (plan_M4ph1
     # STEP 0: isort emits a first-party group-separator blank line once

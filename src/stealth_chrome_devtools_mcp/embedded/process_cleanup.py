@@ -2,6 +2,7 @@
 
 import atexit
 import contextlib
+import os
 import shutil
 import signal
 import sys
@@ -12,10 +13,24 @@ from typing import Any
 
 import psutil
 
-from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
+from stealth_chrome_devtools_mcp.embedded import browser_pid_registry, singleton
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.singleton import STATE_DIR
 from stealth_chrome_devtools_mcp.settings import get_settings
+
+
+def _owner_identity() -> tuple[int, float | None]:
+    """This process's (pid, create_time) — the owner stamped on the entries it
+    records (see :mod:`browser_pid_registry` for what the stamp is for).
+
+    A module function, not instance state: the answer cannot change within a
+    process, and several tests build ProcessCleanup through ``__new__``.
+    """
+    pid = os.getpid()
+    create_time = None
+    with contextlib.suppress(psutil.Error, OSError):
+        create_time = psutil.Process(pid).create_time()
+    return pid, create_time
 
 
 class ProcessCleanup:
@@ -142,24 +157,20 @@ class ProcessCleanup:
         """Persist this process's tracked browsers, merging into whatever the
         other backends on this machine have recorded.
 
-        Merging is the point. The PID file is shared by every backend, so a
-        writer may only replace the entries it is writing; serialising the whole
-        in-memory table over the file — what this did before F-808 — erased the
-        other backends' tracking and leaked their browsers. Entries this process
-        has stopped tracking are removed by name in
-        :meth:`untrack_browser_process`, never by omission here.
+        Only the entries being written are replaced; entries this process has
+        stopped tracking are dropped by name in :meth:`untrack_browser_process`,
+        never by omission here. Each one is stamped with this process's identity
+        on the way out — at write time, so the owner has one source and cannot
+        drift from the process actually holding the browser.
         """
-        try:
-            browser_pid_registry.update_entries(
-                self.pid_file,
-                lambda recorded: {**recorded, **self.browser_processes},
+        owner_pid, owner_create_time = _owner_identity()
+        mine = {
+            instance_id: browser_pid_registry.with_owner(
+                metadata, owner_pid, owner_create_time
             )
-        except Exception as error:
-            debug_logger.log_warning(
-                "process_cleanup",
-                "save_pids",
-                f"Failed to save PID file: {error}",
-            )
+            for instance_id, metadata in self.browser_processes.items()
+        }
+        self._rewrite_record("save_pids", lambda recorded: {**recorded, **mine})
 
     def _drop_recorded(self, instance_ids: set[str]) -> None:
         """Remove the named entries from the shared PID file, keeping the rest.
@@ -170,19 +181,28 @@ class ProcessCleanup:
         """
         if not instance_ids:
             return
+        self._rewrite_record(
+            "drop_pids",
+            lambda recorded: {
+                instance_id: metadata
+                for instance_id, metadata in recorded.items()
+                if instance_id not in instance_ids
+            },
+        )
+
+    def _rewrite_record(self, action, mutate) -> None:
+        """Apply *mutate* to the shared PID file, degrading to a logged skip.
+
+        The one place a record write is attempted, so the two callers cannot
+        drift on how a failure is handled. Skipping is safe: the next write
+        repairs the entry, and the leaf leaves the record untouched on failure.
+        """
         try:
-            browser_pid_registry.update_entries(
-                self.pid_file,
-                lambda recorded: {
-                    instance_id: metadata
-                    for instance_id, metadata in recorded.items()
-                    if instance_id not in instance_ids
-                },
-            )
+            browser_pid_registry.update_entries(self.pid_file, mutate)
         except Exception as error:
             debug_logger.log_warning(
                 "process_cleanup",
-                "drop_pids",
+                action,
                 f"Failed to update PID file: {error}",
             )
 
@@ -272,6 +292,26 @@ class ProcessCleanup:
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             return False
         return stored_create_time is None or abs(actual - stored_create_time) < 1.0
+
+    def _owner_backend_alive(
+        self, owner_pid: int, owner_create_time: float | None
+    ) -> bool:
+        """True when *owner_pid* is a live backend of ours AND is still the same
+        process that recorded the entry. Passed to the registry leaf, which owns
+        the record's schema and imports neither psutil nor ``singleton``.
+
+        Composed from the two predicates that already exist rather than a third:
+        ``_is_our_backend`` is what eviction trusts to never touch the wrong
+        process (it excludes the stdio proxy), and
+        :meth:`_fallback_pid_identity_ok` is this module's create_time tolerance
+        for a recycled pid — a second tolerance constant here would be two
+        answers to one question. Neither half suffices alone: identity would
+        spare a pid recycled onto an unrelated backend, the tolerance one
+        recycled onto any process at all.
+        """
+        return singleton._is_our_backend(owner_pid) and self._fallback_pid_identity_ok(
+            owner_pid, owner_create_time
+        )
 
     def _kill_processes_for_metadata(  # noqa: C901,PLR0912  plan_M11a
         self,
@@ -543,8 +583,13 @@ class ProcessCleanup:
         return removed_count
 
     def _recover_orphaned_processes(self):
-        """
-        Recover from previous-run orphan browsers and abandoned temp profiles.
+        """Reap the browsers a previous run left behind, sparing every browser a
+        live backend still owns.
+
+        Recorded ownership is what separates "left behind" from "someone else's,
+        right now" — the distinction the old create_time guard could not draw,
+        since every already-running backend's browsers predate our import. See
+        :mod:`browser_pid_registry` for the record's side of the rule.
 
         Returns:
             None
@@ -554,6 +599,13 @@ class ProcessCleanup:
         reaped: set[str] = set()
 
         for instance_id, metadata in saved_processes.items():
+            if not browser_pid_registry.is_reapable(
+                metadata, self._owner_backend_alive
+            ):
+                continue
+            # Reaped before the attempt, not after: a failed kill or a locked
+            # profile dir must still drop the entry, exactly as the previous
+            # unconditional wipe did. The temp-profile sweep is the retry.
             reaped.add(instance_id)
             try:
                 if self._kill_processes_for_metadata(
@@ -918,10 +970,9 @@ class ProcessCleanup:
             f"Cleaned up {cleaned_count} tracked browser process entries",
         )
 
-        # Whatever survived is still running and stays recorded; everything that
-        # was cleaned up already dropped its own entry through untrack. There is
-        # no wipe here for the same reason there is none in recovery — the file
-        # also holds other backends' browsers.
+        # Whatever survived stays recorded; what was cleaned up already dropped
+        # its own entry through untrack. No wipe here, for the same reason there
+        # is none in recovery — the file also holds other backends' browsers.
         if self.browser_processes:
             self._save_tracked_pids()
 

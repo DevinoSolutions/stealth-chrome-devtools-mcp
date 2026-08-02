@@ -123,23 +123,26 @@ def normalize_entries(raw: object) -> Entries:
                 "timestamp": 0,
             }
         elif isinstance(value, dict):
-            pid = value.get("pid")
+            # Re-key to str up front: JSON object keys always are, and it is
+            # what lets the rest of this branch read fields by name.
+            recorded: Entry = {str(k): v for k, v in value.items()}
+            pid = recorded.get("pid")
             if not isinstance(pid, int):
                 continue
-            recorded_dir = value.get("user_data_dir")
+            recorded_dir = recorded.get("user_data_dir")
             metadata = {
                 "pid": pid,
-                "create_time": value.get("create_time"),
+                "create_time": recorded.get("create_time"),
                 "user_data_dir": normalize_path(
                     recorded_dir if isinstance(recorded_dir, str) else None
                 ),
-                "uses_custom_data_dir": value.get("uses_custom_data_dir"),
-                "auto_clone": bool(value.get("auto_clone", False)),
-                "timestamp": value.get("timestamp", 0),
+                "uses_custom_data_dir": recorded.get("uses_custom_data_dir"),
+                "auto_clone": bool(recorded.get("auto_clone", False)),
+                "timestamp": recorded.get("timestamp", 0),
             }
             for key in (OWNER_PID, OWNER_CREATE_TIME):
-                if key in value:
-                    metadata[key] = value[key]
+                if key in recorded:
+                    metadata[key] = recorded[key]
         else:
             continue
 

@@ -13,12 +13,15 @@ keeping a test run off the developer's live ~/.stealth-mcp/browser_pids.json.
 
 import inspect
 import json
+import os
+import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
+from stealth_chrome_devtools_mcp.embedded import singleton
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 
@@ -224,6 +227,16 @@ class TestWritesMerge:
         assert recorded["inst-a"]["pid"] == 101
         assert recorded["inst-b"]["pid"] == 202
 
+    def test_save_stamps_the_writing_process_as_owner(self, tmp_path):
+        record = tmp_path / "pids.json"
+        pc = _cleanup(tmp_path)
+        pc.pid_file = record
+        pc.browser_processes = {"inst": _entry(101)}
+
+        pc._save_tracked_pids()
+
+        assert registry.read_entries(record)["inst"]["owner_pid"] == os.getpid()
+
     def test_untrack_drops_only_the_named_entry(self, tmp_path):
         """Untracking deletes by id. It cannot delete by omission — that is the
         same whole-file replacement, and it would take every other backend's
@@ -301,3 +314,176 @@ class TestRecordParentDir:
         record.write_text("{not json")
 
         assert registry.read_entries(record) == {}
+
+
+# ---------------------------------------------------------------------------
+# P2/P3: recovery spares live owners and still reaps the dead
+# ---------------------------------------------------------------------------
+
+
+def _recovery_harness(pc, monkeypatch, *, owner_alive: bool):
+    """Point recovery at a fake machine: one live browser pid on the profile,
+    a kill recorder, and a decided verdict for the recorded owner.
+
+    The verdict is composed the way production composes it — singleton's
+    backend-identity check AND this module's existing create_time tolerance —
+    rather than by stubbing the adapter itself, so the pins fail if either half
+    is dropped.
+    """
+    killed: list[int] = []
+    monkeypatch.setattr(pc, "_get_browser_pids_for_profile", lambda _dir: {9999})
+    monkeypatch.setattr(pc, "_get_active_browser_profile_dirs", lambda: set())
+    monkeypatch.setattr(
+        pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+    )
+    monkeypatch.setattr(singleton, "_is_our_backend", lambda pid: owner_alive)
+    monkeypatch.setattr(pc, "_fallback_pid_identity_ok", lambda pid, ct: owner_alive)
+    return killed
+
+
+class TestRecoverySparesLiveOwners:
+    def test_entry_owned_by_live_backend_is_neither_killed_nor_dropped(
+        self, tmp_path, monkeypatch
+    ):
+        """THE fratricide pin. Every browser a second backend owns predates our
+        import, so the old create_time guard spared none of them — recovery
+        killed them, deleted their auto-clone profiles, and then wiped the
+        record that was the only trace of them.
+        """
+        record = tmp_path / "pids.json"
+        clone = tmp_path / "sessions" / "ws-live"
+        clone.mkdir(parents=True)
+        _seed(
+            record,
+            {
+                "other": _entry(
+                    501,
+                    owner_pid=4242,
+                    owner_create_time=7.0,
+                    user_data_dir=str(clone),
+                    uses_custom_data_dir=True,
+                    auto_clone=True,
+                )
+            },
+        )
+        pc = _cleanup(tmp_path)
+        pc.pid_file = record
+        killed = _recovery_harness(pc, monkeypatch, owner_alive=True)
+
+        pc._recover_orphaned_processes()
+
+        assert killed == []
+        assert clone.exists()
+        assert set(registry.read_entries(record)) == {"other"}
+
+    def test_entry_owned_by_dead_backend_is_reaped_and_dropped(
+        self, tmp_path, monkeypatch
+    ):
+        """The other half: sparing live owners must not cost us the orphans a
+        crashed backend leaves behind.
+        """
+        record = tmp_path / "pids.json"
+        clone = tmp_path / "sessions" / "ws-dead"
+        clone.mkdir(parents=True)
+        _seed(
+            record,
+            {
+                "other": _entry(
+                    501,
+                    owner_pid=4242,
+                    owner_create_time=7.0,
+                    user_data_dir=str(clone),
+                    uses_custom_data_dir=True,
+                    auto_clone=True,
+                )
+            },
+        )
+        pc = _cleanup(tmp_path)
+        pc.pid_file = record
+        killed = _recovery_harness(pc, monkeypatch, owner_alive=False)
+
+        with patch(
+            "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process"
+        ) as mock_process:
+            mock_process.return_value = MagicMock(
+                **{"create_time.return_value": 1700000050.0}
+            )
+            pc._recover_orphaned_processes()
+
+        assert killed == [9999]
+        assert not clone.exists()
+        assert registry.read_entries(record) == {}
+
+    def test_recovery_keeps_a_live_owners_entry_while_reaping_a_dead_ones(
+        self, tmp_path, monkeypatch
+    ):
+        """Both verdicts in one pass, which is the case a real machine hits:
+        the drop must name the entries it reaped, not everything it read.
+        """
+        record = tmp_path / "pids.json"
+        _seed(
+            record,
+            {
+                "live": _entry(501, owner_pid=4242, owner_create_time=7.0),
+                "dead": _entry(502, owner_pid=4343, owner_create_time=8.0),
+                "legacy": _entry(503),
+            },
+        )
+        pc = _cleanup(tmp_path)
+        pc.pid_file = record
+        monkeypatch.setattr(pc, "_get_browser_pids_for_profile", lambda _dir: set())
+        monkeypatch.setattr(pc, "_get_active_browser_profile_dirs", lambda: set())
+        monkeypatch.setattr(pc, "_kill_process_by_pid", lambda pid, iid: True)
+        monkeypatch.setattr(singleton, "_is_our_backend", lambda pid: True)
+        monkeypatch.setattr(
+            pc, "_fallback_pid_identity_ok", lambda pid, ct: pid == 4242
+        )
+
+        pc._recover_orphaned_processes()
+
+        assert set(registry.read_entries(record)) == {"live"}
+
+
+class TestOwnerLivenessComposition:
+    @pytest.mark.parametrize(
+        "is_backend,identity_ok,expected",
+        [
+            (True, True, True),
+            (True, False, False),
+            (False, True, False),
+            (False, False, False),
+        ],
+    )
+    def test_both_halves_must_agree(
+        self, tmp_path, monkeypatch, is_backend, identity_ok, expected
+    ):
+        """The owner verdict composes the two predicates that already exist —
+        singleton's "is this OUR backend" and this module's create_time
+        tolerance for a recycled pid. Neither alone is sufficient, and a third
+        tolerance constant would be a second way to answer the same question.
+        """
+        pc = _cleanup(tmp_path)
+        monkeypatch.setattr(singleton, "_is_our_backend", lambda pid: is_backend)
+        monkeypatch.setattr(
+            pc, "_fallback_pid_identity_ok", lambda pid, ct: identity_ok
+        )
+
+        assert pc._owner_backend_alive(4242, 7.0) is expected
+
+
+class TestTrackedEntryShape:
+    def test_tracking_records_an_owner_a_later_recovery_can_check(self, tmp_path):
+        """End to end through the public tracking API: what track writes must be
+        what recovery reads, or the owner check silently never fires.
+        """
+        pc = _cleanup(tmp_path)
+        pc.pid_file = tmp_path / "pids.json"
+        process = MagicMock()
+        process.pid = 5555
+
+        assert pc.track_browser_process("inst", process) is True
+
+        entry = registry.read_entries(pc.pid_file)["inst"]
+        assert entry["owner_pid"] == os.getpid()
+        assert registry.is_reapable(entry, lambda pid, ct: True) is False
+        assert time.time() - entry["timestamp"] < 60
