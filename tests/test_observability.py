@@ -102,6 +102,7 @@ def test_the_host_projects_sentry_dsn_is_never_read(monkeypatch):
     variable meant shipping THIS tool's errors into somebody else's app project.
     """
     pytest.importorskip("sentry_sdk")
+    monkeypatch.delenv("STEALTH_MCP_NO_ERROR_REPORTING", raising=False)
     monkeypatch.setenv("SENTRY_DSN", "https://host-project@example.test/9")
     captured = {}
 
