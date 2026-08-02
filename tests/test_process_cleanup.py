@@ -53,7 +53,7 @@ class TestProcessCleanupInit:
 # ---------------------------------------------------------------------------
 
 
-class TestNormalizeProcessMetadata:
+class TestNormalizeEntries:
     def test_legacy_int_format(self):
         raw = {"instance-1": 12345}
         result = browser_pid_registry.normalize_entries(raw)
