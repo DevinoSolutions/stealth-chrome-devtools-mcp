@@ -107,6 +107,29 @@ existing env guards, and because the singleton strips only
 integration backends inherit the mute too. An explicitly-set value still wins, so a
 CI cell that *wants* reporting keeps it.
 
+### Changed — error reports no longer carry your username or machine name
+
+Error reporting is on by default, and this release is the one that stopped
+pretending it only ever runs here. Events arriving from third-party installs of
+2.0.3 carried **their** Windows usernames — in stacktrace frame paths, in captured
+local variables, and inside exception messages such as
+`No such file or directory: 'C:\Users\<name>\…'` — plus **their** machine names, as
+Sentry's `server_name`.
+
+The reporting stays: it is how two real bugs on machines nobody here owns were
+found. What changes is that every event now passes through a scrubber before it
+leaves your machine. `server_name` is dropped, and the home-directory segment of
+every path is replaced with `~` — `C:\Users\~\…`, `/home/~/…`, `/Users/~/…` —
+under both path flavors regardless of which OS produced the event, since a
+Windows maintainer receives Linux users' reports and the reverse. What a
+maintainer actually debugs from is deliberately untouched: the release, the
+environment, the exception type and mechanism, and the module path *after* the
+home segment.
+
+This is universal — there is no maintainer-only exemption and no way to opt back
+into sending the identifying fields. The README now discloses what a report
+contains and how to switch it off (`STEALTH_MCP_NO_ERROR_REPORTING=true`).
+
 ### Known gaps
 
 Recorded, not fixed here; each is a row in the `DESIGN.md` §10 known-debt ledger.

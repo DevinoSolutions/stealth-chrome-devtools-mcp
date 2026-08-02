@@ -93,6 +93,11 @@ def test_sentry_init_ships_to_the_hardcoded_dsn_by_default(monkeypatch):
     names = {type(i).__name__ for i in captured["integrations"]}
     assert "LoggingIntegration" in names
     assert "AsyncioIntegration" in names
+    # The PII scrubber is wired at init or it never runs at all. Reporting is on
+    # for people who never chose it (2026-08-02 ruling), so an event that skips
+    # `before_send` carries their username and machine name off their machine.
+    # What it scrubs is pinned in `tests/test_observability_scrubbing.py`.
+    assert captured["before_send"] is observability._scrub_event
 
 
 def test_the_host_projects_sentry_dsn_is_never_read(monkeypatch):

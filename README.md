@@ -65,6 +65,10 @@ Or install via pip:
 pip install stealth-chrome-devtools-mcp==2.0.3
 ```
 
+Crashes are reported to the maintainers by default, with your username and
+machine name scrubbed out. See [Error Reporting](#error-reporting) for what a
+report contains and how to turn it off.
+
 ### Local Development
 
 ```json
@@ -311,6 +315,24 @@ Crashes and errors are reported to [Sentry](https://sentry.io) **by default**, s
 that a failure you hit is a failure we can see and fix. There is nothing to
 install and nothing to configure: the SDK ships with the package and the
 destination is built in.
+
+**What a report contains.** The exception type and message, the stack trace, the
+package version, and the platform. Two things are taken out before it leaves
+your machine:
+
+- your **machine name** (Sentry's `server_name`) is dropped entirely;
+- your **username** is removed from every path, so a stack frame reads
+  `C:\Users\~\...`, `/home/~/...` or `/Users/~/...` instead of your home
+  directory.
+
+That scrubbing is universal — it runs on every install, ours included, and there
+is no way to opt back into sending those fields. What it deliberately leaves
+alone is the part that makes a report useful: the error type, the module path
+after the home segment, and the release it came from.
+
+An error message still quotes whatever the failing call was working with — a URL
+you navigated to, a file you asked for. If that is not a trade you want to make,
+turn reporting off.
 
 To turn it off, set one variable in your shell or in `~/.stealth-mcp/.env`:
 
