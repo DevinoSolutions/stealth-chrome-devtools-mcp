@@ -85,8 +85,7 @@ that absence is exactly what makes it a reclaimable orphan after an upgrade.
 2.0.1 reported window sizes truthfully but explained the clamp as headed Chrome
 fitting "the desktop work area", read as an ordinary monitor limit. That reasoning
 concluded a workstation driving an RTX 3080 had a ~1024x768 screen. The real clamp
-was **Session 0's default desktop**, which measures exactly 1024x768 — the same root
-cause as F-808. The remedy is unchanged (`spawn_diagnostics.window_size` still
+was **Session 0's small default desktop** — the same root cause as F-808. The remedy is unchanged (`spawn_diagnostics.window_size` still
 reports `requested`, `actual`, `inner_viewport` and `clamped`); the docstrings on
 `spawn_browser` and `window_sizing` now say the clamp is to the **launching**
 context's desktop, which is the user's monitor only when the backend runs on it.

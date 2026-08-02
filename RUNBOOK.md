@@ -21,7 +21,7 @@ console script is not on PATH. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for th
 
 | Verb | What it does |
 |---|---|
-| `status` | backend state (`responsive`/`wedged`/`down`/not running), pid, log path, version, browser-session root, and the two disk caps |
+| `status` | backend state as one of three printed outcomes — `not running`, `running (responsive)`, or `running but UNRESPONSIVE … wedged` — plus pid, log path, version, browser-session root, and the two disk caps |
 | `doctor` | environment check: Python, platform, browser-session root, backend, port occupant, **one line per recorded backend with its display context and whether it can show a window**, Chrome |
 | `profiles` | list on-disk profiles with size, role, and in-use flag |
 | `cleanup` | reclaim disk — delete idle auto-clones over the clone cap and trim idle named profiles over the browser-session cap (**dry run** unless `--apply`) |
