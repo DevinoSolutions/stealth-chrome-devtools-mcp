@@ -17,6 +17,11 @@ from pathlib import Path
 
 import pytest
 
+# The Win32 window probe is shared E2E MECHANISM, so it lives in e2e_helpers with
+# the rest of it — not in src/, where display_context.py already owns the
+# production question and a second Win32 probe would be a second way.
+from e2e_helpers import await_visible_window
+
 # We need to import server.py as a module (it uses bare imports internally)
 _spec = importlib.util.spec_from_file_location(
     "server",
@@ -766,3 +771,118 @@ class TestChromeIdentity:
                 assert got_major == want_major, (product, expected["version"])
         finally:
             await close(instance_id=iid)
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="EnumWindows is a Win32 probe, and the Linux gate cell runs a bare "
+    "Xvfb with no window manager — the headed-visibility twin belongs to the "
+    "Windows integration cell",
+)
+class TestHeadedSpawnIsSeenOrRefused:
+    """F-808's integration twin: the assertion whose absence let the defect ship.
+
+    ``spawn_browser(headless=False)`` used to return a healthy instance and a real
+    Chrome onto a desktop nobody was looking at, because Chrome inherits its
+    launcher's window station. The hermetic tier can only ever prove what the code
+    does with a stated premise; this node asks the machine itself.
+
+    ONE node with two branches rather than two skip-gated nodes, deliberately: on
+    Windows it never skips, so the JUnit report the gate already hashes always
+    carries an answer, and which branch ran is recorded rather than inferred. A
+    GitHub Windows runner is a Session 0 service context and will take branch B —
+    that skip-free record is exactly how we learn so.
+
+    Branch B asserts only the error type and the one phrase. The full six-token
+    message contract is owned by ``test_spawn_headed_requires_display.py``;
+    re-asserting it here would be a second home for it.
+    """
+
+    DATA_URL = "data:text/html,<h1 id='t'>f808</h1>"
+
+    @pytest.mark.asyncio
+    async def test_headed_spawn_owns_a_real_window_or_is_refused(
+        self, tmp_path, record_property
+    ):
+        from stealth_chrome_devtools_mcp.embedded import display_context
+
+        token = display_context.display_context()
+        record_property("f808_display_context", token)
+        if display_context.can_show_windows():
+            record_property("f808_branch", "A")
+            await self._assert_a_window_really_appears(tmp_path, token)
+        else:
+            record_property("f808_branch", "B")
+            await self._assert_the_guard_refuses(tmp_path)
+
+    async def _assert_a_window_really_appears(self, tmp_path, token: str) -> None:
+        """Branch A — a window-capable context must produce a window we can SEE.
+
+        An absolute ``user_data_dir`` outside the clone root is the one spawn
+        shape that never copies the master profile, so this costs a Chrome launch
+        and nothing else.
+        """
+        import psutil
+
+        from stealth_chrome_devtools_mcp.embedded import process_cleanup as pc_mod
+
+        spawn = _get_fn("spawn_browser")
+        navigate = _get_fn("navigate")
+        close = _get_fn("close_instance")
+
+        result = await spawn(
+            headless=False,
+            user_data_dir=str(tmp_path / "f808-headed"),
+            **_sandbox_kwargs(),
+        )
+        iid = result["instance_id"]
+        tree: list[int] = []
+        try:
+            # Navigate first so the window has real content to paint.
+            await navigate(instance_id=iid, url=self.DATA_URL)
+            metadata = pc_mod.process_cleanup.browser_processes.get(iid) or {}
+            root_pid = metadata.get("pid")
+            assert isinstance(root_pid, int) and psutil.pid_exists(root_pid), (
+                f"headed spawn left no live tracked root pid ({root_pid!r})"
+            )
+            try:
+                tree = [
+                    root_pid,
+                    *[p.pid for p in psutil.Process(root_pid).children(recursive=True)],
+                ]
+            except psutil.Error:
+                tree = [root_pid]
+
+            owner = await await_visible_window(root_pid)
+            assert owner is not None, (
+                "a headed spawn from a window-capable context produced NO visible "
+                f"top-level window (display context {token}, chrome tree {tree}) — "
+                "that ghost is the F-808 symptom"
+            )
+            assert owner in tree or psutil.pid_exists(owner), owner
+        finally:
+            await close(instance_id=iid)
+            # Safety net: a failed assertion must never leak a real Chrome tree
+            # on a machine that already runs agent fleets.
+            for pid in tree:
+                try:
+                    psutil.Process(pid).kill()
+                except psutil.Error:
+                    pass
+
+    async def _assert_the_guard_refuses(self, tmp_path) -> None:
+        """Branch B — a context that cannot display a window refuses, for real.
+
+        No cleanup net is needed: the guard runs before the profile clone and
+        before the browser manager, so nothing was created to leak.
+        """
+        from stealth_chrome_devtools_mcp.embedded import tool_errors
+
+        spawn = _get_fn("spawn_browser")
+        with pytest.raises(tool_errors.ToolError) as err:
+            await spawn(
+                headless=False,
+                user_data_dir=str(tmp_path / "f808-guarded"),
+                **_sandbox_kwargs(),
+            )
+        assert "cannot display a window" in str(err.value)

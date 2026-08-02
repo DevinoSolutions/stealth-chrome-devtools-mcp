@@ -14,6 +14,7 @@ E2E files stay consistent with the existing integration suite.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import importlib.util
 import json
 import os
@@ -166,6 +167,98 @@ async def read_actions(iid: str) -> list[str]:
     """Return the in-page action log ``window.__actions`` as a Python list."""
     raw = await eval_js(iid, "JSON.stringify(window.__actions)")
     return json.loads(raw) if raw else []
+
+
+async def await_visible_window(root_pid: int, timeout: float = 15.0) -> int | None:
+    """First pid in ``root_pid``'s process tree owning a visible, non-zero-area
+    top-level window — or ``None`` at the deadline (F-808's integration twin).
+
+    Only meaningful when the CALLER shares a window station with the spawned
+    Chrome, i.e. the in-process integration lane: ``EnumWindows`` enumerates the
+    desktop of the calling process, so it can never see a detached backend's.
+
+    Bounded poll rather than sleep-then-assert, and BOTH the process tree and the
+    window set are re-snapshotted every iteration: Chrome's renderer children and
+    its first painted window both appear after the launch call returns.
+    """
+    import psutil
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            children = psutil.Process(root_pid).children(recursive=True)
+        except psutil.Error:
+            children = []
+        tree = {root_pid} | {p.pid for p in children}
+        owners = tree & visible_window_pids()
+        if owners:
+            return next(iter(owners))
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(0.25)
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = (
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    )
+
+
+def visible_window_pids() -> set[int]:
+    """PIDs owning a visible, non-zero-area top-level window. Win32 only.
+
+    Empty set on every other platform, so a caller can branch on emptiness only
+    when it has already established it is on Windows.
+
+    This is TEST-side mechanism. The production question — "can a window launched
+    by THIS process be seen" — is owned by ``embedded/display_context.py`` via the
+    TS session id; a second Win32 probe in the package would be a second way. What
+    this adds is the complementary observation display_context deliberately cannot
+    make: whether a window actually MATERIALISED for someone else's process.
+
+    Zero-area windows are rejected because Chrome always owns invisible helper
+    windows (``Chrome_MessageWindow``), which pass ``IsWindowVisible`` and would
+    make the assertion true even for a headless launch.
+    """
+    if sys.platform != "win32":
+        return set()
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    # Declare every signature: an undeclared HWND parameter defaults to c_int and
+    # TRUNCATES on 64-bit Windows, so the probe would silently find nothing.
+    user32.IsWindowVisible.argtypes = (ctypes.c_void_p,)
+    user32.IsWindowVisible.restype = ctypes.c_bool
+    user32.GetWindowRect.argtypes = (ctypes.c_void_p, ctypes.POINTER(_RECT))
+    user32.GetWindowRect.restype = ctypes.c_bool
+    user32.GetWindowThreadProcessId.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_ulong),
+    )
+    user32.GetWindowThreadProcessId.restype = ctypes.c_ulong
+    enum_callback = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    user32.EnumWindows.argtypes = (enum_callback, ctypes.c_void_p)
+    user32.EnumWindows.restype = ctypes.c_bool
+
+    found: set[int] = set()
+
+    def _collect(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True  # keep enumerating
+        rect = _RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return True
+        if rect.right - rect.left <= 0 or rect.bottom - rect.top <= 0:
+            return True
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        found.add(int(pid.value))
+        return True
+
+    user32.EnumWindows(enum_callback(_collect), None)
+    return found
 
 
 async def wait_for_js(
