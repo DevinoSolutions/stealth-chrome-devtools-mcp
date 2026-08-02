@@ -51,16 +51,26 @@ _log = logging.getLogger(__name__)
 #: A home directory under either path flavor, whatever the host OS is: a
 #: Windows maintainer receives Linux users' events and vice versa, so this is a
 #: string rule and never ``os.path``/``pathlib`` (which only know the local
-#: flavor). Separators repeat because ``str(OSError)`` repr-escapes them, and
-#: the look-behind keeps a URL such as ``https://host/Users/x`` from matching a
-#: home directory it merely spells like.
-#: The home roots. Separators repeat everywhere (``//home//x`` is a legal POSIX
-#: path) and the leading run of a UNC share may itself be repr-escaped.
+#: flavor). Separators repeat because ``str(OSError)`` repr-escapes them and
+#: because ``//home//x`` is a legal POSIX path; the leading run of a UNC share
+#: may itself be repr-escaped. The look-behind keeps a URL such as
+#: ``https://host/Users/x`` from matching a home directory it merely spells
+#: like.
+#:
+#: Every separator run is **possessive** (``++``, Python 3.11+, and this package
+#: requires 3.11). Greedy runs made the match quadratic: on a long run of
+#: separators each start position re-scanned the whole run looking for a root
+#: that was not there, so 8000 contiguous slashes cost about a second and 20000
+#: about six — inside ``before_send``, in a process that is already crashing,
+#: on a string that can come from arbitrary page content quoted into an error.
+#: The SDK would not have saved us: sentry 2.64.0 leaves ``max_value_length``
+#: unset. Possessive runs never give characters back, which removes the
+#: backtracking without changing what matches.
 _HOME_ROOTS = (
-    r"[A-Za-z]:[\\/]+Users[\\/]+"  # C:\Users\ , C:/Users/ , C:\\Users\\
-    r"|\\{2,4}[^\\/\s]+[\\/]+Users[\\/]+"  # \\fileserver\Users\
-    r"|/+(?:var/+|usr/+|export/+)?home/+"  # /home/ , /var/home/ (Silverblue)
-    r"|/+Users/+"  # macOS
+    r"[A-Za-z]:[\\/]++Users[\\/]++"  # C:\Users\ , C:/Users/ , C:\\Users\\
+    r"|\\{2,4}+[^\\/\s]++[\\/]++Users[\\/]++"  # \\fileserver\Users\
+    r"|/++(?:var/++|usr/++|export/++)?home/++"  # /home/ , /var/home/ (Silverblue)
+    r"|/++Users/++"  # macOS
 )
 
 #: The account name itself. Two alternatives, tried in order:
@@ -73,6 +83,13 @@ _HOME_ROOTS = (
 #:    cannot swallow an unbounded stretch of text;
 #: 2. the plain single-token segment, which is what prose and ordinary
 #:    usernames hit.
+#:
+#: The residual, stated exactly: a space-containing account name that is NOT
+#: immediately followed by a separator or a quote keeps its later words — the
+#: end of a string, but equally a bare home directory sitting mid-sentence.
+#: Only the first word is anonymized there. Closing it means matching to
+#: end-of-token-run, which is precisely what would eat the prose above, so the
+#: trade is deliberate and it errs toward keeping the sentence readable.
 _HOME_USER = (
     r"[^\\/\s'\"]+(?: [^\\/\s'\"]+){0,3}(?=[\\/'\"])"
     r"|[^\\/\s'\"]+"

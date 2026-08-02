@@ -128,6 +128,18 @@ def test_an_event_that_never_had_a_server_name_is_still_accepted():
         (f"/var/home/{USER}/app.py", "/var/home/~/app.py"),
         (f"/usr/home/{USER}/app.py", "/usr/home/~/app.py"),
         (f"/export/home/{USER}/app.py", "/export/home/~/app.py"),
+        # A long run of separators that leads nowhere, followed by a real home
+        # path. Greedy separator runs made this quadratic — 8000 contiguous
+        # slashes cost about a second inside `before_send` — because every
+        # start position re-scanned the whole run. The runs are possessive now.
+        # There is no timing assertion here (that would flake on a loaded
+        # runner); this row finishing at test speed IS the assertion, and the
+        # expected value proves the rewrite did not change what matches.
+        pytest.param(
+            "//" * 4000 + f" /home/{USER}/app.py",
+            "//" * 4000 + " /home/~/app.py",
+            id="pathological-separator-run",
+        ),
     ],
 )
 def test_every_home_flavor_is_anonymized_whatever_the_host_os_is(raw, expected):
@@ -160,6 +172,15 @@ def test_a_path_outside_a_home_directory_is_left_exactly_as_it_was(path):
 @pytest.mark.parametrize(
     ("prose", "expected"),
     [
+        # THE discriminating row: a tail of three words and then nothing. Under
+        # the rejected `(?=[\\/]|$)` variant the space-tolerant alternative
+        # reaches end-of-string and reads `jdoe and then` as one account name,
+        # shipping `cwd was /home/~` and losing the tail. The longer tails below
+        # pass under both variants, so they do not prove anything on their own.
+        (
+            f"cwd was /home/{USER} and then",
+            "cwd was /home/~ and then",
+        ),
         (
             f"cwd was /home/{USER} and then the spawn failed",
             "cwd was /home/~ and then the spawn failed",
