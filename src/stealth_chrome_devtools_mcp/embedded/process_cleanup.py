@@ -56,9 +56,15 @@ class ProcessCleanup:
         self._setup_cleanup_handlers()
         self._recover_orphaned_processes()
 
-    def recover_orphans(self) -> None:
-        """Public seam for CLI kill-orphans."""
-        self._recover_orphaned_processes()
+    def recover_orphans(self, force: bool = False) -> None:
+        """Public seam for CLI kill-orphans.
+
+        ``force`` reaps every recorded browser whoever owns it — the operator
+        override behind ``kill-orphans --force``, which has always meant "yes,
+        including a live backend's". Startup recovery never passes it; sparing
+        live owners there is the F-808 fix.
+        """
+        self._recover_orphaned_processes(force=force)
 
     @staticmethod
     def _normalize_path(path: str | None) -> str | None:
@@ -582,9 +588,9 @@ class ProcessCleanup:
 
         return removed_count
 
-    def _recover_orphaned_processes(self):
+    def _recover_orphaned_processes(self, force: bool = False):
         """Reap the browsers a previous run left behind, sparing every browser a
-        live backend still owns.
+        live backend still owns unless *force* says otherwise.
 
         Recorded ownership is what separates "left behind" from "someone else's,
         right now" — the distinction the old create_time guard could not draw,
@@ -599,7 +605,7 @@ class ProcessCleanup:
         reaped: set[str] = set()
 
         for instance_id, metadata in saved_processes.items():
-            if not browser_pid_registry.is_reapable(
+            if not force and not browser_pid_registry.is_reapable(
                 metadata, self._owner_backend_alive
             ):
                 continue

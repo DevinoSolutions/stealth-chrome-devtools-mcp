@@ -414,6 +414,28 @@ class TestRecoverySparesLiveOwners:
         assert not clone.exists()
         assert registry.read_entries(record) == {}
 
+    def test_force_reaps_a_live_owners_entry_anyway(self, tmp_path, monkeypatch):
+        """`kill-orphans --force` is the operator saying "yes, including a live
+        backend's" — the wedged-backend case the flag exists for. Sparing live
+        owners must not quietly turn that override into a no-op.
+        """
+        record = tmp_path / "pids.json"
+        _seed(record, {"other": _entry(501, owner_pid=4242, owner_create_time=7.0)})
+        pc = _cleanup(tmp_path)
+        pc.pid_file = record
+        killed = _recovery_harness(pc, monkeypatch, owner_alive=True)
+
+        with patch(
+            "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process"
+        ) as mock_process:
+            mock_process.return_value = MagicMock(
+                **{"create_time.return_value": 1700000050.0}
+            )
+            pc.recover_orphans(force=True)
+
+        assert killed == [9999]
+        assert registry.read_entries(record) == {}
+
     def test_recovery_keeps_a_live_owners_entry_while_reaping_a_dead_ones(
         self, tmp_path, monkeypatch
     ):

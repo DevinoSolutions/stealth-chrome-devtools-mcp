@@ -67,11 +67,14 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # fix needs: _owner_identity, the _owner_backend_alive adapter composing the
     # two EXISTING predicates, the one _rewrite_record write path, and the
     # recovery gate that spares a live owner's browsers. The move was sequenced
-    # first precisely because 1054/1054 left zero headroom for any of it. Net
-    # -37 from the pre-task cap; both numbers are the actual post-ruff-format
-    # LOC (cap == actual, no padding), per the C1 discipline. CAP RAISE 966->1017
+    # first precisely because 1054/1054 left zero headroom for any of it. Then
+    # 1017 -> 1023 (step 10c) to thread `force` from `kill-orphans --force`
+    # through to the reaper, which that gate would otherwise have turned into a
+    # no-op against the very wedged backend the flag exists for. Net -31 from
+    # the pre-task cap; every number is the actual post-ruff-format LOC
+    # (cap == actual, no padding), per the C1 discipline. CAP RAISE 966->1023
     # PENDING HUMAN RATIFICATION in the F-808 PR. No-grow applies from here.
-    "embedded/process_cleanup.py": (1017, "plan_M11a_M15 + plan_M7 + plan_F808"),
+    "embedded/process_cleanup.py": (1023, "plan_M11a_M15 + plan_M7 + plan_F808"),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
     # + honest message + debug_logger.log_info on failure) + 1 (plan_M4ph1
     # STEP 0: isort emits a first-party group-separator blank line once

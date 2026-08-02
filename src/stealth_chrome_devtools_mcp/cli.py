@@ -469,12 +469,14 @@ def _cmd_kill_orphans(args) -> int:
     process_cleanup.py (plan_M8 SS2.1-C; M11a adds a public seam later, per
     state.json's recorded decision).
 
-    Guarded off a LIVE backend: `_recover_orphaned_processes` both reaps
-    tracked browsers and clears the pid-tracking file, so running it against
-    a responsive/wedged backend would kill that backend's own browsers and
-    corrupt its bookkeeping. `restart` is the verb for "backend alive but
-    bad"; this verb is for "backend gone, browsers orphaned" — a clean
-    behavioral partition. `--force` overrides the guard.
+    Guarded off a LIVE backend: reaping would kill that backend's own browsers.
+    `restart` is the verb for "backend alive but bad"; this verb is for
+    "backend gone, browsers orphaned" — a clean behavioral partition.
+
+    `--force` overrides the guard, and is passed THROUGH to the reaper rather
+    than merely getting past the gate. Since plan_F808 Task 10 the reaper spares
+    entries a live backend still owns, which would otherwise have made
+    `--force` a no-op against exactly the wedged backend it exists for.
     """
     _server()
     from stealth_chrome_devtools_mcp.embedded import process_cleanup, singleton
@@ -488,7 +490,7 @@ def _cmd_kill_orphans(args) -> int:
         )
         return 1
 
-    process_cleanup.process_cleanup.recover_orphans()
+    process_cleanup.process_cleanup.recover_orphans(force=args.force)
     print(
         "orphan recovery triggered: reaped any browsers left over from a dead backend."
     )
