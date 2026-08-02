@@ -7,6 +7,7 @@ Skip in CI without Chrome: pytest -m "not integration"
 """
 
 import asyncio
+import contextlib
 
 # Embedded modules via conftest sys.path setup
 import importlib.util
@@ -20,6 +21,18 @@ import pytest
 # The Win32 window probe is shared E2E MECHANISM, so it lives in e2e_helpers with
 # the rest of it — not in src/, where display_context.py already owns the
 # production question and a second Win32 probe would be a second way.
+#
+# Importing e2e_helpers here means embedded/server.py is exec'd twice when THIS
+# file runs alone (both modules importlib-load it under their own module object).
+# That is safe, and the three reasons are worth recording so nobody "tidies" this
+# into a lazy import: (a) ToolRegistry.section_tool records each tool name at most
+# once per section, so a second registration pass cannot accumulate — this is the
+# runpy double-load idempotency that already had to hold; (b) each exec builds its
+# own FastMCP app, registry and managers, so there is no shared mutable app object
+# for the second pass to corrupt; (c) the module body does no I/O — logging setup
+# and process_cleanup.activate() both sit at the serve boundary, not at import.
+# In any lane where test_window_sizing.py is also collected there is no second
+# load at all: it already imports e2e_helpers, and Python caches the module.
 from e2e_helpers import await_visible_window
 
 # We need to import server.py as a module (it uses bare imports internally)
@@ -773,6 +786,21 @@ class TestChromeIdentity:
             await close(instance_id=iid)
 
 
+def _chrome_tree_pids(root_pid: int) -> list[int]:
+    """``root_pid`` plus every live descendant, or just the root if it is gone.
+
+    Cheap enough to re-snapshot: Chrome's renderer children appear after the
+    launch call returns, so one snapshot taken too early under-reports the tree.
+    """
+    import psutil
+
+    try:
+        children = psutil.Process(root_pid).children(recursive=True)
+    except psutil.Error:
+        return [root_pid]
+    return [root_pid, *[p.pid for p in children]]
+
+
 @pytest.mark.skipif(
     sys.platform != "win32",
     reason="EnumWindows is a Win32 probe, and the Linux gate cell runs a bare "
@@ -842,33 +870,36 @@ class TestHeadedSpawnIsSeenOrRefused:
             await navigate(instance_id=iid, url=self.DATA_URL)
             metadata = pc_mod.process_cleanup.browser_processes.get(iid) or {}
             root_pid = metadata.get("pid")
+            # ASSERTS where TestCloseKillsProcessTree skips, deliberately: this
+            # node must never skip on Windows, so a missing tracked pid has to be
+            # a failure. Silence here would look exactly like a passing run.
             assert isinstance(root_pid, int) and psutil.pid_exists(root_pid), (
                 f"headed spawn left no live tracked root pid ({root_pid!r})"
             )
-            try:
-                tree = [
-                    root_pid,
-                    *[p.pid for p in psutil.Process(root_pid).children(recursive=True)],
-                ]
-            except psutil.Error:
-                tree = [root_pid]
+            tree = _chrome_tree_pids(root_pid)
 
             owner = await await_visible_window(root_pid)
+            # Re-snapshot before asserting: renderers appear late, so the window's
+            # owner can be a child that did not exist at the first snapshot. This
+            # also widens the kill net below to whatever the poll spawned.
+            tree = sorted(set(tree) | set(_chrome_tree_pids(root_pid)))
             assert owner is not None, (
                 "a headed spawn from a window-capable context produced NO visible "
                 f"top-level window (display context {token}, chrome tree {tree}) — "
                 "that ghost is the F-808 symptom"
             )
-            assert owner in tree or psutil.pid_exists(owner), owner
+            assert owner in tree, (owner, tree)
         finally:
-            await close(instance_id=iid)
+            # Suppressed on purpose: if close_instance raises (the teardown path
+            # Task 10 churns), the net below must still run — otherwise a failed
+            # close leaks a real headed Chrome tree.
+            with contextlib.suppress(Exception):
+                await close(instance_id=iid)
             # Safety net: a failed assertion must never leak a real Chrome tree
             # on a machine that already runs agent fleets.
             for pid in tree:
-                try:
+                with contextlib.suppress(psutil.Error):
                     psutil.Process(pid).kill()
-                except psutil.Error:
-                    pass
 
     async def _assert_the_guard_refuses(self, tmp_path) -> None:
         """Branch B — a context that cannot display a window refuses, for real.
