@@ -317,18 +317,21 @@ install and nothing to configure: the SDK ships with the package and the
 destination is built in.
 
 **What a report contains.** The exception type and message, the stack trace, the
-package version, and the platform. Two things are taken out before it leaves
-your machine:
+package version, and the platform. Three things are kept out of it:
 
 - your **machine name** (Sentry's `server_name`) is dropped entirely;
 - your **username** is removed from every path, so a stack frame reads
   `C:\Users\~\...`, `/home/~/...` or `/Users/~/...` instead of your home
-  directory.
+  directory;
+- **local variables are not captured at all.** The Sentry SDK sends them by
+  default; we turn that off, because a local in this tool can hold a proxy
+  password, an `Authorization` or `Cookie` header, or a script you asked it to
+  run — secrets that no path rule could rescue.
 
-That scrubbing is universal — it runs on every install, ours included, and there
-is no way to opt back into sending those fields. What it deliberately leaves
-alone is the part that makes a report useful: the error type, the module path
-after the home segment, and the release it came from.
+That is universal — it runs on every install, ours included, and there is no way
+to opt back into sending those fields. What it deliberately leaves alone is the
+part that makes a report useful: the error type, the module path after the home
+segment, the source line that failed, and the release it came from.
 
 An error message still quotes whatever the failing call was working with — a URL
 you navigated to, a file you asked for. If that is not a trade you want to make,

@@ -54,10 +54,34 @@ _log = logging.getLogger(__name__)
 #: flavor). Separators repeat because ``str(OSError)`` repr-escapes them, and
 #: the look-behind keeps a URL such as ``https://host/Users/x`` from matching a
 #: home directory it merely spells like.
+#: The home roots. Separators repeat everywhere (``//home//x`` is a legal POSIX
+#: path) and the leading run of a UNC share may itself be repr-escaped.
+_HOME_ROOTS = (
+    r"[A-Za-z]:[\\/]+Users[\\/]+"  # C:\Users\ , C:/Users/ , C:\\Users\\
+    r"|\\{2,4}[^\\/\s]+[\\/]+Users[\\/]+"  # \\fileserver\Users\
+    r"|/+(?:var/+|usr/+|export/+)?home/+"  # /home/ , /var/home/ (Silverblue)
+    r"|/+Users/+"  # macOS
+)
+
+#: The account name itself. Two alternatives, tried in order:
+#:
+#: 1. space-tolerant, but only when a separator or a closing quote proves the
+#:    path really continues — ``C:\Users\John Doe\app.py`` and the repr form
+#:    ``'C:\\Users\\John Doe'``. Deliberately NOT anchored on end-of-string:
+#:    prose ends there too, and ``cwd was /home/jdoe and then`` would have had
+#:    its sentence eaten. The space run is capped so a stray later separator
+#:    cannot swallow an unbounded stretch of text;
+#: 2. the plain single-token segment, which is what prose and ordinary
+#:    usernames hit.
+_HOME_USER = (
+    r"[^\\/\s'\"]+(?: [^\\/\s'\"]+){0,3}(?=[\\/'\"])"
+    r"|[^\\/\s'\"]+"
+)
+
 _HOME_SEGMENT_RE = re.compile(
     r"(?<![A-Za-z0-9])"
-    r"(?P<prefix>[A-Za-z]:[\\/]+Users[\\/]+|/home/|/Users/)"
-    r"(?P<user>[^\\/\s'\"]+)",
+    rf"(?P<prefix>{_HOME_ROOTS})"
+    rf"(?P<user>{_HOME_USER})",
     re.IGNORECASE,
 )
 
@@ -65,8 +89,13 @@ _HOME_SEGMENT_RE = re.compile(
 #: which OS and which home root the failure came from.
 _ANONYMOUS_USER = "~"
 
-#: Depth at which the event walk stops descending. Sentry events are shallow;
-#: this only has to make a self-referential one terminate.
+#: Cycle terminator for the event walk, not a size limit. A real event cannot
+#: reach it — by the time ``before_send`` runs the SDK has already serialized
+#: the event (``client.py`` calls ``serialize()`` at :880, ``before_send`` at
+#: :896, sdk 2.64.0), so what arrives is plain JSON-shaped data: no cycles, no
+#: shared subtrees, and nothing but ``str``/``dict``/``list``/``tuple`` and
+#: scalars — which is exactly why covering those four types covers everything.
+#: This bound exists only so a hand-built or hostile event still terminates.
 _MAX_EVENT_DEPTH = 24
 
 
@@ -82,10 +111,10 @@ def _anonymize(value: object, depth: int = 0) -> object:
     """Return ``value`` with every home-directory segment in it replaced.
 
     Applied to the whole event rather than to a list of known fields: paths turn
-    up in frame ``abs_path``/``filename``, in exception messages, in log
-    messages and their params, in breadcrumbs, and in captured frame locals. A
-    field list would have to grow every time the SDK grows one. The transform is
-    a no-op on anything that is not a home path, so nothing else can be damaged.
+    up in frame ``abs_path``/``filename``, in exception messages, in log messages
+    and their params, and in breadcrumbs. A field list would have to grow every
+    time the SDK grows one. The transform is a no-op on anything that is not a
+    home path, so nothing else can be damaged.
     """
     if depth > _MAX_EVENT_DEPTH:
         return value
@@ -111,23 +140,41 @@ def _scrub_event(event: "Event", _hint: "dict[str, object] | None" = None) -> "E
     * the home-directory segment of every path, which is the account name.
 
     Never raises, and never drops the event: an event we could not fully scrub
-    is still worth more than silence, so an internal failure degrades to the
-    unscrubbed event minus ``server_name`` rather than to ``None``. The
-    ``isinstance`` guards look redundant against the annotation and are not —
-    the annotation states what the SDK promises to pass, and this function is
-    the last thing that runs before an event leaves the machine, so it defends
-    against being handed something else rather than dying at the boundary.
+    is still worth more than silence, so an internal failure degrades to
+    :func:`_without_server_name` rather than to ``None``. The ``isinstance``
+    guards look redundant against the annotation and are not — the annotation
+    states what the SDK promises to pass, and this function is the last thing
+    that runs before an event leaves the machine, so it defends against being
+    handed something else rather than dying at the boundary.
     """
-    scrubbed = event
     try:
-        anonymized = _anonymize(event)
+        scrubbed = _anonymize(event)
+        if isinstance(scrubbed, dict):
+            scrubbed.pop("server_name", None)
+            return cast("Event", scrubbed)
     except Exception:  # noqa: BLE001  PERMANENT(never-raises contract, #55)
-        anonymized = None
-    if isinstance(anonymized, dict):
-        scrubbed = cast("Event", anonymized)
-    if isinstance(scrubbed, dict):
-        scrubbed.pop("server_name", None)
-    return scrubbed
+        # DEBUG on purpose: the logging integration turns INFO into breadcrumbs
+        # and ERROR into events, and an event raised while shipping an event is
+        # how a reporting loop starts.
+        _log.debug("Sentry event scrubbing failed; degrading", exc_info=True)
+    return _without_server_name(event)
+
+
+def _without_server_name(event: "Event") -> "Event":
+    """The floor the scrubber degrades to: no hostname, nothing else promised.
+
+    Copies before removing. The event belongs to the SDK and the caller may
+    still hold it, so mutating it in place would be a second, invisible way for
+    this module to change an event.
+    """
+    try:
+        if isinstance(event, dict):
+            remainder = dict(event)
+            remainder.pop("server_name", None)
+            return cast("Event", remainder)
+    except Exception:  # noqa: BLE001  PERMANENT(never-raises contract, #55)
+        _log.debug("Sentry server_name removal failed", exc_info=True)  # see above
+    return event
 
 
 def sentry_init() -> bool:
@@ -168,5 +215,13 @@ def sentry_init() -> bool:
         ],
         release=_release(),
         before_send=_scrub_event,
+        # The SDK captures every frame's local variables by default. In THIS
+        # product those locals hold proxy credentials (`proxy_utils`,
+        # `proxy_forwarder`), Authorization and Cookie headers
+        # (`network_interceptor`), and user script bodies — the exact classes
+        # the canary suite treats as release blockers on every other surface.
+        # Path scrubbing does not help there: the secret is the value itself.
+        # We now know third parties run this, so the locals are theirs.
+        include_local_variables=False,
     )
     return True

@@ -113,6 +113,21 @@ def test_an_event_that_never_had_a_server_name_is_still_accepted():
         (f"/home/{USER}", "/home/~"),
         # A file: URL, which is still a local path.
         (f"file:///home/{USER}/src/app.py", "file:///home/~/src/app.py"),
+        # A Windows account name with a space — the common display-name folder.
+        (r"C:\Users\John Doe\app.py", r"C:\Users\~\app.py"),
+        (r"C:\\Users\\John Doe\\app.py", r"C:\\Users\\~\\app.py"),
+        ("/Users/John Appleseed/x.py", "/Users/~/x.py"),
+        # …and one whose name only ends at a closing quote.
+        (r"'C:\\Users\\John Doe'", r"'C:\\Users\\~'"),
+        # A UNC share: the home is on a file server, the account is still theirs.
+        (r"\\fileserver\Users\jdoe\app.py", r"\\fileserver\Users\~\app.py"),
+        # Repeated separators are legal and must not be a way through.
+        (f"/home//{USER}/app.py", "/home//~/app.py"),
+        (f"//home/{USER}/app.py", "//home/~/app.py"),
+        # Silverblue and the Solaris-style layouts put $HOME elsewhere.
+        (f"/var/home/{USER}/app.py", "/var/home/~/app.py"),
+        (f"/usr/home/{USER}/app.py", "/usr/home/~/app.py"),
+        (f"/export/home/{USER}/app.py", "/export/home/~/app.py"),
     ],
 )
 def test_every_home_flavor_is_anonymized_whatever_the_host_os_is(raw, expected):
@@ -140,6 +155,36 @@ def test_a_path_outside_a_home_directory_is_left_exactly_as_it_was(path):
     out = observability._scrub_event(_event_with_frames(path))
 
     assert _frames(out)[0]["abs_path"] == path
+
+
+@pytest.mark.parametrize(
+    ("prose", "expected"),
+    [
+        (
+            f"cwd was /home/{USER} and then the spawn failed",
+            "cwd was /home/~ and then the spawn failed",
+        ),
+        (
+            f"cwd was /home/{USER} and then it read /etc/hosts",
+            "cwd was /home/~ and then it read /etc/hosts",
+        ),
+        (
+            rf"profile C:\Users\{USER} was locked by another process",
+            r"profile C:\Users\~ was locked by another process",
+        ),
+    ],
+)
+def test_a_home_path_in_prose_loses_the_name_and_keeps_the_sentence(prose, expected):
+    """The space-tolerant rule must not eat the words after the username.
+
+    This is the reason the space-tolerant alternative demands a following
+    separator or quote and is never anchored on end-of-string: a sentence ends
+    there too, and `/home/jdoe and then` would have been read as one very
+    unusual account name.
+    """
+    out = observability._scrub_event({"message": prose})
+
+    assert out["message"] == expected
 
 
 def test_every_frame_is_reached_not_just_the_first():
@@ -301,6 +346,10 @@ def test_an_internal_crash_still_strips_the_server_name():
 
     assert "server_name" not in out
     assert out["release"] == "2.0.4"
+    # …and the failure path copies too. The SDK still holds this object; a
+    # scrubber that reaches back into its caller's event is a second way to
+    # change an event, and the one that nobody can see.
+    assert hostile["server_name"] == "DESKTOP-ABC123"
 
 
 def test_the_scrubber_accepts_the_hint_sentry_passes_positionally():

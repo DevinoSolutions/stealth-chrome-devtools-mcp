@@ -111,20 +111,29 @@ CI cell that *wants* reporting keeps it.
 
 Error reporting is on by default, and this release is the one that stopped
 pretending it only ever runs here. Events arriving from third-party installs of
-2.0.3 carried **their** Windows usernames — in stacktrace frame paths, in captured
-local variables, and inside exception messages such as
+2.0.3 carried **their** Windows usernames — in stacktrace frame paths, in the
+recorded command line, and inside exception messages such as
 `No such file or directory: 'C:\Users\<name>\…'` — plus **their** machine names, as
 Sentry's `server_name`.
 
 The reporting stays: it is how two real bugs on machines nobody here owns were
 found. What changes is that every event now passes through a scrubber before it
 leaves your machine. `server_name` is dropped, and the home-directory segment of
-every path is replaced with `~` — `C:\Users\~\…`, `/home/~/…`, `/Users/~/…` —
-under both path flavors regardless of which OS produced the event, since a
-Windows maintainer receives Linux users' reports and the reverse. What a
-maintainer actually debugs from is deliberately untouched: the release, the
-environment, the exception type and mechanism, and the module path *after* the
-home segment.
+every path is replaced with `~` — `C:\Users\~\…`, `/home/~/…`, `/Users/~/…`, plus
+UNC shares and the `/var/home` layouts — regardless of which OS produced the
+event, since a Windows maintainer receives Linux users' reports and the reverse.
+Account names containing spaces are handled too.
+
+Separately, **local variables are no longer captured**. The SDK records every
+frame's locals by default, and in this product a local can hold a proxy
+password, an `Authorization` or `Cookie` header, or a script you passed in —
+values that are secret in themselves, which no amount of path scrubbing would
+have fixed. The project's own canary suite already treats those classes as
+release blockers on every other surface; error reports now match.
+
+What a maintainer actually debugs from is deliberately untouched: the release,
+the environment, the exception type and mechanism, the failing source line, and
+the module path *after* the home segment.
 
 This is universal — there is no maintainer-only exemption and no way to opt back
 into sending the identifying fields. The README now discloses what a report

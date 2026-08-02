@@ -98,6 +98,12 @@ def test_sentry_init_ships_to_the_hardcoded_dsn_by_default(monkeypatch):
     # `before_send` carries their username and machine name off their machine.
     # What it scrubs is pinned in `tests/test_observability_scrubbing.py`.
     assert captured["before_send"] is observability._scrub_event
+    # Frame locals are NOT captured. The scrubber anonymizes paths, but a local
+    # in this product holds proxy credentials, an Authorization or Cookie
+    # header, or a user script body — values that are secret in themselves and
+    # that no path rule can rescue. The SDK's default is True, so this is a
+    # decision and has to be pinned as one.
+    assert captured["include_local_variables"] is False
 
 
 def test_the_host_projects_sentry_dsn_is_never_read(monkeypatch):
