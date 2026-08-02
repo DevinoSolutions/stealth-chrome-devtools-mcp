@@ -147,7 +147,8 @@ def _recorded_backend_pid() -> int | None:
     this with `_format_backend_status()`'s liveness read separately (F-305).
 
     The FIRST recorded backend: the record can now hold one per display context
-    (F-808), and naming them all is Task 6's job, not this line's."""
+    (F-808), and naming them all belongs to `_doctor_backend_lines`, not to this
+    one-value line."""
     from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
     entry = backend_registry.first_backend(singleton._read_server_state())
@@ -162,6 +163,76 @@ def _backend_log_location(pid: int | None) -> str:
 
     filename = f"backend-{pid}.log" if pid is not None else "backend-boot.log"
     return str(resolve_log_dir() / filename)
+
+
+def _probe_recorded_backend(port: int | None) -> str:
+    """One recorded backend's liveness on a port the caller already holds, in
+    `_probe_backend_status`'s exact vocabulary: down / wedged / responsive.
+
+    Same two primitives in the same order producing the same three words as
+    `singleton._probe_backend_status` (ONE liveness vocabulary, plan_M8
+    SS2.1-B) — all that differs is where the port comes from. That function
+    reads the FIRST recorded backend, which cannot answer for a record holding
+    one per display context (F-808), and singleton.py sits at its LOC budget,
+    so the per-port form lives here rather than beside it. It reaches the
+    primitives THROUGH the module (`singleton._server_is_healthy`), never by
+    importing their names, so a test that patches singleton still reaches them.
+    """
+    from stealth_chrome_devtools_mcp.embedded import singleton
+
+    if port is None:
+        return "no port recorded"
+    if not singleton._server_is_healthy(port):
+        return "down"
+    return "responsive" if singleton._backend_http_ready(port) else "wedged"
+
+
+def _doctor_backend_lines() -> list[str]:
+    """One line per RECORDED backend — context, port, pid, version, liveness,
+    and whether a window launched there could be seen — plus the remedy when
+    none of them can show one.
+
+    The `backend :` line above answers "is the backend up"; this answers "which
+    desktops have one", the operational question F-808 created. A headed spawn
+    is refused when the backend serving it cannot display a window, and that
+    refusal points the operator at this command, so it must be able to name
+    every context — the summary line, which reports the first recorded backend
+    only, cannot. Ordering is `backend_registry.window_capable_first`'s, so
+    doctor presents the same preference discovery applies rather than
+    re-deriving one.
+    """
+    from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
+    from stealth_chrome_devtools_mcp.embedded.display_context import HEADLESS
+
+    lines: list[str] = []
+    capable = False
+    for entry in backend_registry.window_capable_first(singleton.SERVER_STATE_FILE):
+        context = str(entry.get("display_context"))
+        port = backend_registry.recorded_int(entry, "port")
+        pid = backend_registry.recorded_int(entry, "pid")
+        version = entry.get("version")
+        capable = capable or context != HEADLESS
+        lines.append(
+            f"backend  {context}  port {port if port is not None else '-'}  "
+            f"pid {pid if pid is not None else '-'}  "
+            f"version {version if isinstance(version, str) else '-'}  "
+            f"{_probe_recorded_backend(port)}  "
+            f"({'headless only' if context == HEADLESS else 'can show windows'})"
+        )
+    if not lines:
+        # Not the headless-only diagnosis: with nothing recorded the next
+        # session cold-starts a backend in whatever context it runs in, so
+        # there is no remedy to give yet.
+        return ["backend  (none recorded)"]
+    if not capable:
+        # Deliberately the spawn refusal's own words (embedded/server.py's
+        # headed-visibility guard): an operator who arrives here from that
+        # error must recognise the instruction, not re-interpret a paraphrase.
+        lines.append(
+            "no backend can display a window: headed spawns will fail — start "
+            "one from a desktop session and any session will use it automatically"
+        )
+    return lines
 
 
 def _doctor_port_occupant_line() -> str:
@@ -286,6 +357,9 @@ def _cmd_doctor(_args) -> int:
     print(f"pid         : {pid if pid is not None else '-'}")
     print(f"log         : {_backend_log_location(pid)}")
     print(f"port        : {_doctor_port_occupant_line()}")
+    print("contexts    :")
+    for line in _doctor_backend_lines():
+        print(f"  {line}")
 
     chrome = _find_chrome()
     print(f"chrome      : {chrome or 'NOT FOUND — install Google Chrome'}")
