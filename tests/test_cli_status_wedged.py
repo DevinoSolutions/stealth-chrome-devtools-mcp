@@ -6,8 +6,15 @@ status`) instead of `_find_running_server`'s binary reuse-or-not answer.
 _cmd_status/_cmd_doctor call) to avoid the real, heavyweight `import server`
 side effect (FastMCP tool registration) — the singleton wiring is what these
 tests pin, not the rest of the CLI's server-derived fields.
+
+The last class extends that to F-808's question: `_format_backend_status` still
+answers "is THE backend up", but the record now holds one backend per display
+context, so doctor must also name every recorded one and say which of them can
+put a window on a screen.
 """
 
+import json
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -15,6 +22,16 @@ import pytest
 
 from stealth_chrome_devtools_mcp import cli
 from stealth_chrome_devtools_mcp.embedded import singleton
+
+
+@pytest.fixture(autouse=True)
+def _state_file_in_tmp(tmp_path, monkeypatch):
+    """Every test here runs against a tmp record. `_doctor_backend_lines` reads
+    `singleton.SERVER_STATE_FILE` directly (via `backend_registry.window_capable_
+    first`), a path `_read_server_state` patches do not cover — without this,
+    any `_cmd_doctor` test would list, and port-probe, whatever the developer's
+    real `~/.stealth-mcp/server.json` happens to record."""
+    monkeypatch.setattr(singleton, "SERVER_STATE_FILE", tmp_path / "server.json")
 
 
 @pytest.fixture()
@@ -277,3 +294,252 @@ class TestCliDoctorPortOccupant:
             cli._cmd_doctor(None)
         out = capsys.readouterr().out
         assert "NON-stealth" in out
+
+
+@pytest.fixture()
+def recorded_backends(tmp_path, monkeypatch):
+    """Redirect the backend record at a tmp file and hand back a writer.
+
+    `singleton.SERVER_STATE_FILE` is the one binding every reader resolves
+    through, so patching it — never a registry global — is what keeps a test
+    run out of the developer's live `~/.stealth-mcp/server.json`.
+    """
+    path = tmp_path / "server.json"
+    monkeypatch.setattr(singleton, "SERVER_STATE_FILE", path)
+
+    def _record(state: dict | None) -> None:
+        if state is not None:
+            path.write_text(json.dumps(state), encoding="utf-8")
+
+    return _record
+
+
+def _v2(**backends) -> dict:
+    """A schema-v2 record from `context=entry` kwargs (`_` reads as `-`)."""
+    return {
+        "schema": 2,
+        "backends": {ctx.replace("_", "-"): entry for ctx, entry in backends.items()},
+    }
+
+
+@contextmanager
+def _doctor_probes(fake_server, *, healthy=True, ready=True):
+    """Run doctor with every live probe stubbed, so the ONLY input that varies
+    is the recorded state file.
+
+    `healthy`/`ready` take a bool or a port predicate — that pair is what
+    `_probe_backend_status`'s vocabulary is built from (is the socket open? and
+    does it answer a real initialize?), so per-port liveness is expressible here
+    without a second set of stubs.
+    """
+
+    def _by_port(answer):
+        return lambda port, **_kwargs: answer(port) if callable(answer) else answer
+
+    with (
+        patch.object(cli, "_clone_storage", return_value=fake_server),
+        patch.object(cli, "_find_chrome", return_value="/usr/bin/chrome"),
+        patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton._probe_backend_status",
+            return_value=("none", None),
+        ),
+        patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton._backend_pid_on_port",
+            return_value=None,
+        ),
+        patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton._port_is_foreign_held",
+            return_value=False,
+        ),
+        patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton._server_is_healthy",
+            side_effect=_by_port(healthy),
+        ),
+        patch(
+            "stealth_chrome_devtools_mcp.embedded.singleton._backend_http_ready",
+            side_effect=_by_port(ready),
+        ),
+    ):
+        yield
+
+
+class TestCliDoctorDisplayContexts:
+    """plan_F808 Task 6: doctor names EVERY recorded backend with its display
+    context, so "which contexts have a backend" — the question `spawn_browser`'s
+    headed-visibility refusal sends the operator here to answer — is answerable
+    at all. The single `backend :` summary line above it reports the first
+    recorded backend only, and cannot.
+    """
+
+    def test_every_recorded_backend_is_listed_with_its_context(
+        self, fake_server, recorded_backends, capsys
+    ):
+        recorded_backends(
+            _v2(
+                win_session_1={"port": 55296, "pid": 4242, "version": "2.0.4"},
+                headless={"port": 19222, "pid": 909, "version": "2.0.4"},
+            )
+        )
+        with _doctor_probes(fake_server):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        assert "backend  win-session-1  port 55296  pid 4242  version 2.0.4" in out
+        assert "backend  headless  port 19222  pid 909  version 2.0.4" in out
+        assert "(can show windows)" in out
+        assert "(headless only)" in out
+
+    def test_window_capable_backends_are_listed_first(
+        self, fake_server, recorded_backends, capsys
+    ):
+        """Recorded headless-first, printed capable-first: the order is
+        `backend_registry.window_capable_first`'s, not the file's."""
+        recorded_backends(
+            _v2(
+                headless={"port": 19222, "pid": 909, "version": "2.0.4"},
+                win_session_1={"port": 55296, "pid": 4242, "version": "2.0.4"},
+            )
+        )
+        with _doctor_probes(fake_server):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        assert out.index("backend  win-session-1") < out.index("backend  headless")
+
+    def test_each_backend_is_probed_on_its_own_port(
+        self, fake_server, recorded_backends, capsys
+    ):
+        """Three recorded backends, three different liveness answers — a
+        once-per-record probe would report one verdict for all of them."""
+        recorded_backends(
+            _v2(
+                win_session_1={"port": 55296, "pid": 4242, "version": "2.0.4"},
+                win_session_2={"port": 55297, "pid": 4243, "version": "2.0.4"},
+                headless={"port": 19222, "pid": 909, "version": "2.0.4"},
+            )
+        )
+        with _doctor_probes(
+            fake_server,
+            healthy=lambda port: port != 19222,  # the headless one is gone
+            ready=lambda port: port == 55296,  # 55297 holds its socket only
+        ):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        assert "port 55296  pid 4242  version 2.0.4  responsive" in out
+        assert "port 55297  pid 4243  version 2.0.4  wedged" in out
+        assert "port 19222  pid 909  version 2.0.4  down" in out
+
+    def test_remedy_line_when_no_backend_can_show_a_window(
+        self, fake_server, recorded_backends, capsys
+    ):
+        """The actionable half: a headless-only machine must be told what to do,
+        in the same words `spawn_browser`'s refusal uses."""
+        recorded_backends(_v2(headless={"port": 19222, "pid": 909, "version": "2.0.4"}))
+        with _doctor_probes(fake_server):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        assert "no live backend can display a window" in out
+        assert "headed spawns will fail" in out
+        assert "desktop session" in out
+        assert "automatically" in out
+
+    def test_no_remedy_line_when_a_window_capable_backend_is_responsive(
+        self, fake_server, recorded_backends, capsys
+    ):
+        recorded_backends(
+            _v2(
+                headless={"port": 19222, "pid": 909, "version": "2.0.4"},
+                win_session_1={"port": 55296, "pid": 4242, "version": "2.0.4"},
+            )
+        )
+        # Explicitly responsive: it is the LIVENESS, not the recorded token,
+        # that is allowed to suppress the remedy.
+        with _doctor_probes(fake_server, healthy=True, ready=True):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        # Both halves: the capable backend IS listed, and its presence is what
+        # suppresses the remedy (asserting only the absence would pass against
+        # a doctor that prints nothing at all).
+        assert "backend  win-session-1" in out
+        assert "responsive  (can show windows)" in out
+        assert "no live backend can display a window" not in out
+
+    def test_a_dead_window_capable_backend_does_not_suppress_the_remedy(
+        self, fake_server, recorded_backends, capsys
+    ):
+        """The desktop logged out. The entry survives, so a token-only judgment
+        would hide the advice in exactly the state that needs it — the SSH
+        operator's headed spawn is still refused, because discovery finds no
+        LIVE capable backend to adopt."""
+        recorded_backends(
+            _v2(win_session_1={"port": 55296, "pid": 4242, "version": "2.0.4"})
+        )
+        with _doctor_probes(fake_server, healthy=False):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        # The note stays token-driven: that is still where its windows WOULD go.
+        assert "down  (can show windows)" in out
+        assert "no live backend can display a window" in out
+
+    def test_a_wedged_window_capable_backend_does_not_suppress_the_remedy(
+        self, fake_server, recorded_backends, capsys
+    ):
+        """Same ruling's other half: a wedged backend holds its socket open but
+        cannot serve a spawn either."""
+        recorded_backends(
+            _v2(win_session_1={"port": 55296, "pid": 4242, "version": "2.0.4"})
+        )
+        with _doctor_probes(fake_server, healthy=True, ready=False):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        assert "wedged  (can show windows)" in out
+        assert "no live backend can display a window" in out
+
+    def test_an_entry_with_no_usable_port_says_so(
+        self, fake_server, recorded_backends, capsys
+    ):
+        """The record tolerates hand-editing, so `port` can be a string. There
+        is nothing to probe, and claiming "down" would assert a liveness we
+        never tested."""
+        recorded_backends(
+            _v2(win_session_1={"port": "55296", "pid": 4242, "version": "2.0.4"})
+        )
+        with _doctor_probes(fake_server):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        assert "backend  win-session-1  port -  pid 4242" in out
+        assert "no port recorded  (can show windows)" in out
+        assert "no live backend can display a window" in out
+
+    def test_a_v1_record_reads_as_one_unverified_window_capable_backend(
+        self, fake_server, recorded_backends, capsys
+    ):
+        """Every release up to 2.0.3 wrote the flat record. It must list, and it
+        must NOT provoke the remedy — UNVERIFIED is treated as capable."""
+        recorded_backends({"port": 19222, "pid": 909, "version": "2.0.3"})
+        with _doctor_probes(fake_server):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        assert "backend  unverified  port 19222  pid 909  version 2.0.3" in out
+        assert "(can show windows)" in out
+        assert "no live backend can display a window" not in out
+
+    def test_no_record_says_none_recorded_without_a_remedy(
+        self, fake_server, recorded_backends, capsys
+    ):
+        """Nothing recorded is not the headless-only diagnosis: the next spawn
+        cold-starts a backend in whatever context it happens to run in."""
+        recorded_backends(None)  # the file is never written
+        with _doctor_probes(fake_server):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        assert "backend  (none recorded)" in out
+        assert "no live backend can display a window" not in out

@@ -18,7 +18,7 @@ them in exactly that sense.
 
 ## 1. Two surfaces, one backend
 
-There are **two front-ends** over **one shared backend process**:
+There are **two front-ends** over a **shared backend process**:
 
 - the **MCP tool surface** — **94 tools** exposed over HTTP (and bridged to stdio),
   defined in `stealth_chrome_devtools_mcp.embedded.server` and registered through
@@ -27,13 +27,16 @@ There are **two front-ends** over **one shared backend process**:
   / `restart` / `cleanup` / `kill-orphans` / `serve`) in
   `stealth_chrome_devtools_mcp.cli`, for a human to inspect and operate the backend.
 
-Both talk to the **one** ***backend***: a single detached
+Both talk to a shared ***backend***: a detached
 `python -m stealth_chrome_devtools_mcp --transport http` process that hosts FastMCP
-and all 94 tools. A Claude Code session connects through a short-lived ***stdio
-proxy*** that bridges stdio ↔ the backend's HTTP; the ops CLI talks to the same
-backend over the same HTTP contract. Keeping the tool surface and the CLI as thin
-front-ends over one backend is what lets N client sessions share one browser fleet
-without N competing servers.
+and all 94 tools. There is **one backend per (source fingerprint, display context)** —
+in practice one process on a headless box, and at most two on a desktop box that is
+also SSH'd into ([§2.7](#27-display-context-where-a-window-launched-here-would-be-seen)).
+A Claude Code session connects through a short-lived ***stdio proxy*** that bridges
+stdio ↔ the backend's HTTP; the ops CLI talks to the same backend over the same HTTP
+contract. Keeping the tool surface and the CLI as thin front-ends over a shared
+backend is what lets N client sessions share one browser fleet without N competing
+servers.
 
 **The tool count is 94, and it is derived, not typed.** The authoritative source is
 the live `SECTION_TOOLS` registry (`sum(len(v) for v in SECTION_TOOLS.values())`).
@@ -96,15 +99,37 @@ at scale — 40 simultaneous real stdio sessions, exactly one logical backend.
 is free or held by our own backend, and only when a **foreign** process occupies the
 target does it fall back to an OS-assigned free port (`_free_port`, from
 `proxy_forwarder`). The chosen port, plus the version, pid, and source fingerprint,
-are handed off through `~/.stealth-mcp/server.json` with exactly these keys:
+are handed off through `~/.stealth-mcp/server.json`, which records one backend
+per **display context** (F-808) so a headless and a desktop backend can coexist:
 
 ```json
-{ "port": 19222, "version": "...", "pid": 12345, "source_fingerprint": "..." }
+{
+  "schema": 2,
+  "backends": {
+    "win-session-1": {
+      "port": 19222, "version": "...", "pid": 12345,
+      "source_fingerprint": "...", "display_context": "win-session-1"
+    }
+  }
+}
 ```
 
+The flat `{port, version, pid, source_fingerprint}` record every release up to
+2.0.3 wrote still reads, as one backend classified `unverified`. Read entries out
+of the record through `backend_registry`'s accessors — nothing outside that module
+branches on `schema`.
+
+Recording a backend also **supersedes by port**: any other entry claiming that port
+is dropped, because only one process can hold a loopback listener, so a second entry
+naming it is by construction a leftover (a v1 record, or a context token that changed
+under a backend that did not — a Windows session id is reassigned across an RDP
+reconnect). Entries on other ports, `unverified` included, survive.
+
 Discovery and reuse **read the recorded port**; they never assume `19222`. `stop`
-clears `server.json`, so the next start falls back to `DEFAULT_PORT`. **Never
-re-hardcode `19222`** anywhere in the path — the port is data, not a constant.
+forgets the stopped backend's own display-context entry and clears `server.json` only
+once nothing else is recorded, so the next start falls back to `DEFAULT_PORT` when it
+was the last backend on the machine. **Never re-hardcode `19222`** anywhere in the
+path — the port is data, not a constant.
 
 ### 2.3 Source-fingerprint reuse, and an always-fresh dev backend
 
@@ -160,6 +185,55 @@ stdio proxy — does **zero** reaping. A public `ProcessCleanup.recover_orphans(
 backs the `kill-orphans` CLI verb. This is why importing the package never kills a
 stray Chrome you were mid-debugging.
 
+### 2.7 Display context: where a window launched here would be seen
+
+Chrome inherits its parent's window station, so whether a headed browser is
+**visible** is decided by the process that launches it — never by the caller and
+never by the `headless` flag. On the machine F-808 was reported from, the shared
+backend had been cold-started by an SSH client in Windows **Session 0** (isolated
+since Vista; its desktop is never composited onto a user's screen), so every
+desktop session on that box reused it and got a browser that was fully driveable
+over CDP and permanently invisible. `spawn_browser` reported `state: "ready"`,
+`headless: false`, `window_size.measured: true` — all true, none of them an
+observation of a window.
+
+`embedded/display_context.py` makes that property explicit and **observational**:
+it reports OUR OWN context and never tries to pick or enter someone else's session.
+`WTSGetActiveConsoleSessionId()` is deliberately not used — on the reporting machine
+the active console session was 2 while the user's desktop lived in session 1, so any
+"find the interactive session" heuristic is wrong on somebody's machine. The token is
+`headless` (PROVEN invisible), `unverified` (unclassifiable — treated as capable, so
+a broken probe can never block headed browsing), or a specific desktop:
+`win-session-N`, `wayland-<display>`, `x11-<display>`, `aqua-<uid>`.
+
+**Identity is a preference, not an equality test — in one direction only.** The
+asymmetry lives in `backend_registry.adoption_candidates` and is the whole fix:
+
+- A client that **cannot prove** it has a desktop (`headless` or `unverified`)
+  adopts **any** recorded backend, window-capable entries first. This is what makes
+  an SSH session's headed spawn visible: it converges on the desktop backend, and
+  the window opens on the real desktop. For such a client display context is a
+  *preference*, never a filter.
+- A client that **can prove** it has a desktop adopts only its **own** context's
+  entry plus `unverified` ones. Every other proven context is excluded — foreign
+  desktops as much as `headless`. Identity cannot separate them (a sibling desktop
+  runs the same install, so version and fingerprint both match), yet a browser
+  spawned there renders on a window station this user cannot see. Refusing costs
+  one cold start.
+
+`unverified` is adoptable on **both** sides, because it is what every record written
+up to 2.0.3 reads as. Refusing it would evict a healthy backend the moment a user
+upgrades. **Only a PROVEN verdict moves anything** — that rule also governs
+`port_conflict`, where treating `unverified` as a conflict would divert the spawn to
+a random free port, send eviction at the wrong port, and leak the live 2.0.3 backend
+and its Chrome processes for good.
+
+Where no window-capable backend exists at all, `spawn_browser(headless=False)`
+**raises** a `ToolError` naming the context and the two remedies (start a backend from
+a desktop session; or pass `headless=True`). Silent headed→headless degradation was
+rejected as the same defect wearing a different hat. Headless spawns from a `headless`
+context are unaffected — CI depends on exactly that.
+
 ---
 
 ## 3. The observability spine
@@ -202,7 +276,7 @@ took the backend down for every connected session), and silently wrong when the
 key happened to be one of ours (`PORT`, `DEBUG`, `SENTRY_DSN`). Scoping the file
 to our own state dir is also what keeps `extra="forbid"` honest: it now guards a
 file the operator wrote. `settings.py` is a leaf module and may not import the
-package, so it recomputes the state-dir path that `embedded/singleton.py`'s
+package, so it recomputes the state-dir path that `embedded/backend_registry.py`'s
 `STATE_DIR` canonically defines — the one deliberate duplication, commented at
 both ends.
 
@@ -413,6 +487,13 @@ owed* by your change.
 | **F-765** | a `poll_until` helper to fold repeated polling loops. OPEN. |
 | **M1 probe-body dedup** | `_backend_http_ready` deliberately copies ~10 lines of the `initialize` probe body to stay disjoint from M3-owned code; one shared probe body in `singleton` is a future cleanup. |
 | **M11b DI seam** | a general factory/DI seam for the import-time singletons (F-125 remainder) is deferred; M11a removed only `process_cleanup`'s import-time side effects. |
+| **F-509 A2** | cold-start lock **losers** commit to their own `_select_backend_port` result; behind a foreign squatter the winner's `_free_port()` pick differs, so a loser polls a port nothing will bind for the full `BACKEND_READY_TIMEOUT` (120 s) before self-healing. Recorded in `TRIAGE_final-review_to_plan_RELEASE.md` A2 (singleton.py, MED). Fix shape: losers re-read the record after the lock resolves, or serialize port choice under the lock. OPEN. |
+| **F-809** | a clean POSIX shutdown emits ERROR logs, so every graceful stop ships Sentry events (`STEALTH-CHROME-DEVTOOLS-MCP-1J`, `-1H`). Two independent causes: `ProcessCleanup._signal_handler` **replaces** uvicorn's `handle_exit` rather than coexisting with it (both use `signal.signal`, ours installs second), so `sys.exit(0)` erupts inside the running loop and the lifespan/session tasks unwind abnormally; and FastMCP 2.11.2 hard-codes `timeout_graceful_shutdown: 0`, where `asyncio.wait_for(coro, 0)` **always** raises, so uvicorn logs "Cancel N running task(s)" on every graceful HTTP stop regardless. Fix shape: clean up, then hand the signal back to the host server, plus a real grace budget under singleton's 5 s terminate→kill window. Windows is unaffected (`TerminateProcess` runs no handler). OPEN. |
+| **`_PROTECTED_CLONE_DIRS` lifetime** | `clone_storage._protect_clone_dir` shields an in-flight clone from the cap sweep, but protection is released only on a clean `close_instance`; a spawn that dies between `_protect_` and its instance record leaks a permanently sweep-exempt entry in a process-global set. Bounded and small, never audited. OPEN. |
+| **`PORT_FILE` vestige** | `server.port` is written by `singleton` and cleared by `stop_backend`, with **no reader anywhere in `src/`**. Now that `backend_registry` owns the record, deleting it is a one-line removal plus the test fixtures that redirect it. OPEN. |
+| **Proxy-side `debug_logger` records reach no file** | `debug_logger` emits to the `stealth.backend` logger; `logging_setup.configure_logging(role)` attaches a handler only to `stealth.<role>` with `propagate = False`. In a stdio-proxy process only `stealth.proxy` is wired, so every `debug_logger` warning raised proxy-side is discarded. F-808 made this load-bearing: `display_context`'s "session probe refused / raised → unverified" warnings fire in the proxy, exactly where an operator would look to explain an invisible spawn. OPEN. |
+| **Handled `ToolError`s ship to Sentry at full volume** | `debug_logger.log_error` emits `_backend_logger.error(...)` **unconditionally and un-deduped** (deliberate, F-182/F-204: the durable file must have every occurrence), and `observability.py` installs `LoggingIntegration(event_level=logging.ERROR)`. So an ordinary user-side error becomes a Sentry event per occurrence — Sentry issue `STEALTH-CHROME-DEVTOOLS-MCP-P` is **132 events from a single user-script `SyntaxError`**. The durable-file requirement and the Sentry volume want different gates; today there is one. OPEN. |
+| **WebSocket 404 in `window_sizing.apply_and_measure`** | Post-launch measurement raised a WebSocket-404 on a teammate machine (Sentry `STEALTH-CHROME-DEVTOOLS-MCP-1E`, **one event**, not reproduced). Measurement is already guarded — it degrades to `measured: false` rather than failing the spawn — so the visible cost is a spawn that reports an unmeasured size. Root cause unknown; too thin to act on. OPEN. |
 
 **Not debt (delivered):** the F-104 error-envelope sweep (M10b) was **delivered** via
 M4-Ph1 Amendment A1 and is **closed** — it is intentionally absent from this ledger.

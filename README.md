@@ -34,9 +34,10 @@ https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
 - **Smart profile management** — master/snapshot/clone strategy preserves logins across sessions
 - **Stealth arg filtering** — automatically strips 30+ detectable Chrome flags (Puppeteer/Playwright signatures, automation markers)
 - **Multi-instance support** — spawn and manage multiple browsers simultaneously
-- **One shared backend across sessions** — every client session proxies to a single
-  backend process rather than starting its own; simultaneous cold start is scale-tested
-  at 40 concurrent sessions, all usable in seconds against one backend
+- **A shared backend across sessions** — every client session proxies to a shared
+  backend process rather than starting its own, one per desktop so a headed spawn
+  lands on a real screen; simultaneous cold start is scale-tested at 40 concurrent
+  sessions, all usable in seconds against one backend
 - **Auto-suffix busy profiles** — `github-session` auto-becomes `github-session-2` when occupied
 - **Orphan recovery** — safely cleans up leaked browser processes without killing live ones
 - **Session persistence** — cloned profiles carry cookies, logins, and Web Data from master
@@ -52,7 +53,7 @@ Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, e
   "mcpServers": {
     "stealth-chrome-devtools-mcp": {
       "command": "uvx",
-      "args": ["stealth-chrome-devtools-mcp==2.0.3"]
+      "args": ["stealth-chrome-devtools-mcp==2.0.4"]
     }
   }
 }
@@ -61,8 +62,12 @@ Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, e
 Or install via pip:
 
 ```bash
-pip install stealth-chrome-devtools-mcp==2.0.3
+pip install stealth-chrome-devtools-mcp==2.0.4
 ```
+
+Crashes are reported to the maintainers by default, with your username and
+machine name scrubbed out. See [Error Reporting](#error-reporting) for what a
+report contains and how to turn it off.
 
 ### Local Development
 
@@ -139,10 +144,27 @@ Stripped args are reported in `spawn_diagnostics.stealth_args_stripped`.
 
 On server restart, the process cleanup system:
 
-- Identifies browser processes from previous sessions via `create_time` tracking
-- Only kills processes started **before** the current server session
-- Never kills browsers spawned during the current run
+- Reaps only browsers whose **owner backend is dead** — every tracked browser records
+  which backend started it, so two backends running side by side never reap each
+  other's browsers
+- Keeps `create_time` tracking as a second net: never kills a process that started
+  **after** the current server session began
 - Safely handles `psutil.AccessDenied` on Windows elevated processes
+
+### Headed Browsing and Where the Window Opens
+
+A headed browser appears on the desktop of whichever process **launched** it, not
+of whichever session asked. Because sessions share a backend, a backend that was
+first started from an SSH login or a Windows service session cannot show a window
+to anyone — including the sessions running on the physical desktop.
+
+So the backend is keyed by **display context**: one per desktop, plus one for a
+headless context. Discovery prefers a backend that can show a window, which means
+an SSH-driven `spawn_browser(headless=False)` automatically uses the desktop
+backend and its window opens on the real screen. Where no such backend exists, the
+spawn **raises** instead of handing back an invisible browser; run
+`stealth-chrome-devtools doctor` to see which contexts have a backend. Headless
+spawns work from anywhere.
 
 ## Usage Examples
 
@@ -215,7 +237,7 @@ All optional. Defaults work for normal use. Set them in your shell, or in
 `~/.stealth-mcp/.env` — every key is documented in [`.env.example`](./.env.example).
 
 A `.env` in your **project** directory is deliberately ignored. The backend is a
-single shared process launched with whatever folder your MCP client had open, so
+shared process launched with whatever folder your MCP client had open, so
 reading the project's `.env` meant reading someone else's application config —
 which crashed the server outright on an ordinary `DATABASE_URL` and silently
 adopted that app's `PORT`, `DEBUG`, and `SENTRY_DSN` as the server's own.
@@ -285,6 +307,7 @@ uses the same selectors as the automatic sweep, so the preview matches `--apply`
 - Python 3.11+
 - Chrome, Chromium, or Microsoft Edge
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- A desktop session for **headed** browsing (headless works from SSH, CI, and services)
 
 ## Error Reporting
 
@@ -292,6 +315,27 @@ Crashes and errors are reported to [Sentry](https://sentry.io) **by default**, s
 that a failure you hit is a failure we can see and fix. There is nothing to
 install and nothing to configure: the SDK ships with the package and the
 destination is built in.
+
+**What a report contains.** The exception type and message, the stack trace, the
+package version, and the platform. Three things are kept out of it:
+
+- your **machine name** (Sentry's `server_name`) is dropped entirely;
+- your **username** is removed from every path, so a stack frame reads
+  `C:\Users\~\...`, `/home/~/...` or `/Users/~/...` instead of your home
+  directory;
+- **local variables are not captured at all.** The Sentry SDK sends them by
+  default; we turn that off, because a local in this tool can hold a proxy
+  password, an `Authorization` or `Cookie` header, or a script you asked it to
+  run — secrets that no path rule could rescue.
+
+That is universal — it runs on every install, ours included, and there is no way
+to opt back into sending those fields. What it deliberately leaves alone is the
+part that makes a report useful: the error type, the module path after the home
+segment, the source line that failed, and the release it came from.
+
+An error message still quotes whatever the failing call was working with — a URL
+you navigated to, a file you asked for. If that is not a trade you want to make,
+turn reporting off.
 
 To turn it off, set one variable in your shell or in `~/.stealth-mcp/.env`:
 

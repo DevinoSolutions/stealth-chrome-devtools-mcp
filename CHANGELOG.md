@@ -1,5 +1,167 @@
 # Changelog
 
+## 2.0.4
+
+### Fixed — a headed spawn opens a browser you can actually see, or says why not (F-808)
+
+`spawn_browser(headless=False)` could return `state: "ready"`, `headless: false`
+and `window_size.measured: true` while producing a browser that was **permanently
+invisible**. Chrome inherits its parent's window station, so visibility is decided
+by whoever launched the backend — not by the `headless` flag and not by the caller.
+One session cold-starting the shared backend from an SSH login or a Windows service
+session (Session 0, isolated since Vista) poisoned headed browsing for **every**
+session on the machine, including the ones running on the physical desktop. Every
+signal the server had said success, because none of them observed a window: CDP
+attaches to the process, and `take_screenshot` captures the compositor surface
+whether or not it is displayed. This was a regression from 1.0.0, where each client
+ran the server in-process and Chrome was always a descendant of the session that
+asked.
+
+The fix has two halves, and the first is the one that closes the report.
+
+- **The backend a session adopts now depends on where windows can be shown.**
+  `server.json` records one backend per **display context** — an observed token
+  naming the desktop a process could put a window on (`win-session-N`,
+  `wayland-…`, `x11-…`, `aqua-<uid>`, or `headless` / `unverified`). Discovery
+  prefers a window-capable backend, and adoption is deliberately asymmetric: a
+  client that cannot prove it has a desktop adopts **any** backend, window-capable
+  first — which is exactly what makes an SSH session's headed spawn land on the
+  desktop backend and open on the real screen — while a client that can prove one
+  adopts only its own context's backend. Nothing tries to *find* the interactive
+  session: on the reporting machine the active console session was 2 while the
+  user's desktop was session 1, so every "pick the interactive session" heuristic
+  is wrong on somebody's machine. The cost is one extra backend process on a
+  desktop box that is also SSH'd into, which is the correct trade against invisible
+  browsing.
+- **Where no window-capable backend exists, the spawn raises.** A headed spawn in a
+  context that cannot display a window now fails with a `ToolError` naming the
+  context and both remedies — start a backend from a desktop session, or pass
+  `headless=True` — instead of handing back a browser nobody can see. It refuses
+  before cloning a profile directory, so a doomed spawn costs no disk. There is no
+  silent headed→headless degradation; that is the same defect wearing a different
+  hat. **Headless spawns are unaffected from any context**, which is what CI
+  depends on.
+
+`stealth-chrome-devtools doctor` now prints one line per recorded backend with its
+display context and whether that context can show a window, plus an explicit remedy
+line when none of them can.
+
+Fixes `STEALTH-CHROME-DEVTOOLS-MCP-K` — 66 nodriver "Failed to connect to browser"
+events on 2.0.3, all from headed spawns driven over the magent/psmux SSH path
+against a backend that had no desktop to put a window on. That is F-808's signature
+seen from the other end, and it is closed by the adoption fix above.
+
+### Changed — `server.json` is schema v2, and your existing record is not evicted
+
+The record grew from a flat `{port, version, pid, source_fingerprint}` to
+`{"schema": 2, "backends": {"<display context>": {…}}}`, so one machine can hold a
+headless backend and a desktop backend at once. **Records written by 2.0.3 and
+earlier still read**, as one backend classified `unverified` — which every client
+treats as adoptable — so upgrading does not evict the backend you are currently
+using. The v1 entry is superseded in place the first time a 2.0.4 backend records
+itself on that port: recording supersedes any other entry claiming the same port,
+because only one process can hold a loopback listener, so a second entry naming it
+is by construction a leftover. Without that rule the stale entry would sort first
+forever and force a kill-and-respawn of the shared backend on every proxy start.
+Reading the record belongs to `embedded/backend_registry.py`; nothing outside it
+branches on the schema.
+
+### Fixed — concurrent backends stop erasing each other's tracked browsers
+
+`browser_pids.json` was read and rewritten whole by every writer, so two backends
+running at once — which schema v2 now makes an ordinary state — clobbered each
+other's entries, and the loser's browsers became untrackable orphans nothing would
+ever reap. Every write now read-merge-writes under a sibling lock
+(`browser_pids.json.lock`), with the record's schema, its owner stamp, and that
+protocol living in one new module, `embedded/browser_pid_registry.py`.
+
+Entries also carry the identity of the backend that started them (`owner_pid` and
+`owner_create_time`), and recovery reaps only browsers whose owner backend is
+**dead** — the distinction the old `create_time` guard could not draw, since every
+already-running backend's browsers predate a starting backend's import. `kill-orphans`
+now drops only the entries it actually reaped, leaving other backends' entries
+alone, and `--force` bypasses the ownership check as well as the live-backend
+refusal, so it still does what an operator reaches for it to do. There is
+deliberately **no schema bump**: an entry with no owner keys is a 2.0.3 entry, and
+that absence is exactly what makes it a reclaimable orphan after an upgrade.
+
+### Fixed — the window-size clamp is attributed to the right desktop (corrects F-804)
+
+2.0.1 reported window sizes truthfully but explained the clamp as headed Chrome
+fitting "the desktop work area", read as an ordinary monitor limit. That reasoning
+concluded a workstation driving an RTX 3080 had a ~1024x768 screen. The real clamp
+was **Session 0's small default desktop** — the same root cause as F-808. The
+remedy is unchanged (`spawn_diagnostics.window_size` still reports `requested`,
+`actual`, `inner_viewport` and `clamped`); the docstrings on `spawn_browser` and
+`window_sizing` now say the clamp is to the **launching** context's desktop,
+which is the user's monitor only when the backend runs on it.
+
+### Fixed — test runs no longer ship injected failures to the real Sentry
+
+Error reporting is on by default and `LoggingIntegration` forwards every
+ERROR-level log, so a local test campaign — which deliberately injects failures —
+pushed roughly 50,000 noise events into the live project in 15 hours. `conftest.py`
+now sets `STEALTH_MCP_NO_ERROR_REPORTING=1` as a session-wide default alongside its
+existing env guards, and because the singleton strips only
+`STEALTH_MCP_NO_AUTO_RECOVERY` from a spawned backend's environment, real-Chrome
+integration backends inherit the mute too. An explicitly-set value still wins, so a
+CI cell that *wants* reporting keeps it.
+
+### Changed — error reports no longer carry your username or machine name
+
+Error reporting is on by default, and this release is the one that stopped
+pretending it only ever runs here. Events arriving from third-party installs of
+2.0.3 carried **their** Windows usernames — in stacktrace frame paths, in the
+recorded command line, and inside exception messages such as
+`No such file or directory: 'C:\Users\<name>\…'` — plus **their** machine names, as
+Sentry's `server_name`.
+
+The reporting stays: it is how two real bugs on machines nobody here owns were
+found. What changes is that every event now passes through a scrubber before it
+leaves your machine. `server_name` is dropped, and the home-directory segment of
+every path is replaced with `~` — `C:\Users\~\…`, `/home/~/…`, `/Users/~/…`, plus
+UNC shares and the `/var/home` layouts — regardless of which OS produced the
+event, since a Windows maintainer receives Linux users' reports and the reverse.
+Account names containing spaces are handled too.
+
+Separately, **local variables are no longer captured**. The SDK records every
+frame's locals by default, and in this product a local can hold a proxy
+password, an `Authorization` or `Cookie` header, or a script you passed in —
+values that are secret in themselves, which no amount of path scrubbing would
+have fixed. The project's own canary suite already treats those classes as
+release blockers on every other surface; error reports now match.
+
+What a maintainer actually debugs from is deliberately untouched: the release,
+the environment, the exception type and mechanism, the failing source line, and
+the module path *after* the home segment.
+
+This is universal — there is no maintainer-only exemption and no way to opt back
+into sending the identifying fields. The README now discloses what a report
+contains and how to switch it off (`STEALTH_MCP_NO_ERROR_REPORTING=true`).
+
+### Known gaps
+
+Recorded, not fixed here; each is a row in the `DESIGN.md` §10 known-debt ledger.
+
+- A clean shutdown on Linux and macOS still logs at ERROR, so every graceful stop
+  ships Sentry events (`STEALTH-CHROME-DEVTOOLS-MCP-1J`, `-1H`). Two independent
+  causes: our signal handler replaces the HTTP server's rather than handing control
+  back to it, and FastMCP pins a zero-second graceful-shutdown budget, which always
+  times out. Windows is unaffected. (F-809)
+- A cold-start lock **loser** can poll a port the winner never bound for up to 120 s
+  before self-healing, when a foreign process squats the preferred port (F-509 A2).
+- Handled tool errors reach Sentry at full volume: the durable debug log is
+  deliberately un-deduped, and the same records feed error reporting. One user-script
+  `SyntaxError` produced 132 events (`STEALTH-CHROME-DEVTOOLS-MCP-P`).
+- `debug_logger` records emitted inside a **stdio proxy** reach no log file — only the
+  backend role has a handler for them.
+- A single unreproduced WebSocket 404 during post-launch window measurement
+  (`STEALTH-CHROME-DEVTOOLS-MCP-1E`); measurement is already guarded, so the visible
+  cost is `measured: false`.
+- `~/.stealth-mcp/server.port` is still written and still has no reader.
+- A clone directory shielded from the storage sweep stays shielded if its spawn dies
+  before the instance exists.
+
 ## 2.0.3
 
 ### Fixed — the shared backend no longer absorbs the host project's `.env` (#56)

@@ -48,7 +48,7 @@ _ENV_PREFIX = "STEALTH_MCP_"
 # ``extra="forbid"`` correct again: strictness protects the operator from typos
 # in a file they wrote, instead of punishing them for a file they did not.
 #
-# ``embedded/singleton.py``'s ``STATE_DIR`` is the CANONICAL definition of this
+# ``embedded/backend_registry.py``'s ``STATE_DIR`` is the CANONICAL definition of this
 # path. It is duplicated here rather than imported because this module is a
 # leaf (see the invariants above) and importing the package from it would break
 # that constraint and risk the runpy import cycle. Keep the two in step.

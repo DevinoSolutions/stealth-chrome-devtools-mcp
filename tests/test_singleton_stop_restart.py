@@ -31,7 +31,7 @@ from unittest.mock import MagicMock
 import psutil
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
 
 @pytest.fixture()
@@ -314,6 +314,61 @@ class TestStopBackend:
         assert pid is None
         assert singleton._read_server_state() is None
 
+    def test_stop_forgets_only_the_stopped_context(self, isolated_state, monkeypatch):
+        """F-808: `stop` used to unlink the whole record, which would make a
+        LIVE backend on another display context undiscoverable - the next proxy
+        start would spawn a second one beside it. It must forget only the
+        backend it actually stopped, and clear the file only once nothing is
+        left recorded.
+
+        Termination is stubbed on purpose: this pins the record bookkeeping,
+        not the kill (which TestStopBackend's marked-sleeper cases cover).
+        """
+        monkeypatch.setattr(singleton, "_terminate_backend", lambda port: True)
+        # Mirror the real _probe_backend_status: it reports the FIRST recorded
+        # backend's port, so a constant stub would not move between the two
+        # stops this test performs.
+        monkeypatch.setattr(
+            singleton,
+            "_probe_backend_status",
+            lambda: (
+                "responsive",
+                (
+                    backend_registry.first_backend(singleton._read_server_state()) or {}
+                ).get("port"),
+            ),
+        )
+        backend_registry.record_backend(
+            singleton.SERVER_STATE_FILE,
+            port=5000,
+            version="1.2.1",
+            pid=1111,
+            source_fingerprint="fp",
+            display_context="headless",
+        )
+        backend_registry.record_backend(
+            singleton.SERVER_STATE_FILE,
+            port=6000,
+            version="1.2.1",
+            pid=2222,
+            source_fingerprint="fp",
+            display_context="win-session-1",
+        )
+
+        result, pid = singleton.stop_backend()
+
+        assert (result, pid) == ("stopped", 1111)
+        assert [
+            (e["display_context"], e["port"])
+            for e in backend_registry.read_backends(singleton.SERVER_STATE_FILE)
+        ] == [("win-session-1", 6000)]
+
+        result, pid = singleton.stop_backend()
+
+        assert (result, pid) == ("stopped", 2222)
+        assert singleton._read_server_state() is None
+        assert not singleton.SERVER_STATE_FILE.exists()
+
     def test_none_reports_not_running(self, isolated_state, monkeypatch):
         monkeypatch.setattr(singleton, "_probe_backend_status", lambda: ("none", None))
 
@@ -572,7 +627,11 @@ class TestRestartPortSelection:
             singleton.restart_backend()
 
             assert spawned_on["port"] != squatted_port
-            assert singleton._read_server_state()["port"] == spawned_on["port"]
+            # SOFT golden updated with F-808's schema v2 (same commit): same
+            # claim - the record ends up naming the NEW port, not the squatted
+            # one - read off the recorded backend instead of the raw record.
+            recorded = backend_registry.first_backend(singleton._read_server_state())
+            assert recorded["port"] == spawned_on["port"]
         finally:
             squatter.close()
 
@@ -609,3 +668,153 @@ class TestRestartPortSelection:
         result = singleton.restart_backend()
 
         assert result == ("responsive", 4242)
+
+
+class TestRestartIsPerDisplayContext:
+    """F-808 steps 4c/4d: restart's two halves must agree on ONE port.
+
+    A terminate half that resolved its own target split-brained on a
+    two-context machine: it killed whichever backend some other read named — a
+    sibling desktop's, and every browser session on it — and then respawned
+    ours somewhere else, so the operator's restart both destroyed someone
+    else's work and did not restart what they asked for.
+
+    Step 4d closes it structurally instead of by keeping two reads in step:
+    selection runs FIRST under the lock and the terminate targets exactly the
+    port it returned. There is now no second resolution to diverge, including
+    on the fallback path where selection DIVERTS (below) — which a matching
+    pair of reads could not have covered.
+    """
+
+    def test_restart_terminates_our_own_context_and_leaves_the_sibling_alone(
+        self, isolated_state, monkeypatch
+    ):
+        from stealth_chrome_devtools_mcp.embedded import display_context
+
+        sibling_port = _free_closed_port()
+        our_port = _free_closed_port()
+        record = isolated_state / "server.json"
+        # The sibling is recorded FIRST, so `first_backend` would name it.
+        backend_registry.record_backend(
+            record,
+            port=sibling_port,
+            version="1.2.1",
+            pid=1111,
+            source_fingerprint="",
+            display_context="win-session-OTHER",
+        )
+        backend_registry.record_backend(
+            record,
+            port=our_port,
+            version="1.2.1",
+            pid=2222,
+            source_fingerprint="",
+            display_context="win-session-OURS",
+        )
+        monkeypatch.setattr(
+            display_context, "display_context", lambda: "win-session-OURS"
+        )
+
+        terminated: list[int] = []
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: False)
+        monkeypatch.setattr(
+            singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
+        )
+        monkeypatch.setattr(
+            singleton, "_terminate_backend", lambda port: terminated.append(port)
+        )
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
+        monkeypatch.setattr(
+            singleton, "_probe_backend_status", lambda: ("responsive", our_port)
+        )
+
+        spawned: list[int] = []
+
+        def _fake_spawn(port):
+            spawned.append(port)
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=4242, source_fingerprint=""
+            )
+
+        monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
+
+        status, pid = singleton.restart_backend()
+
+        assert terminated == [our_port]  # never the sibling's
+        assert spawned == [our_port]  # and both halves agree
+        assert (status, pid) == ("responsive", 4242)
+        # The sibling's entry survives untouched: restart must not make another
+        # desktop's live backend undiscoverable.
+        surviving = {
+            e["display_context"]: e["port"]
+            for e in backend_registry.read_backends(record)
+        }
+        assert surviving["win-session-OTHER"] == sibling_port
+
+    def test_restart_with_no_entry_of_our_own_diverts_instead_of_killing_a_sibling(
+        self, isolated_state, monkeypatch
+    ):
+        """The fallback path, which the 4c fix did NOT cover and which the
+        reorder does. Our context has no entry at all, so the pre-lock guess
+        falls back to the sibling's port; selection then refuses that port
+        (a proven foreign context recorded it) and diverts to a free one.
+
+        With terminate resolving its own target that meant killing the sibling
+        and spawning ours elsewhere — the exact split-brain, just reached by a
+        different route. Selecting first makes the terminate target the
+        diverted port by construction, so the sibling is never touched.
+        """
+        from stealth_chrome_devtools_mcp.embedded import (
+            display_context,
+            proxy_forwarder,
+        )
+
+        sibling_port = _free_closed_port()
+        diverted_port = _free_closed_port()
+        record = isolated_state / "server.json"
+        backend_registry.record_backend(
+            record,
+            port=sibling_port,
+            version="1.2.1",
+            pid=1111,
+            source_fingerprint="",
+            display_context="headless",  # PROVEN, and not ours
+        )
+        monkeypatch.setattr(
+            display_context, "display_context", lambda: "win-session-OURS"
+        )
+        # Nothing is probed for real: not foreign-held, and the picker is fixed.
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: False)
+        monkeypatch.setattr(proxy_forwarder, "_free_port", lambda: diverted_port)
+
+        terminated: list[int] = []
+        monkeypatch.setattr(
+            singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
+        )
+        monkeypatch.setattr(
+            singleton, "_terminate_backend", lambda port: terminated.append(port)
+        )
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
+        monkeypatch.setattr(
+            singleton, "_probe_backend_status", lambda: ("responsive", diverted_port)
+        )
+
+        spawned: list[int] = []
+
+        def _fake_spawn(port):
+            spawned.append(port)
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=4242, source_fingerprint=""
+            )
+
+        monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
+
+        singleton.restart_backend()
+
+        assert terminated == [diverted_port]  # NOT the sibling's port
+        assert spawned == [diverted_port]
+        surviving = {
+            e["display_context"]: e["port"]
+            for e in backend_registry.read_backends(record)
+        }
+        assert surviving["headless"] == sibling_port

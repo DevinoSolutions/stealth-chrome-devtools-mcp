@@ -144,11 +144,15 @@ def _format_backend_status() -> str:
 def _recorded_backend_pid() -> int | None:
     """The pid singleton last recorded for the backend (server.json), or None
     if there is no record. Independent of liveness — status/doctor combine
-    this with `_format_backend_status()`'s liveness read separately (F-305)."""
-    from stealth_chrome_devtools_mcp.embedded import singleton
+    this with `_format_backend_status()`'s liveness read separately (F-305).
 
-    state = singleton._read_server_state()
-    return state.get("pid") if state else None
+    The FIRST recorded backend: the record can now hold one per display context
+    (F-808), and naming them all belongs to `_doctor_backend_lines`, not to this
+    one-value line."""
+    from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
+
+    entry = backend_registry.first_backend(singleton._read_server_state())
+    return backend_registry.recorded_int(entry, "pid")
 
 
 def _backend_log_location(pid: int | None) -> str:
@@ -161,18 +165,103 @@ def _backend_log_location(pid: int | None) -> str:
     return str(resolve_log_dir() / filename)
 
 
+def _probe_recorded_backend(port: int | None) -> str:
+    """One recorded backend's liveness on a port the caller already holds, in
+    `_probe_backend_status`'s exact vocabulary: down / wedged / responsive —
+    plus "no port recorded" for an entry naming nothing usable as a port, a
+    state that function cannot reach (it reports such a record as no backend
+    at all, and so has no word for it).
+
+    Same two primitives in the same order producing the same three words as
+    `singleton._probe_backend_status` (ONE liveness vocabulary, plan_M8
+    SS2.1-B) — all that differs is where the port comes from. That function
+    reads the FIRST recorded backend, which cannot answer for a record holding
+    one per display context (F-808), and singleton.py sits at its LOC budget,
+    so the per-port form lives here rather than beside it. It reaches the
+    primitives THROUGH the module (`singleton._server_is_healthy`), never by
+    importing their names, so a test that patches singleton still reaches them.
+    """
+    from stealth_chrome_devtools_mcp.embedded import singleton
+
+    if port is None:
+        return "no port recorded"
+    if not singleton._server_is_healthy(port):
+        return "down"
+    return "responsive" if singleton._backend_http_ready(port) else "wedged"
+
+
+def _doctor_backend_lines() -> list[str]:
+    """One line per RECORDED backend — context, port, pid, version, liveness,
+    and whether a window launched there could be seen — plus the remedy when
+    none of them can show one.
+
+    The `backend :` line above answers "is the backend up"; this answers "which
+    desktops have one", the operational question F-808 created. A headed spawn
+    is refused when the backend serving it cannot display a window, and that
+    refusal points the operator at this command, so it must be able to name
+    every context — the summary line, which reports the first recorded backend
+    only, cannot. Ordering is `backend_registry.window_capable_first`'s, so
+    doctor presents the same preference discovery applies rather than
+    re-deriving one.
+
+    The remedy is suppressed only by a window-capable backend that is actually
+    RESPONSIVE. A desktop backend recorded but dead — the desktop logged out —
+    would otherwise hide the advice in precisely the state that needs it: an
+    SSH session's headed spawn still gets refused, because discovery finds no
+    live capable backend to adopt, and "start one from a desktop session" is
+    still the fix. A wedged one is no better: it cannot serve the spawn either.
+    The per-line "(can show windows)" note stays token-driven — it describes
+    where that backend's windows WOULD appear, which is true whether or not it
+    is currently answering.
+    """
+    from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
+    from stealth_chrome_devtools_mcp.embedded.display_context import HEADLESS
+
+    lines: list[str] = []
+    serviceable = False
+    for entry in backend_registry.window_capable_first(singleton.SERVER_STATE_FILE):
+        context = str(entry.get("display_context"))
+        port = backend_registry.recorded_int(entry, "port")
+        pid = backend_registry.recorded_int(entry, "pid")
+        version = entry.get("version")
+        status = _probe_recorded_backend(port)
+        serviceable = serviceable or (context != HEADLESS and status == "responsive")
+        lines.append(
+            f"backend  {context}  port {port if port is not None else '-'}  "
+            f"pid {pid if pid is not None else '-'}  "
+            f"version {version if isinstance(version, str) else '-'}  "
+            f"{status}  "
+            f"({'headless only' if context == HEADLESS else 'can show windows'})"
+        )
+    if not lines:
+        # Not the headless-only diagnosis: with nothing recorded the next
+        # session cold-starts a backend in whatever context it runs in, so
+        # there is no remedy to give yet.
+        return ["backend  (none recorded)"]
+    if not serviceable:
+        # "no LIVE backend": the lines above may well show a capable one that
+        # is down, and a remedy contradicting the list it follows is worse than
+        # no remedy. The instruction deliberately echoes the spawn refusal's
+        # advice (embedded/server.py's headed-visibility guard) so an operator
+        # who arrives here from that error recognises it — a close paraphrase,
+        # not a shared constant; keep the two saying the same thing.
+        lines.append(
+            "no live backend can display a window: headed spawns will fail — "
+            "start one from a desktop session and any session will use it "
+            "automatically"
+        )
+    return lines
+
+
 def _doctor_port_occupant_line() -> str:
     """F-509 visibility: is the target port free, ours, or a NON-stealth
     process squatting it (which would otherwise silently block a backend
     from binding)? Uses only existing helpers — no new port logic."""
-    from stealth_chrome_devtools_mcp.embedded import singleton
+    from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
-    state = singleton._read_server_state()
-    port = (
-        state.get("port")
-        if state and isinstance(state.get("port"), int)
-        else (singleton.DEFAULT_PORT)
-    )
+    entry = backend_registry.first_backend(singleton._read_server_state())
+    recorded = entry.get("port") if entry else None
+    port = recorded if isinstance(recorded, int) else singleton.DEFAULT_PORT
     our_pid = singleton._backend_pid_on_port(port)
     if our_pid is not None:
         return f"port {port} held by our backend (pid {our_pid})"
@@ -286,6 +375,9 @@ def _cmd_doctor(_args) -> int:
     print(f"pid         : {pid if pid is not None else '-'}")
     print(f"log         : {_backend_log_location(pid)}")
     print(f"port        : {_doctor_port_occupant_line()}")
+    print("contexts    :")
+    for line in _doctor_backend_lines():
+        print(f"  {line}")
 
     chrome = _find_chrome()
     print(f"chrome      : {chrome or 'NOT FOUND — install Google Chrome'}")
@@ -377,12 +469,14 @@ def _cmd_kill_orphans(args) -> int:
     process_cleanup.py (plan_M8 SS2.1-C; M11a adds a public seam later, per
     state.json's recorded decision).
 
-    Guarded off a LIVE backend: `_recover_orphaned_processes` both reaps
-    tracked browsers and clears the pid-tracking file, so running it against
-    a responsive/wedged backend would kill that backend's own browsers and
-    corrupt its bookkeeping. `restart` is the verb for "backend alive but
-    bad"; this verb is for "backend gone, browsers orphaned" — a clean
-    behavioral partition. `--force` overrides the guard.
+    Guarded off a LIVE backend: reaping would kill that backend's own browsers.
+    `restart` is the verb for "backend alive but bad"; this verb is for
+    "backend gone, browsers orphaned" — a clean behavioral partition.
+
+    `--force` overrides the guard, and is passed THROUGH to the reaper rather
+    than merely getting past the gate. Since plan_F808 Task 10 the reaper spares
+    entries a live backend still owns, which would otherwise have made
+    `--force` a no-op against exactly the wedged backend it exists for.
     """
     _server()
     from stealth_chrome_devtools_mcp.embedded import process_cleanup, singleton
@@ -396,7 +490,7 @@ def _cmd_kill_orphans(args) -> int:
         )
         return 1
 
-    process_cleanup.process_cleanup.recover_orphans()
+    process_cleanup.process_cleanup.recover_orphans(force=args.force)
     print(
         "orphan recovery triggered: reaped any browsers left over from a dead backend."
     )

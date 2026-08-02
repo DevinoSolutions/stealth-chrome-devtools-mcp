@@ -23,7 +23,19 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import (
+    backend_registry,
+    display_context,
+    singleton,
+)
+
+
+def _recorded_backend():
+    """The one backend the isolated record holds, read the way production
+    reads it. F-808 made server.json a per-context map, so the raw record is
+    no longer the entry; these pins are about WHAT gets recorded, not about
+    the file's layout (which test_backend_registry.py owns)."""
+    return backend_registry.first_backend(singleton._read_server_state())
 
 
 def _listening_socket():
@@ -294,16 +306,34 @@ class TestSourceFingerprintReuse:
         assert singleton._source_fingerprint() != second
 
 
+@pytest.fixture
+def stubbed_context(monkeypatch):
+    """Pin the recorded display context to a token production can never
+    produce, so the assertions below compare the writer against a KNOWN value
+    instead of against display_context.display_context() - which would be
+    production checking itself and would pass even if the writer stamped the
+    wrong thing. _write_server_state imports the module lazily and reads the
+    attribute at call time, so patching the attribute lands.
+    """
+    monkeypatch.setattr(display_context, "display_context", lambda: "ctx-sentinel")
+    return "ctx-sentinel"
+
+
 class TestServerStatePersistence:
-    def test_write_then_read_roundtrips(self, isolated_state):
+    def test_write_then_read_roundtrips(self, isolated_state, stubbed_context):
         singleton._write_server_state(
             port=12345, version="9.9.9", pid=4242, source_fingerprint="deadbeef"
         )
-        assert singleton._read_server_state() == {
+        # SOFT golden updated with F-808's schema v2 (same commit): the four
+        # identity fields still round-trip verbatim, and the writer now also
+        # stamps the display context it recorded them under - which is the
+        # whole point of the new schema, so it is asserted, not ignored.
+        assert _recorded_backend() == {
             "port": 12345,
             "version": "9.9.9",
             "pid": 4242,
             "source_fingerprint": "deadbeef",
+            "display_context": stubbed_context,
         }
 
     def test_written_state_makes_backend_reusable(self, isolated_state, monkeypatch):
@@ -327,7 +357,7 @@ class TestServerStatePersistence:
             sock.close()
 
     def test_start_server_process_records_current_version_pid_and_fingerprint(
-        self, isolated_state, monkeypatch
+        self, isolated_state, monkeypatch, stubbed_context
     ):
         from unittest.mock import MagicMock
 
@@ -341,11 +371,13 @@ class TestServerStatePersistence:
 
         singleton._start_server_process(4321)
 
-        state = singleton._read_server_state()
-        assert state["port"] == 4321
-        assert state["version"] == "1.2.1"
-        assert state["pid"] == 4242
-        assert state["source_fingerprint"] == "test-fp"
+        entry = _recorded_backend()
+        assert entry["port"] == 4321
+        assert entry["version"] == "1.2.1"
+        assert entry["pid"] == 4242
+        assert entry["source_fingerprint"] == "test-fp"
+        # F-808: a real spawn also records WHERE its windows could appear.
+        assert entry["display_context"] == stubbed_context
 
 
 class TestBackendIdentity:
@@ -444,10 +476,20 @@ class TestBackendPidOnPort:
 
 
 class TestClearStaleBackend:
+    """The no-op guard is asked of THE PORT (`_same_identity_backend_ready`),
+    not of `_find_running_server`. Updated deliberately with F-808 Task 4 (same
+    commit): under adoption ordering `_find_running_server` legitimately
+    returns ANOTHER display context's port, so `== port` would have started
+    terminating live same-identity backends whenever a preferred sibling
+    existed. The claims below are unchanged — only the stubbed seam moves.
+    """
+
     def test_no_op_when_reusable_backend_present(self, monkeypatch):
         # If the port already holds a reusable same-version backend, nothing may
         # be terminated (must not even look up a pid to kill).
-        monkeypatch.setattr(singleton, "_find_running_server", lambda: 19222)
+        monkeypatch.setattr(
+            singleton, "_same_identity_backend_ready", lambda port, **kw: port == 19222
+        )
         looked_up = []
         monkeypatch.setattr(
             singleton, "_backend_pid_on_port", lambda port: looked_up.append(port)
@@ -456,7 +498,9 @@ class TestClearStaleBackend:
         assert looked_up == []
 
     def test_terminates_stale_backend_on_port(self, monkeypatch):
-        monkeypatch.setattr(singleton, "_find_running_server", lambda: None)
+        monkeypatch.setattr(
+            singleton, "_same_identity_backend_ready", lambda port, **kw: False
+        )
         monkeypatch.setattr(singleton, "_backend_pid_on_port", lambda port: 4242)
         proc = MagicMock()
         monkeypatch.setattr(singleton.psutil, "Process", MagicMock(return_value=proc))
@@ -465,7 +509,9 @@ class TestClearStaleBackend:
         proc.terminate.assert_called_once()
 
     def test_no_op_when_nothing_to_kill(self, monkeypatch):
-        monkeypatch.setattr(singleton, "_find_running_server", lambda: None)
+        monkeypatch.setattr(
+            singleton, "_same_identity_backend_ready", lambda port, **kw: False
+        )
         monkeypatch.setattr(singleton, "_backend_pid_on_port", lambda port: None)
         monkeypatch.setattr(singleton, "_read_server_state", lambda: None)
         # Must not raise even when there is nothing on the port.

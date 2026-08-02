@@ -19,7 +19,19 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # its actual 3389 LOC (measured after ruff format). Ratcheted DOWN per the
     # no-grow discipline; the prior M3/M10a except-surface bumps are folded into
     # this post-extraction baseline. Owner string unchanged.
-    "embedded/server.py": (3389, "plan_M4ph1 + plan_M3 + plan_M10a"),
+    # + 12 (plan_F808 step 5: spawn_browser's headed-visibility guard — 10 lines
+    # for the pre-try refusal + its message, 2 for the F-804 docstring clamp
+    # correction). The two candidate homes are documented leaves whose stated
+    # contracts a ToolError-raising display guard would violate:
+    # display_context.py declares "imports no embedded module except
+    # debug_logger" and is deliberately observational; tool_errors.py declares
+    # itself dependency-free three times over (it is why _require_* take
+    # browser_manager as an argument). The ~7 lines a tool_errors._require_*-
+    # style helper would save do not justify amending one. Same minimal-bump
+    # rationale as the M10a rows below. Cap == actual ruff-clean LOC, no
+    # padding; no-grow applies from this commit forward. CAP RAISE 3389->3401
+    # PENDING HUMAN RATIFICATION in the F-808 PR.
+    "embedded/server.py": (3401, "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808"),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
     # irreducibly ~1024-line contiguous block, landing this module over the
     # 1000-LOC budget. GRANDFATHERED at its actual post-ruff-format LOC per the
@@ -47,9 +59,22 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
         1532,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1",
     ),
-    # + 27 (plan_M7 step M7-2: _fallback_pid_identity_ok shared predicate +
-    # non-recovery fallback identity check + recovery branch refactored).
-    "embedded/process_cleanup.py": (1054, "plan_M11a_M15 + plan_M7"),
+    # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
+    # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
+    # read-merge-write protocol moved out to the new browser_pid_registry.py
+    # leaf, which is the record's one home; this file keeps the reaping policy
+    # and passes the path in. 966 -> 1017 (step 10b) for the owner identity that
+    # fix needs: _owner_identity, the _owner_backend_alive adapter composing the
+    # two EXISTING predicates, the one _rewrite_record write path, and the
+    # recovery gate that spares a live owner's browsers. The move was sequenced
+    # first precisely because 1054/1054 left zero headroom for any of it. Then
+    # 1017 -> 1023 (step 10c) to thread `force` from `kill-orphans --force`
+    # through to the reaper, which that gate would otherwise have turned into a
+    # no-op against the very wedged backend the flag exists for. Net -31 from
+    # the pre-task cap; every number is the actual post-ruff-format LOC
+    # (cap == actual, no padding), per the C1 discipline. CAP RAISE 966->1023
+    # PENDING HUMAN RATIFICATION in the F-808 PR. No-grow applies from here.
+    "embedded/process_cleanup.py": (1023, "plan_M11a_M15 + plan_M7 + plan_F808"),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
     # + honest message + debug_logger.log_info on failure) + 1 (plan_M4ph1
     # STEP 0: isort emits a first-party group-separator blank line once

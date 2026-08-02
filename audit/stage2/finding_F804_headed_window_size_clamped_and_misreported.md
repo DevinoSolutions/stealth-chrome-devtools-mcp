@@ -42,10 +42,23 @@ Three things fall out of that table:
 1. **The size WAS being applied.** `tab.set_window_size(...)` (CDP
    `Browser.setWindowBounds`) ran on every spawn and worked: 900x600 landed
    exactly. The argument was never ignored.
-2. **Headed Chrome clamps to the desktop work area.** Anything larger than the
-   work area (1024x768 on the backend's session here) came back at ~1044x788 —
-   the same number for 1200x800 and for 1920x1080, which is the signature of a
-   clamp rather than of a dropped argument.
+2. **Headed Chrome clamps to the work area of the LAUNCHING process's desktop.**
+   Anything larger came back at ~1044x788 — the same number for 1200x800 and for
+   1920x1080, which is the signature of a clamp rather than of a dropped argument.
+   *Corrected 2026-08-02:* this finding originally read that 1024x768 as an
+   ordinary monitor limit, which implied a machine driving an RTX 3080 had a
+   ~1024x768 screen. It was **Session 0's default desktop**, whose size is exactly
+   1024x768 (measured via `GetDesktopWindow`'s rect, not inferred) — the backend
+   had been cold-started from a non-interactive session, and that is also why the
+   browser was invisible. See
+   `finding_F808_headed_spawn_is_invisible_when_the_backend_was_cold_started_from_a_non_interactive_session.md`.
+   *Provenance:* that measurement was taken ad hoc during the F-808 Task-10 prep
+   session (2026-08-02) and lives only in that session's transcript. No repo
+   artifact reproduces it — there is no test or script that measures the Session 0
+   desktop, so treat the exact 1024x768 as a one-time observation rather than a
+   standing, re-checkable claim.
+   The remedy below (report requested/actual/clamped truthfully) is unchanged and
+   still correct; only the stated cause was wrong.
 3. **Headless does not clamp**, because there is no window manager to clamp
    against. That is the entire headed/headless asymmetry; nothing mode-specific
    existed in the product code.
