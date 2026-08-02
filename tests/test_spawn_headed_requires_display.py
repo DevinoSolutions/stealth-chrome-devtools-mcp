@@ -56,7 +56,10 @@ def doomed_spawn(monkeypatch, patched_server):
         raise AssertionError("profile selection ran before the visibility guard")
 
     monkeypatch.setattr(clone_storage, "resolve_profile_selection", tripwire_resolve)
-    fbm = FakeBrowserManager(spawn_instance=_fake_instance(False))
+    # Unseeded on purpose: FakeBrowserManager's own "seed spawn_instance" error IS
+    # the second tripwire (and contains no contract token). A seeded instance here
+    # would let a regressed guard spawn "successfully".
+    fbm = FakeBrowserManager()
     return patched_server(browser_manager=fbm), fbm
 
 
