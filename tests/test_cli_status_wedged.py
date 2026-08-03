@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from stealth_chrome_devtools_mcp import cli
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import desktop_launch, singleton
 
 
 @pytest.fixture(autouse=True)
@@ -369,7 +369,19 @@ class TestCliDoctorDisplayContexts:
     headed-visibility refusal sends the operator here to answer — is answerable
     at all. The single `backend :` summary line above it reports the first
     recorded backend only, and cannot.
+
+    F-810 gave the remedy line two forms, so these tests STATE whether desktop
+    delegation is on offer instead of inheriting the runner's console session —
+    the same discipline `test_spawn_headed_requires_display.py` applies to the
+    display premise, and for the same reason: a Windows developer's box and a
+    Linux CI cell would otherwise assert different sentences.
     """
+
+    @pytest.fixture(autouse=True)
+    def _no_desktop_delegation(self, monkeypatch):
+        """Default premise: nobody logged on, so the remedy is the refusal form.
+        The one test about the other form overrides this."""
+        monkeypatch.setattr(desktop_launch, "available", lambda: False)
 
     def test_every_recorded_backend_is_listed_with_its_context(
         self, fake_server, recorded_backends, capsys
@@ -433,8 +445,9 @@ class TestCliDoctorDisplayContexts:
     def test_remedy_line_when_no_backend_can_show_a_window(
         self, fake_server, recorded_backends, capsys
     ):
-        """The actionable half: a headless-only machine must be told what to do,
-        in the same words `spawn_browser`'s refusal uses."""
+        """The actionable half: a headless-only machine with nobody logged on
+        must be told what to do, in the same words `spawn_browser`'s refusal
+        uses — that refusal is what sends the operator here."""
         recorded_backends(_v2(headless={"port": 19222, "pid": 909, "version": "2.0.4"}))
         with _doctor_probes(fake_server):
             cli._cmd_doctor(None)
@@ -442,8 +455,30 @@ class TestCliDoctorDisplayContexts:
 
         assert "no live backend can display a window" in out
         assert "headed spawns will fail" in out
+        assert "nobody is logged on" in out  # WHY they will fail (F-810)
         assert "desktop session" in out
         assert "automatically" in out
+
+    def test_the_remedy_does_not_claim_failure_when_delegation_will_deliver(
+        self, fake_server, recorded_backends, capsys, monkeypatch
+    ):
+        """F-810: with a user logged on, a headed spawn is launched on that
+        desktop by the OS and succeeds. Printing "headed spawns will fail" here
+        would be doctor lying about the operator's own machine — the advice
+        degrades from a fix to an optimisation, and must read that way."""
+        monkeypatch.setattr(desktop_launch, "available", lambda: True)
+        recorded_backends(_v2(headless={"port": 19222, "pid": 909, "version": "2.0.4"}))
+        with _doctor_probes(fake_server):
+            cli._cmd_doctor(None)
+        out = capsys.readouterr().out
+
+        # The diagnosis is unchanged — it is the greppable invariant, and it is
+        # still true: no live backend can display a window ITSELF.
+        assert "no live backend can display a window" in out
+        assert "headed spawns will fail" not in out
+        assert "F-810" in out
+        assert "logged on" in out
+        assert "desktop session" in out
 
     def test_no_remedy_line_when_a_window_capable_backend_is_responsive(
         self, fake_server, recorded_backends, capsys

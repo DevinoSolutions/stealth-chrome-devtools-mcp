@@ -197,24 +197,33 @@ def _doctor_backend_lines() -> list[str]:
 
     The `backend :` line above answers "is the backend up"; this answers "which
     desktops have one", the operational question F-808 created. A headed spawn
-    is refused when the backend serving it cannot display a window, and that
-    refusal points the operator at this command, so it must be able to name
-    every context — the summary line, which reports the first recorded backend
-    only, cannot. Ordering is `backend_registry.window_capable_first`'s, so
-    doctor presents the same preference discovery applies rather than
-    re-deriving one.
+    is refused when the backend serving it can neither display a window nor hand
+    the launch to a logged-on desktop (F-810), and that refusal points the
+    operator at this command, so it must be able to name every context — the
+    summary line, which reports the first recorded backend only, cannot.
+    Ordering is `backend_registry.window_capable_first`'s, so doctor presents
+    the same preference discovery applies rather than re-deriving one.
 
     The remedy is suppressed only by a window-capable backend that is actually
     RESPONSIVE. A desktop backend recorded but dead — the desktop logged out —
     would otherwise hide the advice in precisely the state that needs it: an
-    SSH session's headed spawn still gets refused, because discovery finds no
-    live capable backend to adopt, and "start one from a desktop session" is
-    still the fix. A wedged one is no better: it cannot serve the spawn either.
-    The per-line "(can show windows)" note stays token-driven — it describes
-    where that backend's windows WOULD appear, which is true whether or not it
-    is currently answering.
+    SSH session's headed spawn is served by no live capable backend, so
+    "start one from a desktop session" is still worth saying. A wedged one is no
+    better: it cannot serve the spawn either. The per-line "(can show windows)"
+    note stays token-driven — it describes where that backend's windows WOULD
+    appear, which is true whether or not it is currently answering.
+
+    What that state MEANS changed with F-810, so the remedy has two forms. With
+    a user logged on at the desktop, headed spawns self-heal (the OS places the
+    launch there), and telling the operator they "will fail" would be a lie
+    about their own machine — the advice degrades to an optimisation. Only with
+    nobody logged on is the spawn genuinely refused.
     """
-    from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
+    from stealth_chrome_devtools_mcp.embedded import (
+        backend_registry,
+        desktop_launch,
+        singleton,
+    )
     from stealth_chrome_devtools_mcp.embedded.display_context import HEADLESS
 
     lines: list[str] = []
@@ -244,12 +253,21 @@ def _doctor_backend_lines() -> list[str]:
         # no remedy. The instruction deliberately echoes the spawn refusal's
         # advice (embedded/server.py's headed-visibility guard) so an operator
         # who arrives here from that error recognises it — a close paraphrase,
-        # not a shared constant; keep the two saying the same thing.
-        lines.append(
-            "no live backend can display a window: headed spawns will fail — "
-            "start one from a desktop session and any session will use it "
-            "automatically"
-        )
+        # not a shared constant; keep the two saying the same thing. Both forms
+        # keep the leading phrase verbatim: it is the greppable diagnosis, and
+        # only the CONSEQUENCE differs between them.
+        if desktop_launch.available():
+            lines.append(
+                "no live backend can display a window, but a user is logged on "
+                "at the desktop: headed spawns are launched there automatically "
+                "(F-810) — start a backend from a desktop session to skip that hop"
+            )
+        else:
+            lines.append(
+                "no live backend can display a window and nobody is logged on at "
+                "the desktop: headed spawns will fail — start one from a desktop "
+                "session and any session will use it automatically"
+            )
     return lines
 
 

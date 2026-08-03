@@ -815,15 +815,21 @@ class TestHeadedSpawnIsSeenOrRefused:
     launcher's window station. The hermetic tier can only ever prove what the code
     does with a stated premise; this node asks the machine itself.
 
-    ONE node with two branches rather than two skip-gated nodes, deliberately: on
-    Windows it never skips, so the JUnit report the gate already hashes always
+    ONE node with three branches rather than three skip-gated nodes, deliberately:
+    on Windows it never skips, so the JUnit report the gate already hashes always
     carries an answer, and which branch ran is recorded rather than inferred. A
-    GitHub Windows runner is a Session 0 service context and will take branch B —
-    that skip-free record is exactly how we learn so.
+    GitHub Windows runner is a Session 0 service context and will take branch B or
+    C — that skip-free record is exactly how we learn so.
 
-    Branch B asserts only the error type and the one phrase. The full six-token
-    message contract is owned by ``test_spawn_headed_requires_display.py``;
-    re-asserting it here would be a second home for it.
+    F-810 added branch C: a context that cannot show a window itself but CAN hand
+    the launch to a logged-on desktop no longer refuses. It asserts without
+    spawning — a real delegated launch would create a real scheduled task, which
+    no test may do; the delegation mechanism is covered hermetically in
+    ``tests/test_desktop_launch.py``.
+
+    Branch B asserts only the error type and the one phrase. The full message
+    contract is owned by ``test_spawn_headed_requires_display.py``; re-asserting
+    it here would be a second home for it.
     """
 
     DATA_URL = "data:text/html,<h1 id='t'>f808</h1>"
@@ -832,16 +838,30 @@ class TestHeadedSpawnIsSeenOrRefused:
     async def test_headed_spawn_owns_a_real_window_or_is_refused(
         self, tmp_path, record_property
     ):
-        from stealth_chrome_devtools_mcp.embedded import display_context
+        from stealth_chrome_devtools_mcp.embedded import desktop_launch, display_context
 
         token = display_context.display_context()
         record_property("f808_display_context", token)
         if display_context.can_show_windows():
             record_property("f808_branch", "A")
             await self._assert_a_window_really_appears(tmp_path, token)
+        elif desktop_launch.available():
+            record_property("f808_branch", "C")
+            self._assert_delegation_replaces_the_refusal()
         else:
             record_property("f808_branch", "B")
             await self._assert_the_guard_refuses(tmp_path)
+
+    def _assert_delegation_replaces_the_refusal(self) -> None:
+        """Branch C (F-810) — the OS can place the launch on a logged-on desktop,
+        so the refusal must be OFF on this machine.
+
+        Deliberately does not spawn: the real delegated launch would create a real
+        scheduled task on the developer's box.
+        """
+        from stealth_chrome_devtools_mcp.embedded import desktop_launch
+
+        assert desktop_launch.can_deliver_headed_window() is True
 
     async def _assert_a_window_really_appears(self, tmp_path, token: str) -> None:
         """Branch A — a window-capable context must produce a window we can SEE.

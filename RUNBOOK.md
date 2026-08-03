@@ -238,6 +238,12 @@ an SSH login with no `DISPLAY`/`WAYLAND_DISPLAY`. This is deliberate: before 2.0
 the same spawn returned `state: "ready"`, `headless: false` and a browser that was
 fully driveable over CDP and permanently invisible (F-808).
 
+Since 2.0.5 this is the **fallback**, not the first answer: on Windows, if a user is
+logged on at the console, the spawn is handed to Task Scheduler and the OS opens the
+window on that user's desktop (F-810), so you should not see this error at all. When
+you do, it means delegation was unavailable (not Windows, or nobody logged on) or it
+failed — the message says which.
+
 Run `doctor`. It lists one line per recorded backend with its display context and
 whether that context can show a window. Two outcomes:
 

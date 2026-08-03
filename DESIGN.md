@@ -199,9 +199,11 @@ observation of a window.
 
 `embedded/display_context.py` makes that property explicit and **observational**:
 it reports OUR OWN context and never tries to pick or enter someone else's session.
-`WTSGetActiveConsoleSessionId()` is deliberately not used — on the reporting machine
-the active console session was 2 while the user's desktop lived in session 1, so any
-"find the interactive session" heuristic is wrong on somebody's machine. The token is
+`WTSGetActiveConsoleSessionId()` is deliberately not used *here* — on the reporting
+machine the active console session was 2 while the user's desktop lived in session 1,
+so any "find the interactive session" heuristic is wrong on somebody's machine. (F-810
+reads it in `desktop_launch.py` for a different question — "is anyone logged on at
+all" — and still never picks a session; see the amendment below.) The token is
 `headless` (PROVEN invisible), `unverified` (unclassifiable — treated as capable, so
 a broken probe can never block headed browsing), or a specific desktop:
 `win-session-N`, `wayland-<display>`, `x11-<display>`, `aqua-<uid>`.
@@ -228,11 +230,32 @@ upgrades. **Only a PROVEN verdict moves anything** — that rule also governs
 a random free port, send eviction at the wrong port, and leak the live 2.0.3 backend
 and its Chrome processes for good.
 
-Where no window-capable backend exists at all, `spawn_browser(headless=False)`
-**raises** a `ToolError` naming the context and the two remedies (start a backend from
-a desktop session; or pass `headless=True`). Silent headed→headless degradation was
-rejected as the same defect wearing a different hat. Headless spawns from a `headless`
-context are unaffected — CI depends on exactly that.
+**F-810 amends the ruling in mechanism, not in spirit.** Refusing is correct but it
+is not *service*: a user who asks for a headed browser wants a headed browser, with
+no manual step. So on Windows, when this backend's own context cannot show a window
+and a user IS logged on at the console, `embedded/desktop_launch.py` hands Chrome's
+**process creation** to Task Scheduler — a one-shot task that runs "only when the
+user is logged on" — and **Windows itself** places the process in that user's
+interactive session. The window is visible by construction rather than by our guess.
+The same backend then attaches over CDP (`uc.Config(host, port)` →
+`connect_existing`), so there is still exactly ONE backend, the instance lives in the
+same registry as every other instance, and all 94 tools work unchanged.
+
+This does **not** reintroduce session-picking. `display_context.py` is untouched and
+still observational; the tool still never selects or enters a session. The one new
+OS read, `WTSGetActiveConsoleSessionId()`, answers only "is delegation on offer at
+all" — it is never used to *choose* where the browser goes, which is precisely the
+heuristic 2.7 rejects. On the reporting machine that call returns 2 while the desktop
+lives in session 1, and F-810 is still correct there: it asks the scheduler for "the
+logged-on user's session", and the OS resolves it.
+
+Where delegation is impossible (non-Windows, nobody logged on) or fails,
+`spawn_browser(headless=False)` **raises** a `ToolError` naming the context, the
+delegation attempt, and the remedies (start a backend from a desktop session; or pass
+`headless=True`) — the loud refusal is now the fallback, which is exactly when a loud
+error is correct. Silent headed→headless degradation was rejected as the same defect
+wearing a different hat. Headless spawns from a `headless` context are unaffected —
+CI depends on exactly that, and a headless spawn is never delegated.
 
 ---
 
@@ -489,6 +512,7 @@ owed* by your change.
 | **M11b DI seam** | a general factory/DI seam for the import-time singletons (F-125 remainder) is deferred; M11a removed only `process_cleanup`'s import-time side effects. |
 | **F-509 A2** | cold-start lock **losers** commit to their own `_select_backend_port` result; behind a foreign squatter the winner's `_free_port()` pick differs, so a loser polls a port nothing will bind for the full `BACKEND_READY_TIMEOUT` (120 s) before self-healing. Recorded in `TRIAGE_final-review_to_plan_RELEASE.md` A2 (singleton.py, MED). Fix shape: losers re-read the record after the lock resolves, or serialize port choice under the lock. OPEN. |
 | **F-809** | a clean POSIX shutdown emits ERROR logs, so every graceful stop ships Sentry events (`STEALTH-CHROME-DEVTOOLS-MCP-1J`, `-1H`). Two independent causes: `ProcessCleanup._signal_handler` **replaces** uvicorn's `handle_exit` rather than coexisting with it (both use `signal.signal`, ours installs second), so `sys.exit(0)` erupts inside the running loop and the lifespan/session tasks unwind abnormally; and FastMCP 2.11.2 hard-codes `timeout_graceful_shutdown: 0`, where `asyncio.wait_for(coro, 0)` **always** raises, so uvicorn logs "Cancel N running task(s)" on every graceful HTTP stop regardless. Fix shape: clean up, then hand the signal back to the host server, plus a real grace budget under singleton's 5 s terminate→kill window. Windows is unaffected (`TerminateProcess` runs no handler). OPEN. |
+| **F-810** | desktop delegation is **Windows-only**. A Linux/macOS backend with no desktop of its own still refuses a headed spawn; there is no `sudo -u`/`launchctl asuser` equivalent path, and no login-time autostart installer. The scheduled task is one-shot and torn down in a `finally`, but a hard-killed backend can still leave `stealth-mcp-launch-<uuid>` behind — nothing sweeps stale ones. OPEN. |
 | **`_PROTECTED_CLONE_DIRS` lifetime** | `clone_storage._protect_clone_dir` shields an in-flight clone from the cap sweep, but protection is released only on a clean `close_instance`; a spawn that dies between `_protect_` and its instance record leaks a permanently sweep-exempt entry in a process-global set. Bounded and small, never audited. OPEN. |
 | **`PORT_FILE` vestige** | `server.port` is written by `singleton` and cleared by `stop_backend`, with **no reader anywhere in `src/`**. Now that `backend_registry` owns the record, deleting it is a one-line removal plus the test fixtures that redirect it. OPEN. |
 | **Proxy-side `debug_logger` records reach no file** | `debug_logger` emits to the `stealth.backend` logger; `logging_setup.configure_logging(role)` attaches a handler only to `stealth.<role>` with `propagate = False`. In a stdio-proxy process only `stealth.proxy` is wired, so every `debug_logger` warning raised proxy-side is discarded. F-808 made this load-bearing: `display_context`'s "session probe refused / raised → unverified" warnings fire in the proxy, exactly where an operator would look to explain an invisible spawn. OPEN. |

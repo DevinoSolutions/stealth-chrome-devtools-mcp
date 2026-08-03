@@ -13,7 +13,7 @@ import nodriver as uc
 import psutil
 from nodriver import Browser, Tab
 
-from stealth_chrome_devtools_mcp.embedded import window_sizing
+from stealth_chrome_devtools_mcp.embedded import desktop_launch, window_sizing
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
@@ -533,12 +533,16 @@ class BrowserManager:
         browser_executable: str,
         launch_args: list[str],
     ) -> Browser:
-        """Build the ``uc.Config`` and start the browser, returning the live
-        ``Browser``.
-
-        Kept minimal — only the fallible ``uc.start`` await lives here — so the
-        orchestrator captures the browser handle immediately and can tear it down
-        if any later phase raises."""
+        """Start the browser and return the live ``Browser``: normally by building
+        the ``uc.Config`` here, but when this backend cannot show windows a headed
+        launch is delegated to the user's desktop and attached to (F-810). Kept
+        minimal — only the fallible starts live here — so the orchestrator captures
+        the handle immediately and can tear it down if a later phase raises."""
+        if desktop_launch.should_delegate(options.headless):
+            browser, _pid = await desktop_launch.launch_and_attach(
+                browser_executable, launch_args, options.user_data_dir
+            )
+            return browser
         config = uc.Config(
             headless=options.headless,
             user_data_dir=options.user_data_dir,
@@ -546,7 +550,6 @@ class BrowserManager:
             browser_executable_path=browser_executable,
             browser_args=launch_args,
         )
-
         return await uc.start(config=config)
 
     async def _apply_post_launch(  # noqa: PLR0913  PERMANENT(function interface)
@@ -564,10 +567,13 @@ class BrowserManager:
         Returns ``(applied IANA timezone id or None, window-size metrics)``. Runs
         after the browser is orchestrator-owned, so a failure here still routes
         through the spawn cleanup path."""
-        if hasattr(browser, "_process") and browser._process:
+        # A DELEGATED browser (F-810) was attached to, not spawned: it has no
+        # _process, only a pid. Untracked it would be an orphan-reaping hole.
+        process = getattr(browser, "_process", None) or desktop_launch.pid_shim(browser)
+        if process:
             process_cleanup.track_browser_process(
                 instance_id,
-                browser._process,
+                process,
                 user_data_dir=actual_user_data_dir,
                 uses_custom_data_dir=uses_custom_data_dir,
                 auto_clone=options.auto_clone,

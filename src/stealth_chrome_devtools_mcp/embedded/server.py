@@ -39,6 +39,8 @@ from stealth_chrome_devtools_mcp.embedded.models import (
 from stealth_chrome_devtools_mcp.embedded.network_interceptor import NetworkInterceptor
 from stealth_chrome_devtools_mcp.embedded.platform_utils import (
     get_platform_info,
+    is_running_as_root,
+    is_running_in_container,
     validate_browser_environment,
 )
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
@@ -387,20 +389,18 @@ async def spawn_browser(
     """
     # BEFORE any other work, and outside the try so it is not re-wrapped (F-808):
     # a spawn nobody could ever see must not first clone a profile dir onto disk.
-    if not headless and not display_context.can_show_windows():
+    # F-810 demoted it to a FALLBACK: it fires only when delegation is impossible.
+    from stealth_chrome_devtools_mcp.embedded import desktop_launch
+
+    if not headless and not desktop_launch.can_deliver_headed_window():
         raise ToolError(
             f"This backend runs in a context that cannot display a window "
             f"({display_context.display_context()}), so a headed browser would launch "
-            "invisibly (F-808). Start the backend from a desktop session and this "
-            "session will use it automatically, or pass headless=True. Run "
-            "`stealth-chrome-devtools doctor` to see which contexts have a backend."
+            "invisibly (F-808), and no user is logged on at the desktop for the OS to "
+            "launch it there instead (F-810). Start the backend from a desktop session "
+            "or pass headless=True; `stealth-chrome-devtools doctor` lists the contexts."
         )
     try:
-        from stealth_chrome_devtools_mcp.embedded.platform_utils import (
-            is_running_as_root,
-            is_running_in_container,
-        )
-
         if sandbox is None:
             sandbox = not (is_running_as_root() or is_running_in_container())
         elif isinstance(sandbox, str):
