@@ -13,7 +13,11 @@ import nodriver as uc
 import psutil
 from nodriver import Browser, Tab
 
-from stealth_chrome_devtools_mcp.embedded import desktop_launch, window_sizing
+from stealth_chrome_devtools_mcp.embedded import (
+    desktop_launch,
+    spawn_exhaustion,
+    window_sizing,
+)
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
@@ -366,11 +370,7 @@ class BrowserManager:
                             "profile cleanup entrie(s)",
                         )
                 except Exception as error:
-                    debug_logger.log_error(
-                        "browser_manager",
-                        "idle_reaper",
-                        error,
-                    )
+                    debug_logger.log_error("browser_manager", "idle_reaper", error)
         except asyncio.CancelledError:
             debug_logger.log_info(
                 "browser_manager",
@@ -506,10 +506,7 @@ class BrowserManager:
         caller_args = list(options.browser_args or [])
         caller_args = self._append_user_agent_arg(caller_args, options.user_agent)
         caller_args = window_sizing.append_size_arg(caller_args, options)
-        caller_args = merge_proxy_server_arg(
-            caller_args,
-            launch_proxy_server,
-        )
+        caller_args = merge_proxy_server_arg(caller_args, launch_proxy_server)
         launch_args, stealth_warnings = merge_browser_args(caller_args)
         if stealth_warnings:
             debug_logger.log_warning(
@@ -772,7 +769,9 @@ class BrowserManager:
                     f"for {instance_id}: {proc_err}",
                 )
             instance.state = BrowserState.ERROR
-            raise Exception(f"Failed to spawn browser: {e!s}")  # noqa: B904  plan_M4ph1
+            hint = spawn_exhaustion.exhaustion_hint(process_cleanup.pid_file) or ""
+            message = f"Failed to spawn browser: {e!s}{hint}"
+            raise Exception(message)  # noqa: B904  plan_M4ph1
 
         return instance
 
