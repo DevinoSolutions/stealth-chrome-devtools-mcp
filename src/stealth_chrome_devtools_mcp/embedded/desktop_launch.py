@@ -100,6 +100,13 @@ def available() -> bool:
     try:
         session = _active_console_session_id()
     except Exception:  # noqa: BLE001  PERMANENT(probe must never raise)
+        # Belt and braces: the seam already swallows, but a future edit (or a
+        # test double) must not be able to turn a spawn guard into a crash.
+        debug_logger.log_warning(
+            "desktop_launch",
+            "available",
+            "Console-session seam raised; treating delegation as unavailable",
+        )
         return False
     return session is not None and session not in _NO_CONSOLE_SESSION
 

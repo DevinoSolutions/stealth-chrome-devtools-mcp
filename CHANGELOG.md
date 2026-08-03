@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased (2.0.5)
+
+### Fixed — a headed spawn just works, even from a backend with no desktop (F-810)
+
+2.0.4 made an invisible headed spawn impossible by **refusing** it (F-808). Refusing
+is honest, but it is not what you asked for: you asked for a browser you can see.
+
+On Windows, `spawn_browser(headless=False)` from a backend whose display context
+cannot show a window now delegates Chrome's **process creation** to Task Scheduler —
+a one-shot task that runs "only when the user is logged on" — so **Windows itself**
+puts the process in the logged-on user's interactive session and the window is
+visible by construction. The same backend then attaches to it over CDP, so there is
+still exactly one backend, the instance appears in `list_instances` like any other,
+and all 94 tools work unchanged. No env knob, no installer, on by default.
+
+This amends the F-808 ruling in mechanism, not in spirit: the tool still never picks
+or enters a session, and `display_context.py` is unchanged and still observational.
+The one new OS read answers "is anyone logged on at all", never "which session".
+
+The F-808 refusal is now the **fallback** — it fires only when delegation is
+impossible (not Windows, nobody logged on) or fails, and its message says so. That is
+exactly the situation a loud error is correct for.
+
 ## 2.0.4
 
 ### Fixed — a headed spawn opens a browser you can actually see, or says why not (F-808)
