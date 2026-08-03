@@ -41,6 +41,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import nodriver as uc
+import psutil
 import requests
 from nodriver import Browser
 
@@ -190,12 +191,22 @@ def _launcher_script(executable: str, args: list[str], pid_file: Path) -> str:
     ``schtasks /Create /TR`` truncates around 261 characters, so the real command
     line cannot live there — the task runs this file, and the file carries the
     args. ``-PassThru`` gives us the pid, which is the only thing we need back.
+
+    **Two quoting layers, both load-bearing.** ``subprocess.list2cmdline`` builds
+    the Windows command line by the MS C-runtime rules Chrome's own argv parser
+    uses (quote anything with whitespace, escape embedded quotes and the
+    backslash runs before them); ``_ps_quote`` then turns that whole string into
+    ONE PowerShell literal. Passing a LIST to ``-ArgumentList`` would skip the
+    first layer entirely: PowerShell joins array elements with spaces and does
+    NOT re-quote them, so ``--user-data-dir=C:/A B/prof`` arrives at Chrome as
+    two arguments, and a caller-supplied ``--user-agent=`` becomes an injection
+    channel into the command line.
     """
-    arg_list = ", ".join(_ps_quote(arg) for arg in args)
+    command_line = subprocess.list2cmdline(args)
     return (
         "$ErrorActionPreference = 'Stop'\n"
         f"$p = Start-Process -FilePath {_ps_quote(executable)} "
-        f"-ArgumentList {arg_list} -PassThru\n"
+        f"-ArgumentList {_ps_quote(command_line)} -PassThru\n"
         f"Set-Content -LiteralPath {_ps_quote(str(pid_file))} -Value $p.Id\n"
     )
 
@@ -211,19 +222,40 @@ def _devtools_ready(port: int) -> bool:
     return response.status_code == _HTTP_OK
 
 
-def _probe(port: int, pid_file: Path) -> int | None:
-    """One readiness poll: the launcher's pid file AND a live DevTools port.
-
-    Both, in that order: a pid without a port is a Chrome that has not finished
-    starting, and a port without a pid is somebody else's browser.
-    """
+def _read_pid(pid_file: Path) -> int | None:
+    """The pid the launcher recorded, or ``None`` until it has written one."""
     if not pid_file.exists():
         return None
     try:
-        pid = int(pid_file.read_text(encoding="utf-8").strip())
+        return int(pid_file.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
-    return pid if _devtools_ready(port) else None
+
+
+def _pid_alive(pid: int) -> bool:
+    """Seam: is the delegated process still running? Blocking; call in a thread."""
+    return psutil.pid_exists(pid)
+
+
+def _kill_delegated(pid: int) -> None:
+    """Best-effort kill of a delegated Chrome we could not attach to.
+
+    Nothing else can reap it: it was never handed to ``process_cleanup``, so it
+    is in no registry and belongs to no instance. Never raises — the caller is
+    already unwinding the real error.
+    """
+    try:
+        process = psutil.Process(pid)
+        for child in process.children(recursive=True):
+            with contextlib.suppress(psutil.Error):
+                child.kill()
+        process.kill()
+    except psutil.Error as error:
+        debug_logger.log_warning(
+            "desktop_launch",
+            "_kill_delegated",
+            f"Could not kill the unattached delegated browser {pid}: {error}",
+        )
 
 
 def _cleanup(task_name: str, script: Path, pid_file: Path) -> None:
@@ -269,9 +301,19 @@ async def _run_task(task_name: str, script: Path, port: int, pid_file: Path) -> 
         )
     deadline = time.monotonic() + PORT_READY_TIMEOUT
     while time.monotonic() < deadline:
-        pid = await asyncio.to_thread(_probe, port, pid_file)
+        pid = await asyncio.to_thread(_read_pid, pid_file)
         if pid is not None:
-            return pid
+            # Liveness first: a Chrome that exited (it handed off to an already
+            # running instance, or died on a bad arg) must fail NOW with a
+            # precise reason rather than burn the whole deadline in silence.
+            if not await asyncio.to_thread(_pid_alive, pid):
+                raise ToolError(
+                    f"F-810: the delegated browser (pid {pid}) exited before it "
+                    f"opened DevTools port {port} — it most likely handed off to "
+                    "an already-running Chrome instead of starting its own."
+                )
+            if await asyncio.to_thread(_devtools_ready, port):
+                return pid
         await asyncio.sleep(POLL_INTERVAL)
     raise ToolError(
         f"F-810: the delegated browser never opened its DevTools port {port} "
@@ -292,39 +334,63 @@ async def launch_and_attach(
     fallback depends on it.
 
     Raises ``ToolError`` naming the step that failed. The task and the launcher
-    script are always removed, success or failure.
+    script are always removed, success or failure, and a Chrome that started but
+    could not be attached to is killed rather than left as an untracked orphan.
     """
+    # The port is chosen here but bound by Chrome SECONDS later (task create,
+    # task run, browser start) — a far wider race window than the normal path's
+    # milliseconds. Accepted deliberately: a squatter surfaces as the readiness
+    # timeout below, which names the port, and never as a silent attach to some
+    # stranger's browser, because we also require OUR launcher's pid.
     port = proxy_forwarder._free_port()
+    # Derive the argv from nodriver's OWN config object rather than hand-copying
+    # its defaults: the delegated Chrome must receive exactly what the normal
+    # path's uc.start would have given it (including --remote-allow-origins=*,
+    # without which the CDP websocket handshake is refused), and one home for
+    # that list is the only way the two paths cannot drift. Config also
+    # synthesizes a temp profile dir when the caller has none, so we never launch
+    # against the user's REAL profile — Chrome would hand off to the already
+    # running instance and exit, leaving us a dead pid to wait on.
+    # (``sandbox`` is not a parameter: ``--no-sandbox`` already rides in
+    # ``launch_args`` when the spawn asked for it, added by
+    # ``browser_manager._resolve_launch_args`` after the stealth filter.)
+    config = uc.Config(
+        user_data_dir=user_data_dir,
+        headless=False,
+        browser_executable_path=browser_executable,
+        browser_args=launch_args,
+    )
+    config.host = "127.0.0.1"
+    config.port = port
+    args = config()
     token = uuid.uuid4().hex
     task_name = f"{TASK_PREFIX}{token}"
     launch_dir = _launch_dir()
     launch_dir.mkdir(parents=True, exist_ok=True)
     script = launch_dir / f"{token}.ps1"
     pid_file = launch_dir / f"{token}.pid"
-    args = [*launch_args, f"--remote-debugging-port={port}"]
-    if user_data_dir:
-        args.append(f"--user-data-dir={user_data_dir}")
     script.write_text(
         _launcher_script(browser_executable, args, pid_file), encoding="utf-8"
     )
+    pid: int | None = None
+    attached = False
     try:
         pid = await _run_task(task_name, script, port, pid_file)
-    finally:
-        _cleanup(task_name, script, pid_file)
-
-    debug_logger.log_info(
-        "desktop_launch",
-        "launch_and_attach",
-        f"Delegated headed launch landed on the user's desktop as pid {pid}; "
-        f"attaching on port {port}",
-    )
-    browser = await uc.start(
-        config=uc.Config(
-            host="127.0.0.1",
-            port=port,
-            browser_executable_path=browser_executable,
-            user_data_dir=user_data_dir,
+        debug_logger.log_info(
+            "desktop_launch",
+            "launch_and_attach",
+            f"Delegated headed launch landed on the user's desktop as pid {pid}; "
+            f"attaching on port {port}",
         )
-    )
-    browser._process_pid = pid
-    return browser, pid
+        # The SAME config: on the attach path nodriver ignores its args and
+        # user_data_dir, but ``browser.config.user_data_dir`` is what the spawn
+        # pipeline reads back to decide profile cleanup, so it must be the dir
+        # the browser actually launched with.
+        browser = await uc.start(config=config)
+        browser._process_pid = pid
+        attached = True
+        return browser, pid
+    finally:
+        await asyncio.to_thread(_cleanup, task_name, script, pid_file)
+        if not attached and pid is not None:
+            _kill_delegated(pid)

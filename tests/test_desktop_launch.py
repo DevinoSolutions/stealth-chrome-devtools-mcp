@@ -17,11 +17,13 @@ NOTHING here may create a real scheduled task or touch the real ``~/.stealth-mcp
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import (
@@ -137,6 +139,77 @@ def test_should_delegate_false_on_a_desktop_backend(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _split_windows_command_line(line: str) -> list[str]:
+    """Split a Windows command line into argv the way Chrome's CRT parser does.
+
+    An INDEPENDENT implementation of the documented MS C-runtime rules (2n
+    backslashes + `"` → n backslashes and a quote toggle; 2n+1 → n backslashes
+    and a literal quote), so an assertion on it is not just
+    ``list2cmdline`` agreeing with itself. Asserting on the PowerShell literal
+    instead would pin the serialization and miss the only thing that matters:
+    what lands in Chrome's ``argv``.
+    """
+    argv: list[str] = []
+    current: list[str] = []
+    quoted = False
+    started = False
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\":
+            slashes = 0
+            while index < len(line) and line[index] == "\\":
+                slashes += 1
+                index += 1
+            if index < len(line) and line[index] == '"':
+                current.append("\\" * (slashes // 2))
+                if slashes % 2:
+                    current.append('"')
+                else:
+                    quoted = not quoted
+                index += 1
+            else:
+                current.append("\\" * slashes)
+            started = True
+            continue
+        if char == '"':
+            quoted = not quoted
+            started = True
+            index += 1
+            continue
+        if char in " \t" and not quoted:
+            if started:
+                argv.append("".join(current))
+                current = []
+                started = False
+            index += 1
+            continue
+        current.append(char)
+        started = True
+        index += 1
+    if started:
+        argv.append("".join(current))
+    return argv
+
+
+def _powershell_literal(text: str, after: str) -> str:
+    """The single-quoted PowerShell literal following *after* in *text*."""
+    rest = text.split(after, 1)[1]
+    assert rest.startswith("'"), rest[:40]
+    out: list[str] = []
+    index = 1
+    while index < len(rest):
+        if rest[index] == "'":
+            if rest[index + 1 : index + 2] == "'":  # '' is an escaped quote
+                out.append("'")
+                index += 2
+                continue
+            return "".join(out)
+        out.append(rest[index])
+        index += 1
+    raise AssertionError("unterminated PowerShell literal")
+
+
 class FakeSchtasks:
     """Records every schtasks invocation and plays the scheduler's part.
 
@@ -184,6 +257,24 @@ class FakeSchtasks:
     def task_names(self) -> list[str]:
         return [call[call.index("/TN") + 1] for call in self.calls if "/TN" in call]
 
+    @property
+    def chrome_argv(self) -> list[str]:
+        """What Chrome's ``argv`` would actually contain (argv[1:]).
+
+        Both layers undone in order: the PowerShell literal, then the Windows
+        command-line quoting. This is the assertion surface — the raw script
+        text is not, because a script that reads plausibly can still hand Chrome
+        four arguments where one was meant.
+        """
+        assert self.script_text is not None
+        command_line = _powershell_literal(self.script_text, "-ArgumentList ")
+        return _split_windows_command_line(command_line)
+
+    @property
+    def chrome_executable(self) -> str:
+        assert self.script_text is not None
+        return _powershell_literal(self.script_text, "-FilePath ")
+
 
 @pytest.fixture()
 def delegation(monkeypatch, tmp_path):
@@ -192,22 +283,28 @@ def delegation(monkeypatch, tmp_path):
     monkeypatch.setattr(backend_registry, "STATE_DIR", tmp_path)
     monkeypatch.setattr(proxy_forwarder, "_free_port", lambda: 9333)
     monkeypatch.setattr(desktop_launch, "_devtools_ready", lambda port: True)
+    # The launched pid is a fake number, so liveness is stated, not observed.
+    monkeypatch.setattr(desktop_launch, "_pid_alive", lambda pid: True)
     monkeypatch.setattr(desktop_launch, "POLL_INTERVAL", 0.01)
     monkeypatch.setattr(desktop_launch, "PORT_READY_TIMEOUT", 1.0)
 
     started: list[object] = []
+    killed: list[int] = []
 
     async def fake_start(config):
         started.append(config)
         return SimpleNamespace(_process=None, _process_pid=None)
 
     monkeypatch.setattr(desktop_launch.uc, "start", fake_start)
+    monkeypatch.setattr(desktop_launch, "_kill_delegated", killed.append)
 
     def _install(schtasks: FakeSchtasks) -> FakeSchtasks:
         monkeypatch.setattr(desktop_launch, "_schtasks", schtasks)
         return schtasks
 
-    return SimpleNamespace(install=_install, started=started, state_dir=tmp_path)
+    return SimpleNamespace(
+        install=_install, started=started, killed=killed, state_dir=tmp_path
+    )
 
 
 async def test_launch_and_attach_returns_the_launched_pid_and_attaches(delegation):
@@ -226,23 +323,168 @@ async def test_launch_and_attach_returns_the_launched_pid_and_attaches(delegatio
     assert (config.host, config.port) == ("127.0.0.1", 9333)
 
 
-async def test_the_launcher_script_carries_the_args_the_config_would_have(delegation):
+async def test_the_launcher_hands_chrome_the_args_the_config_would_have(delegation):
     """``browser_args``/``user_data_dir`` are IGNORED by nodriver on attach, so the
-    ONLY place they can take effect is the launcher command line."""
+    ONLY place they can take effect is the launcher command line — asserted as
+    the argv Chrome receives, not as the text of the script."""
     schtasks = delegation.install(FakeSchtasks())
     await desktop_launch.launch_and_attach(
         "C:/Program Files/Google/Chrome/chrome.exe",
         ["--window-size=800,600"],
         "C:/profiles/clone one",
     )
-    text = schtasks.script_text
-    assert "--window-size=800,600" in text
-    assert "--remote-debugging-port=9333" in text
-    assert "--user-data-dir=C:/profiles/clone one" in text
-    # Every value single-quoted: paths here routinely contain spaces.
-    assert "'C:/Program Files/Google/Chrome/chrome.exe'" in text
-    assert "'--user-data-dir=C:/profiles/clone one'" in text
-    assert "-PassThru" in text
+    argv = schtasks.chrome_argv
+    assert "--window-size=800,600" in argv
+    assert "--remote-debugging-port=9333" in argv
+    assert "--user-data-dir=C:/profiles/clone one" in argv
+    assert schtasks.chrome_executable == "C:/Program Files/Google/Chrome/chrome.exe"
+    assert "-PassThru" in schtasks.script_text
+
+
+async def test_a_path_with_spaces_stays_one_chrome_argument(delegation):
+    """The regression: ``-ArgumentList`` given a LIST joins elements with spaces
+    and does not re-quote them, so this profile path used to reach Chrome as four
+    separate arguments — a browser silently launched against the wrong profile.
+    A user agent is the same hole pointed the other way: caller-controlled text
+    on the command line."""
+    schtasks = delegation.install(FakeSchtasks())
+    profile = "C:/Users/amind/CUSTOM MCPs & PRODUCTIVITY/prof"
+    user_agent = "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) Safari/537"
+    await desktop_launch.launch_and_attach(
+        "C:/Program Files/Google/Chrome/chrome.exe", [user_agent], profile
+    )
+    argv = schtasks.chrome_argv
+    assert f"--user-data-dir={profile}" in argv
+    assert user_agent in argv
+    # The sharp edge stated positively: NO fragment of either value became its
+    # own argument. "MCPs" alone in argv is exactly the shipped-bug signature.
+    assert "MCPs" not in argv
+    assert "&" not in argv
+    assert "(Windows" not in argv
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="CommandLineToArgvW is a Win32 API")
+async def test_the_quoting_matches_windows_own_parser(delegation):
+    """Cross-check the reference splitter against the OS: ``CommandLineToArgvW``
+    is the parser Chrome's own argv comes from."""
+    import ctypes
+    from ctypes import wintypes
+
+    schtasks = delegation.install(FakeSchtasks())
+    profile = 'C:/a b/pro"file\\'
+    await desktop_launch.launch_and_attach("chrome.exe", ["--foo=a b"], profile)
+    command_line = _powershell_literal(schtasks.script_text, "-ArgumentList ")
+
+    ctypes.windll.shell32.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    count = ctypes.c_int(0)
+    # A leading exe token: CommandLineToArgvW parses argv[0] by different rules.
+    argv_ptr = ctypes.windll.shell32.CommandLineToArgvW(
+        f"chrome.exe {command_line}", ctypes.byref(count)
+    )
+    try:
+        os_argv = [argv_ptr[i] for i in range(count.value)][1:]
+    finally:
+        ctypes.windll.kernel32.LocalFree(ctypes.cast(argv_ptr, wintypes.HLOCAL))
+
+    assert os_argv == schtasks.chrome_argv
+    assert f"--user-data-dir={profile}" in os_argv
+    assert "--foo=a b" in os_argv
+
+
+async def test_the_delegated_chrome_gets_nodrivers_own_default_args(delegation):
+    """The delegated argv is DERIVED from nodriver's Config, never hand-copied.
+
+    Without ``--remote-allow-origins=*`` the CDP websocket handshake is refused,
+    so a delegated browser that came up would still be unusable — and any list we
+    maintained ourselves would drift from nodriver's on the next upgrade.
+    """
+    import nodriver as uc
+
+    schtasks = delegation.install(FakeSchtasks())
+    await desktop_launch.launch_and_attach(
+        "chrome.exe", ["--window-size=800,600"], "C:/profiles/p"
+    )
+    argv = schtasks.chrome_argv
+    expected = uc.Config(
+        user_data_dir="C:/profiles/p",
+        headless=False,
+        browser_executable_path="chrome.exe",
+        browser_args=["--window-size=800,600"],
+    )
+    expected.host, expected.port = "127.0.0.1", 9333
+    assert argv == expected()
+    assert "--remote-allow-origins=*" in argv
+    assert "--remote-debugging-host=127.0.0.1" in argv
+
+
+async def test_a_delegated_launch_always_names_a_profile_dir(delegation):
+    """With no user_data_dir, Chrome would open the user's DEFAULT profile — and
+    if Chrome is already running it hands off and exits, leaving -PassThru a dead
+    pid and the poll burning its whole deadline. Config synthesizes a temp dir;
+    we use it rather than launching bare."""
+    schtasks = delegation.install(FakeSchtasks())
+    browser, _pid = await desktop_launch.launch_and_attach("chrome.exe", [], None)
+    profile_args = [a for a in schtasks.chrome_argv if a.startswith("--user-data-dir=")]
+    assert len(profile_args) == 1
+    assert profile_args[0] != "--user-data-dir="
+    # The attach config reports the dir the browser REALLY launched with — the
+    # spawn pipeline reads it back to decide profile cleanup.
+    assert delegation.started[0].user_data_dir == profile_args[0].split("=", 1)[1]
+
+
+async def test_a_chrome_that_died_fails_fast_with_a_precise_reason(
+    delegation, monkeypatch
+):
+    """A handed-off Chrome exits immediately. Waiting out the full deadline for a
+    process that is already gone is 20s of silence for a knowable answer."""
+    delegation.install(FakeSchtasks(pid=4242))
+    checked: list[int] = []
+
+    def dead(pid: int) -> bool:
+        checked.append(pid)
+        return False
+
+    monkeypatch.setattr(desktop_launch, "_pid_alive", dead)
+    monkeypatch.setattr(desktop_launch, "_devtools_ready", lambda port: False)
+    with pytest.raises(tool_errors.ToolError) as err:
+        await desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
+    message = str(err.value)
+    assert "F-810" in message
+    assert "4242" in message
+    assert "exited" in message
+    assert checked == [4242]
+    # Nothing is killed: the process is gone by definition, and if it handed off
+    # then the live Chrome on that desktop is the USER'S — killing it would take
+    # their browser down to clean up after ourselves.
+    assert delegation.killed == []
+
+
+async def test_a_browser_we_could_not_attach_to_is_killed(delegation, monkeypatch):
+    """The orphan hole: the launch succeeded, so a real Chrome is on the user's
+    desktop, but nothing recorded it — no instance, no pid registry, no reaper.
+    Every exit path after the pid is known must kill it."""
+    delegation.install(FakeSchtasks(pid=4242))
+
+    async def exploding_start(config):
+        raise RuntimeError("websocket handshake refused")
+
+    monkeypatch.setattr(desktop_launch.uc, "start", exploding_start)
+    with pytest.raises(RuntimeError):
+        await desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
+    assert delegation.killed == [4242]
+
+
+async def test_a_successful_attach_kills_nothing(delegation):
+    delegation.install(FakeSchtasks(pid=4242))
+    await desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
+    assert delegation.killed == []
+
+
+async def test_a_failure_before_the_pid_is_known_kills_nothing(delegation):
+    delegation.install(FakeSchtasks(create_rc=1))
+    with pytest.raises(tool_errors.ToolError):
+        await desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
+    assert delegation.killed == []
 
 
 async def test_the_task_is_created_run_and_deleted_under_one_name(delegation):
@@ -296,6 +538,44 @@ async def test_a_devtools_port_that_never_answers_raises_after_the_deadline(
     assert "9333" in message
     assert "/Delete" in schtasks.verbs
     assert delegation.started == []
+
+
+# ---------------------------------------------------------------------------
+# The unfaked psutil seams
+# ---------------------------------------------------------------------------
+
+
+def test_pid_alive_reads_the_real_process_table():
+    assert desktop_launch._pid_alive(os.getpid()) is True
+
+
+def test_kill_delegated_takes_the_children_too(monkeypatch):
+    """Chrome is a process TREE; killing only the root can leave renderers."""
+    killed: list[str] = []
+
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def children(self, recursive=False):
+            return [SimpleNamespace(kill=lambda: killed.append("child"))]
+
+        def kill(self):
+            killed.append("root")
+
+    monkeypatch.setattr(desktop_launch.psutil, "Process", FakeProcess)
+    desktop_launch._kill_delegated(4242)
+    assert killed == ["child", "root"]
+
+
+def test_kill_delegated_never_raises(monkeypatch):
+    """It runs while the real error is unwinding; it must not replace it."""
+
+    def boom(pid):
+        raise psutil.NoSuchProcess(pid)
+
+    monkeypatch.setattr(desktop_launch.psutil, "Process", boom)
+    desktop_launch._kill_delegated(4242)  # no raise
 
 
 # ---------------------------------------------------------------------------
