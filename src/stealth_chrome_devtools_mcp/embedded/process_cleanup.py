@@ -10,6 +10,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import psutil
@@ -19,6 +20,10 @@ from stealth_chrome_devtools_mcp.embedded.browser_pid_registry import Entries
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.singleton import STATE_DIR
 from stealth_chrome_devtools_mcp.settings import get_settings
+
+# What ``signal.signal`` returns: the disposition it displaced (a handler, or
+# one of the SIG_DFL / SIG_IGN ints, or None for one it cannot describe).
+SignalDisposition = Callable[[int, FrameType | None], object] | int | None
 
 
 def _owner_identity() -> tuple[int, float | None]:
@@ -50,6 +55,8 @@ class ProcessCleanup:
             get_settings().browser_orphan_profile_max_age
         )
         self._init_time = time.time()
+        self._previous_signal_handlers: dict[int, SignalDisposition] = {}
+        self._shutdown_in_progress = False
 
     def activate(self) -> None:
         """Install cleanup handlers and run orphan recovery once at serve startup."""
@@ -75,15 +82,7 @@ class ProcessCleanup:
 
     @staticmethod
     def _is_browser_process_name(process_name: str) -> bool:
-        """
-        Determine whether a process name belongs to a supported browser.
-
-        Args:
-            process_name (str): Process executable name.
-
-        Returns:
-            bool: True when the process looks like a Chromium-family browser.
-        """
+        """Whether a process name belongs to a Chromium-family browser."""
         normalized_name = (process_name or "").lower()
         return any(
             marker in normalized_name
@@ -112,40 +111,59 @@ class ProcessCleanup:
         return None
 
     def _setup_cleanup_handlers(self):
-        """
-        Register process cleanup hooks for normal interpreter shutdown and signals.
+        """Register cleanup hooks for interpreter exit and termination signals.
 
-        Returns:
-            None
+        ``signal.signal`` returns the disposition it displaces; recording it is
+        what lets ``_signal_handler`` hand the signal back (F-809) — under HTTP
+        that is uvicorn's ``handle_exit``, installed first by ``capture_signals``
+        and so REPLACED by ours, never coexisting. SIGBREAK exists on Windows
+        only, so ``getattr`` is the whole platform gate. A re-install is skipped
+        (runpy double-loads the server module): re-recording would make
+        ``previous`` OUR handler, i.e. ``_signal_handler`` delegating to itself.
         """
         atexit.register(self._cleanup_all_tracked)
 
-        if hasattr(signal, "SIGTERM"):
-            signal.signal(signal.SIGTERM, self._signal_handler)
-        if hasattr(signal, "SIGINT"):
-            signal.signal(signal.SIGINT, self._signal_handler)
+        for name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+            signum = getattr(signal, name, None)
+            if signum is None or signum in self._previous_signal_handlers:
+                continue
+            self._previous_signal_handlers[signum] = signal.signal(
+                signum, self._signal_handler
+            )
 
-        if sys.platform == "win32" and hasattr(signal, "SIGBREAK"):
-            signal.signal(signal.SIGBREAK, self._signal_handler)
-
-    def _signal_handler(self, signum, _frame):
-        """
-        Handle interpreter termination signals by cleaning tracked browser resources.
-
-        Args:
-            signum: Signal number.
-            frame: Current stack frame.
-
-        Returns:
-            None
-        """
+    def _signal_handler(self, signum, frame):
+        """Clean up tracked browsers, then hand the signal back (F-809)."""
         debug_logger.log_info(
             "process_cleanup",
             "signal_handler",
             f"Received signal {signum}, initiating cleanup...",
         )
-        self._cleanup_all_tracked()
-        sys.exit(0)
+        previous = self._previous_signal_handlers.get(signum)
+        # SIG_DFL / SIG_IGN are ints and nothing recorded is None — neither is a
+        # loop to hand back to. ``default_int_handler`` is excluded deliberately:
+        # under standalone stdio it IS SIGINT's prior disposition, and delegating
+        # would swap today's clean exit 0 for a KeyboardInterrupt unwind.
+        default_int = signal.default_int_handler
+        if previous is None or isinstance(previous, int) or previous is default_int:
+            self._run_shutdown_cleanup()  # verbatim 1.x standalone behaviour
+            sys.exit(0)
+        # Delegate FIRST (a cheap flag set — a slow or failing cleanup must not
+        # strand the server), then RETURN into the interrupted frame so the
+        # server's own graceful path unwinds the loop, instead of ``sys.exit``
+        # tearing it down from inside ``select()``.
+        previous(signum, frame)
+        self._run_shutdown_cleanup()
+
+    def _run_shutdown_cleanup(self) -> None:
+        """Run the tracked-browser cleanup at most once per shutdown (a second
+        SIGTERM must not re-enter it mid-``rmtree``)."""
+        if self._shutdown_in_progress:
+            return
+        self._shutdown_in_progress = True
+        try:
+            self._cleanup_all_tracked()
+        except Exception as error:
+            debug_logger.log_error("process_cleanup", "shutdown_cleanup", error)
 
     def _load_tracked_pids(self) -> dict[str, dict[str, Any]]:
         """Every browser recorded in the shared PID file, ours and other
@@ -943,12 +961,7 @@ class ProcessCleanup:
             return False
 
     def _cleanup_all_tracked(self):
-        """
-        Clean up all tracked browser processes and temp profiles for the current run.
-
-        Returns:
-            None
-        """
+        """Clean up every tracked browser process and temp profile for this run."""
         if not self.browser_processes:
             debug_logger.log_info(
                 "process_cleanup",
@@ -983,12 +996,7 @@ class ProcessCleanup:
             self._save_tracked_pids()
 
     def get_tracked_processes(self) -> dict[str, int]:
-        """
-        Return currently tracked browser PIDs keyed by instance id.
-
-        Returns:
-            Dict[str, int]: Mapping of instance id to process id.
-        """
+        """Currently tracked browser PIDs, keyed by instance id."""
         return {
             instance_id: metadata["pid"]
             for instance_id, metadata in self.browser_processes.items()
@@ -996,15 +1004,7 @@ class ProcessCleanup:
         }
 
     def is_process_alive(self, instance_id: str) -> bool:
-        """
-        Check whether a tracked process is still alive.
-
-        Args:
-            instance_id: Browser instance identifier.
-
-        Returns:
-            bool: True if the tracked process still exists.
-        """
+        """Whether the tracked process for ``instance_id`` still exists."""
         metadata = self.browser_processes.get(instance_id)
         if metadata is None:
             return False
