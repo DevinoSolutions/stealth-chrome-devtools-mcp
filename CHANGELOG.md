@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.6
 
 ### Fixed — a failed spawn tells you the machine is out of process capacity (F-811)
 
