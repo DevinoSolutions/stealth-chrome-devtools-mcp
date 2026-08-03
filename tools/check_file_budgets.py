@@ -31,7 +31,22 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # rationale as the M10a rows below. Cap == actual ruff-clean LOC, no
     # padding; no-grow applies from this commit forward. Cap raise 3389->3401
     # RATIFIED per the human gate ruling 2026-08-02 (PR #57 merge).
-    "embedded/server.py": (3401, "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808"),
+    # + 10 (plan_F809 / F-809: the graceful-shutdown timeout FastMCP hard-codes
+    # to 0, which ERROR-logs "timeout graceful shutdown exceeded" — and ships it
+    # to Sentry — on every clean HTTP stop). 5 lines are the
+    # _GRACEFUL_SHUTDOWN_SECONDS constant and the rationale comment that has to
+    # sit with it; 5 are ruff's 88-col expansion of the one-line
+    # mcp.run(transport="http", ...) once it carries the uvicorn_config kwarg.
+    # There is no honest in-file offset left here. The spec's rejected
+    # alternative — a new shutdown_signals.py leaf to dodge the gate — would
+    # split the timeout from the run call it configures, i.e. a second home for
+    # one concern (CLAUDE.md convention 4). Cap == actual ruff-clean LOC, no
+    # padding. Cap raise 3401->3411 AWAITING RATIFICATION at the human gate;
+    # do not merge without it.
+    "embedded/server.py": (
+        3411,
+        "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809",
+    ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
     # irreducibly ~1024-line contiguous block, landing this module over the
     # 1000-LOC budget. GRANDFATHERED at its actual post-ruff-format LOC per the
