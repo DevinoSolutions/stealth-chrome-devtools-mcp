@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (2.0.5)
+## 2.0.5
 
 ### Fixed — a headed spawn just works, even from a backend with no desktop (F-810)
 
@@ -22,6 +22,27 @@ The one new OS read answers "is anyone logged on at all", never "which session".
 The F-808 refusal is now the **fallback** — it fires only when delegation is
 impossible (not Windows, nobody logged on) or fails, and its message says so. That is
 exactly the situation a loud error is correct for.
+
+### Fixed — a clean backend stop no longer ships ERROR noise to Sentry (F-809)
+
+Stopping the backend cleanly (`stealth-chrome-devtools stop`, or SIGTERM) produced
+1-3 ERROR-level Sentry events per shutdown: process_cleanup's signal handler
+**replaced** uvicorn's own handler and `sys.exit`-ed from inside it, unwinding the
+event loop abnormally. Every clean stop looked like a crash in the error stream,
+burying real errors.
+
+The handler now records the disposition that was installed before it and **hands
+the signal back** after cleanup, and uvicorn gets a positive graceful-shutdown
+timeout so in-flight requests drain instead of erroring. A clean POSIX stop now
+exits via SIGTERM's default disposition with zero ERROR lines — pinned by an e2e
+test that accepts *only* exit 0 or `-SIGTERM` (a crash still fails it).
+
+Closing the loop on Ctrl+C: handing SIGINT back meant uvicorn re-raised it as a
+`KeyboardInterrupt` that escaped `main()` — a traceback and an unhandled-exception
+Sentry event per Ctrl+C, on both the HTTP backend and the default stdio `serve`
+(where Ctrl+C is the only way out). The entry-point shim now converts it to a
+quiet exit 130; the interrupted frame is still logged at DEBUG so an interrupt
+during a wedged startup keeps its diagnosis.
 
 ## 2.0.4
 

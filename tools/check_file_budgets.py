@@ -41,8 +41,9 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # alternative — a new shutdown_signals.py leaf to dodge the gate — would
     # split the timeout from the run call it configures, i.e. a second home for
     # one concern (CLAUDE.md convention 4). Cap == actual ruff-clean LOC, no
-    # padding. Cap raise 3401->3411 AWAITING RATIFICATION at the human gate;
-    # do not merge without it.
+    # padding. Cap raise 3401->3411 RATIFIED per the maintainer's release
+    # directive 2026-08-03 ("ship both; go for it, you can release"), executed
+    # by the PR #60 merge.
     "embedded/server.py": (
         3411,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809",

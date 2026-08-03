@@ -53,7 +53,7 @@ Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, e
   "mcpServers": {
     "stealth-chrome-devtools-mcp": {
       "command": "uvx",
-      "args": ["stealth-chrome-devtools-mcp==2.0.4"]
+      "args": ["stealth-chrome-devtools-mcp==2.0.5"]
     }
   }
 }
@@ -62,7 +62,7 @@ Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, e
 Or install via pip:
 
 ```bash
-pip install stealth-chrome-devtools-mcp==2.0.4
+pip install stealth-chrome-devtools-mcp==2.0.5
 ```
 
 Crashes are reported to the maintainers by default, with your username and
