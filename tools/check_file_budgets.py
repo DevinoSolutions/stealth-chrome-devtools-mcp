@@ -90,7 +90,16 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # (cap == actual, no padding), per the C1 discipline. Cap raise 966->1023
     # RATIFIED per the human gate ruling 2026-08-02 (PR #57 merge). No-grow
     # applies from here.
-    "embedded/process_cleanup.py": (1023, "plan_M11a_M15 + plan_M7 + plan_F808"),
+    # plan_F809 / F-809 spends the whole remaining balance and not a line more:
+    # the signal hand-off paid its own way (-3, the two boilerplate
+    # Args:/Returns: docstring blocks the spec's §4 payment plan named), and the
+    # re-install guard spends +3 (one loop line, two docstring lines for why a
+    # second install must not record our own handler). 1023 stays the actual
+    # post-ruff-format LOC, so this is a ratchet to actual, NOT a raise.
+    "embedded/process_cleanup.py": (
+        1023,
+        "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809",
+    ),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
     # + honest message + debug_logger.log_info on failure) + 1 (plan_M4ph1
     # STEP 0: isort emits a first-party group-separator blank line once
