@@ -303,10 +303,15 @@ def http_argv(monkeypatch):
     )
 
 
+def _must_not_run(*args, **kwargs):
+    raise AssertionError("the wrong branch of main() ran")
+
+
 class TestCtrlCDoesNotEscapeTheShim:
     """``__main__.py``, the ``stealth-chrome-devtools-mcp`` console script and
-    ``stealth-chrome-devtools serve`` all run this one ``main()``, so catching
-    it here covers every entry point."""
+    ``stealth-chrome-devtools serve`` all run this one ``main()``. Both of its
+    exits are covered — the ``runpy`` branch AND the stdio-proxy branch, which
+    returns before ``runpy`` is ever reached."""
 
     def test_keyboard_interrupt_becomes_a_quiet_systemexit_130(
         self, monkeypatch, http_argv
@@ -318,6 +323,27 @@ class TestCtrlCDoesNotEscapeTheShim:
 
         # A KeyboardInterrupt escaping here IS the bug: it is a BaseException,
         # so pytest.raises(SystemExit) would not swallow it.
+        with pytest.raises(SystemExit) as excinfo:
+            shim.main()
+
+        assert excinfo.value.code == 130
+
+    def test_a_ctrl_c_in_the_stdio_proxy_is_quiet_too(self, monkeypatch):
+        """``serve`` with no ``--http`` is the DEFAULT verb, it never reaches
+        ``runpy``, and Ctrl+C is the only way to stop a foreground serve — so
+        this is the likeliest interrupt in the product, not an edge case."""
+        from stealth_chrome_devtools_mcp.embedded import singleton
+
+        def interrupted(port):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            sys, "argv", ["stealth-chrome-devtools-mcp", "--transport", "stdio"]
+        )
+        monkeypatch.setattr(singleton, "ensure_server_running", lambda port: port)
+        monkeypatch.setattr(singleton, "run_stdio_proxy", interrupted)
+        monkeypatch.setattr(runpy, "run_path", _must_not_run)
+
         with pytest.raises(SystemExit) as excinfo:
             shim.main()
 
