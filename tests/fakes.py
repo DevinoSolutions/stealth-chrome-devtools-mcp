@@ -51,10 +51,21 @@ def _public_functions(module: Any) -> list[tuple[str, Any]]:
     ]
 
 
+def _is_path_param(param: Any) -> bool:
+    """A parameter that selects an on-disk record, by name or by annotation.
+
+    Name alone was enough while the only callers were the two registry modules,
+    whose parameters are literally ``path``/``paths``. ``spawn_exhaustion``
+    takes the same kind of argument under a domain name (``pid_file``), so the
+    annotation counts too — otherwise the guard reads as vacuous there and
+    fails for the wrong reason.
+    """
+    return param.name in ("path", "paths") or "Path" in str(param.annotation)
+
+
 def _takes_a_path(func: Any) -> bool:
     return any(
-        param.name in ("path", "paths")
-        for param in inspect.signature(func).parameters.values()
+        _is_path_param(param) for param in inspect.signature(func).parameters.values()
     )
 
 
@@ -69,9 +80,11 @@ def assert_no_default_paths(module: Any) -> None:
     ``~/.stealth-mcp``. A function that defaulted its path would bind its own
     module global at def-time and silently ignore that redirection.
 
-    Two ways to offend, both caught: naming the parameter ``path``/``paths`` and
-    giving it a default, and defaulting ANY parameter to a Path (a future
-    ``record=SERVER_STATE_FILE`` would escape a name-only check).
+    Three ways to offend, all caught: naming the parameter ``path``/``paths``
+    and giving it a default, annotating ANY parameter as a Path and giving it a
+    default (``pid_file: Path | None = None`` would escape a name-only check),
+    and defaulting ANY parameter to a Path (a future
+    ``record=SERVER_STATE_FILE`` would escape both).
 
     The companion assertion is that the sweep actually visited a path-taking
     function — a renamed module, a broken ``__module__`` filter, or an API that
@@ -82,10 +95,7 @@ def assert_no_default_paths(module: Any) -> None:
         f"{name}({param})"
         for name, func in functions
         for param in inspect.signature(func).parameters.values()
-        if (
-            param.name in ("path", "paths")
-            and param.default is not inspect.Parameter.empty
-        )
+        if (_is_path_param(param) and param.default is not inspect.Parameter.empty)
         or isinstance(param.default, Path)
     ]
     assert offenders == [], (
