@@ -965,6 +965,10 @@ jobs:
           --out "install-smoke-${{ matrix.kind }}.json"
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+          # install_smoke.py is invoked directly (not via pytest), so the
+          # conftest.py Sentry mute never loads; the spawned backend inherits
+          # this env, keeping CI launch failures out of production telemetry.
+          STEALTH_MCP_NO_ERROR_REPORTING: "true"
       - name: Upload smoke result + identity
         if: always()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
