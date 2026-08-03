@@ -24,6 +24,7 @@ end-to-end pin below therefore asserts the *positive* marker
 import ast
 import os
 import re
+import runpy
 import signal
 import socket
 import subprocess
@@ -34,6 +35,7 @@ from unittest.mock import patch
 
 import pytest
 
+from stealth_chrome_devtools_mcp import server as shim
 from stealth_chrome_devtools_mcp.embedded import server
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
@@ -86,6 +88,30 @@ class TestSetupRecordsDisplacedHandlers:
 
         assert signal.SIGTERM in installed
         assert signal.SIGINT in installed
+
+    def test_a_second_install_never_records_our_own_handler(self, cleanup):
+        """Installing twice in one process is a live shape here (the server
+        module is loaded twice under runpy). Without the guard the second
+        install records OUR handler as ``previous``, and ``_signal_handler``
+        then delegates to itself — unbounded recursion on the first signal."""
+        installed: dict[int, object] = {}
+
+        def fake_signal(signum, handler):
+            previous = installed.get(signum, signal.SIG_DFL)
+            installed[signum] = handler
+            return previous
+
+        with (
+            patch("signal.signal", side_effect=fake_signal),
+            patch("atexit.register"),
+        ):
+            cleanup._setup_cleanup_handlers()
+            cleanup._setup_cleanup_handlers()
+
+        assert cleanup._previous_signal_handlers
+        for previous in cleanup._previous_signal_handlers.values():
+            assert previous != cleanup._signal_handler
+            assert previous == signal.SIG_DFL
 
 
 class TestSignalHandoff:
@@ -256,6 +282,53 @@ class TestGracefulShutdownTimeout:
         assert isinstance(timeout, (int, float))
         assert timeout > 0
         assert timeout < 5
+
+
+# ---------------------------------------------------------------------------
+# N4 — Ctrl+C must not escape the top-level shim as a KeyboardInterrupt.
+#
+# The shutdown itself is already clean by then: uvicorn's ``capture_signals``
+# restores the pre-serve dispositions on the way out and re-raises every signal
+# it captured, so SIGINT arrives at Python's interrupt handler AFTER
+# "Application shutdown complete". Unhandled it reaches ``sys.excepthook``, and
+# Sentry's ExcepthookIntegration ships one unhandled-error event per Ctrl+C.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def http_argv(monkeypatch):
+    """argv that routes ``main()`` past the stdio-proxy branch to ``runpy``."""
+    monkeypatch.setattr(
+        sys, "argv", ["stealth-chrome-devtools-mcp", "--transport", "http"]
+    )
+
+
+class TestCtrlCDoesNotEscapeTheShim:
+    """``__main__.py``, the ``stealth-chrome-devtools-mcp`` console script and
+    ``stealth-chrome-devtools serve`` all run this one ``main()``, so catching
+    it here covers every entry point."""
+
+    def test_keyboard_interrupt_becomes_a_quiet_systemexit_130(
+        self, monkeypatch, http_argv
+    ):
+        def interrupted(*args, **kwargs):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(runpy, "run_path", interrupted)
+
+        # A KeyboardInterrupt escaping here IS the bug: it is a BaseException,
+        # so pytest.raises(SystemExit) would not swallow it.
+        with pytest.raises(SystemExit) as excinfo:
+            shim.main()
+
+        assert excinfo.value.code == 130
+
+    def test_a_normal_run_is_unchanged(self, monkeypatch, http_argv):
+        calls: list[tuple] = []
+        monkeypatch.setattr(runpy, "run_path", lambda *a, **k: calls.append((a, k)))
+
+        assert shim.main() is None
+        assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------

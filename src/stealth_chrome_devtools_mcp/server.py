@@ -30,7 +30,17 @@ def main() -> None:
             run_stdio_proxy(port)
             return
 
-    runpy.run_path(str(EMBEDDED_DIR / "server.py"), run_name="__main__")
+    try:
+        runpy.run_path(str(EMBEDDED_DIR / "server.py"), run_name="__main__")
+    except KeyboardInterrupt:
+        # Ctrl+C on the HTTP backend shuts down cleanly and THEN escapes: on the
+        # way out uvicorn's ``capture_signals`` restores the pre-serve signal
+        # dispositions and re-raises every signal it captured, so SIGINT lands on
+        # Python's own interrupt handler with nothing left to catch it. Unhandled,
+        # that prints a traceback and reaches ``sys.excepthook`` — which Sentry
+        # ships as an unhandled error on every Ctrl+C. ``SystemExit`` does
+        # neither; 130 is the conventional exit code for a SIGINT stop (F-809).
+        raise SystemExit(130) from None
 
 
 if __name__ == "__main__":
