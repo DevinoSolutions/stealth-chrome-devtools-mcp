@@ -78,6 +78,7 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | `proxy_forwarder.py` | authenticated egress-proxy forwarding + `_free_port` |
 | `proxy_utils.py` | proxy string parsing + Chrome launch-arg helpers |
 | `window_sizing.py` | **the one home for a spawn's requested window size** — the `--window-size` launch arg, the CDP `setWindowBounds` apply, and the post-launch measurement that makes the reported size truthful (F-804) |
+| `spawn_exhaustion.py` | **THE one home for "is this machine out of browser-process capacity, and what should the operator do about it"** (F-811) — the live Chromium-family count, the threshold (`_EXHAUSTION_PROCESS_THRESHOLD`), and the operator paragraph `exhaustion_hint` appends to a failed spawn's error. Its name matcher is deliberately narrower than `process_cleanup`'s ("how much of what WE spawn is running", not "may I kill this pid") — do not unify them. Never raises, never ships to Sentry |
 
 **Cloner subsystem** (one engine + thin adapters + disk storage)
 | File | Owns |

@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a failed spawn tells you the machine is out of process capacity (F-811)
+
+When Chrome could not launch because the machine had run out of process capacity,
+`spawn_browser` surfaced nodriver's raw
+`ToolError: Failed to spawn browser: --- Failed to connect to browser ---` with no
+indication that hundreds of browser processes were live. The caller — usually an
+agent — read an opaque string and retried, which made the exhaustion worse.
+
+Everything needed to make that error actionable was already present and simply not
+consulted: the CLI ships the remedies, `browser_pid_registry` knows which browsers
+are tracked, and psutil is already a dependency. A failed spawn on a machine showing
+an exhaustion signal now appends a paragraph naming the live Chromium-family process
+count and the tracked-browser count, then the two remedy commands in order —
+`stealth-chrome-devtools kill-orphans --force` (with why `--force` is required: the
+command refuses while a backend is alive, and a spawn failure is by definition raised
+by a live one), then `stealth-chrome-devtools cleanup --apply` to reclaim the profile
+directories — and the honest limit that processes we do not track are not ours to
+reap.
+
+Below the threshold the error is byte-identical to before. Nothing is killed,
+throttled, or retried differently, and nothing runs on the success path: the
+measurement happens exactly once, on a spawn that has already failed. The threshold
+is a module constant, not a new `STEALTH_MCP_*` knob, and it fires on the measured
+signal rather than on nodriver's message text, so a nodriver upgrade cannot silently
+switch it off.
+
 ## 2.0.5
 
 ### Fixed — a headed spawn just works, even from a backend with no desktop (F-810)
