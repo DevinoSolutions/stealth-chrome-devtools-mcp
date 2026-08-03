@@ -15,6 +15,13 @@ token that reports itself invisible). It also makes each test say the same thing
 on every runner — Session 0 Windows, a DISPLAY-less Linux CI cell, or an Aqua
 desktop. Exactly one test breaks that rule, deliberately and with its reasons
 written down: ``test_the_message_reports_the_token_rather_than_the_word_headless``.
+
+F-810 demoted the refusal to a FALLBACK: when the OS can place the launch on a
+logged-on user's desktop (``desktop_launch.available()``), the spawn proceeds and
+delegation delivers the window. So every test here states a SECOND premise —
+whether delegation is on offer — the same way it states its display premise, and
+for the same reason: otherwise a Windows developer's console session and a Linux
+CI cell would run different branches of the guard.
 """
 
 from types import SimpleNamespace
@@ -24,6 +31,7 @@ import pytest
 from fakes import FakeBrowserManager, pretend_display_context
 from stealth_chrome_devtools_mcp.embedded import (
     clone_storage,
+    desktop_launch,
     display_context,
     tool_errors,
 )
@@ -56,6 +64,10 @@ def doomed_spawn(monkeypatch, patched_server):
         raise AssertionError("profile selection ran before the visibility guard")
 
     monkeypatch.setattr(clone_storage, "resolve_profile_selection", tripwire_resolve)
+    # The second premise (F-810): no logged-on desktop to hand the launch to, so
+    # the refusal is the only remaining branch. Stated, never inherited from the
+    # runner — a Windows dev box has a console session and a CI cell does not.
+    monkeypatch.setattr(desktop_launch, "available", lambda: False)
     # Unseeded on purpose: FakeBrowserManager's own "seed spawn_instance" error IS
     # the second tripwire (and contains no contract token). A seeded instance here
     # would let a regressed guard spawn "successfully".
@@ -79,6 +91,9 @@ def spawn_fakes(monkeypatch, patched_server):
             return {"user_data_dir": "/fake/dir", "profile_role": "clone"}
 
         monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        # Delegation OFF by default here, so a test that proceeds proves it did so
+        # on the DISPLAY premise (F-808) and not on an available desktop (F-810).
+        monkeypatch.setattr(desktop_launch, "available", lambda: False)
         return patched_server(browser_manager=fbm), fbm
 
     return _install
@@ -100,6 +115,10 @@ async def test_headed_spawn_raises_when_no_window_can_be_shown(
     assert "headless=True" in msg  # the honest alternative
     assert "stealth-chrome-devtools doctor" in msg  # where to see the diagnosis
     assert "F-808" in msg  # the finding, for greppability
+    # F-810: the message must say the automatic delivery was TRIED and unavailable,
+    # otherwise a user on a machine where it normally works reads a stale reason.
+    assert "F-810" in msg
+    assert "logged on" in msg
     # Raised on its own terms, NOT re-wrapped by the tool's blanket handler: the
     # guard sits outside the try, so the user reads the diagnosis first.
     assert not msg.startswith("Failed to spawn browser")
@@ -168,6 +187,53 @@ async def test_unverified_context_does_not_block_headed_spawn(
     assert result["state"] == "ready"
     assert len(fbm.spawn_calls) == 1
     assert fbm.spawn_calls[0].headless is False
+
+
+async def test_an_available_desktop_launch_turns_the_refusal_off(
+    monkeypatch, call_tool, spawn_fakes
+):
+    """F-810, the whole point: from a context that cannot show a window, a headed
+    spawn now PROCEEDS when the OS can place the launch on a logged-on desktop.
+    The refusal is the fallback for when it cannot."""
+    pretend_display_context(monkeypatch, display_context.HEADLESS)
+    server_mod, fbm = spawn_fakes(headless=False)
+    monkeypatch.setattr(desktop_launch, "available", lambda: True)
+    result = await call_tool(server_mod, "spawn_browser", headless=False, sandbox=False)
+    assert result["state"] == "ready"
+    assert len(fbm.spawn_calls) == 1
+    assert fbm.spawn_calls[0].headless is False
+
+
+async def test_a_failing_delegation_surfaces_its_own_reason(
+    monkeypatch, call_tool, patched_server
+):
+    """When delegation is on offer but fails, the user must read WHY it failed —
+    not the F-808 refusal, which by then would be a lie about the machine."""
+
+    class ExplodingManager(FakeBrowserManager):
+        async def spawn_browser(self, options):
+            self.spawn_calls.append(options)
+            raise RuntimeError(
+                "F-810: could not create the desktop-launch task "
+                "stealth-mcp-launch-abc (schtasks exit 1)"
+            )
+
+    async def fake_resolve(user_data_dir, **kwargs):
+        return {"user_data_dir": "/fake/dir", "profile_role": "clone"}
+
+    monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+    pretend_display_context(monkeypatch, display_context.HEADLESS)
+    monkeypatch.setattr(desktop_launch, "available", lambda: True)
+    fbm = ExplodingManager()
+    server_mod = patched_server(browser_manager=fbm)
+    with pytest.raises(tool_errors.ToolError) as err:
+        await call_tool(server_mod, "spawn_browser", headless=False, sandbox=False)
+    msg = str(err.value)
+    assert "F-810" in msg
+    assert "desktop-launch task" in msg
+    # The delegation branch is a real spawn attempt, so it DOES reach the manager
+    # (unlike the refusal branch, which must precede every side effect).
+    assert len(fbm.spawn_calls) >= 1
 
 
 async def test_a_named_desktop_does_not_block_headed_spawn(
