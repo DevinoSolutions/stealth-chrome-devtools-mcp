@@ -63,6 +63,10 @@ PORT_READY_TIMEOUT = 20.0
 POLL_INTERVAL = 0.25
 SCHTASKS_TIMEOUT = 15
 DEVTOOLS_PROBE_TIMEOUT = 2
+# How far apart two readings of one process's start time may be and still be
+# the same process. psutil reports it deterministically, so this only absorbs
+# float representation — it is NOT slack for "probably the same pid".
+PID_IDENTITY_TOLERANCE = 0.5
 _HTTP_OK = 200
 # WTSGetActiveConsoleSessionId: 0 is the isolated services session (never
 # composited onto a screen since Vista), 0xFFFFFFFF means no session is attached.
@@ -232,20 +236,66 @@ def _read_pid(pid_file: Path) -> int | None:
         return None
 
 
-def _pid_alive(pid: int) -> bool:
-    """Seam: is the delegated process still running? Blocking; call in a thread."""
-    return psutil.pid_exists(pid)
+def _process_create_time(pid: int) -> float | None:
+    """The process's start time, or ``None`` if there is no such process.
+
+    Doubles as the liveness probe — a pid with no start time is a pid with no
+    process — and as the identity stamp: pid alone is not an identity, because
+    the OS recycles the number. Seam; blocking, so call it in a thread.
+    """
+    try:
+        return psutil.Process(pid).create_time()
+    except psutil.Error:
+        return None
 
 
-def _kill_delegated(pid: int) -> None:
+class _Delegated:
+    """What the poll learned about the launched browser, readable even when the
+    poll RAISES.
+
+    A plain return value cannot carry this: the timeout and cancellation paths
+    leave ``_run_task`` by exception, and both of them leave a live Chrome on
+    the user's desktop that only we know about. So the pid travels out-of-band,
+    with the identity stamp that pins it to that exact process.
+    """
+
+    __slots__ = ("create_time", "pid")
+
+    def __init__(self) -> None:
+        self.pid: int | None = None
+        self.create_time: float | None = None
+
+
+def _kill_delegated(pid: int, create_time: float | None) -> None:
     """Best-effort kill of a delegated Chrome we could not attach to.
 
     Nothing else can reap it: it was never handed to ``process_cleanup``, so it
     is in no registry and belongs to no instance. Never raises — the caller is
     already unwinding the real error.
+
+    ``create_time`` is the identity check, not a nicety. Seconds pass between
+    the poll that last saw this pid and this kill, and Windows reissues pids
+    freely; killing a recycled number would take down an unrelated process of
+    the user's. Same pid AND same start time is psutil's own identity rule. No
+    stamp means no proof, and no proof means no kill.
     """
+    if create_time is None:
+        debug_logger.log_warning(
+            "desktop_launch",
+            "_kill_delegated",
+            f"No identity stamp for delegated pid {pid}; refusing to kill it",
+        )
+        return
     try:
         process = psutil.Process(pid)
+        if abs(process.create_time() - create_time) > PID_IDENTITY_TOLERANCE:
+            debug_logger.log_warning(
+                "desktop_launch",
+                "_kill_delegated",
+                f"Pid {pid} was recycled since we launched it; refusing to kill "
+                "a process that is not ours",
+            )
+            return
         for child in process.children(recursive=True):
             with contextlib.suppress(psutil.Error):
                 child.kill()
@@ -268,8 +318,17 @@ def _cleanup(task_name: str, script: Path, pid_file: Path) -> None:
             path.unlink()
 
 
-async def _run_task(task_name: str, script: Path, port: int, pid_file: Path) -> int:
-    """Create + run the one-shot task, then wait for Chrome. Returns its pid."""
+async def _run_task(
+    task_name: str, script: Path, port: int, pid_file: Path, delegated: _Delegated
+) -> int:
+    """Create + run the one-shot task, then wait for Chrome. Returns its pid.
+
+    Also RECORDS that pid into *delegated* as soon as it is known to belong to a
+    live process, because the two failure paths that matter — the readiness
+    timeout and a cancellation mid-poll — leave by exception with a Chrome
+    already on the user's desktop, and the return value cannot reach the caller
+    to have it killed.
+    """
     command = f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script}"'
     # No /RU or /RP: a task that runs only when the current user is logged on
     # needs no stored credentials and no admin rights.
@@ -306,12 +365,17 @@ async def _run_task(task_name: str, script: Path, port: int, pid_file: Path) -> 
             # Liveness first: a Chrome that exited (it handed off to an already
             # running instance, or died on a bad arg) must fail NOW with a
             # precise reason rather than burn the whole deadline in silence.
-            if not await asyncio.to_thread(_pid_alive, pid):
+            # Deliberately does NOT record into `delegated`: the process is gone,
+            # and if it handed off, the live Chrome on that desktop is the
+            # USER'S — killing it would be us tidying up with their browser.
+            create_time = await asyncio.to_thread(_process_create_time, pid)
+            if create_time is None:
                 raise ToolError(
                     f"F-810: the delegated browser (pid {pid}) exited before it "
                     f"opened DevTools port {port} — it most likely handed off to "
                     "an already-running Chrome instead of starting its own."
                 )
+            delegated.pid, delegated.create_time = pid, create_time
             if await asyncio.to_thread(_devtools_ready, port):
                 return pid
         await asyncio.sleep(POLL_INTERVAL)
@@ -372,10 +436,10 @@ async def launch_and_attach(
     script.write_text(
         _launcher_script(browser_executable, args, pid_file), encoding="utf-8"
     )
-    pid: int | None = None
+    delegated = _Delegated()
     attached = False
     try:
-        pid = await _run_task(task_name, script, port, pid_file)
+        pid = await _run_task(task_name, script, port, pid_file, delegated)
         debug_logger.log_info(
             "desktop_launch",
             "launch_and_attach",
@@ -391,6 +455,15 @@ async def launch_and_attach(
         attached = True
         return browser, pid
     finally:
-        await asyncio.to_thread(_cleanup, task_name, script, pid_file)
-        if not attached and pid is not None:
-            _kill_delegated(pid)
+        # The kill goes FIRST and is synchronous. A cancellation delivered while
+        # this ``finally`` is awaiting abandons everything sequenced after that
+        # await — measured, not assumed: a second ``cancel()`` landing during
+        # the cleanup await skips the remainder of the block. Of the two things
+        # that could be stranded here, a visible Chrome that no registry knows
+        # about is far worse than a scratch file, so it must not sit behind one.
+        if not attached and delegated.pid is not None:
+            _kill_delegated(delegated.pid, delegated.create_time)
+        # Shielded against the same hazard from the other side: the delete still
+        # RUNS to completion if this coroutine is cancelled — we merely stop
+        # waiting on it — so a cancelled spawn cannot strand a scheduled task.
+        await asyncio.shield(asyncio.to_thread(_cleanup, task_name, script, pid_file))

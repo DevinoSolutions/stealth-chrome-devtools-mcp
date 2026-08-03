@@ -17,6 +17,7 @@ NOTHING here may create a real scheduled task or touch the real ``~/.stealth-mcp
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -283,20 +284,25 @@ def delegation(monkeypatch, tmp_path):
     monkeypatch.setattr(backend_registry, "STATE_DIR", tmp_path)
     monkeypatch.setattr(proxy_forwarder, "_free_port", lambda: 9333)
     monkeypatch.setattr(desktop_launch, "_devtools_ready", lambda port: True)
-    # The launched pid is a fake number, so liveness is stated, not observed.
-    monkeypatch.setattr(desktop_launch, "_pid_alive", lambda pid: True)
+    # The launched pid is a fake number, so its liveness AND its identity stamp
+    # are stated, not observed.
+    monkeypatch.setattr(desktop_launch, "_process_create_time", lambda pid: 1000.0)
     monkeypatch.setattr(desktop_launch, "POLL_INTERVAL", 0.01)
     monkeypatch.setattr(desktop_launch, "PORT_READY_TIMEOUT", 1.0)
 
     started: list[object] = []
-    killed: list[int] = []
+    killed: list[tuple[int, float | None]] = []
 
     async def fake_start(config):
         started.append(config)
         return SimpleNamespace(_process=None, _process_pid=None)
 
     monkeypatch.setattr(desktop_launch.uc, "start", fake_start)
-    monkeypatch.setattr(desktop_launch, "_kill_delegated", killed.append)
+    monkeypatch.setattr(
+        desktop_launch,
+        "_kill_delegated",
+        lambda pid, create_time: killed.append((pid, create_time)),
+    )
 
     def _install(schtasks: FakeSchtasks) -> FakeSchtasks:
         monkeypatch.setattr(desktop_launch, "_schtasks", schtasks)
@@ -440,11 +446,11 @@ async def test_a_chrome_that_died_fails_fast_with_a_precise_reason(
     delegation.install(FakeSchtasks(pid=4242))
     checked: list[int] = []
 
-    def dead(pid: int) -> bool:
+    def dead(pid: int) -> float | None:
         checked.append(pid)
-        return False
+        return None
 
-    monkeypatch.setattr(desktop_launch, "_pid_alive", dead)
+    monkeypatch.setattr(desktop_launch, "_process_create_time", dead)
     monkeypatch.setattr(desktop_launch, "_devtools_ready", lambda port: False)
     with pytest.raises(tool_errors.ToolError) as err:
         await desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
@@ -471,7 +477,9 @@ async def test_a_browser_we_could_not_attach_to_is_killed(delegation, monkeypatc
     monkeypatch.setattr(desktop_launch.uc, "start", exploding_start)
     with pytest.raises(RuntimeError):
         await desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
-    assert delegation.killed == [4242]
+    # With the identity stamp the poll captured, so the kill can prove the pid
+    # still belongs to the process we launched.
+    assert delegation.killed == [(4242, 1000.0)]
 
 
 async def test_a_successful_attach_kills_nothing(delegation):
@@ -530,7 +538,7 @@ async def test_a_devtools_port_that_never_answers_raises_after_the_deadline(
     delegation, monkeypatch
 ):
     monkeypatch.setattr(desktop_launch, "_devtools_ready", lambda port: False)
-    schtasks = delegation.install(FakeSchtasks())
+    schtasks = delegation.install(FakeSchtasks(pid=4242))
     with pytest.raises(tool_errors.ToolError) as err:
         await desktop_launch.launch_and_attach("chrome.exe", [], None)
     message = str(err.value)
@@ -538,6 +546,41 @@ async def test_a_devtools_port_that_never_answers_raises_after_the_deadline(
     assert "9333" in message
     assert "/Delete" in schtasks.verbs
     assert delegation.started == []
+    # The sharp part: this Chrome is ALIVE — the poll proved it every iteration,
+    # it just never opened the port. Raising without killing it leaves a browser
+    # on the user's desktop that no registry, reaper or tool can ever reach.
+    assert delegation.killed == [(4242, 1000.0)]
+
+
+async def test_a_cancelled_poll_still_kills_the_browser_it_launched(
+    delegation, monkeypatch
+):
+    """Cancellation has the timeout's exact shape: we leave by exception with a
+    live Chrome we launched. It is also the harder case — an ``await`` in the
+    ``finally`` can re-raise CancelledError at once, so the kill has to be
+    sequenced before one, not after."""
+    probes: list[int] = []
+
+    def never_ready(port: int) -> bool:
+        probes.append(port)
+        return False
+
+    monkeypatch.setattr(desktop_launch, "_devtools_ready", never_ready)
+    monkeypatch.setattr(desktop_launch, "PORT_READY_TIMEOUT", 30.0)
+    delegation.install(FakeSchtasks(pid=4242))
+
+    task = asyncio.create_task(
+        desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
+    )
+    # Cancel only once the poll has actually seen the browser — cancelling
+    # earlier would test the "no pid yet" path, which already has its own test.
+    while not probes:
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert delegation.killed == [(4242, 1000.0)]
 
 
 # ---------------------------------------------------------------------------
@@ -545,17 +588,27 @@ async def test_a_devtools_port_that_never_answers_raises_after_the_deadline(
 # ---------------------------------------------------------------------------
 
 
-def test_pid_alive_reads_the_real_process_table():
-    assert desktop_launch._pid_alive(os.getpid()) is True
+def test_process_create_time_reads_the_real_process_table():
+    """One call answers both questions it is used for: alive, and which one."""
+    mine = desktop_launch._process_create_time(os.getpid())
+    assert isinstance(mine, float)
+    assert desktop_launch._process_create_time(_a_pid_that_does_not_exist()) is None
 
 
-def test_kill_delegated_takes_the_children_too(monkeypatch):
-    """Chrome is a process TREE; killing only the root can leave renderers."""
-    killed: list[str] = []
+def _a_pid_that_does_not_exist() -> int:
+    candidate = 999_999
+    while psutil.pid_exists(candidate):
+        candidate -= 1
+    return candidate
 
+
+def _fake_process_class(created: float, killed: list[str]):
     class FakeProcess:
         def __init__(self, pid):
             self.pid = pid
+
+        def create_time(self):
+            return created
 
         def children(self, recursive=False):
             return [SimpleNamespace(kill=lambda: killed.append("child"))]
@@ -563,9 +616,50 @@ def test_kill_delegated_takes_the_children_too(monkeypatch):
         def kill(self):
             killed.append("root")
 
-    monkeypatch.setattr(desktop_launch.psutil, "Process", FakeProcess)
-    desktop_launch._kill_delegated(4242)
+    return FakeProcess
+
+
+def test_kill_delegated_takes_the_children_too(monkeypatch):
+    """Chrome is a process TREE; killing only the root can leave renderers."""
+    killed: list[str] = []
+    monkeypatch.setattr(
+        desktop_launch.psutil, "Process", _fake_process_class(1000.0, killed)
+    )
+    desktop_launch._kill_delegated(4242, 1000.0)
     assert killed == ["child", "root"]
+
+
+def test_kill_delegated_refuses_a_recycled_pid(monkeypatch):
+    """Seconds pass between the poll that saw this pid and this kill, and the OS
+    reissues pids freely. A different start time means the number now belongs to
+    somebody else's process — killing it would be us taking down a stranger."""
+    killed: list[str] = []
+    monkeypatch.setattr(
+        desktop_launch.psutil, "Process", _fake_process_class(2000.0, killed)
+    )
+    desktop_launch._kill_delegated(4242, 1000.0)
+    assert killed == []
+
+
+def test_kill_delegated_tolerates_float_noise_in_the_stamp(monkeypatch):
+    """The guard must not become an excuse to leak the browser: the same process
+    read twice is still the same process."""
+    killed: list[str] = []
+    monkeypatch.setattr(
+        desktop_launch.psutil, "Process", _fake_process_class(1000.0001, killed)
+    )
+    desktop_launch._kill_delegated(4242, 1000.0)
+    assert killed == ["child", "root"]
+
+
+def test_kill_delegated_refuses_without_an_identity_stamp(monkeypatch):
+    """No stamp is no proof, and no proof is no kill."""
+    killed: list[str] = []
+    monkeypatch.setattr(
+        desktop_launch.psutil, "Process", _fake_process_class(1000.0, killed)
+    )
+    desktop_launch._kill_delegated(4242, None)
+    assert killed == []
 
 
 def test_kill_delegated_never_raises(monkeypatch):
@@ -575,7 +669,7 @@ def test_kill_delegated_never_raises(monkeypatch):
         raise psutil.NoSuchProcess(pid)
 
     monkeypatch.setattr(desktop_launch.psutil, "Process", boom)
-    desktop_launch._kill_delegated(4242)  # no raise
+    desktop_launch._kill_delegated(4242, 1000.0)  # no raise
 
 
 # ---------------------------------------------------------------------------
