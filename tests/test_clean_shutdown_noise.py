@@ -325,7 +325,15 @@ def test_sigterm_on_a_real_backend_is_a_clean_shutdown(tmp_path):
                 proc.wait(timeout=10)
 
     log = log_path.read_text(encoding="utf-8", errors="replace")
-    assert returncode == 0, f"unclean exit {returncode}:\n{log}"
+    # Two clean codes, not one. uvicorn 0.35's ``capture_signals`` restores the
+    # pre-serve dispositions and then ``signal.raise_signal``s every signal
+    # ``handle_exit`` captured — against SIG_DFL, so a delegated SIGTERM leaves
+    # the process terminated BY SIGTERM (-15), which is the conventional and
+    # correct outcome for a signalled server. (The spec draft's flat "exit 0"
+    # predates that check; its own §3 cites this same re-raise as the reason the
+    # drop-our-handler shape was rejected.) Exit 0 stays valid for a build where
+    # nothing re-raises. Anything else — 1, 3, -SIGKILL — is a real failure.
+    assert returncode in (0, -signal.SIGTERM), f"unclean exit {returncode}:\n{log}"
     # The POSITIVE marker: this is what makes the pin immune to a fix that
     # merely silences the ERROR records instead of shutting down cleanly.
     assert "Application shutdown complete" in log, log
