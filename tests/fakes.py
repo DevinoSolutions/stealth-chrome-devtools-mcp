@@ -30,9 +30,10 @@ from __future__ import annotations
 import inspect
 import json
 from pathlib import Path
-from types import SimpleNamespace
+from types import GeneratorType, SimpleNamespace
 from typing import Any
 
+import nodriver.cdp.dom as cdp_dom
 import nodriver.cdp.target as cdp_target
 
 # ---------------------------------------------------------------------------
@@ -195,6 +196,7 @@ class FakeTab:
         self._select_result = select_result
         self.evaluate_calls: list[str] = []
         self.send_calls: list[str] = []
+        self.get_calls: list[str] = []
         self.select_calls: list[str] = []
         self.cdp_frames: list[dict[str, Any]] = []
         self.handlers: list[tuple[Any, Any]] = []
@@ -215,6 +217,17 @@ class FakeTab:
                 return resp
         return self._evaluate_result
 
+    async def get(self, url: str, *args: Any, **kwargs: Any) -> FakeTab:
+        """nodriver's ``Tab.get`` — the navigation seam.
+
+        Updates ``.url`` the way a real navigation does, so a caller that reads
+        the tab back after navigating sees where it went. Returns ``self``, as
+        ``Tab.get`` returns the tab it navigated.
+        """
+        self.get_calls.append(url)
+        self.url = url
+        return self
+
     async def select(self, selector: str, *args: Any, **kwargs: Any) -> Any:
         """The nodriver element-resolution seam used by the CDP styles path and
         ``clone_element_complete``. Returns the configured ``select_result``
@@ -234,18 +247,26 @@ class FakeTab:
     async def send(self, cdp_obj: Any, *args: Any, **kwargs: Any) -> Any:
         name = cdp_command_name(cdp_obj)
         self.send_calls.append(name)
-        close = getattr(cdp_obj, "close", None)
-        if callable(close):
+        if isinstance(cdp_obj, GeneratorType):
+            # Advancing once yields the request frame ({"method", "params"}), so a
+            # test can assert the *arguments* of a CDP command.
+            #
+            # Nothing here is swallowed, deliberately. A nodriver command builds
+            # its frame WHILE being advanced, so an argument it cannot serialize
+            # (a raw dict where a ``to_json()``-bearing type is required) raises on
+            # exactly this line — and a bare ``except Exception: pass`` around it
+            # is what let Sentry STEALTH-…-1P ship green through 43 tests. Only
+            # StopIteration is tolerated, and only because a command that yields no
+            # frame has nothing to record.
+            #
+            # The ``isinstance`` gate is the whole tolerance: a non-generator
+            # double (a Mock, which answers ``callable(obj.close)`` truthfully)
+            # is skipped outright rather than advanced and forgiven.
             try:
-                # Advancing once yields the request frame ({"method", "params"}),
-                # so a test can assert the *arguments* of a CDP command.
                 self.cdp_frames.append(next(cdp_obj))
-            except Exception:
+            except StopIteration:
                 pass
-            try:
-                close()  # never leave the generator un-iterated
-            except Exception:
-                pass
+            cdp_obj.close()  # never leave the generator un-iterated
         resp = self._cdp_responses.get(name, None)
         return resp(name) if callable(resp) else resp
 
@@ -274,6 +295,21 @@ def fake_target(
     return SimpleNamespace(
         target_id=cdp_target.TargetID(target_id), url=url, title=title, type_=type_
     )
+
+
+def fake_element(node_id: int = 1, **attrs: Any) -> SimpleNamespace:
+    """A nodriver element double carrying a REAL ``cdp.dom.NodeId``.
+
+    The exact twin of :func:`fake_target`'s reasoning, one level down. ``NodeId``
+    is an ``int`` subclass whose only addition is ``to_json()``, and every by-node
+    CDP command serialises with ``node_id.to_json()`` (``cdp/css.py:1814``), so a
+    bare ``int`` here is an element that could not exist: production's
+    ``_resolve_node_id`` returns ``element.node.node_id``, always a real
+    ``NodeId``.
+
+    ``NodeId(n) == n``, so assertions comparing against a plain int still hold.
+    """
+    return SimpleNamespace(node_id=cdp_dom.NodeId(node_id), **attrs)
 
 
 class FakeDiscoveredTarget:

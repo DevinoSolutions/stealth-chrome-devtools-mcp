@@ -741,19 +741,21 @@ count, not membership of each path created by the test.
 `tests/test_e2e_functions_hooks.py::test_list_cdp_commands_are_domain_method_strings`.
 **Current support (non-acceptance)**: pytest:
 `tests/test_e2e_functions_hooks.py::test_cdp_functions_walk` proves only a
-non-empty list; pytest:
-`tests/test_e2e_functions_hooks.py::test_execute_cdp_command_rejects_domain_qualified_name`
-is an unrouted characterization of the convention mismatch.
+non-empty list; the convention mismatch it used to advertise is closed by F-813
+and pinned hermetically by pytest:
+`tests/test_cdp_command_normalization.py::test_every_command_the_tool_advertises_can_actually_run`
+(every advertised name resolves; the list is still bare Runtime methods, not the
+`domain.method` strings this step asks for).
 
 ### MQ-81: Execute CDP command
 **Manual**: `execute_cdp_command` with `Runtime.evaluate` → returns result.
 **Evidence**: planned — planned-pytest:
 `tests/test_e2e_functions_hooks.py::test_execute_cdp_runtime_evaluate_domain_qualified`.
-**Current support (non-acceptance)**: pytest:
-`tests/test_e2e_functions_hooks.py::test_cdp_functions_walk` succeeds only with
-the bare command `evaluate`; pytest:
-`tests/test_e2e_functions_hooks.py::test_execute_cdp_command_rejects_domain_qualified_name`
-is an unrouted characterization of `Runtime.evaluate` failing.
+**Current support (non-acceptance)**: that node now EXISTS and asserts the fixed
+behaviour (F-813 replaced the characterization that pinned `Runtime.evaluate`
+failing), but it has not been run against real Chrome yet — flip this row to
+acceptance once the integration lane is green. Hermetic half: pytest:
+`tests/test_cdp_command_normalization.py`.
 
 ### MQ-82: Get execution contexts
 **Manual**: `get_execution_contexts` → ≥1 context.
