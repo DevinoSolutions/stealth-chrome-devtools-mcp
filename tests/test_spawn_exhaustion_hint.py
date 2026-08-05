@@ -266,7 +266,9 @@ async def test_the_hint_lands_in_the_raised_error_when_the_seam_reads_high(
         await doomed_manager.spawn_browser(BrowserOptions())
 
     message = str(err.value)
-    assert message.startswith("Failed to spawn browser:")
+    # The "Failed to spawn browser:" prefix belongs to server.py's tool wrapper
+    # alone; carrying a second copy here doubled it in the user-visible ToolError.
+    assert not message.startswith("Failed to spawn browser")
     assert INNER_FAILURE in message
     assert message.endswith(sentinel)
     # Read off the live singleton at call time — that binding is what the
@@ -280,8 +282,9 @@ async def test_no_hint_when_the_seam_returns_none(monkeypatch, doomed_manager):
     with pytest.raises(Exception) as err:
         await doomed_manager.spawn_browser(BrowserOptions())
 
-    # EXACTLY today's text: pins the `or ""` and leaves no trailing artifact.
-    assert str(err.value) == f"Failed to spawn browser: {INNER_FAILURE}"
+    # EXACTLY the inner failure: pins the `or ""` and leaves no trailing artifact,
+    # and pins that the prefix is server.py's to add, never this layer's.
+    assert str(err.value) == INNER_FAILURE
 
 
 def test_no_public_function_defaults_its_path_parameter():
