@@ -26,11 +26,17 @@ the machine's ``server_name`` is dropped and the home-directory segment of every
 path is replaced with ``~``. Everything a maintainer debugs from — release,
 environment, correlation ids, the exception type and mechanism, the module path
 after the home segment — is deliberately left intact.
+
+The same hook is also the one place that decides an event is not worth sending:
+a failure raised through the project's own error CONVENTION
+(``embedded/tool_errors.py``) is the product working as designed, not a crash.
+See :func:`_is_expected_tool_failure`.
 """
 
 import importlib.metadata
 import logging
 import re
+from functools import cache
 from typing import TYPE_CHECKING, cast
 
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -148,22 +154,196 @@ def _anonymize(value: object, depth: int = 0) -> object:
     return value
 
 
-def _scrub_event(event: "Event", _hint: "dict[str, object] | None" = None) -> "Event":
-    """Sentry's ``before_send``: strip what identifies the reporter, keep the rest.
+#: The tool-surface classes that mean "expected failure", by NAME. Used only by
+#: the payload fallback below; the live-object path uses ``isinstance`` instead.
+#: Deliberately an explicit allowlist rather than "anything from our package":
+#: this decides what is never seen again, so it names what it drops.
+_EXPECTED_ERROR_NAMES = frozenset({"ToolError", "InstanceNotFoundError"})
+
+#: A name alone is not enough. ``fastmcp.exceptions.ToolError`` is a DIFFERENT
+#: class with the same name, and it is what wraps a genuine crash on its way out
+#: of ``tool_manager`` (``raise ToolError(...) from e``) — matching on the bare
+#: name would drop exactly the real bugs this filter exists to preserve.
+_EXPECTED_ERROR_MODULE_PREFIX = "stealth_chrome_devtools_mcp"
+
+#: ``sys.exc_info()``'s shape — ``(type, value, traceback)``.
+_EXC_INFO_LENGTH = 3
+
+
+@cache
+def _expected_error_base() -> "type[BaseException] | None":
+    """``tool_errors.ToolError``, imported on first use rather than at module import.
+
+    Lazy on purpose. ``cli.py`` imports this module at startup and imports
+    nothing from ``embedded/`` at top level, and importing the ``embedded``
+    package runs its sanctioned ``sys.path`` shim (``embedded/__init__.py``),
+    which puts module names like ``models`` and ``settings`` ahead of everything
+    else on the path. That shim belongs to the backend; nothing is gained by
+    firing it in an ops-CLI process that may never ship an event. By the time a
+    ``ToolError`` exists to classify, the leaf is loaded anyway.
+
+    ``ToolError`` alone is the base: ``InstanceNotFoundError`` and any future
+    subclass are covered by ``isinstance``, which is the point of the convention.
+    Returns ``None`` if the import fails, which degrades to the payload fallback
+    rather than to an exception.
+    """
+    try:
+        from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+    except Exception:  # noqa: BLE001  PERMANENT(never-raises contract, #55)
+        return None
+    return ToolError
+
+
+def _exception_chain(exc: BaseException) -> "list[BaseException]":
+    """``exc`` and everything it was raised from, in the order Sentry reports them.
+
+    Mirrors the SDK's own walk (``__cause__``, else ``__context__`` unless
+    ``raise ... from None`` suppressed it) so the live-object path and the
+    payload path below judge the SAME set of exceptions. Bounded and cycle-safe
+    for the same reason :data:`_MAX_EVENT_DEPTH` exists.
+    """
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if len(chain) >= _MAX_EVENT_DEPTH:
+            break
+        seen.add(id(current))
+        chain.append(current)
+        following = current.__cause__
+        if following is None and not current.__suppress_context__:
+            following = current.__context__
+        current = following
+    return chain
+
+
+def _hint_exception(hint: "dict[str, object] | None") -> "BaseException | None":
+    """The live exception behind an event, if the SDK handed one over.
+
+    Two shapes, because the logging integration produces both: an exception
+    event carries ``hint["exc_info"]`` (``event_from_exception`` fills it in even
+    when the event came from ``logger.exception``), and the record itself is
+    attached as ``hint["log_record"]``. The record is consulted only as a
+    fallback — a hand-built hint, or an SDK that stops filling ``exc_info`` in.
+    """
+    if not isinstance(hint, dict):
+        return None
+    candidates = (
+        hint.get("exc_info"),
+        getattr(hint.get("log_record"), "exc_info", None),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, BaseException):
+            return candidate
+        if (
+            isinstance(candidate, tuple)
+            and len(candidate) == _EXC_INFO_LENGTH
+            and isinstance(candidate[1], BaseException)
+        ):
+            return candidate[1]
+    return None
+
+
+def _is_expected_tool_failure(
+    event: "Event", hint: "dict[str, object] | None" = None
+) -> bool:
+    """Is this event nothing but the error convention doing its job?
+
+    Tools report an expected failure by RAISING ``tool_errors.ToolError`` (a bad
+    script, a missing instance, an unknown selector) — CLAUDE.md convention 2.
+    FastMCP logs every raising tool through ``logger.exception``, so the logging
+    integration turns each of those into a Sentry ERROR event with
+    ``handled: yes``. The top issues in the project's Sentry were all of them:
+    205 events of an agent passing an illegal script to ``execute_script``. That
+    is the product answering correctly, and it drowns the events that are not.
+
+    Two paths to the same decision, and the SAME rule:
+
+    * ``hint`` carries the live exception → ``isinstance``, which is exact and
+      picks up subclasses raised anywhere;
+    * only the serialized payload is available → the exception ``type`` name must
+      be in :data:`_EXPECTED_ERROR_NAMES` *and* its ``module`` must be ours.
+
+    **Drops only when EVERY exception in the chain is one of ours.** A
+    ``ToolError`` raised while handling an ``AttributeError`` keeps the event:
+    the real bug is in there, and this filter must never be the reason nobody
+    saw it. That is also why a broken logger name is not the test — the
+    ``AttributeError`` in ``navigate`` that this project actually shipped
+    arrived through ``FastMCP.fastmcp.tools.tool_manager``, the very logger the
+    noise arrives on, so ``ignore_logger`` on it would have hidden a real bug.
+
+    Never raises: an event it cannot classify is an event it sends.
+    """
+    try:
+        exception = _hint_exception(hint)
+        if exception is not None:
+            base = _expected_error_base()
+            if base is not None:
+                return all(
+                    isinstance(link, base) for link in _exception_chain(exception)
+                )
+        return _payload_is_expected_tool_failure(event)
+    except Exception:  # noqa: BLE001  PERMANENT(never-raises contract, #55)
+        _log.debug("Sentry expected-failure check failed; shipping", exc_info=True)
+        return False
+
+
+def _payload_is_expected_tool_failure(event: "Event") -> bool:
+    """The name-and-module rule, applied to a serialized event's exception values.
+
+    Every value must match, and an event with no exception values at all does
+    not match: "nothing to classify" is not "expected", or a message-only event
+    would be silently dropped.
+    """
+    if not isinstance(event, dict):
+        return False
+    exception = event.get("exception")
+    values = exception.get("values") if isinstance(exception, dict) else None
+    if not isinstance(values, list) or not values:
+        return False
+    return all(_value_is_expected_tool_failure(value) for value in values)
+
+
+def _value_is_expected_tool_failure(value: object) -> bool:
+    """One serialized exception: ours by name AND by module, or it is not ours."""
+    if not isinstance(value, dict):
+        return False
+    module = value.get("module")
+    return (
+        value.get("type") in _EXPECTED_ERROR_NAMES
+        and isinstance(module, str)
+        and module.startswith(_EXPECTED_ERROR_MODULE_PREFIX)
+    )
+
+
+def _scrub_event(
+    event: "Event", hint: "dict[str, object] | None" = None
+) -> "Event | None":
+    """Sentry's ``before_send``: drop the expected, scrub what is left.
+
+    THE one hook (there is no second ``before_send``; a second way to change an
+    outgoing event is a defect). It does two things in order:
+
+    0. an event that is only the error convention working as designed is dropped
+       — see :func:`_is_expected_tool_failure`;
+    1. everything that survives is scrubbed.
 
     Two removals, both universal — there is no maintainer-only path:
 
     * ``server_name``, which is the machine's own hostname;
     * the home-directory segment of every path, which is the account name.
 
-    Never raises, and never drops the event: an event we could not fully scrub
-    is still worth more than silence, so an internal failure degrades to
+    Never raises. The only event it drops is the one it positively recognised in
+    step 0; an event we could not fully scrub, or could not classify, is still
+    worth more than silence, so an internal failure degrades to
     :func:`_without_server_name` rather than to ``None``. The ``isinstance``
     guards look redundant against the annotation and are not — the annotation
     states what the SDK promises to pass, and this function is the last thing
     that runs before an event leaves the machine, so it defends against being
     handed something else rather than dying at the boundary.
     """
+    if _is_expected_tool_failure(event, hint):
+        return None
     try:
         scrubbed = _anonymize(event)
         if isinstance(scrubbed, dict):
