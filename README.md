@@ -1,5 +1,7 @@
 # Stealth Chrome DevTools MCP
 
+[![MCP Toplist](https://mcptoplist.com/badge/pulsemcp%2Fdevinosolutions-chrome-devtools.svg)](https://mcptoplist.com/server/pulsemcp%2Fdevinosolutions-chrome-devtools)
+
 [![PyPI](https://img.shields.io/pypi/v/stealth-chrome-devtools-mcp?color=blue&label=pypi)](https://pypi.org/project/stealth-chrome-devtools-mcp/)
 [![Tests](https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/actions/workflows/test.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
