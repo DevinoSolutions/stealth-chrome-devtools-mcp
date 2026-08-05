@@ -21,12 +21,14 @@ import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
+import nodriver.cdp.dom as cdp_dom
 import pytest
 
 from fakes import (
     FakeStorage,
     FakeTab,
     as_jsonable,
+    fake_element,
     load_or_capture_golden,
     normalize_golden,
 )
@@ -62,8 +64,10 @@ def _cdp_responses():
     ns = SimpleNamespace
     return {
         "enable": None,
-        "get_document": ns(node_id=1),
-        "query_selector_all": [2],
+        # Real NodeIds, not bare ints: every by-node CDP command serialises with
+        # node_id.to_json(), so a bare int is a response Chrome could not send.
+        "get_document": fake_element(node_id=1),
+        "query_selector_all": [cdp_dom.NodeId(2)],
         "describe_node": ns(
             tag_name="div",
             node_name="DIV",
@@ -266,7 +270,7 @@ class TestCanonicalEngine:
 
     async def test_styles_uses_cdp_direct_schema(self):
         tab = FakeTab(
-            cdp_responses=_cdp_responses(), select_result=SimpleNamespace(node_id=2)
+            cdp_responses=_cdp_responses(), select_result=fake_element(node_id=2)
         )
         result = await _cdc.cdp_element_cloner.extract_element_styles(
             tab, selector="#demo"
@@ -330,7 +334,7 @@ class TestCanonicalEngine:
         """Pins the §2.1 transport decision deterministically (no timing): styles
         takes the CDP (``.send``) path; the JS aspects take ``.evaluate``."""
         styles_tab = FakeTab(
-            cdp_responses=_cdp_responses(), select_result=SimpleNamespace(node_id=2)
+            cdp_responses=_cdp_responses(), select_result=fake_element(node_id=2)
         )
         await _cdc.cdp_element_cloner.extract_element_styles(
             styles_tab, selector="#demo"
@@ -347,7 +351,7 @@ class TestCanonicalEngine:
         tab = FakeTab(cdp_responses=_cdp_responses())
         assert (
             await _cdc.cdp_element_cloner._resolve_node_id(
-                tab, element=SimpleNamespace(node_id=7)
+                tab, element=fake_element(node_id=7)
             )
             == 7
         )
@@ -361,7 +365,7 @@ class TestCanonicalEngine:
         tab = FakeTab(
             evaluate_result=dict(CANNED_JS_ELEMENT),
             cdp_responses=_cdp_responses(),
-            select_result=SimpleNamespace(node_id=2),
+            select_result=fake_element(node_id=2),
         )
         result = await _cdc.cdp_element_cloner.extract_complete_element(
             tab, selector="#demo"
