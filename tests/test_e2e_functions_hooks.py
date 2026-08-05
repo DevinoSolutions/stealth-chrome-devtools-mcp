@@ -76,10 +76,9 @@ async def test_cdp_functions_walk(fixture_app_server):
 
         assert isinstance(await get_fn("get_execution_contexts")(instance_id=iid), list)
 
-        # execute_cdp_command is Runtime-only: it resolves the command via
-        # getattr(uc.cdp.runtime, command), so the domain-qualified
-        # "Runtime.evaluate" never resolves — use the bare snake_case attr
-        # "evaluate" (advertised-vs-executable mismatch pinned separately below).
+        # The bare Runtime method — the one spelling that resolved before F-813.
+        # Kept as-is so this walk proves it still resolves identically; the
+        # domain-qualified form has its own node below.
         cdp = await get_fn("execute_cdp_command")(
             instance_id=iid,
             command="evaluate",
@@ -200,16 +199,18 @@ async def test_python_binding_is_callable_from_javascript(fixture_app_server):
 
 
 @integration_test
-@pytest.mark.characterization
-async def test_execute_cdp_command_rejects_domain_qualified_name(fixture_app_server):
-    """PINS execute_cdp_command's advertised-vs-executable mismatch.
+async def test_execute_cdp_runtime_evaluate_domain_qualified(fixture_app_server):
+    """MQ-81: a domain-qualified CDP command runs (F-813).
 
-    Finding — execute_cdp_command is Runtime-only and rejects domain-qualified
-    names: it resolves the command via ``getattr(uc.cdp.runtime, command)`` (see
-    cdp_function_executor.py:169-171), so ``list_cdp_commands`` advertises
-    camelCase names like 'evaluate'/'callFunctionOn' but a domain-qualified
-    'Runtime.evaluate' (or any non-Runtime domain) can never resolve. The working
-    path uses ``command="evaluate"`` (test_cdp_functions_walk). Route M4-Ph1/M14.
+    Was ``test_execute_cdp_command_rejects_domain_qualified_name``, a
+    characterization of the advertised-vs-executable mismatch: the command
+    resolved via ``getattr(uc.cdp.runtime, command)``, so ``list_cdp_commands``
+    advertised camelCase names like 'callFunctionOn' while only the bare
+    'evaluate' could run, and 'Runtime.evaluate' — the spelling the CDP docs and
+    every caller use — could not resolve at all. That is now the defect it was
+    routed to fix, so the node asserts the fixed behaviour instead of pinning the
+    bug. Name resolution itself is covered hermetically in
+    tests/test_cdp_command_normalization.py; this is the real-Chrome half.
     """
     await warmup_once()
     base = fixture_app_server
@@ -225,8 +226,14 @@ async def test_execute_cdp_command_rejects_domain_qualified_name(fixture_app_ser
             command="Runtime.evaluate",
             params={"expression": "6 * 7", "return_by_value": True},
         )
-        assert cdp["success"] is False
-        assert "Unknown CDP command" in json.dumps(cdp, default=str)
+        assert cdp["success"] is True, cdp
+        assert "42" in json.dumps(cdp, default=str), cdp
+
+        unknown = await get_fn("execute_cdp_command")(
+            instance_id=iid, command="Runtime.noSuchCommand", params={}
+        )
+        assert unknown["success"] is False
+        assert "Unknown CDP command" in json.dumps(unknown, default=str)
     finally:
         await close(instance_id=iid)
 
