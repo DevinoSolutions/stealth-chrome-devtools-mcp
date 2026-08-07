@@ -16,6 +16,7 @@ from nodriver import Browser, Tab
 from stealth_chrome_devtools_mcp.embedded import (
     desktop_launch,
     spawn_exhaustion,
+    tool_errors,
     window_sizing,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -482,15 +483,13 @@ class BrowserManager:
             )
 
         # Identify browser type for logging
+        executable_lower = browser_executable.lower()
         browser_type = "Unknown"
-        if (
-            "edge" in browser_executable.lower()
-            or "msedge" in browser_executable.lower()
-        ):
+        if "edge" in executable_lower or "msedge" in executable_lower:
             browser_type = "Microsoft Edge"
-        elif "chromium" in browser_executable.lower():
+        elif "chromium" in executable_lower:
             browser_type = "Chromium"
-        elif "chrome" in browser_executable.lower():
+        elif "chrome" in executable_lower:
             browser_type = "Google Chrome"
 
         debug_logger.log_info(
@@ -1040,7 +1039,17 @@ class BrowserManager:
 
         browser = data["browser"]
         previous_tab = data.get("tab")
-        new_tab = await browser.get("about:blank", new_tab=True)
+        try:
+            new_tab = await browser.get("about:blank", new_tab=True)
+        except RuntimeError as e:
+            # nodriver picks the new target with a bare next(filter(...)) over
+            # browser.targets; PEP 479 turns that StopIteration into this.
+            if not isinstance(e.__cause__, StopIteration):
+                raise
+            raise tool_errors.ToolError(
+                "Browser has no usable page target (it may be shutting down or "
+                "its last tab was closed); spawn a new instance or retry."
+            ) from e
         await new_tab
 
         if close_existing and previous_tab:
@@ -1088,16 +1097,11 @@ class BrowserManager:
         tracked_tab = data.get("tab")
         navigation_count = data.get("navigation_count", 0)
 
-        if (
-            self.NAVIGATION_RECYCLE_THRESHOLD > 0
-            and navigation_count >= self.NAVIGATION_RECYCLE_THRESHOLD
-        ):
+        threshold = self.NAVIGATION_RECYCLE_THRESHOLD
+        if threshold > 0 and navigation_count >= threshold:
             return await self._replace_main_tab(
                 instance_id,
-                reason=(
-                    f"navigation recycle threshold "
-                    f"{self.NAVIGATION_RECYCLE_THRESHOLD} reached"
-                ),
+                reason=f"navigation recycle threshold {threshold} reached",
             )
 
         # F-775a: never await a browser.tabs entry, nor hand one to a caller that
@@ -1186,16 +1190,16 @@ class BrowserManager:
             if attempt == 0:
                 tab = await self.get_navigation_tab(instance_id)
             else:
+                cause = type(last_error).__name__ if last_error else "unknown"
                 tab = await self._replace_main_tab(
                     instance_id,
-                    reason=(
-                        f"recovering after navigation failure: "
-                        f"{type(last_error).__name__ if last_error else 'unknown'}"
-                    ),
+                    reason=f"recovering after navigation failure: {cause}",
                 )
 
             if not tab:
-                raise Exception(f"Instance not found: {instance_id}")
+                raise tool_errors.InstanceNotFoundError(
+                    f"Instance not found: {instance_id}"
+                )
 
             start_time = time.monotonic()
 
@@ -1239,11 +1243,7 @@ class BrowserManager:
                             self._instances[instance_id].get("navigation_count", 0) + 1
                         )
 
-                return {
-                    "url": final_url,
-                    "title": title,
-                    "success": True,
-                }
+                return {"url": final_url, "title": title, "success": True}
             except Exception as error:
                 last_error = error
                 debug_logger.log_warning(
@@ -1255,7 +1255,7 @@ class BrowserManager:
                 )
                 if attempt == 1 or not self._is_recoverable_navigation_error(error):
                     if isinstance(error, asyncio.TimeoutError):
-                        raise Exception(
+                        raise tool_errors.ToolError(
                             f"Navigation to {url} timed out after {timeout}ms"
                         ) from error
                     raise

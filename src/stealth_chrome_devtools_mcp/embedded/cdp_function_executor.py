@@ -13,7 +13,7 @@ nodriver's CDP access:
 import asyncio
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from types import ModuleType
 from typing import Any
 
@@ -81,6 +81,15 @@ def resolve_cdp_command(command: str) -> tuple[Any, str]:
         )
     domain_name = module.__name__.rpartition(".")[2]
     return found, f"{domain_name}.{getattr(found, '__name__', method)}"
+
+
+def build_cdp_call(method: Callable, params: dict[str, Any]) -> Generator:
+    """Build ``method``'s call, folding the wire's param names onto its own (F-816)."""
+    real = {_lookup_key(name): name for name in inspect.signature(method).parameters}
+    try:
+        return method(**{real.get(_lookup_key(k), k): v for k, v in params.items()})
+    except TypeError as exc:
+        raise ToolError(f"{exc}; valid params: {', '.join(real.values())}") from exc
 
 
 class ExecutionContext:
@@ -216,13 +225,10 @@ class CDPFunctionExecutor:
     async def execute_cdp_command(
         self, tab: Tab, command: str, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """
-        Executes any CDP Runtime command with given parameters.
+        """Executes any CDP command (any domain, since F-813) with given params.
 
-        Args:
-            tab (Tab): The browser tab.
-            command (str): CDP command name.
-            params (Dict[str, Any]): Parameters for the command.
+        The command name and its param names are each forgiven their spelling —
+        see ``resolve_cdp_command`` (F-813) and ``build_cdp_call`` (F-816).
 
         Returns:
             Dict[str, Any]: Result of the command execution.
@@ -236,7 +242,7 @@ class CDPFunctionExecutor:
                 # failure, and observability's before_send drops those by type.
                 # As a ValueError it was an unhandled-crash shape, and shipped.
                 raise ToolError(f"Unknown CDP command: {command} (tried {tried})")  # noqa: TRY301  plan_M4ph1
-            result = await tab.send(cdp_method(**params))
+            result = await tab.send(build_cdp_call(cdp_method, params))
             debug_logger.log_info(
                 "cdp_function_executor",
                 "execute_cdp_command",
