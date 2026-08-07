@@ -24,6 +24,7 @@ from fakes import FakeBrowserManager, FakeTab, call_tool
 from stealth_chrome_devtools_mcp.embedded import cdp_function_executor, server
 from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
     CDPFunctionExecutor,
+    build_cdp_call,
     resolve_cdp_command,
 )
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -202,3 +203,88 @@ async def test_the_tool_surfaces_one_unwrapped_failure(monkeypatch):
         "Unknown CDP command: Runtime.noSuchThing (tried runtime.noSuchThing)"
     )
     assert result["command"] == "Runtime.noSuchThing"
+
+
+# ---------------------------------------------------------------------------
+# F-816: the same forgiveness, one level down — the command's PARAMETERS
+#
+# Resolving the command name only moved the identical mistake one line along:
+# the caller who reads ``Runtime.evaluate`` in the CDP docs reads its parameters
+# there too, and sends ``awaitPromise`` to a generated function that declares
+# ``await_promise`` (Sentry STEALTH-CHROME-DEVTOOLS-MCP-22, 3 events, 2.0.6).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"expression": "6 * 7", "awaitPromise": True, "returnByValue": True},
+        {"expression": "6 * 7", "await_promise": True, "return_by_value": True},
+        {"expression": "6 * 7", "awaitPromise": True, "return_by_value": True},
+    ],
+    ids=["wire", "nodriver", "mixed"],
+)
+@pytest.mark.asyncio
+async def test_every_spelling_of_a_param_reaches_the_wire(params):
+    """All three spellings must build the ONE frame the protocol defines.
+
+    The frame is the assertion rather than the kwargs: it is what Chrome
+    receives, so it proves the value arrived under the right name instead of
+    being silently dropped.
+    """
+    tab = FakeTab(cdp_responses={"enable": None, "evaluate": ("remote", None)})
+
+    result = await CDPFunctionExecutor().execute_cdp_command(tab, "evaluate", params)
+
+    assert result["success"] is True
+    assert tab.cdp_frames[-1] == {
+        "method": "Runtime.evaluate",
+        "params": {"expression": "6 * 7", "returnByValue": True, "awaitPromise": True},
+    }
+    # The caller's own spelling is echoed back, exactly as the command name is.
+    assert result["params"] == params
+
+
+def test_the_param_folding_is_not_runtime_only():
+    """Folding is a property of the resolved callable, not of one domain."""
+    call = build_cdp_call(
+        uc.cdp.emulation.set_device_metrics_override,
+        {"width": 390, "height": 844, "deviceScaleFactor": 3.0, "mobile": True},
+    )
+
+    assert next(call)["params"]["deviceScaleFactor"] == 3.0
+
+
+def test_an_exact_param_name_is_never_folded_onto_another():
+    """The exact name wins, so a name that worked before is passed untouched."""
+    call = build_cdp_call(uc.cdp.runtime.evaluate, {"expression": "1", "silent": True})
+
+    assert next(call)["params"] == {"expression": "1", "silent": True}
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_param_names_the_ones_the_command_takes(monkeypatch):
+    """A param no folding can match is a caller mistake: an EXPECTED failure.
+
+    Same shape as the unknown-command path above — a ToolError the executor
+    catches itself, so Sentry's ``before_send`` drops it by type and the caller
+    still receives the method's ``{"success": False}`` KEEP contract. The valid
+    names go in the message because that is the one thing the caller needs.
+    """
+    reported: list[BaseException] = []
+    monkeypatch.setattr(
+        cdp_function_executor.debug_logger,
+        "log_error",
+        lambda component, method, error, context=None: reported.append(error),
+    )
+    tab = FakeTab(cdp_responses={"enable": None, "evaluate": ("remote", None)})
+
+    result = await CDPFunctionExecutor().execute_cdp_command(
+        tab, "Runtime.evaluate", {"expression": "1", "awaitPromis": True}
+    )
+
+    assert result["success"] is False
+    assert "awaitPromis" in result["error"]
+    assert "await_promise" in result["error"], "must list what the command takes"
+    assert [type(error) for error in reported] == [ToolError]
+    assert "evaluate" not in tab.send_calls, "a bad call must not reach the browser"
