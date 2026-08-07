@@ -1,6 +1,11 @@
 # F-783 — the timeout and cancellation paths escape the one-error convention
 
-**Status:** OPEN — characterized by plan_RELEASE W15, not fixed (W15 is zero-`src/`).
+**Status:** FIXED (2026-08-07, fix/sentry-2.0.8-batch) — `_with_cdp_timeout`'s
+timeout raise is now `ToolError`; the cancellation path still propagates
+`CancelledError` untouched (pinned by
+`tests/test_error_typing.py::test_cdp_timeout_does_not_convert_cancellation`).
+The W15 characterization pin in `tests/test_observability.py` was inverted into
+a regression guard (`test_the_timeout_path_now_joins_the_one_error_convention`).
 **Severity:** MEDIUM. A client cannot distinguish the commonest runtime failure
 from an interpreter bug by type.
 **Surface:** `src/stealth_chrome_devtools_mcp/embedded/server.py`

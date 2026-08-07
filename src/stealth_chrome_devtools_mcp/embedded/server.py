@@ -144,7 +144,7 @@ async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
         return await asyncio.wait_for(coro, timeout=t)
     except TimeoutError:
         tag = f" (instance {instance_id})" if instance_id else ""
-        raise Exception(
+        raise ToolError(
             f"CDP operation timed out after {t:.0f}s{tag}. "
             "The browser may have crashed or the connection dropped. "
             "Try closing the instance with close_instance and spawning a new one."
@@ -2665,16 +2665,16 @@ async def execute_cdp_command(
         command (str): CDP command, either domain-qualified ('Page.reload',
                 'Emulation.setDeviceMetricsOverride') or a bare Runtime method
                 ('evaluate'). Wire casing and snake_case both resolve.
-        params (Dict[str, Any], optional): Command parameters as a dictionary.
-                IMPORTANT: Use snake_case parameter names (e.g., 'return_by_value')
-                NOT camelCase ('returnByValue'). The nodriver library expects
-                Python-style parameter names.
+        params (Dict[str, Any], optional): Command parameters. Wire casing and
+                snake_case both resolve, per parameter ('returnByValue' and
+                'return_by_value' are the same argument), so the CDP docs' own
+                spelling works.
 
     Returns:
         Dict[str, Any]: Command execution result.
 
     Example:
-        # The command NAME is casing-flexible; the PARAMS are not — snake_case.
+        # Both the command NAME and its PARAM names are casing-flexible.
         params = {"expression": "document.title", "return_by_value": True}
     """
     tab = await _require_tab(browser_manager, instance_id)

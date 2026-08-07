@@ -23,6 +23,7 @@ from stealth_chrome_devtools_mcp.embedded.server import (
     _clamp_timeout,
     _with_cdp_timeout,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 # ---------------------------------------------------------------------------
 # Unit tests: _with_cdp_timeout mechanism
@@ -332,14 +333,18 @@ class TestFastTimeoutFailure:
 
     @pytest.mark.asyncio
     async def test_1s_timeout_returns_correct_error_type(self):
-        """Timeout should raise a plain Exception (not asyncio.TimeoutError)."""
+        """Timeout raises ``ToolError`` (not ``asyncio.TimeoutError``, and no
+        longer a bare ``Exception`` — F-783 closed in 2.0.8: the timeout path
+        joins convention 2 so a client can tell it from an interpreter bug by
+        type, and Sentry can drop the whole family instead of splitting it into
+        one issue per instance UUID)."""
 
         async def hang():
             await asyncio.sleep(9999)
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ToolError) as exc_info:
             await _with_cdp_timeout(hang(), timeout=1)
-        assert type(exc_info.value) is Exception
+        assert type(exc_info.value) is ToolError
         assert "CDP operation timed out" in str(exc_info.value)
 
     @pytest.mark.asyncio
