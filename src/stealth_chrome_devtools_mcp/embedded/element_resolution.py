@@ -16,9 +16,18 @@ place selectors resolve through, so every selector-driven tool inherits the
 recovery instead of surfacing an intermittent -32000 to callers -- and to real
 users -- under DOM churn.
 
-The recovery is keyed to the exact -32000 signal and bounded: a genuinely
+nodriver has a second, unrelated race with the same "retry clears it" shape, so
+it recovers here too. ``Tab.select_all`` awaits the tab, and ``Tab.wait``
+registers page-event handlers (``FrameStoppedLoading`` and friends) then drops
+them in a ``finally`` via ``Connection.remove_handler``, whose cleanup is a bare
+``del self.handlers[evt_dom]``. That delete removes the whole key rather than
+just this handler, so when two ``wait``s overlap on one tab the second one's
+cleanup finds the key gone and raises ``KeyError(<cdp event class>)``.
+
+The recovery is keyed to those two exact signals and bounded: a genuinely
 absent selector still surfaces as the normal not-found/timeout after the final
-attempt, and any other ``ProtocolException`` propagates unchanged.
+attempt, and any other ``ProtocolException`` -- or any ``KeyError`` not naming a
+``nodriver.cdp`` event class -- propagates unchanged.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ from nodriver import cdp
 from nodriver.core.connection import ProtocolException
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -44,6 +54,11 @@ _T = TypeVar("_T")
 # code only inside the stringified exception.
 _STALE_NODE_MARKER = "Could not find node with given id"
 
+# Package of the CDP event classes nodriver keys its handler table by. A KeyError
+# carrying one of these classes is nodriver's own bookkeeping race, never a
+# lookup miss in our code or a caller's.
+_CDP_EVENT_PACKAGE = "nodriver.cdp"
+
 # A DOM.documentUpdated burst settles within a few frames, so a small bounded
 # number of re-resolves clears the race; past that the selector is treated as
 # genuinely unresolvable and the stale-node error is surfaced to the caller.
@@ -55,8 +70,37 @@ def _is_stale_node_error(exc: ProtocolException) -> bool:
     return _STALE_NODE_MARKER in str(exc)
 
 
+def _raced_cdp_event(exc: KeyError) -> str | None:
+    """Name of the CDP event class in a nodriver handler-cleanup ``KeyError``.
+
+    ``None`` for every other ``KeyError`` — a missing dict key raised anywhere
+    else is a real defect and must not be retried or reworded.
+    """
+    if not exc.args:
+        return None
+    key = exc.args[0]
+    if not isinstance(key, type):
+        return None
+    module = getattr(key, "__module__", "") or ""
+    if module != _CDP_EVENT_PACKAGE and not module.startswith(f"{_CDP_EVENT_PACKAGE}."):
+        return None
+    return key.__name__
+
+
+def _recoverable_race(exc: ProtocolException | KeyError) -> str | None:
+    """Describe ``exc`` if it is one of the two known nodriver resolve races."""
+    if isinstance(exc, ProtocolException):
+        if _is_stale_node_error(exc):
+            return "document node invalidated mid-resolve"
+        return None
+    event = _raced_cdp_event(exc)
+    if event is None:
+        return None
+    return f"transient nodriver event-handler race ({event})"
+
+
 async def _resolve_with_recovery(what: str, resolve: Callable[[], Awaitable[_T]]) -> _T:
-    """Run ``resolve``, re-running it on the -32000 stale-document race.
+    """Run ``resolve``, re-running it on either known nodriver resolve race.
 
     ``resolve`` must build a *fresh* awaitable on each call so the retry lands on
     a freshly fetched document nodeId.
@@ -65,20 +109,29 @@ async def _resolve_with_recovery(what: str, resolve: Callable[[], Awaitable[_T]]
     while True:
         try:
             return await resolve()
-        except ProtocolException as exc:
-            if not _is_stale_node_error(exc):
+        except (ProtocolException, KeyError) as exc:
+            race = _recoverable_race(exc)
+            if race is None:
                 raise
             attempt += 1
             if attempt >= _MAX_RESOLVES:
+                if isinstance(exc, KeyError):
+                    # str(KeyError(cls)) is just the class repr, which tells a
+                    # caller nothing — name the condition instead.
+                    raise ToolError(
+                        f"{race} while resolving {what}; re-resolved {attempt} "
+                        f"times without clearing it"
+                    ) from exc
                 raise
             debug_logger.log_warning(
                 "element_resolution",
                 "_resolve_with_recovery",
-                f"document node invalidated mid-resolve ({what}); re-resolving on "
-                f"a fresh document (attempt {attempt}/{_MAX_RESOLVES})",
+                f"{race} ({what}); re-resolving on a fresh document "
+                f"(attempt {attempt}/{_MAX_RESOLVES})",
                 context={"what": what, "attempt": attempt},
             )
-            # Let the documentUpdated burst settle before re-resolving.
+            # Let the documentUpdated burst (or the handler-table churn) settle
+            # before re-resolving.
             await asyncio.sleep(_SETTLE_SECONDS * attempt)
 
 
@@ -124,7 +177,9 @@ async def resolve_elements(tab: Tab, selector: str) -> list[Element]:
     full match list of live ``Element`` objects (with ``.attrs``/``.text_all``/
     ``.get_position()``), or an empty list on a genuine zero-match. A -32000
     stale-node race re-resolves against a fresh document; a persistent one
-    surfaces after ``_MAX_RESOLVES`` exactly like the single-element path.
+    surfaces after ``_MAX_RESOLVES`` exactly like the single-element path. This
+    is also the path that hits nodriver's handler-cleanup ``KeyError``, since
+    ``select_all`` awaits the tab between attempts.
     """
 
     async def _do() -> list[Element]:
