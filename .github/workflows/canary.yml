@@ -91,8 +91,10 @@ jobs:
       - name: Record the Chrome Stable this future run happened to get
         # Informational identity capture only. It does not qualify the release
         # SHA and does not extend support to this Chrome version.
+        # F-819: --freeze-updater pins that Stable for the rest of the run, so
+        # the recorded identity describes the browser this run actually used.
         shell: bash
-        run: uv run python tools/resolve_chrome.py --out chrome-identity.json
+        run: uv run python tools/resolve_chrome.py --freeze-updater --out chrome-identity.json
       - name: Start Xvfb
         run: |
           sudo apt-get update -qq
@@ -142,6 +144,9 @@ jobs:
           echo "AUTHORITY OF EACH HALF:"
           echo "  deterministic     : local fixture, RED MEANS RED (calls the one reusable gate)"
           echo "  live-observation  : INFORMATIONAL ONLY, cannot gate or license a claim"
-          echo "  chrome identity   : whichever Stable the runner image supplied AT RUN TIME;"
-          echo "                      it does not qualify the release SHA, and says nothing"
-          echo "                      about historical, future, or non-stable channels."
+          echo "  chrome identity   : whichever Stable the runner image supplied, FROZEN AT RUN"
+          echo "                      START (F-819: the image's background updater is neutralised"
+          echo "                      before the version is read, so the recorded identity is the"
+          echo "                      one this run used end to end). It does not qualify the"
+          echo "                      release SHA, and says nothing about historical, future, or"
+          echo "                      non-stable channels."
