@@ -26,7 +26,11 @@ import nodriver as uc
 import pytest
 
 from fakes import FakeTab
-from stealth_chrome_devtools_mcp.embedded import spawn_exhaustion, window_sizing
+from stealth_chrome_devtools_mcp.embedded import (
+    browser_manager,
+    spawn_exhaustion,
+    window_sizing,
+)
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
@@ -92,6 +96,18 @@ def post_launch_manager(monkeypatch):
         return None
 
     monkeypatch.setattr(BrowserManager, "_apply_timezone_override", no_timezone)
+
+    # F-806's version reconciliation is a neighbour like the three above: it
+    # sends its own `Browser.getVersion` frame, which `FakeTab` records like any
+    # other, so leaving it live would put a second command in `cdp_frames` and
+    # make "no header command was sent" untestable. Patched on the module,
+    # because that is where `browser_manager` bound the imported name.
+    async def no_reconcile(tab, executable):
+        return None
+
+    monkeypatch.setattr(
+        browser_manager, "reconcile_launched_browser_version", no_reconcile
+    )
     return BrowserManager()
 
 
@@ -108,6 +124,7 @@ async def _run_post_launch(manager, tab, options):
         instance_id="iid-1",
         actual_user_data_dir=None,
         uses_custom_data_dir=False,
+        browser_executable="chrome",
     )
 
 

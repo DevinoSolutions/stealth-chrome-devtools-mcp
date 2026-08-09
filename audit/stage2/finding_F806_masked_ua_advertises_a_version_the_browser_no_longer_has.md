@@ -1,17 +1,26 @@
 # F-806 — the masked User-Agent keeps advertising a Chrome version the browser no longer has
 
-**Status: FIXED, NOT YET SHIPPED — targeted at 2.0.4.** The fix landed on `main`
-(merge `ca63b77`) and was then reverted back out of the 2.0.3 release, so the
-defect described below is still present in every published version. Reason for
-the revert: the fix adds `reconcile_launched_browser_version` — an **unbounded**
-CDP `Browser.getVersion` — to *every* spawn, first in the post-launch sequence.
-The `integration (Windows/X64)` gate cell failed three times running with three
+**Status: FIXED — RE-LANDED 2026-08-09** on branch
+`fix/f806-reland-ua-version-skew`, with the condition the revert attached to it
+discharged.
+
+The history, because it is the reason this file reads as it does. The fix first
+landed on `main` (merge `ca63b77`) and was reverted back out of the 2.0.3 release
+by `b628b61`. Reason for the revert: the fix adds
+`reconcile_launched_browser_version` — an **unbounded** CDP `Browser.getVersion`
+— to *every* spawn, first in the post-launch sequence. The
+`integration (Windows/X64)` gate cell failed three times running with three
 different spawn-path symptoms (an F-801 cookie race, "Failed to connect to
 browser", then a job-level hang producing no pytest report at all), having
-passed on 2.0.2. That is suspicion, not proof — it was never reproduced off CI —
-but 2.0.3 exists to fix a backend-killing config bug, so the release was reduced
-to the smallest diff that does it. Before this re-lands, bound that CDP call.
-The work itself is preserved on branch `fix/ua-version-skew`.
+passed on 2.0.2. That was suspicion, not proof — it was never reproduced off CI
+— but 2.0.3 existed to fix a backend-killing config bug, so the release was
+reduced to the smallest diff that does it, and the recorded condition was: bound
+that CDP call before re-landing.
+
+**That bound now exists** (see "The CDP read is bounded" below), so the two
+commits preserved on `fix/ua-version-skew` (`39927a0`, `b863878`) are re-landed
+here unchanged in substance, reconciled against 2.0.3→2.0.6 and the Sentry
+batches.
 **Severity: MEDIUM-HIGH (stealth)** — the mask exists to remove one tell and
 this replaces it with a sharper one. A UA reading `Chrome/150` on a browser
 whose own `sec-ch-ua` says `151` is not a version anyone's browser reports; it
@@ -171,7 +180,7 @@ reports the binary rather than the mask, which is what makes it usable as the
 yardstick. The regression test re-measures it on every run rather than citing
 this paragraph (see Tests, node 3).
 
-Wiring: `browser_manager._apply_post_launch_setup` now takes the resolved
+Wiring: `browser_manager._apply_post_launch` now takes the resolved
 `browser_executable` and awaits the reconciliation once per spawn, before the
 extra-headers / window-size / timezone overrides. It is guarded the way
 `window_sizing` guards its measurement — a diagnostic probe must never fail a
@@ -181,9 +190,44 @@ as well as the CDP call: `_executable_identity` swallows only `OSError` and the
 skew warning is unguarded, so a `try` around `tab.send` alone did not deliver
 what the docstring promised.
 
+### The CDP read is bounded
+
+This is the condition the 2.0.3 revert attached to the re-land, and it is the
+one substantive change this re-land makes to the reverted work.
+
+Defence 3 is the **first await of every spawn**, and a guard that catches
+exceptions does nothing about a call that never returns: against a stale or dead
+CDP connection `tab.send` simply hangs, and with it the spawn. "A diagnostic
+probe must never *fail* a spawn" is the weaker half of the promise; it must not
+be able to *wedge* one either.
+
+`server.py`'s `_with_cdp_timeout` is the established wrapper for exactly this,
+and it is **not reachable from here**: convention 1 forbids any module under
+`embedded/` importing `server` (it double-registers the tools under `runpy`).
+So the bound is a local `asyncio.wait_for` inside
+`reconcile_launched_browser_version`, on the module's existing
+`_VERSION_PROBE_TIMEOUT_SECONDS` — **10s**, the same bound the pre-launch
+`subprocess.run([exe, "--version"], timeout=…)` probe already waits for the same
+answer about the same binary. One question gets one number; a second constant
+beside it would be the second way convention 4 calls a defect, and 30s (the
+`_with_cdp_timeout` default) is a long time to hold a spawn for a reading that
+is only ever advisory.
+
+On expiry `wait_for` **cancels** the pending send — it is not left running
+behind the spawn — and the `TimeoutError` lands in the guard that was already
+there, so the outcome is the one every other probe failure already produces: log
+it, return `None`, leave the memo exactly as the pre-launch probe set it. The
+warning names the bound so an operator reading `TimeoutError` knows how long was
+waited. A spawn's worst case therefore grows by at most 10s, and never fails.
+
+Scope is deliberately narrow. The **other** unbounded awaits in
+`_apply_post_launch` are untouched, per the round-2 note below: they are
+pre-existing, they are not what the revert named, and bounding them is a
+separate finding's job. This bounds the call this fix introduced.
+
 ## Tests
 
-**Unit — `tests/test_platform_utils.py`** (44 nodes total in the file), four new
+**Unit — `tests/test_platform_utils.py`** (46 nodes total in the file), five new
 classes, no Chrome:
 
 * `TestWindowsProbeReadsTheBinaryNotItsNeighbours` — the version resource wins
@@ -206,6 +250,18 @@ classes, no Chrome:
   the write-back, the skew warning, the guard that keeps a failed
   `Browser.getVersion` from failing a spawn, and the guard covering a failing
   write-back too.
+* `TestTheReconcileCdpCallIsBounded` — the re-land condition. A `tab.send` that
+  **never answers** must still let the reconciliation return: with the bound
+  patched to 50ms the call returns `None` promptly, the memo still holds the
+  pre-launch probe's answer (nothing was written back from a reading that never
+  arrived), and the pending send is observed **cancelled** rather than left
+  running behind the spawn. The node's own `asyncio.wait_for(…, timeout=5)` is
+  what makes this a terminating RED: against the unbounded code it fails there
+  in 5s instead of wedging the suite the way the reverted code wedged the CI
+  job — verified red before the bound was written. A second node checks the
+  bound is not so tight that a merely slow browser loses its reconciliation (it
+  passes pre-fix too, and says so), and the default is asserted positive and
+  finite so a regression to `None` cannot quietly restore the unbounded await.
 
 **Real Chrome — `tests/test_stealth.py`** (the existing home for UA facts
 measured against a live browser; no parallel file was created), two new nodes:
@@ -253,10 +309,19 @@ things came out of it; three are fixed here.
    cover the write-back, as its docstring already promised.
 
 A fifth observation — `reconcile_launched_browser_version` has no CDP timeout —
-was deliberately **not** fixed here. Its neighbours in `_apply_post_launch_setup`
-are equally unbounded and `_with_cdp_timeout` lives in `server.py`, which
-`embedded/` may not import; a fix belongs in a finding of its own that covers
-all of them.
+was deliberately **not** fixed in round 2. Its neighbours in
+`_apply_post_launch` are equally unbounded and `_with_cdp_timeout` lives in
+`server.py`, which `embedded/` may not import; a fix was left to a finding of
+its own that covers all of them.
+
+**That deferral did not survive contact with CI.** The reds that got this fix
+reverted out of 2.0.3 were all on the spawn path, one of them a job-level hang,
+and this call was the one await whose *position* the fix had changed. Being
+right that the neighbours are equally unbounded was not the same as being right
+to ship a new unbounded await ahead of them. It is bounded as of the re-land —
+see "The CDP read is bounded" above — using a local `asyncio.wait_for` rather
+than the forbidden `server` import. The neighbours remain unbounded and remain a
+separate finding; that part of the round-2 judgement stands.
 
 By the time this round was implemented the workstation's Chrome had finished
 updating (sibling dirs `['151.0.7922.72', …]`, file version `151.0.7922.72`), so
@@ -279,6 +344,15 @@ instance. Every later spawn is corrected by the write-back. Widening the fix to
 cover that instance was judged the wrong trade. The wide window the first round
 left open on Windows — days, one skewed browser per backend — is closed, not
 narrowed.
+
+The bounded CDP read costs a spawn **up to 10s** in the one case where the
+connection is dead but the launch otherwise succeeded, and in that case the
+reconciliation is skipped, so the mask keeps the pre-launch probe's answer and
+the next spawn tries again. That is the price of the bound and it is deliberate:
+the alternative the revert measured is an unbounded hang. The remaining
+unbounded awaits in `_apply_post_launch` (extra headers, window sizing, timezone
+override) are **not** addressed here and are the subject of their own finding —
+this one bounds only the call it introduced.
 
 F-774 (Chrome blanks the *high-entropy* UA client hints whenever a
 `--user-agent` override is active) is unchanged by this work and remains an

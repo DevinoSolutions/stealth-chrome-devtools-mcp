@@ -722,8 +722,13 @@ async def test_apply_post_launch_tracks_an_attached_browser(monkeypatch):
 
     options = browser_manager.BrowserOptions(headless=False)
     attached = SimpleNamespace(_process=None, _process_pid=1234)
+    # The trailing executable is F-806's version reconciliation. It is left LIVE
+    # here on purpose: this bare tab has no `send`, so the reconcile's guard
+    # swallows the AttributeError and the tracking below still happens — which is
+    # the guard's actual contract ("a diagnostic probe must never fail a spawn")
+    # exercised on the delegated-launch path rather than stubbed away.
     await manager._apply_post_launch(
-        attached, SimpleNamespace(), options, "i-attached", None, False
+        attached, SimpleNamespace(), options, "i-attached", None, False, "chrome.exe"
     )
 
     assert len(tracked) == 1

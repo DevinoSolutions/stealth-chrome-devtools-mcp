@@ -32,6 +32,7 @@ from stealth_chrome_devtools_mcp.embedded.platform_utils import (
     check_browser_executable,
     get_platform_info,
     merge_browser_args,
+    reconcile_launched_browser_version,
 )
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import (
@@ -556,9 +557,10 @@ class BrowserManager:
         instance_id: str,
         actual_user_data_dir: str | None,
         uses_custom_data_dir: bool,
+        browser_executable: str,
     ) -> tuple[str | None, window_sizing.WindowSizeMetrics]:
-        """Register the process for cleanup and apply the per-instance CDP
-        overrides (extra headers, window size, timezone).
+        """Register the process, reconcile the masked User-Agent (F-806), then
+        apply the per-instance CDP overrides (headers, window size, timezone).
 
         Returns ``(applied IANA timezone id or None, window-size metrics)``. Runs
         after the browser is orchestrator-owned, so a failure here still routes
@@ -580,6 +582,8 @@ class BrowserManager:
                 "spawn_browser",
                 f"Browser {instance_id} has no process to track",
             )
+
+        await reconcile_launched_browser_version(tab, browser_executable)
 
         if options.extra_headers:
             headers = uc.cdp.network.Headers(options.extra_headers)
@@ -651,6 +655,7 @@ class BrowserManager:
                 instance_id,
                 actual_user_data_dir,
                 uses_custom_data_dir,
+                browser_executable,
             )
 
             await self._setup_dynamic_hooks(tab, instance_id)
@@ -880,14 +885,9 @@ class BrowserManager:
             try:
                 import nodriver.cdp.browser as cdp_browser
 
-                if (
-                    getattr(browser, "connection", None)
-                    and not browser.connection.closed
-                ):
-                    await asyncio.wait_for(
-                        browser.connection.send(cdp_browser.close()),
-                        timeout=2.0,
-                    )
+                conn = getattr(browser, "connection", None)
+                if conn and not conn.closed:
+                    await asyncio.wait_for(conn.send(cdp_browser.close()), timeout=2.0)
             except (TimeoutError, Exception) as cdp_err:
                 debug_logger.log_info(
                     "browser_manager",
