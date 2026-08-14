@@ -1,0 +1,12 @@
+{
+  "name": "@stealthly/mcp",
+  "version": "0.0.1",
+  "description": "Placeholder — the official Stealthly MCP server. Coming soon.",
+  "license": "MIT",
+  "homepage": "https://stealthly.io",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp.git"
+  }
+}
