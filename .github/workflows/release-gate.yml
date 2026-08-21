@@ -286,8 +286,13 @@ jobs:
           --expect-arch "${{ matrix.runner_arch }}" --python "3.12"
           --out "runner-identity.json"
       - name: Resolve image Chrome Stable identity
+        # F-819: --freeze-updater neutralises the image's background Chrome
+        # updater BEFORE the version is read, so the identity recorded here is
+        # the identity the browser this job launches will still report. Without
+        # it, macOS Keystone can swap Chrome Stable mid-run and the CDP
+        # comparison in TestChromeIdentity fails on two different binaries.
         shell: bash
-        run: uv run python tools/resolve_chrome.py --out chrome-identity.json
+        run: uv run python tools/resolve_chrome.py --freeze-updater --out chrome-identity.json
       - name: Start Xvfb (Linux headed cases only)
         if: runner.os == 'Linux'
         run: |
@@ -470,8 +475,13 @@ jobs:
           --expect-arch "${{ matrix.runner_arch }}" --python "3.12"
           --out "runner-identity.json"
       - name: Resolve image Chrome Stable identity
+        # F-819: --freeze-updater neutralises the image's background Chrome
+        # updater BEFORE the version is read, so the identity recorded here is
+        # the identity the browser this job launches will still report. Without
+        # it, macOS Keystone can swap Chrome Stable mid-run and the CDP
+        # comparison in TestChromeIdentity fails on two different binaries.
         shell: bash
-        run: uv run python tools/resolve_chrome.py --out chrome-identity.json
+        run: uv run python tools/resolve_chrome.py --freeze-updater --out chrome-identity.json
       - name: Start Xvfb (Linux headed cases only)
         if: runner.os == 'Linux'
         run: |
@@ -645,8 +655,13 @@ jobs:
           --expect-arch "${{ matrix.runner_arch }}" --python "3.12"
           --out "runner-identity.json"
       - name: Resolve image Chrome Stable identity
+        # F-819: --freeze-updater neutralises the image's background Chrome
+        # updater BEFORE the version is read, so the identity recorded here is
+        # the identity the browser this job launches will still report. Without
+        # it, macOS Keystone can swap Chrome Stable mid-run and the CDP
+        # comparison in TestChromeIdentity fails on two different binaries.
         shell: bash
-        run: uv run python tools/resolve_chrome.py --out chrome-identity.json
+        run: uv run python tools/resolve_chrome.py --freeze-updater --out chrome-identity.json
       - name: Start Xvfb (Linux only)
         if: runner.os == 'Linux'
         run: |
@@ -935,8 +950,13 @@ jobs:
           --expect-arch "${{ matrix.cell.runner_arch }}" --python "3.12"
           --out "runner-identity.json"
       - name: Resolve image Chrome Stable identity
+        # F-819: --freeze-updater neutralises the image's background Chrome
+        # updater BEFORE the version is read, so the identity recorded here is
+        # the identity the browser this job launches will still report. Without
+        # it, macOS Keystone can swap Chrome Stable mid-run and the CDP
+        # comparison in TestChromeIdentity fails on two different binaries.
         shell: bash
-        run: uv run python tools/resolve_chrome.py --out chrome-identity.json
+        run: uv run python tools/resolve_chrome.py --freeze-updater --out chrome-identity.json
       - name: Start Xvfb (Linux headed cases only)
         if: runner.os == 'Linux'
         run: |

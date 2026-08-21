@@ -47,6 +47,37 @@ bound the pre-launch version probe already uses for the same question — then
 cancels the read, logs, and leaves the mask exactly as the pre-launch probe set
 it. A spawn is never delayed by more than that, and never fails because of it.
 
+### Fixed — CI: the image's Chrome is frozen at run start, so a red macOS cell means red (F-819)
+
+No product change. `tools/resolve_chrome.py` — the one home of the expected Chrome
+identity — gains `--freeze-updater`, and every CI invocation now passes it.
+
+GitHub's macOS runners let Google's Keystone updater upgrade Chrome Stable in place
+*while a job is running*. The gate resolves the image's Chrome identity at the top of
+each browser job and then trusts it minutes later, when the browser actually launches,
+so an upgrade in between makes the two readings describe two different binaries. PR
+#64 showed it twice on byte-identical trees: CDP `Browser.getVersion` reported
+`Chrome/151.0.7922.76` against a resolved identity of `150.0.7871.187`, and on the
+re-run the same swap surfaced through the UA-coherence gates instead. No product fix
+can close that — F-806 already narrowed the product-side window as far as measurement
+allows; a program cannot make a binary hold still between two measurements.
+
+So the run environment is frozen instead. Before the version is read, the flag
+neutralises the OS's updater: on macOS it unloads and deletes Keystone's launchd jobs
+and both `GoogleSoftwareUpdate` trees, then leaves each path as a root-owned
+unwritable stub inside a root-owned parent — Chrome re-registers Keystone every time
+it launches, and this run launches Chrome, so removal alone would not survive the very
+act it has to survive. On Windows it stops and disables the two Google Update
+services, disables the machine update tasks, and sets the enterprise policy that
+forbids updates. On Linux it does nothing and says so — the images ship no background
+updater.
+
+Every sub-step is best-effort: exit codes are recorded, never checked, and an absent
+service, task, plist or directory is the normal case on at least one OS. The freeze
+narrates to stderr; stdout stays the identity JSON alone. Without the flag, behaviour
+is byte-identical to before, and `resolve_chrome()` itself remains side-effect-free,
+so importing the module can never touch a developer's machine.
+
 ## 2.0.6
 
 ### Fixed — a failed spawn tells you the machine is out of process capacity (F-811)

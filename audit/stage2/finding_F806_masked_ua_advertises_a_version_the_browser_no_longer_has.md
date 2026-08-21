@@ -357,3 +357,8 @@ this one bounds only the call it introduced.
 F-774 (Chrome blanks the *high-entropy* UA client hints whenever a
 `--user-agent` override is active) is unchanged by this work and remains an
 open, strictly-xfailed gap.
+
+The CI-environment half of that remaining window — a runner whose Chrome the
+image's own updater replaces *between* two of the gate's measurements, which no
+product change can close — is
+[F-819](./finding_F819_ci_image_chrome_updates_mid_run.md).

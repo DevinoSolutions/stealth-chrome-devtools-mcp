@@ -475,6 +475,29 @@ def test_the_deterministic_half_is_not_marked_non_gating(canary_jobs):
             )
 
 
+# ---------------------------------------------------------------------------
+# F-819: every resolved identity is a frozen identity.
+# ---------------------------------------------------------------------------
+def test_every_chrome_identity_resolution_freezes_the_updater_first():
+    """An unfrozen `resolve_chrome.py` reads an identity the runner may replace.
+
+    GitHub's macOS images let Keystone upgrade Chrome Stable mid-run, so a job
+    that resolves the identity and later launches the browser can compare two
+    different binaries (PR #64: CDP said 151.x, the artifact said 150.x). The
+    flag is what makes the reading durable for the rest of the job, so a job
+    that resolves without it is resolving something it cannot rely on.
+    """
+    for path in (RELEASE_GATE, CANARY):
+        for name, job in _jobs(path).items():
+            for run in _all_run_steps(job):
+                if "resolve_chrome.py" not in run:
+                    continue
+                assert "--freeze-updater" in run, (
+                    f"{path.name} job {name!r} resolves the Chrome identity "
+                    f"without freezing the updater first: {run.strip()!r}"
+                )
+
+
 def test_the_canary_is_not_wired_into_the_gate(gate_jobs):
     """Nothing in the required check may depend on an observation lane."""
     for name, job in gate_jobs.items():
