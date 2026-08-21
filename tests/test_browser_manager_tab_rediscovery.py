@@ -39,6 +39,10 @@ from fakes import (
     fake_target,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+from stealth_chrome_devtools_mcp.embedded.tool_errors import (
+    InstanceNotFoundError,
+    ToolError,
+)
 
 INSTANCE_ID = "i1"
 
@@ -223,3 +227,93 @@ async def test_switch_to_tab_reports_an_unknown_tab_id_unchanged(manager_and_bro
 
     assert await manager.switch_to_tab(INSTANCE_ID, "T-nope") is False
     assert browser.connection.send_calls == []
+
+
+# ---------------------------------------------------------------------------
+# F-816 — _replace_main_tab: nodriver's bare StopIteration escapes as RuntimeError
+# ---------------------------------------------------------------------------
+
+
+async def _get_with_no_page_target(*_args, **_kwargs):
+    """``nodriver.Browser.get``'s failure mode, reproduced line-for-line.
+
+    ``get(new_tab=True)`` locates the freshly created target with
+    ``next(filter(lambda item: item.type_ == "page", self.targets))``
+    (``core/browser.py:256-261``). When nothing in ``targets`` is a page — the
+    browser is tearing down, the last tab was closed, or the entries degraded to
+    raw ``Connection`` objects after a rediscovery — that bare ``next`` raises
+    ``StopIteration`` *inside a coroutine*, which PEP 479 converts to
+    ``RuntimeError("coroutine raised StopIteration")`` with the ``StopIteration``
+    as its ``__cause__``.
+
+    Built from the real construct rather than a hand-written
+    ``RuntimeError(...)`` so the double cannot encode a ``__cause__``/message
+    shape the interpreter would never produce.
+    """
+    return next(filter(lambda item: item.type_ == "page", []))
+
+
+async def test_replace_main_tab_reports_a_browser_with_no_page_target(
+    manager_and_browser,
+):
+    """THE pin: the RuntimeError becomes an actionable ``ToolError``.
+
+    Sentry STEALTH-CHROME-DEVTOOLS-MCP-2K: ``navigate`` retries through
+    ``_replace_main_tab``, whose ``browser.get`` blew up with the bare
+    ``RuntimeError: coroutine raised StopIteration`` — a message that names
+    neither the browser nor anything the operator can act on.
+    """
+    manager, browser, _tracked = manager_and_browser
+    browser.get = _get_with_no_page_target
+
+    with pytest.raises(ToolError) as excinfo:
+        await manager._replace_main_tab(INSTANCE_ID, reason="test")
+
+    message = str(excinfo.value)
+    assert "page target" in message
+    assert "StopIteration" not in message
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+async def test_replace_main_tab_lets_an_unrelated_runtime_error_through(
+    manager_and_browser,
+):
+    """The guard is scoped to the StopIteration cause, not to ``RuntimeError``.
+
+    A transport-level ``RuntimeError`` (a closed event loop, a dead websocket)
+    is NOT "no usable page target" and must keep its own type and message so it
+    still reaches Sentry as the unexpected failure it is.
+    """
+    manager, browser, _tracked = manager_and_browser
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("Event loop is closed")
+
+    browser.get = _boom
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await manager._replace_main_tab(INSTANCE_ID, reason="test")
+
+    assert not isinstance(excinfo.value, ToolError)
+    assert str(excinfo.value) == "Event loop is closed"
+
+
+# ---------------------------------------------------------------------------
+# F-816 — navigate: the instance-not-found shape is typed, not a bare Exception
+# ---------------------------------------------------------------------------
+
+
+async def test_navigate_on_an_unknown_instance_raises_instance_not_found():
+    """Sentry STEALTH-CHROME-DEVTOOLS-MCP-12 (7 events).
+
+    ``navigate`` raised a bare ``Exception``, which breaks CLAUDE.md convention 2
+    and — because it is not a ``ToolError`` — defeats the F-815 before-send
+    filter, shipping an ordinary "you named an instance that does not exist"
+    caller mistake to Sentry as if it were a crash.
+    """
+    manager = BrowserManager()
+
+    with pytest.raises(InstanceNotFoundError) as excinfo:
+        await manager.navigate("no-such-instance", "https://fake.test/page")
+
+    assert str(excinfo.value) == "Instance not found: no-such-instance"

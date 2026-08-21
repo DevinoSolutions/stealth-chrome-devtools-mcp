@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+### Fixed — the masked User-Agent no longer advertises a Chrome version the browser no longer has (F-806)
+
+The stealth mask renders the browser's major version into a `--user-agent=`
+launch flag, and that version was probed once and cached on the executable's
+**path**. Chrome updates in place, so under the long-lived backend the cache
+could not see an upgrade: the mask kept claiming `Chrome/150` while the browser
+it was masking — and the `sec-ch-ua` client hints Chrome generates from its own
+build — said `151`. A User-Agent that contradicts its own client hints is a
+sharper tell than the headless token the mask exists to remove. It turned the
+macOS stealth-gate cell red against byte-identical product code.
+
+Three defenses now.
+
+**The Windows probe reads the binary.** It used to list the version-named
+directories beside `chrome.exe` and take the newest. Chrome's updater lands that
+directory long before it swaps the launcher stub, and the browser keeps running
+the old build until it next restarts — days on a workstation — so during that
+whole window the probe answered with a version Chrome would not run, and the
+first spawn of every fresh backend shipped a skewed UA. It now reads
+`chrome.exe`'s own embedded file-version resource, which is the executable
+answering for itself; the directory scan remains as the fallback for a binary
+whose resource cannot be read, so no machine gets a worse answer than before.
+(Windows still does not shell out: `chrome.exe --version` hands the flag to an
+already-running Chrome instead of printing.)
+
+**The memo expires with the binary.** The version probe is memoized on the
+executable's on-disk identity — `(mtime_ns, size)` — rather than on its path, so
+an in-place upgrade expires it while an unchanged binary is still probed only
+once.
+
+**The launched browser has the last word.** Every spawn reads CDP
+`Browser.getVersion` after launch and writes the *actual* launched version back,
+so a version that changed between probe and launch corrects every later spawn.
+`Browser.getVersion`'s `product` field is not rewritten by `--user-agent=`,
+which is what makes it authoritative — the regression test re-measures that on
+every run rather than assuming it.
+
+That third defense is now **bounded**. This fix shipped in 2.0.3 and was pulled
+back out of it: the post-launch read was the first await of every spawn and had
+no timeout, so against a stale or dead CDP connection a probe that must never
+even *fail* a spawn could hang one indefinitely. It waits 10 seconds — the same
+bound the pre-launch version probe already uses for the same question — then
+cancels the read, logs, and leaves the mask exactly as the pre-launch probe set
+it. A spawn is never delayed by more than that, and never fails because of it.
+
 ### Fixed — CI: the image's Chrome is frozen at run start, so a red macOS cell means red (F-819)
 
 No product change. `tools/resolve_chrome.py` — the one home of the expected Chrome

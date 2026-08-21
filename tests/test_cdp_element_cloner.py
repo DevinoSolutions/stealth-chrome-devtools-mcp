@@ -19,7 +19,7 @@ no real Chrome).
 import json
 from types import SimpleNamespace
 
-from fakes import FakeTab
+from fakes import FakeTab, fake_element
 from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import (
     cdp_element_cloner,
 )
@@ -51,7 +51,7 @@ class TestExtractStylesPseudoWithoutCssRules:
         # The legal combo the defect crashed on: pseudo requested, css_rules not.
         tab = FakeTab(
             cdp_responses=_styles_cdp_responses(),
-            select_result=SimpleNamespace(node_id=2),
+            select_result=fake_element(node_id=2),
         )
         result = await cdp_element_cloner.extract_element_styles(
             tab,

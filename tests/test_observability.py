@@ -319,10 +319,12 @@ class TestDiagnosticOracle:
     async def test_timeout_failure_pins_its_exact_bytes(self, w15_server):
         import asyncio
 
+        from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
         async def never() -> None:
             await asyncio.sleep(30)
 
-        with pytest.raises(Exception) as caught:  # noqa: B017  PERMANENT(F-783: the timeout path raises bare Exception; narrowing here would hide that)
+        with pytest.raises(ToolError) as caught:
             await w15_server._with_cdp_timeout(
                 never(), timeout=0.01, instance_id="w15-dead"
             )
@@ -334,10 +336,12 @@ class TestDiagnosticOracle:
     async def test_the_timeout_tag_is_omitted_without_an_instance(self, w15_server):
         import asyncio
 
+        from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
         async def never() -> None:
             await asyncio.sleep(30)
 
-        with pytest.raises(Exception) as caught:  # noqa: B017  PERMANENT(F-783, as above)
+        with pytest.raises(ToolError) as caught:
             await w15_server._with_cdp_timeout(never(), timeout=0.01)
         assert str(caught.value) == MSG_CDP_TIMEOUT.format(t=0.01, tag="")
 
@@ -456,14 +460,18 @@ class TestErrorConventionGaps:
         assert ToolError.__mro__[1] is Exception
         assert InstanceNotFoundError.__mro__[1] is ToolError
 
-    @pytest.mark.characterization
     @pytest.mark.asyncio
-    async def test_the_timeout_path_escapes_the_one_error_convention(self, w15_server):
-        """route:F-783 — ``_with_cdp_timeout`` raises a bare ``Exception``.
+    async def test_the_timeout_path_now_joins_the_one_error_convention(
+        self, w15_server
+    ):
+        """route:F-783 — CLOSED in 2.0.8: ``_with_cdp_timeout`` raises ``ToolError``.
 
-        CLAUDE.md convention 2 says tools raise ``ToolError``. The CDP timeout
-        path — the single most likely runtime failure — raises the base class,
-        so a client cannot tell a timeout from an interpreter bug by type.
+        This class characterizes gaps; this one is no longer a gap, so the pin is
+        inverted rather than deleted — it is now the regression guard. The timeout
+        path is the single most likely runtime failure, and while it raised the
+        base class a client could not tell a timeout from an interpreter bug by
+        type, and ``_is_expected_tool_failure`` could not drop it (Sentry carried
+        it as seven issues, one per instance UUID in the message).
         """
         import asyncio
 
@@ -472,10 +480,9 @@ class TestErrorConventionGaps:
         async def never() -> None:
             await asyncio.sleep(30)
 
-        with pytest.raises(Exception) as caught:  # noqa: B017  PERMANENT(that the type is exactly Exception IS the finding)
+        with pytest.raises(ToolError) as caught:
             await w15_server._with_cdp_timeout(never(), timeout=0.01)
-        assert type(caught.value) is Exception
-        assert not isinstance(caught.value, ToolError)
+        assert type(caught.value) is ToolError
 
     @pytest.mark.characterization
     @pytest.mark.asyncio

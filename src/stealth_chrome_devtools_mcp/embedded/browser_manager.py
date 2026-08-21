@@ -16,6 +16,7 @@ from nodriver import Browser, Tab
 from stealth_chrome_devtools_mcp.embedded import (
     desktop_launch,
     spawn_exhaustion,
+    tool_errors,
     window_sizing,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -31,6 +32,7 @@ from stealth_chrome_devtools_mcp.embedded.platform_utils import (
     check_browser_executable,
     get_platform_info,
     merge_browser_args,
+    reconcile_launched_browser_version,
 )
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import (
@@ -482,15 +484,13 @@ class BrowserManager:
             )
 
         # Identify browser type for logging
+        executable_lower = browser_executable.lower()
         browser_type = "Unknown"
-        if (
-            "edge" in browser_executable.lower()
-            or "msedge" in browser_executable.lower()
-        ):
+        if "edge" in executable_lower or "msedge" in executable_lower:
             browser_type = "Microsoft Edge"
-        elif "chromium" in browser_executable.lower():
+        elif "chromium" in executable_lower:
             browser_type = "Chromium"
-        elif "chrome" in browser_executable.lower():
+        elif "chrome" in executable_lower:
             browser_type = "Google Chrome"
 
         debug_logger.log_info(
@@ -557,9 +557,10 @@ class BrowserManager:
         instance_id: str,
         actual_user_data_dir: str | None,
         uses_custom_data_dir: bool,
+        browser_executable: str,
     ) -> tuple[str | None, window_sizing.WindowSizeMetrics]:
-        """Register the process for cleanup and apply the per-instance CDP
-        overrides (extra headers, window size, timezone).
+        """Register the process, reconcile the masked User-Agent (F-806), then
+        apply the per-instance CDP overrides (headers, window size, timezone).
 
         Returns ``(applied IANA timezone id or None, window-size metrics)``. Runs
         after the browser is orchestrator-owned, so a failure here still routes
@@ -582,10 +583,11 @@ class BrowserManager:
                 f"Browser {instance_id} has no process to track",
             )
 
+        await reconcile_launched_browser_version(tab, browser_executable)
+
         if options.extra_headers:
-            await tab.send(
-                uc.cdp.network.set_extra_http_headers(headers=options.extra_headers)
-            )
+            headers = uc.cdp.network.Headers(options.extra_headers)
+            await tab.send(uc.cdp.network.set_extra_http_headers(headers=headers))
 
         window_metrics = await window_sizing.apply_and_measure(tab, options)
 
@@ -653,6 +655,7 @@ class BrowserManager:
                 instance_id,
                 actual_user_data_dir,
                 uses_custom_data_dir,
+                browser_executable,
             )
 
             await self._setup_dynamic_hooks(tab, instance_id)
@@ -770,8 +773,10 @@ class BrowserManager:
                 )
             instance.state = BrowserState.ERROR
             hint = spawn_exhaustion.exhaustion_hint(process_cleanup.pid_file) or ""
-            message = f"Failed to spawn browser: {e!s}{hint}"
-            raise Exception(message)  # noqa: B904  plan_M4ph1
+            # No "Failed to spawn browser:" prefix here: the spawn_browser tool in
+            # server.py wraps this exception with exactly one, and carrying a second
+            # copy doubled it in the user-visible ToolError.
+            raise Exception(f"{e!s}{hint}")  # noqa: B904  plan_M4ph1
 
         return instance
 
@@ -880,14 +885,9 @@ class BrowserManager:
             try:
                 import nodriver.cdp.browser as cdp_browser
 
-                if (
-                    getattr(browser, "connection", None)
-                    and not browser.connection.closed
-                ):
-                    await asyncio.wait_for(
-                        browser.connection.send(cdp_browser.close()),
-                        timeout=2.0,
-                    )
+                conn = getattr(browser, "connection", None)
+                if conn and not conn.closed:
+                    await asyncio.wait_for(conn.send(cdp_browser.close()), timeout=2.0)
             except (TimeoutError, Exception) as cdp_err:
                 debug_logger.log_info(
                     "browser_manager",
@@ -1039,7 +1039,17 @@ class BrowserManager:
 
         browser = data["browser"]
         previous_tab = data.get("tab")
-        new_tab = await browser.get("about:blank", new_tab=True)
+        try:
+            new_tab = await browser.get("about:blank", new_tab=True)
+        except RuntimeError as e:
+            # nodriver picks the new target with a bare next(filter(...)) over
+            # browser.targets; PEP 479 turns that StopIteration into this.
+            if not isinstance(e.__cause__, StopIteration):
+                raise
+            raise tool_errors.ToolError(
+                "Browser has no usable page target (it may be shutting down or "
+                "its last tab was closed); spawn a new instance or retry."
+            ) from e
         await new_tab
 
         if close_existing and previous_tab:
@@ -1087,16 +1097,11 @@ class BrowserManager:
         tracked_tab = data.get("tab")
         navigation_count = data.get("navigation_count", 0)
 
-        if (
-            self.NAVIGATION_RECYCLE_THRESHOLD > 0
-            and navigation_count >= self.NAVIGATION_RECYCLE_THRESHOLD
-        ):
+        threshold = self.NAVIGATION_RECYCLE_THRESHOLD
+        if threshold > 0 and navigation_count >= threshold:
             return await self._replace_main_tab(
                 instance_id,
-                reason=(
-                    f"navigation recycle threshold "
-                    f"{self.NAVIGATION_RECYCLE_THRESHOLD} reached"
-                ),
+                reason=f"navigation recycle threshold {threshold} reached",
             )
 
         # F-775a: never await a browser.tabs entry, nor hand one to a caller that
@@ -1185,16 +1190,16 @@ class BrowserManager:
             if attempt == 0:
                 tab = await self.get_navigation_tab(instance_id)
             else:
+                cause = type(last_error).__name__ if last_error else "unknown"
                 tab = await self._replace_main_tab(
                     instance_id,
-                    reason=(
-                        f"recovering after navigation failure: "
-                        f"{type(last_error).__name__ if last_error else 'unknown'}"
-                    ),
+                    reason=f"recovering after navigation failure: {cause}",
                 )
 
             if not tab:
-                raise Exception(f"Instance not found: {instance_id}")
+                raise tool_errors.InstanceNotFoundError(
+                    f"Instance not found: {instance_id}"
+                )
 
             start_time = time.monotonic()
 
@@ -1202,7 +1207,7 @@ class BrowserManager:
                 if referrer:
                     await tab.send(
                         uc.cdp.network.set_extra_http_headers(
-                            headers={"Referer": referrer}
+                            headers=uc.cdp.network.Headers({"Referer": referrer})
                         )
                     )
 
@@ -1238,11 +1243,7 @@ class BrowserManager:
                             self._instances[instance_id].get("navigation_count", 0) + 1
                         )
 
-                return {
-                    "url": final_url,
-                    "title": title,
-                    "success": True,
-                }
+                return {"url": final_url, "title": title, "success": True}
             except Exception as error:
                 last_error = error
                 debug_logger.log_warning(
@@ -1254,7 +1255,7 @@ class BrowserManager:
                 )
                 if attempt == 1 or not self._is_recoverable_navigation_error(error):
                     if isinstance(error, asyncio.TimeoutError):
-                        raise Exception(
+                        raise tool_errors.ToolError(
                             f"Navigation to {url} timed out after {timeout}ms"
                         ) from error
                     raise

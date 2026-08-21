@@ -144,7 +144,7 @@ async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
         return await asyncio.wait_for(coro, timeout=t)
     except TimeoutError:
         tag = f" (instance {instance_id})" if instance_id else ""
-        raise Exception(
+        raise ToolError(
             f"CDP operation timed out after {t:.0f}s{tag}. "
             "The browser may have crashed or the connection dropped. "
             "Try closing the instance with close_instance and spawning a new one."
@@ -1022,7 +1022,7 @@ async def execute_script(
 
     Args:
         instance_id (str): Browser instance ID.
-        script (str): JavaScript to execute. Must be non-blocking.
+        script (str): JavaScript to execute; non-blocking. Top-level 'return' OK.
         args (Optional[List[Any]]): Arguments passed to the script body.
         timeout_ms (Optional[int]): Max run time in ms (default 10000, max 60000).
             A blocking script is killed at this limit instead of hanging the tab.
@@ -2656,26 +2656,26 @@ async def execute_cdp_command(
     instance_id: str, command: str, params: dict[str, Any] = None
 ) -> dict[str, Any]:
     """
-    Execute a raw CDP Runtime command by name — the low-level escape hatch
-    beneath the exec-family tools. Prefer `execute_script` for ordinary page JS;
-    use this only for a specific CDP method (e.g. 'evaluate', 'callFunctionOn').
+    Execute a raw CDP command by name — the low-level escape hatch beneath the
+    exec-family tools. Prefer `execute_script` for ordinary page JS; use this
+    only for one specific CDP method (e.g. 'evaluate', 'Page.reload').
 
     Args:
         instance_id (str): Browser instance ID.
-        command (str): CDP command name (e.g., 'evaluate', 'callFunctionOn').
-        params (Dict[str, Any], optional): Command parameters as a dictionary.
-                IMPORTANT: Use snake_case parameter names (e.g., 'return_by_value')
-                NOT camelCase ('returnByValue'). The nodriver library expects
-                Python-style parameter names.
+        command (str): CDP command, either domain-qualified ('Page.reload',
+                'Emulation.setDeviceMetricsOverride') or a bare Runtime method
+                ('evaluate'). Wire casing and snake_case both resolve.
+        params (Dict[str, Any], optional): Command parameters. Wire casing and
+                snake_case both resolve, per parameter ('returnByValue' and
+                'return_by_value' are the same argument), so the CDP docs' own
+                spelling works.
 
     Returns:
         Dict[str, Any]: Command execution result.
 
     Example:
-        # Correct - use snake_case
+        # Both the command NAME and its PARAM names are casing-flexible.
         params = {"expression": "document.title", "return_by_value": True}
-
-        params = {"expression": "document.title", "returnByValue": True}
     """
     tab = await _require_tab(browser_manager, instance_id)
     return await _with_cdp_timeout(

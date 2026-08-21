@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import logging
 import socket
 import ssl
 from ssl import SSLContext
@@ -27,6 +28,74 @@ def _free_port() -> int:
     port = free_socket.getsockname()[1]
     free_socket.close()
     return port
+
+
+def _port_is_forbidden(port: int) -> bool:
+    """True iff the OS refuses us ``port`` OUTRIGHT — a permission verdict,
+    never a "someone is using it right now" one.
+
+    The question a CONNECT probe cannot ask (``singleton._port_is_foreign_held``
+    is one): it only ever sees ports someone LISTENS on. A port inside a
+    Windows excluded/reserved range (Hyper-V/WinNAT reserve them — ``netsh
+    interface ipv4 show excludedportrange protocol=tcp``) has no listener at
+    all, reads "free" to every such probe, and still fails bind with
+    ``[Errno 13] ... [winerror 10013] ... forbidden by its access
+    permissions``. uvicorn then dies INSIDE the spawned backend, where the
+    parent sees only a backend that never comes up — Sentry
+    STEALTH-CHROME-DEVTOOLS-MCP-2J, an external user's box on 2.0.6 whose MCP
+    server never started because ``singleton.DEFAULT_PORT`` was reserved.
+
+    ONLY ``PermissionError`` counts — errno 13, exactly what that report
+    shows. Every other bind failure (EADDRINUSE above all) answers False,
+    deliberately:
+
+      * it is a TRANSIENT, contended fact, and every proxy in a startup herd
+        asks this at once. A probe that treated "in use" as disqualifying
+        would collide with the OTHER proxies' momentary probe sockets and
+        scatter the herd across private ports nothing will ever bind —
+        measured, not theorised (tests/test_startup_herd.py went from 23s
+        green to a 240s hard timeout on exactly that mistake);
+      * "occupied" already belongs to ``singleton._port_is_foreign_held``,
+        and OUR OWN backend legitimately occupies its own port — diverting a
+        healthy restart off it would undo plan_M8 SSA1.5.
+
+    A permission verdict has neither problem: it is structural to the machine,
+    identical for every process, and stable across a herd.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", port))
+    except PermissionError:
+        return True
+    except OSError:
+        # In use, or any other transient refusal - not this question. See above.
+        return False
+    finally:
+        probe.close()
+    return False
+
+
+def bindable_port(preferred: int, *, force_new: bool = False) -> int:
+    """A loopback port we can actually bind: ``preferred`` when the OS permits
+    it, else a fresh OS-assigned one from `_free_port`.
+
+    The port-ACQUISITION half of the F-509 fallback, kept beside the picker it
+    delegates to. The port-SELECTION policy — which port to prefer, and when a
+    conflict or a foreign occupant forces a move — stays whole in
+    ``singleton._select_backend_port``, which passes its verdict as
+    ``force_new`` rather than re-deriving anything here.
+    """
+    if force_new:
+        return _free_port()
+    if not _port_is_forbidden(preferred):
+        return preferred
+    replacement = _free_port()
+    logging.getLogger("stealth.proxy").warning(
+        "port %s is reserved on this machine (bind forbidden); using %s instead",
+        preferred,
+        replacement,
+    )
+    return replacement
 
 
 class AuthenticatedProxyForwarder:

@@ -276,6 +276,11 @@ class TestPortSelectionKeepsContextsApart:
         )
         client_context(DESKTOP)
         monkeypatch.setattr(singleton, "_port_is_foreign_held", lambda port: False)
+        # ...and not diverted by the reserved-port probe either: that probe
+        # really binds, so leaving it live would aim a real bind at the real
+        # 19222 on whatever machine runs this. The claim under test is the
+        # v1-record routing, not the OS's opinion of the port.
+        monkeypatch.setattr(proxy_forwarder, "_port_is_forbidden", lambda port: False)
         monkeypatch.setattr(proxy_forwarder, "_free_port", lambda: 54321)
 
         selected = singleton._select_backend_port(singleton.DEFAULT_PORT)
@@ -292,5 +297,8 @@ class TestPortSelectionKeepsContextsApart:
         _record(state_file, 4444, DESKTOP)
         client_context(DESKTOP)
         monkeypatch.setattr(singleton, "_port_is_foreign_held", lambda port: False)
+        # Same reason as the test above: keep the real bind probe off the
+        # literal 4444, which this machine may well have something on.
+        monkeypatch.setattr(proxy_forwarder, "_port_is_forbidden", lambda port: False)
 
         assert singleton._select_backend_port(singleton.DEFAULT_PORT) == 4444

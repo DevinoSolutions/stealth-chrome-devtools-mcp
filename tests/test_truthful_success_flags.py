@@ -180,20 +180,24 @@ async def test_execute_script_raises_when_the_script_throws(
     """F-795: a script that raises is a failure, whatever raised it.
 
     Both classes are driven: a SyntaxError the evaluator raises before the
-    script runs (a top-level ``return``, which is what found the defect) and a
-    runtime ``throw`` from inside a script that parsed fine. Both used to come
-    back as ``success: true`` with the exception record standing in for the
-    value.
+    script runs and a runtime ``throw`` from inside a script that parsed fine.
+    Both used to come back as ``success: true`` with the exception record
+    standing in for the value.
+
+    The SyntaxError specimen is genuinely malformed JS rather than the original
+    top-level ``return`` (which is what found the defect) because that one is no
+    longer a failure at all: F-812 retries it as a function body, asserted at
+    the end of this node. F-795's invariant is untouched — only the example.
     """
     execute = get_fn("execute_script")
     await navigate_and_settle(instance, f"{fixture_app_server}/index.html")
 
     with pytest.raises(ToolError) as syntax_error:
         await _bounded(
-            execute(instance_id=instance, script="return 'illegal-here';"),
-            "execute_script with an illegal top-level return",
+            execute(instance_id=instance, script="] f795-not-js ["),
+            "execute_script with malformed JS",
         )
-    assert "SyntaxError: Illegal return statement" in str(syntax_error.value)
+    assert "SyntaxError" in str(syntax_error.value)
 
     with pytest.raises(ToolError) as runtime_error:
         await _bounded(
@@ -212,6 +216,18 @@ async def test_execute_script_raises_when_the_script_throws(
         "execute_script after a thrown script",
     )
     assert ok == {"success": True, "result": 2, "error": None}, ok
+
+    # F-812: the script an agent actually writes — a top-level ``return`` — is
+    # a VALUE now, not the SyntaxError this node used to demonstrate F-795 with.
+    returned = await _bounded(
+        execute(instance_id=instance, script="return 'top-level-return';"),
+        "execute_script with a top-level return",
+    )
+    assert returned == {
+        "success": True,
+        "result": "top-level-return",
+        "error": None,
+    }, returned
     assert (
         await eval_js(instance, "document.getElementById('sentinel').textContent")
         == "fixture-index-page"
