@@ -208,6 +208,12 @@ class DOMHandler:
             )
             return results
 
+        except ToolError:
+            # The resolution layer already raised THE canonical error for this
+            # selector, names the selector itself, and logged its own diagnosis.
+            # Re-wrapping would spell the selector twice in one message and bury
+            # that diagnosis under a generic prefix.
+            raise
         except Exception as e:
             debug_logger.log_error(
                 "DOMHandler",
@@ -247,7 +253,7 @@ class DOMHandler:
                 element = await resolve_element(tab, selector, timeout=timeout / 1000)
 
             if not element:
-                raise Exception(f"Element not found: {selector}")
+                raise ToolError(f"Element not found: {selector}")
 
             await element.scroll_into_view()
             await asyncio.sleep(0.5)
@@ -261,7 +267,7 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to click element: {e!s}")
+            raise ToolError(f"Failed to click element: {e!s}")
 
     @staticmethod
     async def upload_file(
@@ -289,31 +295,31 @@ class DOMHandler:
         """
         try:
             if not file_paths:
-                raise Exception("No file paths provided")
+                raise ToolError("No file paths provided")
 
             resolved: list[str] = []
             for raw_path in file_paths:
                 path = Path(str(raw_path)).expanduser()  # noqa: ASYNC240  plan_M7
                 if not path.is_file():
-                    raise Exception(f"File not found: {path}")
+                    raise ToolError(f"File not found: {path}")
                 resolved.append(str(path.resolve()))
 
             element = await resolve_element(tab, selector, timeout=timeout / 1000)
             if not element:
-                raise Exception(f"File input not found: {selector}")
+                raise ToolError(f"File input not found: {selector}")
 
             tag_name = (getattr(element, "tag_name", "") or "").lower()
             input_type = ""
             if hasattr(element, "attrs") and element.attrs:
                 input_type = (element.attrs.get("type") or "").lower()
             if tag_name and tag_name != "input":
-                raise Exception(
+                raise ToolError(
                     f"Selector '{selector}' resolved to <{tag_name}>, "
                     "not a file input. "
                     'Point the selector at an <input type="file"> element.'
                 )
             if input_type and input_type != "file":
-                raise Exception(
+                raise ToolError(
                     f"Selector '{selector}' is an <input type=\"{input_type}\">, "
                     'not type="file".'
                 )
@@ -323,7 +329,7 @@ class DOMHandler:
             return {"uploaded": resolved, "count": len(resolved)}
 
         except Exception as e:
-            raise Exception(f"Failed to upload file: {e!s}")
+            raise ToolError(f"Failed to upload file: {e!s}")
 
     @staticmethod
     async def type_text(  # noqa: PLR0913  PERMANENT(function interface)
@@ -354,7 +360,7 @@ class DOMHandler:
         try:
             element = await resolve_element(tab, selector)
             if not element:
-                raise Exception(f"Element not found: {selector}")
+                raise ToolError(f"Element not found: {selector}")
 
             await element.focus()
             await asyncio.sleep(0.1)
@@ -420,7 +426,7 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to type text: {e!s}")
+            raise ToolError(f"Failed to type text: {e!s}")
 
     @staticmethod
     async def paste_text(
@@ -444,7 +450,7 @@ class DOMHandler:
         try:
             element = await resolve_element(tab, selector)
             if not element:
-                raise Exception(f"Element not found: {selector}")
+                raise ToolError(f"Element not found: {selector}")
 
             await element.focus()
             await asyncio.sleep(0.1)
@@ -495,7 +501,7 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to paste text: {e!s}")
+            raise ToolError(f"Failed to paste text: {e!s}")
 
     @staticmethod
     async def select_option(
@@ -521,7 +527,7 @@ class DOMHandler:
         try:
             select_element = await resolve_element(tab, selector)
             if not select_element:
-                raise Exception(f"Select element not found: {selector}")
+                raise ToolError(f"Select element not found: {selector}")
 
             if text is not None:
                 await select_element.send_keys(text)
@@ -552,10 +558,10 @@ class DOMHandler:
                 """)
                 return True
 
-            raise Exception("No selection criteria provided (value, text, or index)")
+            raise ToolError("No selection criteria provided (value, text, or index)")
 
         except Exception as e:
-            raise Exception(f"Failed to select option: {e!s}")
+            raise ToolError(f"Failed to select option: {e!s}")
 
     @staticmethod
     async def get_element_state(tab: Tab, selector: str) -> dict[str, Any]:
@@ -572,7 +578,7 @@ class DOMHandler:
         try:
             element = await resolve_element(tab, selector)
             if not element:
-                raise Exception(f"Element not found: {selector}")
+                raise ToolError(f"Element not found: {selector}")
 
             if hasattr(element, "update"):
                 await element.update()
@@ -609,7 +615,7 @@ class DOMHandler:
             }
 
         except Exception as e:
-            raise Exception(f"Failed to get element state: {e!s}")
+            raise ToolError(f"Failed to get element state: {e!s}")
 
     @staticmethod
     async def wait_for_element(
@@ -711,7 +717,7 @@ class DOMHandler:
                 result = await tab.evaluate(script)
 
         except Exception as e:
-            raise Exception(f"Failed to execute script: {e!s}")
+            raise ToolError(f"Failed to execute script: {e!s}")
 
         # Outside the except on purpose: a script that THREW is a failure of the
         # script, not of the CDP call, so it must not be re-wrapped in the
@@ -738,7 +744,7 @@ class DOMHandler:
         try:
             result = await tab.evaluate(f"(() => {{\n{script}\n}})()")
         except Exception as e:
-            raise Exception(f"Failed to execute script: {e!s}")
+            raise ToolError(f"Failed to execute script: {e!s}")
 
         try:
             return _require_js_value(result)
@@ -808,7 +814,7 @@ class DOMHandler:
             return content
 
         except Exception as e:
-            raise Exception(f"Failed to get page content: {e!s}")
+            raise ToolError(f"Failed to get page content: {e!s}")
 
     @staticmethod
     async def scroll_page(
@@ -864,4 +870,4 @@ class DOMHandler:
             return True
 
         except Exception as e:
-            raise Exception(f"Failed to scroll page: {e!s}")
+            raise ToolError(f"Failed to scroll page: {e!s}")

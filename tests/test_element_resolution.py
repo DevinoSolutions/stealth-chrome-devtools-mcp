@@ -9,6 +9,7 @@ hermetic (a fake Tab) so they run in the fast unit lane, not the browser lane.
 """
 
 import pytest
+from nodriver import cdp
 from nodriver.core.connection import ProtocolException
 
 from stealth_chrome_devtools_mcp.embedded import element_resolution
@@ -17,7 +18,9 @@ from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     query_selector_all,
     resolve_by_text,
     resolve_element,
+    resolve_elements,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +41,14 @@ def _other():
     return ProtocolException({"message": "Some unrelated CDP failure", "code": -32601})
 
 
+def _handler_race():
+    # Mirrors nodriver's own bookkeeping race: Tab.wait() registers the
+    # page-event handlers and its finally-block does a bare
+    # ``del self.handlers[evt_dom]``; a concurrent wait() on the same tab has
+    # already dropped the key, so the KeyError's arg is the CDP event CLASS.
+    return KeyError(cdp.page.FrameStoppedLoading)
+
+
 def _pop(effects):
     effect = effects.pop(0)
     if isinstance(effect, Exception):
@@ -46,17 +57,23 @@ def _pop(effects):
 
 
 class _FakeTab:
-    def __init__(self, *, select=None, find=None, send=None):
+    def __init__(self, *, select=None, select_all=None, find=None, send=None):
         self._select = list(select or [])
+        self._select_all = list(select_all or [])
         self._find = list(find or [])
         self._send = list(send or [])
         self.select_calls = 0
+        self.select_all_calls = 0
         self.find_calls = 0
         self.send_calls = 0
 
     async def select(self, selector, timeout=None):
         self.select_calls += 1
         return _pop(self._select)
+
+    async def select_all(self, selector):
+        self.select_all_calls += 1
+        return _pop(self._select_all)
 
     async def find(self, text, best_match=True, timeout=None):
         self.find_calls += 1
@@ -124,6 +141,61 @@ async def test_resolve_by_text_recovers_from_stale_node():
     tab = _FakeTab(find=[_stale(), sentinel])
     assert await resolve_by_text(tab, "Submit") is sentinel
     assert tab.find_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_elements_recovers_from_nodriver_handler_race():
+    # STEALTH-CHROME-DEVTOOLS-MCP-2R: select_all -> `await self` -> Tab.wait(),
+    # whose handler cleanup raises KeyError(<cdp event class>) under concurrency.
+    # Transient by construction: the same call succeeds on the retry.
+    nodes = [object()]
+    tab = _FakeTab(select_all=[_handler_race(), nodes])
+    assert await resolve_elements(tab, ".row") == nodes
+    assert tab.select_all_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_elements_raises_readable_tool_error_when_race_persists():
+    # STEALTH-CHROME-DEVTOOLS-MCP-2S: the bare KeyError used to escape as
+    # "<class 'nodriver.cdp.page.FrameStoppedLoading'>" — useless to a caller.
+    tab = _FakeTab(select_all=[_handler_race() for _ in range(_MAX_RESOLVES)])
+    with pytest.raises(ToolError) as excinfo:
+        await resolve_elements(tab, ".row")
+    message = str(excinfo.value)
+    assert "FrameStoppedLoading" in message
+    assert "nodriver" in message
+    assert ".row" in message
+    assert "<class " not in message  # never the raw class repr
+    assert tab.select_all_calls == _MAX_RESOLVES  # bounded, same as the -32000 path
+
+
+@pytest.mark.asyncio
+async def test_resolve_element_recovers_from_nodriver_handler_race():
+    # The single-element path inherits the same recovery (one shared structure).
+    sentinel = object()
+    tab = _FakeTab(select=[_handler_race(), sentinel])
+    assert await resolve_element(tab, "#btn") is sentinel
+    assert tab.select_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_unrelated_key_error_is_neither_retried_nor_converted():
+    # A KeyError from anywhere else is a real defect: it must not be silently
+    # retried, nor dressed up as a nodriver race.
+    tab = _FakeTab(select_all=[KeyError("foo")])
+    with pytest.raises(KeyError, match="foo"):
+        await resolve_elements(tab, ".row")
+    assert tab.select_all_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_key_error_naming_a_non_nodriver_class_is_not_retried():
+    # Scoped to nodriver.cdp classes: a KeyError whose arg happens to be some
+    # other class is still a genuine failure.
+    tab = _FakeTab(select_all=[KeyError(dict)])
+    with pytest.raises(KeyError):
+        await resolve_elements(tab, ".row")
+    assert tab.select_all_calls == 1
 
 
 @pytest.mark.asyncio

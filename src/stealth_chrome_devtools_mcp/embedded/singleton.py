@@ -664,18 +664,18 @@ def _select_backend_port(preferred: int = DEFAULT_PORT) -> int:
     eviction/restart land where a prior backend ran), else ``preferred``. Keeps
     that target when free or held by OUR OWN backend; a FOREIGN occupant — or
     one another display context recorded, whose entry our spawn's own record
-    would supersede-evict (F-808) — forces an OS-assigned fallback via
-    ``proxy_forwarder._free_port()`` (the one existing port-picker — no new
-    convention), so a collision is recoverable, not a silent 120s outage.
+    would supersede-evict (F-808), or a target the OS FORBIDS us outright
+    (F-509's field residual) — each forces an OS-assigned fallback via the one
+    picker, ``proxy_forwarder.bindable_port``: recoverable, not a 120s outage.
     """
     # lazy; no module-top cycle
-    from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import _free_port
+    from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import bindable_port
 
     own = display_context.display_context()
     recorded = backend_registry.port_for_context(SERVER_STATE_FILE, own)
     target = preferred if recorded is None else recorded
     taken = backend_registry.port_conflict(SERVER_STATE_FILE, target, own)
-    return _free_port() if taken or _port_is_foreign_held(target) else target
+    return bindable_port(target, force_new=taken or _port_is_foreign_held(target))
 
 
 def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:
