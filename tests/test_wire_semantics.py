@@ -570,11 +570,10 @@ async def test_execute_script_reports_failure_for_a_script_that_threw(
 ):
     """F-795 (FIXED): a script that raises is an ERROR on the wire.
 
-    Found incidentally: the first draft of MQ-139 above used ``return 'x';``,
-    which is a ``SyntaxError: Illegal return statement`` for an expression
-    evaluator — and the tool used to report it as a success whose ``result``
-    happened to be an exception record, with ``success: true``, ``error: null``
-    and ``isError`` false.
+    Found incidentally: the first draft of MQ-139 above used ``return 'x';`` and
+    the tool reported the failure as a success whose ``result`` happened to be an
+    exception record, with ``success: true``, ``error: null`` and ``isError``
+    false.
 
     ``nodriver``'s ``Tab.evaluate`` RETURNS the CDP ``ExceptionDetails`` in the
     value's place instead of raising, so the fix is one guard
@@ -582,12 +581,21 @@ async def test_execute_script_reports_failure_for_a_script_that_threw(
     half of that fix: what a caller sees is ``isError: true`` carrying the
     exception text — and the SAME tab still runs a valid script afterwards, so
     the failure is reported without wedging anything.
+
+    The specimen is a script that THROWS rather than the original ``return 'x';``
+    because that one is no longer a failure at all: a top-level ``return`` is
+    retried as a function body (F-812), pinned hermetically in
+    tests/test_execute_script_return_wrap.py and on the wire at the end of this
+    node. F-795's invariant is untouched — only the example that demonstrates it.
     """
     await _navigate(wire, named_instance, f"{fixture_app_server}/index.html")
 
     request_id = await wire.call_tool(
         "execute_script",
-        {"instance_id": named_instance, "script": "return 'illegal-here';"},
+        {
+            "instance_id": named_instance,
+            "script": "throw new Error('thrown-on-purpose');",
+        },
     )
     frame = await wire.response(request_id, OUTER_BOUND)
     result = _tool_result(frame)
@@ -598,7 +606,16 @@ async def test_execute_script_reports_failure_for_a_script_that_threw(
     assert text.startswith(
         "Error calling tool 'execute_script': Script raised an exception: "
     ), text
-    assert "SyntaxError: Illegal return statement" in text, text
+    assert "thrown-on-purpose" in text, text
+
+    # F-812, the other half: the script an agent actually writes is a VALUE on
+    # the wire, not the SyntaxError this node used to demonstrate F-795 with.
+    returned = await _call(
+        wire,
+        "execute_script",
+        {"instance_id": named_instance, "script": "return 'top-level-return';"},
+    )
+    assert _tool_payload(returned)["result"] == "top-level-return"
 
     # The tab is not wedged by its own script's exception.
     ok = await _call(

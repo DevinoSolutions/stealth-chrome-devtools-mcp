@@ -583,9 +583,8 @@ class BrowserManager:
             )
 
         if options.extra_headers:
-            await tab.send(
-                uc.cdp.network.set_extra_http_headers(headers=options.extra_headers)
-            )
+            headers = uc.cdp.network.Headers(options.extra_headers)
+            await tab.send(uc.cdp.network.set_extra_http_headers(headers=headers))
 
         window_metrics = await window_sizing.apply_and_measure(tab, options)
 
@@ -770,8 +769,10 @@ class BrowserManager:
                 )
             instance.state = BrowserState.ERROR
             hint = spawn_exhaustion.exhaustion_hint(process_cleanup.pid_file) or ""
-            message = f"Failed to spawn browser: {e!s}{hint}"
-            raise Exception(message)  # noqa: B904  plan_M4ph1
+            # No "Failed to spawn browser:" prefix here: the spawn_browser tool in
+            # server.py wraps this exception with exactly one, and carrying a second
+            # copy doubled it in the user-visible ToolError.
+            raise Exception(f"{e!s}{hint}")  # noqa: B904  plan_M4ph1
 
         return instance
 
@@ -1202,7 +1203,7 @@ class BrowserManager:
                 if referrer:
                     await tab.send(
                         uc.cdp.network.set_extra_http_headers(
-                            headers={"Referer": referrer}
+                            headers=uc.cdp.network.Headers({"Referer": referrer})
                         )
                     )
 
