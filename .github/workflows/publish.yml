@@ -61,7 +61,13 @@ jobs:
           sha256sum dist/*
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        # F-820 release postmortem (2026-08-30): the previous pin's bundled
+        # validator predated Metadata-Version 2.5, which the (unpinned) build
+        # backend now emits — v2.0.7 failed twice with "InvalidDistribution:
+        # '2.5' is not a valid metadata version". Same skew shape as
+        # F-806/F-819: an unpinned producer drifting under a pinned validator.
+        # When bumping this pin, take the current release/v1 head.
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1 (2026-07-28)
         with:
           packages-dir: dist
 
