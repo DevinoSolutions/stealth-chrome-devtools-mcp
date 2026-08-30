@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)
+
+This is the user-reported "stealth randomly disconnects", and it was neither
+random nor per-session. The stdio proxy's liveness watchdog tore itself down
+after three consecutive misses of its 2s `initialize` probe — about six
+seconds of slowness. Under a multi-session fleet the one shared backend
+answers that probe in more than 2s for stretches of 20–40s while serving
+everyone perfectly well, and because every proxy probes the *same* backend
+they all reached the same wrong verdict in the same second: production logs
+for 2026-08-30 show four waves (7, 30, 3 and 10 proxies) torn down while
+backend pid 52396 went on serving `navigate` and `screenshot` throughout, with
+the strike counters visibly resetting in between — the signature of slow, not
+gone.
+
+Three strikes now open a **confirmation phase** instead of passing sentence,
+and the verdict comes from the gate the cold-start lock already trusts
+(`_same_identity_backend_ready`, F-807) rather than a second busy-vs-dead
+policy: **busy** answers inside the existing 60s patience window and the proxy
+stays up; **dead** fails on the first refused connection and buys none of it,
+so hard-down detection keeps its ~12s window; **wedged** (socket open, nothing
+answering) is still condemned, only now confirmed first — which costs it up to
+60s more. The fast loop, its interval, its timeout and its strike counter are
+unchanged. Details and residuals in
+`audit/stage2/finding_F820_watchdog_condemns_busy_backend.md`.
+
 ### Fixed — the masked User-Agent no longer advertises a Chrome version the browser no longer has (F-806)
 
 The stealth mask renders the browser's major version into a `--user-agent=`

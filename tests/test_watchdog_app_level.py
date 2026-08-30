@@ -78,6 +78,11 @@ class TestWatchdogDefaultUsesAppProbe:
                 failures_before_teardown=3,
                 sleep=tiny_sleep,
                 # is_healthy intentionally omitted: pins the DEFAULT wiring.
+                # F-820: the strikes now open a confirmation phase, so a
+                # teardown needs the gate to agree. Injected False = "not
+                # merely busy", which is this test's wedged premise, and keeps
+                # the case hermetic (the real gate would read server.json).
+                confirm_probe=lambda: False,
             )
 
         assert calls["n"] == 3  # tore down after exactly 3 consecutive failures
@@ -136,6 +141,7 @@ class TestWatchdogAwaitAwareLoop:
                 failures_before_teardown=2,
                 is_healthy=sync_check,
                 sleep=tiny_sleep,
+                confirm_probe=lambda: False,  # F-820: dead, not busy
             )
 
         assert calls["n"] == 2
@@ -162,6 +168,7 @@ class TestWatchdogAwaitAwareLoop:
                 failures_before_teardown=2,
                 is_healthy=async_check,
                 sleep=tiny_sleep,
+                confirm_probe=lambda: False,  # F-820: dead, not busy
             )
 
         assert calls["n"] == 2
