@@ -126,10 +126,9 @@ def _server_is_healthy(port: int) -> bool:
 # patch surface the rest of the tree (cli.py, the tests) already targets.
 def _read_server_state() -> dict | None:
     """The RAW record — v1 flat or v2 per-context (F-808) — not a backend.
-
-    Kept raw because it is a patch surface: test_cli / test_cli_status_wedged
-    stub it with v1-flat dicts. Every consumer therefore reads backends out of
-    it through backend_registry's normalizers (`first_backend` /
+    Kept raw because it is a patch surface (test_cli / test_cli_status_wedged
+    stub it with v1-flat dicts), so every consumer reads backends out of it
+    through backend_registry's normalizers (`first_backend` /
     `backend_on_port`), which accept both shapes, rather than indexing it.
     """
     return backend_registry.read_record(SERVER_STATE_FILE)
@@ -159,11 +158,9 @@ def _probe_backend_status() -> tuple[str, int | None]:
     socket check cannot see). Read-only: never evicts, never spawns. Doctor
     runs this same ladder per-entry in `cli._probe_recorded_backend`.
 
-    Returns one of:
-        ("none", None)        - no recorded backend
-        ("down", port)         - recorded but the socket itself is closed
-        ("wedged", port)       - socket open, but no real MCP initialize answer
-        ("responsive", port)  - socket open AND initialize answers 200
+    Returns ("none", None) no recorded backend | ("down", port) socket closed |
+    ("wedged", port) socket open, no real MCP initialize answer |
+    ("responsive", port) socket open AND initialize answers 200.
     """
     entry = backend_registry.first_backend(_read_server_state())
     if entry is None:
@@ -190,10 +187,11 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     path: a backend absorbing a many-session startup herd can miss a single 2s
     probe while perfectly healthy — and a lock-holder that trusts that one miss
     "evicts" (kills) the backend everyone else is using, then double-spawns.
-    Identity-gated on purpose: a version- or source-stale record gets NO
-    patience and is evicted immediately. ``patience=0.0`` (discovery's
-    single-shot probe) probes exactly once and never sleeps. ``None`` means
-    ``REUSE_PATIENCE_SECONDS`` (read at call time, so tests can shrink it).
+    ``_watch_backend_liveness`` applies the same discrimination mid-session
+    (F-820). Identity-gated on purpose: a version- or source-stale record gets
+    NO patience and is evicted immediately. ``patience=0.0`` (discovery's
+    single-shot probe) probes once and never sleeps; ``None`` means
+    ``REUSE_PATIENCE_SECONDS``, read at call time so tests can shrink it.
     """
     # The entry recorded ON THIS PORT, not merely the first one: with a
     # per-context record (F-808) another desktop's backend can be recorded
@@ -227,8 +225,7 @@ def _find_running_server() -> int | None:
     (F-808; the policy and its asymmetry live in
     :func:`backend_registry.adoption_candidates`), but IDENTITY, never display
     context, is the gate. Single-shot per candidate on the proxy's hot path,
-    behind a socket pre-filter: a dead record then costs ms, not a 2s timeout.
-    """
+    behind a socket pre-filter: a dead record costs ms, not a 2s timeout."""
     own = display_context.display_context()
     for entry in backend_registry.adoption_candidates(SERVER_STATE_FILE, own):
         port = entry.get("port")
@@ -418,19 +415,15 @@ def _backend_http_ready(port: int, *, timeout: float = LIVENESS_PROBE_TIMEOUT) -
     """Single-shot, synchronous app-level liveness probe: True iff the backend
     on ``port`` answers a real ``initialize`` with HTTP 200.
 
-    This is the promoted, reusable form of the mechanism `_await_backend_http`
-    already proves at startup (initialize->200), turned into ONE attempt
-    instead of a poll loop, so sync callers (discovery, CLI) can call it
-    directly and the watchdog can drive it off-thread. Never raises: any
-    failure (connection refused, timeout, malformed response) resolves to
-    False, matching `_server_is_healthy`'s fail-closed contract - a probe
-    error must always read as "not ready," never propagate.
-
-    NOTE: this intentionally duplicates ~10 lines of `_await_backend_http`'s
-    `initialize` request shape rather than sharing a helper (plan_M1 SS2.2
-    rejected-alternative #4, cross-review ruling: M1/M3 singleton regions stay
-    disjoint - `_await_backend_http` is M3's). `grep '"initialize"'` finds
-    both twins; consolidating them is a future finding, not this plan's scope.
+    The promoted, reusable form of what `_await_backend_http` proves at startup
+    (initialize->200), as ONE attempt instead of a poll loop, so sync callers
+    (discovery, CLI) can call it directly and the watchdog can drive it
+    off-thread. Never raises: any failure (connection refused, timeout,
+    malformed response) resolves to False - `_server_is_healthy`'s fail-closed
+    contract, where a probe error reads as "not ready" and never propagates.
+    The ~10 duplicated lines of that twin's `initialize` shape are deliberate
+    (plan_M1 SS2.2 rejected-alternative #4, cross-review ruling: M1/M3
+    singleton regions stay disjoint); consolidating is a future finding.
     """
     import httpx
     from mcp.types import DEFAULT_NEGOTIATED_VERSION
@@ -472,11 +465,10 @@ def _backend_http_ready(port: int, *, timeout: float = LIVENESS_PROBE_TIMEOUT) -
         # Fail-closed: connection refused (down), a hung/wedged backend that
         # never answers (timeout), or any other transport error all read as
         # "not ready" - matching _server_is_healthy's contract. DEBUG, not
-        # WARNING (M10a convention, cf. _await_backend_http's identical
-        # catch): this fires routinely during a normal cold start and on
-        # every watchdog tick while a backend is briefly busy - the caller
-        # (the watchdog) is the one that decides when repeated failures are
-        # WARNING-worthy, not this single-attempt probe.
+        # WARNING (M10a convention, cf. _await_backend_http's identical catch):
+        # this fires routinely during a normal cold start and on every watchdog
+        # tick while a backend is briefly busy - the caller decides when
+        # repeated failures are WARNING-worthy, not this single-attempt probe.
         _logger.debug("liveness probe attempt failed", exc_info=e)
         return False
 
@@ -534,10 +526,10 @@ def _start_backend_holding_lock(port: int) -> None:
                 return  # ours, merely busy or mid-boot — never evict it (F-807)
             # M2-3: surface WHY a fresh backend is about to spawn when the cause
             # is a source change (version matches, fingerprint differs) - the
-            # eviction is otherwise silent. Logged once per spawn HERE rather
-            # than inside _find_running_server (which runs up to 3x per locked
-            # cold start); the state re-read is a cheap diagnostic probe,
-            # deliberately NOT a second reuse gate (that stays single-homed in
+            # eviction is otherwise silent. Logged once per spawn HERE, not in
+            # _find_running_server (which runs up to 3x per locked cold start);
+            # the state re-read is a cheap diagnostic probe, deliberately NOT a
+            # second reuse gate (that stays single-homed in
             # _find_running_server). Source-only: a version-change eviction
             # (issue #14) must not emit this line.
             entry = backend_registry.backend_on_port(_read_server_state(), port)
@@ -571,16 +563,15 @@ def stop_backend() -> tuple[str, int | None]:
     that terminates every live browser session on it — that is the verb's
     purpose, not a side effect to guard against.
 
-    Consumes M1's `_probe_backend_status()` for the state read (binding
-    ruling: no new liveness check anywhere) — only a responsive/wedged
-    backend is actually targeted for termination; a stale `down` record is
-    cleared without anything left to kill; `none` is reported as-is. Lock
-    contention (a concurrent cold start/stop/restart already holding it)
-    reports "busy" so the operator can retry instead of racing it.
+    Consumes M1's `_probe_backend_status()` for the state read (binding ruling:
+    no new liveness check anywhere) — only a responsive/wedged backend is
+    actually targeted for termination; a stale `down` record is cleared with
+    nothing left to kill; `none` is reported as-is. Lock contention (a
+    concurrent cold start/stop/restart already holding it) reports "busy" so
+    the operator can retry instead of racing it.
 
-    Returns ``(result, pid)``: ``result`` is one of "stopped" |
-    "already stopped" | "not running" | "busy". ``pid`` is the terminated
-    pid when ``result == "stopped"``, else None.
+    Returns ``(result, pid)``: "stopped" | "already stopped" | "not running" |
+    "busy", with ``pid`` the terminated pid only when ``result == "stopped"``.
     """
     status, port = _probe_backend_status()
     if status == "none":
@@ -608,22 +599,22 @@ def stop_backend() -> tuple[str, int | None]:
 
 
 def restart_backend() -> tuple[str, int | None]:
-    """Restart the shared backend (CLI `restart` verb): the manual escape
-    hatch for a wedged (M1) or stale same-version (M2) backend — terminate
-    whatever is on the target port, then run the exact cold-start spawn
-    sequence under the same lock, with the SAME primitives (plan_M8 SS2.1-B:
-    no second spawn path, no new kill logic). Unconditional by design, so a
-    "down"/"none" backend also ends up running, not merely evicted. The spawn
-    port is chosen FIRST — `_select_backend_port()` (F-509 A1) — and terminate
-    then targets exactly it, so both halves agree BY CONSTRUCTION (F-808), not
-    via two reads that can diverge onto a sibling desktop's backend. Selection
-    means a squatter on the dead backend's port forces a fresh `_free_port()`
-    pick instead of a repeat 120s outage — the fallback port stays recorded
-    (SSA1.5); `stop` clears `server.json`, the reset path to `DEFAULT_PORT`.
-    Lock contention reports "busy" so the operator retries instead of racing.
-    The post-restart state is reported via `_probe_backend_status()` (binding
-    ruling: ONE liveness vocabulary) — a restart that comes back wedged or
-    down must be visible, not assumed "responsive".
+    """Restart the shared backend (CLI `restart` verb): the manual escape hatch
+    for a wedged (M1) or stale same-version (M2) backend — terminate whatever
+    is on the target port, then run the exact cold-start spawn sequence under
+    the same lock, with the SAME primitives (plan_M8 SS2.1-B: no second spawn
+    path, no new kill logic). Unconditional by design, so a "down"/"none"
+    backend also ends up running, not merely evicted. The spawn port is chosen
+    FIRST — `_select_backend_port()` (F-509 A1) — and terminate then targets
+    exactly it, so both halves agree BY CONSTRUCTION (F-808), not via two reads
+    that can diverge onto a sibling desktop's backend. Selection means a
+    squatter on the dead backend's port forces a fresh `_free_port()` pick
+    instead of a repeat 120s outage — the fallback port stays recorded (SSA1.5);
+    `stop` clears `server.json`, the reset path to `DEFAULT_PORT`. Lock
+    contention reports "busy" so the operator retries instead of racing. The
+    post-restart state is reported via `_probe_backend_status()` (binding
+    ruling: ONE liveness vocabulary) — a restart that comes back wedged or down
+    must be visible, not assumed "responsive".
 
     Returns ``(status, pid)``: `_probe_backend_status`'s status or "busy";
     ``pid`` is the freshly recorded pid once the lock is acquired, else None.
@@ -766,60 +757,69 @@ async def _await_backend_http(
     return False
 
 
-async def _watch_backend_liveness(
+async def _watch_backend_liveness(  # noqa: PLR0913  PERMANENT(function interface)
     port: int,
     *,
     interval: float = 2.0,
     failures_before_teardown: int = 3,
     is_healthy=None,
     sleep=None,
+    confirm_probe=None,
 ) -> None:
-    """Return once the backend on ``port`` has been unreachable for
-    ``failures_before_teardown`` consecutive checks.
-
-    Armed only after the backend was confirmed up; the caller tears the proxy
-    down when this returns. That converts a backend death mid-session into a
+    """Return once the backend on ``port`` is CONFIRMED unusable; the caller
+    tears the proxy down then, converting a backend death mid-session into a
     clean client reconnect (which respawns a fresh backend) instead of an
-    unbounded hang on requests a dead backend can never answer. A single healthy
-    check resets the failure run, so a transient blip never tears down a live
-    backend. ``is_healthy``/``sleep`` are injectable for testing.
+    unbounded hang on requests a dead backend can never answer. Armed only
+    after the backend was confirmed up; one healthy check resets the failure
+    run, so a transient blip never tears down a live backend. ``is_healthy``/
+    ``sleep``/``confirm_probe`` are injectable, sync or awaitable.
 
-    F-501: the default check used to be a bare socket connect
+    F-501: the fast check used to be a bare socket connect
     (``_server_is_healthy``), which a wedged backend (dispatch loop dead,
-    socket still open) always passes - so the sole auto-recovery watchdog
-    never armed against the exact failure it exists for. The default now runs
-    the app-level probe (``_backend_http_ready``) off-thread via
-    ``anyio.to_thread.run_sync`` (plan_M1 SS2.2 rejected alternative #3: a
-    blocking httpx call run inline would freeze the stdio pump for up to
-    ``LIVENESS_PROBE_TIMEOUT`` every ``interval``). The loop is await-aware
-    (``inspect.isawaitable``) so this async default and every existing
-    injected SYNC ``is_healthy`` callable both drive it unchanged.
+    socket still open) always passes - so the sole auto-recovery watchdog never
+    armed against the exact failure it exists for. It now runs the app-level
+    ``_backend_http_ready`` off-thread (plan_M1 SS2.2 rejected alternative #3:
+    a blocking httpx call run inline would freeze the stdio pump for up to
+    ``LIVENESS_PROBE_TIMEOUT`` every ``interval``).
+
+    F-820: those strikes no longer condemn on their own. Under fleet load a
+    healthy shared backend answers ``initialize`` slower than 2s for 20-40s at
+    a time, and whole waves of proxies tore down in the same second while it
+    went on serving (evidence in the finding). They now only open a
+    CONFIRMATION phase whose verdict comes from the SAME gate the cold-start
+    lock trusts - ``_same_identity_backend_ready``, driven off-thread, so there
+    is no second busy-vs-dead policy: dead (no socket, no process of ours)
+    fails in ms, keeping the human-pinned ~12s hard-down window; busy gets
+    ``REUSE_PATIENCE_SECONDS`` of ``REUSE_PROBE_TIMEOUT`` probes and survives;
+    only a backend silent for that whole window is condemned, ~12s + 60s in.
     """
     import anyio
 
-    def _default_check():
-        return anyio.to_thread.run_sync(_backend_http_ready, port)
+    async def _ask(probe):
+        res = probe()
+        return await res if inspect.isawaitable(res) else res
 
-    check = is_healthy if is_healthy is not None else _default_check
-    nap = sleep if sleep is not None else anyio.sleep
+    run = anyio.to_thread.run_sync
+    check = is_healthy or (lambda: run(_backend_http_ready, port))
+    confirm = confirm_probe or (lambda: run(_same_identity_backend_ready, port))
+    nap = sleep or anyio.sleep
     consecutive = 0
     while True:
         await nap(interval)
-        res = check()
-        if inspect.isawaitable(res):
-            res = await res
-        if res:
+        if await _ask(check):
             consecutive = 0
             continue
         consecutive += 1
         _logger.warning(
-            "liveness probe failed for backend on port %d (%d/%d)",
-            port,
-            consecutive,
-            failures_before_teardown,
+            "probe failed %d/%d on port %d", consecutive, failures_before_teardown, port
         )
-        if consecutive >= failures_before_teardown:
+        if consecutive < failures_before_teardown:
+            continue
+        if not await _ask(confirm):
+            _logger.warning("backend on port %d confirmed unusable", port)
             return
+        _logger.info("backend on port %d was busy, not dead", port)
+        consecutive = 0
 
 
 async def _proxy_streams(client_read, client_write, port: int) -> None:

@@ -86,6 +86,10 @@ class TestWatchBackendLiveness:
                 failures_before_teardown=3,
                 is_healthy=health,
                 sleep=tiny_sleep,
+                # F-820: strikes alone no longer condemn — the gone backend of
+                # this test's premise is stated explicitly, which also keeps
+                # the case off the real server.json the default gate reads.
+                confirm_probe=lambda: False,
             )
 
         assert calls["n"] == 3  # tore down after exactly 3 consecutive failures
@@ -112,6 +116,7 @@ class TestWatchBackendLiveness:
                 failures_before_teardown=3,
                 is_healthy=health,
                 sleep=tiny_sleep,
+                confirm_probe=lambda: False,  # F-820: gone, not merely busy
             )
 
         assert idx["i"] == 6  # needed all 6 checks: the True reset the run of failures
