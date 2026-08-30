@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)
 
