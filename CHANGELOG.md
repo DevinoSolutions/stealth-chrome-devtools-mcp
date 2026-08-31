@@ -327,6 +327,41 @@ top-level `return` still gets exactly one retry as a function body (F-812) — b
 value too, since that is the path most agent-written scripts actually take.
 Details and residuals in
 `audit/stage2/finding_F832_execute_script_shallow_serialization.md`.
+### Fixed — `set_cookie(same_site=…)` could not set a cookie at all (F-821)
+
+Every `set_cookie` call that supplied `same_site` failed with
+`Failed to set cookie: 'str' object has no attribute 'to_json'`; omitting the
+attribute worked, which is why the tool looked healthy. nodriver's CDP commands
+build their request frame while being advanced and serialise `same_site` with
+`.to_json()`, so the plain string an MCP argument carries killed the command
+before it reached Chrome. The one CDP cookie boundary
+(`network_interceptor.to_cookie_same_site`) now converts it to the real
+`cdp.network.CookieSameSite` enum, accepting `Strict` / `Lax` / `None` in any
+case and raising a `ToolError` that names the valid values for anything else.
+
+Fixes `STEALTH-CHROME-DEVTOOLS-MCP-3P` (9 events).
+
+### Changed — `search_network_requests` says which argument filters the URL (F-825)
+
+Its summary line was "Search network requests with advanced filters and
+pagination", which names no filter at all, so a caller reaching for the obvious
+one guessed `url=` or `pattern=` and got a validation error. The summary now
+names `url_pattern`, and every filter states how it actually matches
+(case-insensitive substring for `url_pattern` / `response_contains` /
+`payload_contains` / `resource_type`, whole-value for `method`, exact for
+`status_code`).
+
+### Fixed — the environment validator no longer recommends args the stealth filter strips (F-836)
+
+As root or in a container, `validate_browser_environment_tool` returned
+`recommended_args: ["--no-sandbox", "--disable-setuid-sandbox", …]` — the exact
+flags the stealth filter blocks out of caller-supplied `browser_args`. Anyone
+who followed the advice got "Stripped 4 detectable arg(s)" and no effect. The
+recommendation is now derived *through* the filter, so it can never name a
+blocked flag again, and the flags the environment genuinely needs are reported
+in `recommendations` as what they are: applied automatically by `spawn_browser`
+after the filter runs, not something to pass by hand. The launch policy itself
+is unchanged, and on a normal desktop the tool's output is identical to before.
 
 ## 2.0.7
 
