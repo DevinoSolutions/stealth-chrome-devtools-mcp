@@ -147,6 +147,18 @@ class TestViewAndClear:
         assert breakdown["api"]["errors"] == 1 and breakdown["api"]["warnings"] == 1
         assert breakdown["dom"]["calls"] == 3
 
+    def test_clear_also_forgets_the_dedup_signatures(self):
+        """F-835: "clear the view, then watch" is the operator loop a live
+        outage is diagnosed with. If the dedup set survived the clear, every
+        repeat of an already-seen failure would be deduped against a signature
+        whose entry no longer exists — the ring would stay empty for exactly
+        the error the operator is watching for."""
+        log = DebugLogger()
+        log.log_error("comp", "meth", ValueError("recurring"))
+        log.clear_debug_view()
+        log.log_error("comp", "meth", ValueError("recurring"))
+        assert log.get_debug_view()["summary"]["total_errors"] == 1
+
     def test_clear_empties_all_buffers(self):
         log = DebugLogger()
         log.enable()

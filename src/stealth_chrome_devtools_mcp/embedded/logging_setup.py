@@ -71,6 +71,40 @@ class CorrelationIdFilter(logging.Filter):
 _tool_call_logger = logging.getLogger("stealth.backend")
 
 
+def _record_tool_failure(tool_name: str, error: Exception) -> None:
+    """Put a failed tool call into the in-memory debug ring (F-835).
+
+    Called from the ONE wrapper every registered tool passes through, so a
+    failure is visible in the product's own debug surface no matter which tool
+    it came from — before this, a total ``spawn_browser`` outage (24 consecutive
+    failures) left ``get_debug_view`` reporting ``total_errors: 0``.
+
+    Two properties this helper exists to guarantee:
+
+    * it **never raises**. It sits on the failure path of all 94 tools, and a
+      debug-ring problem must not replace (or mask) the error the client is
+      owed. The recording is the only thing that can be lost here.
+    * it **never touches** ``error``. The exception continues to the client
+      byte-identical — same type, same args, no attributes added (a pinned
+      contract: ``test_observability`` asserts ``vars(exc) == {}``).
+
+    Note what it does NOT do: write the failure to the backend log. That is
+    ``log_tool_failure``'s deliberate split (F-782's redaction condition), not
+    an oversight — the ring is process-local, the log file is durable and
+    Sentry-bridged, and a failure message echoes the caller's arguments.
+
+    ``debug_logger`` is imported here rather than at module scope because it
+    imports ``correlation_id_var`` from THIS module; a top-level import would
+    close the cycle. Deferred, function-local imports are the established fix
+    for exactly this shape here (see the module docstring and pyproject's
+    PLC0415 rationale) — and on the failure path the cost is a dict lookup.
+    """
+    with contextlib.suppress(Exception):
+        from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+
+        debug_logger.log_tool_failure(tool_name, error)
+
+
 def with_correlation_id(func: Callable[..., object]) -> Callable[..., object]:
     """Wrap a registered tool function (the ``section_tool`` chokepoint, F-308)
     so every call gets a fresh correlation id — stamped by
@@ -79,6 +113,12 @@ def with_correlation_id(func: Callable[..., object]) -> Callable[..., object]:
     pair. ``functools.wraps`` preserves the schema FastMCP introspects
     (name/signature/docstring); a ``tools/list`` schema-snapshot test pins
     that this holds for a representative tool per section.
+
+    It is also where a FAILED call is recorded (F-835,
+    :func:`_record_tool_failure`): the same chokepoint argument that makes this
+    the home of the correlation id makes it the home of "this call failed" —
+    one place, all 94 tools, instead of a per-tool ``except`` nobody adds. The
+    exception is recorded and re-raised unchanged.
 
     91 of the 96 registered tools are ``async def`` and 5 are plain ``def``;
     Python has no single syntax that both ``await``s and doesn't, so this
@@ -98,6 +138,11 @@ def with_correlation_id(func: Callable[..., object]) -> Callable[..., object]:
             _tool_call_logger.info("tool %s start", tool_name)
             try:
                 return await func(*args, **kwargs)
+            except Exception as error:
+                # Record and re-raise, unchanged (F-835). Only Exception:
+                # CancelledError is a shutdown signal, not a tool failure.
+                _record_tool_failure(tool_name, error)
+                raise
             finally:
                 elapsed_ms = (time.monotonic() - start) * 1000
                 _tool_call_logger.info("tool %s end (%.1fms)", tool_name, elapsed_ms)
@@ -112,6 +157,9 @@ def with_correlation_id(func: Callable[..., object]) -> Callable[..., object]:
         _tool_call_logger.info("tool %s start", tool_name)
         try:
             return func(*args, **kwargs)
+        except Exception as error:
+            _record_tool_failure(tool_name, error)  # F-835, as above
+            raise
         finally:
             elapsed_ms = (time.monotonic() - start) * 1000
             _tool_call_logger.info("tool %s end (%.1fms)", tool_name, elapsed_ms)

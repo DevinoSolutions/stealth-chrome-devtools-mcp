@@ -36,6 +36,37 @@ Three layers, so no single one has to hold alone:
   `embedded/spawn_contention.py`, appended at the same one composition site as
   F-811's exhaustion hint.
 
+### Fixed — a tool that fails is now visible in `get_debug_view` (F-835)
+
+After 24 consecutive failed `spawn_browser` calls — a total spawn outage —
+`get_debug_view` still reported `total_errors: 0`. The surface an operator
+watches to answer "is this thing healthy" said it was, while nothing could
+launch. The raised `ToolError`'s only copy went to the MCP client; the failure
+path emitted INFO lines and nothing ever turned "this call raised" into an
+error record.
+
+The fix is at the one wrapper every registered tool passes through
+(`logging_setup.with_correlation_id`, the `section_tool` chokepoint), so it is
+**all 94 tools**, not just spawn: an escaping exception is recorded in the debug
+ring — filed under component `tool` with the tool's own name, the message, and
+the call's correlation id — and then re-raised **unchanged**. Recording never
+transforms the error, never records the same exception twice, and can never
+break a tool call (a throwing debug ring loses only the recording). Repeats
+still dedup as they always have, so 24 identical failures read as one entry with
+`stats["tool.spawn_browser.errors"] == 24` — what can no longer happen is `0`.
+
+Scope, deliberately: the **in-memory ring only**, not the backend log file. A
+failure message echoes the caller's own arguments, and F-782's condition for
+logging it — redact the record first — is unanswered (F-826). The ring is
+process-local and returns only to the client that already holds those bytes; the
+log is durable and Sentry-bridged, so it stays clean and F-782 keeps its log
+half.
+
+`clear_debug_view` now also forgets the de-duplication signatures. Without that,
+"clear the view and watch" — the operator loop for a live outage — would show an
+empty ring forever, because each repeat was deduped against a signature whose
+entry had just been cleared.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)
