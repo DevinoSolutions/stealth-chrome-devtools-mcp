@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from nodriver import Tab
+from nodriver import Tab, cdp
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
@@ -24,6 +24,67 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import (
 #: (lower-cased for matching). ``execute_script`` treats it as "this script is a
 #: function body, not an expression" and retries once — see F-812.
 ILLEGAL_RETURN = "illegal return statement"
+
+#: "the CDP result carried no ``value`` field at all", which is NOT the same
+#: thing as a ``value`` that IS ``None`` (an explicit JS ``null``). Reading an
+#: evaluate result needs both cases named, and the whole of F-832 is that they
+#: were conflated with "the value was falsy" — see :func:`_json_value`.
+_ABSENT = object()
+
+
+def _json_value(remote_object: object) -> object:
+    """Read a by-value ``Runtime.evaluate`` result as a plain JSON value (F-832).
+
+    The test is None-vs-ABSENT, never truthiness. ``nodriver``'s ``Tab.evaluate``
+    reads its result with ``if remote_object.value:`` / ``if
+    remote_object.deep_serialized_value:``, so ``0``, ``""``, ``false`` and
+    ``null`` — all legitimate answers — failed the test and fell through to a
+    bare ``RemoteObject`` husk in their place. That is the trap this function
+    exists not to fall into.
+
+    The mapping, in branch order:
+
+    * ``undefined`` → ``None`` (Python has one nullish, so JS's two agree here)
+    * a present ``value`` → that value, **verbatim**, falsy or not
+    * ``null`` (by ``subtype``) → ``None``, reached by its own named branch
+    * ``unserializableValue`` (``Infinity`` / ``NaN`` / ``-0``) → its token
+    * nothing serializable (a live DOM node, a cycle) → the ``description``
+
+    A ``RemoteObject`` is never returned: it is not JSON-serializable, so the
+    tool composing it into its payload must not be able to crash on it.
+    """
+    if remote_object is None:
+        return None
+    if getattr(remote_object, "type_", None) == "undefined":
+        return None
+    value = getattr(remote_object, "value", _ABSENT)
+    if value is not _ABSENT and value is not None:
+        return value
+    # No value came back. WHICH of the ways that happens decides the answer —
+    # "it was falsy" is not one of them, and never reaches this point.
+    if getattr(remote_object, "subtype", None) == "null":
+        return None
+    unserializable = getattr(remote_object, "unserializable_value", None)
+    if unserializable is not None:
+        return str(unserializable)
+    description = getattr(remote_object, "description", None)
+    return None if description is None else str(description)
+
+
+def _script_value(remote_object: object, exception_details: object) -> object:
+    """Turn one ``Runtime.evaluate`` answer into the script's value, or raise.
+
+    Chrome answers a thrown script with BOTH a result object (the thrown value)
+    and ``exceptionDetails``, so the details are consulted FIRST — reading the
+    result would report the exception as the script's value and call it a
+    success, which is the F-795 defect. The record is routed into
+    ``tool_errors._require_js_value`` rather than raising here: that is the ONE
+    place a thrown script becomes the error convention, and it stays the one
+    place now that the raw command hands the record over explicitly.
+    """
+    if exception_details is not None:
+        _require_js_value(exception_details)
+    return _json_value(remote_object)
 
 
 class DOMHandler:
@@ -685,7 +746,12 @@ class DOMHandler:
         tab: Tab, script: str, args: list[Any] | None = None
     ) -> Any:
         """
-        Execute JavaScript in page context.
+        Execute JavaScript in page context and return its plain JSON value.
+
+        The value is what the script evaluated to — a nested object comes back
+        whole, and ``0`` / ``""`` / ``false`` / ``null`` come back as themselves
+        (F-832 / issue #17). See :meth:`_evaluate_by_value` for how, and
+        :func:`_json_value` for the undefined/null/unserializable mapping.
 
         A script is evaluated as-is. If — and only if — that fails with Chrome's
         "Illegal return statement", it is re-evaluated ONCE as a function body so
@@ -701,30 +767,59 @@ class DOMHandler:
             args (Optional[List[Any]]): Arguments for the script.
 
         Returns:
-            Any: Result of script execution.
+            Any: Result of script execution, as a plain JSON value (F-832).
         """
-        try:
-            if args:
-                serialized_args = ",".join(json.dumps(a) for a in args)
-                result = await tab.evaluate(
-                    f"(function() {{ {script} }})({serialized_args})"
-                )
-            else:
-                result = await tab.evaluate(script)
+        if args:
+            serialized_args = ",".join(json.dumps(a) for a in args)
+            expression = f"(function() {{ {script} }})({serialized_args})"
+        else:
+            expression = script
 
-        except Exception as e:
-            raise ToolError(f"Failed to execute script: {e!s}")
+        answer = await DOMHandler._evaluate_by_value(tab, expression)
 
-        # Outside the except on purpose: a script that THREW is a failure of the
+        # Outside the send on purpose: a script that THREW is a failure of the
         # script, not of the CDP call, so it must not be re-wrapped in the
         # "Failed to execute script" (operational) message. F-795.
         try:
-            return _require_js_value(result)
+            return _script_value(*answer)
         except ToolError as exception:
             if ILLEGAL_RETURN not in str(exception).lower():
                 raise
 
         return await DOMHandler._evaluate_as_function_body(tab, script)
+
+    @staticmethod
+    async def _evaluate_by_value(tab: Tab, expression: str) -> tuple[Any, Any]:
+        """Evaluate *expression* asking Chrome for the value ITSELF (F-832, #17).
+
+        A raw ``Runtime.evaluate`` with ``return_by_value=True`` rather than
+        ``nodriver``'s ``Tab.evaluate``, which asks for a *deep-serialized*
+        result instead: a BiDi-shaped graph of ``{"type": …, "value": …}`` nodes
+        capped at depth 10. A caller who asked for an object therefore got a CDP
+        envelope to unwrap — or a truncated one — instead of their JSON.
+
+        No ``serialization_options`` is sent: CDP documents it as **overriding**
+        ``returnByValue``, so passing both would quietly reinstate the envelope
+        this exists to remove. ``user_gesture`` and
+        ``allow_unsafe_eval_blocked_by_csp`` ARE carried over from nodriver's own
+        call — dropping either would regress a page whose CSP blocks unsafe-eval,
+        or a handler gated on user activation.
+
+        Returns the ``(result, exceptionDetails)`` pair verbatim; reading it is
+        :func:`_script_value`'s job.
+        """
+        try:
+            remote_object, exception_details = await tab.send(
+                cdp.runtime.evaluate(
+                    expression=expression,
+                    return_by_value=True,
+                    user_gesture=True,
+                    allow_unsafe_eval_blocked_by_csp=True,
+                )
+            )
+        except Exception as e:
+            raise ToolError(f"Failed to execute script: {e!s}")
+        return remote_object, exception_details
 
     @staticmethod
     async def _evaluate_as_function_body(tab: Tab, script: str) -> Any:
@@ -737,13 +832,9 @@ class DOMHandler:
         of the caller's actual defect (a ``ReferenceError`` in the body, say).
         The wrapper is named in the message because it is visible in the stack.
         """
+        answer = await DOMHandler._evaluate_by_value(tab, f"(() => {{\n{script}\n}})()")
         try:
-            result = await tab.evaluate(f"(() => {{\n{script}\n}})()")
-        except Exception as e:
-            raise ToolError(f"Failed to execute script: {e!s}")
-
-        try:
-            return _require_js_value(result)
+            return _script_value(*answer)
         except ToolError as exception:
             raise ToolError(
                 f"{exception} (the script was re-evaluated inside a wrapper "
