@@ -21,11 +21,20 @@ address, not a credential), so hardcoding ours costs nothing and removes the
 collision entirely.
 
 Every outgoing event goes through :func:`_scrub_event` first. Reporting is on by
-default for people who never chose it, so the events must not identify them:
-the machine's ``server_name`` is dropped and the home-directory segment of every
-path is replaced with ``~``. Everything a maintainer debugs from — release,
-environment, correlation ids, the exception type and mechanism, the module path
-after the home segment — is deliberately left intact.
+default for people who never chose it, so the events must not identify them —
+neither the machine nor the pages it drives. Four removals, all universal:
+
+* the machine's ``server_name``;
+* the home-directory segment of every path, replaced with ``~``;
+* every email address, replaced with ``[redacted-email]`` (F-826);
+* every URL's query, fragment and userinfo, replaced with
+  ``[redacted-query]`` / ``[redacted-fragment]`` / ``[redacted]@`` (F-826).
+
+Everything a maintainer debugs from — release, environment, correlation ids, the
+exception type and mechanism, the module path after the home segment, a URL's
+scheme, host and path — is deliberately left intact. The redaction is TARGETED
+for that reason: a message replaced wholesale is an issue nobody can act on,
+which is a slower way of turning reporting off.
 
 The same hook is also the one place that decides an event is not worth sending:
 a failure raised through the project's own error CONVENTION
@@ -112,6 +121,66 @@ _HOME_SEGMENT_RE = re.compile(
 #: which OS and which home root the failure came from.
 _ANONYMOUS_USER = "~"
 
+#: F-826. This product's exceptions quote the thing that failed, and the thing
+#: that failed is a page: a URL an agent navigated to, a value it typed into a
+#: form. The project's own Sentry held OAuth authorization URLs with the token
+#: still in the query, and email addresses — from third-party machines as well
+#: as the maintainer's. Two more string rules, both surgical: they take the
+#: secret and leave the sentence, because an unreadable issue is a closed issue.
+#:
+#: A URL, split where its secrets live. ``scheme://`` then, optionally,
+#: ``userinfo@`` (proxy credentials are written exactly like this), then the
+#: host and path — which are the diagnostic and are KEPT verbatim — then the
+#: query and fragment, which is where tokens ride in both OAuth flows.
+#:
+#: The look-behind is a performance guard, not a semantic one: without it, a
+#: long run of scheme-legal characters containing no ``://`` retried the scan at
+#: every offset, which is quadratic on a string that can be arbitrary page
+#: content quoted into an error. With it, only a position that actually starts a
+#: token is ever tried. Same reasoning as the possessive runs above.
+_URL_RE = re.compile(
+    r"(?<![A-Za-z0-9+.\-])"
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)"
+    r"(?P<userinfo>[^/?#\s'\"\\]*@)?"
+    r"(?P<hostpath>[^?#\s'\"<>\\]*)"
+    r"(?P<tail>[?#][^\s'\"<>\\]*)?"
+)
+
+#: An email address, anchored on a local part that is not preceded by more of
+#: itself. The look-behind is what keeps this linear: on ``aaaa…@`` only the
+#: first offset is viable, and every other one is rejected without scanning.
+#: Whether the trailing token really IS a domain is decided in
+#: :func:`_redact_email`, not here — ``python@3.11`` and ``sentry-sdk@2.64.0``
+#: match this shape, and redacting them would eat the interpreter path out of
+#: every macOS stacktrace.
+_EMAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+\-])"
+    r"[A-Za-z0-9._%+\-]++@"
+    r"(?P<domain>[A-Za-z0-9.\-]++)"
+)
+
+#: The last label of a real domain: alphabetic, at least two characters. This is
+#: the whole difference between an address and a version pin.
+_EMAIL_TLD_RE = re.compile(r"\A[A-Za-z]{2,}\Z")
+
+#: A domain has a name and a TLD. ``postgres@localhost`` has neither, and a host
+#: with no dot is not an address a person can be reached at.
+_EMAIL_MIN_DOMAIN_LABELS = 2
+
+_REDACTED_EMAIL = "[redacted-email]"
+_REDACTED_USERINFO = "[redacted]@"
+_REDACTED_QUERY = "?[redacted-query]"
+_REDACTED_FRAGMENT = "#[redacted-fragment]"
+
+#: What free text becomes when the walk itself failed — see
+#: :func:`_without_unscrubbable_text`.
+_REDACTED_UNSCRUBBABLE = "[redacted-unscrubbable]"
+
+#: The free-text fields, by name. Only the degraded floor uses this list: the
+#: normal path walks everything and needs no list at all. Enumerated here
+#: because "drop what we could not prove clean" has to name what it drops.
+_FREE_TEXT_FIELDS = ("logentry", "breadcrumbs", "message", "extra")
+
 #: Cycle terminator for the event walk, not a size limit. A real event cannot
 #: reach it — by the time ``before_send`` runs the SDK has already serialized
 #: the event (``client.py`` calls ``serialize()`` at :880, ``before_send`` at
@@ -130,21 +199,68 @@ def _release() -> str | None:
         return None
 
 
-def _anonymize(value: object, depth: int = 0) -> object:
-    """Return ``value`` with every home-directory segment in it replaced.
+def _redact_url(match: "re.Match[str]") -> str:
+    """Keep a URL's scheme, host and path; drop its userinfo, query and fragment.
 
-    Applied to the whole event rather than to a list of known fields: paths turn
-    up in frame ``abs_path``/``filename``, in exception messages, in log messages
-    and their params, and in breadcrumbs. A field list would have to grow every
-    time the SDK grows one. The transform is a no-op on anything that is not a
-    home path, so nothing else can be damaged.
+    Positional, deliberately: an implicit-flow ``#access_token=…`` and a docs
+    ``#readme`` anchor occupy the same slot and nothing can tell them apart, so
+    both go. What survives still names the provider, the endpoint and the page,
+    which is what a maintainer reads the issue for.
+    """
+    prefix = match.group("scheme")
+    if match.group("userinfo"):
+        prefix += _REDACTED_USERINFO
+    tail = match.group("tail") or ""
+    marks = ""
+    if "?" in tail:
+        marks += _REDACTED_QUERY
+    if "#" in tail:
+        marks += _REDACTED_FRAGMENT
+    return f"{prefix}{match.group('hostpath')}{marks}"
+
+
+def _redact_email(match: "re.Match[str]") -> str:
+    """Replace a real address; leave every other use of ``@`` exactly as it was.
+
+    "Real" means the domain's last label is alphabetic. A trailing dot or hyphen
+    belongs to the prose around the address, not to it, so it is handed back.
+    Returning ``match.group(0)`` unchanged is how this rule declines: over-
+    redaction costs diagnostics that nobody notices are missing.
+    """
+    domain = match.group("domain")
+    core = domain.rstrip(".-")
+    labels = core.split(".")
+    if len(labels) < _EMAIL_MIN_DOMAIN_LABELS or not _EMAIL_TLD_RE.match(labels[-1]):
+        return match.group(0)
+    return f"{_REDACTED_EMAIL}{domain[len(core) :]}"
+
+
+def _redact_text(text: str) -> str:
+    """THE per-string rule: every redaction this module performs, in one place.
+
+    Order matters exactly once. The URL rule runs first so that a proxy URL's
+    ``user:pass@host`` is already gone before the email rule looks for an ``@``;
+    afterwards the two cannot see each other's output. The home rule is last and
+    is independent of both.
+    """
+    text = _URL_RE.sub(_redact_url, text)
+    text = _EMAIL_RE.sub(_redact_email, text)
+    return _HOME_SEGMENT_RE.sub(lambda m: f"{m.group('prefix')}{_ANONYMOUS_USER}", text)
+
+
+def _anonymize(value: object, depth: int = 0) -> object:
+    """Return ``value`` with :func:`_redact_text` applied to every string in it.
+
+    Applied to the whole event rather than to a list of known fields: paths, URLs
+    and quoted page content turn up in frame ``abs_path``/``filename``, in
+    exception messages, in log messages and their params, and in breadcrumbs. A
+    field list would have to grow every time the SDK grows one. The transform is
+    a no-op on anything that matches no rule, so nothing else can be damaged.
     """
     if depth > _MAX_EVENT_DEPTH:
         return value
     if isinstance(value, str):
-        return _HOME_SEGMENT_RE.sub(
-            lambda m: f"{m.group('prefix')}{_ANONYMOUS_USER}", value
-        )
+        return _redact_text(value)
     if isinstance(value, dict):
         return {key: _anonymize(item, depth + 1) for key, item in value.items()}
     if isinstance(value, list):
@@ -328,15 +444,22 @@ def _scrub_event(
        — see :func:`_is_expected_tool_failure`;
     1. everything that survives is scrubbed.
 
-    Two removals, both universal — there is no maintainer-only path:
+    Four removals, all universal — there is no maintainer-only path:
 
     * ``server_name``, which is the machine's own hostname;
-    * the home-directory segment of every path, which is the account name.
+    * the home-directory segment of every path, which is the account name;
+    * every email address (F-826);
+    * every URL's userinfo, query and fragment (F-826).
+
+    Step 0 runs FIRST and that ordering is load-bearing in both directions: an
+    expected ``ToolError`` is dropped whole, page content and all, so the rules
+    below never have to be the last line of defence for it — and equally, they
+    only ever run on the events that survived, so nothing is scrubbed twice.
 
     Never raises. The only event it drops is the one it positively recognised in
     step 0; an event we could not fully scrub, or could not classify, is still
     worth more than silence, so an internal failure degrades to
-    :func:`_without_server_name` rather than to ``None``. The ``isinstance``
+    :func:`_without_unscrubbable_text` rather than to ``None``. The ``isinstance``
     guards look redundant against the annotation and are not — the annotation
     states what the SDK promises to pass, and this function is the last thing
     that runs before an event leaves the machine, so it defends against being
@@ -354,11 +477,21 @@ def _scrub_event(
         # and ERROR into events, and an event raised while shipping an event is
         # how a reporting loop starts.
         _log.debug("Sentry event scrubbing failed; degrading", exc_info=True)
-    return _without_server_name(event)
+    return _without_unscrubbable_text(event)
 
 
-def _without_server_name(event: "Event") -> "Event":
-    """The floor the scrubber degrades to: no hostname, nothing else promised.
+def _without_unscrubbable_text(event: "Event") -> "Event":
+    """The floor the scrubber degrades to: no hostname, and no unproven free text.
+
+    The event is still SENT — losing it entirely is the failure mode the
+    never-raises contract exists to prevent, and its type, module, mechanism,
+    frames, tags and release are still worth reading. What it no longer carries
+    is the free text F-826 found page content in: if the walk that redacts those
+    strings is the thing that failed, we cannot claim they are clean, and a
+    guess is not a redaction. So they are dropped, not shipped raw.
+    (Structurally this path is unreachable for a real event — by the time
+    ``before_send`` runs the SDK has serialized it to plain JSON — but it is the
+    one place a hostile or hand-built event could smuggle text past the rules.)
 
     Copies before removing. The event belongs to the SDK and the caller may
     still hold it, so mutating it in place would be a second, invisible way for
@@ -368,10 +501,26 @@ def _without_server_name(event: "Event") -> "Event":
         if isinstance(event, dict):
             remainder = dict(event)
             remainder.pop("server_name", None)
+            for field in _FREE_TEXT_FIELDS:
+                remainder.pop(field, None)
+            exception = remainder.get("exception")
+            values = exception.get("values") if isinstance(exception, dict) else None
+            if isinstance(values, list):
+                remainder["exception"] = {
+                    **exception,
+                    "values": [_value_without_text(item) for item in values],
+                }
             return cast("Event", remainder)
     except Exception:  # noqa: BLE001  PERMANENT(never-raises contract, #55)
-        _log.debug("Sentry server_name removal failed", exc_info=True)  # see above
+        _log.debug("Sentry degraded scrub failed", exc_info=True)  # see above
     return event
+
+
+def _value_without_text(value: object) -> object:
+    """One serialized exception with its message replaced, its identity kept."""
+    if isinstance(value, dict) and "value" in value:
+        return {**value, "value": _REDACTED_UNSCRUBBABLE}
+    return value
 
 
 def sentry_init() -> bool:
