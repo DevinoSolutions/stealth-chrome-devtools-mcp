@@ -339,6 +339,29 @@ class FakeTab:
 
 
 # ---------------------------------------------------------------------------
+# animations-aspect transport fidelity (F-846)
+# ---------------------------------------------------------------------------
+
+# The marker present in ``embedded/js/extract_animations.js`` — the substring an
+# ``evaluate_map`` keys on to answer THAT script and no other.
+ANIMATION_JS_MARKER = "animation-facts"
+
+
+def animation_evaluate_map(facts: Any) -> dict[str, str]:
+    """``evaluate_map`` answering the animations script the way a REAL tab does.
+
+    The animations collector ends in ``JSON.stringify`` (F-846): a string is the
+    one shape that survives ``tab.evaluate`` — a non-primitive comes back as CDP
+    deep-serialization instead. So the fake must answer with the **JSON string**,
+    never the dict. A fake that returned the dict would re-encode the very bug
+    the transport fix removes, and every golden captured through it would prove
+    nothing. This helper is the one home for that fidelity: tests state the facts
+    as a dict and the encoding happens here, once.
+    """
+    return {ANIMATION_JS_MARKER: json.dumps(facts)}
+
+
+# ---------------------------------------------------------------------------
 # ``Runtime.evaluate`` answers (the F-832 execute_script seam)
 # ---------------------------------------------------------------------------
 

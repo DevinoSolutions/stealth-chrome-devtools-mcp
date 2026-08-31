@@ -26,6 +26,7 @@ from urllib.parse import urljoin
 import nodriver as uc
 import requests
 
+from stealth_chrome_devtools_mcp.embedded import animation_analysis
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     query_selector_all,
@@ -667,39 +668,37 @@ class CDPElementCloner:
         tab,
         element=None,
         selector: str | None = None,
-        include_css_animations: bool = True,
-        include_transitions: bool = True,
-        include_transforms: bool = True,
-        analyze_keyframes: bool = True,
+        include_subtree: bool = True,
+        include_waapi: bool = True,
     ) -> dict[str, Any]:
-        """Extract CSS animations/transitions/transforms via JS-eval (verbatim
-        move; KEEP-JS — CDP has no synchronous per-node ``@keyframes`` read)."""
+        """Extract the animations aspect as schema v2 (KEEP-JS — CDP has no
+        synchronous per-node ``@keyframes`` read).
+
+        The page returns ONE JSON **string** of collected facts (F-846: a
+        non-primitive comes back CDP-deep-serialized and unusable), and every
+        derivation lives in ``animation_analysis``. Engine -> analysis is the
+        only call path, so DOM extraction keeps its one home.
+        """
         try:
             if not selector:
                 return {"error": "Selector is required"}
-
             options = {
-                "include_css_animations": include_css_animations,
-                "include_transitions": include_transitions,
-                "include_transforms": include_transforms,
-                "analyze_keyframes": analyze_keyframes,
+                "include_subtree": include_subtree,
+                "include_waapi": include_waapi,
             }
-
             js_code = self._load_js_file("extract_animations.js", selector, options)
-            animation_data = await tab.evaluate(js_code)
-
-            if hasattr(animation_data, "exception_details"):
+            raw = await tab.evaluate(js_code)
+            if hasattr(raw, "exception_details"):
+                return {"error": f"JavaScript error: {raw.exception_details}"}
+            if not isinstance(raw, str):
                 return {
-                    "error": f"JavaScript error: {animation_data.exception_details}"
+                    "error": f"Unexpected return type: {type(raw)}",
+                    "raw_data": str(raw)[:400],
                 }
-            if isinstance(animation_data, dict):
-                return animation_data
-            if isinstance(animation_data, list):
-                return self._convert_nodriver_result(animation_data)
-            return {
-                "error": f"Unexpected return type: {type(animation_data)}",
-                "raw_data": str(animation_data),
-            }
+            facts = json.loads(raw)
+            if "error" in facts:
+                return facts
+            return animation_analysis.analyze(facts, options)
         except Exception as e:
             debug_logger.log_error("cdp_cloner", "extract_animations", e)
             return {"error": str(e)}
@@ -905,7 +904,7 @@ class CDPElementCloner:
                 },
                 "structure": {"include_children": False, "include_attributes": True},
                 "events": {"include_framework": True, "analyze_handlers": False},
-                "animations": {"analyze_keyframes": True},
+                "animations": {"include_subtree": True},
                 "assets": {"fetch_external": False},
                 "related_files": {"follow_imports": False},
             }

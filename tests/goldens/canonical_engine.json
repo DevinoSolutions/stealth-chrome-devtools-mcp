@@ -1,30 +1,166 @@
 {
   "animations": {
-    "children": [],
-    "computedStyles": {
-      "color": "rgb(0, 0, 0)",
-      "display": "block"
-    },
-    "cssRules": [],
-    "eventListeners": [
+    "animations": [
       {
-        "handler": "f()",
-        "source": "inline",
-        "type": "click"
+        "animated_properties": [
+          "transform"
+        ],
+        "checkpoints": [
+          {
+            "exact": true,
+            "offset": 0.0,
+            "time_ms": 0.0,
+            "values": {
+              "transform": "scale(1)"
+            }
+          },
+          {
+            "between": {
+              "from_offset": 0.0,
+              "to_offset": 1.0
+            },
+            "exact": false,
+            "from": {
+              "transform": "scale(1)"
+            },
+            "offset": 0.25,
+            "time_ms": 500.0,
+            "to": {
+              "transform": "scale(1.08)"
+            }
+          },
+          {
+            "between": {
+              "from_offset": 0.0,
+              "to_offset": 1.0
+            },
+            "exact": false,
+            "from": {
+              "transform": "scale(1)"
+            },
+            "offset": 0.5,
+            "time_ms": 1000.0,
+            "to": {
+              "transform": "scale(1.08)"
+            }
+          },
+          {
+            "between": {
+              "from_offset": 0.0,
+              "to_offset": 1.0
+            },
+            "exact": false,
+            "from": {
+              "transform": "scale(1)"
+            },
+            "offset": 0.75,
+            "time_ms": 1500.0,
+            "to": {
+              "transform": "scale(1.08)"
+            }
+          },
+          {
+            "exact": true,
+            "offset": 1.0,
+            "time_ms": 2000.0,
+            "values": {
+              "transform": "scale(1.08)"
+            }
+          }
+        ],
+        "derived": {
+          "active_end_ms": "infinite",
+          "active_start_ms": 0.0,
+          "cycle_ms": 4000.0,
+          "iteration_ms": 2000.0,
+          "total_ms": "infinite"
+        },
+        "edits": [],
+        "id": "anim-0",
+        "keyframes": [
+          {
+            "offset": 0.0,
+            "properties": {
+              "transform": "scale(1)"
+            },
+            "raw_css_text": "transform: scale(1);"
+          },
+          {
+            "offset": 1.0,
+            "properties": {
+              "transform": "scale(1.08)"
+            },
+            "raw_css_text": "transform: scale(1.08);"
+          }
+        ],
+        "kind": "css-animation",
+        "name": "pulse",
+        "semantics": {
+          "easing_class": "ease-in-out",
+          "easing_confidence": "high",
+          "motion_kind": "scale",
+          "motion_properties": [
+            "transform"
+          ]
+        },
+        "source_refs": [
+          "src-0"
+        ],
+        "summary": "pulse scales, over 2s, infinite, alternate, with ease-in-out easing",
+        "target": {
+          "relation": "self",
+          "selector": "#demo"
+        },
+        "timeline": {
+          "raw": "auto",
+          "type": "time"
+        },
+        "timing": {
+          "composition": "replace",
+          "delay_ms": 0.0,
+          "delay_raw": "0s",
+          "direction": "alternate",
+          "duration_ms": 2000.0,
+          "duration_raw": "2s",
+          "easing": "ease-in-out",
+          "fill": "both",
+          "iterations": "infinite",
+          "play_state": "running"
+        },
+        "trigger": {
+          "confidence": "low",
+          "kind": "unknown"
+        },
+        "warnings": []
       }
     ],
-    "html": {
-      "attributes": [
-        {
-          "name": "id",
-          "value": "demo"
-        }
-      ],
-      "className": "box",
-      "id": "demo",
-      "outerHTML": "<div id=\"demo\">hi</div>",
-      "tagName": "DIV"
-    }
+    "caps": {
+      "animations": 200,
+      "keyframes_per_animation": 60,
+      "truncated": {
+        "animations": false,
+        "keyframes": false
+      }
+    },
+    "captured_at_ms": 100.0,
+    "has_motion": true,
+    "interactions": [],
+    "options": {
+      "include_subtree": true,
+      "include_waapi": true
+    },
+    "overview": "1 animation and 0 transitions. Running: 'pulse' on #demo.",
+    "pending_animations": [],
+    "schema_version": 2,
+    "selector": "#demo",
+    "sources": [],
+    "transforms": {
+      "transform": "none",
+      "transform_origin": "50% 50%"
+    },
+    "transitions": [],
+    "url": "https://fake.test/page",
+    "warnings": []
   },
   "assets": {
     "children": [],
@@ -82,7 +218,7 @@
   },
   "extraction_options": {
     "animations": {
-      "analyze_keyframes": true
+      "include_subtree": true
     },
     "assets": {
       "fetch_external": false

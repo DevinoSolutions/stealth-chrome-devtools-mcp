@@ -1,5 +1,65 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — animation keyframes arrived as unusable serialization garbage (F-846)
+
+`extract_element_animations` returned a nested object from `tab.evaluate`, and
+`tab.evaluate` deep-serializes anything non-primitive: `keyframe_rules` reached
+callers as `{"type": "object", "value": [["pulse", {...}]]}` rather than as
+keyframes. This is the same hazard class as the fixed F-844 viewport bug, and
+it is why nothing downstream could depend on the field. The page now builds one
+`JSON.stringify` payload and the engine `json.loads` it, so a keyframe arrives
+as a real parsed object with a numeric `offset` and a property map.
+
+`Infinity` is normalized to the string `"infinite"` in the page *before*
+stringify: `JSON.stringify` silently turns it into `null`, and a null reads as
+"unknown" rather than "forever".
+
+### Fixed — keyframes came back empty whenever an element had 2+ animations (F-847)
+
+The lookup compared the whole computed `animation-name` list — the literal
+string `"pulse, spin"` — against each `CSSKeyframesRule.name`. It therefore
+matched nothing in exactly the case the feature exists for. Animations are now
+split into one record per animation, with the CSS list-cycling rule applied
+where it belongs (a single `animation-delay` against two names now gives both
+animations that delay, instead of dropping one). The UA-default `all 0s ease
+0s` transition every element reports is suppressed, so `transitions` carries
+motion rather than noise.
+
+### Added — animation extraction rebuilt for models that have to edit the CSS (F-848)
+
+Schema v2, aimed at a consumer that will open the stylesheet and change it. Per
+animation: a generated `summary`; `semantics` (motion kind, easing class);
+`timeline` typed `time`/`scroll`/`view`; `timing` with every duration as a
+`*_ms` number beside its `*_raw` CSS token; `derived` (cycle, active window,
+total, stagger deltas) so no arithmetic is needed; `trigger` attribution;
+resolved `keyframes`; `checkpoints`; and `edits` — per knob, the file plus a
+`find` literal *verified unique in its rule*, which turns an edit from CSS
+comprehension into find/replace. Alongside them: `interactions[]`, the
+precomputed conflicts with remedies (a scroll-driven animation whose duration
+edits would do nothing; two animations writing one property; an inline style
+that overrides the rule you were about to edit), `sources[]` with stylesheet
+href and rule path, and named `warnings[]` where a cross-origin sheet used to
+be swallowed by a bare `catch {}`.
+
+`getAnimations({subtree: true})` is now covered, so a running
+`element.animate()`, a `::before` animation and descendant animations are
+reported at all — previously the payload said an element was static while it
+was visibly moving. A live animation with no CSS declaration is marked
+`editable: false` with the reason, because editing CSS would not affect it.
+
+Every derived field is emitted only when it is mechanically decidable, carries a
+`confidence`, or is omitted — no value is interpolated by this tool and
+presented as if it were measured.
+
+**Breaking:** `css_animations`, `css_transitions` and `keyframe_rules` are
+removed (the last of these only ever carried the F-846 garbage). The
+`include_css_animations` / `include_transitions` / `include_transforms` /
+`analyze_keyframes` arguments are replaced by `include_subtree` and
+`include_waapi`; the removed flags gated v1 keys that no longer exist, and the
+stylesheet walk they toggled now also feeds sources, triggers and edit recipes.
+
 ## 2.0.9
 
 ### Fixed — a backend that dies with a call in flight now heals instead of disconnecting (F-843)

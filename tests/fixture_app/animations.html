@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>fixture-animations-page</title>
+    <link rel="stylesheet" href="animations.css" />
+  </head>
+  <body>
+    <h1 id="page-title">ANIMATIONS</h1>
+    <p id="sentinel">fixture-animations-page</p>
+
+    <!-- Two CSS animations + a ::before animation + a transition. -->
+    <div id="hero"></div>
+
+    <ul id="stagger">
+      <li class="stagger-item">one</li>
+      <li class="stagger-item">two</li>
+      <li class="stagger-item">three</li>
+    </ul>
+
+    <!-- element.animate(): composite + infinite iterations. v1 reported
+         NOTHING at all for this, so the model was told #waapi was static. -->
+    <div id="waapi"></div>
+
+    <div id="scroller">
+      <div id="scroll-bar"></div>
+      <div class="spacer"></div>
+    </div>
+
+    <pre id="action-log"></pre>
+    <script>
+      // Kept in the page (not app.js) so the animation ground truth lives beside
+      // the CSS it is asserted against.
+      window.__fixtureWaapi = document.getElementById("waapi").animate(
+        [
+          { opacity: 0, transform: "translateY(10px)" },
+          { opacity: 1, transform: "translateY(0px)" },
+        ],
+        {
+          id: "fixture-waapi-fade",
+          duration: 750,
+          iterations: Infinity,
+          composite: "add",
+          easing: "ease-in-out",
+          fill: "both",
+        },
+      );
+    </script>
+    <script src="app.js"></script>
+  </body>
+</html>
