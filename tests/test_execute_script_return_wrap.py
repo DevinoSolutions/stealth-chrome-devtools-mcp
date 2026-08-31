@@ -14,13 +14,18 @@ is the *narrowness* of it — a script that fails for any other reason keeps the
 old error and is never evaluated twice, so nothing that already worked acquires a
 second execution or a changed meaning.
 
+Since F-832 the eval seam is a raw ``Runtime.evaluate`` (``return_by_value``)
+rather than nodriver's ``Tab.evaluate``, so the attempts are counted off
+``tab.cdp_frames`` and the canned answers are ``(result, exceptionDetails)``
+pairs. The retry's *behaviour* — one error, one extra eval, never a wrapper on
+the happy path — is unchanged, which is what this module exists to hold still.
+
 Hermetic: a ``FakeTab`` and real ``nodriver`` CDP records, no browser.
 """
 
 import pytest
-from nodriver.cdp.runtime import ExceptionDetails, RemoteObject
 
-from fakes import FakeBrowserManager, FakeTab, call_tool
+from fakes import FakeBrowserManager, FakeTab, call_tool, js_result, js_threw
 from stealth_chrome_devtools_mcp.embedded import server
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -29,58 +34,45 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 # is what lets a FakeTab's evaluate_map answer the two attempts differently.
 WRAPPED = "=>"
 
-
-def _threw(description: str) -> ExceptionDetails:
-    """The record nodriver RETURNS (never raises) when an evaluated script fails.
-
-    Built from nodriver's own constructors rather than a hand-rolled stand-in: a
-    double that invented the field names could keep these tests green over a
-    guard that reads the wrong ones.
-    """
-    return ExceptionDetails(
-        exception_id=1,
-        text="Uncaught",
-        line_number=0,
-        column_number=0,
-        exception=RemoteObject(
-            type_="object",
-            class_name=description.split(":", maxsplit=1)[0],
-            description=description,
-        ),
-    )
+ILLEGAL_RETURN = js_threw("SyntaxError: Illegal return statement")
 
 
-ILLEGAL_RETURN = _threw("SyntaxError: Illegal return statement")
+def _expressions(tab: FakeTab) -> list[str]:
+    """The JS of every ``Runtime.evaluate`` the tab was sent, in order."""
+    return [frame["params"]["expression"] for frame in tab.cdp_frames]
 
 
 @pytest.mark.asyncio
 async def test_top_level_return_is_retried_as_a_function_body_and_succeeds():
     # First attempt (bare) is the illegal-return SyntaxError; the retry carries
     # the wrapper, so the fake answers it with the script's real value.
-    tab = FakeTab(evaluate_result=ILLEGAL_RETURN, evaluate_map={WRAPPED: "Fake Page"})
+    tab = FakeTab(
+        evaluate_result=ILLEGAL_RETURN,
+        evaluate_map={WRAPPED: js_result("Fake Page", type_="string")},
+    )
 
     result = await DOMHandler.execute_script(tab, "return document.title;")
 
     assert result == "Fake Page"
-    assert len(tab.evaluate_calls) == 2
-    assert tab.evaluate_calls[0] == "return document.title;", "first try is verbatim"
-    assert "return document.title;" in tab.evaluate_calls[1]
+    assert len(tab.cdp_frames) == 2
+    assert _expressions(tab)[0] == "return document.title;", "first try is verbatim"
+    assert "return document.title;" in _expressions(tab)[1]
 
 
 @pytest.mark.asyncio
 async def test_a_working_script_is_evaluated_exactly_once():
     """The retry is dead weight on the happy path — it must never fire there."""
-    tab = FakeTab(evaluate_result=42)
+    tab = FakeTab(evaluate_result=js_result(42, type_="number"))
 
     assert await DOMHandler.execute_script(tab, "6 * 7") == 42
-    assert len(tab.evaluate_calls) == 1
+    assert len(tab.cdp_frames) == 1
 
 
 @pytest.mark.asyncio
 async def test_a_script_failing_for_another_reason_keeps_its_error_and_one_eval():
     """No double execution for ordinary failures: a script with a side effect
     that throws afterwards must not have that side effect applied twice."""
-    tab = FakeTab(evaluate_result=_threw("ReferenceError: nope is not defined"))
+    tab = FakeTab(evaluate_result=js_threw("ReferenceError: nope is not defined"))
 
     with pytest.raises(ToolError) as raised:
         await DOMHandler.execute_script(tab, "nope.x = 1; nope.boom()")
@@ -88,7 +80,7 @@ async def test_a_script_failing_for_another_reason_keeps_its_error_and_one_eval(
     assert str(raised.value) == (
         "Script raised an exception: ReferenceError: nope is not defined"
     )
-    assert len(tab.evaluate_calls) == 1
+    assert len(tab.cdp_frames) == 1
 
 
 @pytest.mark.asyncio
@@ -99,7 +91,7 @@ async def test_a_retry_that_fails_reports_the_scripts_own_error_not_ours():
     it, and repeating it would send them fixing the wrong thing."""
     tab = FakeTab(
         evaluate_result=ILLEGAL_RETURN,
-        evaluate_map={WRAPPED: _threw("ReferenceError: nope is not defined")},
+        evaluate_map={WRAPPED: js_threw("ReferenceError: nope is not defined")},
     )
 
     with pytest.raises(ToolError) as raised:
@@ -116,11 +108,11 @@ async def test_a_retry_that_fails_reports_the_scripts_own_error_not_ours():
 async def test_the_args_path_is_untouched():
     """A script WITH args was already wrapped in a function before this fix, so
     its top-level return was always legal — it must not gain a second eval."""
-    tab = FakeTab(evaluate_result="ok")
+    tab = FakeTab(evaluate_result=js_result("ok", type_="string"))
 
     assert await DOMHandler.execute_script(tab, "return 1;", args=[7]) == "ok"
-    assert len(tab.evaluate_calls) == 1
-    assert tab.evaluate_calls[0] == "(function() { return 1; })(7)"
+    assert len(tab.cdp_frames) == 1
+    assert _expressions(tab)[0] == "(function() { return 1; })(7)"
 
 
 @pytest.mark.asyncio
@@ -128,18 +120,21 @@ async def test_declarations_still_reach_the_page_unwrapped():
     """The reason for retrying instead of always wrapping: a script that
     declares a global is evaluated as written, so the declaration lands on the
     page instead of becoming a local of a wrapper that is thrown away."""
-    tab = FakeTab(evaluate_result=None)
+    tab = FakeTab(evaluate_result=js_result(None, type_="undefined"))
 
     await DOMHandler.execute_script(tab, "var installed = 1; function f() {}")
 
-    assert tab.evaluate_calls == ["var installed = 1; function f() {}"]
+    assert _expressions(tab) == ["var installed = 1; function f() {}"]
 
 
 @pytest.mark.asyncio
 async def test_the_tool_returns_the_value_of_a_top_level_return(monkeypatch):
     """End of the path the Sentry issue was reported from: the MCP tool answers
     with the script's value instead of raising."""
-    tab = FakeTab(evaluate_result=ILLEGAL_RETURN, evaluate_map={WRAPPED: "Fake Page"})
+    tab = FakeTab(
+        evaluate_result=ILLEGAL_RETURN,
+        evaluate_map={WRAPPED: js_result("Fake Page", type_="string")},
+    )
     monkeypatch.setattr(server, "browser_manager", FakeBrowserManager(tabs={"i1": tab}))
 
     result = await call_tool(

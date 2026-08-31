@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — `execute_script` returns your value, not a CDP envelope (F-832, closes #17)
+
+`execute_script` evaluated through `nodriver`'s `Tab.evaluate`, which asks Chrome
+for a **deep-serialized** result — a BiDi-shaped graph of `{"type": …, "value": …}`
+nodes, capped at depth 10 — and then reads it back with two truthiness tests. Two
+things went wrong, from one root cause: the value was *inferred* rather than read.
+
+An object came back as an envelope to unwrap instead of its JSON (the reported
+issue), and anything past depth 10 was gone. Worse, `if remote_object.value:`
+cannot tell "there is no value" from "the value is falsy" — so a script
+evaluating to `0`, `""`, `false` or `null` failed that test and fell through to a
+bare `RemoteObject` husk in place of the number, string or boolean you asked for.
+
+The eval now goes through a raw `Runtime.evaluate` with `return_by_value=True`
+(no `serializationOptions`, which CDP documents as *overriding* it; `userGesture`
+and `allowUnsafeEvalBlockedByCSP` are carried over so CSP-strict pages and
+activation-gated handlers do not regress), and the answer is read with an
+explicit None-vs-absent check: `undefined` → `None`, `null` → `None` by its own
+branch, a present value verbatim however falsy, `Infinity`/`NaN` as their token,
+and anything Chrome could not send by value as its description — a `RemoteObject`
+is never handed to the transport.
+
+The two behaviours that ride on this path are unchanged: a script that **throws**
+still raises, through the same single `_require_js_value` guard (F-795), now fed
+the `exceptionDetails` explicitly rather than in the value's place; and a
+top-level `return` still gets exactly one retry as a function body (F-812) — by
+value too, since that is the path most agent-written scripts actually take.
+Details and residuals in
+`audit/stage2/finding_F832_execute_script_shallow_serialization.md`.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)

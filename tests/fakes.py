@@ -34,6 +34,7 @@ from types import GeneratorType, SimpleNamespace
 from typing import Any
 
 import nodriver.cdp.dom as cdp_dom
+import nodriver.cdp.runtime as cdp_runtime
 import nodriver.cdp.target as cdp_target
 
 # ---------------------------------------------------------------------------
@@ -210,12 +211,22 @@ class FakeTab:
 
         return _wait().__await__()
 
-    async def evaluate(self, expression: str, *args: Any, **kwargs: Any) -> Any:
-        self.evaluate_calls.append(expression)
+    def _answer_for_js(self, expression: str) -> Any:
+        """The canned answer for a JS expression — ONE home for it.
+
+        Both eval seams route here: ``evaluate()`` (nodriver's helper) and
+        ``send(cdp.runtime.evaluate(...))`` (the raw command ``execute_script``
+        uses since F-832). A test says "this JS answers with X" once, whichever
+        seam the code under test happens to take.
+        """
         for needle, resp in self._evaluate_map.items():
             if needle in expression:
                 return resp
         return self._evaluate_result
+
+    async def evaluate(self, expression: str, *args: Any, **kwargs: Any) -> Any:
+        self.evaluate_calls.append(expression)
+        return self._answer_for_js(expression)
 
     async def get(self, url: str, *args: Any, **kwargs: Any) -> FakeTab:
         """nodriver's ``Tab.get`` — the navigation seam.
@@ -247,6 +258,7 @@ class FakeTab:
     async def send(self, cdp_obj: Any, *args: Any, **kwargs: Any) -> Any:
         name = cdp_command_name(cdp_obj)
         self.send_calls.append(name)
+        frame: dict[str, Any] | None = None
         if isinstance(cdp_obj, GeneratorType):
             # Advancing once yields the request frame ({"method", "params"}), so a
             # test can assert the *arguments* of a CDP command.
@@ -263,12 +275,81 @@ class FakeTab:
             # double (a Mock, which answers ``callable(obj.close)`` truthfully)
             # is skipped outright rather than advanced and forgiven.
             try:
-                self.cdp_frames.append(next(cdp_obj))
+                frame = next(cdp_obj)
+                self.cdp_frames.append(frame)
             except StopIteration:
                 pass
             cdp_obj.close()  # never leave the generator un-iterated
+        if name == "evaluate" and name not in self._cdp_responses and frame:
+            # ``Runtime.evaluate`` reaches the SAME canned answers as
+            # ``evaluate()`` — see ``_answer_for_js``. An explicit
+            # ``cdp_responses["evaluate"]`` still wins, so no existing test moves.
+            return self._answer_for_js(frame["params"]["expression"])
         resp = self._cdp_responses.get(name, None)
         return resp(name) if callable(resp) else resp
+
+
+# ---------------------------------------------------------------------------
+# ``Runtime.evaluate`` answers (the F-832 execute_script seam)
+# ---------------------------------------------------------------------------
+
+
+def js_result(
+    value: Any = None,
+    type_: str = "object",
+    subtype: str | None = None,
+    unserializable_value: str | None = None,
+    description: str | None = None,
+) -> tuple[cdp_runtime.RemoteObject, None]:
+    """The ``(result, exceptionDetails)`` pair Chrome answers a successful
+    ``Runtime.evaluate`` with — built from nodriver's own constructor.
+
+    Mirrors what Chrome actually sends under ``returnByValue``: ``undefined``
+    carries no ``value``; ``null`` is an object with ``subtype="null"``;
+    ``Infinity``/``NaN`` arrive as ``unserializableValue``; a value Chrome cannot
+    send at all arrives as type + ``description`` only.
+    """
+    return (
+        cdp_runtime.RemoteObject(
+            type_=type_,
+            subtype=subtype,
+            value=value,
+            unserializable_value=(
+                None
+                if unserializable_value is None
+                else cdp_runtime.UnserializableValue(unserializable_value)
+            ),
+            description=description,
+        ),
+        None,
+    )
+
+
+def js_threw(
+    description: str,
+) -> tuple[cdp_runtime.RemoteObject, cdp_runtime.ExceptionDetails]:
+    """The pair Chrome answers with when the evaluated script THREW.
+
+    Chrome sends BOTH a result object (the thrown value) and ``exceptionDetails``
+    — which is why a reader that trusts the result reports a throw as a success
+    (F-795). Built from nodriver's constructors so a guard reading the wrong
+    field names cannot stay green.
+    """
+    thrown = cdp_runtime.RemoteObject(
+        type_="object",
+        class_name=description.split(":", maxsplit=1)[0],
+        description=description,
+    )
+    return (
+        thrown,
+        cdp_runtime.ExceptionDetails(
+            exception_id=1,
+            text="Uncaught",
+            line_number=0,
+            column_number=0,
+            exception=thrown,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
