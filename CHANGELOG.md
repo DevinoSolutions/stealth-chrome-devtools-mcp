@@ -2,6 +2,76 @@
 
 ## Unreleased
 
+### Changed — every derived animation field now carries the confidence it was derived with (F-850)
+
+Ten separately reported defects in the animations schema shared one root cause:
+confidence was stamped **after** the fact. The code wrote
+`easing_confidence: "high"` onto whatever a heuristic returned — including a
+fall-through branch that had decided nothing — the edit recipes defaulted to
+`"high"`, and the live-animation path hardcoded `warnings: []`. The honesty rule
+says every derived field carries a confidence or is omitted; the code said it and
+then routed around it.
+
+Derivations now return their value and their confidence together, so a branch
+that reached no conclusion cannot inherit a caller's optimism. Where the honest
+answer is "I do not know", the field is **omitted** rather than emitted hedged.
+
+**Breaking:** `semantics.motion_kind` and `semantics.easing_class` are now
+claim objects — `{"value": "overshoot", "confidence": "high"}` — instead of bare
+strings, as is `transitions[].easing_class`. `semantics.easing_confidence` is
+gone; the confidence lives inside the claim it belongs to.
+
+Concrete consequences:
+
+- `cubic-bezier(0.1, 0.9, 0.9, 0.1)` (fast at both ends) was classified
+  `"linear"` at `"high"` confidence. It has no name in this vocabulary, so it
+  now has none.
+- `semantics.easing_class` read only the animation-level curve. An animation
+  whose keyframes each declare their own `animation-timing-function` reported
+  that unused curve confidently while its own `checkpoints[].between.segment_easing`
+  said otherwise. Segments that disagree now report `"per-keyframe"`.
+- `transform: translateX(10px) scale(1.2)` was classified `"scale"` alone
+  (first-match-wins substring scanning), and `matrix3d(...)` was asserted to be
+  a `"translate"`. Transform functions are now read as functions; a matrix is
+  not decoded rather than guessed at.
+
+### Fixed — caps, checkpoints, delays, triggers and stale options (F-851)
+
+- **Caps are enforced and surfaced.** `include_subtree` defaults on, so one call
+  can pull in hundreds of live animations; that path had no cap at all while
+  `caps.truncated` reported `false`, and keyframes were cut to the cap silently.
+  Both now stop at the cap and say so in `warnings`.
+- **Checkpoints respect `animation-direction`.** With `reverse` or
+  `alternate-reverse`, `time_ms` claimed offset 0 renders at t=0 — where the
+  element actually shows the 100% keyframe. A non-zero iteration-start now omits
+  `time_ms` entirely with a warning naming why.
+- **A negative delay is not a wait.** `animation-delay: -0.5s` produced
+  `active_start_ms: -500` and the prose "after a -0.5s delay". It starts
+  immediately, already 500ms in, and now says so.
+- **`pending_animations` no longer advises an impossible edit.** For
+  `.gallery .card` matched against a `.card` outside any `.gallery`, it said "add
+  the 'gallery' class to run it" — which cannot make that rule match. Only a
+  class on the element's own compound selector is offered; an ancestor or sibling
+  requirement is described as one.
+- **`prefers-reduced-motion: no-preference` no longer fires the reduced-motion
+  warning.** The check matched the feature name as a substring, so a block that
+  applies only when motion IS allowed got a warning whose remedy is backwards.
+- **Staggers that are not staggers.** Identical delays across siblings produced
+  `{uniform: true, delta_ms: 0.0}`, and an unreadable delay was coerced to 0
+  before differencing, turning an unknown into a confident invented spacing.
+  Neither is reported now.
+- **`editable` is mandatory wherever there are no usable recipes**, whatever the
+  record's kind — absence read as "editable". Transitions now carry edit recipes
+  of their own, or an explicit `editable: false` with a reason.
+- **A retired extraction option degrades instead of destroying the whole clone.**
+  `extraction_options={"animations": {"analyze_keyframes": True}}` (a real v1
+  option) bound against the new signature and raised `TypeError` at the call
+  site — before any coroutine existed, so the per-aspect isolation never saw it —
+  turning one stale string into a single error payload for the entire complete
+  clone, losing structure, styles, events, assets and related_files. Unknown
+  per-aspect options are now dropped and reported in that aspect's `warnings`,
+  naming the option and its replacement.
+
 ### Fixed — edit recipes pointed at text that is not in your stylesheet (F-849)
 
 The `find` literals in `edits[]` were built from Chrome's `cssText`, which is a

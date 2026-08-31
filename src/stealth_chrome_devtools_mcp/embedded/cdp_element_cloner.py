@@ -26,7 +26,7 @@ from urllib.parse import urljoin
 import nodriver as uc
 import requests
 
-from stealth_chrome_devtools_mcp.embedded import animation_analysis
+from stealth_chrome_devtools_mcp.embedded import animation_analysis, aspect_options
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     query_selector_all,
@@ -920,76 +920,33 @@ class CDPElementCloner:
                 "selector": selector,
                 "extraction_options": default_options,
             }
+            # One table, one loop: the six aspects differ only in whether they
+            # take a target. Per-aspect options are filtered through the
+            # aspect's OWN signature, so a retired option name degrades with a
+            # warning instead of raising TypeError right here — a synchronous
+            # raise at this call site happens before any coroutine exists, which
+            # puts it outside gather's per-aspect isolation and failed the whole
+            # clone (F-851).
+            aspects = (
+                ("styles", self.extract_element_styles, True),
+                ("structure", self.extract_element_structure, True),
+                ("events", self.extract_element_events, True),
+                ("animations", self.extract_element_animations, True),
+                ("assets", self.extract_element_assets, True),
+                ("related_files", self.extract_related_files, False),
+            )
             tasks = []
-            if "styles" in default_options:
-                tasks.append(
-                    (
-                        "styles",
-                        self.extract_element_styles(
-                            tab,
-                            element=element,
-                            selector=selector,
-                            **default_options["styles"],
-                        ),
-                    )
+            retired: dict[str, list[dict[str, Any]]] = {}
+            for name, method, targeted in aspects:
+                if name not in default_options:
+                    continue
+                kept, reports = aspect_options.accepted(
+                    method, default_options[name], name
                 )
-            if "structure" in default_options:
-                tasks.append(
-                    (
-                        "structure",
-                        self.extract_element_structure(
-                            tab,
-                            element=element,
-                            selector=selector,
-                            **default_options["structure"],
-                        ),
-                    )
-                )
-            if "events" in default_options:
-                tasks.append(
-                    (
-                        "events",
-                        self.extract_element_events(
-                            tab,
-                            element=element,
-                            selector=selector,
-                            **default_options["events"],
-                        ),
-                    )
-                )
-            if "animations" in default_options:
-                tasks.append(
-                    (
-                        "animations",
-                        self.extract_element_animations(
-                            tab,
-                            element=element,
-                            selector=selector,
-                            **default_options["animations"],
-                        ),
-                    )
-                )
-            if "assets" in default_options:
-                tasks.append(
-                    (
-                        "assets",
-                        self.extract_element_assets(
-                            tab,
-                            element=element,
-                            selector=selector,
-                            **default_options["assets"],
-                        ),
-                    )
-                )
-            if "related_files" in default_options:
-                tasks.append(
-                    (
-                        "related_files",
-                        self.extract_related_files(
-                            tab, **default_options["related_files"]
-                        ),
-                    )
-                )
+                if reports:
+                    retired[name] = reports
+                target = {"element": element, "selector": selector} if targeted else {}
+                tasks.append((name, method(tab, **target, **kept)))
             results = await asyncio.gather(
                 *[task[1] for task in tasks], return_exceptions=True
             )
@@ -998,6 +955,7 @@ class CDPElementCloner:
                     result[name] = {"error": str(results[i])}
                 else:
                     result[name] = results[i]
+                aspect_options.note(result[name], retired.get(name, []))
             debug_logger.log_info(
                 "cdp_cloner",
                 "extract_complete_element",

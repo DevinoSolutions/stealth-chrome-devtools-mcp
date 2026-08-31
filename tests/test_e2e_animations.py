@@ -105,8 +105,13 @@ async def test_schema_v2_end_to_end_over_the_real_transport(fixture_app_server):
         assert spin["derived"]["total_ms"] == 6200  # 200 + 2 x 3000
 
         # --- semantics + prose ---
-        assert pulse["semantics"]["easing_class"] == "overshoot"
-        assert spin["semantics"]["motion_kind"] == "rotate"
+        # A derived field is a claim: value plus the confidence its derivation
+        # produced (F-850). And R6 — hero-pulse declares an overshoot bezier at
+        # the animation level, but every segment overrides it with ease-out, so
+        # the declared curve never renders and the payload must not quote it.
+        assert pulse["semantics"]["easing_class"]["value"] == "ease-out"
+        assert pulse["semantics"]["easing_class"]["confidence"] == "high"
+        assert spin["semantics"]["motion_kind"]["value"] == "rotate"
         assert "2s" in pulse["summary"] and "infinite" in pulse["summary"]
         assert "animation" in payload["overview"]
 

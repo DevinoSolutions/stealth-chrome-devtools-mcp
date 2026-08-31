@@ -98,9 +98,14 @@
         "name": "pulse",
         "not_editable_reason": "no readable CSS rule declares this animation; its stylesheet is likely cross-origin, so there is nothing here to find/replace",
         "semantics": {
-          "easing_class": "ease-in-out",
-          "easing_confidence": "high",
-          "motion_kind": "scale",
+          "easing_class": {
+            "confidence": "high",
+            "value": "ease-in-out"
+          },
+          "motion_kind": {
+            "confidence": "high",
+            "value": "scale"
+          },
           "motion_properties": [
             "transform"
           ]

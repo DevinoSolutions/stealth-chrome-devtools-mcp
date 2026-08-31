@@ -33,8 +33,11 @@ from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     as_rows,
     as_strings,
     as_text,
+    claim_value,
     cycle_get,
     keyframe_offsets,
+    own_compound,
+    prefers_reduced_motion,
     split_css_list,
 )
 
@@ -51,6 +54,13 @@ _KNOB_LONGHAND = {
     "iterations": "animation-iteration-count",
 }
 
+_TRANSITION_LONGHAND = {
+    "property": "transition-property",
+    "duration": "transition-duration",
+    "delay": "transition-delay",
+    "easing": "transition-timing-function",
+}
+
 _INTERACTION_PSEUDO = (
     (":hover", "hover"),
     (":focus-visible", "focus"),
@@ -65,15 +75,15 @@ _INTERACTION_PSEUDO = (
 # ---------------------------------------------------------------------------
 
 
-def applying_rule(facts: Facts) -> Record | None:
-    """The currently-matching rule that declares this element's animation.
+def applying_rule(facts: Facts, prefix: str = "animation") -> Record | None:
+    """The currently-matching rule that declares this element's ``prefix`` block.
 
     The LAST such rule wins, mirroring the cascade — the rule a model must edit
     is the one that actually applies, not the first one found.
     """
     found = None
     for rule in as_rows(facts.get("matched_rules")):
-        if any(prop.startswith("animation") for prop in as_obj(rule.get("declares"))):
+        if any(prop.startswith(prefix) for prop in as_obj(rule.get("declares"))):
             found = rule
     return found
 
@@ -265,6 +275,49 @@ class Knob(NamedTuple):
     list_index: int | None = None
 
 
+class Located(NamedTuple):
+    """A declaration found in the author's text, welded to the confidence the
+    branch that found it produced. ``literal`` is empty when nothing was found —
+    the confidence still travels, because "I could not read the source" is a
+    conclusion about the edit, not the absence of one."""
+
+    literal: str
+    value: str
+    unique: bool
+    confidence: str
+    reason: str = ""
+
+
+def locate(span: str | None, properties: list[str]) -> Located:
+    """Where this knob's declaration sits in the AUTHOR's text, and how sure.
+
+    The confidence is produced HERE, by the branch that actually looked, and a
+    caller cannot upgrade it (F-850): a declaration located exactly once is a
+    verified address; one that repeats needs positional matching; unreadable
+    author text is a rule pointer and nothing more.
+    """
+    found = author_declaration(span, properties) if span else None
+    if found is None:
+        return Located(
+            "",
+            "",
+            False,
+            "low",
+            "the author's text for this rule is not readable, so no find literal "
+            "is offered; open the rule at source_ref and edit it there",
+        )
+    literal, value, occurrences = found
+    if occurrences == 1:
+        return Located(literal, value, True, "high")
+    return Located(
+        literal,
+        value,
+        False,
+        "medium",
+        "this declaration repeats in the rule; match by position",
+    )
+
+
 def _recipe(knob: Knob, target: EditTarget) -> Record:
     """One edit recipe, addressed to the AUTHOR'S text (F-849).
 
@@ -277,46 +330,46 @@ def _recipe(knob: Knob, target: EditTarget) -> Record:
 
     When the author's text is unavailable (a linked or cross-origin sheet, which
     we do not re-fetch) or the declaration cannot be located in it, the recipe
-    degrades to a rule pointer with ``confidence: low`` and no ``find``.
+    degrades to a rule pointer with no ``find``.
     """
     recipe: Record = {"knob": knob.name, "current": knob.current}
     if target.source:
         recipe["source_ref"] = target.source.get("id")
         recipe["file"] = stylesheet_file(target.source)
-    found = author_declaration(target.span, knob.properties) if target.span else None
-    if found is None:
-        recipe["confidence"] = "low"
-        recipe["note"] = (
-            "the author's text for this rule is not readable, so no find literal "
-            "is offered; open the rule at source_ref and edit it there"
-        )
+    located = locate(target.span, knob.properties)
+    recipe["confidence"] = located.confidence
+    if located.reason:
+        recipe["note"] = located.reason
+    if not located.literal:
         if knob.computed_declaration:
             # Context only. Named so it can never be mistaken for a find target.
             recipe["computed_declaration"] = knob.computed_declaration
         return recipe
-    literal, value, occurrences = found
-    unique = occurrences == 1
-    recipe["find"] = literal
-    recipe["find_unique_in_rule"] = unique
-    recipe["confidence"] = "high" if unique else "medium"
-    if knob.properties and literal.split(":", 1)[0].strip() == knob.properties[0]:
+    recipe["find"] = located.literal
+    recipe["find_unique_in_rule"] = located.unique
+    if (
+        knob.properties
+        and located.literal.split(":", 1)[0].strip() == knob.properties[0]
+    ):
         # The knob's own longhand, so the author's text IS the current value —
         # but a longhand can be a comma list covering EVERY animation on the
         # element, so take this animation's item under the same cycling rule
         # the rest of the schema applies. Taking the whole list would report
         # "2s, 3s" as one animation's duration.
         recipe["current"] = (
-            value
+            located.value
             if knob.list_index is None
-            else cycle_get(split_css_list(value), knob.list_index, value)
+            else cycle_get(
+                split_css_list(located.value), knob.list_index, located.value
+            )
         )
-    else:
+    elif located.unique:
+        # A repeated declaration keeps ``locate``'s note: match-by-position is
+        # the more urgent caveat of the two.
         recipe["note"] = (
             f"set inside the shorthand; change the {knob.name} component "
             f"({knob.current!r}) within `find`"
         )
-    if not unique:
-        recipe["note"] = "this declaration repeats in the rule; match by position"
     return recipe
 
 
@@ -382,6 +435,43 @@ def build_edits(
     return edits
 
 
+def build_transition_edits(
+    record: Record, rule: Record | None, target: EditTarget, index: int
+) -> list[Record]:
+    """Edit recipes for one transitioned longhand.
+
+    A transition is as editable as an animation — its ``transition`` declaration
+    is sitting in the same rule — but it used to get no ``edits``, no
+    ``editable`` and no reason, and absence reads as "editable" (R10). Same
+    knobs, same author-text addressing, same degradation.
+    """
+    if rule is None:
+        return []
+    computed = as_text(as_obj(rule.get("declares")).get("transition"))
+    edits: list[Record] = []
+    for knob, current in (
+        ("duration", record.get("duration_raw")),
+        ("delay", record.get("delay_raw")),
+        ("easing", record.get("easing")),
+        ("property", record.get("property")),
+    ):
+        if not isinstance(current, str) or not current:
+            continue
+        edits.append(
+            _recipe(
+                Knob(
+                    knob,
+                    current,
+                    [_TRANSITION_LONGHAND[knob], "transition"],
+                    f"transition: {computed}" if computed else "",
+                    index,
+                ),
+                target,
+            )
+        )
+    return edits
+
+
 # ---------------------------------------------------------------------------
 # Trigger attribution (§3.5)
 # ---------------------------------------------------------------------------
@@ -438,30 +528,55 @@ def build_pending(facts: Facts) -> list[Record]:
         if not isinstance(declared, str) or not declared or rule.get("matches_now"):
             continue
         selector = as_text(rule.get("selector_text"))
-        missing = [
+        own = own_compound(selector)
+        own_classes = re.findall(r"\.([A-Za-z0-9_-]+)", own)
+        addable = [token for token in own_classes if token not in classes]
+        context = [
             token
             for token in re.findall(r"\.([A-Za-z0-9_-]+)", selector)
-            if token not in classes
+            if token not in own_classes
         ]
-        if not missing:
-            continue
         name = split_css_list(declared)[0]
+        detail: Record = {
+            "rule_selector": selector,
+            "source_ref": rule.get("source_ref"),
+        }
+        if addable:
+            detail["class"] = addable[0]
+            trigger: Record = {
+                "kind": "class-toggle",
+                "confidence": "medium",
+                "detail": detail,
+            }
+            summary = (
+                f"'{name}' is declared on {selector}, which does not match yet; "
+                f"add the '{addable[0]}' class to run it"
+            )
+        elif context:
+            # R8: the missing class is on an ANCESTOR or SIBLING compound.
+            # Telling a model to add it to the element is advice that cannot
+            # work, and it will follow the advice rather than check.
+            detail["required_context_classes"] = context
+            trigger = {
+                "kind": "context-required",
+                "confidence": "medium",
+                "detail": detail,
+            }
+            summary = (
+                f"'{name}' is declared on {selector}, which does not match yet; "
+                f"it needs '{context[0]}' on an ancestor or sibling, so adding a "
+                f"class to this element cannot make it run"
+            )
+        else:
+            # It does not match for a reason the selector text does not name
+            # (an attribute, a state pseudo-class we did not model). Silence is
+            # the honest answer.
+            continue
         pending.append(
             {
                 "name": name,
-                "summary": (
-                    f"'{name}' is declared on {selector}, which does not match yet; "
-                    f"add the '{missing[0]}' class to run it"
-                ),
-                "trigger": {
-                    "kind": "class-toggle",
-                    "confidence": "medium",
-                    "detail": {
-                        "class": missing[0],
-                        "rule_selector": selector,
-                        "source_ref": rule.get("source_ref"),
-                    },
-                },
+                "summary": summary,
+                "trigger": trigger,
                 "source_refs": [rule.get("source_ref")],
             }
         )
@@ -471,6 +586,27 @@ def build_pending(facts: Facts) -> list[Record]:
 # ---------------------------------------------------------------------------
 # Stagger grouping (§3.3)
 # ---------------------------------------------------------------------------
+
+
+def stagger_group(
+    group_id: str, name: str, delays: list[float], deltas: list[float], position: int
+) -> Record:
+    """One member's view of a stagger group, with the confidence it was derived
+    with. Uniformity is a property of the delays, so it is decided here rather
+    than asserted by the caller."""
+    uniform = bool(deltas) and len(set(deltas)) == 1
+    group: Record = {
+        "group_id": group_id,
+        "name": name,
+        "members": len(delays),
+        "position": position,
+        "uniform": uniform,
+        "delays_ms": delays,
+        "confidence": "high",
+    }
+    if uniform:
+        group["delta_ms"] = deltas[0]
+    return group
 
 
 def apply_stagger_groups(animations: list[Record]) -> None:
@@ -488,6 +624,12 @@ def apply_stagger_groups(animations: list[Record]) -> None:
     for name, members in groups.items():
         if len(members) < MIN_STAGGER_MEMBERS or not name:
             continue
+        readable = [as_number(as_obj(a.get("timing")).get("delay_ms")) for a in members]
+        if any(value is None for value in readable):
+            # An unreadable delay used to be coerced to 0.0 before differencing,
+            # so a member we could not measure produced a confident, invented
+            # spacing (R10). Say nothing instead.
+            continue
         ordered = sorted(
             members,
             key=lambda a: as_number(as_obj(a.get("timing")).get("delay_ms")) or 0.0,
@@ -497,18 +639,13 @@ def apply_stagger_groups(animations: list[Record]) -> None:
             for a in ordered
         ]
         deltas = [round(b - a, 3) for a, b in pairwise(delays)]
-        uniform = bool(deltas) and len(set(deltas)) == 1
+        if not any(deltas):
+            # Same delay on every member is a chorus, not a stagger. Reporting
+            # ``{uniform: true, delta_ms: 0.0}`` invites a model to "fix" the
+            # spacing of something that was never staggered (R10).
+            continue
         for position, animation in enumerate(ordered, start=1):
-            group: Record = {
-                "group_id": f"stagger-{index}",
-                "name": name,
-                "members": len(ordered),
-                "position": position,
-                "uniform": uniform,
-                "delays_ms": delays,
-            }
-            if uniform:
-                group["delta_ms"] = deltas[0]
+            group = stagger_group(f"stagger-{index}", name, delays, deltas, position)
             derived = as_obj(animation.get("derived"))
             derived["stagger_group"] = group
             animation["derived"] = derived
@@ -634,7 +771,7 @@ def build_interactions(facts: Facts, animations: list[Record]) -> list[Record]:
     rules = as_rows(facts.get("matched_rules")) + as_rows(facts.get("candidate_rules"))
     for rule in rules:
         context = " ".join(as_strings(rule.get("at_rule_context")))
-        if "prefers-reduced-motion" in context:
+        if prefers_reduced_motion(context):
             records.append(
                 _conflict(
                     "reduced_motion_override",
@@ -674,7 +811,7 @@ def summarize(animation: Record) -> str:
     """
     timing = as_obj(animation.get("timing"))
     semantics = as_obj(animation.get("semantics"))
-    kind = as_text(semantics.get("motion_kind"))
+    kind = as_text(claim_value(semantics, "motion_kind"))
     properties = animation.get("animated_properties")
     if kind in _MOTION_VERB:
         clause = _MOTION_VERB[kind]
@@ -696,11 +833,16 @@ def summarize(animation: Record) -> str:
     direction = as_text(timing.get("direction"))
     if direction and direction != "normal":
         parts.append(direction)
-    klass = as_text(semantics.get("easing_class"))
+    klass = as_text(claim_value(semantics, "easing_class"))
     if klass:
         parts.append(f"with {klass} easing")
-    if as_number(timing.get("delay_ms")):
+    delay = as_number(timing.get("delay_ms")) or 0.0
+    if delay > 0:
         parts.append(f"after a {timing.get('delay_raw')} delay")
+    elif delay < 0:
+        # A negative delay is not a wait. The old truthiness check narrated it
+        # as "after a -0.5s delay"; it starts immediately, already 500ms in (R7).
+        parts.append(f"starting {round(-delay)}ms into the animation")
     if as_text(timing.get("play_state")) == "paused":
         parts.append("currently PAUSED")
     return ", ".join(parts)

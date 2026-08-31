@@ -682,7 +682,10 @@ class TestSemantics:
         )
         result = await extract(payload)
         semantics = result["animations"][0]["semantics"]
-        assert semantics["easing_class"] == expected
+        # A derived field is a CLAIM: the value never travels without the
+        # confidence the derivation produced for it (F-850).
+        assert semantics["easing_class"]["value"] == expected
+        assert semantics["easing_class"]["confidence"] in ("high", "medium", "low")
         # The raw string always stays alongside the classification.
         assert result["animations"][0]["timing"]["easing"] == easing
 
@@ -701,8 +704,8 @@ class TestSemantics:
         result = await extract(TWO_ANIMATIONS)
         by_name = {a["name"]: a for a in result["animations"]}
         # pulse touches transform: scale + opacity -> two families -> mixed
-        assert by_name["pulse"]["semantics"]["motion_kind"] == "mixed"
-        assert by_name["spin"]["semantics"]["motion_kind"] == "rotate"
+        assert by_name["pulse"]["semantics"]["motion_kind"]["value"] == "mixed"
+        assert by_name["spin"]["semantics"]["motion_kind"]["value"] == "rotate"
 
     async def test_motion_kind_omitted_when_no_keyframes_are_readable(self):
         payload = facts(
@@ -1341,7 +1344,12 @@ class TestFixturePageEndToEnd:
         result = await extract(FIXTURE_PAGE)
         pulse = only(result["animations"], name="hero-pulse")
         assert pulse["summary"]
-        assert pulse["semantics"]["easing_class"] == "overshoot"
+        # R6: the animation-level curve is an overshoot bezier, but EVERY
+        # segment of hero-pulse declares its own animation-timing-function
+        # (ease-out), so the declared curve never renders. The old code quoted
+        # the declared one confidently; this fixture was itself an instance of
+        # the defect.
+        assert pulse["semantics"]["easing_class"]["value"] == "ease-out"
         assert pulse["timeline"]["type"] == "time"
         assert pulse["timing"]["duration_ms"] == 2000
         assert pulse["derived"]["cycle_ms"] == 4000

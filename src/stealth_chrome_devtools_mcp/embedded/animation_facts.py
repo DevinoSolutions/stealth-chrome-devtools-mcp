@@ -22,11 +22,74 @@ This is the bottom of that pipeline and imports no other ``embedded`` module.
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 # JSON-shaped payloads crossing the browser boundary, typed the way the repo's
 # other JSON-record modules type them (cf. ``backend_registry.BackendEntry``).
 Facts = dict[str, object]
 Record = dict[str, object]
+
+# The closed set. An invented level ("certain", "probably") reads as a stronger
+# or weaker claim than any of these, so there are exactly three.
+CONFIDENCE_LEVELS = ("high", "medium", "low")
+
+
+# ---------------------------------------------------------------------------
+# Derived values and the confidence they were derived WITH (F-850)
+# ---------------------------------------------------------------------------
+
+
+class Derived(NamedTuple):
+    """A derived value welded to the confidence its own branch produced.
+
+    The point is that a caller CANNOT supply the confidence. Ten separately
+    reported defects shared one root cause: a heuristic returned a bare value
+    and the call site stamped ``"high"`` on whatever came back — including a
+    fall-through branch that had decided nothing. With this type, a branch that
+    reached no conclusion physically cannot inherit a caller's optimism.
+
+    An empty ``confidence`` means "I do not know", and such a field is OMITTED
+    rather than emitted hedged: a weak model quotes a present field verbatim and
+    reads absence as a reason to be careful (M11, owner ruling).
+    """
+
+    value: object = None
+    confidence: str = ""
+    reason: str = ""
+
+    @property
+    def known(self) -> bool:
+        return bool(self.confidence) and self.value is not None
+
+
+UNKNOWN = Derived()
+
+
+def claim(derived: Derived) -> Record | None:
+    """One derived claim as the payload carries it, or ``None`` to omit it.
+
+    Value and confidence travel in ONE object so a reader cannot pick up the
+    value without the caveat that belongs to it.
+    """
+    if not derived.known:
+        return None
+    body: Record = {"value": derived.value, "confidence": derived.confidence}
+    if derived.reason:
+        body["reason"] = derived.reason
+    return body
+
+
+def put(record: Record, field: str, derived: Derived) -> None:
+    """Attach ``derived`` at ``field``, or leave the field absent entirely."""
+    body = claim(derived)
+    if body is not None:
+        record[field] = body
+
+
+def claim_value(record: Record, field: str) -> object:
+    """The value inside a claim field, for a reader that has already decided the
+    claim is good enough to act on (the prose templates, mainly)."""
+    return as_obj(record.get(field)).get("value")
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +246,56 @@ def keyframe_offsets(key_text: str) -> list[float]:
     return offsets
 
 
+_REDUCED_MOTION = re.compile(r"prefers-reduced-motion\s*(?::\s*([A-Za-z-]+))?")
+
+
+def prefers_reduced_motion(context: str) -> bool:
+    """Does this at-rule context apply only when the user asked for LESS motion?
+
+    ``@media (prefers-reduced-motion: no-preference)`` applies exactly when
+    motion IS allowed, so a substring match on the feature NAME fired a warning
+    whose remedy is backwards for that input (R9). A bare feature query is true
+    for anything but ``no-preference``, so it counts.
+    """
+    match = _REDUCED_MOTION.search(context or "")
+    if match is None:
+        return False
+    return (match.group(1) or "reduce").strip().lower() == "reduce"
+
+
+def split_at_top_level(value: str, separators: str) -> list[str]:
+    """Split on ``separators`` that are OUTSIDE any parentheses.
+
+    Selector-shaped text needs this as much as value-shaped text does: the space
+    inside ``:is(.a, .b) .card`` is not a descendant combinator.
+    """
+    parts: list[str] = []
+    depth = 0
+    current = ""
+    for ch in value or "":
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        if ch in separators and depth == 0:
+            if current.strip():
+                parts.append(current.strip())
+            current = ""
+        else:
+            current += ch
+    if current.strip():
+        parts.append(current.strip())
+    return parts
+
+
+def own_compound(selector: str) -> str:
+    """The RIGHTMOST compound of a selector — the only part that describes this
+    element. ``.gallery .card`` is a claim about a ``.card`` inside a
+    ``.gallery``; adding ``gallery`` to the element cannot make it match (R8)."""
+    parts = split_at_top_level(selector, " \t\n>+~")
+    return parts[-1] if parts else ""
+
+
 def iteration_count(token: str) -> float | int | str | None:
     """``"infinite"`` stays the documented string; a number stays a number."""
     text = (token or "").strip().lower()
@@ -220,7 +333,7 @@ def _bezier_points(text: str) -> tuple[float, float, float, float] | None:
     return x1, y1, x2, y2
 
 
-def _bezier_class(x1: float, y1: float, x2: float, y2: float) -> str:
+def _bezier_class(x1: float, y1: float, x2: float, y2: float) -> Derived:
     """Classify a bezier by its control points.
 
     ``overshoot`` is any curve whose control points leave the 0..1 band, in
@@ -229,22 +342,29 @@ def _bezier_class(x1: float, y1: float, x2: float, y2: float) -> str:
     misses ``cubic-bezier(0.34, 1.56, 0.64, 1)``: the classic "back-out" curve
     and the most common overshoot in the wild, whose excursion is ``y1 > 1``.
     The band check is the honest form of the same rule.
+
+    The final branch is the one that mattered (R4). A curve that is FAST at both
+    ends — ``cubic-bezier(0.1, 0.9, 0.9, 0.1)`` — is none of these families, and
+    the old code fell through to ``"linear"``, which the caller then stamped
+    ``"high"``. It has no name in this vocabulary, so it gets none.
     """
     if not (0.0 <= y1 <= 1.0) or not (0.0 <= y2 <= 1.0):
-        return "overshoot"
+        return Derived("overshoot", "high")
     slow_start = y1 < x1
     slow_end = y2 > x2
     if slow_start and slow_end:
-        return "ease-in-out"
+        return Derived("ease-in-out", "high")
     if slow_start:
-        return "ease-in"
+        return Derived("ease-in", "high")
     if slow_end:
-        return "ease-out"
-    return "linear"
+        return Derived("ease-out", "high")
+    if (y1, y2) == (x1, x2):
+        return Derived("linear", "high")
+    return UNKNOWN
 
 
-def easing_class(easing: str) -> str | None:
-    """The curve's shape as a class, or ``None`` when it is not decidable.
+def easing_class(easing: str) -> Derived:
+    """The curve's shape as a class, with the confidence that branch produced.
 
     There is deliberately NO ``spring-like`` class: real springs are not
     beziers, and the label invites a model to reach for spring physics the CSS
@@ -253,13 +373,18 @@ def easing_class(easing: str) -> str | None:
     """
     text = (easing or "").strip().lower()
     if text in _EASING_KEYWORDS:
-        return _EASING_KEYWORDS[text]
+        return Derived(_EASING_KEYWORDS[text], "high")
     if text.startswith("steps("):
-        return "stepped"
+        return Derived("stepped", "high")
     if text.startswith("linear("):
-        return "custom"
+        return Derived(
+            "custom",
+            "medium",
+            "a linear() easing is a polyline; 'custom' names the family, not the "
+            "shape of this particular curve",
+        )
     points = _bezier_points(text)
-    return None if points is None else _bezier_class(*points)
+    return UNKNOWN if points is None else _bezier_class(*points)
 
 
 # ---------------------------------------------------------------------------
@@ -289,23 +414,54 @@ _PROPERTY_FAMILY = {
     "translate": "translate",
 }
 
-_TRANSFORM_FAMILY = (
-    ("scale", "scale"),
-    ("rotate", "rotate"),
-    ("translate", "translate"),
-    ("matrix", "translate"),
-)
+_TRANSFORM_FUNCTION_FAMILY = {
+    "translate": "translate",
+    "translatex": "translate",
+    "translatey": "translate",
+    "translatez": "translate",
+    "translate3d": "translate",
+    "scale": "scale",
+    "scalex": "scale",
+    "scaley": "scale",
+    "scalez": "scale",
+    "scale3d": "scale",
+    "rotate": "rotate",
+    "rotatex": "rotate",
+    "rotatey": "rotate",
+    "rotatez": "rotate",
+    "rotate3d": "rotate",
+    "skew": "skew",
+    "skewx": "skew",
+    "skewy": "skew",
+    "perspective": "perspective",
+}
+
+# A matrix encodes translate, scale, rotate AND skew at once, so naming any one
+# of them is a guess. The retired table mapped the SUBSTRING "matrix" to
+# "translate" and asserted it (R10).
+_OPAQUE_TRANSFORMS = {"matrix", "matrix3d"}
 
 
-def _transform_family(value: str) -> str:
-    text = (value or "").lower()
-    for token, family in _TRANSFORM_FAMILY:
-        if token in text:
-            return family
-    return "other"
+def transform_families(value: str) -> tuple[set[str], bool]:
+    """Every family a ``transform`` value touches, plus "was any part opaque".
+
+    Function names are read as functions, not as substrings: the retired scan
+    was first-match-wins over ``"scale" in text``, so ``translateX(10px)
+    scale(1.2)`` came back as "scale" alone and a compound transform could never
+    be reported as ``mixed`` (R10).
+    """
+    families: set[str] = set()
+    opaque = False
+    for name in re.findall(r"([A-Za-z0-9]+)\s*\(", value or ""):
+        lowered = name.lower()
+        if lowered in _OPAQUE_TRANSFORMS:
+            opaque = True
+        elif lowered in _TRANSFORM_FUNCTION_FAMILY:
+            families.add(_TRANSFORM_FUNCTION_FAMILY[lowered])
+    return families, opaque
 
 
-def motion_kind(keyframes: list[Record]) -> str | None:
+def motion_kind(keyframes: list[Record]) -> Derived:
     """The kind of motion, from the property/value pairs the keyframes touch.
 
     A name lookup, not a judgement. Omitted (not guessed) when no keyframe was
@@ -313,15 +469,25 @@ def motion_kind(keyframes: list[Record]) -> str | None:
     not be described as animating "other". Two or more families is ``mixed``.
     """
     families: set[str] = set()
+    opaque = False
     for frame in keyframes:
         for prop, value in as_obj(frame.get("properties")).items():
             if prop == "transform":
-                families.add(_transform_family(as_text(value)))
+                found, was_opaque = transform_families(as_text(value))
+                families |= found
+                opaque = opaque or was_opaque
             else:
                 families.add(_PROPERTY_FAMILY.get(prop, "other"))
     if len(families) > 1:
         # "other" is only informative when it is the ONLY thing we saw.
         families.discard("other")
     if not families:
-        return None
-    return "mixed" if len(families) > 1 else families.pop()
+        return UNKNOWN
+    kind = "mixed" if len(families) > 1 else families.pop()
+    if opaque:
+        return Derived(
+            kind,
+            "medium",
+            "a matrix() transform was not decoded, so more families may be in play",
+        )
+    return Derived(kind, "high")

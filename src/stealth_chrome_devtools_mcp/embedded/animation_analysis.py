@@ -33,6 +33,11 @@ exotic input is strictly worse than its absence.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 import re
 
 from stealth_chrome_devtools_mcp.embedded.animation_advice import (
@@ -43,6 +48,7 @@ from stealth_chrome_devtools_mcp.embedded.animation_advice import (
     build_interactions,
     build_overview,
     build_pending,
+    build_transition_edits,
     rule_declaring,
     source_by_id,
     source_span,
@@ -50,6 +56,7 @@ from stealth_chrome_devtools_mcp.embedded.animation_advice import (
     trigger_from_rules,
 )
 from stealth_chrome_devtools_mcp.embedded.animation_facts import (
+    Derived,
     Facts,
     Record,
     as_number,
@@ -64,6 +71,7 @@ from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     keyframe_offsets,
     motion_kind,
     parse_declarations,
+    put,
     split_css_list,
 )
 
@@ -73,6 +81,18 @@ from stealth_chrome_devtools_mcp.embedded.animation_facts import (
 ANIMATION_CAP = 200
 KEYFRAME_CAP = 60
 CHECKPOINT_OFFSETS = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+# ── The confidence invariant (F-850) ───────────────────────────────────────
+# Two shapes in the payload, one rule: our code decided it, so it states how
+# sure it is, or the field is absent.
+#   CLAIM_FIELDS      the field's VALUE is a claim: {"value", "confidence"}
+#   JUDGEMENT_BLOCKS  a block (or list of blocks) with more to say than a bare
+#                     value, carrying "confidence" alongside its own fields
+# ``tests/test_animation_confidence.py`` walks the emitted payload against both,
+# so a field added later that forgets its confidence reds with no test of its
+# own — which is the point of registering them here rather than in the test.
+CLAIM_FIELDS = frozenset({"motion_kind", "easing_class"})
+JUDGEMENT_BLOCKS = frozenset({"trigger", "stagger_group", "edits", "interactions"})
 
 # Properties that appear inside a keyframe block but describe the ANIMATION
 # rather than being animated themselves.
@@ -97,6 +117,18 @@ _TIMELINE_CLASS = {
 # ---------------------------------------------------------------------------
 
 
+def warn(record: Record, code: str, message: str, detail: Record | None = None) -> None:
+    """Append one warning to a record's ``warnings``, creating it if needed.
+
+    THE one way an animation record grows a warning, so no site can decide to
+    hardcode ``warnings: []`` and drop what it had to say (R3).
+    """
+    existing = record.get("warnings")
+    warnings: list[Record] = as_rows(existing) if isinstance(existing, list) else []
+    warnings.append({"code": code, "message": message, "detail": detail or {}})
+    record["warnings"] = warnings
+
+
 def derive_timing(timing: Record) -> Record:
     """Every number a model would otherwise have to compute, or nothing at all.
 
@@ -117,8 +149,13 @@ def derive_timing(timing: Record) -> Record:
         "cycle_ms": round(
             duration * (2 if direction.startswith("alternate") else 1), 3
         ),
-        "active_start_ms": round(delay, 3),
+        # A NEGATIVE delay is not a wait that happened in the past: the
+        # animation starts immediately, already that far into its first
+        # iteration. Reporting -500 here said it began before the page did (R7).
+        "active_start_ms": round(max(delay, 0.0), 3),
     }
+    if delay < 0:
+        derived["starts_at_progress_ms"] = round(-delay, 3)
     count = as_number(iterations)
     if iterations == "infinite" or count is None:
         derived["active_end_ms"] = "infinite"
@@ -188,7 +225,32 @@ def keyframe_rule_for(facts: Facts, name: str) -> Record | None:
     return found
 
 
-def build_checkpoints(keyframes: list[Record], duration: float | None) -> list[Record]:
+def checkpoint_time(timing: Record) -> Callable[[float], float] | None:
+    """How a keyframe OFFSET maps to wall-clock time in the first iteration.
+
+    ``None`` when it does not map at all. The old code assumed
+    ``time = duration * offset`` unconditionally, so under
+    ``animation-direction: reverse`` it reported that offset 0 renders at t=0 —
+    where the element actually shows the 100% keyframe. ``time_ms`` looks
+    measured, so being wrong there is worse than being absent (R5).
+
+    A non-zero ``iteration-start`` means the first iteration begins partway
+    through and reaches its offsets in an order we are not going to
+    reconstruct, so no time is offered for it at all.
+    """
+    duration = as_number(timing.get("duration_ms"))
+    if duration is None or as_number(timing.get("iteration_start")):
+        return None
+    direction = as_text(timing.get("direction"), "normal")
+    # 'alternate' plays its FIRST iteration forwards; 'alternate-reverse'
+    # plays its first backwards. Later iterations swap, which is why every
+    # time here is explicitly the first iteration's.
+    if direction in {"reverse", "alternate-reverse"}:
+        return lambda offset: round(duration * (1.0 - offset), 3)
+    return lambda offset: round(duration * offset, 3)
+
+
+def build_checkpoints(keyframes: list[Record], timing: Record) -> list[Record]:
     """What the element looks like at 0/25/50/75/100%, WITHOUT interpolating.
 
     Either the checkpoint lands on a declared keyframe (``exact: true``, with the
@@ -200,13 +262,14 @@ def build_checkpoints(keyframes: list[Record], duration: float | None) -> list[R
     """
     if not keyframes:
         return []
+    at_time = checkpoint_time(timing)
     by_offset = {as_number(k["offset"]): k for k in keyframes}
     declared = sorted(o for o in by_offset if o is not None)
     checkpoints: list[Record] = []
     for offset in CHECKPOINT_OFFSETS:
         record: Record = {"offset": offset}
-        if duration is not None:
-            record["time_ms"] = round(duration * offset, 3)
+        if at_time is not None:
+            record["time_ms"] = at_time(offset)
         exact = by_offset.get(offset)
         if exact is not None:
             record["exact"] = True
@@ -415,9 +478,14 @@ def _dash_case(name: str) -> str:
     return re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", name).lower()
 
 
-def _waapi_keyframes(raw: list[Record]) -> list[Record]:
+def _waapi_keyframes(raw: list[Record]) -> tuple[list[Record], bool]:
     """``effect.getKeyframes()`` entries -> the keyframe record shape the CSS
-    path produces, so one consumer reads both without branching."""
+    path produces, so one consumer reads both without branching.
+
+    Returns ``(keyframes, truncated)``: this used to slice to the cap and say
+    nothing, so 240 of 300 keyframes vanished while the payload reported
+    completeness (R3). The CSS path already reported its truncation; both now do.
+    """
     records: list[Record] = []
     for frame in raw:
         offset = as_number(frame.get("computedOffset"))
@@ -437,7 +505,7 @@ def _waapi_keyframes(raw: list[Record]) -> list[Record]:
         }
         records.append(record)
     records.sort(key=lambda r: as_number(r["offset"]) or 0.0)
-    return records[:KEYFRAME_CAP]
+    return records[:KEYFRAME_CAP], len(records) > KEYFRAME_CAP
 
 
 def _timing_from_waapi(entry: Record) -> Record:
@@ -475,7 +543,9 @@ def _timing_from_waapi(entry: Record) -> Record:
     return timing
 
 
-def build_waapi(facts: Facts, css_names: set[str], start_index: int) -> list[Record]:
+def build_waapi(
+    facts: Facts, css_names: set[str], start_index: int
+) -> tuple[list[Record], bool]:
     """Records for live animations the declared CSS did not already describe.
 
     A ``CSSAnimation`` on the element itself whose name is already a declared
@@ -484,8 +554,14 @@ def build_waapi(facts: Facts, css_names: set[str], start_index: int) -> list[Rec
     ``element.animate()``, transitions, descendants, pseudo-elements — is here
     and nowhere else. v1 reported NOTHING for a running ``element.animate()``,
     telling the model an element was static while it was visibly moving.
+
+    Returns ``(records, truncated)``. ``include_subtree`` defaults ON, so one
+    call on a page section can pull in hundreds of live animations; this loop
+    had NO cap at all while ``caps.truncated`` reported ``false`` (R3).
     """
     records: list[Record] = []
+    room = max(ANIMATION_CAP - start_index, 0)
+    truncated = False
     for entry in as_rows(facts.get("waapi")):
         target = as_obj(entry.get("target"))
         name = entry.get("animation_name")
@@ -496,6 +572,9 @@ def build_waapi(facts: Facts, css_names: set[str], start_index: int) -> list[Rec
             and name in css_names
         ):
             continue
+        if len(records) >= room:
+            truncated = True
+            break
         kind = {
             "CSSAnimation": "css-animation",
             "CSSTransition": "css-transition",
@@ -517,10 +596,18 @@ def build_waapi(facts: Facts, css_names: set[str], start_index: int) -> list[Rec
         record["target"] = target_block
         record["timeline"] = timeline_from_waapi(entry)
         record["timing"] = _timing_from_waapi(entry)
-        record["keyframes"] = _waapi_keyframes(as_rows(entry.get("keyframes")))
+        keyframes, kf_truncated = _waapi_keyframes(as_rows(entry.get("keyframes")))
+        record["keyframes"] = keyframes
         record["warnings"] = []
+        if kf_truncated:
+            warn(
+                record,
+                "keyframe_cap_reached",
+                f"Keyframes truncated at {KEYFRAME_CAP}",
+                {"name": record["name"]},
+            )
         records.append(record)
-    return records
+    return records, truncated
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +632,9 @@ def build_transitions(facts: Facts) -> list[Record]:
     delays = parts("transition_delay")
     easings = parts("transition_timing_function")
     behaviors = parts("transition_behavior")
+    rule = applying_rule(facts, "transition")
+    rule_source = source_by_id(facts, rule.get("source_ref") if rule else None)
+    target = EditTarget(rule_source, source_span(facts, rule_source))
     records: list[Record] = []
     for index, prop in enumerate(properties):
         if not prop or prop == "none":
@@ -568,13 +658,22 @@ def build_transitions(facts: Facts) -> list[Record]:
             "delay_raw": delay_raw,
             "easing": easing,
         }
-        klass = easing_class(easing)
-        if klass:
-            record["easing_class"] = klass
+        put(record, "easing_class", easing_class(easing))
         behavior = cycle_get(behaviors, index, "")
         if behavior:
             record["behavior"] = behavior
         record["trigger"] = trigger_from_rules(facts, {prop})
+        record["edits"] = build_transition_edits(record, rule, target, index)
+        if rule is not None:
+            record["source_refs"] = [rule.get("source_ref")]
+        if not as_rows(record.get("edits")):
+            # Mandatory on any record with no usable recipes, whatever its kind:
+            # an absent verdict reads as "editable" (R10).
+            record["editable"] = False
+            record["not_editable_reason"] = (
+                "no readable CSS rule declares this transition; its stylesheet "
+                "is likely cross-origin, so there is nothing here to find/replace"
+            )
         records.append(record)
     return records
 
@@ -615,6 +714,35 @@ def _ordered(animation: Record) -> Record:
     return ordered
 
 
+def effective_easing(animation: Record, keyframes: list[Record]) -> Derived:
+    """The animation's easing class, taking the KEYFRAMES into account (R6).
+
+    A keyframe may declare its own ``animation-timing-function``, which
+    overrides the animation-level curve for the segment starting there. Reading
+    only ``timing.easing`` reported a confident ``"linear"`` for an animation
+    whose every segment was a different curve — while the payload's own
+    ``checkpoints[].between.segment_easing`` said otherwise. When the segments
+    disagree, that disagreement IS the answer, and the confident field is the
+    one a weak model quotes.
+
+    The last keyframe is excluded: no segment starts there, so its declared
+    easing never applies.
+    """
+    declared = as_text(as_obj(animation.get("timing")).get("easing"))
+    segments = {as_text(frame.get("easing")) or declared for frame in keyframes[:-1]}
+    if not segments:
+        segments = {declared}
+    if len(segments) == 1:
+        return easing_class(segments.pop())
+    return Derived(
+        "per-keyframe",
+        "high",
+        "the keyframes declare their own animation-timing-function, so the "
+        "animation-level curve never applies; the per-segment curves are in "
+        "checkpoints[].between.segment_easing",
+    )
+
+
 def _enrich(animation: Record) -> None:
     """Attach the derived blocks every animation record carries, in place."""
     keyframes = as_rows(animation.get("keyframes"))
@@ -623,21 +751,29 @@ def _enrich(animation: Record) -> None:
     )
     animation["animated_properties"] = properties
     semantics: Record = {}
-    kind = motion_kind(keyframes)
-    if kind:
-        semantics["motion_kind"] = kind
+    put(semantics, "motion_kind", motion_kind(keyframes))
+    if "motion_kind" in semantics:
         semantics["motion_properties"] = properties
-    klass = easing_class(as_text(as_obj(animation.get("timing")).get("easing")))
-    if klass:
-        semantics["easing_class"] = klass
-        semantics["easing_confidence"] = "high"
+    put(semantics, "easing_class", effective_easing(animation, keyframes))
     if semantics:
         animation["semantics"] = semantics
     timing = as_obj(animation.get("timing"))
     animation["derived"] = derive_timing(timing)
-    animation["checkpoints"] = build_checkpoints(
-        keyframes, as_number(timing.get("duration_ms"))
-    )
+    animation["checkpoints"] = build_checkpoints(keyframes, timing)
+    if animation["checkpoints"] and checkpoint_time(timing) is None:
+        # Silence about a missing time_ms would read as "this animation has no
+        # timeline"; say which input made it undecidable instead.
+        warn(
+            animation,
+            "checkpoint_time_not_decidable",
+            "checkpoints carry no time_ms: this animation's first iteration "
+            "does not start at offset 0 (a non-zero iteration-start, or no "
+            "numeric duration)",
+            {
+                "direction": timing.get("direction"),
+                "iteration_start": timing.get("iteration_start"),
+            },
+        )
 
 
 def adopt_live_timelines(facts: Facts, animations: list[Record]) -> None:
@@ -705,7 +841,9 @@ def analyze(facts: Facts, options: Record | None = None) -> Record:
     options = options or {}
     animations, anim_truncated = build_animations(facts)
     css_names = {as_text(a.get("name")) for a in animations}
-    for record in build_waapi(facts, css_names, len(animations)):
+    live, live_truncated = build_waapi(facts, css_names, len(animations))
+    anim_truncated = anim_truncated or live_truncated
+    for record in live:
         if record["kind"] == "waapi":
             # A live animation with no CSS declaration has no CSS to edit, and
             # saying so IS the point (M10's negative case): a weak model handed a
