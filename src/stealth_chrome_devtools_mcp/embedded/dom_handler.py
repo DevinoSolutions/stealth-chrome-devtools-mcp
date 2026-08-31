@@ -87,20 +87,17 @@ class DOMHandler:
             },
         )
         try:
-            if selector.startswith("//"):
-                elements = await tab.xpath(selector)
-                debug_logger.log_info(
-                    "DOMHandler",
-                    "query_elements",
-                    f"XPath query returned {len(elements)} elements",
-                )
-            else:
-                elements = await resolve_elements(tab, selector)
-                debug_logger.log_info(
-                    "DOMHandler",
-                    "query_elements",
-                    f"CSS query returned {len(elements)} elements",
-                )
+            # CSS or XPath is decided inside element_resolution (F-831), so both
+            # inherit its stale-document/handler-race recovery. This used to
+            # branch on ``selector.startswith("//")`` and call ``tab.xpath``
+            # directly -- a second, unprotected way to resolve a selector that
+            # only this one tool had.
+            elements = await resolve_elements(tab, selector)
+            debug_logger.log_info(
+                "DOMHandler",
+                "query_elements",
+                f"Selector resolved to {len(elements)} elements",
+            )
 
             results = []
             for idx, elem in enumerate(elements):
@@ -533,29 +530,28 @@ class DOMHandler:
                 await select_element.send_keys(text)
                 return True
 
+            # The value/index arms act on the element already resolved above,
+            # never on a second `document.querySelector(selector)` lookup: that
+            # was a second resolution of the same selector, in a language that
+            # cannot express the XPath element_resolution now accepts (F-831) —
+            # it would have silently matched nothing and still returned True.
             if value is not None:
-                safe_selector = json.dumps(selector)
                 safe_value = json.dumps(value)
-                await tab.evaluate(f"""
-                    const select = document.querySelector({safe_selector});
-                    if (select) {{
-                        select.value = {safe_value};
-                        select.dispatchEvent(new Event('change', {{bubbles: true}}));
-                    }}
-                """)
+                await select_element.apply(f"""(select) => {{
+                    select.value = {safe_value};
+                    select.dispatchEvent(new Event('change', {{bubbles: true}}));
+                }}""")
                 return True
 
             if index is not None:
-                safe_selector = json.dumps(selector)
                 safe_index = int(index)
-                await tab.evaluate(f"""
-                    const select = document.querySelector({safe_selector});
-                    if (select && {safe_index} >= 0
+                await select_element.apply(f"""(select) => {{
+                    if ({safe_index} >= 0
                         && {safe_index} < select.options.length) {{
                         select.selectedIndex = {safe_index};
                         select.dispatchEvent(new Event('change', {{bubbles: true}}));
                     }}
-                """)
+                }}""")
                 return True
 
             raise ToolError("No selection criteria provided (value, text, or index)")
