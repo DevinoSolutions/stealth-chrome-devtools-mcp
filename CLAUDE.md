@@ -64,7 +64,7 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | `browser_pid_registry.py` | **THE one home for `browser_pids.json`** — its schema, the owner stamp on every entry (`owner_pid`, `owner_create_time`), and the read-merge-write protocol every writer shares |
 | `tool_registry.py` | `SECTION_TOOLS` + `ToolRegistry.section_tool` (registration, section gating, correlation-id stamping) + the canonical **verb taxonomy** (module docstring) |
 | `tool_errors.py` | the error convention — `ToolError`, `InstanceNotFoundError`, `_require_tab`, `_require_browser` |
-| `logging_setup.py` | the observability spine — `resolve_log_dir`, `configure_logging`, `with_correlation_id`, `CorrelationIdFilter` |
+| `logging_setup.py` | the observability spine — `resolve_log_dir`, `configure_logging`, `with_correlation_id`, `CorrelationIdFilter`; **the one home for log-file retention** — `roll_boot_log` (the launcher-side boot-log rotation, F-830) and `prune_old_logs` + its dead-backend post-mortem exemption (F-840); plus `backend_uvicorn_config` — the one home for the backend's uvicorn run-config (access logging off, graceful-shutdown timeout) |
 | `process_cleanup.py` | orphan reaping — side-effect-free `__init__`, `activate()` at serve boundary, `recover_orphans()` seam |
 | `models.py` | pydantic data models (`BrowserInstance`, `BrowserState`, `NetworkRequest`, …) |
 | `platform_utils.py` | OS-specific helpers |

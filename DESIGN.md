@@ -268,7 +268,9 @@ File logging exists on both fronts, all under `logging_setup.resolve_log_dir()`
   `logging_setup.configure_logging("backend")`);
 - `backend-boot.log` — the raw `Popen` stdout/stderr redirect the parent opens for the
   child, so a crash **before** `main()` (bad import, syntax error) still leaves a trace
-  instead of vanishing into `DEVNULL`;
+  instead of vanishing into `DEVNULL`. Shared by every boot and held open by the
+  running child, so it can only be rotated by the **launcher**, between two backends:
+  `logging_setup.roll_boot_log` does that in `singleton._start_server_process` (F-830);
 - `proxy-<pid>.log` — one per stdio proxy (`configure_logging("proxy")`).
 
 Every MCP request is stamped with a **correlation id** at the one chokepoint every
