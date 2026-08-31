@@ -125,8 +125,14 @@ class TestCorrelationIdFilter:
 
 class TestPruneOldLogs:
     def test_prune_caps_file_count(self, tmp_path):
+        # Proxy logs, not backend ones: F-840 gave dead-backend log SETS a
+        # retention exemption from this cap (a crashed backend's log is the
+        # post-mortem), so `backend-<n>.log` no longer demonstrates the count
+        # cap. "One per proxy session" is what the cap was always aimed at —
+        # see the prune_old_logs docstring. Exemption coverage lives in
+        # tests/test_log_hygiene.py::TestPrunerKeepsPostMortems.
         for i in range(5):
-            (tmp_path / f"backend-{i}.log").write_text("x")
+            (tmp_path / f"proxy-{i}.log").write_text("x")
         prune_old_logs(tmp_path, keep_days=7, keep_files=2)
         remaining = list(tmp_path.glob("*.log"))
         assert len(remaining) <= 2

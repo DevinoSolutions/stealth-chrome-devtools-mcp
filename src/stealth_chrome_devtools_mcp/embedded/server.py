@@ -31,6 +31,7 @@ from stealth_chrome_devtools_mcp.embedded.file_based_element_cloner import (
 )
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
 from stealth_chrome_devtools_mcp.embedded.logging_setup import (
+    backend_uvicorn_config,
     bootstrap_backend_process_logging,
 )
 from stealth_chrome_devtools_mcp.embedded.models import (
@@ -224,11 +225,6 @@ DEBUG_LOGGING_ENABLED = get_settings().stealth_browser_debug or get_settings().d
 # an idle HTTP backend crossing back to zero sessions must NOT re-arm startup.
 _LIFESPAN_STARTED = False
 _SERVE_TRANSPORT = "stdio"
-# F-809: FastMCP hard-codes uvicorn's timeout_graceful_shutdown to 0, and a
-# zero-second asyncio timeout always fires — so every clean HTTP stop ERROR-logs
-# "timeout graceful shutdown exceeded" (and Sentry ships it). Sized against
-# singleton._terminate_backend's 5 s wait; never None, uvicorn's "wait forever".
-_GRACEFUL_SHUTDOWN_SECONDS = 2.0
 
 
 @asynccontextmanager
@@ -3405,7 +3401,7 @@ if __name__ == "__main__":
             transport="http",
             host=args.host,
             port=args.port,
-            uvicorn_config={"timeout_graceful_shutdown": _GRACEFUL_SHUTDOWN_SECONDS},
+            uvicorn_config=backend_uvicorn_config(),
         )
     else:
         mcp.run(transport="stdio")

@@ -344,17 +344,17 @@ def _start_server_process(port: int):
     cmd = _server_process_cmd(port)
 
     # F-303/F-503: stdout/stderr used to be DEVNULL, hiding every backend
-    # crash. An embedded/server.py import-time crash dies before any
-    # in-process logging (configure_logging) can install itself, so only a
-    # raw stream redirect at Popen can capture it. stdin stays DEVNULL - the
-    # backend never reads stdin, and it remains the legitimately-allowed use.
-    from stealth_chrome_devtools_mcp.embedded.logging_setup import resolve_log_dir
+    # crash - an import-time crash dies before configure_logging installs
+    # itself, so only a raw Popen redirect captures it. stdin stays DEVNULL.
+    from stealth_chrome_devtools_mcp.embedded import logging_setup
 
     boot_log = None
     try:
-        log_dir = resolve_log_dir()
+        log_dir = logging_setup.resolve_log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
-        boot_log = open(log_dir / "backend-boot.log", "a", encoding="utf-8")
+        # F-830: the launcher is the ONLY place this file can be rotated - once
+        # Popen inherits the fd, the child pins it for life (see roll_boot_log).
+        boot_log = logging_setup.roll_boot_log(log_dir).open("a", encoding="utf-8")
     except OSError:
         # Fail-open (plan_M3 §7: "M3's file setup is fail-open"): a log dir
         # that can't be created/opened must never block the backend from

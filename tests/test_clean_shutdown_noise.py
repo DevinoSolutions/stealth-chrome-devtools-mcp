@@ -37,6 +37,7 @@ import pytest
 
 from stealth_chrome_devtools_mcp import server as shim
 from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded.logging_setup import backend_uvicorn_config
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 # ---------------------------------------------------------------------------
@@ -275,16 +276,21 @@ class TestGracefulShutdownTimeout:
             "hard-codes timeout_graceful_shutdown=0, which makes uvicorn ERROR-log "
             "'timeout graceful shutdown exceeded' on every clean stop (F-809)"
         )
-        assert isinstance(uvicorn_config, ast.Dict)
-        keys = [k.value for k in uvicorn_config.keys if isinstance(k, ast.Constant)]
-        assert "timeout_graceful_shutdown" in keys
+        # F-830 moved the composition into logging_setup.backend_uvicorn_config
+        # (it now also carries access_log=False), so the argument is a call, not
+        # a dict literal. The contract is unchanged: whatever reaches uvicorn
+        # must carry a graceful-shutdown timeout.
+        assert isinstance(uvicorn_config, ast.Call)
+        assert isinstance(uvicorn_config.func, ast.Name)
+        assert uvicorn_config.func.id == "backend_uvicorn_config"
+        assert "timeout_graceful_shutdown" in backend_uvicorn_config()
 
     def test_the_graceful_shutdown_timeout_is_positive_and_bounded(self):
         """Positivity, not the literal value, is the contract — tuning the
         number must not need a golden update. ``None`` is uvicorn's "wait
         forever", which an open SSE stream would ride all the way to SIGKILL.
         The ceiling is ``singleton._terminate_backend``'s 5 s wait window."""
-        timeout = server._GRACEFUL_SHUTDOWN_SECONDS
+        timeout = backend_uvicorn_config()["timeout_graceful_shutdown"]
         assert isinstance(timeout, (int, float))
         assert timeout > 0
         assert timeout < 5

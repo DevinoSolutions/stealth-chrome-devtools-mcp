@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Fixed — the boot log no longer grows without bound (F-830)
+
+`~/.stealth-mcp/logs/backend-boot.log` reached **794 MB** on a single developer
+machine: ~13 million uvicorn HTTP access-log lines — mostly the client
+watchdog's ~2 s probe of every live stdio proxy — appended to one shared file
+across every backend the machine had ever started. Nothing could rotate it: the
+file is a raw `Popen` stdout/stderr redirect, so the running backend holds its
+descriptor for life, an in-process rotating handler never sees those bytes, and
+an external rename either fails (Windows) or leaves the child writing to the
+old inode (POSIX). The age-based log pruner skipped it too, because a live
+backend refreshes its mtime continuously.
+
+Fixed on both sides. The backend's uvicorn run-config now sets
+`access_log=False`, so the per-request spam is never emitted — tool calls are
+still logged, with a correlation id and a duration, by the existing
+`stealth.backend` logger into the size-rotated per-pid file. And the launcher
+rolls the boot log aside when it exceeds 16 MB, keeping two numbered siblings:
+`singleton._start_server_process` does it on the line where it opens the file
+for a *new* backend, which is the only moment in the system's life at which
+that rotation is safe. Both the setting and the rotation live in
+`logging_setup.py`, the observability spine. An existing oversize file is
+rolled at the next backend spawn; the `.1` sibling it becomes can then be
+deleted freely, because nothing holds it open.
+
+### Fixed — the log pruner no longer destroys crash post-mortems (F-840)
+
+`prune_old_logs` swept purely on recency, and that is backwards for exactly
+the files that matter: a *live* backend keeps refreshing its log's mtime, while
+a *dead* one never does, so the sweep preferentially deleted the logs of
+processes that had crashed. On 2026-08-30 an OOM-killed worker's
+`backend-<pid>.log` and `backend-<pid>-fault.log` were gone by the next
+morning and the investigation started blind — the fault log especially, since
+`faulthandler` writes it at the C level for exactly the hard crashes that leave
+no other trace.
+
+Dead-backend logs now get a retention exemption. The three most recent backend
+log sets (the per-pid log, its rotations and its fault log) are kept whatever
+their age, and no `*-fault.log` younger than 14 days is ever pruned. The
+exemption is deliberately narrow: proxy logs, older surplus backend sets and
+`backend-boot.log`'s own rotations are still swept exactly as before, so this
+cannot re-open F-830. The backend's startup line also now records its `argv`,
+so a post-mortem can tell a console-attached `serve --http` birth from the
+detached spawn path.
+
 ### Fixed — a file the OS could not read no longer counts as "you edited the source" (F-829)
 
 Reuse identity is the package version plus a SHA-256 of the package's `*.py`

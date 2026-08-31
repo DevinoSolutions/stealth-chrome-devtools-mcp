@@ -30,6 +30,7 @@ import functools
 import inspect
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -51,7 +52,51 @@ LOG_FORMAT = (
 _MAX_BYTES = 5 * 1024 * 1024
 _BACKUP_COUNT = 3
 
+# The shared raw-stream file every backend's Popen stdout/stderr is redirected
+# into (singleton._start_server_process). One file for ALL boots, by design:
+# an import-time crash happens before the process knows its own log name.
+BOOT_LOG_NAME = "backend-boot.log"
+# F-830: unrotated, this reached 794 MB on the reporting machine. 16 MB still
+# holds many boots' worth of tracebacks while staying small enough to open in
+# an editor; 2 backups caps the whole boot-log family at ~48 MB.
+_BOOT_LOG_MAX_BYTES = 16 * 1024 * 1024
+_BOOT_LOG_BACKUPS = 2
+
+# F-840: a dead backend's log set IS the post-mortem. Keep the newest few
+# unconditionally (age is exactly what an unattended crash accrues before
+# anyone looks), and hold every fault log for a fortnight.
+_KEEP_BACKEND_SETS = 3
+_FAULT_LOG_KEEP_DAYS = 14
+# ``backend-<pid>.log``, its ``.1``/``.2`` rotations, and the matching
+# ``backend-<pid>-fault.log``. ``backend-boot.log`` deliberately does not match
+# (``boot`` is not a pid): it is shared across backends, not one's post-mortem.
+_BACKEND_LOG_RE = re.compile(r"^backend-(\d+)(?:-fault)?\.log")
+
+# F-809: FastMCP hard-codes uvicorn's timeout_graceful_shutdown to 0, and a
+# zero-second asyncio timeout always fires — so every clean HTTP stop ERROR-logs
+# "timeout graceful shutdown exceeded" (and Sentry ships it). Sized against
+# singleton._terminate_backend's 5 s wait; never None, uvicorn's "wait forever".
+_GRACEFUL_SHUTDOWN_SECONDS = 2.0
+
 correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
+
+
+def backend_uvicorn_config() -> dict[str, object]:
+    """The ``uvicorn_config`` the backend's ``mcp.run(transport="http", …)``
+    passes — the one home for how the backend's HTTP server logs and stops.
+
+    ``access_log=False`` is F-830's first half. Uvicorn writes one INFO line
+    per request to stdout, which ``singleton._start_server_process`` redirects
+    into the shared boot log, and the client watchdog probes every live stdio
+    proxy every ~2 s: ~13M lines / 794 MB of ``"POST /mcp/ 200"`` on the
+    reporting machine, with zero diagnostic value. Only the HTTP access spam
+    goes — the calls that matter are logged by :func:`with_correlation_id`
+    against ``stealth.backend``, which this does not touch.
+    """
+    return {
+        "timeout_graceful_shutdown": _GRACEFUL_SHUTDOWN_SECONDS,
+        "access_log": False,
+    }
 
 
 def new_correlation_id() -> str:
@@ -230,10 +275,83 @@ def bootstrap_backend_process_logging() -> Path:
     # this the structured log stays EMPTY until the first error/warning/info
     # call, so "did the backend boot at all" was answerable only from
     # backend-boot.log (plan_M3 §3 step-2 verify: "a backend-<pid>.log with
-    # the ... startup line").
-    logger.info("backend process starting (pid=%d, log=%s)", os.getpid(), log_path)
+    # the ... startup line"). F-840 adds argv: the ONE thing that distinguishes
+    # a console-attached `serve --http` birth from the detached
+    # _start_server_process spawn, which a post-mortem otherwise cannot tell
+    # apart. Local file only — this line is never shipped to Sentry.
+    logger.info(
+        "backend process starting (pid=%d, log=%s, argv=%r)",
+        os.getpid(),
+        log_path,
+        sys.argv,
+    )
 
     return log_path
+
+
+def roll_boot_log(log_dir: Path) -> Path:
+    """Rotate ``<logdir>/backend-boot.log`` if it has grown past
+    :data:`_BOOT_LOG_MAX_BYTES`, then return its (now free) path.
+
+    Called by ``singleton._start_server_process`` immediately before it opens
+    the file for a NEW backend. That is the ONLY moment rotation is possible:
+    the boot log is a raw ``Popen`` stdout/stderr redirect, so the running
+    backend holds its descriptor open for its entire life — an in-process
+    ``RotatingFileHandler`` never sees these bytes, and an external rotation
+    would either fail (Windows sharing violation) or silently keep writing to
+    the renamed inode (POSIX). The launcher is between two backends and holds
+    no descriptor, so it is the one safe hand-off point.
+
+    Keeps ``.1`` … ``.<_BOOT_LOG_BACKUPS>``, newest first, and drops the rest —
+    a rotation that accumulated would only rename F-830, not fix it. Never
+    raises: a boot log that cannot be rolled must not block a spawn (plan_M3
+    §7's fail-open discipline, same as the caller's own OSError fallback).
+    """
+    boot_log = log_dir / BOOT_LOG_NAME
+    try:
+        if boot_log.stat().st_size <= _BOOT_LOG_MAX_BYTES:
+            return boot_log
+        (log_dir / f"{BOOT_LOG_NAME}.{_BOOT_LOG_BACKUPS}").unlink(missing_ok=True)
+        for index in range(_BOOT_LOG_BACKUPS - 1, 0, -1):
+            older = log_dir / f"{BOOT_LOG_NAME}.{index}"
+            if older.exists():
+                older.replace(log_dir / f"{BOOT_LOG_NAME}.{index + 1}")
+        boot_log.replace(log_dir / f"{BOOT_LOG_NAME}.1")
+    except OSError:
+        pass
+    return boot_log
+
+
+def _post_mortem_exempt(files: list[Path]) -> set[Path]:
+    """F-840: the subset of ``files`` (newest first) that age must not reach.
+
+    A dead backend's ``backend-<pid>.log`` + ``backend-<pid>-fault.log`` pair
+    is the whole post-mortem for that process, and the age at which it becomes
+    interesting is exactly the age at which an unattended crash gets noticed —
+    so a plain mtime sweep deletes evidence precisely when it is needed (the
+    2026-08-30 OOM investigation started blind for this reason). Two rules,
+    both narrow: keep the newest :data:`_KEEP_BACKEND_SETS` pid-sets whatever
+    their age, and keep every fault log younger than
+    :data:`_FAULT_LOG_KEEP_DAYS` (they are near-empty unless a hard crash
+    actually wrote one, so this costs bytes, not megabytes).
+    """
+    fault_cutoff = time.time() - _FAULT_LOG_KEEP_DAYS * 86400
+    exempt = {
+        path
+        for path in files
+        if path.name.endswith("-fault.log") and path.stat().st_mtime >= fault_cutoff
+    }
+    recent_pids: list[str] = []
+    for path in files:
+        match = _BACKEND_LOG_RE.match(path.name)
+        if match is not None and match.group(1) not in recent_pids:
+            recent_pids.append(match.group(1))
+    keep_pids = set(recent_pids[:_KEEP_BACKEND_SETS])
+    for path in files:
+        match = _BACKEND_LOG_RE.match(path.name)
+        if match is not None and match.group(1) in keep_pids:
+            exempt.add(path)
+    return exempt
 
 
 def prune_old_logs(
@@ -241,6 +359,8 @@ def prune_old_logs(
 ) -> None:
     """Best-effort sweep of ``<logdir>`` so per-pid log files (one per proxy
     session) don't accumulate forever. Never raises.
+
+    Dead-backend post-mortems are exempt — see :func:`_post_mortem_exempt`.
     """
     try:
         target_dir = log_dir if log_dir is not None else resolve_log_dir()
@@ -251,8 +371,11 @@ def prune_old_logs(
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
+        exempt = _post_mortem_exempt(files)
         cutoff = time.time() - keep_days * 86400
         for index, path in enumerate(files):
+            if path in exempt:
+                continue
             if index >= keep_files or path.stat().st_mtime < cutoff:
                 with contextlib.suppress(OSError):
                     path.unlink()
