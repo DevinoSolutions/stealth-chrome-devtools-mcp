@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — error reports no longer carry OAuth tokens or email addresses (F-826)
+
+Error reporting is on by default, and this product's exceptions quote the thing
+that failed — which is page content. The 2.0.4 scrubber removed what a machine
+leaks about *itself* (its hostname, the username in every path) but let the
+exception's own message through verbatim. The project's Sentry consequently held
+OAuth authorization URLs with `access_token` still in the query, and email
+addresses, from third-party installs as well as the maintainer's machine.
+
+`_scrub_event` — still the one `before_send`, still one walk over the event —
+now applies two more rules to every string it visits:
+
+* **email addresses** become `[redacted-email]`;
+* **URLs** keep their scheme, host and path and lose their secrets:
+  `user:pass@` becomes `[redacted]@`, the query becomes `?[redacted-query]`, the
+  fragment becomes `#[redacted-fragment]` (the implicit OAuth flow puts the token
+  there).
+
+The redaction is deliberately **targeted, not wholesale**: a message that has
+been blanked is an issue nobody can act on, which is a slower way of turning
+reporting off. `GET https://api.example.com/v1/instances/42 returned 500` is
+untouched, and so are the `@`-shaped things that are not addresses —
+`/opt/homebrew/opt/python@3.11/…`, `sentry-sdk@2.64.0`, `@sentry/browser`.
+
+Two behaviours are unchanged: an expected `ToolError` is still dropped whole
+before any of this runs (F-815), and the username in a path is still `~` rather
+than a new spelling. One behaviour is tightened: if the scrub walk itself fails,
+the event is still sent — with its type, module, mechanism, frames and tags —
+but the free-text fields it could not vouch for are dropped instead of shipped
+raw.
+
+No new environment knobs; `STEALTH_MCP_NO_ERROR_REPORTING=true` still disables
+reporting entirely.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)
