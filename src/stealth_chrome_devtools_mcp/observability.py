@@ -523,6 +523,46 @@ def _value_without_text(value: object) -> object:
     return value
 
 
+def capture_lifecycle(
+    message: str, *, level: str = "warning", **fields: object
+) -> bool:
+    """Ship ONE proxy-lifecycle transition as a Sentry message event (F-827).
+
+    The stdio proxy's disconnect decisions — condemning a backend, healing onto
+    a replacement, giving up and tearing down, evicting an edited one — are not
+    exceptions, so nothing on this module's error path would ever have carried
+    them: ``LoggingIntegration`` ships ERROR records and turns WARNING/INFO into
+    breadcrumbs, which only travel attached to some *other* event. These are the
+    events a disconnect investigation actually needs, so they are captured
+    explicitly. It PIGGYBACKS: every caller keeps its own log line, at its own
+    level, with its own text.
+
+    ``fields`` become one ``proxy`` context on the event, which means they go
+    through :func:`_scrub_event` like everything else. Returns ``True`` only
+    when the event was handed to the SDK.
+
+    Never raises and never blocks. Reporting turned off, an SDK that is not
+    importable, one that was never initialized, or one that fails mid-capture
+    are all a quiet ``False`` — a proxy must not lose a backend because its
+    telemetry had a bad day. Sentry's own ``capture_message`` is a no-op on an
+    uninitialized client, so an early transition is dropped rather than queued.
+    """
+    try:
+        if get_settings().no_error_reporting:
+            return False
+        import sentry_sdk
+
+        with sentry_sdk.new_scope() as scope:
+            scope.set_context("proxy", dict(fields))
+            sentry_sdk.capture_message(message, level=level)
+    except Exception:  # noqa: BLE001  PERMANENT(never-raises contract, #55)
+        # DEBUG for the same reason _scrub_event is: an ERROR raised while
+        # shipping is how a reporting loop starts.
+        _log.debug("Sentry lifecycle capture failed", exc_info=True)
+        return False
+    return True
+
+
 def sentry_init() -> bool:
     """Initialize Sentry error shipping unless the operator opted out.
 

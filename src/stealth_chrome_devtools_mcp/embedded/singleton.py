@@ -32,6 +32,7 @@ from stealth_chrome_devtools_mcp.embedded.backend_registry import (
     SERVER_STATE_FILE,
     STATE_DIR,
 )
+from stealth_chrome_devtools_mcp.observability import capture_lifecycle
 
 if sys.platform == "win32":
     import msvcrt
@@ -526,18 +527,17 @@ def _start_backend_holding_lock(port: int) -> None:
                 return  # already up (same version) ON THE PORT WE WERE HANDED
             if _same_identity_backend_ready(port):
                 return  # ours, merely busy or mid-boot — never evict it (F-807)
-            # M2-3: surface WHY a fresh backend is about to spawn when the cause
-            # is a source change (version matches, digests differ) - the
-            # eviction is otherwise silent. Logged once per spawn HERE, not in
-            # the thrice-called _find_running_server; the state re-read is a
-            # cheap diagnostic probe, deliberately NOT a second reuse gate (that
-            # stays single-homed in _find_running_server). Source-only: neither
-            # a version change (issue #14) nor an UNREADABLE digest (F-829).
+            # M2-3: surface WHY a fresh backend is about to spawn when the cause is a
+            # source change (version matches, digests differ) — it is otherwise silent,
+            # in the log and now (F-827) on the wire. Once per spawn HERE, not in the
+            # thrice-called _find_running_server; the state+digest re-read is a cheap
+            # unconditional diagnostic probe, deliberately NOT a second reuse gate.
+            # Source-only: not a version change (#14), not an unreadable digest (F-829).
             entry = backend_registry.backend_on_port(_read_server_state(), port) or {}
-            if entry.get("version") == _server_version() and (
-                backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
-            ):
+            edited = backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
+            if edited and entry.get("version") == _server_version():
                 _logger.info("backend stale (source changed), evicting")
+                capture_lifecycle("proxy: backend evicted (source changed)", port=port)
             # A stale/legacy backend (different or unknown version) may still be
             # holding the port; evict it under the lock so our fresh, correctly
             # versioned backend can bind — otherwise the proxy would fall back to

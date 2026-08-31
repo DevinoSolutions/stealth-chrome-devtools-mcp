@@ -44,6 +44,7 @@ sees one failed call instead of an eternal wait — and so a non-idempotent
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -77,6 +78,56 @@ HEAL_STREAK_RESET_SECONDS = 300.0
 # JSON-RPC "Internal error" — the only reserved code that fits "the server this
 # call was sent to stopped existing".
 _BACKEND_DIED_CODE = -32603
+
+# The proxy's reported vocabulary (F-827). Three of the four disconnect-relevant
+# transitions happen here, so their names live here; the fourth (an eviction for
+# a genuine source change) is reported from its own site in ``singleton``. Named
+# constants rather than inline literals because a report whose message drifts is
+# a report nobody can search for.
+CONDEMNED_EVENT = "proxy: backend condemned"
+HEALED_EVENT = "proxy: backend healed"
+TEARDOWN_EVENT = "proxy: teardown after failed heal"
+
+
+def _report(message: str, *, level: str = "warning", **fields: object) -> None:
+    """Ship one lifecycle transition, or don't — but never disturb the caller.
+
+    ``observability.capture_lifecycle`` already promises never to raise; this
+    wrapper exists because the promise is not the point. A module whose whole
+    job is to be the backstop when everything else has failed cannot have its
+    control flow depend on a telemetry call being well-behaved, so the guard is
+    local and unconditional. Imported lazily and by module attribute: the leaf
+    stays importable without the reporting stack, and a test can spy the one
+    seam. This is the only place under ``embedded/`` that talks to Sentry
+    besides the backend's own ``sentry_init`` — reporting stays single-homed in
+    ``observability``; nothing here decides what an event looks like.
+    """
+    try:
+        from stealth_chrome_devtools_mcp.observability import capture_lifecycle
+
+        capture_lifecycle(message, level=level, **fields)
+    except Exception:  # noqa: BLE001  PERMANENT(a backstop must not raise)
+        _logger.debug("could not report a lifecycle transition", exc_info=True)
+
+
+def _teardown(*, port: int, generation: int, reason: str, streak: int) -> None:
+    """The one report for the ONE remaining user-visible disconnect.
+
+    ``drive`` gives up on two axes — this recovery failed (``unhealable``) and
+    recoveries keep failing (``flapping``) — but the user experiences a single
+    thing: the MCP server went away. One event with a ``reason``, not two event
+    names, so a search for "how often does stealth still disconnect" is one
+    query. ERROR level: after F-838 this is the only path left that ends a
+    session, so it is not a warning about something, it is the something.
+    """
+    _report(
+        TEARDOWN_EVENT,
+        level="error",
+        port=port,
+        generation=generation,
+        reason=reason,
+        consecutive_heals=streak,
+    )
 
 
 class _MessageSink(Protocol):
@@ -214,7 +265,17 @@ async def _one_generation(  # noqa: PLR0913  PERMANENT(function interface)
 
         async def monitor() -> None:
             await armed.wait()
+            live_since = time.monotonic()
             await watch(port)
+            # ``watch`` returns for exactly one reason (F-820's strikes plus the
+            # identity+readiness confirmation), so this IS the condemnation. The
+            # elapsed time dates the verdict against the backend's own logs: how
+            # long it had been serving this proxy before the strikes concluded.
+            _report(
+                CONDEMNED_EVENT,
+                port=port,
+                strike_seconds=round(time.monotonic() - live_since, 1),
+            )
             died.set()
             generation.cancel_scope.cancel()
 
@@ -246,12 +307,16 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
     client's original ``initialize`` so the next generation opens with a real
     handshake and its own fresh ``mcp-session-id``. Returning means the caller
     should tear down, which is what it always did.
-    """
-    import time
 
+    ``generation`` exists only to be reported (F-827): a heal is far easier to
+    read as "the 3rd backend under this proxy" than as a port number, and both
+    give-up exits carry it too, so a teardown says how much recovery preceded
+    it. Nothing in the loop's decisions reads it.
+    """
     current: int = port
     resend: object = None
     streak = 0
+    generation = 1
     while True:
         started = time.monotonic()
         confirmed_dead = await _one_generation(
@@ -270,6 +335,9 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
         streak += 1
         if streak > MAX_CONSECUTIVE_HEALS:
             _logger.error("backend died %d times in a row; giving up", streak)
+            _teardown(
+                port=current, generation=generation, reason="flapping", streak=streak
+            )
             return
         healed = await heal_backend(
             current,
@@ -278,5 +346,19 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
             url_for=url_for,
         )
         if healed is None:
+            _teardown(
+                port=current, generation=generation, reason="unhealable", streak=streak
+            )
             return
+        generation += 1
+        # The recovery the user never saw. Reported at INFO because it is the
+        # denominator: a teardown means little without how often healing WORKED.
+        _report(
+            HEALED_EVENT,
+            level="info",
+            old_port=current,
+            new_port=healed,
+            generation=generation,
+            consecutive_heals=streak,
+        )
         current, resend = healed, replay()

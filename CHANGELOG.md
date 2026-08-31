@@ -45,6 +45,40 @@ exemption is deliberately narrow: proxy logs, older surplus backend sets and
 cannot re-open F-830. The backend's startup line also now records its `argv`,
 so a post-mortem can tell a console-attached `serve --http` birth from the
 detached spawn path.
+### Fixed — the stdio proxy reports to Sentry: condemnations, heals, teardowns and evictions now ship (F-827)
+
+`sentry_init()` had exactly two callers — the HTTP backend and the ops CLI. The
+stdio proxy had none: the thin entrypoint's stdio branch returns after
+`run_stdio_proxy()` and never reaches the `runpy` load that would have brought
+the backend's own init into the process. So the one component that owns the
+liveness watchdog, the eviction decision and (since F-838) the heal loop — the
+component that *decides to disconnect you* — reported nothing at all. The whole
+2026-08-30 disconnect saga (F-820 / F-829 / F-838 / F-839) had to be
+reconstructed from local log files on one machine; every other install produced
+silence.
+
+The proxy now initializes error reporting in its own branch, and only there:
+placing it at the top of `main()` would run a *second* init in the same process
+the moment `runpy` loads the backend, which is a class of bug this repo has
+already paid for once. Because `sentry_sdk` costs ~1.5–2.5 s to import and
+initialize — and the proxy's whole value is answering the client's `initialize`
+locally and instantly — the init runs on a daemon thread instead of ahead of
+the handshake, the same way the backend cold start already does. The proxy's
+log handler is now installed in the same place, before the cold-start thread
+that writes to it.
+
+Four transitions now ship as structured events: a backend **condemned** by the
+watchdog (with the strike timing), a **heal** that re-bridged onto a
+replacement (old port → new port, generation), a heal that failed and **tore
+the session down** (the only user-visible disconnect left after F-838, reported
+as an error), and a backend **evicted for a genuine source change** — never for
+F-829's unreadable digest. Every existing log line keeps its exact level and
+text; the reports piggyback, they do not replace. Reporting still honours
+`STEALTH_MCP_NO_ERROR_REPORTING`, still passes through the one PII scrubber,
+and no capture path can raise: a telemetry call that throws cannot cost you a
+backend.
+
+Full write-up: `audit/stage2/finding_F827_proxy_invisible_to_sentry.md`.
 
 ### Fixed — a file the OS could not read no longer counts as "you edited the source" (F-829)
 
