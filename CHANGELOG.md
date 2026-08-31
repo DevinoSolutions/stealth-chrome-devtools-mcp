@@ -228,6 +228,40 @@ as one code point, never as a pair, so a surrogate in a payload is always
 broken. U+FFFD rather than `errors="replace"`'s `?`, so the loss is visible and
 not confusable with a question mark the page really contained. Details in
 `audit/stage2/finding_F823_lone_surrogates_crash_tool_returns.md`.
+### Fixed — advertised XPath selectors now work in every tool that advertises them (F-831, [#15](https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/issues/15))
+
+Seven element-interaction tools document their `selector` parameter as "CSS
+selector or XPath" — `query_elements`, `click_element`, `upload_file`,
+`type_text`, `paste_text`, `get_element_state`, `wait_for_element`. Only
+`query_elements` honoured one, and it did so through its own
+`selector.startswith("//")` branch calling `tab.xpath` **inside the tool path**.
+The other six handed the XPath string to `DOM.querySelector` as if it were CSS
+and failed. A user reading the tool schema had no way to tell which was which.
+
+Choosing between the two selector *languages* is part of resolving a selector,
+so it now lives in `element_resolution` — the one home selector resolution
+already routes through:
+
+* `xpath_expression` / `is_xpath` are the one place the choice is made, purely
+  syntactically. An explicit `xpath=` prefix (case-insensitive, stripped before
+  dispatch) is XPath; otherwise a selector whose first non-space character is
+  `/` or `(` is XPath — `//a`, `/html/body`, `(//div)[1]`, and everything the
+  deleted branch accepted. No CSS selector may begin with either character, so
+  nothing is taken from CSS. `#id`, `.cls`, `div > a` stay CSS, including
+  `./div` (use `xpath=./div` for the relative form).
+* `resolve_element`, `resolve_elements` and `query_selector_all` all dispatch,
+  and all run the XPath call inside the **same** retry/race-recovery the CSS
+  paths use — one classifier, one loop, one bound, both languages. An XPath in
+  `query_elements` previously got none of that recovery, so a DOM mutation
+  mid-query surfaced a raw CDP `-32000` to the caller.
+* The `query_elements` branch is **deleted**; it now resolves like every other
+  tool. Its returned shape is unchanged and pinned.
+
+Also fixed in passing: `select_option`'s `value`/`index` arms re-resolved the
+selector a second time with `document.querySelector(...)` in the page. They now
+act on the element already resolved, so they cannot silently match nothing and
+still report success.
+
 ### Fixed — the nodriver race classifier now reaches `navigate` (F-824)
 
 F-817 taught `element_resolution` to recover from nodriver's two known races:
