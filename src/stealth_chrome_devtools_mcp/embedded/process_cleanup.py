@@ -114,12 +114,13 @@ class ProcessCleanup:
         """Register cleanup hooks for interpreter exit and termination signals.
 
         ``signal.signal`` returns the disposition it displaces; recording it is
-        what lets ``_signal_handler`` hand the signal back (F-809) — under HTTP
-        that is uvicorn's ``handle_exit``, installed first by ``capture_signals``
-        and so REPLACED by ours, never coexisting. SIGBREAK exists on Windows
-        only, so ``getattr`` is the whole platform gate. A re-install is skipped
-        (runpy double-loads the server module): re-recording would make
-        ``previous`` OUR handler, i.e. ``_signal_handler`` delegating to itself.
+        what lets ``_signal_handler`` hand the signal back (F-809) — under HTTP,
+        uvicorn's ``handle_exit``, installed first and so REPLACED by ours. A
+        re-install is skipped (runpy double-loads the module): it would record
+        OUR handler as ``previous``, one delegating to itself. SIGBREAK
+        (Windows-only, hence ``getattr``) is IGNORED, never handled (F-839): no
+        product path sends it — stop/restart/evict all use TerminateProcess,
+        which runs no handler — so obeying one serves only a console killer.
         """
         atexit.register(self._cleanup_all_tracked)
 
@@ -127,9 +128,8 @@ class ProcessCleanup:
             signum = getattr(signal, name, None)
             if signum is None or signum in self._previous_signal_handlers:
                 continue
-            self._previous_signal_handlers[signum] = signal.signal(
-                signum, self._signal_handler
-            )
+            handler = signal.SIG_IGN if name == "SIGBREAK" else self._signal_handler
+            self._previous_signal_handlers[signum] = signal.signal(signum, handler)
 
     def _signal_handler(self, signum, frame):
         """Clean up tracked browsers, then hand the signal back (F-809)."""

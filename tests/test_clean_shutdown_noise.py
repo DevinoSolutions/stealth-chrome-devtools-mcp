@@ -74,8 +74,14 @@ class TestSetupRecordsDisplacedHandlers:
         assert set(installed) == set(cleanup._previous_signal_handlers)
         for signum, previous in displaced.items():
             assert cleanup._previous_signal_handlers[signum] == previous
-        for handler in installed.values():
-            assert handler == cleanup._signal_handler
+        # Every displaced disposition is recorded, but only the two shutdown
+        # signals get our handler: SIGBREAK is installed as SIG_IGN (F-839 — see
+        # tests/test_sigbreak_immunity.py), never handled.
+        for signum, handler in installed.items():
+            if signum == getattr(signal, "SIGBREAK", None):
+                assert handler is signal.SIG_IGN
+            else:
+                assert handler == cleanup._signal_handler
 
     def test_setup_still_covers_sigterm_and_sigint(self, cleanup):
         installed: list[int] = []
