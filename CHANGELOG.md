@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a closing terminal can no longer take the shared backend down with it (F-839)
+
+On 2026-08-30 at 18:43:57 the backend serving every live session — healthy,
+its last tool call completed normally two and a half hours earlier — logged
+`Received signal 21, initiating cleanup...` and shut down cleanly. Signal 21
+on Windows is **SIGBREAK**, a console control event: it can only arrive from a
+shared console. Four proxies then confirmed a genuinely dead backend within
+thirteen seconds and every attached Claude session disconnected at once. This
+is the residual "stealth randomly disconnects" left after 2.0.7's F-820 fix:
+that one stopped *false* condemnations of a busy backend; this one stops the
+backend actually dying for a reason it was never supposed to be reachable by.
+
+Nothing in the product sends SIGBREAK. Eviction and the `stop` / `restart`
+verbs all terminate through `TerminateProcess`, which runs no signal handler
+at all — so honoring SIGBREAK served only accidental, session-scoped killers:
+a terminal closing, or a client killing its child process tree on exit. One
+process shared by N sessions had its lifetime tethered to one of them.
+
+The backend now installs `SIG_IGN` for SIGBREAK. SIGTERM and SIGINT keep the
+F-809 hand-off unchanged, so every deliberate stop — including Ctrl+C on a
+foreground `serve --http` — behaves exactly as before.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)
