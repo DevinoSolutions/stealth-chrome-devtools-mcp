@@ -564,3 +564,65 @@ class TestTheToolDocstringDoesNotOversell:
             assert claim is None or "find_unique_in_rule" in doc, (
                 f"{tool} promises uniqueness without naming the field that reports it"
             )
+
+
+class TestATruncationMessageCanBeFollowedWithoutFailing:
+    """R14: the R12 truncation message told the reader to pass ``max_animations``
+    "to this tool", and neither ``extract_element_animations`` nor its
+    ``_to_file`` twin accepts it -- so the payload confidently instructed a
+    model to make a call that would be rejected.
+
+    A truncated payload is exactly when a model is most motivated to act on the
+    remedy, which makes this the same honesty class the whole review removed,
+    arriving through the fix for it. The message is produced by a leaf that
+    cannot see the tool signatures, so nothing but a test can hold the two
+    together; this one reads the REAL signatures rather than a copy of them, so
+    it also fires the day someone exposes the parameters and leaves the message
+    saying they are unavailable.
+    """
+
+    ANIMATIONS_TOOLS = (
+        "extract_element_animations",
+        "extract_element_animations_to_file",
+    )
+
+    def _accepted(self) -> set[str]:
+        import inspect
+
+        from stealth_chrome_devtools_mcp.embedded import server as _server
+
+        return set.intersection(
+            *(
+                set(inspect.signature(getattr(_server, tool).fn).parameters)
+                for tool in self.ANIMATIONS_TOOLS
+            )
+        )
+
+    @pytest.mark.parametrize(
+        ("noun", "cap", "option"),
+        [("animations", 25, "max_animations"), ("keyframes", 20, "max_keyframes")],
+    )
+    def test_it_never_tells_a_tool_caller_to_pass_an_option_the_tool_rejects(
+        self, noun, cap, option
+    ):
+        from stealth_chrome_devtools_mcp.embedded import animation_facts
+
+        message = animation_facts.cap_message(noun, cap, option)
+        if option in self._accepted():
+            return  # the parameter exists; telling the caller to pass it is true
+        assert "this tool" not in message, (
+            f"the message tells the reader to pass {option} 'to this tool', but "
+            f"neither {' nor '.join(self.ANIMATIONS_TOOLS)} accepts it"
+        )
+        assert option not in message or "clone_element_complete" in message, (
+            f"{option} is named without the path it is actually settable on, so "
+            "a reader following it has nowhere to go"
+        )
+
+    def test_it_always_offers_the_remedy_a_direct_tool_caller_can_actually_use(self):
+        """Narrowing the selector is the ONLY lever the two direct tools give a
+        caller. It has to be there whatever the parameter situation is."""
+        from stealth_chrome_devtools_mcp.embedded import animation_facts
+
+        message = animation_facts.cap_message("animations", 25, "max_animations")
+        assert "selector" in message, "no remedy the direct tool caller can act on"

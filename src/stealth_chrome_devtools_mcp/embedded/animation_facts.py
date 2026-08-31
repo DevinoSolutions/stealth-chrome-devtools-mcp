@@ -595,15 +595,33 @@ def caps_from(options: Record) -> Caps:
 
 
 def cap_message(noun: str, cap: int, option: str) -> str:
-    """A truncation message that says what was cut and how to get more.
+    """A truncation message that says what was cut and a remedy that WORKS.
 
     With the R12 caps this fires far more often than the old ones did, so it has
     to answer both questions a model will have: what is missing, and what do I
-    pass to see it.
+    do about it. The second answer has to be true for whoever is reading.
+
+    R14: it used to say "raise it by passing {option} to this tool", and the two
+    tools a model actually calls -- ``extract_element_animations`` and its
+    ``_to_file`` twin -- do not accept those parameters (``server.py`` has no
+    room to add them until it is split; they stay engine-only until then). A
+    truncated payload is exactly when a model is most motivated to act on the
+    remedy, so a remedy that gets rejected is worse than none.
+
+    So the lever that works from EVERY path -- narrowing the selector -- comes
+    first, and the option is named with the path it is genuinely settable on
+    rather than "this tool". Do not shorten this back to "this tool": that
+    phrase is a claim about the reader's own entry point, and it is false for
+    the readers most likely to act on it.
+    ``tests/test_animation_edit_recipes.py`` reads the real tool signatures and
+    fails if the two drift apart in either direction.
     """
     return (
-        f"{noun} truncated at {cap}; raise it by passing {option} to this tool "
-        f"(or extract a narrower selector to stay under the cap)"
+        f"{noun} truncated at {cap}; extract a narrower selector to stay under "
+        f"the cap. Raising it takes {option}, which is settable only on the "
+        f"engine path -- clone_element_complete(extraction_options="
+        f"{{'animations': {{'{option}': N}}}}) -- not on the "
+        f"extract_element_animations tools"
     )
 
 

@@ -43,6 +43,22 @@ the animations is an artifact of the cap, not a fact about the page.
 A test pins a busy page's payload under a stated byte budget, so the sizing
 cannot silently regress the way it did here.
 
+The truncation message names a remedy the reader can actually act on. It first
+said "raise it by passing `max_animations` to this tool", and the two tools a
+model actually calls — `extract_element_animations` and its `_to_file` twin —
+do not accept that parameter; a truncated payload is precisely when a model is
+most motivated to follow the advice, so a remedy that gets rejected is worse
+than none. It now leads with narrowing the selector (the only lever those
+callers have) and names the option against the path it is genuinely settable
+on. A test reads the real tool signatures, so the message and the parameters
+cannot drift apart in either direction.
+
+**Known limitation:** `max_animations` / `max_keyframes` are settable only on
+the engine path — `clone_element_complete(extraction_options={"animations":
+{...}})` — and not as arguments to the two `extract_element_animations` tools.
+`server.py` is at its grandfathered line budget with no room to add them; they
+become tool arguments when that module is split.
+
 **Internal:** `animation_analysis.py` reached its 1000-line budget, so the live
 `Animation` half moved to a new leaf, `animation_waapi.py` (timeline typing,
 live timing and keyframes, and the declared-vs-live reconciliation). The shared
