@@ -284,7 +284,15 @@ class FakeTab:
             # ``Runtime.evaluate`` reaches the SAME canned answers as
             # ``evaluate()`` — see ``_answer_for_js``. An explicit
             # ``cdp_responses["evaluate"]`` still wins, so no existing test moves.
-            return self._answer_for_js(frame["params"]["expression"])
+            # A bare canned value is wrapped the way Chrome would answer it (a
+            # ``(RemoteObject, exceptionDetails)`` pair) so a test can state the
+            # answer once, whichever seam the code under test takes; an answer
+            # that is already such a pair (``js_result``/``js_threw``) passes
+            # through untouched.
+            answer = self._answer_for_js(frame["params"]["expression"])
+            if answer is None or isinstance(answer, tuple):
+                return answer
+            return js_result(answer)
         resp = self._cdp_responses.get(name, None)
         return resp(name) if callable(resp) else resp
 
