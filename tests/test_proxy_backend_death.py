@@ -42,6 +42,7 @@ import time
 
 import anyio
 import anyio.lowlevel
+import psutil
 import pytest
 
 from e2e_helpers import CAN_RUN
@@ -361,10 +362,22 @@ class TestBackendDeathWithACallInFlight:
                     f"expected exactly one backend so far: {before}"
                 )
 
-                # THE reproduction. The request is written to the proxy's stdin
-                # and deliberately NOT awaited, so the backend dies with it in
-                # flight — the ordering the whole finding is about.
+                # THE reproduction. Freeze the backend FIRST so it cannot
+                # answer, THEN write the request, THEN kill: the call is now
+                # guaranteed to be riding the HTTP leg when the death lands —
+                # the ordering the whole finding is about. Without the freeze
+                # this is a race the runner's speed decides: the first Linux
+                # gate answered ``tools/list`` before the kill landed, nothing
+                # was in flight, and the death degraded to the watchdog path
+                # this node exists NOT to test. A SIGKILL is delivered to a
+                # stopped process like any other, so the freeze never outlives
+                # the kill below.
+                psutil.Process(backend_pid).suspend()
                 inflight = await wire.request("tools/list")
+                # Let the proxy pull the frame off stdin and write it onto the
+                # frozen backend's socket (the kernel accepts the bytes; only
+                # the response can never come).
+                await anyio.sleep(1.0)
                 _terminate_process_tree(backend_pid, 15.0)
 
                 # Contract 1: whatever was riding the dying connection is still
