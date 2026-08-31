@@ -39,6 +39,20 @@ a proxy pretending to be alive, which is the failure mode it exists to end.
 requests the dead backend was actually holding as JSON-RPC errors, so the client
 sees one failed call instead of an eternal wait — and so a non-idempotent
 ``tools/call`` is never silently re-run against the replacement.
+
+**Both legs may notice the death; only one of them used to count** (F-843).
+The watchdog is the SLOW witness: three strikes plus a confirmation, ~12s at
+best. The bridge is the FAST one — a backend that dies while a client call is in
+flight breaks the HTTP leg in milliseconds, and ``bridge``'s ``finally`` cancels
+the generation before ``monitor`` has finished its first strike. So the
+discriminator "did the WATCHDOG condemn it" answered no to the very deaths users
+felt: an idle session healed (the bridge stays quiet, the watchdog runs its
+course) while a session with a call in flight tore down ~1s after the kill,
+every time. The discriminator is now "did the backend LEG end for a reason
+recovery answers", and the dead-vs-busy question is settled the same way in both
+cases — by ``confirm_alive``, the identity+readiness gate the watchdog's own
+confirmation phase already trusts. What the verdict changes is the reported
+``cause``, never the recovery: one heal path, no second policy.
 """
 
 from __future__ import annotations
@@ -87,6 +101,17 @@ _BACKEND_DIED_CODE = -32603
 CONDEMNED_EVENT = "proxy: backend condemned"
 HEALED_EVENT = "proxy: backend healed"
 TEARDOWN_EVENT = "proxy: teardown after failed heal"
+
+# Why a backend generation ended, for the generations recovery answers (F-843).
+# One vocabulary, carried on every report the recovery emits, because "the
+# proxy healed" and "the proxy gave up" are unreadable without which WITNESS saw
+# the death: the watchdog's ~12s verdict and the bridge's millisecond one are
+# different incidents on the same backend.
+WATCHDOG_CAUSE = "watchdog"  # F-820's strikes + confirmation concluded
+CONNECTION_LOST_CAUSE = "connection_lost"  # the leg broke; the backend is gone
+CONNECTION_RESET_CAUSE = "connection_reset"  # the leg broke; the backend is not
+# Internal sentinel: the bridge leg ended while armed, verdict not yet asked.
+_BRIDGE_ENDED = "bridge_ended"
 
 
 def _report(message: str, *, level: str = "warning", **fields: object) -> None:
@@ -232,6 +257,44 @@ async def heal_backend(
     return None
 
 
+async def _confirm_bridge_verdict(
+    port: int, *, confirm_alive: Callable[[int], bool]
+) -> str:
+    """Ask the ONE gate why the bridge leg to ``port`` ended (F-843).
+
+    The bridge breaking says the TCP/HTTP leg is gone; it says nothing about the
+    backend, and the two are not the same question — F-820 exists because a
+    healthy backend under fleet load looks dead to a hasty probe. So the answer
+    comes from ``_same_identity_backend_ready``, the same identity+readiness gate
+    the watchdog's confirmation phase and the cold-start lock consult: a genuinely
+    dead backend fails it in milliseconds (no socket, no process of ours), a busy
+    one survives its patience window.
+
+    Driven off-thread because that gate blocks (socket probes and a real
+    ``initialize``); run inline it would freeze the stdio pump this module exists
+    to keep alive — the same reason ``heal_backend`` treats ``ensure_running``
+    that way. A confirmation that cannot answer at all reads as DEAD: recovery is
+    the safe direction (it re-enters the startup path, which re-asks the same
+    gate), where trusting a broken probe's silence would strand the client.
+    """
+    import anyio
+
+    try:
+        alive = await anyio.to_thread.run_sync(confirm_alive, port)
+    except Exception:  # noqa: BLE001  PERMANENT(a backstop must not raise)
+        _logger.warning("could not confirm the backend after a lost connection")
+        _logger.debug("confirmation detail", exc_info=True)
+        alive = False
+    if alive:
+        _logger.warning(
+            "connection to port %d broke but the backend is alive; re-bridging", port
+        )
+        return CONNECTION_RESET_CAUSE
+    _report(CONDEMNED_EVENT, port=port, cause=CONNECTION_LOST_CAUSE)
+    _logger.warning("backend on port %d confirmed gone after a lost connection", port)
+    return CONNECTION_LOST_CAUSE
+
+
 async def _one_generation(  # noqa: PLR0913  PERMANENT(function interface)
     *,
     url: str,
@@ -239,20 +302,33 @@ async def _one_generation(  # noqa: PLR0913  PERMANENT(function interface)
     port: int,
     connect: Callable[..., Awaitable[None]],
     watch: Callable[..., Awaitable[None]],
+    confirm_alive: Callable[[int], bool],
     pending: PendingCalls,
     client_write: _MessageSink,
-) -> bool:
-    """Bridge to ONE backend until it ends; True iff it ended CONFIRMED dead.
+) -> str | None:
+    """Bridge to ONE backend until it ends; the CAUSE, or None if unrecoverable.
 
     ``connect`` sets the ``armed`` event it is handed once the backend has
     genuinely answered an ``initialize``; ``watch`` (the F-820 watchdog) is held
     back until then, so a replacement's own cold start can never be condemned by
     the monitor that was watching its predecessor.
+
+    ``armed`` is also what separates the two ways the bridge leg can end. Ended
+    while armed, this backend was demonstrably serving us a moment ago, so its
+    leg breaking is an incident to confirm (F-843). Ended BEFORE it — readiness
+    never came — nothing was ever there to lose: that keeps its pre-F-838
+    answer, ``None``, so a proxy whose backend never booted still fails honestly
+    instead of grinding through a recovery budget.
+
+    Returning ``None`` is also the client's exit, but only by never being
+    reached: a client that goes away cancels this task group from OUTSIDE, and
+    that cancellation unwinds through the ``async with`` below rather than
+    producing a verdict at all.
     """
     import anyio
 
     armed = anyio.Event()
-    died = anyio.Event()
+    verdict: dict[str, str | None] = {"cause": None}
     async with anyio.create_task_group() as generation:
 
         async def bridge() -> None:
@@ -261,6 +337,12 @@ async def _one_generation(  # noqa: PLR0913  PERMANENT(function interface)
             except Exception:  # noqa: BLE001  PERMANENT(a dead backend must not crash the proxy)
                 _logger.warning("backend connection lost", exc_info=True)
             finally:
+                # F-843: the fast witness. Claim the verdict only if the monitor
+                # has not already reached its own — when the watchdog condemns,
+                # THIS is the cancellation it just fired, not an independent
+                # death — and only once the backend had genuinely served us.
+                if verdict["cause"] is None and armed.is_set():
+                    verdict["cause"] = _BRIDGE_ENDED
                 generation.cancel_scope.cancel()
 
         async def monitor() -> None:
@@ -274,16 +356,22 @@ async def _one_generation(  # noqa: PLR0913  PERMANENT(function interface)
             _report(
                 CONDEMNED_EVENT,
                 port=port,
+                cause=WATCHDOG_CAUSE,
                 strike_seconds=round(time.monotonic() - live_since, 1),
             )
-            died.set()
+            verdict["cause"] = WATCHDOG_CAUSE
             generation.cancel_scope.cancel()
 
         generation.start_soon(bridge)
         generation.start_soon(monitor)
 
+    # Unconditional and FIRST: whatever the verdict turns out to be, the calls
+    # this backend was holding are already unanswerable, and the client is owed
+    # its errors before anything slower than that runs.
     await pending.fail_all(client_write, port)
-    return died.is_set()
+    if verdict["cause"] == _BRIDGE_ENDED:
+        return await _confirm_bridge_verdict(port, confirm_alive=confirm_alive)
+    return verdict["cause"]
 
 
 async def drive(  # noqa: PLR0913  PERMANENT(function interface)
@@ -292,6 +380,7 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
     url_for: Callable[[int], str],
     connect: Callable[..., Awaitable[None]],
     watch: Callable[..., Awaitable[None]],
+    confirm_alive: Callable[[int], bool],
     replay: Callable[[], object],
     pending: PendingCalls,
     client_write: _MessageSink,
@@ -300,13 +389,21 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
 ) -> None:
     """Own the proxy's backend leg across backend GENERATIONS.
 
-    One iteration per backend. A generation that merely ends (the client went
-    away, the connection raised, readiness never came) returns at once — that is
-    the pre-F-838 behaviour, untouched. Only a CONFIRMED death heals, and only
-    while healing works and the deaths are not a flap; ``replay()`` yields the
-    client's original ``initialize`` so the next generation opens with a real
-    handshake and its own fresh ``mcp-session-id``. Returning means the caller
-    should tear down, which is what it always did.
+    One iteration per backend. A generation that ends with nothing to recover
+    from (the client went away, readiness never came) returns at once — that is
+    the pre-F-838 behaviour, untouched. Every OTHER ending is an incident with a
+    ``cause``, and every cause heals, while healing works and the deaths are not
+    a flap; ``replay()`` yields the client's original ``initialize`` so the next
+    generation opens with a real handshake and its own fresh ``mcp-session-id``.
+    Returning means the caller should tear down, which is what it always did.
+
+    The cause never branches the recovery, and that is deliberate: healing IS
+    ``ensure_running``, which reuses a live same-identity backend and spawns only
+    when there is none, so "the backend is gone" and "only our connection to it
+    is gone" already have one correct answer between them. The cause is carried
+    so the reports can tell the two incidents apart (F-827), and it is counted
+    against the SAME flap budget, because a connection that keeps breaking is a
+    proxy pretending to be alive exactly as much as a backend that keeps dying.
 
     ``generation`` exists only to be reported (F-827): a heal is far easier to
     read as "the 3rd backend under this proxy" than as a port number, and both
@@ -319,22 +416,25 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
     generation = 1
     while True:
         started = time.monotonic()
-        confirmed_dead = await _one_generation(
+        cause = await _one_generation(
             url=url_for(current),
             replay_msg=resend,
             port=current,
             connect=connect,
             watch=watch,
+            confirm_alive=confirm_alive,
             pending=pending,
             client_write=client_write,
         )
-        if not confirmed_dead:
+        if cause is None:
             return
         if time.monotonic() - started >= HEAL_STREAK_RESET_SECONDS:
             streak = 0  # that generation was a real working session
         streak += 1
         if streak > MAX_CONSECUTIVE_HEALS:
-            _logger.error("backend died %d times in a row; giving up", streak)
+            _logger.error(
+                "backend lost %d times in a row (%s); giving up", streak, cause
+            )
             _teardown(
                 port=current, generation=generation, reason="flapping", streak=streak
             )
@@ -360,5 +460,6 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
             new_port=healed,
             generation=generation,
             consecutive_heals=streak,
+            cause=cause,
         )
         current, resend = healed, replay()

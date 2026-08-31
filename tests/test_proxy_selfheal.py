@@ -17,6 +17,12 @@ What this file pins:
     starts the next generation, an unhealable one returns so the caller runs the
     pre-F-838 teardown, and a BUSY backend (the watchdog simply never returns)
     heals nothing at all.
+  * F-843: the WATCHDOG is not the only witness. Every node here used to drive a
+    fake ``watch`` — the slow-death path — while the death users actually felt
+    (a backend killed with a client call in flight) is noticed by the BRIDGE leg
+    first, ~11s before the watchdog can conclude. Those generations must run the
+    same dead-vs-busy confirmation and heal on either verdict, while a
+    never-armed generation and an outer cancellation still exit untouched.
   * ``_proxy_streams`` really re-bridges: a second transport is opened against
     the NEW port, a fresh ``initialize`` handshake is replayed on it (that is
     what mints the new ``mcp-session-id``), and a tool call issued afterwards is
@@ -198,6 +204,10 @@ def _drive_kwargs(**overrides):
         "url_for": lambda p: f"http://127.0.0.1:{p}/mcp/",
         "connect": connect,
         "watch": watch,
+        # F-843: the dead-vs-busy confirmation a bridge-first death now runs.
+        # Default "dead" — the premise of every death case below, and stating it
+        # keeps the real ~/.stealth-mcp record off the hermetic lane entirely.
+        "confirm_alive": lambda _port: False,
         "replay": lambda: None,
         "pending": proxy_selfheal.PendingCalls(),
         "client_write": _Sink(),
@@ -238,6 +248,146 @@ class TestDrive:
         assert len(generations) == 2
         assert str(PORT_A) in generations[0]
         assert str(PORT_B) in generations[1]
+
+    async def test_a_bridge_failure_confirmed_dead_heals_the_next_generation(
+        self, monkeypatch
+    ):
+        """F-843 REGRESSION PIN. When the backend dies with a client call in
+        flight the BRIDGE leg notices first — the watchdog is still inside its
+        first strike, so ``watch`` never concludes. Before the fix that
+        generation ended unconfirmed and the proxy tore down ~1s after the kill:
+        a permanent client disconnect. It must instead run the SAME dead-vs-busy
+        confirmation the watchdog uses and, on a DEAD verdict, heal."""
+        generations = []
+        breaks = [True, False]
+
+        async def connect(url, _replay, armed):
+            generations.append(url)
+            armed.set()
+            if breaks.pop(0):
+                raise ConnectionResetError("backend went away mid-call")
+            await anyio.sleep_forever()
+
+        async def watch(_port):
+            await anyio.sleep_forever()  # mid-first-strike: no verdict yet
+
+        async def fake_heal(dead_port, **_kw):
+            assert dead_port == PORT_A
+            return PORT_B
+
+        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
+
+        with anyio.move_on_after(5):
+            await proxy_selfheal.drive(**_drive_kwargs(connect=connect, watch=watch))
+
+        assert len(generations) == 2, "the bridge-first death must reach the heal"
+        assert str(PORT_B) in generations[1], "must re-bridge onto the NEW port"
+
+    async def test_a_bridge_failure_over_a_live_backend_still_converges(
+        self, monkeypatch
+    ):
+        """The other verdict. A broken leg over a backend the gate still calls
+        alive is a transient break, not a death — and it recovers through the
+        SAME path, because ``ensure_running`` reuses a live same-identity backend
+        rather than spawning beside it. One recovery, two causes."""
+        generations = []
+        breaks = [True, False]
+        asked = []
+
+        async def connect(url, _replay, armed):
+            generations.append(url)
+            armed.set()
+            if breaks.pop(0):
+                raise ConnectionResetError("the leg broke, the backend did not")
+            await anyio.sleep_forever()
+
+        async def watch(_port):
+            await anyio.sleep_forever()
+
+        async def fake_heal(dead_port, **_kw):
+            asked.append(dead_port)
+            return dead_port  # the one gate hands back the SAME live backend
+
+        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
+
+        with anyio.move_on_after(5):
+            await proxy_selfheal.drive(
+                **_drive_kwargs(
+                    connect=connect, watch=watch, confirm_alive=lambda _p: True
+                )
+            )
+
+        assert asked == [PORT_A], "recovery must still route through the one gate"
+        assert len(generations) == 2, "the client must be re-bridged, not dropped"
+        assert str(PORT_A) in generations[1], "onto the backend that is still there"
+
+    async def test_a_bridge_failure_before_readiness_is_not_an_incident(
+        self, monkeypatch
+    ):
+        """``armed`` is the discriminator's other half: a backend that never
+        answered an initialize was never ours to lose, so the pre-F-838 answer
+        stands — return at once instead of spending a recovery budget on a cold
+        start that already had its own 120s."""
+        heals = []
+        confirmations = []
+
+        async def connect(_url, _replay, _armed):
+            return  # readiness never came; armed stays unset
+
+        async def fake_heal(dead_port, **_kw):
+            heals.append(dead_port)
+            return PORT_B
+
+        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
+
+        with anyio.fail_after(5):
+            await proxy_selfheal.drive(
+                **_drive_kwargs(
+                    connect=connect,
+                    confirm_alive=lambda p: confirmations.append(p) or False,
+                )
+            )
+
+        assert heals == []
+        assert confirmations == [], "nothing was serving us; nothing to confirm"
+
+    async def test_the_client_going_away_still_exits_without_healing(self, monkeypatch):
+        """The client EOF reaches ``drive`` as a cancellation from OUTSIDE (the
+        proxy's outer task group cancels it when ``pump_client`` returns). That
+        must unwind straight through — never be caught by the confirmation and
+        never heal a backend nobody is left to talk to."""
+        heals = []
+        confirmations = []
+
+        async def connect(_url, _replay, armed):
+            armed.set()
+            await anyio.sleep_forever()
+
+        async def watch(_port):
+            await anyio.sleep_forever()
+
+        async def fake_heal(dead_port, **_kw):
+            heals.append(dead_port)
+            return PORT_B
+
+        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
+
+        async def run():
+            await proxy_selfheal.drive(
+                **_drive_kwargs(
+                    connect=connect,
+                    watch=watch,
+                    confirm_alive=lambda p: confirmations.append(p) or False,
+                )
+            )
+
+        async with anyio.create_task_group() as outer:
+            outer.start_soon(run)
+            await anyio.sleep(0.05)
+            outer.cancel_scope.cancel()  # what pump_client's return does
+
+        assert heals == [], "a departed client must not be healed for"
+        assert confirmations == [], "cancellation is not a verdict to confirm"
 
     async def test_an_unhealable_death_returns_for_the_legacy_teardown(
         self, monkeypatch

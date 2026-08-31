@@ -210,6 +210,9 @@ def _drive_kwargs(**overrides):
         "url_for": lambda p: f"http://127.0.0.1:{p}/mcp/",
         "connect": connect,
         "watch": watch,
+        # F-843: default "dead", the premise of the death cases below — and it
+        # keeps the real ~/.stealth-mcp record out of the hermetic lane.
+        "confirm_alive": lambda _port: False,
         "replay": lambda: None,
         "pending": proxy_selfheal.PendingCalls(),
         "client_write": _Sink(),
@@ -232,21 +235,86 @@ class TestCondemnationIsReported:
             return  # the F-820 confirmed-dead verdict
 
         with anyio.fail_after(5):
-            died = await proxy_selfheal._one_generation(
+            cause = await proxy_selfheal._one_generation(
                 url="http://127.0.0.1/mcp/",
                 replay_msg=None,
                 port=PORT_A,
                 connect=connect,
                 watch=watch,
+                confirm_alive=lambda _port: False,
                 pending=proxy_selfheal.PendingCalls(),
                 client_write=_Sink(),
             )
 
-        assert died
+        assert cause == proxy_selfheal.WATCHDOG_CAUSE
         assert [e[0] for e in captured] == [proxy_selfheal.CONDEMNED_EVENT]
         fields = captured[0][2]
         assert fields["port"] == PORT_A
+        assert fields["cause"] == proxy_selfheal.WATCHDOG_CAUSE
         assert "strike_seconds" in fields, "the timing is what dates the verdict"
+
+    async def test_a_bridge_first_death_is_condemned_under_its_own_cause(
+        self, captured
+    ):
+        """F-843. The same incident seen by the FAST witness must ship too, and
+        must be distinguishable: a ``connection_lost`` condemnation is a backend
+        that died under a live call, ~11s before the watchdog could have said
+        so. Same event name (the user-visible thing is identical), different
+        cause — one query still answers "how often is a backend condemned"."""
+
+        async def connect(_url, _replay, armed):
+            armed.set()
+            raise ConnectionResetError("backend went away mid-call")
+
+        async def watch(_port):
+            await anyio.sleep_forever()  # mid-first-strike: no verdict of its own
+
+        with anyio.fail_after(5):
+            cause = await proxy_selfheal._one_generation(
+                url="http://127.0.0.1/mcp/",
+                replay_msg=None,
+                port=PORT_A,
+                connect=connect,
+                watch=watch,
+                confirm_alive=lambda _port: False,
+                pending=proxy_selfheal.PendingCalls(),
+                client_write=_Sink(),
+            )
+
+        assert cause == proxy_selfheal.CONNECTION_LOST_CAUSE
+        assert [e[0] for e in captured] == [proxy_selfheal.CONDEMNED_EVENT]
+        fields = captured[0][2]
+        assert fields["port"] == PORT_A
+        assert fields["cause"] == proxy_selfheal.CONNECTION_LOST_CAUSE
+
+    async def test_a_live_backend_behind_a_broken_leg_is_never_condemned(
+        self, captured
+    ):
+        """The confirmation's whole point: a leg that broke over a backend the
+        one gate still calls alive is a reset, not a death. Condemning it would
+        make every F-827 condemnation count a lie."""
+
+        async def connect(_url, _replay, armed):
+            armed.set()
+            raise ConnectionResetError("the leg broke, the backend did not")
+
+        async def watch(_port):
+            await anyio.sleep_forever()
+
+        with anyio.fail_after(5):
+            cause = await proxy_selfheal._one_generation(
+                url="http://127.0.0.1/mcp/",
+                replay_msg=None,
+                port=PORT_A,
+                connect=connect,
+                watch=watch,
+                confirm_alive=lambda _port: True,
+                pending=proxy_selfheal.PendingCalls(),
+                client_write=_Sink(),
+            )
+
+        assert cause == proxy_selfheal.CONNECTION_RESET_CAUSE
+        assert captured == [], "nothing was condemned; nothing may be reported"
 
 
 class TestHealOutcomesAreReported:
@@ -273,6 +341,8 @@ class TestHealOutcomesAreReported:
         assert healed[0][2]["old_port"] == PORT_A
         assert healed[0][2]["new_port"] == PORT_B
         assert healed[0][2]["generation"] == 2
+        # F-843: and WHICH witness saw the death this heal answered.
+        assert healed[0][2]["cause"] == proxy_selfheal.WATCHDOG_CAUSE
 
     async def test_an_unhealable_backend_ships_the_user_visible_teardown(
         self, captured, monkeypatch
@@ -315,16 +385,42 @@ class TestHealOutcomesAreReported:
             teardowns[0][2]["consecutive_heals"] > proxy_selfheal.MAX_CONSECUTIVE_HEALS
         )
 
-    async def test_a_backend_that_merely_ended_reports_nothing(
+    async def test_a_backend_that_never_became_ready_reports_nothing(
         self, captured, monkeypatch
     ):
-        """The client going away is not a disconnect worth an event."""
+        """SOFT golden, updated deliberately with F-843.
 
-        async def connect(_url, _replay, armed):
-            armed.set()
+        This node used to arm the generation and then let ``connect`` return,
+        asserting silence — which is exactly the shape F-843 turned out to be:
+        an armed backend whose leg ends IS an incident, and reporting nothing
+        was the defect, not the contract. What the node was really protecting is
+        that a generation with nothing to lose stays silent, so it now states
+        that premise properly: readiness never came, ``armed`` never set."""
+
+        async def connect(_url, _replay, _armed):
+            return  # never armed: no backend was ever serving this proxy
 
         with anyio.fail_after(5):
             await proxy_selfheal.drive(**_drive_kwargs(connect=connect))
+
+        assert captured == []
+
+    async def test_the_client_going_away_reports_nothing(self, captured, monkeypatch):
+        """The client's own exit is not a backend disconnect. It reaches
+        ``drive`` as a cancellation from the proxy's OUTER task group, so no
+        verdict is ever reached — and nothing may be shipped."""
+
+        async def connect(_url, _replay, armed):
+            armed.set()
+            await anyio.sleep_forever()
+
+        async def run():
+            await proxy_selfheal.drive(**_drive_kwargs(connect=connect))
+
+        async with anyio.create_task_group() as outer:
+            outer.start_soon(run)
+            await anyio.sleep(0.05)
+            outer.cancel_scope.cancel()
 
         assert captured == []
 
