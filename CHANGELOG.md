@@ -18,10 +18,12 @@ round numbers:
   An element with more than 25 animations *of its own* does not exist in
   practice — that cap is really a subtree bound — and 20 keyframes is four times
   over the `0/25/50/75/100` vocabulary, while keyframes were 75-83% of every
-  oversized payload measured. Both are overridable per call
-  (`max_animations` / `max_keyframes`); they are module constants and
-  deliberately **not** `STEALTH_MCP_*` env knobs, being payload shape rather
-  than deployment config.
+  oversized payload measured. Both are overridable per call as
+  `max_animations` / `max_keyframes` — but only on the engine path,
+  `clone_element_complete(extraction_options={"animations": {...}})`, and not as
+  arguments to the two `extract_element_animations` tools (see the known
+  limitation below). They are module constants and deliberately **not**
+  `STEALTH_MCP_*` env knobs, being payload shape rather than deployment config.
 * **The edit protocol is stated once for the payload** instead of once per
   recipe. The `how` sentence and `replace_placeholder` were 6,960 bytes of a
   single 24,759-byte record — 36% of its `edits` block — repeated verbatim. They
@@ -36,9 +38,11 @@ round numbers:
   another would otherwise conclude the second is not editable.
 
 Truncation stays loud, and now fires far more often, so each warning says how
-many were dropped and what to pass to raise the cap. A truncated list also no
-longer reports stagger groups — a stagger inferred from an arbitrary prefix of
-the animations is an artifact of the cap, not a fact about the page.
+many were dropped and names a remedy the reader can actually act on: narrow the
+selector, which works from every path, and — where the caller is on the engine
+path — raise the cap. A truncated list also no longer reports stagger groups; a
+stagger inferred from an arbitrary prefix of the animations is an artifact of
+the cap, not a fact about the page.
 
 A test pins a busy page's payload under a stated byte budget, so the sizing
 cannot silently regress the way it did here.
