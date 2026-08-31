@@ -76,7 +76,50 @@
           "total_ms": "infinite"
         },
         "editable": false,
-        "edits": [],
+        "edits": [
+          {
+            "confidence": "low",
+            "current": "2s",
+            "knob": "duration",
+            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+          },
+          {
+            "confidence": "low",
+            "current": "0s",
+            "knob": "delay",
+            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+          },
+          {
+            "confidence": "low",
+            "current": "ease-in-out",
+            "knob": "easing",
+            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+          },
+          {
+            "confidence": "low",
+            "current": "infinite",
+            "knob": "iterations",
+            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+          },
+          {
+            "confidence": "low",
+            "current": "pulse",
+            "knob": "name",
+            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+          },
+          {
+            "confidence": "low",
+            "current": "scale(1)",
+            "knob": "keyframe[0.0].transform",
+            "note": "the author's text for this rule is not readable, so no find literal is offered; open the rule at source_ref and edit it there"
+          },
+          {
+            "confidence": "low",
+            "current": "scale(1.08)",
+            "knob": "keyframe[1.0].transform",
+            "note": "the author's text for this rule is not readable, so no find literal is offered; open the rule at source_ref and edit it there"
+          }
+        ],
         "id": "anim-0",
         "keyframes": [
           {

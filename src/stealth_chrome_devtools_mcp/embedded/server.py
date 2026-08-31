@@ -1931,15 +1931,18 @@ async def extract_element_animations(
     Returns:
         Dict[str, Any]: `schema_version: 2`, `has_motion`, `overview` prose,
         `animations[]`, `transitions[]`, `interactions[]` (conflicts + remedies),
-        `sources[]` (href + rule path + cssText), `transforms`, `warnings[]`.
-        Per animation: `summary`, `kind`, `target`, `semantics`, `trigger`,
-        `timeline` (time|scroll|view — duration edits are IGNORED on
-        scroll/view), `timing` (each duration a `*_ms` number beside its `*_raw`
-        token; `iterations` may be "infinite"), `derived` (cycle_ms, active
-        window, total_ms, stagger_group — no arithmetic needed), `keyframes[]`
-        (numeric `offset` + parsed properties), `checkpoints[]` (declared values,
-        never interpolated), `edits[]` (per knob: file + a `find` literal verified
-        unique in its rule). Undecidable fields are OMITTED, never guessed.
+        `sources[]` (href, rule path, author text), `transforms`, `warnings[]`.
+        Per animation: `summary`, `kind`, `target`, `trigger`, `semantics` (each
+        a `{value, confidence}` claim), `timeline` (time|scroll|view — duration
+        edits are IGNORED on scroll/view), `timing` (`*_ms` numbers beside
+        `*_raw` tokens; `iterations` may be "infinite"), `derived` (cycle_ms,
+        active window, total_ms, stagger_group), `keyframes[]` (numeric `offset`
+        + parsed properties), `checkpoints[]` (declared values, never
+        interpolated), `edits[]` (per knob: the author's own declaration as
+        `find`, the one `token` in it this knob owns, and `replace` — the same
+        declaration with just that token swapped for `replace_placeholder`, so
+        applying it cannot drop the rest; no `find` means a pointer, not an
+        edit). Undecidable fields are OMITTED, never guessed.
     """
     tab = await _require_tab(browser_manager, instance_id)
     return await _with_cdp_timeout(

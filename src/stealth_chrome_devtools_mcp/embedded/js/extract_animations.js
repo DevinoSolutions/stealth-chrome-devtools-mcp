@@ -36,6 +36,7 @@
     const warnings = [];
     const sources = [];
     const rawSources = {};
+    const heldKeyframes = [];
     const capsHit = {};
     let sourceSeq = 0;
     let rulesScanned = 0;
@@ -268,9 +269,10 @@
             const path = rulePath.concat([i]);
             const kfRules = rule.cssRules;
             if (rule.type === 7 || (rule.name && kfRules && !rule.selectorText && rule.appendRule)) {
-                // CSSKeyframesRule
-                const srcId = addSource('keyframes', sheet, sheetIdx, path, atContext,
-                    rule.name, null, rule.cssText || '');
+                // CSSKeyframesRule. HELD, not emitted: a document can carry
+                // dozens of @keyframes blocks with full cssText and only a
+                // couple of them reach this element. They are filtered against
+                // the referenced names once the live animations are known.
                 const frames = [];
                 for (let k = 0; k < kfRules.length; k++) {
                     const kf = kfRules[k];
@@ -281,7 +283,11 @@
                         composite: kf.style ? (kf.style.getPropertyValue('animation-composition') || '') : ''
                     });
                 }
-                facts.keyframe_rules.push({ name: rule.name, source_ref: srcId, keyframes: frames });
+                heldKeyframes.push({
+                    name: rule.name, sheet: sheet, sheetIdx: sheetIdx,
+                    path: path, at: atContext.slice(),
+                    cssText: rule.cssText || '', frames: frames
+                });
             } else if (rule.style && rule.selectorText !== undefined) {
                 ruleFacts(rule, sheet, sheetIdx, path, atContext);
             } else if (kfRules) {
@@ -415,6 +421,47 @@
                 facts.waapi.push(rec);
             }
         }
+    }
+
+    // ── @keyframes: emit only the blocks anything here could reference ──
+    //
+    // Every @keyframes block in the document used to be shipped with its full
+    // cssText, so a page with a library's animation kit paid for all of it on
+    // every call. The referenced set is deliberately generous -- every token of
+    // every animation-name/animation declaration we captured -- because keeping
+    // one block too many costs bytes while dropping one costs an answer.
+
+    const referenced = Object.create(null);
+    function referenceAll(value) {
+        String(value || '').split(',').forEach(function (item) {
+            item.trim().split(/\s+/).forEach(function (token) {
+                if (token) referenced[token] = true;
+            });
+        });
+    }
+    referenceAll(cs('animation-name'));
+    facts.waapi.forEach(function (rec) { referenceAll(rec.animation_name); });
+    facts.matched_rules.concat(facts.candidate_rules).forEach(function (rec) {
+        const declares = rec.declares || {};
+        referenceAll(declares['animation-name']);
+        referenceAll(declares['animation']);
+    });
+
+    let omitted = 0;
+    for (let i = 0; i < heldKeyframes.length; i++) {
+        const held = heldKeyframes[i];
+        if (!referenced[held.name]) { omitted++; continue; }
+        const srcId = addSource('keyframes', held.sheet, held.sheetIdx, held.path,
+            held.at, held.name, null, held.cssText);
+        facts.keyframe_rules.push({
+            name: held.name, source_ref: srcId, keyframes: held.frames
+        });
+    }
+    if (omitted) {
+        warn('unreferenced_keyframes_omitted',
+            omitted + ' @keyframes block(s) in this document are not referenced by '
+            + 'anything on or under this element and were not captured',
+            { omitted: omitted });
     }
 
     return JSON.stringify(facts);

@@ -41,19 +41,20 @@ if TYPE_CHECKING:
 import re
 
 from stealth_chrome_devtools_mcp.embedded.animation_advice import (
-    EditTarget,
     apply_stagger_groups,
-    applying_rule,
-    build_edits,
     build_interactions,
     build_overview,
     build_pending,
+    summarize,
+    trigger_from_rules,
+)
+from stealth_chrome_devtools_mcp.embedded.animation_edits import (
+    applying_rule,
+    build_edits,
     build_transition_edits,
     rule_declaring,
     source_by_id,
     source_span,
-    summarize,
-    trigger_from_rules,
 )
 from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     Derived,
@@ -127,6 +128,16 @@ def warn(record: Record, code: str, message: str, detail: Record | None = None) 
     warnings: list[Record] = as_rows(existing) if isinstance(existing, list) else []
     warnings.append({"code": code, "message": message, "detail": detail or {}})
     record["warnings"] = warnings
+
+
+def usable_edits(record: Record) -> bool:
+    """Does this record carry a recipe a model can actually APPLY?
+
+    A degraded recipe is a rule pointer, not an edit: it has no ``find``. Only
+    counting the applicable ones keeps ``editable`` honest — a list full of
+    pointers is exactly the case that has to say ``editable: false`` and why.
+    """
+    return any("find" in edit for edit in as_rows(record.get("edits")))
 
 
 def derive_timing(timing: Record) -> Record:
@@ -383,7 +394,6 @@ def build_animations(facts: Facts) -> tuple[list[Record], bool]:
     ]
     truncated = len(names) > ANIMATION_CAP
     rule = applying_rule(facts)
-    rule_source = source_by_id(facts, rule.get("source_ref") if rule else None)
     records: list[Record] = []
     for index, name in enumerate(names[:ANIMATION_CAP]):
         record: Record = {
@@ -397,7 +407,6 @@ def build_animations(facts: Facts) -> tuple[list[Record], bool]:
         source_refs = [rule.get("source_ref")] if rule else []
         warnings: list[Record] = []
         keyframe_rule = keyframe_rule_for(facts, name)
-        keyframe_source = None
         if keyframe_rule is None:
             # M7: empty keyframes with no warning reads as "no keyframes exist",
             # a false negative that makes a model ADD a duplicate block.
@@ -416,7 +425,6 @@ def build_animations(facts: Facts) -> tuple[list[Record], bool]:
             keyframes, kf_truncated = resolve_keyframes(keyframe_rule)
             record["keyframes"] = keyframes
             source_refs.append(keyframe_rule.get("source_ref"))
-            keyframe_source = source_by_id(facts, keyframe_rule.get("source_ref"))
             if kf_truncated:
                 warnings.append(
                     {
@@ -426,13 +434,7 @@ def build_animations(facts: Facts) -> tuple[list[Record], bool]:
                     }
                 )
         record["warnings"] = warnings
-        record["edits"] = build_edits(
-            record,
-            rule,
-            EditTarget(rule_source, source_span(facts, rule_source)),
-            EditTarget(keyframe_source, source_span(facts, keyframe_source)),
-            index,
-        )
+        record["edits"] = build_edits(facts, record, index)
         record["source_refs"] = [ref for ref in source_refs if ref]
         records.append(record)
     return records, truncated
@@ -450,21 +452,22 @@ def attach_css_edits(facts: Facts, record: Record) -> None:
     name = as_text(record.get("name"))
     pseudo = as_text(as_obj(record.get("target")).get("pseudo_element"))
     rule = rule_declaring(facts, name, pseudo)
-    rule_source = source_by_id(facts, rule.get("source_ref") if rule else None)
     keyframe_rule = keyframe_rule_for(facts, name)
-    keyframe_source = source_by_id(
-        facts, keyframe_rule.get("source_ref") if keyframe_rule else None
-    )
     if keyframe_rule is not None and not as_rows(record.get("keyframes")):
         record["keyframes"], _ = resolve_keyframes(keyframe_rule)
-    record["edits"] = build_edits(
-        record,
-        rule,
-        EditTarget(rule_source, source_span(facts, rule_source)),
-        EditTarget(keyframe_source, source_span(facts, keyframe_source)),
-    )
+    # The declaring rule never MATCHES the element (it is on ::before, or on a
+    # descendant), so the cascade scope is the one rule we identified rather
+    # than the element's matched rules.
+    record["edits"] = build_edits(facts, record, 0, [rule] if rule else [])
     record["source_refs"] = [
-        source.get("id") for source in (rule_source, keyframe_source) if source
+        source.get("id")
+        for source in (
+            source_by_id(facts, rule.get("source_ref") if rule else None),
+            source_by_id(
+                facts, keyframe_rule.get("source_ref") if keyframe_rule else None
+            ),
+        )
+        if source
     ]
 
 
@@ -633,8 +636,6 @@ def build_transitions(facts: Facts) -> list[Record]:
     easings = parts("transition_timing_function")
     behaviors = parts("transition_behavior")
     rule = applying_rule(facts, "transition")
-    rule_source = source_by_id(facts, rule.get("source_ref") if rule else None)
-    target = EditTarget(rule_source, source_span(facts, rule_source))
     records: list[Record] = []
     for index, prop in enumerate(properties):
         if not prop or prop == "none":
@@ -663,10 +664,10 @@ def build_transitions(facts: Facts) -> list[Record]:
         if behavior:
             record["behavior"] = behavior
         record["trigger"] = trigger_from_rules(facts, {prop})
-        record["edits"] = build_transition_edits(record, rule, target, index)
+        record["edits"] = build_transition_edits(facts, record, index)
         if rule is not None:
             record["source_refs"] = [rule.get("source_ref")]
-        if not as_rows(record.get("edits")):
+        if not usable_edits(record):
             # Mandatory on any record with no usable recipes, whatever its kind:
             # an absent verdict reads as "editable" (R10).
             record["editable"] = False
@@ -867,7 +868,7 @@ def analyze(facts: Facts, options: Record | None = None) -> Record:
     for animation in animations:
         _attach_trigger(facts, animation)
         animation["summary"] = summarize(animation)
-        if not as_rows(animation.get("edits")) and "editable" not in animation:
+        if not usable_edits(animation) and "editable" not in animation:
             # Never hand back an empty edits list with no explanation: silence
             # reads as "nothing to do here", which is the failure M11 forbids.
             animation["editable"] = False

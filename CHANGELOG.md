@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### Fixed — an edit recipe now names the token to change and the rule that wins (F-852)
+
+Two defects that compounded, both worse than a missing recipe.
+
+**Every timing knob got the same `find`.** For a rule written as
+
+    animation: pulse 2.4s cubic-bezier(.68,-0.55,.27,1.55) 0.3s infinite alternate both;
+
+the duration, delay, easing, iteration-count and name recipes all carried that
+entire declaration as `find`, each at `confidence: "high"`, differing only in
+`current`. A model told "find this, replace it with the new duration" turns
+`.card { animation: fade 2s ease; }` into `.card { 3s; }` — a file-corrupting
+instruction delivered at the highest confidence the schema has.
+
+A recipe now carries three things instead of one: the author's whole declaration
+as `find`, the single `token` inside it that this knob owns, and `replace` — the
+same declaration with only that token swapped for `replace_placeholder`
+(`{{NEW_VALUE}}`). Applying it cannot drop the rest of the declaration, because
+the rest is carried in the replacement. Times are read positionally, the way CSS
+defines the shorthand (first `<time>` is the duration, second is the delay), and
+the identified token is checked against what the browser computed before it is
+offered. Anything ambiguous — an animation literally named `ease`, say — degrades
+rather than rewriting the wrong part of a working declaration.
+
+**The recipe could point at a rule that cannot change the rendering.** The rule
+was chosen as the last document-order rule declaring anything `animation*`,
+ignoring specificity and `!important`, while `current` came from computed style.
+With `.card { animation: fade 2s ease }` before `#hero { animation-duration: 5s }`
+it reported `current: "5s"` with a `find` inside `.card`. Selection is now
+per knob and follows the cascade: `!important`, then specificity, then document
+order. Two situations degrade instead of guessing — a functional pseudo-class
+(`:is`/`:where`/`:not`/`:has`) whose specificity depends on its argument, and a
+winner whose declared value disagrees with what the element computes (which means
+an inline style, a UA sheet or an unreadable stylesheet is in charge). Recipes
+also carry `rule_selector` and `at_rule_context`, so the rule-scoped
+`find_unique_in_rule` claim can actually be checked.
+
+Transitions get the same treatment rather than an `editable: false`, and the
+collector no longer ships every `@keyframes` block in the document — only those
+something on or under the element references.
+
+**Breaking:** the recipe shape gains `token`, `replace`, `replace_placeholder`,
+`how`, `rule_selector` and `at_rule_context`; the prose note "change the X
+component within `find`" is gone, superseded by `token`/`replace`. The
+`extract_element_animations` docstring no longer describes `find` as "verified
+unique in its rule" — that claim only ever held for the recipes reporting
+`find_unique_in_rule: true`.
+
 ### Changed — every derived animation field now carries the confidence it was derived with (F-850)
 
 Ten separately reported defects in the animations schema shared one root cause:

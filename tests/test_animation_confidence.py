@@ -31,6 +31,7 @@ MODULES = (
     "animation_facts.py",
     "animation_advice.py",
     "animation_analysis.py",
+    "animation_edits.py",
 )
 
 
@@ -228,6 +229,8 @@ DECIDERS = frozenset(
         "build_pending",
         "_attach_trigger",
         "locate",
+        "winning_rule",
+        "token_verdict",
         "stagger_group",
     }
 )

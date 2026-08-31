@@ -288,6 +288,37 @@ def split_at_top_level(value: str, separators: str) -> list[str]:
     return parts
 
 
+# :is/:where/:not/:has take the specificity of their ARGUMENT, which we did not
+# compute. Every other functional pseudo-class (:nth-child, :lang) is plain
+# class-level, so only these four make a selector undecidable.
+_ARGUMENT_SPECIFICITY = re.compile(r":(?:is|where|not|has)\(", re.IGNORECASE)
+
+
+def specificity(selector: str) -> tuple[int, int, int] | None:
+    """``(ids, classes, types)`` for a selector, or ``None`` when undecidable.
+
+    Used to answer "which rule actually decides this property" rather than the
+    retired "whichever rule came last" (R2). ``None`` is a real answer: guessing
+    a specificity decides a cascade we did not compute, and a recipe that points
+    at a rule which cannot change the rendering is worse than no recipe.
+    """
+    text = selector or ""
+    if not text or _ARGUMENT_SPECIFICITY.search(text):
+        return None
+    ids = len(re.findall(r"#[\w-]+", text))
+    elements = len(re.findall(r"::[\w-]+", text))
+    # Pseudo-ELEMENTS are type-level, so remove them before counting the
+    # class-level tokens, or ``::before`` would also read as a pseudo-class.
+    body = re.sub(r"::[\w-]+", " ", text)
+    classes = (
+        len(re.findall(r"\.[\w-]+", body))
+        + len(re.findall(r"\[[^\]]*\]", body))
+        + len(re.findall(r"(?<![\w:]):[\w-]+(?:\([^)]*\))?", body))
+    )
+    elements += len(re.findall(r"(?:^|[\s>+~,])([a-zA-Z][\w-]*)", body))
+    return ids, classes, elements
+
+
 def own_compound(selector: str) -> str:
     """The RIGHTMOST compound of a selector — the only part that describes this
     element. ``.gallery .card`` is a claim about a ``.card`` inside a

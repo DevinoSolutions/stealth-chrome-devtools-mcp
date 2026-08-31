@@ -171,7 +171,17 @@ TWO_ANIMATIONS = facts(
                 "animation-duration: 2s, 3s; "
                 "transition: opacity 0.3s ease-in-out; }"
             ),
+            # What ``style.getPropertyValue`` reports for the rule: the
+            # shorthand in Chrome's serialization (name last, decimals expanded,
+            # `running` injected) ALONGSIDE the longhands the author also wrote.
+            # The shorthand has to be here for the same reason the defect
+            # existed: it is the only declaration carrying easing/delay/
+            # iterations, and a recipe for those has to address it.
             "declares": {
+                "animation": (
+                    "2s cubic-bezier(0.34, 1.56, 0.64, 1) 0.2s infinite alternate "
+                    "both running pulse, 3s linear 0.2s 2 normal both running spin"
+                ),
                 "animation-name": "pulse, spin",
                 "animation-duration": "2s, 3s",
                 "transition": "opacity 0.3s ease-in-out",
@@ -441,14 +451,19 @@ class TestSourcesAndRecipes:
 
     async def test_a_shorthand_only_knob_points_at_the_authored_shorthand(self):
         """`easing` has no longhand here, so the recipe addresses the shorthand
-        the author wrote -- name first, bare decimals, tight bezier -- and says
-        which component to change."""
+        the author wrote -- name first, bare decimals, tight bezier -- and names
+        the one token inside it that this knob owns (F-852)."""
         result = await extract(TWO_ANIMATIONS)
         easing = only(result["animations"][0]["edits"], knob="easing")
         assert easing["find"] in AUTHOR_SOURCE
         assert "pulse 2s cubic-bezier(.34,1.56,.64,1)" in easing["find"]
         assert "running" not in easing["find"]
-        assert "component" in easing["note"]
+        # Superseded the prose "change the easing component within find": a
+        # sentence is not something a model can apply mechanically, and the four
+        # other knobs carried the identical sentence with the identical find.
+        assert easing["token"] == "cubic-bezier(.34,1.56,.64,1)"
+        assert easing["replace"].count("{{NEW_VALUE}}") == 1
+        assert "pulse 2s {{NEW_VALUE}}" in easing["replace"]
 
     async def test_a_linked_sheet_degrades_to_a_pointer(self):
         """No author bytes (we do not re-fetch, Q5) means no find literal --

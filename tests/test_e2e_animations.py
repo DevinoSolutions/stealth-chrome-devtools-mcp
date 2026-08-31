@@ -288,6 +288,30 @@ async def test_every_find_literal_occurs_in_the_author_source(fixture_app_server
             "cubic-bezier(.68,-0.55,.27,1.55)" in duration["find"]
         )  # tight, as authored
 
+        # F-852/R1 over the real transport: each knob owns ONE token, and
+        # applying a recipe mechanically preserves the rest of the declaration.
+        # Over-the-wire is where this matters most -- the hermetic tier cannot
+        # prove that Chrome's own serialization is what we degraded away from.
+        assert duration["token"] == "2.4s"
+        delay = only(pulse["edits"], knob="delay")
+        assert delay["token"] == "0.3s", "the SECOND <time> is the delay"
+        timing_knobs = ["duration", "delay", "easing", "iterations", "name"]
+        # Scoped to the timing knobs on purpose: a `0%,50%` keyframe selector
+        # produces two RECORDS that genuinely share one declaration, so they
+        # share one edit. The defect was five DIFFERENT knobs sharing one.
+        timing = [only(pulse["edits"], knob=knob) for knob in timing_knobs]
+        assert len({e["replace"] for e in timing}) == len(timing), (
+            "two timing knobs share a replacement, so at least one rewrites the "
+            "wrong part of the declaration"
+        )
+        applied = author_text.replace(
+            duration["find"],
+            duration["replace"].replace(duration["replace_placeholder"], "3s"),
+        )
+        assert "animation: torture-pulse 3s" in applied
+        for survivor in ("cubic-bezier(.68,-0.55,.27,1.55)", "0.3s", "infinite"):
+            assert survivor in applied, f"applying the duration edit lost {survivor}"
+
         # Keyframe declarations keep the author's bare decimals.
         opacity = only(pulse["edits"], knob="keyframe[0.0].opacity")
         assert opacity["find"] == "opacity: .8"
