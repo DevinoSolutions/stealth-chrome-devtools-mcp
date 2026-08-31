@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import os
 import time
 import uuid
@@ -1415,14 +1416,11 @@ class BrowserManager:
         await self.touch_instance(instance_id)
 
     async def get_page_state(self, instance_id: str) -> PageState | None:
-        """
-        Get complete page state for an instance.
+        """The instance's full page state, or ``None`` when it has no tab.
 
-        Args:
-            instance_id (str): The ID of the browser instance.
-
-        Returns:
-            Optional[PageState]: The page state if available, else None.
+        Raises on a collection failure — ``get_instance_state`` is what turns
+        that into its ``partial`` record. Every read below takes the shape
+        nodriver really answers with; see the ``JSON.stringify`` note (F-844).
         """
         tab = await self.get_tab(instance_id)
         if not tab:
@@ -1433,7 +1431,9 @@ class BrowserManager:
             title = await tab.evaluate("document.title")
             ready_state = await tab.evaluate("document.readyState")
 
-            cookies = await tab.send(uc.cdp.network.get_cookies())
+            # nodriver's wrapper already deserializes: a ``list[Cookie]``, never
+            # a ``{"cookies": [...]}`` envelope (F-844). PageState wants dicts.
+            cookies = await tab.send(uc.cdp.network.get_cookies()) or []
 
             local_storage = {}
             session_storage = {}
@@ -1463,20 +1463,22 @@ class BrowserManager:
                     f"Storage access unavailable for {instance_id}: {e}",
                 )
 
-            viewport = await tab.evaluate("""
-                ({
-                    width: window.innerWidth,
-                    height: window.innerHeight,
-                    devicePixelRatio: window.devicePixelRatio
-                })
-            """)
+            # ``JSON.stringify``, not a bare object literal: nodriver always
+            # sends deep serialization options, so an object comes back as
+            # ``[[key, {type,value}], …]`` — return_by_value cannot undo it.
+            viewport = json.loads(
+                await tab.evaluate(
+                    "JSON.stringify({width:innerWidth,height:innerHeight,"
+                    "devicePixelRatio})"
+                )
+            )
 
             return PageState(
                 instance_id=instance_id,
                 url=url,
                 title=title,
                 ready_state=ready_state,
-                cookies=cookies.get("cookies", []),
+                cookies=[c.to_json() for c in cookies],
                 local_storage=local_storage,
                 session_storage=session_storage,
                 viewport=viewport,

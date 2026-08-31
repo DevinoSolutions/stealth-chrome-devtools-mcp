@@ -110,6 +110,28 @@ RED evidence (pre-fix, same pins): the stored tab is still the `FakeAttachedTab`
 for the closed target — `assert <FakeAttachedTab object …> is None` and
 `_get_tab_target_id(active) == 'T-other'` failing with `'T-main'`.
 
+GREEN evidence over the real path (real headless Chrome, real stdio, isolated
+`gate_workspace` backend on a free port, fixture app): open a second tab,
+`switch_tab` to it, confirm `get_active_tab` names it, `close_tab` it —
+
+```
+F-845 execute_script after closing the ACTIVE tab:
+  {'success': True, 'result': 'fixture-index-page', 'error': None}
+F-845 get_active_tab after close:
+  {'tab_id': 'C3A2BCD…', 'url': 'http://127.0.0.1:16568/index.html',
+   'title': 'fixture-index-page', 'type': 'page'}
+```
+
+— i.e. the two calls that answered `server rejected WebSocket connection:
+HTTP 500` and a stale tab id on 2.0.8 now answer from the surviving tab.
+
+Note what the existing coverage could not have caught: `test_tabs_lifecycle`
+(`tests/test_e2e_interaction.py`) and the release gate's soak churn both close a
+tab, but the E2E node deliberately switches **away** first, and the soak's
+post-close assertions (`isinstance(inst_state, dict)`,
+`active.get("tab_id")`) are satisfied by a stale pointer. Closing the tab that
+is *currently active* and then asserting *which* tab answers is the gap.
+
 ## Residuals (deliberately out of scope)
 
 * **The message itself.** `server rejected WebSocket connection: HTTP 500` still
