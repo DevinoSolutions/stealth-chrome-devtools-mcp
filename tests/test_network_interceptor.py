@@ -11,13 +11,17 @@ import base64
 import json
 
 import nodriver as uc
+import pytest
 
+from fakes import FakeTab
 from stealth_chrome_devtools_mcp.embedded.models import NetworkRequest, NetworkResponse
 from stealth_chrome_devtools_mcp.embedded.network_interceptor import (
     NetworkInterceptor,
     is_internal_url,
     resource_type_of,
+    to_cookie_same_site,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 
 def _req(rid, url, method="GET", post_data=None, resource_type="XHR", iid="i1"):
@@ -650,3 +654,109 @@ class TestInternalUrlExclusion:
         assert filters["exclude"] == ["Image"]
         assert filters["capture_bodies"] is True
         assert filters["capture_internal_urls"] is True
+
+
+# ---------------------------------------------------------------------------
+# F-821 — set_cookie's ``same_site`` must reach CDP as a CookieSameSite enum
+# ---------------------------------------------------------------------------
+
+
+class TestCookieSameSite:
+    """``cdp.network.set_cookie`` serialises ``same_site`` with ``.to_json()``
+    while it builds its request frame, so a bare ``"Lax"`` string blows the
+    command up with ``'str' object has no attribute 'to_json'``. The tool layer
+    takes the value as a string, so the one CDP boundary must convert it.
+
+    The doubles here are the library's own: the enum members come from
+    ``nodriver.cdp.network.CookieSameSite`` and the frame is the one the real
+    command generator yields (``FakeTab.send`` advances it, swallowing nothing).
+    """
+
+    def test_documented_names_map_to_the_real_enum(self):
+        assert to_cookie_same_site("Strict") is uc.cdp.network.CookieSameSite.STRICT
+        assert to_cookie_same_site("Lax") is uc.cdp.network.CookieSameSite.LAX
+        assert to_cookie_same_site("None") is uc.cdp.network.CookieSameSite.NONE
+
+    def test_accepts_the_documented_names_case_insensitively(self):
+        assert to_cookie_same_site("lax") is uc.cdp.network.CookieSameSite.LAX
+        assert to_cookie_same_site("STRICT") is uc.cdp.network.CookieSameSite.STRICT
+        assert to_cookie_same_site("nOnE") is uc.cdp.network.CookieSameSite.NONE
+
+    def test_already_typed_enum_passes_through(self):
+        member = uc.cdp.network.CookieSameSite.STRICT
+        assert to_cookie_same_site(member) is member
+
+    def test_invalid_value_raises_tool_error_listing_the_valid_names(self):
+        with pytest.raises(ToolError) as excinfo:
+            to_cookie_same_site("SameSite=Lax")
+        message = str(excinfo.value)
+        assert "SameSite=Lax" in message
+        for name in ("Strict", "Lax", "None"):
+            assert name in message
+
+    async def test_set_cookie_sends_the_cdp_same_site_enum(self):
+        tab = FakeTab()
+        ni = NetworkInterceptor()
+        assert await ni.set_cookie(
+            tab,
+            {
+                "name": "sid",
+                "value": "abc",
+                "url": "https://fake.test/page",
+                "path": "/",
+                "secure": True,
+                "http_only": False,
+                "same_site": "Lax",
+            },
+        )
+        params = tab.cdp_frames[0]["params"]
+        assert params["sameSite"] == uc.cdp.network.CookieSameSite.LAX.to_json()
+
+    async def test_set_cookie_rejects_an_invalid_same_site(self):
+        ni = NetworkInterceptor()
+        with pytest.raises(ToolError, match=r"Strict"):
+            await ni.set_cookie(
+                FakeTab(),
+                {"name": "s", "value": "a", "url": "https://x/", "same_site": "yes"},
+            )
+
+    async def test_set_cookie_without_same_site_still_works(self):
+        # Regression: the omitted-attribute path must stay untouched.
+        tab = FakeTab()
+        ni = NetworkInterceptor()
+        assert await ni.set_cookie(
+            tab, {"name": "sid", "value": "abc", "url": "https://fake.test/page"}
+        )
+        assert "sameSite" not in tab.cdp_frames[0]["params"]
+
+    async def test_set_cookie_does_not_mutate_the_callers_dict(self):
+        cookie = {
+            "name": "sid",
+            "value": "abc",
+            "url": "https://fake.test/page",
+            "same_site": "Lax",
+        }
+        await NetworkInterceptor().set_cookie(FakeTab(), cookie)
+        assert cookie["same_site"] == "Lax"
+
+    async def test_set_cookie_tool_body_reaches_cdp_with_the_enum(
+        self, call_tool, patched_server
+    ):
+        """The whole tool path, not just the boundary: server.py's ``set_cookie``
+        builds the cookie dict from a plain string argument."""
+        from fakes import FakeBrowserManager
+
+        tab = FakeTab(url="https://fake.test/page")
+        srv = patched_server(
+            browser_manager=FakeBrowserManager(tabs={"i1": tab}),
+            network_interceptor=NetworkInterceptor(),
+        )
+        assert await call_tool(
+            srv,
+            "set_cookie",
+            instance_id="i1",
+            name="sid",
+            value="abc",
+            same_site="Lax",
+        )
+        assert tab.cdp_frames[0]["params"]["sameSite"] == "Lax"

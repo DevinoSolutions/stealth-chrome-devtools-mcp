@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — `set_cookie(same_site=…)` could not set a cookie at all (F-821)
+
+Every `set_cookie` call that supplied `same_site` failed with
+`Failed to set cookie: 'str' object has no attribute 'to_json'`; omitting the
+attribute worked, which is why the tool looked healthy. nodriver's CDP commands
+build their request frame while being advanced and serialise `same_site` with
+`.to_json()`, so the plain string an MCP argument carries killed the command
+before it reached Chrome. The one CDP cookie boundary
+(`network_interceptor.to_cookie_same_site`) now converts it to the real
+`cdp.network.CookieSameSite` enum, accepting `Strict` / `Lax` / `None` in any
+case and raising a `ToolError` that names the valid values for anything else.
+
+Fixes `STEALTH-CHROME-DEVTOOLS-MCP-3P` (9 events).
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)

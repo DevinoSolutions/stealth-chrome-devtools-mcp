@@ -13,6 +13,7 @@ from nodriver import Tab
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.models import NetworkRequest, NetworkResponse
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 # URL schemes Chrome uses for its OWN traffic, not the page's (F-803). A fresh
@@ -66,6 +67,31 @@ def resource_type_of(event) -> str | None:
     # ResourceType is an enum.Enum in nodriver; tolerate a bare string too.
     value = getattr(raw, "value", raw)
     return str(value) if value is not None else None
+
+
+def to_cookie_same_site(
+    value: str | uc.cdp.network.CookieSameSite,
+) -> uc.cdp.network.CookieSameSite:
+    """Return a cookie's ``same_site`` as the CDP ``CookieSameSite`` enum (F-821).
+
+    THE one home for this conversion, because this module is the one CDP cookie
+    boundary. ``cdp.network.set_cookie`` serialises the argument with
+    ``.to_json()`` while it builds its request frame, so a bare ``"Lax"`` string
+    — the only shape the MCP tool surface can carry — kills the command with
+    ``'str' object has no attribute 'to_json'``.
+
+    The documented names are accepted case-insensitively and an already-typed
+    member passes through. Anything else raises ``ToolError`` naming the valid
+    options, per the F-816 unknown-input precedent.
+    """
+    if isinstance(value, uc.cdp.network.CookieSameSite):
+        return value
+    members = {m.value.lower(): m for m in uc.cdp.network.CookieSameSite}
+    member = members.get(str(value).strip().lower())
+    if member is None:
+        valid = ", ".join(m.value for m in uc.cdp.network.CookieSameSite)
+        raise ToolError(f"Invalid same_site value: {value!r}; valid values: {valid}")
+    return member
 
 
 class NetworkInterceptor:
@@ -831,9 +857,13 @@ class NetworkInterceptor:
         Set a cookie.
 
         tab: Tab - The browser tab.
-        cookie: Dict[str, Any] - Cookie parameters.
+        cookie: Dict[str, Any] - Cookie parameters. A ``same_site`` entry is
+            converted to the CDP ``CookieSameSite`` enum here (F-821); the
+            caller's dict is left untouched.
         Returns: bool - True if successful.
         """
+        if cookie.get("same_site") is not None:
+            cookie = {**cookie, "same_site": to_cookie_same_site(cookie["same_site"])}
         try:
             await tab.send(uc.cdp.network.set_cookie(**cookie))
             return True

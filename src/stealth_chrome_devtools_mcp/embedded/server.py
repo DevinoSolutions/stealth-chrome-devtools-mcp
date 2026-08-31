@@ -1477,7 +1477,7 @@ async def set_cookie(
         path (str): Cookie path.
         secure (bool): Secure flag.
         http_only (bool): HttpOnly flag.
-        same_site (Optional[str]): SameSite attribute ('Strict', 'Lax', or 'None').
+        same_site (Optional[str]): SameSite — 'Strict', 'Lax' or 'None' (any case).
 
     Returns:
         bool: True if set successfully.
