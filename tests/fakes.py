@@ -195,9 +195,14 @@ class FakeTab:
         self._evaluate_map = evaluate_map or {}
         self._cdp_responses = cdp_responses or {}
         self._select_result = select_result
+        self.closed = False
+        # Set by :meth:`FakeBrowser.get` for a tab it opened, so ``close()`` can
+        # drop it from that browser's listing the way a real close does.
+        self.opened_by: Any = None
         self.evaluate_calls: list[str] = []
         self.send_calls: list[str] = []
         self.get_calls: list[str] = []
+        self.move_calls: list[str] = []
         self.select_calls: list[str] = []
         self.cdp_frames: list[dict[str, Any]] = []
         self.handlers: list[tuple[Any, Any]] = []
@@ -238,6 +243,42 @@ class FakeTab:
         self.get_calls.append(url)
         self.url = url
         return self
+
+    async def back(self) -> None:
+        """nodriver's ``Tab.back`` — and it is deliberately as weak as the real
+        one: ``Tab.back()`` is a bare ``Runtime.evaluate("window.history.back()")``
+        that returns BEFORE Chrome has committed anything and leaves ``.url``
+        untouched. A fake that flipped ``.url`` here would model a browser that
+        does not exist and would hide exactly the race F-833's guard has to
+        survive. Where the move LANDS is stated by the caller, through the same
+        ``window.location.href`` answer the product reads it from.
+        """
+        self.move_calls.append("back")
+
+    async def forward(self) -> None:
+        """nodriver's ``Tab.forward`` — see :meth:`back`."""
+        self.move_calls.append("forward")
+
+    async def reload(self, *args: Any, **kwargs: Any) -> None:
+        """nodriver's ``Tab.reload`` (``Page.reload``) — see :meth:`back`.
+
+        Takes ``*args``/``**kwargs`` because the real signature carries
+        ``ignore_cache``/``script_to_evaluate_on_load``; recording only the fact
+        of the reload keeps F-800 (``ignore_cache`` dropped by the tool) visible
+        as its own defect rather than accidentally pinned here.
+        """
+        self.move_calls.append("reload")
+
+    async def close(self) -> None:
+        """nodriver's ``Tab.close`` (``Target.closeTarget``).
+
+        Drops the tab from the listing of the browser that opened it, so a test
+        can assert a failure path left NO orphan behind rather than merely that
+        ``close()`` was called.
+        """
+        self.closed = True
+        if self.opened_by is not None and self in self.opened_by.tabs:
+            self.opened_by.tabs.remove(self)
 
     async def select(self, selector: str, *args: Any, **kwargs: Any) -> Any:
         """The nodriver element-resolution seam used by the CDP styles path and
@@ -473,6 +514,7 @@ class FakeBrowser:
         alive: bool | None = True,
         pid: int | None = None,
         tabs: list[Any] | None = None,
+        opened_tab: Any = None,
     ) -> None:
         if alive is None:
             self._process = None
@@ -485,11 +527,23 @@ class FakeBrowser:
         self.update_targets_calls = 0
         self.connection = FakeTab(url="ws://fake.test/devtools/browser")
         self.get_calls: list[tuple[str, bool]] = []
+        self._opened_tab = opened_tab
 
     async def get(self, url: str, new_tab: bool = False) -> FakeTab:
+        """nodriver's ``Browser.get``.
+
+        Seed ``opened_tab`` to say what the opened tab answers (e.g. a landing
+        on a ``chrome-error://`` page); otherwise a plain tab at *url* is made.
+        Either way the tab is stamped with its opener, so closing it removes it
+        from ``tabs`` — the difference between "the failure path closed the tab"
+        and "the failure path leaked it".
+        """
         self.get_calls.append((url, new_tab))
-        tab = FakeTab(url=url, target_id=f"T-opened-{len(self.get_calls)}")
+        tab = self._opened_tab or FakeTab(
+            url=url, target_id=f"T-opened-{len(self.get_calls)}"
+        )
         if new_tab:
+            tab.opened_by = self
             self.tabs.append(tab)
         return tab
 

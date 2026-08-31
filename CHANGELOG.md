@@ -32,6 +32,30 @@ value too, since that is the path most agent-written scripts actually take.
 Details and residuals in
 `audit/stage2/finding_F832_execute_script_shallow_serialization.md`.
 
+### Fixed — `go_back`, `go_forward`, `reload_page` and `new_tab` stop reporting success over a Chrome error page (F-833)
+
+`navigate` has been truthful since F-802: a navigation Chrome could not perform
+still *completes* — Chrome commits a `chrome-error://` page and every
+Python-side step around it succeeds — so the tool raises instead of answering
+success over it. The four other tools that move a tab never got that guard. A
+dead history entry, an offline reload, and a new tab whose initial URL will not
+load each landed on the same error page, and each still said it worked; the
+caller's next `query_elements` or `get_page_content` then described Chrome's
+error page as the page they thought they were on.
+
+All four now raise, through the *same* guard `navigate` uses — one error-page
+detector, five call sites — naming which move failed and what it landed on. The
+loaded-page half is unchanged and asserted alongside it: a 404, a redirect,
+`data:` and `about:blank` are landings, not failures. `new_tab` closes the tab it
+could not land, so the honest error does not cost you a stranded tab.
+
+Two things this deliberately does not change: `reload_page(ignore_cache=…)` is
+still dropped (F-800, open), and a `go_back` with no history entry behind it
+still reports success for a move that never happened — a different kind of
+untruth, pinned as characterization and written up in
+`audit/stage2/finding_F833_navigation_tools_lack_truthfulness_guard.md` with the
+residual settle race.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)

@@ -22,11 +22,18 @@ way). The former dict/json instance-not-found shapes are converted to raises.
   the browser into a raised :class:`ToolError` instead of a payload whose
   ``success`` says it worked. They are duck-typed rather than typed against the
   nodriver CDP classes, which is what keeps this module a dependency-free leaf.
+* :func:`_require_landing_ok` — the ONE entry point the five tab-moving tools
+  call (F-833). It absorbs the only thing those five differ in — whether the
+  landed URL is already in hand or still has to be read off the tab — so the
+  *decision* stays in :func:`_require_navigation_ok` and no tool grows a second
+  error-page detector.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import asyncio
+import contextlib
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from nodriver import Browser, Tab
@@ -94,7 +101,7 @@ def _require_js_value(value: object) -> object:
     raise ToolError(f"Script raised an exception: {detail}")
 
 
-def _require_navigation_ok(url: str, result: object) -> object:
+def _require_navigation_ok(target: str, result: object) -> object:
     """Return a navigation result, or raise if Chrome landed on an error page
     (F-802).
 
@@ -103,15 +110,91 @@ def _require_navigation_ok(url: str, result: object) -> object:
     commits an error page and the tool's own bookkeeping succeeds, so the
     payload used to say ``success: true`` with a ``chrome-error://`` URL.
 
+    THE one error-page detector. *result* is either a navigation payload
+    (``{"url": ...}``) or the landed URL itself, because a history move and a
+    reload have a URL but no payload (F-833); *target* names what was being
+    navigated to — a URL for ``navigate``/``new_tab``, a phrase naming the move
+    ("the previous page") for the tools whose destination is only knowable
+    afterwards.
+
     Only a Chrome-level navigation failure is one: a page answering 404/500, a
     redirect to a different final URL, ``about:blank`` and ``data:`` URLs all
     keep their own scheme and pass through untouched.
     """
-    final_url = result.get("url") if isinstance(result, dict) else None
+    final_url = result.get("url") if isinstance(result, dict) else result
     if isinstance(final_url, str) and final_url.startswith(CHROME_ERROR_SCHEME):
         raise ToolError(
-            f"Navigation to {url} failed: Chrome loaded an error page "
+            f"Navigation to {target} failed: Chrome loaded an error page "
             f"({final_url}). The host may not resolve, the connection may have "
             "been refused, or the TLS handshake may have failed."
         )
     return result
+
+
+async def _require_landing_ok(
+    landed: object,
+    target: str,
+    timeout: float,  # noqa: ASYNC109  PERMANENT(caller-owned deadline)
+    close_on_error: bool = False,
+) -> object:
+    """Return the value the calling tool reports, or raise if it landed on a
+    Chrome error page (F-833) — the ONE entry point for the five tab-moving
+    tools.
+
+    ``navigate`` has been truthful since F-802, but ``go_back``, ``go_forward``,
+    ``reload_page`` and ``new_tab`` move a tab the same way and never got the
+    guard: a dead history entry, an offline reload and a new tab whose initial
+    URL will not load each *complete*, so every Python-side step succeeded and
+    the tool answered ``True`` over a ``chrome-error://`` page. Same defect
+    class, four more surfaces.
+
+    The five differ in exactly one thing — where the landed URL comes from —
+    and that is all this absorbs. Pass the navigation payload when the caller
+    already holds it (``navigate``: ``BrowserManager`` built it), or the tab
+    itself when the destination is only knowable after the move. In the tab
+    case the landing is read the way ``BrowserManager.navigate`` reads its final
+    URL, ``window.location.href``: a tab's cached ``target.url`` is refreshed by
+    ``update_targets()``, not by a history move, so it would answer for the page
+    the tab used to be on. ``await tab`` first is nodriver's ``Tab.wait()`` — it
+    returns on the navigation event, or after 0.5s — because ``Tab.back()`` is a
+    bare ``window.history.back()`` that returns before Chrome has committed
+    anything. A move slower than *timeout* raises rather than hanging the tool.
+    That deadline is a parameter, not an ``asyncio.timeout`` block ASYNC109 would
+    prefer, because its value is ``server``'s ``CDP_OPERATION_TIMEOUT`` and this
+    module imports neither ``server`` nor ``settings`` — the same leaf rule that
+    makes ``_require_tab`` take ``browser_manager`` as an argument.
+
+    Returns what the caller should report: the payload it handed in, or ``True``
+    for the bool-returning tools whose landing was read here. ``close_on_error``
+    closes the tab BEFORE the raise, which is what keeps ``new_tab``'s failure
+    path from leaking the half-open tab it just created.
+    """
+    if isinstance(landed, dict):
+        return _require_navigation_ok(target, landed)
+
+    # A string forward-ref, so the nodriver import stays TYPE_CHECKING-only and
+    # this module stays the dependency-free leaf its guards are built on.
+    tab = cast("Tab", landed)
+
+    async def _settled_url() -> object:
+        await tab  # nodriver Tab.wait(): the navigation event, or 0.5s
+        return await tab.evaluate("window.location.href")
+
+    try:
+        final_url = await asyncio.wait_for(_settled_url(), timeout)
+    except TimeoutError as exc:
+        raise ToolError(
+            f"Could not tell where {target} landed: the tab did not answer "
+            f"within {timeout:.0f}s, so this may or may not have worked."
+        ) from exc
+
+    try:
+        _require_navigation_ok(target, final_url)
+    except ToolError:
+        if close_on_error:
+            # The landing failure is what the caller needs; a tab that also
+            # refuses to close must not replace it.
+            with contextlib.suppress(Exception):
+                await tab.close()
+        raise
+    return True
