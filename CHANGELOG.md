@@ -26,6 +26,18 @@ names `url_pattern`, and every filter states how it actually matches
 `payload_contains` / `resource_type`, whole-value for `method`, exact for
 `status_code`).
 
+### Fixed — the environment validator no longer recommends args the stealth filter strips (F-836)
+
+As root or in a container, `validate_browser_environment_tool` returned
+`recommended_args: ["--no-sandbox", "--disable-setuid-sandbox", …]` — the exact
+flags the stealth filter blocks out of caller-supplied `browser_args`. Anyone
+who followed the advice got "Stripped 4 detectable arg(s)" and no effect. The
+recommendation is now derived *through* the filter, so it can never name a
+blocked flag again, and the flags the environment genuinely needs are reported
+in `recommendations` as what they are: applied automatically by `spawn_browser`
+after the filter runs, not something to pass by hand. The launch policy itself
+is unchanged, and on a normal desktop the tool's output is identical to before.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)

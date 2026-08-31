@@ -717,6 +717,28 @@ def check_browser_executable() -> str | None:
     return None
 
 
+def _caller_safe_sandbox_args() -> tuple[list[str], list[str]]:
+    """Split the platform's required sandbox args into ``(recommend, automatic)``.
+
+    F-836: ``validate_browser_environment`` used to hand the caller
+    ``get_required_sandbox_args()`` verbatim, which on root/container means
+    ``--no-sandbox``, ``--disable-setuid-sandbox`` and friends — the exact flags
+    ``filter_stealth_args`` strips out of caller-supplied ``browser_args``
+    ("Stripped N detectable arg(s)"). One tool recommended what another
+    discarded.
+
+    The recommendation is therefore derived THROUGH the filter rather than
+    restated beside it, so the two can never drift: whatever the filter blocks
+    is reported as ``automatic`` instead. Nothing is lost by that — the spawn
+    path already appends the required args itself, in ``merge_browser_args``,
+    AFTER the filter runs. This coupling is why the two functions must stay in
+    this one file.
+    """
+    required = get_required_sandbox_args()
+    recommend, _ = filter_stealth_args(required)
+    return recommend, [arg for arg in required if arg not in recommend]
+
+
 def validate_browser_environment() -> dict:
     """
     Validate the browser environment and return status information.
@@ -766,6 +788,16 @@ def validate_browser_environment() -> dict:
     if platform_info["system"] not in ["Windows", "Linux", "Darwin"]:
         warnings.append(f"Untested platform: {platform_info['system']}")
 
+    recommended_args, automatic_args = _caller_safe_sandbox_args()
+    if automatic_args:
+        recommendations.append(
+            "This environment needs "
+            + ", ".join(automatic_args)
+            + " — spawn_browser adds them itself. Do NOT pass them in "
+            "browser_args: the stealth filter strips caller-supplied copies "
+            "because they are detectable."
+        )
+
     return {
         "browser_executable": browser_path,
         "browser_type": browser_type if browser_path else None,
@@ -774,5 +806,8 @@ def validate_browser_environment() -> dict:
         "warnings": warnings,
         "recommendations": recommendations,
         "is_ready": len(issues) == 0,
-        "recommended_args": get_required_sandbox_args(),
+        # Args the CALLER may pass, cross-checked against the stealth filter
+        # (F-836). Args the filter would strip are applied automatically by
+        # merge_browser_args instead, and named in `recommendations` above.
+        "recommended_args": recommended_args,
     }
