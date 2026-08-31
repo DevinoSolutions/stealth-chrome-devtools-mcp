@@ -197,6 +197,38 @@ sizes still divert; small responses are untouched. Pinned by tests using the
 measured 59,734-char size. Details in
 `audit/stage2/finding_F837_inline_threshold_above_client_ceiling.md`.
 
+### Fixed — half an emoji in page content no longer destroys the whole tool result (F-823)
+
+Sentry, on `execute_script`: `PydanticSerializationError: Error serializing to
+JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\ud83d' in
+position 5811: surrogates not allowed`. `\ud83d` is the *high half* of an emoji
+pair — what a page hands back whenever a JS `slice`/`substring` (which indexes
+by UTF-16 code unit) cuts between the two halves of a `😀`, or content
+arrives mis-decoded. Python's `str` stores it happily; UTF-8 has no encoding
+for an unpaired surrogate, so FastMCP's serializer
+(`pydantic_core.to_json(data, fallback=str)`) raised and the entire result was
+lost — including the ~5,800 characters of good content in front of it.
+
+The repair is one string policy at the one boundary every tool return travels:
+`response_handler.surrogate_safe` rewrites each unpaired surrogate to a single
+U+FFFD REPLACEMENT CHARACTER and returns the payload **unchanged, by identity**
+when there is nothing to repair, and `tool_registry.section_tool` — already the
+single registration chokepoint — now applies it to the return of all 94 tools.
+It could not live in the large-response handler: `execute_script` and 86 other
+tools never touch it, and F-822's `json_safe` probe (`json.dumps`) *succeeds*
+on a lone surrogate, because serializable and encodable are different
+properties. `json_safe` now calls the same helper, so the file-fallback spill
+path and its caller-supplied metadata get one policy rather than a second
+implementation.
+
+Deliberately narrower than `json_safe`: this touches strings only and returns
+every other leaf by identity, so no tool's payload shape changes. Valid emoji
+and other astral characters pass through byte-identically — CPython stores them
+as one code point, never as a pair, so a surrogate in a payload is always
+broken. U+FFFD rather than `errors="replace"`'s `?`, so the loss is visible and
+not confusable with a question mark the page really contained. Details in
+`audit/stage2/finding_F823_lone_surrogates_crash_tool_returns.md`.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)

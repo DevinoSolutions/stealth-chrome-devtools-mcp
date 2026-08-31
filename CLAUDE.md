@@ -63,7 +63,7 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | `display_context.py` | **THE one home for "can a window launched by THIS process be seen, and on which desktop"** — the opaque token (`display_context()`: `headless` / `unverified` / `win-session-N` / `wayland-…` / `x11-…` / `aqua-<uid>`) and `can_show_windows()`. Observational only: it never picks or enters another session (F-808) |
 | `desktop_launch.py` | **THE one home for "hand a launch to the logged-on user's desktop"** (F-810, Windows only) — the availability probe (`available`, `_active_console_session_id`), the two predicates the guard and the spawn pipeline consult (`can_deliver_headed_window`, `should_delegate`), the Task Scheduler round trip (`launch_and_attach`, `_schtasks`) and the attached-browser process shim (`pid_shim`). The OS places the process; the tool still never picks a session |
 | `browser_pid_registry.py` | **THE one home for `browser_pids.json`** — its schema, the owner stamp on every entry (`owner_pid`, `owner_create_time`), and the read-merge-write protocol every writer shares |
-| `tool_registry.py` | `SECTION_TOOLS` + `ToolRegistry.section_tool` (registration, section gating, correlation-id stamping) + the canonical **verb taxonomy** (module docstring) |
+| `tool_registry.py` | `SECTION_TOOLS` + `ToolRegistry.section_tool` (registration, section gating, correlation-id stamping, the surrogate-safe return wrap) + the canonical **verb taxonomy** (module docstring) |
 | `tool_errors.py` | the error convention — `ToolError`, `InstanceNotFoundError`, `_require_tab`, `_require_browser` |
 | `logging_setup.py` | the observability spine — `resolve_log_dir`, `configure_logging`, `with_correlation_id`, `CorrelationIdFilter`; **the one home for log-file retention** — `roll_boot_log` (the launcher-side boot-log rotation, F-830) and `prune_old_logs` + its dead-backend post-mortem exemption (F-840); plus `backend_uvicorn_config` — the one home for the backend's uvicorn run-config (access logging off, graceful-shutdown timeout) |
 | `process_cleanup.py` | orphan reaping — side-effect-free `__init__`, `activate()` at serve boundary, `recover_orphans()` seam |
@@ -99,7 +99,7 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | `dynamic_hook_ai_interface.py` | AI-facing API for creating/managing hooks |
 | `hook_learning_system.py` | hook examples/training surface |
 | `cdp_function_executor.py` | direct JS function execution via CDP |
-| `response_handler.py` | large-response handling + file fallbacks |
+| `response_handler.py` | large-response handling + file fallbacks; **the one home for "can this payload survive the transport"** — `json_safe` (serializable, F-822) and `surrogate_safe` (utf-8-encodable, F-823) |
 | `in_memory_storage.py` | `InMemoryStorage` — deliberately non-durable instance cross-check |
 | `debug_logger.py` | in-memory debug log ring/view |
 
