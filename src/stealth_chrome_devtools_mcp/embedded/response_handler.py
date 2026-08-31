@@ -3,6 +3,7 @@
 import contextlib
 import dataclasses
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
@@ -50,12 +51,90 @@ def default_clone_output_dir() -> Path:
 #: sits 1.49x above that, and the two already-diverting sizes stay diverted.
 INLINE_TOKEN_CEILING = 10_000
 
-#: Depth guard for :func:`json_safe` — a self-referential or pathologically
-#: nested object degrades to ``str`` rather than blowing the stack.
+#: Depth guard shared by :func:`json_safe` and :func:`surrogate_safe` — a
+#: self-referential or pathologically nested object degrades (to ``str``, or to
+#: itself unrepaired) rather than blowing the stack.
 _MAX_CONVERSION_DEPTH = 24
 
 #: "this object has no JSON form of its own" — distinct from a real ``None``.
 _NO_FORM = object()
+
+#: Any code point in the UTF-16 surrogate range that appears inside a Python
+#: ``str`` is by construction UNPAIRED (F-823): CPython stores a valid astral
+#: character — an emoji, a G-clef, a CJK-ext ideograph — as ONE code point
+#: above U+FFFF, never as a pair, and ``json`` recombines a well-formed
+#: ``😀`` escape pair on the way IN. So a match here is always a
+#: broken half, and never a false positive on the emoji this pattern exists to
+#: leave intact.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+#: U+FFFD REPLACEMENT CHARACTER — Unicode's own "a character was here and it
+#: did not survive" marker, one per broken half. Not ``?`` (what
+#: ``errors="replace"`` yields when *encoding*), which is indistinguishable
+#: from a question mark the page really contained.
+_REPLACEMENT_CHAR = "�"
+
+
+def _repair_text(text: str) -> str:
+    """One lone surrogate becomes one U+FFFD; every other character untouched.
+
+    Returns the SAME object when there is nothing to repair, which is what lets
+    :func:`surrogate_safe` keep a clean payload's identity.
+    """
+    if _LONE_SURROGATE.search(text) is None:
+        return text
+    return _LONE_SURROGATE.sub(_REPLACEMENT_CHAR, text)
+
+
+def surrogate_safe(data: Any, depth: int = 0) -> Any:
+    """THE one repair for lone surrogates in a tool payload (F-823).
+
+    Real pages produce them: a UTF-16-indexed ``slice``/``substring``, a
+    truncating extractor, or a mis-decoded byte run hands back HALF an emoji.
+    UTF-8 has no encoding for an unpaired surrogate, so FastMCP's
+    ``pydantic_core.to_json(data, fallback=str)`` — the last step before the
+    payload leaves this process — raised ``UnicodeEncodeError: 'utf-8' codec
+    can't encode character '\\ud83d' ... surrogates not allowed`` and the whole
+    tool call failed, though the CDP work had already succeeded (Sentry
+    STEALTH-CHROME-DEVTOOLS-MCP-4M, on ``execute_script``).
+
+    Deliberately narrower than :func:`json_safe`: this is the ENCODING guard,
+    so it rewrites **strings only** and returns every other leaf — including
+    objects it does not understand — by identity. That is what makes it safe to
+    run on the return of all 94 tools from ``tool_registry``, where a type
+    conversion would silently change payload shapes that FastMCP's serializer
+    handles natively (``datetime``, ``bytes``, ``UUID``). ``json_safe`` calls
+    it too, so the large-response spill file gets the same one policy.
+
+    Total by construction, never raises: every branch is an ``isinstance``
+    check over already-materialized data, the recursion is depth-guarded, and
+    the only string operation is a regex substitution.
+    """
+    if isinstance(data, str):
+        return _repair_text(data)
+    if depth >= _MAX_CONVERSION_DEPTH:
+        return data
+    if isinstance(data, dict):
+        repaired: dict[Any, Any] = {}
+        changed = False
+        for key, value in data.items():
+            new_key = _repair_text(key) if isinstance(key, str) else key
+            new_value = surrogate_safe(value, depth + 1)
+            changed = changed or new_key is not key or new_value is not value
+            repaired[new_key] = new_value
+        return repaired if changed else data
+    if isinstance(data, (list, tuple, set, frozenset)):
+        # A repaired sequence comes back as a ``list`` (same JSON array either
+        # way); an untouched one comes back as the very object passed in, so a
+        # tuple/set payload only changes type where a repair actually happened.
+        items: list[Any] = []
+        changed = False
+        for value in data:
+            new_value = surrogate_safe(value, depth + 1)
+            changed = changed or new_value is not value
+            items.append(new_value)
+        return items if changed else data
+    return data
 
 
 def _own_json_form(value: Any) -> Any:
@@ -116,12 +195,16 @@ def json_safe(data: Any) -> Any:
     hatch (F-795), where a throwing script IS the failure. This one is the
     transport guard for payloads whose foreign object is incidental — a page
     whose ``document.body.innerText`` threw still has real HTML to return.
+
+    Serializable is not yet *encodable*, so this also runs the payload through
+    :func:`surrogate_safe` (F-823) — the same one string policy the tool-return
+    boundary applies — which is what makes the spill file below writable.
     """
     try:
         json.dumps(data, ensure_ascii=False)
     except (TypeError, ValueError, RecursionError):
-        return _convert(data)
-    return data
+        data = _convert(data)
+    return surrogate_safe(data)
 
 
 class ResponseHandler:
@@ -197,13 +280,21 @@ class ResponseHandler:
         filename = f"{fallback_filename_prefix}_{timestamp}_{unique_id}.json"
         file_path = self.clone_dir / filename
 
+        # ``data`` came through ``json_safe`` above; the caller's ``metadata``
+        # did not, and it reaches the same utf-8 encoder — a page title
+        # carrying half an emoji would crash the write and leave a truncated
+        # spill file (F-823). Same helper, applied once to the one part that
+        # had not seen it yet (and reused for the descriptor below), rather
+        # than re-serializing the by-definition-oversized payload a second time.
+        safe_metadata = json_safe(metadata or {})
+
         # Prepare file content with metadata
         file_content = {
             "metadata": {
                 "created_at": datetime.now(tz=timezone.utc).isoformat(),
                 "estimated_tokens": estimated_tokens,
                 "auto_saved_due_to_size": True,
-                **(metadata or {}),
+                **safe_metadata,
             },
             "data": data,
         }
@@ -223,7 +314,7 @@ class ResponseHandler:
             "file_size_kb": round(file_size_kb, 2),
             "estimated_tokens": estimated_tokens,
             "reason": "Response too large, automatically saved to file",
-            "metadata": metadata or {},
+            "metadata": safe_metadata,
         }
 
 
