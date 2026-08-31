@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a backend that dies with a call in flight now heals instead of disconnecting (F-843)
+
+The F-838 self-heal had a blind spot that turned out to be THE remaining
+user-visible disconnect: it only healed deaths the ~12 s liveness watchdog got
+to condemn. A backend that died *while a client call was in flight* broke the
+HTTP bridge in milliseconds, and the bridge's own teardown cancelled the
+watchdog before it could reach a verdict — so the proxy took the pre-F-838
+exit and the session was dead ~1 s after the kill, every time (idle sessions
+healed fine, which is why the gap survived testing). F-838's own motivating
+incidents — the OOM crash, the CTRL_BREAK — were fast deaths it never covered.
+
+The discriminator is now "did the backend leg end for a reason recovery
+answers", not "did the watchdog condemn it". A bridge that breaks after the
+backend had genuinely served us runs the same identity+readiness confirmation
+the watchdog's own verdict phase uses: confirmed gone → the existing heal loop
+(same `ensure_server_running`, same cold-start lock, same flap budget);
+still alive → re-bridge quietly. Client-gone and never-became-ready keep their
+honest exits. The F-827 lifecycle reports gain a `cause` field
+(`watchdog` / `connection_lost` / `connection_reset`) so the two witnesses are
+distinguishable in telemetry — closing the observability blind spot where a
+fast death tore down before reporting anything at all.
+
+### Fixed — `get_instance_state` reported `partial: true` on every call (F-844)
+
+Three stacked bugs, each able to spoil the whole state read: the cookie
+collection called `.get("cookies", [])` on nodriver's already-deserialized
+`list[Cookie]` (an `AttributeError` on every call since the nodriver
+migration); behind it, the viewport `tab.evaluate` of an object literal comes
+back CDP deep-serialized (`[['width', {...}], ...]`) rather than as the object,
+failing `PageState` validation; and a fractional `devicePixelRatio` (Windows
+125 % scaling, Retina) failed the `dict[str, int]` viewport annotation.
+Cookies now serialize via `Cookie.to_json()`, the viewport read asks the page
+for a `JSON.stringify(...)` string (the one shape deep serialization passes
+through), and the viewport model admits floats. Verified over real Chrome +
+real stdio: `partial: false` with genuine cookies and viewport.
+
+### Fixed — closing the active tab no longer strands the instance on a dead tab (F-845)
+
+`close_tab` sent `Target.closeTarget` and returned without re-pointing the
+stored active tab, so every subsequent tab-scoped tool on that instance hit
+Chrome's DevTools endpoint with the dead target id — surfacing as the baffling
+`server rejected WebSocket connection: HTTP 500` until a manual `switch_tab`.
+Closing the active tab now re-points to the first surviving target under the
+instance lock (the closed id excluded explicitly — nodriver's own target list
+drops it only on a racing `Target.targetDestroyed` event); closing a
+non-active tab pays nothing; closing the last tab leaves the typed
+"no tab" error instead of a lie.
+
+### Documented — python `mcp`-SDK clients tree-kill the shared backend on close (F-842)
+
+The official python SDK's stdio client terminates the launched server's whole
+process tree on close. Our detached shared backend is still in the
+lock-winning proxy's tree, so closing that one session kills the backend under
+every other session. Claude Code does not tree-kill, so production is
+unaffected — but every python-SDK harness and third-party integration is.
+Filed with a proposed double-spawn fix direction
+(`audit/stage2/finding_F842_python_client_tree_kill_kills_shared_backend.md`);
+not fixed in this batch.
+
 ## 2.0.8
 
 ### Fixed — the boot log no longer grows without bound (F-830)
