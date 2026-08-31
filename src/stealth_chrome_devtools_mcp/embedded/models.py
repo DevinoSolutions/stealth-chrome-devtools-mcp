@@ -87,7 +87,7 @@ class PageState(BaseModel):
     local_storage: dict[str, str] = Field(default_factory=dict)
     session_storage: dict[str, str] = Field(default_factory=dict)
     console_logs: list[dict[str, Any]] = Field(default_factory=list)
-    viewport: dict[str, int] = Field(default_factory=dict)
+    viewport: dict[str, int | float] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=datetime.now)
 
 

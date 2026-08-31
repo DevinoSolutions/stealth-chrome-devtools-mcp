@@ -940,16 +940,17 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                 tg.start_soon(from_backend)
 
     async def backend_leg():
-        # F-838: the leg outlives any single backend. proxy_selfheal owns the
-        # generation loop — connect, watch, and on a CONFIRMED-dead verdict heal
-        # via ensure_server_running (the SAME startup path, so the same reuse
-        # gate and cold-start lock) before re-bridging. It returns only when
-        # nothing is left to heal; then the pre-F-838 teardown below runs.
+        # F-838/F-843: the leg outlives any single backend. proxy_selfheal owns
+        # the generation loop — connect, watch, confirm — and on any confirmed
+        # incident heals via ensure_server_running (the SAME startup path, so
+        # the same reuse gate and cold-start lock) before re-bridging. It
+        # returns only when nothing is left to heal; the teardown below runs.
         await proxy_selfheal.drive(
             port=port,
             url_for=_backend_http_url,
             connect=run_backend,
             watch=_watch_backend_liveness,
+            confirm_alive=_same_identity_backend_ready,  # F-843's discriminator
             replay=lambda: init_message["value"],
             pending=pending,
             client_write=client_write,
