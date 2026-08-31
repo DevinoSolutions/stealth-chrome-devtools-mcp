@@ -15,6 +15,7 @@ internal-only helpers keep theirs.
 
 import asyncio
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -851,36 +852,37 @@ async def _clone_profile_dir_for_session(clone_root: Path) -> Path:
     return clone_root / f"{label[:48] or 'session'}-{digest}"
 
 
-def _pid_suffixed_clone_dir(base_clone: Path) -> Path:
-    return base_clone.with_name(f"{base_clone.name}-{os.getpid()}")
+# Per-ATTEMPT uniqueness for a spawn's clone dir (F-834). ``os.getpid()`` alone
+# is the BACKEND's pid — one string for every concurrent spawn — so N retrying
+# spawns copied into and launched Chrome from ONE directory, and a failed
+# sibling's cleanup then deleted the winner's live profile. The counter fixes it.
+_CLONE_ATTEMPT_SEQ = itertools.count(1)
+
+
+def _attempt_token() -> str:
+    """A suffix unique to this spawn attempt within this backend process."""
+    return f"{os.getpid()}-{next(_CLONE_ATTEMPT_SEQ)}"
+
+
+def _dir_unavailable(candidate: Path) -> bool:
+    """Busy for selection: a live browser holds it, or an in-flight spawn has
+    already reserved it via ``_protect_clone_dir``. ``_profile_has_running_browser``
+    is a LIVENESS check, NOT a reservation — every concurrent spawn is pre-launch
+    when it asks, so liveness alone told them all one name was free (F-834).
+    Selection and ``_protect_clone_dir`` have no await between them, so the
+    reserve is atomic on the event loop."""
+    return _clone_dir_is_protected(candidate) or _profile_has_running_browser(candidate)
 
 
 def _unique_clone_dir(base_clone: Path, suffix: str) -> Path:
     safe_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "-", suffix).strip(".-") or "retry"
-    candidate = base_clone.with_name(f"{base_clone.name}-{os.getpid()}-{safe_suffix}")
-    if not _profile_has_running_browser(candidate):
-        return candidate
-    return base_clone.with_name(
-        f"{base_clone.name}-{os.getpid()}-{safe_suffix}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
-    )
+    return base_clone.with_name(f"{base_clone.name}-{_attempt_token()}-{safe_suffix}")
 
 
 def _available_clone_dir(base_clone: Path) -> Path:
-    if not _profile_has_running_browser(base_clone):
+    if not _dir_unavailable(base_clone):
         return base_clone
-
-    pid_clone = _pid_suffixed_clone_dir(base_clone)
-    if not _profile_has_running_browser(pid_clone):
-        return pid_clone
-
-    for index in range(2, 100):
-        candidate = base_clone.with_name(f"{base_clone.name}-{os.getpid()}-{index}")
-        if not _profile_has_running_browser(candidate):
-            return candidate
-
-    return base_clone.with_name(
-        f"{base_clone.name}-{os.getpid()}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
-    )
+    return base_clone.with_name(f"{base_clone.name}-{_attempt_token()}")
 
 
 def _next_available_explicit_dir(requested: Path) -> Path:
@@ -892,7 +894,7 @@ def _next_available_explicit_dir(requested: Path) -> Path:
     """
     for index in range(2, 100):
         candidate = requested.with_name(f"{requested.name}-{index}")
-        if not _profile_has_running_browser(candidate):
+        if not _dir_unavailable(candidate):
             return candidate
     return requested.with_name(
         f"{requested.name}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
@@ -990,8 +992,6 @@ async def resolve_profile_selection(
     # fast; the clone we are about to write has no marker yet, so it is never a
     # sweep target.
     spawn_background_sweep("pre-clone")
-    if _profile_has_running_browser(clone):
-        clone = _unique_clone_dir(base_clone, clone_suffix or "busy")
 
     # Freshen snapshot before cloning if master has newer auth data and is not in use.
     if _snapshot_needs_refresh():

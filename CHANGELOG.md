@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — concurrent `spawn_browser` calls no longer kill each other's browsers (F-834)
+
+Under an agent fleet (several clients spawning against one backend) most
+spawns failed with nodriver's `Failed to connect to browser … you need to pass
+no_sandbox=True`, and — worse — a spawn occasionally returned `state: "ready"`
+with an `instance_id` whose browser was dead by the very next call. The client
+had done nothing wrong: it was the product's own cleanup doing the killing.
+
+The retry/fallback profile clone was named `{base}-{os.getpid()}-{suffix}`.
+That pid is the **backend's**, identical for every concurrent spawn in the
+process, and the only guard — "does a browser already run in this directory?" —
+is false for *all* of them during their pre-launch window. Every loser of the
+master-profile race therefore copied into and launched Chrome from the **same**
+directory; then a deferred profile delete fired against that shared path and
+removed it out from under the one attempt already reported ready.
+
+Three layers, so no single one has to hold alone:
+
+- **Per-attempt directories.** `clone_storage` now stamps a monotonic
+  per-attempt token into the name, and consults the existing in-flight
+  reservation set (`_protect_clone_dir`) as well as liveness when choosing a
+  directory. Liveness is a check, not a reservation — the `-{pid}` /
+  `-{pid}-{index}` ladder had the same hole and is gone with it.
+- **Cleanup ownership, re-asked at fire time.** `cleanup_deferred_profiles`
+  deferred these deletes arbitrarily long ago, so it no longer trusts the
+  live-profile snapshot it took at sweep start, and no profile directory a
+  *live tracked instance* owns is deleted for another instance's sake — the
+  skip is logged.
+- **Honest error text.** A spawn that raced siblings now says so and explicitly
+  disowns nodriver's root/`no_sandbox` advice, which is a red herring for this
+  failure mode and cost two independent diagnosing agents real time. New leaf
+  `embedded/spawn_contention.py`, appended at the same one composition site as
+  F-811's exhaustion hint.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)
