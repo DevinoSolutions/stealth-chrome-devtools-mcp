@@ -418,27 +418,22 @@ async def test_rich_input_types(fixture_app_server):
         )
         assert await _wait_action(iid, "input:color-input:#123456")
 
-        # select_option baseline + a same-document FINDING. The value path drives
-        # the select (synthetic change event, dom_handler.py:513-522).
+        # select_option: value path, then index path on the SAME document. The
+        # index call used to be a silent no-op with a false success — both arms
+        # ran ``const select = ...`` via tab.evaluate, and the second declaration
+        # on the same document threw a SyntaxError nodriver swallowed. F-831's
+        # rework made both arms act on the already-resolved element, so a
+        # same-document index call now genuinely moves the selection and fires
+        # its change event. SOFT golden updated deliberately with that fix.
         assert await select(instance_id=iid, selector="#select-fidelity", value="two")
         assert await _wait_action(iid, "change:select-fidelity:two")
-        # FINDING (silent no-op + false success): the value AND index paths both run
-        # ``const select = ...`` via tab.evaluate (dom_handler.py:513-536). A SECOND
-        # evaluate-path call on the SAME document re-declares ``const select`` -> a
-        # SyntaxError nodriver swallows, so the call silently no-ops while STILL
-        # returning True. The index call here does NOT change the selection (it
-        # stays "two") and logs no new change. Route: M4-Ph1 / M5b.
         assert (
             await select(instance_id=iid, selector="#select-fidelity", index=2) is True
         )
         assert (
             await eval_js(iid, "document.getElementById('select-fidelity').value")
-            == "two"
+            == "three"
         )
-        # The index path itself is sound: on a FRESH document it selects "three",
-        # which proves the no-op above is the collision, not a broken index path.
-        await navigate_and_settle(iid, f"{base}/interactions.html")
-        assert await select(instance_id=iid, selector="#select-fidelity", index=2)
         assert await _wait_action(iid, "change:select-fidelity:three")
     finally:
         await close(instance_id=iid)
