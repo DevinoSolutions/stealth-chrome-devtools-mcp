@@ -32,10 +32,15 @@ ignoring specificity and `!important`, while `current` came from computed style.
 With `.card { animation: fade 2s ease }` before `#hero { animation-duration: 5s }`
 it reported `current: "5s"` with a `find` inside `.card`. Selection is now
 per knob and follows the cascade: `!important`, then specificity, then document
-order. Two situations degrade instead of guessing — a functional pseudo-class
-(`:is`/`:where`/`:not`/`:has`) whose specificity depends on its argument, and a
-winner whose declared value disagrees with what the element computes (which means
-an inline style, a UA sheet or an unreadable stylesheet is in charge). Recipes
+order. Two situations degrade instead of guessing. The first is a selector whose
+specificity cannot be computed exactly from its own text, because it is borrowed
+from something that text does not resolve: `:is`/`:where`/`:not`/`:has(S)` and
+`:nth-child(An+B of S)` take it from their argument, and `&` takes it from the
+parent rule — so under CSS nesting a best-effort count made `& .card` tie with a
+bare `.card`, and document order then handed the win to a rule that cannot change
+the rendering. The second is a winner whose declared value disagrees with what the
+element computes, which means an inline style, a UA sheet or an unreadable
+stylesheet is in charge. (Plain `:nth-child(2)` stays decidable.) Recipes
 also carry `rule_selector` and `at_rule_context`, so the rule-scoped
 `find_unique_in_rule` claim can actually be checked.
 

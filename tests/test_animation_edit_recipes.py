@@ -345,6 +345,101 @@ class TestTheRecipePointsAtTheRuleThatWins:
         assert "find" not in found["duration"]
         assert found["duration"]["note"]
 
+    async def test_a_nested_rule_does_not_hand_the_win_to_the_wrong_selector(self):
+        """`&` resolves to the parent rule's selector, so its specificity cannot
+        be computed from this selector's text at all. Counting it best-effort
+        made `& .card` tie with `.card` at (0,1,0), and document order then gave
+        the win to `.card` — which does NOT render, because the nested rule
+        carries the parent's id.
+
+        Both rules declare the SAME duration on purpose, and the two selectors
+        are deliberately DISTINCT text. That combination is what makes this the
+        dangerous shape: the computed-value cross-check passes (both say 2s) and
+        the duplicate-header guard never fires (the headers differ), so nothing
+        else catches it and the recipe confidently addresses a declaration whose
+        edit changes nothing on the page. R2 through a side door.
+        """
+        payload = facts(
+            selector="#shell .card",
+            raw_sources={
+                "0": "#shell { & .card { animation-duration: 2s; } }\n"
+                ".promo { animation-duration: 2s; }\n"
+            },
+            computed=computed(animation_name="fade", animation_duration="2s"),
+            matched_rules=[
+                rule("& .card", {"animation-duration": "2s"}),
+                rule(".promo", {"animation-duration": "2s"}, source_ref="src-1"),
+            ],
+            sources=[
+                source("src-0", selector="& .card"),
+                source("src-1", selector=".promo"),
+            ],
+        )
+        found = await recipes(payload, name="fade")
+        assert found["duration"]["confidence"] == "low"
+        assert "find" not in found["duration"]
+        assert found["duration"]["note"]
+
+    async def test_a_nth_child_of_selector_degrades_for_the_same_reason(self):
+        """`:nth-child(2 of .promoted)` takes the specificity of its `of`
+        argument. Plain `:nth-child(2)` does not and stays decidable."""
+        payload = facts(
+            selector=".card",
+            raw_sources={
+                "0": ":nth-child(2 of .promoted) { animation-duration: 2s; }\n"
+                ".card { animation-duration: 2s; }\n"
+            },
+            computed=computed(animation_name="fade", animation_duration="2s"),
+            matched_rules=[
+                rule(":nth-child(2 of .promoted)", {"animation-duration": "2s"}),
+                rule(".card", {"animation-duration": "2s"}, source_ref="src-1"),
+            ],
+            sources=[
+                source("src-0", selector=":nth-child(2 of .promoted)"),
+                source("src-1", selector=".card"),
+            ],
+        )
+        found = await recipes(payload, name="fade")
+        assert found["duration"]["confidence"] == "low"
+        assert "find" not in found["duration"]
+
+    async def test_a_lone_nested_rule_is_still_actionable(self):
+        """Undecidable specificity only matters when it has to be COMPARED. One
+        rule declaring the knob has no cascade to resolve, and the value
+        cross-check still guards it, so degrading here would lose a real answer
+        for no gain."""
+        payload = facts(
+            selector="#shell .card",
+            raw_sources={"0": "#shell { & .card { animation-duration: 2s; } }\n"},
+            computed=computed(animation_name="fade", animation_duration="2s"),
+            matched_rules=[rule("& .card", {"animation-duration": "2s"})],
+            sources=[source("src-0", selector="& .card")],
+        )
+        found = await recipes(payload, name="fade")
+        assert found["duration"]["find"] == "animation-duration: 2s"
+        assert found["duration"]["confidence"] == "high"
+
+    async def test_plain_nth_child_still_computes_a_specificity(self):
+        payload = facts(
+            selector=".card",
+            raw_sources={
+                "0": "#shell :nth-child(2) { animation-duration: 5s; }\n"
+                ".card { animation-duration: 2s; }\n"
+            },
+            computed=computed(animation_name="fade", animation_duration="5s"),
+            matched_rules=[
+                rule("#shell :nth-child(2)", {"animation-duration": "5s"}),
+                rule(".card", {"animation-duration": "2s"}, source_ref="src-1"),
+            ],
+            sources=[
+                source("src-0", selector="#shell :nth-child(2)"),
+                source("src-1", selector=".card"),
+            ],
+        )
+        found = await recipes(payload, name="fade")
+        assert found["duration"]["rule_selector"] == "#shell :nth-child(2)"
+        assert found["duration"]["confidence"] == "high"
+
     async def test_a_winner_that_disagrees_with_the_computed_value_degrades(self):
         """If the rule we picked does not produce what the browser computed,
         something we never saw is winning — an inline style, a UA sheet, a

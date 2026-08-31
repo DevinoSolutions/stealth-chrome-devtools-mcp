@@ -235,6 +235,17 @@
         const matchesBase = base && base !== selText ? safeMatches(base) : matchesNow;
         // A rule is a *candidate* when its base form is about this element but it
         // is not currently applying — the class-toggle / :hover trigger cases.
+        //
+        // DO NOT NARROW THIS. It looks over-broad -- `.gallery .card` is admitted
+        // for a `.card` that is nowhere near a `.gallery` -- and narrowing it was
+        // proposed as the fix for exactly that (R8). It is not. candidate_rules
+        // has TWO consumers: the pending-animation advice, which needs precision,
+        // and trigger attribution, which needs this breadth to find the :hover,
+        // :focus and .is-open rules at all. Tightening here trades a wrong-advice
+        // bug for a missing-trigger bug. The precision belongs in the consumer
+        // that was lying: animation_advice.build_pending only offers a class to
+        // ADD when it sits on the element's own compound selector, and describes
+        // an ancestor/sibling requirement as one.
         const mentionsUs = matchesNow || matchesBase ||
             (facts.element.id && selText.indexOf('#' + facts.element.id) !== -1) ||
             facts.element.classes.some(function (c) { return selText.indexOf('.' + c) !== -1; });

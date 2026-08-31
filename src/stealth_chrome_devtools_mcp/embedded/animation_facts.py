@@ -288,10 +288,22 @@ def split_at_top_level(value: str, separators: str) -> list[str]:
     return parts
 
 
-# :is/:where/:not/:has take the specificity of their ARGUMENT, which we did not
-# compute. Every other functional pseudo-class (:nth-child, :lang) is plain
-# class-level, so only these four make a selector undecidable.
-_ARGUMENT_SPECIFICITY = re.compile(r":(?:is|where|not|has)\(", re.IGNORECASE)
+# THE rule: a selector whose specificity cannot be computed EXACTLY from its own
+# text is undecidable. Three constructs qualify, all for the same reason — their
+# specificity is borrowed from something this text does not resolve:
+#
+#   :is/:where/:not/:has(S)      take it from their argument
+#   :nth-child(An+B of S)        takes it from the `of` argument (plain
+#                                :nth-child(2) does not, and stays decidable)
+#   &                            takes it from the PARENT rule's selector
+#
+# `&` is the one that looks harmless and is not. Native CSS nesting has shipped
+# everywhere and is common in hand-authored stylesheets, and a best-effort count
+# makes `& .card` tie with a bare `.card` — so document order hands the win to a
+# rule that cannot change the rendering, which is R2 returning by a side door.
+_ARGUMENT_SPECIFICITY = re.compile(
+    r":(?:is|where|not|has)\(|:nth-(?:last-)?child\([^)]*\bof\b|&", re.IGNORECASE
+)
 
 
 def specificity(selector: str) -> tuple[int, int, int] | None:
