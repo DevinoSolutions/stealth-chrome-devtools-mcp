@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.8
 
 ### Fixed — the boot log no longer grows without bound (F-830)
 
