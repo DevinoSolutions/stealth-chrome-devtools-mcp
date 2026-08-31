@@ -37,6 +37,7 @@ import pytest
 
 from stealth_chrome_devtools_mcp import server as shim
 from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded.logging_setup import backend_uvicorn_config
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 # ---------------------------------------------------------------------------
@@ -74,8 +75,14 @@ class TestSetupRecordsDisplacedHandlers:
         assert set(installed) == set(cleanup._previous_signal_handlers)
         for signum, previous in displaced.items():
             assert cleanup._previous_signal_handlers[signum] == previous
-        for handler in installed.values():
-            assert handler == cleanup._signal_handler
+        # Every displaced disposition is recorded, but only the two shutdown
+        # signals get our handler: SIGBREAK is installed as SIG_IGN (F-839 — see
+        # tests/test_sigbreak_immunity.py), never handled.
+        for signum, handler in installed.items():
+            if signum == getattr(signal, "SIGBREAK", None):
+                assert handler is signal.SIG_IGN
+            else:
+                assert handler == cleanup._signal_handler
 
     def test_setup_still_covers_sigterm_and_sigint(self, cleanup):
         installed: list[int] = []
@@ -269,16 +276,21 @@ class TestGracefulShutdownTimeout:
             "hard-codes timeout_graceful_shutdown=0, which makes uvicorn ERROR-log "
             "'timeout graceful shutdown exceeded' on every clean stop (F-809)"
         )
-        assert isinstance(uvicorn_config, ast.Dict)
-        keys = [k.value for k in uvicorn_config.keys if isinstance(k, ast.Constant)]
-        assert "timeout_graceful_shutdown" in keys
+        # F-830 moved the composition into logging_setup.backend_uvicorn_config
+        # (it now also carries access_log=False), so the argument is a call, not
+        # a dict literal. The contract is unchanged: whatever reaches uvicorn
+        # must carry a graceful-shutdown timeout.
+        assert isinstance(uvicorn_config, ast.Call)
+        assert isinstance(uvicorn_config.func, ast.Name)
+        assert uvicorn_config.func.id == "backend_uvicorn_config"
+        assert "timeout_graceful_shutdown" in backend_uvicorn_config()
 
     def test_the_graceful_shutdown_timeout_is_positive_and_bounded(self):
         """Positivity, not the literal value, is the contract — tuning the
         number must not need a golden update. ``None`` is uvicorn's "wait
         forever", which an open SSE stream would ride all the way to SIGKILL.
         The ceiling is ``singleton._terminate_backend``'s 5 s wait window."""
-        timeout = server._GRACEFUL_SHUTDOWN_SECONDS
+        timeout = backend_uvicorn_config()["timeout_graceful_shutdown"]
         assert isinstance(timeout, (int, float))
         assert timeout > 0
         assert timeout < 5

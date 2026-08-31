@@ -34,6 +34,7 @@ from types import GeneratorType, SimpleNamespace
 from typing import Any
 
 import nodriver.cdp.dom as cdp_dom
+import nodriver.cdp.runtime as cdp_runtime
 import nodriver.cdp.target as cdp_target
 
 # ---------------------------------------------------------------------------
@@ -194,9 +195,14 @@ class FakeTab:
         self._evaluate_map = evaluate_map or {}
         self._cdp_responses = cdp_responses or {}
         self._select_result = select_result
+        self.closed = False
+        # Set by :meth:`FakeBrowser.get` for a tab it opened, so ``close()`` can
+        # drop it from that browser's listing the way a real close does.
+        self.opened_by: Any = None
         self.evaluate_calls: list[str] = []
         self.send_calls: list[str] = []
         self.get_calls: list[str] = []
+        self.move_calls: list[str] = []
         self.select_calls: list[str] = []
         self.cdp_frames: list[dict[str, Any]] = []
         self.handlers: list[tuple[Any, Any]] = []
@@ -210,12 +216,22 @@ class FakeTab:
 
         return _wait().__await__()
 
-    async def evaluate(self, expression: str, *args: Any, **kwargs: Any) -> Any:
-        self.evaluate_calls.append(expression)
+    def _answer_for_js(self, expression: str) -> Any:
+        """The canned answer for a JS expression — ONE home for it.
+
+        Both eval seams route here: ``evaluate()`` (nodriver's helper) and
+        ``send(cdp.runtime.evaluate(...))`` (the raw command ``execute_script``
+        uses since F-832). A test says "this JS answers with X" once, whichever
+        seam the code under test happens to take.
+        """
         for needle, resp in self._evaluate_map.items():
             if needle in expression:
                 return resp
         return self._evaluate_result
+
+    async def evaluate(self, expression: str, *args: Any, **kwargs: Any) -> Any:
+        self.evaluate_calls.append(expression)
+        return self._answer_for_js(expression)
 
     async def get(self, url: str, *args: Any, **kwargs: Any) -> FakeTab:
         """nodriver's ``Tab.get`` — the navigation seam.
@@ -227,6 +243,42 @@ class FakeTab:
         self.get_calls.append(url)
         self.url = url
         return self
+
+    async def back(self) -> None:
+        """nodriver's ``Tab.back`` — and it is deliberately as weak as the real
+        one: ``Tab.back()`` is a bare ``Runtime.evaluate("window.history.back()")``
+        that returns BEFORE Chrome has committed anything and leaves ``.url``
+        untouched. A fake that flipped ``.url`` here would model a browser that
+        does not exist and would hide exactly the race F-833's guard has to
+        survive. Where the move LANDS is stated by the caller, through the same
+        ``window.location.href`` answer the product reads it from.
+        """
+        self.move_calls.append("back")
+
+    async def forward(self) -> None:
+        """nodriver's ``Tab.forward`` — see :meth:`back`."""
+        self.move_calls.append("forward")
+
+    async def reload(self, *args: Any, **kwargs: Any) -> None:
+        """nodriver's ``Tab.reload`` (``Page.reload``) — see :meth:`back`.
+
+        Takes ``*args``/``**kwargs`` because the real signature carries
+        ``ignore_cache``/``script_to_evaluate_on_load``; recording only the fact
+        of the reload keeps F-800 (``ignore_cache`` dropped by the tool) visible
+        as its own defect rather than accidentally pinned here.
+        """
+        self.move_calls.append("reload")
+
+    async def close(self) -> None:
+        """nodriver's ``Tab.close`` (``Target.closeTarget``).
+
+        Drops the tab from the listing of the browser that opened it, so a test
+        can assert a failure path left NO orphan behind rather than merely that
+        ``close()`` was called.
+        """
+        self.closed = True
+        if self.opened_by is not None and self in self.opened_by.tabs:
+            self.opened_by.tabs.remove(self)
 
     async def select(self, selector: str, *args: Any, **kwargs: Any) -> Any:
         """The nodriver element-resolution seam used by the CDP styles path and
@@ -247,6 +299,7 @@ class FakeTab:
     async def send(self, cdp_obj: Any, *args: Any, **kwargs: Any) -> Any:
         name = cdp_command_name(cdp_obj)
         self.send_calls.append(name)
+        frame: dict[str, Any] | None = None
         if isinstance(cdp_obj, GeneratorType):
             # Advancing once yields the request frame ({"method", "params"}), so a
             # test can assert the *arguments* of a CDP command.
@@ -263,12 +316,89 @@ class FakeTab:
             # double (a Mock, which answers ``callable(obj.close)`` truthfully)
             # is skipped outright rather than advanced and forgiven.
             try:
-                self.cdp_frames.append(next(cdp_obj))
+                frame = next(cdp_obj)
+                self.cdp_frames.append(frame)
             except StopIteration:
                 pass
             cdp_obj.close()  # never leave the generator un-iterated
+        if name == "evaluate" and name not in self._cdp_responses and frame:
+            # ``Runtime.evaluate`` reaches the SAME canned answers as
+            # ``evaluate()`` — see ``_answer_for_js``. An explicit
+            # ``cdp_responses["evaluate"]`` still wins, so no existing test moves.
+            # A bare canned value is wrapped the way Chrome would answer it (a
+            # ``(RemoteObject, exceptionDetails)`` pair) so a test can state the
+            # answer once, whichever seam the code under test takes; an answer
+            # that is already such a pair (``js_result``/``js_threw``) passes
+            # through untouched.
+            answer = self._answer_for_js(frame["params"]["expression"])
+            if answer is None or isinstance(answer, tuple):
+                return answer
+            return js_result(answer)
         resp = self._cdp_responses.get(name, None)
         return resp(name) if callable(resp) else resp
+
+
+# ---------------------------------------------------------------------------
+# ``Runtime.evaluate`` answers (the F-832 execute_script seam)
+# ---------------------------------------------------------------------------
+
+
+def js_result(
+    value: Any = None,
+    type_: str = "object",
+    subtype: str | None = None,
+    unserializable_value: str | None = None,
+    description: str | None = None,
+) -> tuple[cdp_runtime.RemoteObject, None]:
+    """The ``(result, exceptionDetails)`` pair Chrome answers a successful
+    ``Runtime.evaluate`` with — built from nodriver's own constructor.
+
+    Mirrors what Chrome actually sends under ``returnByValue``: ``undefined``
+    carries no ``value``; ``null`` is an object with ``subtype="null"``;
+    ``Infinity``/``NaN`` arrive as ``unserializableValue``; a value Chrome cannot
+    send at all arrives as type + ``description`` only.
+    """
+    return (
+        cdp_runtime.RemoteObject(
+            type_=type_,
+            subtype=subtype,
+            value=value,
+            unserializable_value=(
+                None
+                if unserializable_value is None
+                else cdp_runtime.UnserializableValue(unserializable_value)
+            ),
+            description=description,
+        ),
+        None,
+    )
+
+
+def js_threw(
+    description: str,
+) -> tuple[cdp_runtime.RemoteObject, cdp_runtime.ExceptionDetails]:
+    """The pair Chrome answers with when the evaluated script THREW.
+
+    Chrome sends BOTH a result object (the thrown value) and ``exceptionDetails``
+    — which is why a reader that trusts the result reports a throw as a success
+    (F-795). Built from nodriver's constructors so a guard reading the wrong
+    field names cannot stay green.
+    """
+    thrown = cdp_runtime.RemoteObject(
+        type_="object",
+        class_name=description.split(":", maxsplit=1)[0],
+        description=description,
+    )
+    return (
+        thrown,
+        cdp_runtime.ExceptionDetails(
+            exception_id=1,
+            text="Uncaught",
+            line_number=0,
+            column_number=0,
+            exception=thrown,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +522,7 @@ class FakeBrowser:
         alive: bool | None = True,
         pid: int | None = None,
         tabs: list[Any] | None = None,
+        opened_tab: Any = None,
     ) -> None:
         if alive is None:
             self._process = None
@@ -404,11 +535,23 @@ class FakeBrowser:
         self.update_targets_calls = 0
         self.connection = FakeTab(url="ws://fake.test/devtools/browser")
         self.get_calls: list[tuple[str, bool]] = []
+        self._opened_tab = opened_tab
 
     async def get(self, url: str, new_tab: bool = False) -> FakeTab:
+        """nodriver's ``Browser.get``.
+
+        Seed ``opened_tab`` to say what the opened tab answers (e.g. a landing
+        on a ``chrome-error://`` page); otherwise a plain tab at *url* is made.
+        Either way the tab is stamped with its opener, so closing it removes it
+        from ``tabs`` — the difference between "the failure path closed the tab"
+        and "the failure path leaked it".
+        """
         self.get_calls.append((url, new_tab))
-        tab = FakeTab(url=url, target_id=f"T-opened-{len(self.get_calls)}")
+        tab = self._opened_tab or FakeTab(
+            url=url, target_id=f"T-opened-{len(self.get_calls)}"
+        )
         if new_tab:
+            tab.opened_by = self
             self.tabs.append(tab)
         return tab
 

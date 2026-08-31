@@ -32,6 +32,7 @@ from stealth_chrome_devtools_mcp.embedded.backend_registry import (
     SERVER_STATE_FILE,
     STATE_DIR,
 )
+from stealth_chrome_devtools_mcp.observability import capture_lifecycle
 
 if sys.platform == "win32":
     import msvcrt
@@ -52,6 +53,8 @@ DEFAULT_PORT = 19222
 # mismatch (F-206/F-120/F-504): on this editable install the package version is
 # frozen at 1.2.0, so the version key alone can never see an in-place source edit.
 SOURCE_ROOT = Path(__file__).resolve().parent.parent
+_FINGERPRINT_ATTEMPTS = 3  # F-829: outlast a transient read failure
+_FINGERPRINT_RETRY_SECONDS = 0.05
 STARTUP_TIMEOUT = 30
 SERVER_NAME = "stealth-chrome-devtools-mcp"
 # How long the stdio proxy will wait for the backend before later requests
@@ -135,7 +138,7 @@ def _read_server_state() -> dict | None:
 
 
 def _write_server_state(
-    port: int, version: str, pid: int, source_fingerprint: str
+    port: int, version: str, pid: int, source_fingerprint: str | None
 ) -> None:
     backend_registry.record_backend(
         SERVER_STATE_FILE,
@@ -176,31 +179,28 @@ def _probe_backend_status() -> tuple[str, int | None]:
 
 
 def _same_identity_backend_ready(port: int, patience: float | None = None) -> bool:
-    """True iff ``server.json`` records OUR identity on ``port`` — package
-    version AND source fingerprint both match (issue #14 / F-206: a stale,
-    legacy, or edited-source backend is never reused, so upgrades take effect;
-    an empty computed fingerprint fails closed) — and that backend answers a
-    real ``initialize`` within the patience window (F-301/F-501: a wedged
+    """True iff ``server.json`` records OUR identity on ``port`` — the version
+    matches and the fingerprint does not CONTRADICT it (issue #14/F-206 never
+    reuse a stale, legacy or edited-source backend; F-829: an unreadable digest
+    is unknown, not a contradiction — see ``fingerprint_mismatch``) — and it
+    answers a real ``initialize`` in the patience window (F-301/F-501: a wedged
     backend holds its socket open, so only the app-level probe counts).
 
-    ``patience`` is F-807's anti-fratricide grace, used by the cold-start lock
-    path: a backend absorbing a many-session startup herd can miss a single 2s
-    probe while perfectly healthy — and a lock-holder that trusts that one miss
-    "evicts" (kills) the backend everyone else is using, then double-spawns.
-    ``_watch_backend_liveness`` applies the same discrimination mid-session
-    (F-820). Identity-gated on purpose: a version- or source-stale record gets
-    NO patience and is evicted immediately. ``patience=0.0`` (discovery's
-    single-shot probe) probes once and never sleeps; ``None`` means
+    ``patience`` is F-807's anti-fratricide grace for the cold-start lock path:
+    a healthy backend absorbing a many-session startup herd can miss a single
+    2s probe, and a lock-holder trusting that one miss "evicts" (kills) the
+    backend everyone is using, then double-spawns. ``_watch_backend_liveness``
+    applies the same discrimination mid-session (F-820). Identity-gated: a
+    version- or source-stale record gets NO patience and is evicted at once.
+    ``patience=0.0`` (discovery) probes once and never sleeps; ``None`` means
     ``REUSE_PATIENCE_SECONDS``, read at call time so tests can shrink it.
     """
-    # The entry recorded ON THIS PORT, not merely the first one: with a
-    # per-context record (F-808) another desktop's backend can be recorded
-    # alongside ours, and it says nothing about whether `port` is reusable.
+    # The entry recorded ON THIS PORT, not merely the first: under F-808's
+    # per-context record another desktop's backend says nothing about `port`.
     entry = backend_registry.backend_on_port(_read_server_state(), port) or {}
     if entry.get("version") != _server_version():
         return False
-    fp = _source_fingerprint()
-    if not fp or entry.get("source_fingerprint") != fp:
+    if backend_registry.fingerprint_mismatch(entry, _source_fingerprint()):
         return False
     patience = REUSE_PATIENCE_SECONDS if patience is None else patience
     # Busy backends answer slowly, so the patient path probes with the wider
@@ -345,17 +345,17 @@ def _start_server_process(port: int):
     cmd = _server_process_cmd(port)
 
     # F-303/F-503: stdout/stderr used to be DEVNULL, hiding every backend
-    # crash. An embedded/server.py import-time crash dies before any
-    # in-process logging (configure_logging) can install itself, so only a
-    # raw stream redirect at Popen can capture it. stdin stays DEVNULL - the
-    # backend never reads stdin, and it remains the legitimately-allowed use.
-    from stealth_chrome_devtools_mcp.embedded.logging_setup import resolve_log_dir
+    # crash - an import-time crash dies before configure_logging installs
+    # itself, so only a raw Popen redirect captures it. stdin stays DEVNULL.
+    from stealth_chrome_devtools_mcp.embedded import logging_setup
 
     boot_log = None
     try:
-        log_dir = resolve_log_dir()
+        log_dir = logging_setup.resolve_log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
-        boot_log = open(log_dir / "backend-boot.log", "a", encoding="utf-8")
+        # F-830: the launcher is the ONLY place this file can be rotated - once
+        # Popen inherits the fd, the child pins it for life (see roll_boot_log).
+        boot_log = logging_setup.roll_boot_log(log_dir).open("a", encoding="utf-8")
     except OSError:
         # Fail-open (plan_M3 §7: "M3's file setup is fail-open"): a log dir
         # that can't be created/opened must never block the backend from
@@ -483,29 +483,32 @@ def _server_version() -> str:
         return "0.0.0"
 
 
-def _source_fingerprint() -> str:
+def _source_fingerprint() -> str | None:
     """SHA-256 over the package's ``*.py`` source, so a backend built from
     now-stale source is not reused. COMPLETE (every module the backend can
-    import), STABLE (identical bytes -> identical digest, immune to
-    mtime/OneDrive/git quirks), CHEAP (~1 MB read+hash per cold-start
-    discovery). Best-effort: any OS read error yields ``""`` so a transient
-    hiccup costs one respawn, never a crash of discovery - and the reuse gate
-    treats ``""`` as a miss, so an empty digest is never falsely reused.
+    import), STABLE (identical bytes -> identical digest, immune to mtime/git
+    quirks), CHEAP (~1 MB read+hash per cold-start discovery). Never raises: a
+    read that keeps failing across ``_FINGERPRINT_ATTEMPTS`` yields ``None`` —
+    UNREADABLE, which ``backend_registry.fingerprint_mismatch`` reads as
+    unknown, never as "source changed" (F-829: this returned ``""``, which the
+    gate could not tell from a real mismatch, so one OneDrive sync lock evicted
+    the healthy backend every session was sharing).
     """
     import hashlib
 
-    h = hashlib.sha256()
-    try:
-        for p in sorted(SOURCE_ROOT.rglob("*.py")):
-            if "__pycache__" in p.parts:
-                continue
-            h.update(p.relative_to(SOURCE_ROOT).as_posix().encode("utf-8"))
-            h.update(b"\0")
-            h.update(p.read_bytes())
-            h.update(b"\0")
-    except OSError:
-        return ""
-    return h.hexdigest()
+    for _ in range(_FINGERPRINT_ATTEMPTS):
+        h = hashlib.sha256()
+        try:
+            for p in sorted(SOURCE_ROOT.rglob("*.py")):
+                if "__pycache__" not in p.parts:
+                    h.update(p.relative_to(SOURCE_ROOT).as_posix().encode())
+                    h.update(b"\0" + p.read_bytes() + b"\0")
+            return h.hexdigest()
+        except OSError as e:
+            err = e
+            time.sleep(_FINGERPRINT_RETRY_SECONDS)
+    _logger.warning("source fingerprint unreadable: %s", err)
+    return None
 
 
 def _start_backend_holding_lock(port: int) -> None:
@@ -524,21 +527,17 @@ def _start_backend_holding_lock(port: int) -> None:
                 return  # already up (same version) ON THE PORT WE WERE HANDED
             if _same_identity_backend_ready(port):
                 return  # ours, merely busy or mid-boot — never evict it (F-807)
-            # M2-3: surface WHY a fresh backend is about to spawn when the cause
-            # is a source change (version matches, fingerprint differs) - the
-            # eviction is otherwise silent. Logged once per spawn HERE, not in
-            # _find_running_server (which runs up to 3x per locked cold start);
-            # the state re-read is a cheap diagnostic probe, deliberately NOT a
-            # second reuse gate (that stays single-homed in
-            # _find_running_server). Source-only: a version-change eviction
-            # (issue #14) must not emit this line.
-            entry = backend_registry.backend_on_port(_read_server_state(), port)
-            if (
-                entry is not None
-                and entry.get("version") == _server_version()
-                and entry.get("source_fingerprint") != _source_fingerprint()
-            ):
+            # M2-3: surface WHY a fresh backend is about to spawn when the cause is a
+            # source change (version matches, digests differ) — it is otherwise silent,
+            # in the log and now (F-827) on the wire. Once per spawn HERE, not in the
+            # thrice-called _find_running_server; the state+digest re-read is a cheap
+            # unconditional diagnostic probe, deliberately NOT a second reuse gate.
+            # Source-only: not a version change (#14), not an unreadable digest (F-829).
+            entry = backend_registry.backend_on_port(_read_server_state(), port) or {}
+            edited = backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
+            if edited and entry.get("version") == _server_version():
                 _logger.info("backend stale (source changed), evicting")
+                capture_lifecycle("proxy: backend evicted (source changed)", port=port)
             # A stale/legacy backend (different or unknown version) may still be
             # holding the port; evict it under the lock so our fresh, correctly
             # versioned backend can bind — otherwise the proxy would fall back to
@@ -830,6 +829,10 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
     stdio↔streamable-HTTP pipe used previously; the only additions are the local
     ``initialize`` answer and swallowing the backend's duplicate ``initialize``
     response so the client never sees two.
+
+    F-838: a CONFIRMED-dead backend no longer ends the proxy — the client stays
+    connected on stdio while the backend leg heals and re-bridges onto a
+    replacement. That loop, its bound and the herd live in ``proxy_selfheal``.
     """
     import anyio
     from mcp.client.streamable_http import streamablehttp_client
@@ -841,15 +844,12 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
         JSONRPCResponse,
     )
 
-    url = _backend_http_url(port)
+    from stealth_chrome_devtools_mcp.embedded import proxy_selfheal
+
     to_backend_tx, to_backend_rx = anyio.create_memory_object_stream(1024)
     init_request_id = {"value": None}
-    init_swallowed = {"done": False}
-    backend_initialized = anyio.Event()
-    # Set once the backend has answered a real initialize (it is genuinely up).
-    # The liveness monitor stays disarmed until then so it never tears the proxy
-    # down during the backend's normal cold start.
-    backend_ready = anyio.Event()
+    init_message = {"value": None}
+    pending = proxy_selfheal.PendingCalls()
 
     async def pump_client():
         try:
@@ -875,6 +875,7 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                         SessionMessage(message=JSONRPCMessage(response))
                     )
                     init_request_id["value"] = inner.id
+                    init_message["value"] = msg  # F-838 replays it on a re-bridge
                 # Forward everything (including initialize) so the backend session
                 # initializes with the client's real params. Buffered until the
                 # backend connects.
@@ -882,34 +883,35 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
         finally:
             await to_backend_tx.aclose()
 
-    async def run_backend():
+    async def run_backend(url, replay, armed):
         if not await _await_backend_http(url):
-            # Before M3 this returned silently (F-183): a 120s cold-start
-            # failure gave the teardown no cause on disk. Later requests
-            # simply won't answer; the sentinel behavior is unchanged.
+            # F-183: this used to return silently, leaving no cause on disk.
             _logger.error(
                 "backend did not become ready within %.0fs", BACKEND_READY_TIMEOUT
             )
             return
 
-        backend_ready.set()  # arm the liveness monitor now that it is genuinely up
+        armed.set()  # arm the liveness monitor now that it is genuinely up
+        init_swallowed = {"done": False}  # per generation: each backend answers
+        backend_initialized = anyio.Event()  # our initialize exactly once
         async with streamablehttp_client(url) as (backend_read, backend_write, _):
 
             async def to_backend():
                 # Forward the initialize first, then hold every later message
                 # until the backend's initialize response establishes the
-                # streamable-HTTP session id. streamablehttp_client dispatches
-                # requests concurrently and stamps each with the *current*
-                # session id, so sending tools/list before that id exists yields
-                # a 400. The real client gets this sequencing for free by waiting
-                # on the initialize response; we answered it locally, so we must
-                # reproduce the wait here.
-                first = await to_backend_rx.receive()
+                # streamable-HTTP session id: streamablehttp_client stamps each
+                # concurrent request with the CURRENT id, so a tools/list sent
+                # before it exists yields 400. A real client gets that
+                # sequencing by awaiting the initialize response; we answered
+                # locally, so we reproduce the wait. ``replay`` is F-838's
+                # re-bridge: generation 2+ re-sends the client's own initialize.
+                first = replay or await to_backend_rx.receive()
                 await backend_write.send(first)
                 inner = first.message.root
                 if isinstance(inner, JSONRPCRequest) and inner.method == "initialize":
                     await backend_initialized.wait()
                 async for msg in to_backend_rx:
+                    pending.track(msg.message.root)
                     await backend_write.send(msg)
 
             async def from_backend():
@@ -927,41 +929,38 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                             init_swallowed["done"] = True
                             backend_initialized.set()
                             continue  # client already got a local initialize result
+                        pending.settle(inner)
                         await client_write.send(msg)
                 finally:
-                    # Never leave to_backend blocked if the backend died before
-                    # its initialize response arrived.
+                    # never leave to_backend blocked on a never-answered init
                     backend_initialized.set()
 
             async with anyio.create_task_group() as tg:
                 tg.start_soon(to_backend)
                 tg.start_soon(from_backend)
 
-    async def run_backend_guarded():
-        # A backend that dies mid-session surfaces as a read/connection error out
-        # of run_backend. Don't let it crash (or hang) the proxy — swallow it and
-        # tear down so the client sees a clean disconnect and reconnects to a
-        # freshly spawned backend instead of blocking forever on a request the
-        # dead backend can never answer.
-        try:
-            await run_backend()
-        except Exception:
-            _logger.warning("backend connection lost", exc_info=True)
-        finally:
-            tg.cancel_scope.cancel()
-
-    async def monitor_backend():
-        # Armed only after the backend is confirmed up. Covers the case where the
-        # backend vanishes while run_backend is parked forwarding (no error is
-        # raised, so run_backend_guarded alone would never fire).
-        await backend_ready.wait()
-        await _watch_backend_liveness(port)
+    async def backend_leg():
+        # F-838: the leg outlives any single backend. proxy_selfheal owns the
+        # generation loop — connect, watch, and on a CONFIRMED-dead verdict heal
+        # via ensure_server_running (the SAME startup path, so the same reuse
+        # gate and cold-start lock) before re-bridging. It returns only when
+        # nothing is left to heal; then the pre-F-838 teardown below runs.
+        await proxy_selfheal.drive(
+            port=port,
+            url_for=_backend_http_url,
+            connect=run_backend,
+            watch=_watch_backend_liveness,
+            replay=lambda: init_message["value"],
+            pending=pending,
+            client_write=client_write,
+            ensure_running=ensure_server_running,
+            await_ready=_await_backend_http,
+        )
         _logger.warning("backend became unreachable; tearing down for reconnect")
         tg.cancel_scope.cancel()
 
     async with anyio.create_task_group() as tg:
-        tg.start_soon(run_backend_guarded)
-        tg.start_soon(monitor_backend)
+        tg.start_soon(backend_leg)
         # Drive the client pump in the main task. When the client (Claude Code)
         # disconnects, stdin hits EOF and pump_client returns — at which point we
         # cancel everything. Otherwise run_backend's from_backend loop stays

@@ -31,6 +31,7 @@ from stealth_chrome_devtools_mcp.embedded.file_based_element_cloner import (
 )
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
 from stealth_chrome_devtools_mcp.embedded.logging_setup import (
+    backend_uvicorn_config,
     bootstrap_backend_process_logging,
 )
 from stealth_chrome_devtools_mcp.embedded.models import (
@@ -52,7 +53,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     InstanceNotFoundError,
     ToolError,
     _require_browser,
-    _require_navigation_ok,
+    _require_landing_ok,
     _require_tab,
 )
 from stealth_chrome_devtools_mcp.embedded.tool_registry import (
@@ -224,11 +225,6 @@ DEBUG_LOGGING_ENABLED = get_settings().stealth_browser_debug or get_settings().d
 # an idle HTTP backend crossing back to zero sessions must NOT re-arm startup.
 _LIFESPAN_STARTED = False
 _SERVE_TRANSPORT = "stdio"
-# F-809: FastMCP hard-codes uvicorn's timeout_graceful_shutdown to 0, and a
-# zero-second asyncio timeout always fires — so every clean HTTP stop ERROR-logs
-# "timeout graceful shutdown exceeded" (and Sentry ships it). Sized against
-# singleton._terminate_backend's 5 s wait; never None, uvicorn's "wait forever".
-_GRACEFUL_SHUTDOWN_SECONDS = 2.0
 
 
 @asynccontextmanager
@@ -660,7 +656,7 @@ async def navigate(
     )
     # Bookkeeping completed above, so raising here cannot leave the tab or the
     # state table behind (F-802).
-    return _require_navigation_ok(url, result)
+    return await _require_landing_ok(result, url, CDP_OPERATION_TIMEOUT)
 
 
 @section_tool("browser-management")
@@ -672,11 +668,11 @@ async def go_back(instance_id: str) -> bool:
         instance_id (str): Browser instance ID.
 
     Returns:
-        bool: True if navigation was successful.
+        bool: True. Landing on a Chrome error page raises instead (F-833).
     """
     tab = await _require_tab(browser_manager, instance_id)
     await _with_cdp_timeout(tab.back(), instance_id=instance_id)
-    return True
+    return await _require_landing_ok(tab, "the previous page", CDP_OPERATION_TIMEOUT)
 
 
 @section_tool("browser-management")
@@ -688,11 +684,11 @@ async def go_forward(instance_id: str) -> bool:
         instance_id (str): Browser instance ID.
 
     Returns:
-        bool: True if navigation was successful.
+        bool: True. Landing on a Chrome error page raises instead (F-833).
     """
     tab = await _require_tab(browser_manager, instance_id)
     await _with_cdp_timeout(tab.forward(), instance_id=instance_id)
-    return True
+    return await _require_landing_ok(tab, "the next page", CDP_OPERATION_TIMEOUT)
 
 
 @section_tool("browser-management")
@@ -705,11 +701,11 @@ async def reload_page(instance_id: str, ignore_cache: bool = False) -> bool:
         ignore_cache (bool): Whether to ignore cache when reloading.
 
     Returns:
-        bool: True if reload was successful.
+        bool: True. Landing on a Chrome error page raises instead (F-833).
     """
     tab = await _require_tab(browser_manager, instance_id)
     await _with_cdp_timeout(tab.reload(), instance_id=instance_id)
-    return True
+    return await _require_landing_ok(tab, "the reloaded page", CDP_OPERATION_TIMEOUT)
 
 
 @section_tool("element-interaction")
@@ -1290,16 +1286,16 @@ async def search_network_requests(
     offset: int = 0,
 ) -> dict[str, Any]:
     """
-    Search network requests with advanced filters and pagination.
+    Search network requests; ``url_pattern`` filters the URL (substring, not glob).
 
     Args:
         instance_id (str): Browser instance ID.
-        url_pattern (Optional[str]): Filter by URL pattern (substring match).
-        method (Optional[str]): Filter by HTTP method.
-        status_code (Optional[int]): Filter by response status code.
-        response_contains (Optional[str]): Search in response body.
-        payload_contains (Optional[str]): Search in request payload.
-        resource_type (Optional[str]): Filter by resource type.
+        url_pattern (Optional[str]): URL filter — case-insensitive substring.
+        method (Optional[str]): HTTP method, matched whole, case-insensitively.
+        status_code (Optional[int]): Exact response status code.
+        response_contains (Optional[str]): Case-insensitive substring of the body.
+        payload_contains (Optional[str]): Case-insensitive substring of the payload.
+        resource_type (Optional[str]): Case-insensitive substring of the CDP type.
         limit (int): Max results per page.
         offset (int): Starting index for pagination.
 
@@ -1477,7 +1473,7 @@ async def set_cookie(
         path (str): Cookie path.
         secure (bool): Secure flag.
         http_only (bool): HttpOnly flag.
-        same_site (Optional[str]): SameSite attribute ('Strict', 'Lax', or 'None').
+        same_site (Optional[str]): SameSite — 'Strict', 'Lax' or 'None' (any case).
 
     Returns:
         bool: True if set successfully.
@@ -1787,19 +1783,19 @@ async def new_tab(instance_id: str, url: str = "about:blank") -> dict[str, Any]:
         url (str): URL to open in the new tab.
 
     Returns:
-        Dict[str, Any]: New tab information.
+        Dict[str, Any]: New tab information. A Chrome error page raises (F-833).
     """
     browser = await _require_browser(browser_manager, instance_id)
     try:
-        new_tab_obj = await _with_cdp_timeout(
+        tab = await _with_cdp_timeout(
             browser.get(url, new_tab=True), instance_id=instance_id
         )
-        await _with_cdp_timeout(new_tab_obj, instance_id=instance_id)
+        await _require_landing_ok(tab, url, CDP_OPERATION_TIMEOUT, close_on_error=True)
         return {
-            "tab_id": str(new_tab_obj.target.target_id),
-            "url": getattr(new_tab_obj, "url", "") or url,
-            "title": getattr(new_tab_obj.target, "title", "") or "New Tab",
-            "type": getattr(new_tab_obj.target, "type_", "page"),
+            "tab_id": str(tab.target.target_id),
+            "url": getattr(tab, "url", "") or url,
+            "title": getattr(tab.target, "title", "") or "New Tab",
+            "type": getattr(tab.target, "type_", "page"),
         }
     except Exception as e:
         raise ToolError(f"Failed to create new tab: {e!s}")
@@ -3405,7 +3401,7 @@ if __name__ == "__main__":
             transport="http",
             host=args.host,
             port=args.port,
-            uvicorn_config={"timeout_graceful_shutdown": _GRACEFUL_SHUTDOWN_SECONDS},
+            uvicorn_config=backend_uvicorn_config(),
         )
     else:
         mcp.run(transport="stdio")

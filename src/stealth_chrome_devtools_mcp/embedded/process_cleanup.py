@@ -114,12 +114,13 @@ class ProcessCleanup:
         """Register cleanup hooks for interpreter exit and termination signals.
 
         ``signal.signal`` returns the disposition it displaces; recording it is
-        what lets ``_signal_handler`` hand the signal back (F-809) — under HTTP
-        that is uvicorn's ``handle_exit``, installed first by ``capture_signals``
-        and so REPLACED by ours, never coexisting. SIGBREAK exists on Windows
-        only, so ``getattr`` is the whole platform gate. A re-install is skipped
-        (runpy double-loads the server module): re-recording would make
-        ``previous`` OUR handler, i.e. ``_signal_handler`` delegating to itself.
+        what lets ``_signal_handler`` hand the signal back (F-809) — under HTTP,
+        uvicorn's ``handle_exit``, installed first and so REPLACED by ours. A
+        re-install is skipped (runpy double-loads the module): it would record
+        OUR handler as ``previous``, one delegating to itself. SIGBREAK
+        (Windows-only, hence ``getattr``) is IGNORED, never handled (F-839): no
+        product path sends it — stop/restart/evict all use TerminateProcess,
+        which runs no handler — so obeying one serves only a console killer.
         """
         atexit.register(self._cleanup_all_tracked)
 
@@ -127,9 +128,8 @@ class ProcessCleanup:
             signum = getattr(signal, name, None)
             if signum is None or signum in self._previous_signal_handlers:
                 continue
-            self._previous_signal_handlers[signum] = signal.signal(
-                signum, self._signal_handler
-            )
+            handler = signal.SIG_IGN if name == "SIGBREAK" else self._signal_handler
+            self._previous_signal_handlers[signum] = signal.signal(signum, handler)
 
     def _signal_handler(self, signum, frame):
         """Clean up tracked browsers, then hand the signal back (F-809)."""
@@ -419,23 +419,37 @@ class ProcessCleanup:
                 success = False
         return success
 
+    def _profile_claimed_by_live_instance(self, normalized: str, skip_id: str) -> bool:
+        """True when a tracked instance OTHER than *skip_id* holds *normalized*
+        with a live pid.
+
+        A deferred delete is decided at defer time and fired much later; in
+        between, a concurrent spawn can become the live owner of that very
+        directory (F-834 — concurrent spawns used to share one retry clone dir,
+        and the loser's cleanup deleted the winner's live profile seconds after
+        the tool reported it ready). Asking again HERE, at fire time, is what
+        makes the answer current.
+        """
+        return any(
+            other_id != skip_id
+            and self._normalize_path(other.get("user_data_dir")) == normalized
+            and isinstance(other.get("pid"), int)
+            and psutil.pid_exists(other["pid"])
+            for other_id, other in list(self.browser_processes.items())
+        )
+
     def _cleanup_profile_dir(  # noqa: PLR0911  plan_M11a
         self,
         profile_dir: str,
         instance_id: str,
         active_profile_dirs: set[str] | None = None,
     ) -> bool:
-        """
-        Remove a browser temp profile directory when it is safe to do so.
+        """Remove a browser temp profile directory when it is safe to do so.
 
-        Args:
-            profile_dir (str): Profile directory to remove.
-            instance_id (str): Browser instance id for diagnostics.
-            active_profile_dirs (Optional[Set[str]]): Active profile set used
-                to avoid deleting in-use directories.
-
-        Returns:
-            bool: True if the directory was removed or already absent.
+        Returns True if the directory was removed or was already absent.
+        ``active_profile_dirs`` is an optional pre-computed live-profile set;
+        pass it only when it was measured just now (see the F-834 note on
+        ``cleanup_deferred_profiles``).
         """
         normalized_profile_dir = self._normalize_path(profile_dir)
         if normalized_profile_dir is None:
@@ -444,6 +458,14 @@ class ProcessCleanup:
         path = Path(profile_dir)
         if not path.exists():
             return True
+
+        if self._profile_claimed_by_live_instance(normalized_profile_dir, instance_id):
+            debug_logger.log_info(
+                "process_cleanup",
+                "cleanup_profile",
+                f"Skipping profile a live instance owns ({instance_id}): {profile_dir}",
+            )
+            return False
 
         last = self._MAX_CLEANUP_RETRIES - 1
         for attempt in range(self._MAX_CLEANUP_RETRIES):
@@ -491,17 +513,9 @@ class ProcessCleanup:
         metadata: dict[str, Any],
         active_profile_dirs: set[str] | None = None,
     ) -> bool:
-        """
-        Remove an auto-generated profile directory described by tracked metadata.
+        """Remove the auto-generated profile directory *metadata* describes.
 
-        Args:
-            instance_id (str): Browser instance id.
-            metadata (Dict[str, Any]): Persisted process metadata.
-            active_profile_dirs (Optional[Set[str]]): Active profile set used
-                to avoid deleting live directories.
-
-        Returns:
-            bool: True if cleanup succeeded or nothing needed to be removed.
+        Returns True if cleanup succeeded or nothing needed to be removed.
         """
         if metadata.get("uses_custom_data_dir") is True and not metadata.get(
             "auto_clone"
@@ -522,13 +536,6 @@ class ProcessCleanup:
         Windows-locked delete is retried later by ``cleanup_deferred_profiles``
         and startup recovery.  Named/master profiles (custom dir, not an
         auto-clone) are never deleted, so they are dropped immediately.
-
-        Args:
-            metadata (Dict[str, Any]): Tracked process metadata.
-            cleaned (bool): Whether the profile directory was just removed.
-
-        Returns:
-            bool: True when the tracked entry should be untracked now.
         """
         if cleaned:
             return True
@@ -789,14 +796,9 @@ class ProcessCleanup:
         return success
 
     def finalize_browser_process(self, instance_id: str) -> bool:
-        """
-        Finalize tracked metadata after a browser was stopped elsewhere.
+        """Finalize tracked metadata after a browser was stopped elsewhere.
 
-        Args:
-            instance_id: Browser instance identifier.
-
-        Returns:
-            bool: True if the tracked process was fully finalized.
+        Returns True if the tracked process was fully finalized.
         """
         metadata = self.browser_processes.get(instance_id)
         if metadata is None:
@@ -825,14 +827,14 @@ class ProcessCleanup:
         return False
 
     def cleanup_deferred_profiles(self) -> int:
-        """
-        Retry cleanup for tracked temp profiles whose browser process is already gone.
+        """Retry cleanup for tracked temp profiles whose browser is already gone.
 
-        Returns:
-            int: Number of deferred profile entries fully finalized.
+        Returns the number of deferred entries fully finalized. Deliberately
+        passes NO pre-computed active-profile set: these deletes were deferred
+        arbitrarily long ago, so ownership is re-measured per entry at FIRE
+        time. A sweep-start snapshot is a defer-time answer (F-834).
         """
         finalized_count = 0
-        active_profile_dirs = self._get_active_browser_profile_dirs()
 
         for instance_id in list(self.browser_processes.keys()):
             metadata = self.browser_processes.get(instance_id)
@@ -843,11 +845,7 @@ class ProcessCleanup:
             if isinstance(pid, int) and psutil.pid_exists(pid):
                 continue
 
-            cleaned = self._cleanup_profile_for_metadata(
-                instance_id,
-                metadata,
-                active_profile_dirs=active_profile_dirs,
-            )
+            cleaned = self._cleanup_profile_for_metadata(instance_id, metadata)
             if self._should_untrack_after_cleanup(
                 metadata, cleaned
             ) and self.untrack_browser_process(instance_id):

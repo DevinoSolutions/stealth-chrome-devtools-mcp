@@ -1,6 +1,7 @@
 """Shared fixtures for stealth-chrome-devtools-mcp test suite."""
 
 import json
+import logging
 import os
 import shutil
 import sys
@@ -41,6 +42,50 @@ os.environ.setdefault("STEALTH_MCP_NO_ERROR_REPORTING", "1")
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _stealth_logger_hygiene():
+    """No test may leave ``stealth.*`` logger state behind for the next one.
+
+    ``logging_setup.configure_logging`` deliberately sets ``propagate=False``
+    and attaches a file handler on its ``stealth.<role>`` logger — correct in
+    production, poison in a shared test process: any test that drives the real
+    proxy/backend bootstrap in-process (e.g. the Ctrl-C shim test in
+    ``test_clean_shutdown_noise``) silently starves every later
+    ``caplog.at_level(..., logger="stealth.proxy")`` assertion, because caplog
+    captures via propagation to the root logger. Four hermetic log-assertion
+    tests failed lane-only (green in isolation) before this fixture existed.
+
+    Snapshot propagate/handlers/level for every ``stealth``/``stealth.*``
+    logger before the test; restore after. Handlers a test added are closed so
+    Windows can delete the tmp log files they hold open.
+    """
+
+    def _stealth_loggers():
+        return [
+            obj
+            for name, obj in logging.Logger.manager.loggerDict.items()
+            if isinstance(obj, logging.Logger)
+            and (name == "stealth" or name.startswith("stealth."))
+        ]
+
+    before = {
+        lg.name: (lg.propagate, list(lg.handlers), lg.level)
+        for lg in _stealth_loggers()
+    }
+    yield
+    for lg in _stealth_loggers():
+        propagate, handlers, level = before.get(lg.name, (True, [], logging.NOTSET))
+        for handler in list(lg.handlers):
+            if handler not in handlers:
+                lg.removeHandler(handler)
+                handler.close()
+        for handler in handlers:
+            if handler not in lg.handlers:
+                lg.addHandler(handler)
+        lg.propagate = propagate
+        lg.setLevel(level)
 
 
 @pytest.fixture(autouse=True)

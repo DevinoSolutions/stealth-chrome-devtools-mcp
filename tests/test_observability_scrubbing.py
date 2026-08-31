@@ -380,3 +380,332 @@ def test_the_scrubber_accepts_the_hint_sentry_passes_positionally():
     )
 
     assert _frames(out)[0]["abs_path"] == "/home/~/a.py"
+
+
+# ===========================================================================
+# F-826 — page content quoted into an exception VALUE
+# ===========================================================================
+# The 2.0.4 scrubber above anonymized paths and dropped the hostname, which is
+# what the machine leaks about ITSELF. It said nothing about what the machine
+# leaks about the PAGES IT DRIVES: this product's errors quote the thing that
+# failed, and the thing that failed is a URL an agent navigated to or a value it
+# typed into a form. Observed live in the project's own Sentry: OAuth
+# authorization URLs with the token still in the query, and email addresses.
+#
+# The ruling is TARGETED redaction, not message replacement: an issue nobody can
+# read is an issue nobody fixes. Three shapes, each keeping the diagnostic
+# skeleton — the address, the site, the path, the sentence around them.
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # The plain address in prose.
+        (
+            "login failed for alice@example.com",
+            "login failed for [redacted-email]",
+        ),
+        # A display-name style local part, plus-addressing, and a subdomain.
+        (
+            "invited first.last+tag@mail.corp.example.co.uk today",
+            "invited [redacted-email] today",
+        ),
+        # Two of them, and the words between them survive.
+        (
+            "from a@b.com to c@d.org",
+            "from [redacted-email] to [redacted-email]",
+        ),
+        # A trailing sentence period belongs to the sentence, not the address.
+        (
+            "contact bob@example.com.",
+            "contact [redacted-email].",
+        ),
+        # Quoted, which is how a form value arrives in an error.
+        (
+            "field 'email' rejected 'eve@example.net'",
+            "field 'email' rejected '[redacted-email]'",
+        ),
+    ],
+)
+def test_an_email_address_is_redacted_and_the_sentence_survives(raw, expected):
+    out = observability._scrub_event({"message": raw})
+
+    assert out["message"] == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Homebrew's versioned formula directory. `@3.11` is not a domain: the
+        # last label is not alphabetic, and a scrubber that ate this would eat
+        # the interpreter path out of every macOS stacktrace.
+        "/opt/homebrew/opt/python@3.11/lib/python3.11/asyncio/runners.py",
+        # A pinned requirement, same shape.
+        "sentry-sdk@2.64.0 is installed",
+        # A scoped npm package: nothing precedes the `@`.
+        "loaded @sentry/browser",
+        # A bare host with no dot is not an address either.
+        "connected as postgres@localhost",
+    ],
+)
+def test_an_at_sign_that_is_not_an_email_is_left_exactly_as_it_was(raw):
+    """Over-redaction is the failure mode that turns reporting off quietly."""
+    out = observability._scrub_event({"message": raw})
+
+    assert out["message"] == raw
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # THE observed leak: an OAuth authorization URL. Scheme, host and path
+        # say which provider and which endpoint; the query is the credential.
+        (
+            "navigate failed: https://accounts.google.com/o/oauth2/auth"
+            "?client_id=1234.apps.googleusercontent.com&access_token=ya29.SECRET",
+            "navigate failed: https://accounts.google.com/o/oauth2/auth"
+            "?[redacted-query]",
+        ),
+        # The implicit-flow variant puts the token in the FRAGMENT instead.
+        (
+            "https://app.example.com/callback#access_token=SECRET&token_type=bearer",
+            "https://app.example.com/callback#[redacted-fragment]",
+        ),
+        # Both at once.
+        (
+            "https://h.example.com/p?code=abc#state=xyz",
+            "https://h.example.com/p?[redacted-query]#[redacted-fragment]",
+        ),
+        # Credentials in the userinfo — how a proxy URL is written.
+        (
+            "proxy http://user:hunter2@proxy.example.com:8080 refused",
+            "proxy http://[redacted]@proxy.example.com:8080 refused",
+        ),
+        # …and userinfo whose local part is itself an address.
+        (
+            "http://alice@example.com:pw@gw.example.net/",
+            "http://[redacted]@gw.example.net/",
+        ),
+        # A session id in the query of an ordinary page.
+        (
+            "timeout on https://shop.example.com/cart?sid=DEADBEEF&email=a@b.com",
+            "timeout on https://shop.example.com/cart?[redacted-query]",
+        ),
+    ],
+)
+def test_a_url_keeps_its_scheme_host_and_path_and_loses_its_secrets(raw, expected):
+    out = observability._scrub_event({"message": raw})
+
+    assert out["message"] == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # No query, no fragment, no userinfo: nothing to take.
+        "GET https://api.example.com/v1/instances/42 returned 500",
+        # A local file URL is a path, and the path is the diagnostic.
+        "file:///opt/venv/lib/site-packages/sentry_sdk/client.py",
+        # A port and a deep path are structure, not secrets.
+        "backend http://127.0.0.1:19222/mcp did not answer",
+    ],
+)
+def test_a_url_with_nothing_secret_in_it_is_left_exactly_as_it_was(raw):
+    out = observability._scrub_event({"message": raw})
+
+    assert out["message"] == raw
+
+
+def test_a_plain_anchor_is_redacted_because_the_rule_is_positional():
+    """A `#readme` anchor is navigation, not a token — but nothing can tell them apart.
+
+    Stated as a test so the trade is visible and deliberate: an implicit-flow
+    `#access_token=…` and a docs anchor occupy the same position, so both go.
+    The URL that remains still names the page.
+    """
+    out = observability._scrub_event(
+        {"message": "see https://github.com/o/stealth-chrome-devtools-mcp#readme"}
+    )
+
+    assert out["message"] == (
+        "see https://github.com/o/stealth-chrome-devtools-mcp#[redacted-fragment]"
+    )
+
+
+def test_all_three_rules_reach_an_exception_value_at_once():
+    """The field F-826 was actually filed about."""
+    event = _event_with_frames(rf"C:\Users\{USER}\src\browser_manager.py")
+    event["exception"]["values"][0]["value"] = (
+        f"click failed for alice@example.com on "
+        f"https://accounts.example.com/o/auth?token=SECRET "
+        rf"(profile C:\Users\{USER}\profile)"
+    )
+
+    out = observability._scrub_event(event)
+
+    assert out["exception"]["values"][0]["value"] == (
+        "click failed for [redacted-email] on "
+        "https://accounts.example.com/o/auth?[redacted-query] "
+        r"(profile C:\Users\~\profile)"
+    )
+    assert "SECRET" not in str(out)
+    assert "alice" not in str(out)
+    assert USER not in str(out)
+    # …and the frame is still a frame.
+    assert _frames(out)[0]["abs_path"] == r"C:\Users\~\src\browser_manager.py"
+
+
+def test_log_messages_and_breadcrumbs_lose_their_secrets_too():
+    out = observability._scrub_event(
+        {
+            "logentry": {
+                "message": "navigating to %s",
+                "params": ["https://id.example.com/auth?client_secret=SHHH"],
+            },
+            "breadcrumbs": {
+                "values": [
+                    {
+                        "category": "stealth.tool",
+                        "message": "type_text into #email: dave@example.com",
+                    }
+                ]
+            },
+        }
+    )
+
+    assert out["logentry"]["params"] == ["https://id.example.com/auth?[redacted-query]"]
+    assert out["breadcrumbs"]["values"][0]["message"] == (
+        "type_text into #email: [redacted-email]"
+    )
+    assert "SHHH" not in str(out)
+    assert "dave" not in str(out)
+
+
+def test_redacting_an_already_redacted_event_changes_nothing():
+    once = observability._scrub_event(
+        {"message": "a@b.com hit https://h.example.com/p?q=1#f"}
+    )
+    twice = observability._scrub_event(once)
+
+    assert twice == once
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        # A separator run that used to make the home rule quadratic — the new
+        # rules must not reintroduce the cost on the same input class.
+        "?" * 20000,
+        "@" * 20000,
+        "https://h/" + "a." * 10000 + "@",
+        "x@" + "a." * 10000,
+        "http://" + "u:p@" * 5000 + "host/",
+    ],
+)
+def test_a_pathological_string_finishes_at_test_speed(hostile):
+    """No timing assertion — this test COMPLETING is the assertion.
+
+    Same reasoning as the possessive-separator row above: these run inside
+    `before_send`, in a process that is already crashing, on strings that can
+    come from arbitrary page content quoted into an error.
+    """
+    out = observability._scrub_event({"message": hostile})
+
+    assert isinstance(out["message"], str)
+
+
+def test_a_scrub_that_explodes_drops_the_free_text_it_could_not_prove_clean():
+    """The floor moved: an unscrubbable event no longer ships its own prose.
+
+    Before F-826 the degraded path shipped the whole event minus `server_name`,
+    on the rationale that a partly-scrubbed report beats silence. That rationale
+    survives — the event is still sent, with its type, module, mechanism and
+    frames — but the fields F-826 found page content in are not worth the risk
+    of shipping raw, so they are dropped rather than guessed at.
+    """
+
+    class _Hostile(dict):
+        def items(self):
+            raise RuntimeError("event walk exploded")
+
+    hostile = _Hostile(
+        server_name="DESKTOP-ABC123",
+        release="2.0.4",
+        logentry={"message": "user alice@example.com"},
+        breadcrumbs={"values": [{"message": "https://h.example.com/a?token=SECRET"}]},
+        exception={
+            "values": [
+                {
+                    "type": "AttributeError",
+                    "module": "stealth_chrome_devtools_mcp.embedded.dom_handler",
+                    "value": "alice@example.com on https://h.example.com/a?token=SECRET",
+                    "mechanism": {"type": "excepthook", "handled": False},
+                }
+            ]
+        },
+    )
+
+    out = observability._scrub_event(hostile)
+
+    assert "server_name" not in out
+    assert out["release"] == "2.0.4"
+    assert "SECRET" not in str(out)
+    assert "alice" not in str(out)
+    # What a maintainer still gets: which error, raised where, and how.
+    value = out["exception"]["values"][0]
+    assert value["type"] == "AttributeError"
+    assert value["module"] == "stealth_chrome_devtools_mcp.embedded.dom_handler"
+    assert value["mechanism"] == {"type": "excepthook", "handled": False}
+    assert value["value"] == "[redacted-unscrubbable]"
+    # …and the caller's object is still untouched, on the failure path too.
+    assert hostile["server_name"] == "DESKTOP-ABC123"
+    assert hostile["logentry"] == {"message": "user alice@example.com"}
+
+
+# ===========================================================================
+# F-815 must not regress: scrub only what survives the drop filter
+# ===========================================================================
+def test_an_expected_tool_failure_is_still_dropped_before_any_redaction():
+    """The drop comes first, so a `ToolError` full of page content never ships."""
+    out = observability._scrub_event(
+        {
+            "exception": {
+                "values": [
+                    {
+                        "type": "ToolError",
+                        "module": "stealth_chrome_devtools_mcp.embedded.tool_errors",
+                        "value": "no element for alice@example.com",
+                    }
+                ]
+            }
+        }
+    )
+
+    assert out is None
+
+
+def test_a_real_bug_wrapped_in_a_tool_error_is_still_shipped_and_now_redacted():
+    """F-815's "every link must be ours" rule, with F-826 applied to what is left."""
+    out = observability._scrub_event(
+        {
+            "exception": {
+                "values": [
+                    {
+                        "type": "AttributeError",
+                        "module": "stealth_chrome_devtools_mcp.embedded.dom_handler",
+                        "value": "NoneType has no attribute 'send' for a@b.com",
+                    },
+                    {
+                        "type": "ToolError",
+                        "module": "stealth_chrome_devtools_mcp.embedded.tool_errors",
+                        "value": "click failed",
+                    },
+                ]
+            }
+        }
+    )
+
+    assert out is not None
+    assert out["exception"]["values"][0]["value"] == (
+        "NoneType has no attribute 'send' for [redacted-email]"
+    )

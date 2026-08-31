@@ -15,12 +15,14 @@ from nodriver import Browser, Tab
 
 from stealth_chrome_devtools_mcp.embedded import (
     desktop_launch,
+    spawn_contention,
     spawn_exhaustion,
     tool_errors,
     window_sizing,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
+from stealth_chrome_devtools_mcp.embedded.element_resolution import recoverable_race
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
 from stealth_chrome_devtools_mcp.embedded.models import (
     BrowserInstance,
@@ -63,6 +65,11 @@ class BrowserManager:
         self._idle_timeout_seconds_default = get_settings().browser_idle_timeout
         self._idle_reaper_interval_seconds = get_settings().browser_idle_reaper_interval
         self._idle_reaper_task: asyncio.Task | None = None
+        # Spawns mid-flight + the PEAK of the current burst. A failing spawn reads
+        # the peak: one race's losers fail in sequence, so by the last one the live
+        # count is 1 again and only the peak still says "you raced" (F-834).
+        self._spawns_in_flight = 0
+        self._spawn_peak_in_flight = 0
         # Strong refs to fire-and-forget background tasks so the event loop can't
         # garbage-collect them mid-run; the done-callback discards each entry and
         # surfaces any failure instead of letting it vanish (RUF006).
@@ -597,6 +604,17 @@ class BrowserManager:
         )
         return applied_timezone_id, window_metrics
 
+    @staticmethod
+    def _warn_spawn_cleanup(
+        what: str, phase: str, instance_id: str, error: BaseException
+    ) -> None:
+        """One line per spawn-teardown warning; six sites differed only in noun."""
+        debug_logger.log_warning(
+            "browser_manager",
+            "spawn_browser",
+            f"{what} failed during {phase} cleanup for {instance_id}: {error}",
+        )
+
     async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)
         """
         Spawn a new browser instance with given options.
@@ -615,6 +633,10 @@ class BrowserManager:
         """
         instance_id = str(uuid.uuid4())
         instance = self._build_instance(instance_id, options)
+        self._spawns_in_flight += 1
+        self._spawn_peak_in_flight = max(
+            self._spawn_peak_in_flight, self._spawns_in_flight
+        )
 
         browser: Browser | None = None
         proxy_forwarder: AuthenticatedProxyForwarder | None = None
@@ -695,8 +717,6 @@ class BrowserManager:
                 }
 
             instance.state = BrowserState.READY
-            instance.update_activity()
-
             instance.current_url = getattr(tab, "url", "") or instance.current_url
             instance.update_activity()
             in_memory_storage.store_instance(
@@ -707,34 +727,21 @@ class BrowserManager:
             if browser is not None:
                 try:
                     await self._stop_browser(browser)
-                except (OSError, RuntimeError, ConnectionError) as stop_err:
-                    debug_logger.log_warning(
-                        "browser_manager",
-                        "spawn_browser",
-                        f"browser.stop() failed during cancel cleanup "
-                        f"for {instance_id}: {stop_err}",
+                except (OSError, RuntimeError, ConnectionError) as err:
+                    self._warn_spawn_cleanup(
+                        "browser.stop()", "cancel", instance_id, err
                     )
             if proxy_forwarder is not None:
                 try:
                     await proxy_forwarder.close()
-                except (OSError, ConnectionError) as proxy_err:
-                    debug_logger.log_warning(
-                        "browser_manager",
-                        "spawn_browser",
-                        f"Proxy close failed during cancel cleanup "
-                        f"for {instance_id}: {proxy_err}",
-                    )
+                except (OSError, ConnectionError) as err:
+                    self._warn_spawn_cleanup("Proxy close", "cancel", instance_id, err)
             try:
                 process_cleanup.kill_browser_process(instance_id)
                 process_cleanup.finalize_browser_process(instance_id)
                 process_cleanup.cleanup_deferred_profiles()
-            except (OSError, psutil.Error, ProcessLookupError) as proc_err:
-                debug_logger.log_warning(
-                    "browser_manager",
-                    "spawn_browser",
-                    f"Process cleanup failed during cancel "
-                    f"for {instance_id}: {proc_err}",
-                )
+            except (OSError, psutil.Error, ProcessLookupError) as err:
+                self._warn_spawn_cleanup("Process cleanup", "cancel", instance_id, err)
             async with self._lock:
                 self._instances.pop(instance_id, None)
                 self._spawn_diagnostics.pop(instance_id, None)
@@ -745,38 +752,32 @@ class BrowserManager:
             if browser is not None:
                 try:
                     await self._stop_browser(browser)
-                except (OSError, RuntimeError, ConnectionError) as stop_err:
-                    debug_logger.log_warning(
-                        "browser_manager",
-                        "spawn_browser",
-                        f"browser.stop() failed during error cleanup "
-                        f"for {instance_id}: {stop_err}",
+                except (OSError, RuntimeError, ConnectionError) as err:
+                    self._warn_spawn_cleanup(
+                        "browser.stop()", "error", instance_id, err
                     )
             if proxy_forwarder is not None:
                 try:
                     await proxy_forwarder.close()
-                except (OSError, ConnectionError) as proxy_err:
-                    debug_logger.log_warning(
-                        "browser_manager",
-                        "spawn_browser",
-                        f"Proxy close failed during error cleanup "
-                        f"for {instance_id}: {proxy_err}",
-                    )
+                except (OSError, ConnectionError) as err:
+                    self._warn_spawn_cleanup("Proxy close", "error", instance_id, err)
             try:
                 process_cleanup.kill_browser_process(instance_id)
-            except (OSError, psutil.Error, ProcessLookupError) as proc_err:
-                debug_logger.log_warning(
-                    "browser_manager",
-                    "spawn_browser",
-                    f"Process kill failed during error cleanup "
-                    f"for {instance_id}: {proc_err}",
-                )
+            except (OSError, psutil.Error, ProcessLookupError) as err:
+                self._warn_spawn_cleanup("Process kill", "error", instance_id, err)
             instance.state = BrowserState.ERROR
+            # Two independent causes, two homes, one composition site: each hint
+            # carries its own "\n\n", so this stays a bare concatenation.
             hint = spawn_exhaustion.exhaustion_hint(process_cleanup.pid_file) or ""
+            hint += spawn_contention.contention_hint(self._spawn_peak_in_flight) or ""
             # No "Failed to spawn browser:" prefix here: the spawn_browser tool in
             # server.py wraps this exception with exactly one, and carrying a second
             # copy doubled it in the user-visible ToolError.
             raise Exception(f"{e!s}{hint}")  # noqa: B904  plan_M4ph1
+        finally:
+            self._spawns_in_flight -= 1
+            if self._spawns_in_flight == 0:
+                self._spawn_peak_in_flight = 0
 
         return instance
 
@@ -997,11 +998,10 @@ class BrowserManager:
 
     @staticmethod
     def _is_recoverable_navigation_error(error: Exception) -> bool:
-        """Return whether a navigation error should trigger one stale-tab
-        recovery attempt."""
-        if isinstance(error, asyncio.TimeoutError):
+        """Whether a navigation error earns one stale-tab recovery attempt (the
+        nodriver races are classified in element_resolution, not re-listed; F-824)."""
+        if isinstance(error, asyncio.TimeoutError) or recoverable_race(error):
             return True
-
         message = f"{type(error).__name__}: {error}".lower()
         recoverable_markers = (
             "connection dropped",

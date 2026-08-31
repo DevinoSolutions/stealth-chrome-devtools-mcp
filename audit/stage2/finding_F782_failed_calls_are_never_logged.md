@@ -1,6 +1,12 @@
 # F-782 — a failed tool call emits no error log record
 
-**Status:** OPEN — characterized by plan_RELEASE W15, not fixed (W15 is zero-`src/`).
+**Status:** OPEN (log half) — characterized by plan_RELEASE W15, not fixed there
+(W15 is zero-`src/`). **F-835 (2.0.8) closed the in-memory half**: the wrapper
+now has an `except` that records the escaping exception in `debug_logger`'s ring
+and re-raises it unchanged, so `get_debug_view` shows a failure. It deliberately
+does NOT write the durable `_backend_logger.error` line — see "The one upside"
+below, whose condition (redact first) is unanswered. What remains open is
+exactly consequences 1 and 2 below, for the LOG file.
 **Severity:** MEDIUM (operability). The backend log cannot answer "what failed?".
 **Surface:** `src/stealth_chrome_devtools_mcp/embedded/logging_setup.py`
 (`with_correlation_id`), reached from
@@ -54,6 +60,15 @@ passes. That is a consequence of the gap, not a control. **If F-782 is fixed by
 logging the exception, that node must be re-run and the logged record must go
 through `release_evidence.redact` first**, or fixing an observability gap will
 open a disclosure one.
+
+F-835 took that condition literally. It closed the operability gap on the
+surface where the argument echo is not a disclosure — the in-memory ring, which
+is process-local and reaches only the client that already received those bytes —
+and left the durable, Sentry-bridged log alone. The canary node was re-run: the
+three absolute surfaces (stdout, stderr, backend log) stay clean, and the debug
+view is asserted to carry a canary only inside a failure message the caller
+itself received. Closing the log half still needs the redactor question
+answered; it is the same question F-826 raises for the Sentry path.
 
 ## Pin
 

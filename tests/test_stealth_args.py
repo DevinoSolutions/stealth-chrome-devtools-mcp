@@ -236,3 +236,58 @@ class TestMergeBrowserArgs:
         args, warnings = merge_browser_args(["--proxy-server=socks5://localhost:1080"])
         assert "--proxy-server=socks5://localhost:1080" in args
         assert warnings == []
+
+
+# ---------------------------------------------------------------------------
+# F-836 — the environment validator must not recommend what the filter strips
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def _sandbox_required(monkeypatch):
+    """Force the one condition that makes the sandbox args required at all.
+
+    On a normal desktop ``get_required_sandbox_args()`` is empty, so the
+    contradiction is invisible; it only appears as root or in a container.
+    """
+    monkeypatch.setattr(platform_utils, "is_running_as_root", lambda: True)
+    monkeypatch.setattr(platform_utils, "is_running_in_container", lambda: True)
+
+
+class TestRecommendedArgsAgreeWithTheStealthFilter:
+    """F-836 — ``validate_browser_environment`` used to recommend
+    ``--no-sandbox`` / ``--disable-setuid-sandbox`` while ``filter_stealth_args``
+    strips exactly those from caller-supplied ``browser_args`` ("Stripped 4
+    detectable arg(s)"). One tool told the operator to pass what another
+    silently discarded.
+
+    The pin is a cross-check, not a literal list: whatever the filter blocks may
+    never appear in the recommendation, so the two cannot drift apart again.
+    """
+
+    def test_the_precondition_actually_requires_sandbox_args(self, _sandbox_required):
+        # Guards the fixture: without required args the pin below is vacuous.
+        assert platform_utils.get_required_sandbox_args()
+
+    def test_no_recommended_arg_is_one_the_filter_strips(self, _sandbox_required):
+        recommended = platform_utils.validate_browser_environment()["recommended_args"]
+        clean, stripped = filter_stealth_args(recommended)
+        assert stripped == [], f"recommends args the stealth filter strips: {stripped}"
+        assert clean == recommended
+
+    def test_operator_is_told_the_stripped_args_are_applied_automatically(
+        self, _sandbox_required
+    ):
+        # The args are still needed — merge_browser_args appends them AFTER the
+        # filter — so dropping them from the recommendation must not drop the
+        # information. The operator gets told the spawn path applies them.
+        env = platform_utils.validate_browser_environment()
+        text = " ".join(env["recommendations"])
+        for arg in platform_utils.get_required_sandbox_args():
+            assert arg in text
+
+    def test_spawn_path_still_applies_the_required_args(self, _sandbox_required):
+        # The fix is to the ADVICE, not to the launch policy.
+        args, _ = merge_browser_args([])
+        for arg in platform_utils.get_required_sandbox_args():
+            assert arg in args

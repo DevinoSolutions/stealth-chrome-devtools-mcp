@@ -1,5 +1,490 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — the boot log no longer grows without bound (F-830)
+
+`~/.stealth-mcp/logs/backend-boot.log` reached **794 MB** on a single developer
+machine: ~13 million uvicorn HTTP access-log lines — mostly the client
+watchdog's ~2 s probe of every live stdio proxy — appended to one shared file
+across every backend the machine had ever started. Nothing could rotate it: the
+file is a raw `Popen` stdout/stderr redirect, so the running backend holds its
+descriptor for life, an in-process rotating handler never sees those bytes, and
+an external rename either fails (Windows) or leaves the child writing to the
+old inode (POSIX). The age-based log pruner skipped it too, because a live
+backend refreshes its mtime continuously.
+
+Fixed on both sides. The backend's uvicorn run-config now sets
+`access_log=False`, so the per-request spam is never emitted — tool calls are
+still logged, with a correlation id and a duration, by the existing
+`stealth.backend` logger into the size-rotated per-pid file. And the launcher
+rolls the boot log aside when it exceeds 16 MB, keeping two numbered siblings:
+`singleton._start_server_process` does it on the line where it opens the file
+for a *new* backend, which is the only moment in the system's life at which
+that rotation is safe. Both the setting and the rotation live in
+`logging_setup.py`, the observability spine. An existing oversize file is
+rolled at the next backend spawn; the `.1` sibling it becomes can then be
+deleted freely, because nothing holds it open.
+
+### Fixed — the log pruner no longer destroys crash post-mortems (F-840)
+
+`prune_old_logs` swept purely on recency, and that is backwards for exactly
+the files that matter: a *live* backend keeps refreshing its log's mtime, while
+a *dead* one never does, so the sweep preferentially deleted the logs of
+processes that had crashed. On 2026-08-30 an OOM-killed worker's
+`backend-<pid>.log` and `backend-<pid>-fault.log` were gone by the next
+morning and the investigation started blind — the fault log especially, since
+`faulthandler` writes it at the C level for exactly the hard crashes that leave
+no other trace.
+
+Dead-backend logs now get a retention exemption. The three most recent backend
+log sets (the per-pid log, its rotations and its fault log) are kept whatever
+their age, and no `*-fault.log` younger than 14 days is ever pruned. The
+exemption is deliberately narrow: proxy logs, older surplus backend sets and
+`backend-boot.log`'s own rotations are still swept exactly as before, so this
+cannot re-open F-830. The backend's startup line also now records its `argv`,
+so a post-mortem can tell a console-attached `serve --http` birth from the
+detached spawn path.
+### Fixed — the stdio proxy reports to Sentry: condemnations, heals, teardowns and evictions now ship (F-827)
+
+`sentry_init()` had exactly two callers — the HTTP backend and the ops CLI. The
+stdio proxy had none: the thin entrypoint's stdio branch returns after
+`run_stdio_proxy()` and never reaches the `runpy` load that would have brought
+the backend's own init into the process. So the one component that owns the
+liveness watchdog, the eviction decision and (since F-838) the heal loop — the
+component that *decides to disconnect you* — reported nothing at all. The whole
+2026-08-30 disconnect saga (F-820 / F-829 / F-838 / F-839) had to be
+reconstructed from local log files on one machine; every other install produced
+silence.
+
+The proxy now initializes error reporting in its own branch, and only there:
+placing it at the top of `main()` would run a *second* init in the same process
+the moment `runpy` loads the backend, which is a class of bug this repo has
+already paid for once. Because `sentry_sdk` costs ~1.5–2.5 s to import and
+initialize — and the proxy's whole value is answering the client's `initialize`
+locally and instantly — the init runs on a daemon thread instead of ahead of
+the handshake, the same way the backend cold start already does. The proxy's
+log handler is now installed in the same place, before the cold-start thread
+that writes to it.
+
+Four transitions now ship as structured events: a backend **condemned** by the
+watchdog (with the strike timing), a **heal** that re-bridged onto a
+replacement (old port → new port, generation), a heal that failed and **tore
+the session down** (the only user-visible disconnect left after F-838, reported
+as an error), and a backend **evicted for a genuine source change** — never for
+F-829's unreadable digest. Every existing log line keeps its exact level and
+text; the reports piggyback, they do not replace. Reporting still honours
+`STEALTH_MCP_NO_ERROR_REPORTING`, still passes through the one PII scrubber,
+and no capture path can raise: a telemetry call that throws cannot cost you a
+backend.
+
+Full write-up: `audit/stage2/finding_F827_proxy_invisible_to_sentry.md`.
+
+### Fixed — a file the OS could not read no longer counts as "you edited the source" (F-829)
+
+Reuse identity is the package version plus a SHA-256 of the package's `*.py`
+source, and the hash used to return `""` for any OS read error — the same value
+the reuse gate reads as "does not match". So a single unreadable file (this
+tree lives under OneDrive, where a file being synced is briefly locked) made a
+healthy shared backend look source-stale: the next session's cold-start lock
+terminated it, disconnected everyone on it, and logged `backend stale (source
+changed), evicting` for an edit that never happened. A backend that was
+*spawned* during such a hiccup recorded `""` and was then guaranteed to be
+evicted by the following session.
+
+The fingerprint now has the third state it always needed. A failed read is
+retried three times, 50 ms apart, and only then yields `None` — "unreadable",
+which `backend_registry.fingerprint_mismatch` (the one reading of that field)
+treats as *unknown*, never as a mismatch: nothing is evicted, no rival backend
+is started, and the WARNING names the real cause (`source fingerprint
+unreadable: <error>`) instead of blaming a source change. A backend recorded
+while the source was unreadable stamps the sentinel deliberately, so the same
+"unknown" rule applies to it later. A genuine digest mismatch, a version
+mismatch, and a legacy record with no digest all still evict exactly as before.
+
+Full write-up:
+`audit/stage2/finding_F829_transient_fingerprint_read_evicts_healthy_backend.md`.
+
+### Fixed — a closing terminal can no longer take the shared backend down with it (F-839)
+
+On 2026-08-30 at 18:43:57 the backend serving every live session — healthy,
+its last tool call completed normally two and a half hours earlier — logged
+`Received signal 21, initiating cleanup...` and shut down cleanly. Signal 21
+on Windows is **SIGBREAK**, a console control event: it can only arrive from a
+shared console. Four proxies then confirmed a genuinely dead backend within
+thirteen seconds and every attached Claude session disconnected at once. This
+is the residual "stealth randomly disconnects" left after 2.0.7's F-820 fix:
+that one stopped *false* condemnations of a busy backend; this one stops the
+backend actually dying for a reason it was never supposed to be reachable by.
+
+Nothing in the product sends SIGBREAK. Eviction and the `stop` / `restart`
+verbs all terminate through `TerminateProcess`, which runs no signal handler
+at all — so honoring SIGBREAK served only accidental, session-scoped killers:
+a terminal closing, or a client killing its child process tree on exit. One
+process shared by N sessions had its lifetime tethered to one of them.
+
+The backend now installs `SIG_IGN` for SIGBREAK. SIGTERM and SIGINT keep the
+F-809 hand-off unchanged, so every deliberate stop — including Ctrl+C on a
+foreground `serve --http` — behaves exactly as before.
+
+### Fixed — a dead backend no longer takes your session with it (F-838)
+
+When the liveness watchdog confirmed the shared backend was genuinely dead (not
+merely busy — that distinction is F-820's and is untouched), the stdio proxy
+logged `backend became unreachable; tearing down for reconnect` and exited, on
+the assumption that the MCP client would respawn it. Clients do not reliably
+respawn a stdio server mid-session, so every real backend death — an OOM crash,
+a console `CTRL_BREAK` on a backend born through the foreground `serve --http`
+path — showed up as a dead `stealth` server until you reconnected by hand.
+
+The proxy now **heals in place**. On a confirmed death it obtains a replacement
+through the very same startup path it used at boot — the same reuse gate, the
+same F-808 adoption order, the same cold-start lock — and re-bridges onto it
+with a fresh `initialize` handshake, while your stdio connection never drops.
+When a shared backend dies and every proxy on it reacts at once, that lock does
+what it already does for a startup herd: one cold-starts, the rest adopt.
+
+Calls that were in flight when the backend died are answered with a clear error
+naming the method, and are deliberately **not** replayed against the
+replacement. Healing is bounded (two attempts, and at most three back-to-back
+recoveries before a long-lived generation earns the budget back); when it is
+spent, the pre-existing teardown runs exactly as before. Net effect: one slow or
+failed call instead of a dead server. New home: `embedded/proxy_selfheal.py`.
+
+Full write-up: `audit/stage2/finding_F838_proxy_exits_instead_of_healing.md`.
+### Fixed — concurrent `spawn_browser` calls no longer kill each other's browsers (F-834)
+
+Under an agent fleet (several clients spawning against one backend) most
+spawns failed with nodriver's `Failed to connect to browser … you need to pass
+no_sandbox=True`, and — worse — a spawn occasionally returned `state: "ready"`
+with an `instance_id` whose browser was dead by the very next call. The client
+had done nothing wrong: it was the product's own cleanup doing the killing.
+
+The retry/fallback profile clone was named `{base}-{os.getpid()}-{suffix}`.
+That pid is the **backend's**, identical for every concurrent spawn in the
+process, and the only guard — "does a browser already run in this directory?" —
+is false for *all* of them during their pre-launch window. Every loser of the
+master-profile race therefore copied into and launched Chrome from the **same**
+directory; then a deferred profile delete fired against that shared path and
+removed it out from under the one attempt already reported ready.
+
+Three layers, so no single one has to hold alone:
+
+- **Per-attempt directories.** `clone_storage` now stamps a monotonic
+  per-attempt token into the name, and consults the existing in-flight
+  reservation set (`_protect_clone_dir`) as well as liveness when choosing a
+  directory. Liveness is a check, not a reservation — the `-{pid}` /
+  `-{pid}-{index}` ladder had the same hole and is gone with it.
+- **Cleanup ownership, re-asked at fire time.** `cleanup_deferred_profiles`
+  deferred these deletes arbitrarily long ago, so it no longer trusts the
+  live-profile snapshot it took at sweep start, and no profile directory a
+  *live tracked instance* owns is deleted for another instance's sake — the
+  skip is logged.
+- **Honest error text.** A spawn that raced siblings now says so and explicitly
+  disowns nodriver's root/`no_sandbox` advice, which is a red herring for this
+  failure mode and cost two independent diagnosing agents real time. New leaf
+  `embedded/spawn_contention.py`, appended at the same one composition site as
+  F-811's exhaustion hint.
+### Fixed — a page whose JavaScript throws no longer crashes `get_page_content` (F-822)
+
+nodriver's `Tab.evaluate` **returns** the CDP `ExceptionDetails` record in the
+value's place when the evaluated JS throws, instead of raising — and returns a
+bare `RemoteObject` whenever the value is falsy. F-795 installed the one guard
+for that on the `execute_script` path; `dom_handler.get_page_content` calls
+`evaluate` three more times, unguarded, so on any page where `document.body` is
+null (a bare XML/JSON document, a page caught mid-navigation, a CSP-blocked
+eval) a CDP dataclass landed under `text` — and the large-response handler's
+very first act, `json.dumps`, died on it:
+`TypeError: Object of type ExceptionDetails is not JSON serializable`. The CDP
+work had already succeeded; the call died while *measuring* the answer.
+
+The fix is one conversion at the transport boundary, not a per-tool check:
+`response_handler.json_safe` returns a payload unchanged when it is already
+pure JSON data and otherwise converts every foreign object to plain data,
+preferring the object's own `to_json()` so a converted record still carries its
+real `text` / `exception` / `className`. `handle_response` applies it once,
+before the size estimate, covering both exits (inline and spilled) and all six
+call sites. `estimate_tokens` and the spill write also take `default=str`:
+measuring or storing a payload must never be able to fail the tool that
+produced it. Deliberately a *converter*, not `tool_errors._require_js_value`'s
+raise — a page whose `innerText` threw still has real HTML, URL and title to
+return. Details in
+`audit/stage2/finding_F822_estimate_tokens_crashes_on_cdp_objects.md`.
+
+### Fixed — responses too big to deliver are no longer too small to divert (F-837)
+
+The inline/file threshold sat *above* the MCP client's practical token ceiling,
+so there was a dead band. Measured live on 2026-08-30: a **59,734-char**
+response came back inline and the client rejected it with "result exceeds
+maximum allowed tokens", while 138.91 KB and 282.83 KB diverted to file
+correctly. The caller got neither the content nor a file path.
+
+Two compounding errors: the 20,000-token ceiling was too high, and the
+`len // 4` estimate is optimistic for the markup-heavy payloads this handler
+carries — the rejected response estimated at just 14,933 tokens. The new
+`INLINE_TOKEN_CEILING = 10_000` is derived from that failure rather than
+rounded to it: the rejection proves under ~2.4 chars/token against a 25,000-token
+client cap, so taking 2.0 chars/token as the worst case and budgeting 20,000
+real tokens (80% of the cap) gives 10,000 estimated tokens, about 40,000 chars.
+The regression size now clears the threshold by 49%; the two already-diverting
+sizes still divert; small responses are untouched. Pinned by tests using the
+measured 59,734-char size. Details in
+`audit/stage2/finding_F837_inline_threshold_above_client_ceiling.md`.
+
+### Fixed — half an emoji in page content no longer destroys the whole tool result (F-823)
+
+Sentry, on `execute_script`: `PydanticSerializationError: Error serializing to
+JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\ud83d' in
+position 5811: surrogates not allowed`. `\ud83d` is the *high half* of an emoji
+pair — what a page hands back whenever a JS `slice`/`substring` (which indexes
+by UTF-16 code unit) cuts between the two halves of a `😀`, or content
+arrives mis-decoded. Python's `str` stores it happily; UTF-8 has no encoding
+for an unpaired surrogate, so FastMCP's serializer
+(`pydantic_core.to_json(data, fallback=str)`) raised and the entire result was
+lost — including the ~5,800 characters of good content in front of it.
+
+The repair is one string policy at the one boundary every tool return travels:
+`response_handler.surrogate_safe` rewrites each unpaired surrogate to a single
+U+FFFD REPLACEMENT CHARACTER and returns the payload **unchanged, by identity**
+when there is nothing to repair, and `tool_registry.section_tool` — already the
+single registration chokepoint — now applies it to the return of all 94 tools.
+It could not live in the large-response handler: `execute_script` and 86 other
+tools never touch it, and F-822's `json_safe` probe (`json.dumps`) *succeeds*
+on a lone surrogate, because serializable and encodable are different
+properties. `json_safe` now calls the same helper, so the file-fallback spill
+path and its caller-supplied metadata get one policy rather than a second
+implementation.
+
+Deliberately narrower than `json_safe`: this touches strings only and returns
+every other leaf by identity, so no tool's payload shape changes. Valid emoji
+and other astral characters pass through byte-identically — CPython stores them
+as one code point, never as a pair, so a surrogate in a payload is always
+broken. U+FFFD rather than `errors="replace"`'s `?`, so the loss is visible and
+not confusable with a question mark the page really contained. Details in
+`audit/stage2/finding_F823_lone_surrogates_crash_tool_returns.md`.
+### Fixed — advertised XPath selectors now work in every tool that advertises them (F-831, [#15](https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/issues/15))
+
+Seven element-interaction tools document their `selector` parameter as "CSS
+selector or XPath" — `query_elements`, `click_element`, `upload_file`,
+`type_text`, `paste_text`, `get_element_state`, `wait_for_element`. Only
+`query_elements` honoured one, and it did so through its own
+`selector.startswith("//")` branch calling `tab.xpath` **inside the tool path**.
+The other six handed the XPath string to `DOM.querySelector` as if it were CSS
+and failed. A user reading the tool schema had no way to tell which was which.
+
+Choosing between the two selector *languages* is part of resolving a selector,
+so it now lives in `element_resolution` — the one home selector resolution
+already routes through:
+
+* `xpath_expression` / `is_xpath` are the one place the choice is made, purely
+  syntactically. An explicit `xpath=` prefix (case-insensitive, stripped before
+  dispatch) is XPath; otherwise a selector whose first non-space character is
+  `/` or `(` is XPath — `//a`, `/html/body`, `(//div)[1]`, and everything the
+  deleted branch accepted. No CSS selector may begin with either character, so
+  nothing is taken from CSS. `#id`, `.cls`, `div > a` stay CSS, including
+  `./div` (use `xpath=./div` for the relative form).
+* `resolve_element`, `resolve_elements` and `query_selector_all` all dispatch,
+  and all run the XPath call inside the **same** retry/race-recovery the CSS
+  paths use — one classifier, one loop, one bound, both languages. An XPath in
+  `query_elements` previously got none of that recovery, so a DOM mutation
+  mid-query surfaced a raw CDP `-32000` to the caller.
+* The `query_elements` branch is **deleted**; it now resolves like every other
+  tool. Its returned shape is unchanged and pinned.
+
+Also fixed in passing: `select_option`'s `value`/`index` arms re-resolved the
+selector a second time with `document.querySelector(...)` in the page. They now
+act on the element already resolved, so they cannot silently match nothing and
+still report success.
+
+### Fixed — the nodriver race classifier now reaches `navigate` (F-824)
+
+F-817 taught `element_resolution` to recover from nodriver's two known races:
+the CDP `-32000` stale-document error, and the `KeyError(<cdp event class>)`
+that `Tab.wait`'s bare `del self.handlers[evt_dom]` raises when two waits
+overlap on one tab. Every selector-driven tool inherited that recovery —
+**but `navigate` never resolves a selector**, so it never passed through it.
+It classified its own errors from a substring list ("connection dropped",
+"target closed", …), and a `KeyError` whose argument is a CDP event class
+matches none of them: `STEALTH-CHROME-DEVTOOLS-MCP-3N` is exactly that error
+escaping `navigate` → `tab.get(url)` → `Tab.wait` → `remove_handler` on the
+first of its two attempts, as a raw `KeyError` at the caller.
+
+The fix is reach, not a second classifier. `element_resolution.recoverable_race`
+is now the public, single home for "is this one of the known nodriver races",
+and `BrowserManager._is_recoverable_navigation_error` asks it instead of
+re-listing the signals. Retry budgets are untouched on both sides: `navigate`
+still makes at most two attempts, `element_resolution` still re-resolves at
+most three times. A genuinely fatal navigation error is still refused on the
+first attempt.
+
+### Fixed — a stale document that says "DOM Error while querying" is now recovered (F-828)
+
+The stale-document classifier matched one exact CDP message, "Could not find
+node with given id". Chromium has a second reply for the same situation: when
+the query reaches the renderer and fails there, Blink answers with its blanket
+`DOM Error while querying`. Two live Sentry issues are that message
+(`STEALTH-CHROME-DEVTOOLS-MCP-3F`, `-23`) — one of them carrying no numeric
+code at all, because nodriver only fills `ProtocolException.code` when the CDP
+error object supplies it. Both escaped the retry and crashed the calling tool
+(`wait_for_element`, `query_elements`).
+
+The one classifier now matches either message, on message text and never on the
+numeric code, so both code-carrying and code-less variants are recovered. The
+bound is unchanged: after `_MAX_RESOLVES` re-resolves the original
+`ProtocolException` surfaces to the caller exactly as before.
+### Fixed — `execute_script` returns your value, not a CDP envelope (F-832, closes #17)
+
+`execute_script` evaluated through `nodriver`'s `Tab.evaluate`, which asks Chrome
+for a **deep-serialized** result — a BiDi-shaped graph of `{"type": …, "value": …}`
+nodes, capped at depth 10 — and then reads it back with two truthiness tests. Two
+things went wrong, from one root cause: the value was *inferred* rather than read.
+
+An object came back as an envelope to unwrap instead of its JSON (the reported
+issue), and anything past depth 10 was gone. Worse, `if remote_object.value:`
+cannot tell "there is no value" from "the value is falsy" — so a script
+evaluating to `0`, `""`, `false` or `null` failed that test and fell through to a
+bare `RemoteObject` husk in place of the number, string or boolean you asked for.
+
+The eval now goes through a raw `Runtime.evaluate` with `return_by_value=True`
+(no `serializationOptions`, which CDP documents as *overriding* it; `userGesture`
+and `allowUnsafeEvalBlockedByCSP` are carried over so CSP-strict pages and
+activation-gated handlers do not regress), and the answer is read with an
+explicit None-vs-absent check: `undefined` → `None`, `null` → `None` by its own
+branch, a present value verbatim however falsy, `Infinity`/`NaN` as their token,
+and anything Chrome could not send by value as its description — a `RemoteObject`
+is never handed to the transport.
+
+The two behaviours that ride on this path are unchanged: a script that **throws**
+still raises, through the same single `_require_js_value` guard (F-795), now fed
+the `exceptionDetails` explicitly rather than in the value's place; and a
+top-level `return` still gets exactly one retry as a function body (F-812) — by
+value too, since that is the path most agent-written scripts actually take.
+Details and residuals in
+`audit/stage2/finding_F832_execute_script_shallow_serialization.md`.
+### Fixed — `set_cookie(same_site=…)` could not set a cookie at all (F-821)
+
+Every `set_cookie` call that supplied `same_site` failed with
+`Failed to set cookie: 'str' object has no attribute 'to_json'`; omitting the
+attribute worked, which is why the tool looked healthy. nodriver's CDP commands
+build their request frame while being advanced and serialise `same_site` with
+`.to_json()`, so the plain string an MCP argument carries killed the command
+before it reached Chrome. The one CDP cookie boundary
+(`network_interceptor.to_cookie_same_site`) now converts it to the real
+`cdp.network.CookieSameSite` enum, accepting `Strict` / `Lax` / `None` in any
+case and raising a `ToolError` that names the valid values for anything else.
+
+Fixes `STEALTH-CHROME-DEVTOOLS-MCP-3P` (9 events).
+
+### Changed — `search_network_requests` says which argument filters the URL (F-825)
+
+Its summary line was "Search network requests with advanced filters and
+pagination", which names no filter at all, so a caller reaching for the obvious
+one guessed `url=` or `pattern=` and got a validation error. The summary now
+names `url_pattern`, and every filter states how it actually matches
+(case-insensitive substring for `url_pattern` / `response_contains` /
+`payload_contains` / `resource_type`, whole-value for `method`, exact for
+`status_code`).
+
+### Fixed — the environment validator no longer recommends args the stealth filter strips (F-836)
+
+As root or in a container, `validate_browser_environment_tool` returned
+`recommended_args: ["--no-sandbox", "--disable-setuid-sandbox", …]` — the exact
+flags the stealth filter blocks out of caller-supplied `browser_args`. Anyone
+who followed the advice got "Stripped 4 detectable arg(s)" and no effect. The
+recommendation is now derived *through* the filter, so it can never name a
+blocked flag again, and the flags the environment genuinely needs are reported
+in `recommendations` as what they are: applied automatically by `spawn_browser`
+after the filter runs, not something to pass by hand. The launch policy itself
+is unchanged, and on a normal desktop the tool's output is identical to before.
+### Fixed — error reports no longer carry OAuth tokens or email addresses (F-826)
+
+Error reporting is on by default, and this product's exceptions quote the thing
+that failed — which is page content. The 2.0.4 scrubber removed what a machine
+leaks about *itself* (its hostname, the username in every path) but let the
+exception's own message through verbatim. The project's Sentry consequently held
+OAuth authorization URLs with `access_token` still in the query, and email
+addresses, from third-party installs as well as the maintainer's machine.
+
+`_scrub_event` — still the one `before_send`, still one walk over the event —
+now applies two more rules to every string it visits:
+
+* **email addresses** become `[redacted-email]`;
+* **URLs** keep their scheme, host and path and lose their secrets:
+  `user:pass@` becomes `[redacted]@`, the query becomes `?[redacted-query]`, the
+  fragment becomes `#[redacted-fragment]` (the implicit OAuth flow puts the token
+  there).
+
+The redaction is deliberately **targeted, not wholesale**: a message that has
+been blanked is an issue nobody can act on, which is a slower way of turning
+reporting off. `GET https://api.example.com/v1/instances/42 returned 500` is
+untouched, and so are the `@`-shaped things that are not addresses —
+`/opt/homebrew/opt/python@3.11/…`, `sentry-sdk@2.64.0`, `@sentry/browser`.
+
+Two behaviours are unchanged: an expected `ToolError` is still dropped whole
+before any of this runs (F-815), and the username in a path is still `~` rather
+than a new spelling. One behaviour is tightened: if the scrub walk itself fails,
+the event is still sent — with its type, module, mechanism, frames and tags —
+but the free-text fields it could not vouch for are dropped instead of shipped
+raw.
+
+No new environment knobs; `STEALTH_MCP_NO_ERROR_REPORTING=true` still disables
+reporting entirely.
+
+### Fixed — a tool that fails is now visible in `get_debug_view` (F-835)
+
+After 24 consecutive failed `spawn_browser` calls — a total spawn outage —
+`get_debug_view` still reported `total_errors: 0`. The surface an operator
+watches to answer "is this thing healthy" said it was, while nothing could
+launch. The raised `ToolError`'s only copy went to the MCP client; the failure
+path emitted INFO lines and nothing ever turned "this call raised" into an
+error record.
+
+The fix is at the one wrapper every registered tool passes through
+(`logging_setup.with_correlation_id`, the `section_tool` chokepoint), so it is
+**all 94 tools**, not just spawn: an escaping exception is recorded in the debug
+ring — filed under component `tool` with the tool's own name, the message, and
+the call's correlation id — and then re-raised **unchanged**. Recording never
+transforms the error, never records the same exception twice, and can never
+break a tool call (a throwing debug ring loses only the recording). Repeats
+still dedup as they always have, so 24 identical failures read as one entry with
+`stats["tool.spawn_browser.errors"] == 24` — what can no longer happen is `0`.
+
+Scope, deliberately: the **in-memory ring only**, not the backend log file. A
+failure message echoes the caller's own arguments, and F-782's condition for
+logging it — redact the record first — is unanswered (F-826). The ring is
+process-local and returns only to the client that already holds those bytes; the
+log is durable and Sentry-bridged, so it stays clean and F-782 keeps its log
+half.
+
+`clear_debug_view` now also forgets the de-duplication signatures. Without that,
+"clear the view and watch" — the operator loop for a live outage — would show an
+empty ring forever, because each repeat was deduped against a signature whose
+entry had just been cleared.
+
+### Fixed — `go_back`, `go_forward`, `reload_page` and `new_tab` stop reporting success over a Chrome error page (F-833)
+
+`navigate` has been truthful since F-802: a navigation Chrome could not perform
+still *completes* — Chrome commits a `chrome-error://` page and every
+Python-side step around it succeeds — so the tool raises instead of answering
+success over it. The four other tools that move a tab never got that guard. A
+dead history entry, an offline reload, and a new tab whose initial URL will not
+load each landed on the same error page, and each still said it worked; the
+caller's next `query_elements` or `get_page_content` then described Chrome's
+error page as the page they thought they were on.
+
+All four now raise, through the *same* guard `navigate` uses — one error-page
+detector, five call sites — naming which move failed and what it landed on. The
+loaded-page half is unchanged and asserted alongside it: a 404, a redirect,
+`data:` and `about:blank` are landings, not failures. `new_tab` closes the tab it
+could not land, so the honest error does not cost you a stranded tab.
+
+Two things this deliberately does not change: `reload_page(ignore_cache=…)` is
+still dropped (F-800, open), and a `go_back` with no history entry behind it
+still reports success for a move that never happened — a different kind of
+untruth, pinned as characterization and written up in
+`audit/stage2/finding_F833_navigation_tools_lack_truthfulness_guard.md` with the
+residual settle race.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)

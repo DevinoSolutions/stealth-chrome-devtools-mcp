@@ -45,11 +45,11 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 
 | File | Owns |
 |---|---|
-| `server.py` | thin entrypoint — loads `embedded/server.py` as `__main__` via `runpy` (`main()` shim) |
+| `server.py` | thin entrypoint — loads `embedded/server.py` as `__main__` via `runpy` (`main()` shim); its stdio branch is also **THE one place the PROXY process bootstraps its own observability** (`configure_logging("proxy")` + `_start_proxy_error_reporting`, F-827) — in the branch, never at the top of `main()`, or the runpy path would double-init |
 | `__main__.py` | `python -m stealth_chrome_devtools_mcp` → `server.main()` |
 | `cli.py` | the `stealth-chrome-devtools` ops CLI verbs (`status`/`doctor`/`stop`/`restart`/`cleanup`/`kill-orphans`/`serve`) |
 | `settings.py` | **the one env home** — pydantic `Settings` + `get_settings()`; every `STEALTH_MCP_*` knob is a typed field here |
-| `observability.py` | Sentry error shipping — hardcoded DSN, on by default, never raises (no-op under `STEALTH_MCP_NO_ERROR_REPORTING`); **the one PII scrubber** — `_scrub_event` (Sentry's `before_send`) |
+| `observability.py` | Sentry error shipping — hardcoded DSN, on by default, never raises (no-op under `STEALTH_MCP_NO_ERROR_REPORTING`); **the one PII scrubber** — `_scrub_event` (Sentry's `before_send`); **the one non-exception report** — `capture_lifecycle` (F-827: proxy transitions that are decisions, not crashes) |
 
 ### `embedded/` — the backend
 
@@ -57,14 +57,15 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | File | Owns |
 |---|---|
 | `server.py` | the real MCP server — all 94 tool bodies + `app_lifespan` |
-| `singleton.py` | **backend lifecycle + the stdio proxy** — liveness (`_backend_http_ready`, `_probe_backend_status`), port selection (`_select_backend_port`, `DEFAULT_PORT`), the one identity+readiness reuse gate (`_same_identity_backend_ready`, `_source_fingerprint`, `REUSE_PATIENCE_SECONDS`), cold-start lock (`_start_backend_holding_lock`), `run_stdio_proxy`. The `server.json` record moved to `backend_registry.py` (path names re-exported here for legacy callers) |
-| `backend_registry.py` | **THE one home for the `server.json` record** — schema v2 (`SCHEMA_VERSION`, one entry per display context), read/write/clear (`read_backends`, `record_backend`, `forget_backend`, `clear_record`), the adoption order (`adoption_candidates`, `window_capable_first`), per-context port lookup (`port_for_context`, `own_or_first_port`, `port_conflict`), the entry normalizers (`read_record`, `first_backend`, `backend_on_port`, `recorded_int`), plus `STATE_DIR`/`SERVER_STATE_FILE`/`PORT_FILE` |
+| `singleton.py` | **backend lifecycle + the stdio proxy** — liveness (`_backend_http_ready`, `_probe_backend_status`), port selection (`_select_backend_port`, `DEFAULT_PORT`), the one identity+readiness reuse gate (`_same_identity_backend_ready`, `_source_fingerprint`, `REUSE_PATIENCE_SECONDS`), cold-start lock (`_start_backend_holding_lock`), `run_stdio_proxy`. The `server.json` record moved to `backend_registry.py` (path names re-exported here for legacy callers); the proxy's *recovery from a dead backend* moved to `proxy_selfheal.py` |
+| `proxy_selfheal.py` | **THE one home for "the backend under this proxy died — heal in place instead of exiting"** (F-838) — the backend-generation loop (`drive`, `_one_generation`), the bounded recovery (`heal_backend`, `HEAL_ATTEMPTS`, `MAX_CONSECUTIVE_HEALS`) and the in-flight-call failure report (`PendingCalls`). Also the home for **three of F-827's four proxy lifecycle reports** (`CONDEMNED_EVENT` / `HEALED_EVENT` / `TEARDOWN_EVENT` via `_report`, which only ever calls `observability.capture_lifecycle`); the fourth (eviction) is reported from its own site in `singleton.py`. A leaf: it imports no other embedded module and takes the startup path (`ensure_server_running`) as an argument, so the reuse gate, adoption order and cold-start lock — including the herd's serialization — stay single-homed in `singleton.py`. Never raises |
+| `backend_registry.py` | **THE one home for the `server.json` record** — schema v2 (`SCHEMA_VERSION`, one entry per display context), read/write/clear (`read_backends`, `record_backend`, `forget_backend`, `clear_record`), the adoption order (`adoption_candidates`, `window_capable_first`), per-context port lookup (`port_for_context`, `own_or_first_port`, `port_conflict`), the entry normalizers (`read_record`, `first_backend`, `backend_on_port`, `recorded_int`, `fingerprint_mismatch` — the one reading of a recorded source fingerprint, F-829), plus `STATE_DIR`/`SERVER_STATE_FILE`/`PORT_FILE` |
 | `display_context.py` | **THE one home for "can a window launched by THIS process be seen, and on which desktop"** — the opaque token (`display_context()`: `headless` / `unverified` / `win-session-N` / `wayland-…` / `x11-…` / `aqua-<uid>`) and `can_show_windows()`. Observational only: it never picks or enters another session (F-808) |
 | `desktop_launch.py` | **THE one home for "hand a launch to the logged-on user's desktop"** (F-810, Windows only) — the availability probe (`available`, `_active_console_session_id`), the two predicates the guard and the spawn pipeline consult (`can_deliver_headed_window`, `should_delegate`), the Task Scheduler round trip (`launch_and_attach`, `_schtasks`) and the attached-browser process shim (`pid_shim`). The OS places the process; the tool still never picks a session |
 | `browser_pid_registry.py` | **THE one home for `browser_pids.json`** — its schema, the owner stamp on every entry (`owner_pid`, `owner_create_time`), and the read-merge-write protocol every writer shares |
-| `tool_registry.py` | `SECTION_TOOLS` + `ToolRegistry.section_tool` (registration, section gating, correlation-id stamping) + the canonical **verb taxonomy** (module docstring) |
+| `tool_registry.py` | `SECTION_TOOLS` + `ToolRegistry.section_tool` (registration, section gating, correlation-id stamping, the surrogate-safe return wrap) + the canonical **verb taxonomy** (module docstring) |
 | `tool_errors.py` | the error convention — `ToolError`, `InstanceNotFoundError`, `_require_tab`, `_require_browser` |
-| `logging_setup.py` | the observability spine — `resolve_log_dir`, `configure_logging`, `with_correlation_id`, `CorrelationIdFilter` |
+| `logging_setup.py` | the observability spine — `resolve_log_dir`, `configure_logging`, `with_correlation_id`, `CorrelationIdFilter`; `with_correlation_id` is also **THE one place a failed tool call is recorded** (`_record_tool_failure` → `debug_logger.log_tool_failure`, F-835) — never add a per-tool `except` that logs; **the one home for log-file retention** — `roll_boot_log` (the launcher-side boot-log rotation, F-830) and `prune_old_logs` + its dead-backend post-mortem exemption (F-840); plus `backend_uvicorn_config` — the one home for the backend's uvicorn run-config (access logging off, graceful-shutdown timeout) |
 | `process_cleanup.py` | orphan reaping — side-effect-free `__init__`, `activate()` at serve boundary, `recover_orphans()` seam |
 | `models.py` | pydantic data models (`BrowserInstance`, `BrowserState`, `NetworkRequest`, …) |
 | `platform_utils.py` | OS-specific helpers |
@@ -78,6 +79,7 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | `proxy_forwarder.py` | authenticated egress-proxy forwarding + `_free_port` |
 | `proxy_utils.py` | proxy string parsing + Chrome launch-arg helpers |
 | `window_sizing.py` | **the one home for a spawn's requested window size** — the `--window-size` launch arg, the CDP `setWindowBounds` apply, and the post-launch measurement that makes the reported size truthful (F-804) |
+| `spawn_contention.py` | **THE one home for "did this spawn fail because it was racing sibling spawns"** (F-834) — the in-flight threshold and the paragraph `contention_hint` appends to a failed spawn's error, including the explicit disclaimer that nodriver's root/`no_sandbox` advice does not apply. A sibling of `spawn_exhaustion`, not a fold-in: capacity and contention are different questions with different remedies. Both are appended at the ONE composition site in `browser_manager.spawn_browser`; the peak in-flight count they read is `BrowserManager._spawn_peak_in_flight` |
 | `spawn_exhaustion.py` | **THE one home for "is this machine out of browser-process capacity, and what should the operator do about it"** (F-811) — the live Chromium-family count, the threshold (`_EXHAUSTION_PROCESS_THRESHOLD`), and the operator paragraph `exhaustion_hint` appends to a failed spawn's error. Its name matcher is deliberately narrower than `process_cleanup`'s ("how much of what WE spawn is running", not "may I kill this pid") — do not unify them. Never raises, never ships to Sentry |
 
 **Cloner subsystem** (one engine + thin adapters + disk storage)
@@ -97,9 +99,9 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | `dynamic_hook_ai_interface.py` | AI-facing API for creating/managing hooks |
 | `hook_learning_system.py` | hook examples/training surface |
 | `cdp_function_executor.py` | direct JS function execution via CDP |
-| `response_handler.py` | large-response handling + file fallbacks |
+| `response_handler.py` | large-response handling + file fallbacks; **the one home for "can this payload survive the transport"** — `json_safe` (serializable, F-822) and `surrogate_safe` (utf-8-encodable, F-823) |
 | `in_memory_storage.py` | `InMemoryStorage` — deliberately non-durable instance cross-check |
-| `debug_logger.py` | in-memory debug log ring/view |
+| `debug_logger.py` | in-memory debug log ring/view; `log_tool_failure` is the ring entry point for a failed tool call (ring only — the durable/Sentry-bridged log line is deliberately NOT written, F-835/F-782) |
 
 ### Tombstones — do NOT route a change to these (they were removed)
 

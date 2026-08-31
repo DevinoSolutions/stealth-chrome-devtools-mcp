@@ -5,6 +5,7 @@ fresh, synthetically-seeded one and the ``@section_tool`` functions are invoked
 through their FastMCP ``.fn`` (the real tool body, minus the transport layer).
 """
 
+import inspect
 import json
 
 import pytest
@@ -143,3 +144,24 @@ class TestInternalUrlExclusionAtToolLayer:
         )
         rows = await server.list_network_requests.fn(instance_id="i1")
         assert [r["url"] for r in rows] == ["chrome://new-tab-page/"]
+
+
+class TestSearchDescriptionNamesItsFilters:
+    """F-825 — the registered tool description is the ONLY thing an AI caller
+    reads before choosing an argument name, and a caller who guesses ``url`` or
+    ``pattern`` instead of ``url_pattern`` gets a validation error rather than a
+    filtered result. So the description must name every parameter it accepts,
+    and must name the URL filter in its very first line, where a client that
+    truncates long descriptions still shows it.
+    """
+
+    def test_summary_line_names_url_pattern(self):
+        summary = server.search_network_requests.description.splitlines()[0]
+        assert "url_pattern" in summary, summary
+
+    def test_description_names_every_parameter(self):
+        description = server.search_network_requests.description
+        params = inspect.signature(server.search_network_requests.fn).parameters
+        assert "url_pattern" in params  # guards against a rename above
+        for name in params:
+            assert name in description, f"{name} is unnamed in the description"

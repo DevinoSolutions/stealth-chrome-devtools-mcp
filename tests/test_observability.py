@@ -421,12 +421,18 @@ class TestCorrelation:
     async def test_a_failed_call_logs_no_error_record(
         self, w15_server, backend_records
     ):
-        """route:F-782 — the failure itself is never logged.
+        """route:F-782 — the failure is still not in the LOG.
 
-        ``with_correlation_id`` wraps the call in ``try/finally`` with no
-        ``except``, so the INFO ``end`` line is indistinguishable from a
-        success. Nothing at WARNING or above records that the call failed, or
-        what it failed with.
+        ``with_correlation_id`` wraps the call in ``try/except/finally``; the
+        ``except`` records the failure (F-835) but does so in the in-memory ring
+        ONLY, so the backend log still shows an INFO ``end`` line
+        indistinguishable from a success and nothing at WARNING or above.
+
+        That split is deliberate and this pin is what holds it: this finding's
+        own condition for a log fix is that the record go through a redactor
+        first (a failure message echoes the caller's arguments, and an ERROR
+        record on this logger is bridged to Sentry). Until that is answered,
+        F-835 closes the ring half and F-782 keeps the log half.
         """
         await _failure(w15_server, "get_page_content", instance_id="ghost")
         assert [r for r in backend_records if r.levelno >= logging.WARNING] == []
@@ -689,24 +695,56 @@ class TestSecretCanaries:
     async def test_no_canary_reaches_stdout_stderr_or_the_backend_log(
         self, w15_server, tmp_path, monkeypatch, capsys, backend_records
     ):
+        """Three surfaces stay absolute; the in-memory ring is scoped.
+
+        **stdout, stderr and the backend log: absolute.** stdout is the
+        transport's framing channel, stderr is what a user pastes into an issue,
+        and the log is durable and Sentry-bridged. Nothing goes to any of them —
+        which is why F-835 records a failure in the ring ONLY.
+
+        **debug view: only what the CALLER WAS ALREADY TOLD.** F-835 made a
+        failed call land in the in-memory ring, so a canary the caller itself
+        put in an argument and got echoed back in the failure message is now
+        there — by design, in process memory, readable only by the client that
+        already holds those bytes. What stays a RELEASE BLOCKER on that surface
+        is a canary arriving by any OTHER route: an environment value read by
+        the product, a header, a cookie, a script body, URL userinfo — something
+        the caller never saw in its own error.
+        """
         monkeypatch.setenv("W15_CANARY_ENV", CANARIES["environment-canary"])
         capsys.readouterr()
+        # The ring is process-wide and now (F-835) collects every failed call in
+        # the session, including the canary-bearing ones other tests in this file
+        # drive. Scope it to THIS test's three failures, the way the
+        # per-test ``backend_records`` handler already scopes the log.
+        w15_server.debug_logger.clear_debug_view()
         missing = tmp_path / CANARIES["sensitive-path-component"] / "capture.json"
-        await _failure(
-            w15_server,
-            "select_option",
-            instance_id="i1",
-            selector="#s",
-            index=CANARIES["dom-form-value"],
-        )
-        await _failure(
-            w15_server,
-            "get_page_content",
-            instance_id="ghost-" + CANARIES["environment-canary"],
-        )
-        await _failure(
-            w15_server, "import_network_data", instance_id="i1", filepath=str(missing)
-        )
+        told = [
+            str(
+                await _failure(
+                    w15_server,
+                    "select_option",
+                    instance_id="i1",
+                    selector="#s",
+                    index=CANARIES["dom-form-value"],
+                )
+            ),
+            str(
+                await _failure(
+                    w15_server,
+                    "get_page_content",
+                    instance_id="ghost-" + CANARIES["environment-canary"],
+                )
+            ),
+            str(
+                await _failure(
+                    w15_server,
+                    "import_network_data",
+                    instance_id="i1",
+                    filepath=str(missing),
+                )
+            ),
+        ]
         captured = capsys.readouterr()
         log_text = "\n".join(r.getMessage() for r in backend_records)
         view_text = json.dumps(w15_server.debug_logger.get_debug_view(), default=str)
@@ -715,10 +753,16 @@ class TestSecretCanaries:
             ("stdout", captured.out),
             ("stderr", captured.err),
             ("backend-log", log_text),
-            ("debug-view", view_text),
         ):
             leaked = [n for n, v in CANARIES.items() if v in text]
             assert leaked == [], f"RELEASE BLOCKER: {leaked} disclosed via {surface}"
+
+        leaked = [
+            name
+            for name, value in CANARIES.items()
+            if value in view_text and not any(value in message for message in told)
+        ]
+        assert leaked == [], f"RELEASE BLOCKER: {leaked} disclosed via debug-view"
 
     def test_the_bundle_writer_refuses_a_canary_bearing_value(self, tmp_path):
         """W6's closed surface, not a filter, is what keeps a secret out."""
