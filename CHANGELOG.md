@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a page whose JavaScript throws no longer crashes `get_page_content` (F-822)
+
+nodriver's `Tab.evaluate` **returns** the CDP `ExceptionDetails` record in the
+value's place when the evaluated JS throws, instead of raising — and returns a
+bare `RemoteObject` whenever the value is falsy. F-795 installed the one guard
+for that on the `execute_script` path; `dom_handler.get_page_content` calls
+`evaluate` three more times, unguarded, so on any page where `document.body` is
+null (a bare XML/JSON document, a page caught mid-navigation, a CSP-blocked
+eval) a CDP dataclass landed under `text` — and the large-response handler's
+very first act, `json.dumps`, died on it:
+`TypeError: Object of type ExceptionDetails is not JSON serializable`. The CDP
+work had already succeeded; the call died while *measuring* the answer.
+
+The fix is one conversion at the transport boundary, not a per-tool check:
+`response_handler.json_safe` returns a payload unchanged when it is already
+pure JSON data and otherwise converts every foreign object to plain data,
+preferring the object's own `to_json()` so a converted record still carries its
+real `text` / `exception` / `className`. `handle_response` applies it once,
+before the size estimate, covering both exits (inline and spilled) and all six
+call sites. `estimate_tokens` and the spill write also take `default=str`:
+measuring or storing a payload must never be able to fail the tool that
+produced it. Deliberately a *converter*, not `tool_errors._require_js_value`'s
+raise — a page whose `innerText` threw still has real HTML, URL and title to
+return. Details in
+`audit/stage2/finding_F822_estimate_tokens_crashes_on_cdp_objects.md`.
+
+### Fixed — responses too big to deliver are no longer too small to divert (F-837)
+
+The inline/file threshold sat *above* the MCP client's practical token ceiling,
+so there was a dead band. Measured live on 2026-08-30: a **59,734-char**
+response came back inline and the client rejected it with "result exceeds
+maximum allowed tokens", while 138.91 KB and 282.83 KB diverted to file
+correctly. The caller got neither the content nor a file path.
+
+Two compounding errors: the 20,000-token ceiling was too high, and the
+`len // 4` estimate is optimistic for the markup-heavy payloads this handler
+carries — the rejected response estimated at just 14,933 tokens. The new
+`INLINE_TOKEN_CEILING = 10_000` is derived from that failure rather than
+rounded to it: the rejection proves under ~2.4 chars/token against a 25,000-token
+client cap, so taking 2.0 chars/token as the worst case and budgeting 20,000
+real tokens (80% of the cap) gives 10,000 estimated tokens, about 40,000 chars.
+The regression size now clears the threshold by 49%; the two already-diverting
+sizes still divert; small responses are untouched. Pinned by tests using the
+measured 59,734-char size. Details in
+`audit/stage2/finding_F837_inline_threshold_above_client_ceiling.md`.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)
