@@ -37,7 +37,6 @@ from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     split_css_list,
 )
 
-EDIT_CAP = 40
 # Two animations of the same name on different targets is the smallest thing
 # that can be called a stagger.
 MIN_STAGGER_MEMBERS = 2
