@@ -65,7 +65,7 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | `browser_pid_registry.py` | **THE one home for `browser_pids.json`** — its schema, the owner stamp on every entry (`owner_pid`, `owner_create_time`), and the read-merge-write protocol every writer shares |
 | `tool_registry.py` | `SECTION_TOOLS` + `ToolRegistry.section_tool` (registration, section gating, correlation-id stamping, the surrogate-safe return wrap) + the canonical **verb taxonomy** (module docstring) |
 | `tool_errors.py` | the error convention — `ToolError`, `InstanceNotFoundError`, `_require_tab`, `_require_browser` |
-| `logging_setup.py` | the observability spine — `resolve_log_dir`, `configure_logging`, `with_correlation_id`, `CorrelationIdFilter`; **the one home for log-file retention** — `roll_boot_log` (the launcher-side boot-log rotation, F-830) and `prune_old_logs` + its dead-backend post-mortem exemption (F-840); plus `backend_uvicorn_config` — the one home for the backend's uvicorn run-config (access logging off, graceful-shutdown timeout) |
+| `logging_setup.py` | the observability spine — `resolve_log_dir`, `configure_logging`, `with_correlation_id`, `CorrelationIdFilter`; `with_correlation_id` is also **THE one place a failed tool call is recorded** (`_record_tool_failure` → `debug_logger.log_tool_failure`, F-835) — never add a per-tool `except` that logs; **the one home for log-file retention** — `roll_boot_log` (the launcher-side boot-log rotation, F-830) and `prune_old_logs` + its dead-backend post-mortem exemption (F-840); plus `backend_uvicorn_config` — the one home for the backend's uvicorn run-config (access logging off, graceful-shutdown timeout) |
 | `process_cleanup.py` | orphan reaping — side-effect-free `__init__`, `activate()` at serve boundary, `recover_orphans()` seam |
 | `models.py` | pydantic data models (`BrowserInstance`, `BrowserState`, `NetworkRequest`, …) |
 | `platform_utils.py` | OS-specific helpers |
@@ -101,7 +101,7 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 | `cdp_function_executor.py` | direct JS function execution via CDP |
 | `response_handler.py` | large-response handling + file fallbacks; **the one home for "can this payload survive the transport"** — `json_safe` (serializable, F-822) and `surrogate_safe` (utf-8-encodable, F-823) |
 | `in_memory_storage.py` | `InMemoryStorage` — deliberately non-durable instance cross-check |
-| `debug_logger.py` | in-memory debug log ring/view |
+| `debug_logger.py` | in-memory debug log ring/view; `log_tool_failure` is the ring entry point for a failed tool call (ring only — the durable/Sentry-bridged log line is deliberately NOT written, F-835/F-782) |
 
 ### Tombstones — do NOT route a change to these (they were removed)
 

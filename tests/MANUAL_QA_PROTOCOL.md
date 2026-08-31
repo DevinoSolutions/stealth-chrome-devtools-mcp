@@ -1338,10 +1338,21 @@ The headline result is the one that would have blocked the release: **no secret
 canary was disclosed on any surface.** Eight canaries were planted in real
 failing tool calls and searched byte-for-byte across stdout, stderr, the backend
 log records, the debug-logger view, the policy-processed diagnostic and the
-local repro bundle. Note *why* the log surfaces are clean — F-782 means a failed
-call is never logged at all, so the argument-echoing messages never reach a log.
-That is a consequence of an observability gap, not a control, and MQ-151 must be
-re-run if F-782 is ever fixed.
+local repro bundle. Note *why* the log surfaces were clean at the time — F-782
+meant a failed call was never logged at all, so the argument-echoing messages
+never reached a log. That was a consequence of an observability gap, not a
+control.
+
+**Changed in 2.0.8 by F-835 — MQ-151 must be re-run.** A failed call now
+records its own error in the **in-memory debug-logger ring** (a total
+`spawn_browser` outage used to leave `get_debug_view` reporting
+`total_errors: 0`). Only that surface moved, and deliberately so: stdout,
+stderr and the **backend log stay clean**, because F-782's own condition for
+logging the exception — redact it first — is unanswered, and an ERROR record on
+that logger is bridged to Sentry. The pinned test was re-scoped to match: the
+debug view may now carry a canary *only* inside the failure message the caller
+itself received; a canary arriving by any other route (environment, header,
+cookie, script body, URL userinfo) is still a release blocker on every surface.
 
 These landed while `MQ-122..129` (W9, W10) and `MQ-138..149` (W13, W14) are still
 reserved, so the contiguity check stays `MQ-1..113` plus the landed blocks until
@@ -1357,7 +1368,9 @@ written to stdout while the stdio transport is live.
 `tests/test_observability.py::TestDiagnosticOracle::test_the_diagnostic_carries_code_phase_and_correlation`.
 The correlated half cannot be satisfied: a raised error carries no error code,
 no failed phase, no next step and no correlation id (F-781), and the failure is
-never logged at all (F-782), so there is nothing on either side to correlate.
+still not logged (F-782 — F-835 records it in the in-memory ring, under the
+call's correlation id, but not in the log), so there is nothing on either side
+to correlate.
 Covering only the type-and-bytes half cannot satisfy a step whose scope is a
 structured, correlated diagnostic.
 **Current support (non-acceptance)**: pytest:

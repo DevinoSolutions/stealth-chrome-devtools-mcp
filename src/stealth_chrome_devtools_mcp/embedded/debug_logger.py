@@ -21,6 +21,11 @@ from stealth_chrome_devtools_mcp.embedded.logging_setup import correlation_id_va
 # under test), this is a normal Logger with no handlers - a safe no-op.
 _backend_logger = logging.getLogger("stealth.backend")
 
+#: The component every ``log_tool_failure`` entry is filed under (F-835), so
+#: "which TOOL calls are failing" is one lookup in ``component_breakdown``
+#: instead of a scan of whatever component each tool body happened to name.
+TOOL_COMPONENT = "tool"
+
 
 class DebugLogger:
     """Centralized debug logging system for the MCP server."""
@@ -31,6 +36,11 @@ class DebugLogger:
     MAX_SEEN_ERRORS = 1000
     _GZIP_THRESHOLD = 1000
     _PICKLE_THRESHOLD = 100
+    #: How far back :meth:`log_tool_failure` looks for a record of the SAME
+    #: exception already made by the tool body itself. A bound, not a full scan:
+    #: the body's own entry (if any) is at most a handful of appends old, and
+    #: this runs while the ring lock is held.
+    _DUPLICATE_SCAN_DEPTH = 25
 
     def __init__(self):
         """
@@ -98,36 +108,112 @@ class DebugLogger:
             # the durable file regardless of enable() or in-memory dedup, so
             # a suppressed-in-memory repeat still has every occurrence on disk.
             _backend_logger.error("%s.%s: %s", component, method, error, exc_info=error)
+            self._record_error(component, method, error, context)
 
-            error_signature = f"{component}.{method}.{type(error).__name__}.{error!s}"
+    def _record_error(
+        self,
+        component: str,
+        method: str,
+        error: Exception,
+        context: dict[str, Any] | None = None,
+    ):
+        """Put one error in the in-memory ring: dedup, cap, stats, stderr echo.
 
-            if error_signature in self._seen_errors:
-                self._seen_errors.move_to_end(error_signature)
-                self._stats[f"{component}.{method}.errors"] += 1
-                return
+        The ring half of :meth:`log_error`, split out so :meth:`log_tool_failure`
+        can reach the ring WITHOUT the durable ``_backend_logger.error`` line
+        above (see that method for why). One ring-append implementation, two
+        entry points that differ only in whether the record is also written to
+        the backend log file.
 
-            if len(self._seen_errors) >= self.MAX_SEEN_ERRORS:
-                # F-204: evict the single oldest signature (LRU), not every
-                # tracked signature - clearing the whole set used to make
-                # hitting the cap re-log every still-recent error at once.
-                self._seen_errors.popitem(last=False)
-            self._seen_errors[error_signature] = None
+        Caller must hold ``self._lock``.
+        """
+        error_signature = f"{component}.{method}.{type(error).__name__}.{error!s}"
 
-            error_entry = {
-                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                "component": component,
-                "method": method,
-                "error_type": type(error).__name__,
-                "error_message": str(error),
-                "correlation_id": correlation_id_var.get(),
-                "traceback": traceback.format_exc(),
-                "context": context or {},
-            }
-            self._errors.append(error_entry)
-            if len(self._errors) > self.MAX_ERRORS:
-                self._errors = self._errors[-self.MAX_ERRORS :]
+        if error_signature in self._seen_errors:
+            self._seen_errors.move_to_end(error_signature)
             self._stats[f"{component}.{method}.errors"] += 1
-            self._emit_stderr(f"[DEBUG ERROR] {component}.{method}: {error}")
+            return
+
+        if len(self._seen_errors) >= self.MAX_SEEN_ERRORS:
+            # F-204: evict the single oldest signature (LRU), not every
+            # tracked signature - clearing the whole set used to make
+            # hitting the cap re-log every still-recent error at once.
+            self._seen_errors.popitem(last=False)
+        self._seen_errors[error_signature] = None
+
+        error_entry = {
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "component": component,
+            "method": method,
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "correlation_id": correlation_id_var.get(),
+            "traceback": traceback.format_exc(),
+            "context": context or {},
+        }
+        self._errors.append(error_entry)
+        if len(self._errors) > self.MAX_ERRORS:
+            self._errors = self._errors[-self.MAX_ERRORS :]
+        self._stats[f"{component}.{method}.errors"] += 1
+        self._emit_stderr(f"[DEBUG ERROR] {component}.{method}: {error}")
+
+    def log_tool_failure(self, tool_name: str, error: Exception):
+        """Record a tool call that FAILED (F-835) — the one entry point for the
+        ``section_tool`` wrapper (``logging_setup.with_correlation_id``).
+
+        Before this existed, a failing tool emitted the INFO start/end pair and
+        nothing else: 24 consecutive failed ``spawn_browser`` calls left
+        ``get_debug_view`` reporting ``total_errors: 0`` during a total outage.
+        The wrapper now hands every escaping exception here on its way to the
+        client; the exception itself is untouched.
+
+        Filed under the ``tool`` component with the tool's own name as the
+        method, so the entry says WHICH tool failed and WITH WHAT, and
+        ``component_breakdown["tool"]`` counts the failures the client saw. The
+        entry carries the call's correlation id, which is what joins it to the
+        ``tool X start`` / ``tool X end`` pair in the backend log.
+
+        **Ring only — deliberately NOT the durable ``_backend_logger.error``
+        line ``log_error`` writes.** A tool's failure message echoes the
+        caller's own arguments (paths, selectors, indices, URLs), and F-782's
+        finding makes the condition explicit: logging the exception must not
+        land before those records go through a redactor. The in-memory ring is
+        local to the process and reaches only the client that made the failing
+        call — bytes it already holds — while the log file is durable and is
+        bridged to Sentry by ``LoggingIntegration(event_level=ERROR)``. So the
+        ring half of F-782 is closed here (F-835) and its log half stays open
+        until the redaction question is answered.
+
+        Args:
+            tool_name (str): The registered tool whose call failed.
+            error (Exception): The exception on its way to the client.
+        """
+        with self._lock:
+            # Not a blanket "this call already logged something": a body that
+            # logs an unrelated error mid-call must still get its FAILURE
+            # recorded. Only the same exception, in the same call, is a
+            # duplicate - and log_error's own dedup cannot see it, because the
+            # body files it under a different component/method signature.
+            if self._recorded_in_this_call(error):
+                return
+            self._record_error(TOOL_COMPONENT, tool_name, error)
+
+    def _recorded_in_this_call(self, error: Exception) -> bool:
+        """Whether this exact exception is already in the ring for this call.
+
+        Caller must hold ``self._lock``.
+        """
+        correlation_id = correlation_id_var.get()
+        error_type = type(error).__name__
+        message = str(error)
+        for entry in reversed(self._errors[-self._DUPLICATE_SCAN_DEPTH :]):
+            if (
+                entry["correlation_id"] == correlation_id
+                and entry["error_type"] == error_type
+                and entry["error_message"] == message
+            ):
+                return True
+        return False
 
     def log_warning(
         self,
@@ -342,6 +428,13 @@ class DebugLogger:
                     self._warnings.clear()
                     self._info.clear()
                     self._stats.clear()
+                    # F-835: the dedup set is a projection of the ring, so it
+                    # goes with it. Left behind, "clear the view and watch"
+                    # (the operator loop a live outage is diagnosed with)
+                    # would show an empty ring forever: every repeat of an
+                    # already-seen failure would be deduped against a
+                    # signature whose entry no longer exists.
+                    self._seen_errors.clear()
                     self._emit_stderr("[DEBUG] Debug logs cleared")
                 finally:
                     self._lock.release()
@@ -363,6 +456,7 @@ class DebugLogger:
             self._warnings = []
             self._info = []
             self._stats = defaultdict(int)
+            self._seen_errors = OrderedDict()  # F-835, same reason as above
             self._emit_stderr("[DEBUG] Debug logs force-cleared (lock bypass)")
 
     def enable(self):
