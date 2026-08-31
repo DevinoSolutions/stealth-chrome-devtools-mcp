@@ -1296,15 +1296,7 @@ class BrowserManager:
         return None
 
     async def list_tabs(self, instance_id: str) -> list[dict[str, str]]:
-        """
-        List all tabs for a browser instance.
-
-        Args:
-            instance_id (str): The ID of the browser instance.
-
-        Returns:
-            List[Dict[str, str]]: List of tab information dictionaries.
-        """
+        """One ``{tab_id, url, title, type}`` record per tab; ``[]`` on a miss."""
         browser = await self.get_browser(instance_id)
         if not browser:
             return []
@@ -1325,15 +1317,9 @@ class BrowserManager:
         ]
 
     async def switch_to_tab(self, instance_id: str, tab_id: str) -> bool:
-        """
-        Switch to a specific tab by bringing it to front.
+        """Bring tab *tab_id* to front and make it the stored active tab.
 
-        Args:
-            instance_id (str): The ID of the browser instance.
-            tab_id (str): The target ID of the tab to switch to.
-
-        Returns:
-            bool: True if switched successfully, False otherwise.
+        ``False`` if it is unknown or CDP refused.
         """
         browser = await self.get_browser(instance_id)
         if not browser:
@@ -1358,28 +1344,38 @@ class BrowserManager:
             return False
 
     async def get_active_tab(self, instance_id: str) -> Tab | None:
-        """
-        Get the currently active tab.
-
-        Args:
-            instance_id (str): The ID of the browser instance.
-
-        Returns:
-            Optional[Tab]: The active tab if found, else None.
-        """
+        """The instance's stored active tab, or ``None``."""
         return await self.get_tab(instance_id)
 
+    async def _repoint_after_close(
+        self, instance_id: str, browser: Browser, closed_id: str
+    ) -> None:
+        """Re-point the stored active tab when ``close_tab`` destroyed it (F-845).
+
+        Nothing else did, so every later tab-scoped call opened a websocket to
+        the dead target and got Chrome's raw "server rejected WebSocket
+        connection: HTTP 500". Storing ``None`` when nothing survives lets
+        ``tool_errors._require_tab`` raise the honest typed error instead.
+        ``browser.tabs`` is page-filtered and read as ``list_tabs`` reads it —
+        no per-tab ``await`` (F-771) — and the closed id is excluded explicitly:
+        nodriver drops a destroyed target only on ``Target.targetDestroyed``.
+        """
+        async with self._lock:
+            data = self._instances.get(instance_id)
+            stored = data.get("tab") if data else None
+        if self._get_tab_target_id(stored) != closed_id:
+            return
+        await browser.update_targets()
+        survivor = next(
+            (t for t in browser.tabs if self._get_tab_target_id(t) != closed_id),
+            None,
+        )
+        async with self._lock:
+            if instance_id in self._instances:
+                self._instances[instance_id]["tab"] = survivor
+
     async def close_tab(self, instance_id: str, tab_id: str) -> bool:
-        """
-        Close a specific tab.
-
-        Args:
-            instance_id (str): The ID of the browser instance.
-            tab_id (str): The target ID of the tab to close.
-
-        Returns:
-            bool: True if closed successfully, False otherwise.
-        """
+        """Close tab *tab_id*; ``False`` if it is unknown or CDP refused."""
         browser = await self.get_browser(instance_id)
         if not browser:
             return False
@@ -1391,10 +1387,12 @@ class BrowserManager:
         try:
             target_id = target_tab.target.target_id
             await browser.connection.send(uc.cdp.target.close_target(target_id))
-            return True
         except Exception as e:
             debug_logger.log_warning("browser_manager", "close_tab", str(e))
             return False
+        # Outside the handler: the close already succeeded (F-775b lying-False).
+        await self._repoint_after_close(instance_id, browser, str(target_id))
+        return True
 
     async def update_instance_state(
         self, instance_id: str, url: str | None = None, title: str | None = None
