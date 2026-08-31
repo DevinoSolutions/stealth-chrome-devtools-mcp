@@ -1290,16 +1290,16 @@ async def search_network_requests(
     offset: int = 0,
 ) -> dict[str, Any]:
     """
-    Search network requests with advanced filters and pagination.
+    Search network requests; ``url_pattern`` filters the URL (substring, not glob).
 
     Args:
         instance_id (str): Browser instance ID.
-        url_pattern (Optional[str]): Filter by URL pattern (substring match).
-        method (Optional[str]): Filter by HTTP method.
-        status_code (Optional[int]): Filter by response status code.
-        response_contains (Optional[str]): Search in response body.
-        payload_contains (Optional[str]): Search in request payload.
-        resource_type (Optional[str]): Filter by resource type.
+        url_pattern (Optional[str]): URL filter — case-insensitive substring.
+        method (Optional[str]): HTTP method, matched whole, case-insensitively.
+        status_code (Optional[int]): Exact response status code.
+        response_contains (Optional[str]): Case-insensitive substring of the body.
+        payload_contains (Optional[str]): Case-insensitive substring of the payload.
+        resource_type (Optional[str]): Case-insensitive substring of the CDP type.
         limit (int): Max results per page.
         offset (int): Starting index for pagination.
 

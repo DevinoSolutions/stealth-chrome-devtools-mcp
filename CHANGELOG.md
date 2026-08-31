@@ -16,6 +16,16 @@ case and raising a `ToolError` that names the valid values for anything else.
 
 Fixes `STEALTH-CHROME-DEVTOOLS-MCP-3P` (9 events).
 
+### Changed — `search_network_requests` says which argument filters the URL (F-825)
+
+Its summary line was "Search network requests with advanced filters and
+pagination", which names no filter at all, so a caller reaching for the obvious
+one guessed `url=` or `pattern=` and got a validation error. The summary now
+names `url_pattern`, and every filter states how it actually matches
+(case-insensitive substring for `url_pattern` / `response_contains` /
+`payload_contains` / `resource_type`, whole-value for `method`, exact for
+`status_code`).
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)
