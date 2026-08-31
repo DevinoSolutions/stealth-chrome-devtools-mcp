@@ -42,6 +42,7 @@ from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     InstanceNotFoundError,
     ToolError,
+    _require_tab,
 )
 
 INSTANCE_ID = "i1"
@@ -200,6 +201,90 @@ async def test_close_tab_reports_an_unknown_tab_id_unchanged(manager_and_browser
 
     assert await manager.close_tab(INSTANCE_ID, "T-nope") is False
     assert browser.connection.send_calls == []
+
+
+# ---------------------------------------------------------------------------
+# F-845 — close_tab: the stored active tab is left pointing at a dead target
+# ---------------------------------------------------------------------------
+#
+# Live evidence (2.0.8, real stdio transport): close the ACTIVE tab, and every
+# later tab-scoped tool opened a websocket to the destroyed target and failed
+# with ``server rejected WebSocket connection: HTTP 500`` (that "server" is
+# Chrome's own DevTools endpoint — a message that names nothing the operator
+# can act on). ``execute_script`` failed that way twice in a row; only a manual
+# ``switch_tab`` recovered the instance. ``get_active_tab`` meanwhile kept
+# cheerfully reporting the tab that no longer exists.
+#
+# ``switch_to_tab`` has always maintained the pointer under ``self._lock``;
+# ``close_tab`` never touched it. ``list_tabs`` survives only because it reads
+# ``browser.tabs`` through the F-771-hardened path instead of the stored tab.
+#
+# The fixture deliberately leaves the closed target in ``browser.tabs``: real
+# nodriver removes a destroyed target from ``Browser.targets`` only when the
+# ``Target.targetDestroyed`` event arrives (``core/browser.py:223-231``), which
+# is a race against the ``update_targets()`` the repoint does. A fake that
+# dropped the target eagerly would model only the lucky ordering and would let a
+# survivor scan that forgot to exclude the closed id pass.
+
+
+async def test_close_tab_repoints_the_active_tab_to_a_survivor(manager_and_browser):
+    """THE pin: closing the ACTIVE tab leaves the instance pointing somewhere alive.
+
+    Identity, not absence-of-exception: ``close_tab`` already returned ``True``
+    before the fix. What was wrong is what the instance pointed at afterwards.
+    """
+    manager, browser, tracked = manager_and_browser
+
+    assert await manager.close_tab(INSTANCE_ID, TRACKED["target_id"]) is True
+
+    active = await manager.get_active_tab(INSTANCE_ID)
+    assert active is not tracked
+    assert manager._get_tab_target_id(active) == OTHER["target_id"]
+    assert browser.update_targets_calls == 1
+
+
+async def test_close_tab_never_repoints_at_the_target_it_just_closed(
+    manager_and_browser,
+):
+    """The destroyed target is still listed in ``browser.tabs`` (see above), so
+    "first page target wins" would re-point at the corpse and reproduce the
+    HTTP 500 the fix exists to remove."""
+    manager, browser, _tracked = manager_and_browser
+
+    await manager.close_tab(INSTANCE_ID, TRACKED["target_id"])
+
+    stored = manager._instances[INSTANCE_ID]["tab"]
+    assert manager._get_tab_target_id(stored) != TRACKED["target_id"]
+
+
+async def test_close_tab_leaves_an_unrelated_active_tab_alone(manager_and_browser):
+    """Closing a NON-active tab must not disturb the pointer — nor pay for a
+    target refresh it has no use for."""
+    manager, browser, tracked = manager_and_browser
+
+    assert await manager.close_tab(INSTANCE_ID, OTHER["target_id"]) is True
+
+    assert await manager.get_active_tab(INSTANCE_ID) is tracked
+    assert browser.update_targets_calls == 0
+
+
+async def test_closing_the_last_tab_leaves_the_honest_typed_error(
+    manager_and_browser,
+):
+    """No page target survives → store ``None``, so the ONE guard speaks.
+
+    ``tool_errors._require_tab`` then raises the typed instance-not-found error
+    instead of letting a tool open a websocket to a dead target and surface
+    Chrome's raw ``server rejected WebSocket connection: HTTP 500``.
+    """
+    manager, browser, _tracked = manager_and_browser
+    browser.tabs = [FakeDiscoveredTarget(fake_target(**TRACKED))]
+
+    assert await manager.close_tab(INSTANCE_ID, TRACKED["target_id"]) is True
+
+    assert await manager.get_active_tab(INSTANCE_ID) is None
+    with pytest.raises(InstanceNotFoundError):
+        await _require_tab(manager, INSTANCE_ID)
 
 
 # ---------------------------------------------------------------------------
