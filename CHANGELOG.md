@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a file the OS could not read no longer counts as "you edited the source" (F-829)
+
+Reuse identity is the package version plus a SHA-256 of the package's `*.py`
+source, and the hash used to return `""` for any OS read error — the same value
+the reuse gate reads as "does not match". So a single unreadable file (this
+tree lives under OneDrive, where a file being synced is briefly locked) made a
+healthy shared backend look source-stale: the next session's cold-start lock
+terminated it, disconnected everyone on it, and logged `backend stale (source
+changed), evicting` for an edit that never happened. A backend that was
+*spawned* during such a hiccup recorded `""` and was then guaranteed to be
+evicted by the following session.
+
+The fingerprint now has the third state it always needed. A failed read is
+retried three times, 50 ms apart, and only then yields `None` — "unreadable",
+which `backend_registry.fingerprint_mismatch` (the one reading of that field)
+treats as *unknown*, never as a mismatch: nothing is evicted, no rival backend
+is started, and the WARNING names the real cause (`source fingerprint
+unreadable: <error>`) instead of blaming a source change. A backend recorded
+while the source was unreadable stamps the sentinel deliberately, so the same
+"unknown" rule applies to it later. A genuine digest mismatch, a version
+mismatch, and a legacy record with no digest all still evict exactly as before.
+
+Full write-up:
+`audit/stage2/finding_F829_transient_fingerprint_read_evicts_healthy_backend.md`.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)

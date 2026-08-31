@@ -52,6 +52,8 @@ DEFAULT_PORT = 19222
 # mismatch (F-206/F-120/F-504): on this editable install the package version is
 # frozen at 1.2.0, so the version key alone can never see an in-place source edit.
 SOURCE_ROOT = Path(__file__).resolve().parent.parent
+_FINGERPRINT_ATTEMPTS = 3  # F-829: outlast a transient read failure
+_FINGERPRINT_RETRY_SECONDS = 0.05
 STARTUP_TIMEOUT = 30
 SERVER_NAME = "stealth-chrome-devtools-mcp"
 # How long the stdio proxy will wait for the backend before later requests
@@ -135,7 +137,7 @@ def _read_server_state() -> dict | None:
 
 
 def _write_server_state(
-    port: int, version: str, pid: int, source_fingerprint: str
+    port: int, version: str, pid: int, source_fingerprint: str | None
 ) -> None:
     backend_registry.record_backend(
         SERVER_STATE_FILE,
@@ -176,31 +178,28 @@ def _probe_backend_status() -> tuple[str, int | None]:
 
 
 def _same_identity_backend_ready(port: int, patience: float | None = None) -> bool:
-    """True iff ``server.json`` records OUR identity on ``port`` — package
-    version AND source fingerprint both match (issue #14 / F-206: a stale,
-    legacy, or edited-source backend is never reused, so upgrades take effect;
-    an empty computed fingerprint fails closed) — and that backend answers a
-    real ``initialize`` within the patience window (F-301/F-501: a wedged
+    """True iff ``server.json`` records OUR identity on ``port`` — the version
+    matches and the fingerprint does not CONTRADICT it (issue #14/F-206 never
+    reuse a stale, legacy or edited-source backend; F-829: an unreadable digest
+    is unknown, not a contradiction — see ``fingerprint_mismatch``) — and it
+    answers a real ``initialize`` in the patience window (F-301/F-501: a wedged
     backend holds its socket open, so only the app-level probe counts).
 
-    ``patience`` is F-807's anti-fratricide grace, used by the cold-start lock
-    path: a backend absorbing a many-session startup herd can miss a single 2s
-    probe while perfectly healthy — and a lock-holder that trusts that one miss
-    "evicts" (kills) the backend everyone else is using, then double-spawns.
-    ``_watch_backend_liveness`` applies the same discrimination mid-session
-    (F-820). Identity-gated on purpose: a version- or source-stale record gets
-    NO patience and is evicted immediately. ``patience=0.0`` (discovery's
-    single-shot probe) probes once and never sleeps; ``None`` means
+    ``patience`` is F-807's anti-fratricide grace for the cold-start lock path:
+    a healthy backend absorbing a many-session startup herd can miss a single
+    2s probe, and a lock-holder trusting that one miss "evicts" (kills) the
+    backend everyone is using, then double-spawns. ``_watch_backend_liveness``
+    applies the same discrimination mid-session (F-820). Identity-gated: a
+    version- or source-stale record gets NO patience and is evicted at once.
+    ``patience=0.0`` (discovery) probes once and never sleeps; ``None`` means
     ``REUSE_PATIENCE_SECONDS``, read at call time so tests can shrink it.
     """
-    # The entry recorded ON THIS PORT, not merely the first one: with a
-    # per-context record (F-808) another desktop's backend can be recorded
-    # alongside ours, and it says nothing about whether `port` is reusable.
+    # The entry recorded ON THIS PORT, not merely the first: under F-808's
+    # per-context record another desktop's backend says nothing about `port`.
     entry = backend_registry.backend_on_port(_read_server_state(), port) or {}
     if entry.get("version") != _server_version():
         return False
-    fp = _source_fingerprint()
-    if not fp or entry.get("source_fingerprint") != fp:
+    if backend_registry.fingerprint_mismatch(entry, _source_fingerprint()):
         return False
     patience = REUSE_PATIENCE_SECONDS if patience is None else patience
     # Busy backends answer slowly, so the patient path probes with the wider
@@ -483,29 +482,32 @@ def _server_version() -> str:
         return "0.0.0"
 
 
-def _source_fingerprint() -> str:
+def _source_fingerprint() -> str | None:
     """SHA-256 over the package's ``*.py`` source, so a backend built from
     now-stale source is not reused. COMPLETE (every module the backend can
-    import), STABLE (identical bytes -> identical digest, immune to
-    mtime/OneDrive/git quirks), CHEAP (~1 MB read+hash per cold-start
-    discovery). Best-effort: any OS read error yields ``""`` so a transient
-    hiccup costs one respawn, never a crash of discovery - and the reuse gate
-    treats ``""`` as a miss, so an empty digest is never falsely reused.
+    import), STABLE (identical bytes -> identical digest, immune to mtime/git
+    quirks), CHEAP (~1 MB read+hash per cold-start discovery). Never raises: a
+    read that keeps failing across ``_FINGERPRINT_ATTEMPTS`` yields ``None`` —
+    UNREADABLE, which ``backend_registry.fingerprint_mismatch`` reads as
+    unknown, never as "source changed" (F-829: this returned ``""``, which the
+    gate could not tell from a real mismatch, so one OneDrive sync lock evicted
+    the healthy backend every session was sharing).
     """
     import hashlib
 
-    h = hashlib.sha256()
-    try:
-        for p in sorted(SOURCE_ROOT.rglob("*.py")):
-            if "__pycache__" in p.parts:
-                continue
-            h.update(p.relative_to(SOURCE_ROOT).as_posix().encode("utf-8"))
-            h.update(b"\0")
-            h.update(p.read_bytes())
-            h.update(b"\0")
-    except OSError:
-        return ""
-    return h.hexdigest()
+    for _ in range(_FINGERPRINT_ATTEMPTS):
+        h = hashlib.sha256()
+        try:
+            for p in sorted(SOURCE_ROOT.rglob("*.py")):
+                if "__pycache__" not in p.parts:
+                    h.update(p.relative_to(SOURCE_ROOT).as_posix().encode())
+                    h.update(b"\0" + p.read_bytes() + b"\0")
+            return h.hexdigest()
+        except OSError as e:
+            err = e
+            time.sleep(_FINGERPRINT_RETRY_SECONDS)
+    _logger.warning("source fingerprint unreadable: %s", err)
+    return None
 
 
 def _start_backend_holding_lock(port: int) -> None:
@@ -525,18 +527,15 @@ def _start_backend_holding_lock(port: int) -> None:
             if _same_identity_backend_ready(port):
                 return  # ours, merely busy or mid-boot — never evict it (F-807)
             # M2-3: surface WHY a fresh backend is about to spawn when the cause
-            # is a source change (version matches, fingerprint differs) - the
+            # is a source change (version matches, digests differ) - the
             # eviction is otherwise silent. Logged once per spawn HERE, not in
-            # _find_running_server (which runs up to 3x per locked cold start);
-            # the state re-read is a cheap diagnostic probe, deliberately NOT a
-            # second reuse gate (that stays single-homed in
-            # _find_running_server). Source-only: a version-change eviction
-            # (issue #14) must not emit this line.
-            entry = backend_registry.backend_on_port(_read_server_state(), port)
-            if (
-                entry is not None
-                and entry.get("version") == _server_version()
-                and entry.get("source_fingerprint") != _source_fingerprint()
+            # the thrice-called _find_running_server; the state re-read is a
+            # cheap diagnostic probe, deliberately NOT a second reuse gate (that
+            # stays single-homed in _find_running_server). Source-only: neither
+            # a version change (issue #14) nor an UNREADABLE digest (F-829).
+            entry = backend_registry.backend_on_port(_read_server_state(), port) or {}
+            if entry.get("version") == _server_version() and (
+                backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
             ):
                 _logger.info("backend stale (source changed), evicting")
             # A stale/legacy backend (different or unknown version) may still be

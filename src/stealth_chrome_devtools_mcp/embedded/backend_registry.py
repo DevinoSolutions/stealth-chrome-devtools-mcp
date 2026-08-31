@@ -243,6 +243,25 @@ def recorded_int(entry: BackendEntry | None, key: str) -> int | None:
     return value if isinstance(value, int) else None
 
 
+def fingerprint_mismatch(entry: BackendEntry | None, current: str | None) -> bool:
+    """True only when ``entry``'s recorded source fingerprint and ``current``
+    are BOTH known and DIFFER — THE one reading of that field.
+
+    Three states, not two (F-829). A digest compares normally. ``None`` on
+    either side means UNREADABLE: the source could not be hashed just now (this
+    tree syncs through OneDrive, where a file being synced raises a transient
+    OSError), or the backend was recorded while it could not be. Unknown is not
+    evidence of a source change, so it never refuses reuse — reading it as one
+    is what let a single failed read evict a healthy shared backend. ``""`` —
+    an absent field (a pre-M2 record) or a caller that means "no digest" —
+    keeps its fail-closed meaning and still counts as a mismatch.
+    """
+    recorded = (entry or {}).get("source_fingerprint", "")
+    if recorded is None or current is None:
+        return False
+    return not current or recorded != current
+
+
 def own_or_first_port(path: Path, own_context: str) -> int | None:
     """The port to act on when a caller must pick exactly ONE recorded backend:
     our own context's, else whatever single backend is recorded, else None.
@@ -339,7 +358,7 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
     port: int,
     version: str,
     pid: int,
-    source_fingerprint: str,
+    source_fingerprint: str | None,
     display_context: str,
 ) -> None:
     """Record one backend's identity under its display context, replacing any
@@ -348,7 +367,10 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
     Identity is the port, the package version that started it, its pid, and a
     fingerprint of the source it is running: discovery reuses a backend only
     when BOTH the version AND the source fingerprint still match (and it answers
-    a live probe); the pid is used to evict a stale one.
+    a live probe); the pid is used to evict a stale one. ``None`` records the
+    F-829 sentinel — the source was unreadable at spawn — deliberately, so that
+    :func:`fingerprint_mismatch` later reads it as unknown rather than as an
+    empty digest that contradicts every future one.
 
     Also supersedes by port: any OTHER entry claiming this port is a leftover
     (only one process can hold a loopback listener) and is dropped rather than
