@@ -44,9 +44,48 @@ https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
 - **Zero idle timeout** — browsers stay alive until explicitly closed
 - **Full CDP access** — DOM manipulation, network interception, JavaScript execution, screenshots
 
-## Quick Start
+## Installation
 
-Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, etc.):
+### The right way — `uv tool install` (persistent, fleet-safe)
+
+```bash
+uv tool install stealth-chrome-devtools-mcp==2.0.7
+```
+
+This installs a version-pinned executable at `~/.local/bin/stealth-chrome-devtools-mcp`
+(Windows: `%USERPROFILE%\.local\bin\stealth-chrome-devtools-mcp.exe`). Point your MCP
+config (`claude_desktop_config.json`, `~/.claude.json`, etc.) at it:
+
+```json
+{
+  "mcpServers": {
+    "stealth-chrome-devtools-mcp": {
+      "command": "C:\\Users\\<you>\\.local\\bin\\stealth-chrome-devtools-mcp.exe",
+      "args": []
+    }
+  }
+}
+```
+
+Claude Code one-liner (use the `.exe` path above on Windows):
+
+```bash
+claude mcp add --scope user stealth-chrome-devtools-mcp -- ~/.local/bin/stealth-chrome-devtools-mcp
+```
+
+**Why not `uvx` in the config?** It works, but `uvx` re-resolves the package on
+**every client session start**. Each Claude Code session launches its own stdio
+proxy, so a fleet of concurrent sessions (the shared backend is scale-tested at
+40) turns startup into a package-resolution storm. A `uv tool install` gives
+every proxy an instant, pinned executable — the shared backend, profile
+handling, and per-session browser isolation behave identically.
+
+To upgrade later: `uv tool install stealth-chrome-devtools-mcp==<new-version>`
+(or `uv tool upgrade stealth-chrome-devtools-mcp` to track the latest release).
+
+### Alternatives
+
+Zero-install trial (fine for a first look, not for fleets):
 
 ```json
 {
@@ -59,11 +98,9 @@ Add to your MCP config (`claude_desktop_config.json`, `.claude/settings.json`, e
 }
 ```
 
-Or install via pip:
-
-```bash
-pip install stealth-chrome-devtools-mcp==2.0.7
-```
+Or via pip (`pip install stealth-chrome-devtools-mcp==2.0.7`), then use the
+`stealth-chrome-devtools-mcp` console script from that environment as the
+`command`.
 
 Crashes are reported to the maintainers by default, with your username and
 machine name scrubbed out. See [Error Reporting](#error-reporting) for what a
