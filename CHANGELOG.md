@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.9
 
 ### Fixed — a backend that dies with a call in flight now heals instead of disconnecting (F-843)
 
