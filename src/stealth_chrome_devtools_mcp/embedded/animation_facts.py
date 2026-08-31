@@ -10,10 +10,20 @@ Two closely-bound reading concerns, both upstream of any conclusion:
   counts, easing-curve classification and the property -> motion-family lookup.
 
 Nothing here knows about the schema-v2 payload; it only knows what a CSS token
-means. The animations subsystem is three leaves in a pipeline, none of which
-imports ``server`` (CLAUDE.md convention 1):
+means.
+
+It also owns the **shared value types** every leaf above it passes around —
+``Facts``/``Record``, ``Derived`` and its confidence levels, and the per-call
+``Caps`` with the warning shape that announces hitting one. They live at the
+bottom for the same reason the readers do: each is vocabulary two or more leaves
+must agree on, and a vocabulary defined in a leaf that another leaf imports is
+how a cycle starts.
+
+The animations subsystem is four leaves in a pipeline, none of which imports
+``server`` (CLAUDE.md convention 1):
 
     animation_facts (read)  ->  animation_advice (what to do)
+                            ->  animation_waapi  (the live Animation objects)
                             ->  animation_analysis (what it is; owns analyze())
 
 This is the bottom of that pipeline and imports no other ``embedded`` module.
@@ -534,3 +544,76 @@ def motion_kind(keyframes: list[Record]) -> Derived:
             "a matrix() transform was not decoded, so more families may be in play",
         )
     return Derived(kind, "high")
+
+
+# ---------------------------------------------------------------------------
+# Payload bounds and the warning that announces them (R12)
+# ---------------------------------------------------------------------------
+
+# Caps are module constants, never ``STEALTH_MCP_*`` env knobs (an unknown env
+# key crashes ``get_settings()``, and these are payload shape, not deployment
+# config). Overridable per call through ``options``.
+#
+# SIZED FOR THE CONSUMER, WHICH IS A LANGUAGE MODEL (R12). The first pair (200 /
+# 60) bounded the payload correctly and was still useless: a page with 400
+# animated children produced 4.9MB, roughly 1.2M tokens, which the model this
+# feature exists to serve cannot read. A cap that prevents unboundedness but
+# yields an unconsumable payload has met the letter of the rule and missed it.
+#
+# These come from measurement, not from rounding:
+#   ANIMATION_CAP  25  -- a summary record measures ~1.1KB, so 25 of them is
+#                         ~28KB, the "readable in one go" range. An element with
+#                         more than 25 animations of its own does not exist in
+#                         practice; the count is really a SUBTREE bound.
+#   KEYFRAME_CAP   20  -- four times over the 0/25/50/75/100 vocabulary. Keeps
+#                         the keyframes array ~3.5KB, and keyframes were 75-83%
+#                         of every oversized payload measured.
+ANIMATION_CAP = 25
+KEYFRAME_CAP = 20
+
+
+class Caps(NamedTuple):
+    """The per-call payload bounds, threaded as one value so adding a third
+    cap does not push every function past the 5-argument lint limit."""
+
+    animations: int = ANIMATION_CAP
+    keyframes: int = KEYFRAME_CAP
+
+
+def caps_from(options: Record) -> Caps:
+    """Caller overrides, falling back to the defaults. A non-positive or
+    non-numeric value is ignored rather than honoured: a cap of 0 would empty
+    the payload silently, which is the failure mode this whole area is about."""
+
+    def cap(key: str, default: int) -> int:
+        value = as_number(options.get(key))
+        return int(value) if value is not None and value >= 1 else default
+
+    return Caps(
+        cap("max_animations", ANIMATION_CAP), cap("max_keyframes", KEYFRAME_CAP)
+    )
+
+
+def cap_message(noun: str, cap: int, option: str) -> str:
+    """A truncation message that says what was cut and how to get more.
+
+    With the R12 caps this fires far more often than the old ones did, so it has
+    to answer both questions a model will have: what is missing, and what do I
+    pass to see it.
+    """
+    return (
+        f"{noun} truncated at {cap}; raise it by passing {option} to this tool "
+        f"(or extract a narrower selector to stay under the cap)"
+    )
+
+
+def warn(record: Record, code: str, message: str, detail: Record | None = None) -> None:
+    """Append one warning to a record's ``warnings``, creating it if needed.
+
+    THE one way an animation record grows a warning, so no site can decide to
+    hardcode ``warnings: []`` and drop what it had to say (R3).
+    """
+    existing = record.get("warnings")
+    warnings: list[Record] = as_rows(existing) if isinstance(existing, list) else []
+    warnings.append({"code": code, "message": message, "detail": detail or {}})
+    record["warnings"] = warnings

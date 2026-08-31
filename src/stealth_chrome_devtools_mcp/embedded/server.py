@@ -1938,11 +1938,11 @@ async def extract_element_animations(
         `*_raw` tokens; `iterations` may be "infinite"), `derived` (cycle_ms,
         active window, total_ms, stagger_group), `keyframes[]` (numeric `offset`
         + parsed properties), `checkpoints[]` (declared values, never
-        interpolated), `edits[]` (per knob: the author's own declaration as
-        `find`, the one `token` in it this knob owns, and `replace` — the same
-        declaration with just that token swapped for `replace_placeholder`, so
-        applying it cannot drop the rest; no `find` means a pointer, not an
-        edit). Undecidable fields are OMITTED, never guessed.
+        interpolated), `edits[]` (per knob: the author's declaration as `find`,
+        the one `token` in it this knob owns, and `replace` — that declaration
+        with only the token swapped for `edit_protocol.placeholder`; no `find`
+        means a pointer, not an edit). Capped at 25 animations / 20 keyframes;
+        subtree records carry `detail_level: "summary"`. Undecidable: omitted.
     """
     tab = await _require_tab(browser_manager, instance_id)
     return await _with_cdp_timeout(

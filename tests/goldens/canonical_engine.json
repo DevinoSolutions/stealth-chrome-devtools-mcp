@@ -185,19 +185,26 @@
       }
     ],
     "caps": {
-      "animations": 200,
-      "keyframes_per_animation": 60,
+      "animations": 25,
+      "keyframes_per_animation": 20,
       "truncated": {
         "animations": false,
         "keyframes": false
       }
     },
     "captured_at_ms": 100.0,
+    "detail_note": "Records with detail_level: 'summary' are animations on DESCENDANTS of the selected element. They carry identity, timing, semantics and trigger; keyframes, checkpoints and edit recipes are not computed for them. To get the full record for one, call this tool again with that record's target.selector.",
+    "edit_protocol": {
+      "how": "To apply an edit: find the recipe's `find` string in the file named by `file`, inside the rule named by `rule_selector`, and replace it with the recipe's `replace` string, putting your new value where {{NEW_VALUE}} appears. The rest of the declaration is carried in `replace` for you, so nothing else can be lost. `token` is the exact text being replaced, if you want to check it first. A recipe with no `find` is a pointer, not an edit: open it at `source_ref` yourself.",
+      "placeholder": "{{NEW_VALUE}}"
+    },
     "has_motion": true,
     "interactions": [],
     "options": {
       "include_subtree": true,
-      "include_waapi": true
+      "include_waapi": true,
+      "max_animations": 25,
+      "max_keyframes": 20
     },
     "overview": "1 animation and 0 transitions. Running: 'pulse' on #demo.",
     "pending_animations": [],

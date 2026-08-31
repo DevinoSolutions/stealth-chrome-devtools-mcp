@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+### Changed — the animations payload is sized for the model that reads it (F-853)
+
+The caps added in F-849 bounded the payload and still produced something no
+model could read. A page with 400 animated children returned **4,910,005 bytes**
+— roughly 1.2M tokens, about 24.5 KB per animation record. A cap that prevents
+unboundedness but yields an unconsumable payload has met the letter of the rule
+and missed its purpose.
+
+The same page now returns **31,646 bytes**, a 155x reduction, from three changes
+each sized by measuring where the bytes actually went rather than by picking
+round numbers:
+
+* **The default caps drop to 25 animations and 20 keyframes** (from 200 and 60).
+  An element with more than 25 animations *of its own* does not exist in
+  practice — that cap is really a subtree bound — and 20 keyframes is four times
+  over the `0/25/50/75/100` vocabulary, while keyframes were 75-83% of every
+  oversized payload measured. Both are overridable per call
+  (`max_animations` / `max_keyframes`); they are module constants and
+  deliberately **not** `STEALTH_MCP_*` env knobs, being payload shape rather
+  than deployment config.
+* **The edit protocol is stated once for the payload** instead of once per
+  recipe. The `how` sentence and `replace_placeholder` were 6,960 bytes of a
+  single 24,759-byte record — 36% of its `edits` block — repeated verbatim. They
+  now live in a top-level `edit_protocol`, and the per-call recipe cap halves to
+  20.
+* **Records the caller did not select are summarized.** The blowup is always the
+  subtree: ask about a grid and every animated cell arrives at full weight. A
+  descendant keeps its identity, timing, semantics and trigger — enough to decide
+  whether to look closer — and drops keyframes, checkpoints and edit recipes.
+  This is stamped in the record as `detail_level: "summary"`, never left as a
+  silent shape difference: a model seeing `edits` on one record and none on
+  another would otherwise conclude the second is not editable.
+
+Truncation stays loud, and now fires far more often, so each warning says how
+many were dropped and what to pass to raise the cap. A truncated list also no
+longer reports stagger groups — a stagger inferred from an arbitrary prefix of
+the animations is an artifact of the cap, not a fact about the page.
+
+A test pins a busy page's payload under a stated byte budget, so the sizing
+cannot silently regress the way it did here.
+
+**Internal:** `animation_analysis.py` reached its 1000-line budget, so the live
+`Animation` half moved to a new leaf, `animation_waapi.py` (timeline typing,
+live timing and keyframes, and the declared-vs-live reconciliation). The shared
+value types it and `analyze()` both need — `Caps`, `cap_message`, `warn` — moved
+down to `animation_facts.py`. Behaviour is unchanged by the move.
+
 ### Fixed — an edit recipe now names the token to change and the rule that wins (F-852)
 
 Two defects that compounded, both worse than a missing recipe.

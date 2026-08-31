@@ -1325,6 +1325,12 @@ class TestFixturePageEndToEnd:
             "warnings",
             "caps",
             "options",
+            # R12: both are stated ONCE here instead of per record. edit_protocol
+            # replaces a how-to sentence that was repeated in every recipe (36%
+            # of one measured record's edits block); detail_note explains what a
+            # summary record elided and how to ask for the full one.
+            "edit_protocol",
+            "detail_note",
         }
 
     async def test_every_declared_and_live_animation_appears_exactly_once(self):
@@ -1337,9 +1343,16 @@ class TestFixturePageEndToEnd:
         assert "fixture-waapi-fade" in names  # element.animate()
 
     async def test_keyframes_arrive_as_real_parsed_json(self):
-        """D1/F-846 regression net, on the full payload."""
+        """D1/F-846 regression net, on the full payload.
+
+        Scoped to full-detail records: a descendant the caller did not select
+        carries no keyframes at all now (R12), and says so with
+        ``detail_level: "summary"`` rather than an empty list.
+        """
         result = await extract(FIXTURE_PAGE)
-        for animation in result["animations"]:
+        full = [a for a in result["animations"] if "detail_level" not in a]
+        assert full, "no full-detail records to check"
+        for animation in full:
             for frame in animation["keyframes"]:
                 assert isinstance(frame, dict)
                 assert isinstance(frame["offset"], float)

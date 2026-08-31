@@ -2,10 +2,11 @@
 
 Facts in, schema-v2 payload out. This module owns ``analyze()`` — the ONE
 composition site — and everything that answers *what the motion is*: the
-per-animation records, resolved keyframes, derived timing, static checkpoints,
-timeline typing and the transition inventory. What to DO about it (edit
-recipes, triggers, conflicts, prose) is ``animation_advice``; reading a CSS
-token or a JSON field is ``animation_facts``.
+per-animation records, resolved keyframes, derived timing, static checkpoints
+and the transition inventory, all read from the DECLARED CSS. What to DO about
+it (edit recipes, triggers, conflicts, prose) is ``animation_advice``; what is
+actually RUNNING is ``animation_waapi``; reading a CSS token or a JSON field is
+``animation_facts``.
 
 **This is derivation, not extraction.** The ONE-cloner-engine convention
 (CLAUDE.md §3 / DESIGN §5) is preserved because the only call path into this
@@ -14,14 +15,16 @@ DOM extraction still has exactly one home; this is downstream of it, is called
 from nowhere else, and touches no tab, socket or file — which is what makes
 every derived field unit-testable hermetically with no browser.
 
-The pipeline is three leaves, none of which imports ``server``:
+The pipeline is four leaves, none of which imports ``server``:
 
-    animation_facts (read)  ->  animation_advice (what to do)  ->  this module
+    animation_facts (read)  ->  animation_advice (what to do)
+                            ->  animation_waapi  (what is running)
+                            ->  this module
 
-It is three rather than one because the derivation is ~950 lines of code and the
-gate in ``tools/check_file_budgets.py`` caps a module at 1000 — the split
-follows the seam the spec already draws between fidelity and actionability
-rather than a line count.
+It is four rather than one because the derivation runs past the 1000-line cap in
+``tools/check_file_budgets.py``. Each split follows a seam the spec already
+draws — fidelity vs actionability, declared vs live — rather than a line count;
+the budget is what made us look, not what chose the line.
 
 The governing rule throughout is the spec's **M11 honesty rule**: a derived
 field is emitted only when it is mechanically decidable from the captured facts,
@@ -38,7 +41,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-import re
 
 from stealth_chrome_devtools_mcp.embedded.animation_advice import (
     apply_stagger_groups,
@@ -49,6 +51,7 @@ from stealth_chrome_devtools_mcp.embedded.animation_advice import (
     trigger_from_rules,
 )
 from stealth_chrome_devtools_mcp.embedded.animation_edits import (
+    EDIT_PROTOCOL,
     applying_rule,
     build_edits,
     build_transition_edits,
@@ -57,6 +60,7 @@ from stealth_chrome_devtools_mcp.embedded.animation_edits import (
     source_span,
 )
 from stealth_chrome_devtools_mcp.embedded.animation_facts import (
+    Caps,
     Derived,
     Facts,
     Record,
@@ -65,6 +69,8 @@ from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     as_rows,
     as_strings,
     as_text,
+    cap_message,
+    caps_from,
     cycle_get,
     duration_ms,
     easing_class,
@@ -74,14 +80,15 @@ from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     parse_declarations,
     put,
     split_css_list,
+    warn,
+)
+from stealth_chrome_devtools_mcp.embedded.animation_waapi import (
+    adopt_live_timelines,
+    build_waapi,
 )
 
-# Caps are module constants, never ``STEALTH_MCP_*`` env knobs (an unknown env
-# key crashes ``get_settings()``, and these are payload shape, not deployment
-# config). Overridable per call by tool arguments only.
-ANIMATION_CAP = 200
-KEYFRAME_CAP = 60
 CHECKPOINT_OFFSETS = (0.0, 0.25, 0.5, 0.75, 1.0)
+
 
 # ── The confidence invariant (F-850) ───────────────────────────────────────
 # Two shapes in the payload, one rule: our code decided it, so it states how
@@ -95,15 +102,10 @@ CHECKPOINT_OFFSETS = (0.0, 0.25, 0.5, 0.75, 1.0)
 CLAIM_FIELDS = frozenset({"motion_kind", "easing_class"})
 JUDGEMENT_BLOCKS = frozenset({"trigger", "stagger_group", "edits", "interactions"})
 
+
 # Properties that appear inside a keyframe block but describe the ANIMATION
 # rather than being animated themselves.
 _KEYFRAME_META = {"animation-timing-function", "animation-composition"}
-
-_TIMELINE_CLASS = {
-    "DocumentTimeline": "time",
-    "ScrollTimeline": "scroll",
-    "ViewTimeline": "view",
-}
 
 # NOTE (D4, deferred): this aspect returns ``{"error": ...}`` dicts rather than
 # raising ``ToolError``, matching the other five aspects of the cloner engine.
@@ -116,18 +118,6 @@ _TIMELINE_CLASS = {
 # ---------------------------------------------------------------------------
 # Derived timing (M9 / §3.3) — the arithmetic weak models get wrong
 # ---------------------------------------------------------------------------
-
-
-def warn(record: Record, code: str, message: str, detail: Record | None = None) -> None:
-    """Append one warning to a record's ``warnings``, creating it if needed.
-
-    THE one way an animation record grows a warning, so no site can decide to
-    hardcode ``warnings: []`` and drop what it had to say (R3).
-    """
-    existing = record.get("warnings")
-    warnings: list[Record] = as_rows(existing) if isinstance(existing, list) else []
-    warnings.append({"code": code, "message": message, "detail": detail or {}})
-    record["warnings"] = warnings
 
 
 def usable_edits(record: Record) -> bool:
@@ -183,7 +173,7 @@ def derive_timing(timing: Record) -> Record:
 # ---------------------------------------------------------------------------
 
 
-def resolve_keyframes(rule: Record) -> tuple[list[Record], bool]:
+def resolve_keyframes(rule: Record, caps: Caps) -> tuple[list[Record], bool]:
     """A captured ``@keyframes`` rule -> resolved, offset-sorted records.
 
     Returns ``(keyframes, truncated)``. Each record carries a numeric ``offset``,
@@ -218,7 +208,7 @@ def resolve_keyframes(rule: Record) -> tuple[list[Record], bool]:
             record["computed_css_text"] = as_text(frame.get("css_text"))
             records.append(record)
     records.sort(key=lambda r: as_number(r["offset"]) or 0.0)
-    return records[:KEYFRAME_CAP], len(records) > KEYFRAME_CAP
+    return records[: caps.keyframes], len(records) > caps.keyframes
 
 
 def keyframe_rule_for(facts: Facts, name: str) -> Record | None:
@@ -321,29 +311,6 @@ def timeline_from_css(computed: Record) -> Record:
     return {"type": kind, "raw": raw}
 
 
-def timeline_from_waapi(entry: Record) -> Record:
-    """``Animation.timeline`` -> the typed timeline block, with axis and range.
-
-    M12's whole point: a ``view()`` animation reports ``duration: "auto"`` and
-    ``iterations: 1``, which reads as a BROKEN time animation. A model seeing
-    that will "repair" a correct scroll-driven animation — the class of gap that
-    produces actively harmful edits, not merely missing information.
-    """
-    timeline = as_obj(entry.get("timeline"))
-    class_name = as_text(timeline.get("type"), "DocumentTimeline")
-    block: Record = {
-        "type": _TIMELINE_CLASS.get(class_name, "time"),
-        "raw": class_name,
-    }
-    for key in ("axis", "subject_selector"):
-        if timeline.get(key):
-            block[key] = timeline[key]
-    for key in ("range_start", "range_end"):
-        if entry.get(key):
-            block[key] = entry[key]
-    return block
-
-
 # ---------------------------------------------------------------------------
 # Per-animation records (M1) — the declared CSS animations
 # ---------------------------------------------------------------------------
@@ -379,7 +346,7 @@ def _timing_from_computed(computed: Record, index: int) -> Record:
     return timing
 
 
-def build_animations(facts: Facts) -> tuple[list[Record], bool]:
+def build_animations(facts: Facts, caps: Caps) -> tuple[list[Record], bool]:
     """One record per DECLARED CSS animation on the element itself (M1).
 
     Today's ``"pulse, spin"`` / ``"2s, 3s"`` parallel strings are zipped HERE,
@@ -392,10 +359,10 @@ def build_animations(facts: Facts) -> tuple[list[Record], bool]:
         for name in split_css_list(as_text(computed.get("animation_name")))
         if name and name != "none"
     ]
-    truncated = len(names) > ANIMATION_CAP
+    truncated = len(names) > caps.animations
     rule = applying_rule(facts)
     records: list[Record] = []
-    for index, name in enumerate(names[:ANIMATION_CAP]):
+    for index, name in enumerate(names[: caps.animations]):
         record: Record = {
             "id": f"anim-{index}",
             "kind": "css-animation",
@@ -422,14 +389,16 @@ def build_animations(facts: Facts) -> tuple[list[Record], bool]:
                 }
             )
         else:
-            keyframes, kf_truncated = resolve_keyframes(keyframe_rule)
+            keyframes, kf_truncated = resolve_keyframes(keyframe_rule, caps)
             record["keyframes"] = keyframes
             source_refs.append(keyframe_rule.get("source_ref"))
             if kf_truncated:
                 warnings.append(
                     {
                         "code": "keyframe_cap_reached",
-                        "message": f"Keyframes truncated at {KEYFRAME_CAP}",
+                        "message": cap_message(
+                            "keyframes", caps.keyframes, "max_keyframes"
+                        ),
                         "detail": {"name": name},
                     }
                 )
@@ -440,7 +409,7 @@ def build_animations(facts: Facts) -> tuple[list[Record], bool]:
     return records, truncated
 
 
-def attach_css_edits(facts: Facts, record: Record) -> None:
+def attach_css_edits(facts: Facts, record: Record, caps: Caps) -> None:
     """Recipes for a LIVE animation that also has a CSS origin, in place.
 
     A ``::before`` or descendant animation reaches us through
@@ -454,7 +423,7 @@ def attach_css_edits(facts: Facts, record: Record) -> None:
     rule = rule_declaring(facts, name, pseudo)
     keyframe_rule = keyframe_rule_for(facts, name)
     if keyframe_rule is not None and not as_rows(record.get("keyframes")):
-        record["keyframes"], _ = resolve_keyframes(keyframe_rule)
+        record["keyframes"], _ = resolve_keyframes(keyframe_rule, caps)
     # The declaring rule never MATCHES the element (it is on ::before, or on a
     # descendant), so the cascade scope is the one rule we identified rather
     # than the element's matched rules.
@@ -474,143 +443,6 @@ def attach_css_edits(facts: Facts, record: Record) -> None:
 # ---------------------------------------------------------------------------
 # WAAPI records (M4/S2) — the live truth CSS alone cannot report
 # ---------------------------------------------------------------------------
-
-
-def _dash_case(name: str) -> str:
-    """``backgroundColor`` -> ``background-color`` (WAAPI keyframes are camel)."""
-    return re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", name).lower()
-
-
-def _waapi_keyframes(raw: list[Record]) -> tuple[list[Record], bool]:
-    """``effect.getKeyframes()`` entries -> the keyframe record shape the CSS
-    path produces, so one consumer reads both without branching.
-
-    Returns ``(keyframes, truncated)``: this used to slice to the cap and say
-    nothing, so 240 of 300 keyframes vanished while the payload reported
-    completeness (R3). The CSS path already reported its truncation; both now do.
-    """
-    records: list[Record] = []
-    for frame in raw:
-        offset = as_number(frame.get("computedOffset"))
-        if offset is None:
-            offset = as_number(frame.get("offset"))
-        if offset is None:
-            continue
-        record: Record = {"offset": offset}
-        if frame.get("easing"):
-            record["easing"] = frame["easing"]
-        if frame.get("composite"):
-            record["composite"] = frame["composite"]
-        record["properties"] = {
-            _dash_case(key): as_text(value, str(value))
-            for key, value in frame.items()
-            if key not in {"offset", "computedOffset", "easing", "composite"}
-        }
-        records.append(record)
-    records.sort(key=lambda r: as_number(r["offset"]) or 0.0)
-    return records[:KEYFRAME_CAP], len(records) > KEYFRAME_CAP
-
-
-def _timing_from_waapi(entry: Record) -> Record:
-    """``getComputedTiming()`` -> the ``timing`` block the CSS path also builds.
-
-    Durations arrive already in ms. ``duration`` is the string ``"auto"`` for a
-    scroll/view timeline — kept as ``duration_raw`` with ``duration_ms``
-    OMITTED, never coerced to 0 (which would read as an instant animation).
-    """
-    ct = as_obj(entry.get("computed_timing"))
-    timing: Record = {}
-    duration = as_number(ct.get("duration"))
-    if duration is not None:
-        timing["duration_ms"] = round(duration, 3)
-        timing["duration_raw"] = f"{round(duration / 1000.0, 6)}s"
-    elif ct.get("duration") is not None:
-        timing["duration_raw"] = as_text(ct.get("duration"), "auto")
-    delay = as_number(ct.get("delay"))
-    if delay is not None:
-        timing["delay_ms"] = round(delay, 3)
-        timing["delay_raw"] = f"{round(delay / 1000.0, 6)}s"
-    end_delay = as_number(ct.get("end_delay"))
-    if end_delay:
-        timing["end_delay_ms"] = round(end_delay, 3)
-    if ct.get("iterations") is not None:
-        timing["iterations"] = ct["iterations"]
-    if ct.get("iteration_start"):
-        timing["iteration_start"] = ct["iteration_start"]
-    timing["direction"] = as_text(ct.get("direction"), "normal")
-    timing["fill"] = as_text(ct.get("fill"), "none")
-    timing["easing"] = as_text(ct.get("easing"), "linear")
-    timing["play_state"] = as_text(entry.get("play_state"), "running")
-    if entry.get("composite"):
-        timing["composition"] = entry["composite"]
-    return timing
-
-
-def build_waapi(
-    facts: Facts, css_names: set[str], start_index: int
-) -> tuple[list[Record], bool]:
-    """Records for live animations the declared CSS did not already describe.
-
-    A ``CSSAnimation`` on the element itself whose name is already a declared
-    CSS animation is skipped: it is the SAME animation, and two records for one
-    animation is the duplication this schema exists to remove. Everything else —
-    ``element.animate()``, transitions, descendants, pseudo-elements — is here
-    and nowhere else. v1 reported NOTHING for a running ``element.animate()``,
-    telling the model an element was static while it was visibly moving.
-
-    Returns ``(records, truncated)``. ``include_subtree`` defaults ON, so one
-    call on a page section can pull in hundreds of live animations; this loop
-    had NO cap at all while ``caps.truncated`` reported ``false`` (R3).
-    """
-    records: list[Record] = []
-    room = max(ANIMATION_CAP - start_index, 0)
-    truncated = False
-    for entry in as_rows(facts.get("waapi")):
-        target = as_obj(entry.get("target"))
-        name = entry.get("animation_name")
-        if (
-            entry.get("kind") == "CSSAnimation"
-            and target.get("relation") == "self"
-            and not target.get("pseudo")
-            and name in css_names
-        ):
-            continue
-        if len(records) >= room:
-            truncated = True
-            break
-        kind = {
-            "CSSAnimation": "css-animation",
-            "CSSTransition": "css-transition",
-        }.get(as_text(entry.get("kind")), "waapi")
-        record: Record = {
-            "id": f"anim-{start_index + len(records)}",
-            "kind": kind,
-            "name": as_text(name) or as_text(entry.get("author_id")) or f"({kind})",
-        }
-        if entry.get("author_id"):
-            record["author_id"] = entry["author_id"]
-        target_block: Record = {
-            "relation": target.get("relation", "self"),
-            "selector": target.get("selector"),
-        }
-        if target.get("pseudo"):
-            target_block["relation"] = "pseudo"
-            target_block["pseudo_element"] = target["pseudo"]
-        record["target"] = target_block
-        record["timeline"] = timeline_from_waapi(entry)
-        record["timing"] = _timing_from_waapi(entry)
-        keyframes, kf_truncated = _waapi_keyframes(as_rows(entry.get("keyframes")))
-        record["keyframes"] = keyframes
-        record["warnings"] = []
-        if kf_truncated:
-            warn(
-                record,
-                "keyframe_cap_reached",
-                f"Keyframes truncated at {KEYFRAME_CAP}",
-                {"name": record["name"]},
-            )
-        records.append(record)
-    return records, truncated
 
 
 # ---------------------------------------------------------------------------
@@ -690,6 +522,7 @@ _FIELD_ORDER = (
     "name",
     "author_id",
     "target",
+    "detail_level",
     "semantics",
     "timeline",
     "timing",
@@ -777,40 +610,52 @@ def _enrich(animation: Record) -> None:
         )
 
 
-def adopt_live_timelines(facts: Facts, animations: list[Record]) -> None:
-    """Reconcile each CSS animation with its live twin's timeline, in place.
+# Fields a SUMMARY record does not carry. Chosen by measurement: `edits` was
+# 19.4KB and `keyframes` 3.7KB of one 24.8KB record, and on a busy page every
+# oversized record was a descendant the caller never asked about (R12).
+_ELIDED_FOR_SUMMARY = (
+    "edits",
+    "checkpoints",
+    "keyframes",
+    "editable",
+    "not_editable_reason",
+)
 
-    Two things a computed style alone gets wrong about a scroll-driven animation:
 
-    1. ``animation-timeline: view()`` computes to a bare token, while the running
-       ``Animation`` knows the axis and the resolved ``animation-range``. When
-       both describe the same animation we keep the CSS record (it is the one
-       with an editable source) and adopt the richer live timeline onto it.
-    2. The declared ``animation-duration`` is still reported — ``1s``, say — but
-       a scroll/view timeline has no millisecond duration at all; progress comes
-       from the scroller. So ``duration_ms`` is REMOVED while ``duration_raw``
-       keeps what the author actually wrote. Leaving that 1s sitting in a
-       numeric field is the exact reading M12 exists to prevent: it is what
-       makes a model "fix" a working animation by retiming it.
+def summarize_detail(animation: Record) -> None:
+    """Reduce a record for something the caller did not select, in place.
+
+    The blowup case is always the subtree: ask about a grid and every animated
+    cell arrives at full weight. A descendant keeps its identity, timing,
+    semantics and trigger -- everything needed to decide whether to look closer
+    -- and drops the frame-by-frame detail and the edit recipes.
+
+    `detail_level` makes this VISIBLE in the record. A silently different shape
+    between records would be worse than the size problem it solves: a model
+    seeing no `edits` on one record and edits on another would conclude the
+    first is not editable. It is not a claim about the animation, so it does not
+    carry `editable` either -- `detail_level` says we did not look.
     """
-    live_by_name: dict[str, Record] = {}
-    for entry in as_rows(facts.get("waapi")):
-        target = as_obj(entry.get("target"))
-        if (
-            entry.get("kind") == "CSSAnimation"
-            and target.get("relation") == "self"
-            and not target.get("pseudo")
-        ):
-            live_by_name[as_text(entry.get("animation_name"))] = entry
-    for animation in animations:
-        target = as_obj(animation.get("target"))
-        entry = live_by_name.get(as_text(animation.get("name")))
-        if entry is not None and target.get("relation") == "self":
-            animation["timeline"] = timeline_from_waapi(entry)
-        timeline_type = as_text(as_obj(animation.get("timeline")).get("type"), "time")
-        timing = animation.get("timing")
-        if timeline_type in {"scroll", "view"} and isinstance(timing, dict):
-            timing.pop("duration_ms", None)
+    animation["detail_level"] = "summary"
+    for field in _ELIDED_FOR_SUMMARY:
+        animation.pop(field, None)
+    # A "keyframes truncated at 20" warning on a record that now carries no
+    # keyframes at all describes a cut that is not what limits this reader.
+    # detail_level plus the payload's detail_note already say what was elided.
+    animation["warnings"] = [
+        w
+        for w in as_rows(animation.get("warnings"))
+        if as_text(w.get("code")) != "keyframe_cap_reached"
+    ]
+
+
+def wants_full_detail(animation: Record) -> bool:
+    """Is this record about the element the caller actually asked for?
+
+    Its own pseudo-elements count: ``#hero::before`` is part of ``#hero``.
+    """
+    relation = as_text(as_obj(animation.get("target")).get("relation"), "self")
+    return relation in {"self", "pseudo"}
 
 
 def _attach_trigger(facts: Facts, animation: Record) -> None:
@@ -840,9 +685,10 @@ def _with_author_text(facts: Facts, source: Record) -> Record:
 def analyze(facts: Facts, options: Record | None = None) -> Record:
     """Collected facts -> the schema-v2 payload. THE one composition site."""
     options = options or {}
-    animations, anim_truncated = build_animations(facts)
+    caps = caps_from(options)
+    animations, anim_truncated = build_animations(facts, caps)
     css_names = {as_text(a.get("name")) for a in animations}
-    live, live_truncated = build_waapi(facts, css_names, len(animations))
+    live, live_truncated = build_waapi(facts, css_names, len(animations), caps)
     anim_truncated = anim_truncated or live_truncated
     for record in live:
         if record["kind"] == "waapi":
@@ -858,16 +704,22 @@ def analyze(facts: Facts, options: Record | None = None) -> Record:
         else:
             # A CSS animation reaching us live (::before, a descendant) still has
             # a rule and a @keyframes block to edit — find them (F-849).
-            attach_css_edits(facts, record)
+            attach_css_edits(facts, record, caps)
         animations.append(record)
 
     adopt_live_timelines(facts, animations)
     for animation in animations:
         _enrich(animation)
-    apply_stagger_groups(animations)
+    # A truncated list makes a stagger group LIE: `members` and `delays_ms`
+    # would describe the 25 we kept as if they were all of them, and an
+    # off-by-one stagger is exactly what these groups exist to prevent (R10).
+    apply_stagger_groups(animations, complete=not anim_truncated)
     for animation in animations:
         _attach_trigger(facts, animation)
         animation["summary"] = summarize(animation)
+        if not wants_full_detail(animation):
+            summarize_detail(animation)
+            continue
         if not usable_edits(animation) and "editable" not in animation:
             # Never hand back an empty edits list with no explanation: silence
             # reads as "nothing to do here", which is the failure M11 forbids.
@@ -883,8 +735,8 @@ def analyze(facts: Facts, options: Record | None = None) -> Record:
             *warnings,
             {
                 "code": "animation_cap_reached",
-                "message": f"Animations truncated at {ANIMATION_CAP}",
-                "detail": {},
+                "message": cap_message("animations", caps.animations, "max_animations"),
+                "detail": {"kept": len(animations), "cap": caps.animations},
             },
         ]
     keyframes_truncated = any(
@@ -906,9 +758,17 @@ def analyze(facts: Facts, options: Record | None = None) -> Record:
         "transforms": as_obj(facts.get("transforms")),
         "sources": [_with_author_text(facts, s) for s in as_rows(facts.get("sources"))],
         "warnings": warnings,
+        "edit_protocol": EDIT_PROTOCOL,
+        "detail_note": (
+            "Records with detail_level: 'summary' are animations on DESCENDANTS "
+            "of the selected element. They carry identity, timing, semantics and "
+            "trigger; keyframes, checkpoints and edit recipes are not computed "
+            "for them. To get the full record for one, call this tool again with "
+            "that record's target.selector."
+        ),
         "caps": {
-            "animations": ANIMATION_CAP,
-            "keyframes_per_animation": KEYFRAME_CAP,
+            "animations": caps.animations,
+            "keyframes_per_animation": caps.keyframes,
             "truncated": {
                 "animations": anim_truncated,
                 "keyframes": keyframes_truncated,

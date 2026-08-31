@@ -12,23 +12,29 @@ of these defects survived a fixture that only exercised the common case.
 """
 
 import inspect
+import json
 
 import pytest
 
 from fakes import FakeTab, animation_evaluate_map
-from stealth_chrome_devtools_mcp.embedded import animation_analysis
+from stealth_chrome_devtools_mcp.embedded import animation_facts
 from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
-from test_animation_schema_v2 import computed, extract, facts
+from test_animation_schema_v2 import TWO_ANIMATIONS, computed, extract, facts, only
 
 
-def waapi_entry(name, target_selector, keyframes=2, **over):
-    """One live-animation fact record, small enough to multiply by the hundred."""
+def waapi_entry(name, target_selector, keyframes=2, relation="self", **over):
+    """One live-animation fact record, small enough to multiply by the hundred.
+
+    ``relation`` defaults to "self" because most tests here are about what a
+    record SAYS, and only a record for the selected element carries full detail
+    (R12). Pass "descendant" when the subtree behaviour is what is under test.
+    """
     entry = {
         "kind": "Animation",
         "animation_name": name,
         "author_id": "",
         "play_state": "running",
-        "target": {"relation": "descendant", "selector": target_selector, "pseudo": ""},
+        "target": {"relation": relation, "selector": target_selector, "pseudo": ""},
         "computed_timing": {
             "delay": 0,
             "duration": 1000,
@@ -59,12 +65,12 @@ class TestCapsAreEnforcedAndReported:
         payload = await extract(
             facts(
                 waapi=[
-                    waapi_entry(f"anim-{index}", f"#row-{index}")
-                    for index in range(animation_analysis.ANIMATION_CAP + 25)
+                    waapi_entry(f"anim-{index}", f"#row-{index}", relation="descendant")
+                    for index in range(animation_facts.ANIMATION_CAP + 25)
                 ]
             )
         )
-        assert len(payload["animations"]) <= animation_analysis.ANIMATION_CAP
+        assert len(payload["animations"]) <= animation_facts.ANIMATION_CAP
         assert payload["caps"]["truncated"]["animations"] is True
         codes = [w["code"] for w in payload["warnings"]]
         assert "animation_cap_reached" in codes
@@ -77,13 +83,13 @@ class TestCapsAreEnforcedAndReported:
             facts(
                 waapi=[
                     waapi_entry(
-                        "long", "#deep", keyframes=animation_analysis.KEYFRAME_CAP + 40
+                        "long", "#deep", keyframes=animation_facts.KEYFRAME_CAP + 40
                     )
                 ]
             )
         )
         animation = payload["animations"][0]
-        assert len(animation["keyframes"]) == animation_analysis.KEYFRAME_CAP
+        assert len(animation["keyframes"]) == animation_facts.KEYFRAME_CAP
         assert "keyframe_cap_reached" in [w["code"] for w in animation["warnings"]]
         assert payload["caps"]["truncated"]["keyframes"] is True
 
@@ -93,6 +99,148 @@ class TestCapsAreEnforcedAndReported:
             "animations": False,
             "keyframes": False,
         }
+
+
+# ===========================================================================
+# R12 — the caps were correct and still unusable: sized for a machine, not
+# for the language model this schema exists to serve
+# ===========================================================================
+
+# A busy page's payload must stay READABLE, not merely finite. The stress probe
+# that found this measured 4,910,005 bytes -- ~1.2M tokens -- from a correctly
+# capped extraction. These budgets are deliberately a little above what the
+# current defaults produce, so ordinary drift does not red the lane, but nowhere
+# near enough to absorb a cap being quietly raised back.
+BUSY_PAGE_BUDGET = 64 * 1024
+TYPICAL_COMPONENT_BUDGET = 24 * 1024
+
+
+def payload_bytes(payload):
+    return len(json.dumps(payload).encode("utf-8"))
+
+
+def busy_page(count=400, keyframes=300):
+    """What a grid of animated rows looks like to the collector."""
+    return facts(
+        waapi=[
+            waapi_entry(
+                f"row-fade-{index}",
+                f"div.grid > div.row:nth-of-type({index}) > span.cell",
+                keyframes=keyframes,
+                relation="descendant",
+            )
+            for index in range(count)
+        ]
+    )
+
+
+class TestThePayloadStaysReadable:
+    async def test_a_busy_page_fits_in_a_model_sized_payload(self):
+        payload = await extract(busy_page())
+        size = payload_bytes(payload)
+        assert size < BUSY_PAGE_BUDGET, (
+            f"a busy page produced {size:,} bytes; the caps or the record shape "
+            f"regressed. This is the check that stops the payload drifting back "
+            f"to something no model can read."
+        )
+
+    async def test_a_typical_component_is_small(self):
+        payload = await extract(busy_page(count=6, keyframes=12))
+        assert payload_bytes(payload) < TYPICAL_COMPONENT_BUDGET
+
+    async def test_the_edit_instruction_is_stated_once_not_per_recipe(self):
+        """36% of one measured record's `edits` block was the same how-to
+        sentence repeated 40 times. It is now one top-level field."""
+        payload = await extract(TWO_ANIMATIONS)
+        assert payload["edit_protocol"]["placeholder"] == "{{NEW_VALUE}}"
+        assert payload["edit_protocol"]["how"]
+        for animation in payload["animations"]:
+            for edit in animation.get("edits", []):
+                assert "how" not in edit
+                assert "replace_placeholder" not in edit
+
+
+class TestSummaryRecordsSayTheyAreSummaries:
+    async def test_a_descendant_record_is_reduced_and_says_so(self):
+        payload = await extract(busy_page(count=3, keyframes=8))
+        record = payload["animations"][0]
+        assert record["detail_level"] == "summary"
+        for elided in ("keyframes", "checkpoints", "edits"):
+            assert elided not in record
+        # Identity, timing and trigger are what a caller needs to decide
+        # whether to look closer -- so those stay.
+        assert record["name"] and record["timing"] and record["trigger"]
+        assert record["target"]["selector"]
+
+    async def test_the_payload_explains_what_summary_means_and_how_to_drill_in(self):
+        payload = await extract(busy_page(count=3, keyframes=8))
+        assert "target.selector" in payload["detail_note"]
+
+    async def test_a_summary_record_makes_no_editable_claim(self):
+        """`editable: false` would be a claim we did not establish. The R10 rule
+        is that a record with no recipes says WHY; here `detail_level` is the
+        why, and it says "not computed", not "not possible"."""
+        record = (await extract(busy_page(count=2, keyframes=4)))["animations"][0]
+        assert "editable" not in record
+        assert "not_editable_reason" not in record
+
+    async def test_the_selected_element_keeps_its_full_record(self):
+        payload = await extract(facts(waapi=[waapi_entry("mine", "#hero")]))
+        record = payload["animations"][0]
+        assert "detail_level" not in record
+        assert "keyframes" in record and "checkpoints" in record
+
+    async def test_a_pseudo_element_of_the_selection_is_not_a_descendant(self):
+        entry = waapi_entry("glow", "#hero")
+        entry["target"]["pseudo"] = "::before"
+        record = (await extract(facts(waapi=[entry])))["animations"][0]
+        assert record["target"]["relation"] == "pseudo"
+        assert "detail_level" not in record
+
+
+class TestCapsAreOverridablePerCall:
+    async def test_the_caller_can_raise_the_animation_cap(self):
+        payload = await extract(busy_page(count=40, keyframes=4), max_animations=40)
+        assert len(payload["animations"]) == 40
+        assert payload["caps"]["animations"] == 40
+        assert payload["caps"]["truncated"]["animations"] is False
+
+    async def test_the_caller_can_raise_the_keyframe_cap(self):
+        payload = await extract(
+            facts(waapi=[waapi_entry("long", "#hero", keyframes=40)]),
+            max_keyframes=40,
+        )
+        assert len(payload["animations"][0]["keyframes"]) == 40
+
+    async def test_a_nonsense_cap_falls_back_to_the_default(self):
+        """A cap of 0 would empty the payload silently, which is the exact
+        failure this whole area is about."""
+        payload = await extract(busy_page(count=30, keyframes=4), max_animations=0)
+        assert payload["caps"]["animations"] == animation_facts.ANIMATION_CAP
+
+    async def test_the_truncation_warning_says_how_to_see_more(self):
+        payload = await extract(busy_page(count=40, keyframes=4))
+        warning = only(payload["warnings"], code="animation_cap_reached")
+        assert "max_animations" in warning["message"]
+        assert warning["detail"]["kept"] == animation_facts.ANIMATION_CAP
+
+
+class TestATruncatedListDoesNotInventAStagger:
+    async def test_no_stagger_group_when_the_animation_list_was_cut(self):
+        """A group computed from the 25 records we kept would report
+        `members: 25` for a 40-member stagger and a `delays_ms` list missing its
+        tail -- an off-by-one stagger is what these groups exist to prevent."""
+        payload = await extract(
+            facts(
+                waapi=[
+                    sibling("slide", index * 50, index)
+                    for index in range(animation_facts.ANIMATION_CAP + 15)
+                ]
+            )
+        )
+        assert payload["caps"]["truncated"]["animations"] is True
+        for animation in payload["animations"]:
+            assert "stagger_group" not in animation.get("derived", {})
 
 
 # ===========================================================================
@@ -340,7 +488,7 @@ class TestReducedMotionReadsTheFeatureValue:
 
 
 def sibling(name, delay_ms, index):
-    entry = waapi_entry(name, f"#item-{index}")
+    entry = waapi_entry(name, f"#item-{index}", relation="descendant")
     entry["computed_timing"]["delay"] = delay_ms
     return entry
 
@@ -378,6 +526,7 @@ class TestStaggerGroups:
                     waapi_entry(
                         "slide",
                         "#item-2",
+                        relation="descendant",
                         computed_timing={
                             "duration": 1000,
                             "iterations": 1,

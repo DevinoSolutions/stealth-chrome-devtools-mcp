@@ -50,11 +50,31 @@ from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     split_css_list,
 )
 
-EDIT_CAP = 40
+# Measured, not chosen round (R12). After the boilerplate hoist below a recipe
+# averages ~310 bytes, so 20 recipes is ~6KB: the 5 timing knobs plus 15
+# keyframe declarations. The old 40 produced 19KB of edits on a single record --
+# more than the keyframes, checkpoints, timing and prose put together.
+EDIT_CAP = 20
 
-# Spelled out in every recipe as ``replace_placeholder`` so a model never has to
-# infer the marker it is meant to substitute.
+# The marker a recipe's ``replace`` carries where the new value goes. It appears
+# INSIDE every ``replace`` string, so it is discoverable in place; the
+# instruction for using it is stated ONCE at the top of the payload
+# (``edit_protocol``) instead of being repeated per recipe. That repetition was
+# 6,960 bytes -- 36% of the edits block -- on one measured record (R12).
 PLACEHOLDER = "{{NEW_VALUE}}"
+
+EDIT_PROTOCOL = {
+    "placeholder": PLACEHOLDER,
+    "how": (
+        "To apply an edit: find the recipe's `find` string in the file named by "
+        "`file`, inside the rule named by `rule_selector`, and replace it with "
+        f"the recipe's `replace` string, putting your new value where "
+        f"{PLACEHOLDER} appears. The rest of the declaration is carried in "
+        "`replace` for you, so nothing else can be lost. `token` is the exact "
+        "text being replaced, if you want to check it first. A recipe with no "
+        "`find` is a pointer, not an edit: open it at `source_ref` yourself."
+    ),
+}
 
 _KNOB_LONGHAND = {
     "name": "animation-name",
@@ -623,12 +643,6 @@ def _swap(literal: str, value: str, start: int, end: int) -> Record:
         "find": literal,
         "token": value[start:end],
         "replace": literal[: head + start] + PLACEHOLDER + literal[head + end :],
-        "replace_placeholder": PLACEHOLDER,
-        "how": (
-            f"find `find` in the file and replace it with `replace`, putting your "
-            f"new value where {PLACEHOLDER} is; everything else in the "
-            f"declaration is preserved for you"
-        ),
     }
 
 

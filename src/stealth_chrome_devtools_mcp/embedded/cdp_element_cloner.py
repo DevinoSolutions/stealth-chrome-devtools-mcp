@@ -26,7 +26,11 @@ from urllib.parse import urljoin
 import nodriver as uc
 import requests
 
-from stealth_chrome_devtools_mcp.embedded import animation_analysis, aspect_options
+from stealth_chrome_devtools_mcp.embedded import (
+    animation_analysis,
+    animation_facts,
+    aspect_options,
+)
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     query_selector_all,
@@ -670,6 +674,8 @@ class CDPElementCloner:
         selector: str | None = None,
         include_subtree: bool = True,
         include_waapi: bool = True,
+        max_animations: int = animation_facts.ANIMATION_CAP,
+        max_keyframes: int = animation_facts.KEYFRAME_CAP,
     ) -> dict[str, Any]:
         """Extract the animations aspect as schema v2 (KEEP-JS — CDP has no
         synchronous per-node ``@keyframes`` read).
@@ -685,6 +691,10 @@ class CDPElementCloner:
             options = {
                 "include_subtree": include_subtree,
                 "include_waapi": include_waapi,
+                # Defaults are sized for a language model, not a machine (R12).
+                # Raise them per call for a page you know is busy.
+                "max_animations": max_animations,
+                "max_keyframes": max_keyframes,
             }
             js_code = self._load_js_file("extract_animations.js", selector, options)
             raw = await tab.evaluate(js_code)

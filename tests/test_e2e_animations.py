@@ -304,9 +304,14 @@ async def test_every_find_literal_occurs_in_the_author_source(fixture_app_server
             "two timing knobs share a replacement, so at least one rewrites the "
             "wrong part of the declaration"
         )
+        # The placeholder is stated ONCE for the payload rather than repeated on
+        # every recipe (F-853): it was 36% of the edits block on a busy page. A
+        # consumer applying an edit has to reach it here, so the round trip is
+        # asserted from `edit_protocol` exactly the way a model would read it.
+        placeholder = payload["edit_protocol"]["placeholder"]
         applied = author_text.replace(
             duration["find"],
-            duration["replace"].replace(duration["replace_placeholder"], "3s"),
+            duration["replace"].replace(placeholder, "3s"),
         )
         assert "animation: torture-pulse 3s" in applied
         for survivor in ("cubic-bezier(.68,-0.55,.27,1.55)", "0.3s", "infinite"):

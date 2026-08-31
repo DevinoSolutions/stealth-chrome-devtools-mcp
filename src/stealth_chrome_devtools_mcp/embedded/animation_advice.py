@@ -203,14 +203,21 @@ def stagger_group(
     return group
 
 
-def apply_stagger_groups(animations: list[Record]) -> None:
+def apply_stagger_groups(animations: list[Record], complete: bool = True) -> None:
     """Group same-named animations across sibling targets, in place.
+
+    ``complete`` is False when the animation list hit its cap. A group computed
+    from a truncated list reports the members it can see as if they were all of
+    them, so `members` and `delays_ms` would both be wrong -- and an off-by-one
+    stagger is precisely what these groups exist to prevent (R10/R12).
 
     An off-by-one stagger is a visible bug and list arithmetic is exactly what
     weak models get wrong, so the full ``delays_ms`` list is always present.
     When the deltas are NOT equal we emit ``uniform: false`` and the list, and
     NO ``delta_ms`` — a single averaged delta would be a number we invented.
     """
+    if not complete:
+        return
     groups: dict[str, list[Record]] = {}
     for animation in animations:
         groups.setdefault(as_text(animation.get("name")), []).append(animation)

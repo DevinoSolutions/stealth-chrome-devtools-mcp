@@ -209,13 +209,16 @@ class TestARecipeNamesTheTokenToChange:
         assert "torture-pulse 2.4s" in updated
         assert "1.55) 1s infinite" in updated
 
-    async def test_every_recipe_states_its_placeholder_literally(self):
-        """A model must not have to infer the marker it is meant to substitute."""
-        found = await recipes(TORTURE)
+    async def test_the_placeholder_is_visible_in_place_and_named_once(self):
+        """A model must not have to infer the marker it is meant to substitute —
+        but it does not need to be told forty times either (R12). The marker
+        appears inside every `replace`, so it is discoverable where it is used;
+        the instruction for using it is stated once in `edit_protocol`."""
+        payload = await extract(TORTURE)
+        assert payload["edit_protocol"]["placeholder"] == PLACEHOLDER
+        found = {e["knob"]: e for e in payload["animations"][0]["edits"]}
         for edit in found.values():
             if "replace" in edit:
-                assert edit["replace_placeholder"] == PLACEHOLDER
-                assert PLACEHOLDER in edit["replace"]
                 assert edit["replace"].count(PLACEHOLDER) == 1
 
     async def test_a_keyframe_declaration_is_addressed_whole(self):
