@@ -11,6 +11,17 @@ The fix arms a bounded backend-liveness monitor once the backend is confirmed up
 when the backend it proxies to vanishes, the proxy tears down so the client sees
 a clean disconnect and reconnects (respawning a fresh backend) instead of hanging.
 
+F-838 (SOFT golden update, same PR): "tear down and let the client reconnect"
+turned out to rest on a premise that does not hold — MCP clients do not reliably
+respawn a stdio server mid-session — so a confirmed death now HEALS first
+(`proxy_selfheal.drive`) and only tears down when healing is impossible. What
+this file pins is unchanged in substance: the proxy must reach a bounded end
+instead of parking forever on a dead backend. The end-to-end case therefore
+states its premise explicitly — the backend is unhealable — which also keeps a
+test that kills a real backend from cold-starting a replacement against the
+developer's own `~/.stealth-mcp` record. The heal path itself is pinned,
+hermetically, in `test_proxy_selfheal.py`.
+
 `TestWatchBackendLiveness` unit-tests the monitor's decision logic (fast, no
 backend). `TestProxyExitsOnBackendDeath` reproduces the real hang end-to-end.
 """
@@ -21,7 +32,7 @@ import anyio
 import anyio.lowlevel
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import proxy_selfheal, singleton
 
 
 def _free_port() -> int:
@@ -148,17 +159,29 @@ class TestWatchBackendLiveness:
 
 @pytest.mark.integration
 class TestProxyExitsOnBackendDeath:
-    """End-to-end reproduction: the proxy MUST tear down (not hang) when the
-    backend dies mid-session. On the un-fixed code the proxy parks forever on the
-    dead backend and this times out — the exact unbounded hang."""
+    """End-to-end reproduction: the proxy MUST reach a bounded end (not hang)
+    when the backend dies mid-session. On the un-fixed code the proxy parks
+    forever on the dead backend and this times out — the exact unbounded hang.
+
+    F-838: the bounded end is now "heal, else tear down", so this case pins the
+    ELSE branch by stating its premise — no replacement is obtainable."""
 
     @pytest.mark.asyncio
-    async def test_proxy_returns_when_backend_dies_midsession(self, tmp_path):
+    async def test_proxy_returns_when_backend_dies_and_cannot_be_healed(
+        self, tmp_path, monkeypatch
+    ):
         import os
         import subprocess
         import sys
 
         from stealth_chrome_devtools_mcp.embedded.singleton import _proxy_streams
+
+        async def unhealable(_dead_port, **_kwargs):
+            return None
+
+        # Also keeps this test off the real cold-start path (and off the
+        # developer's live ~/.stealth-mcp record) while it kills a real backend.
+        monkeypatch.setattr(proxy_selfheal, "heal_backend", unhealable)
 
         port = _free_port()
         env = dict(os.environ)

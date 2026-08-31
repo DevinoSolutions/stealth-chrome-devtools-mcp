@@ -829,6 +829,10 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
     stdio↔streamable-HTTP pipe used previously; the only additions are the local
     ``initialize`` answer and swallowing the backend's duplicate ``initialize``
     response so the client never sees two.
+
+    F-838: a CONFIRMED-dead backend no longer ends the proxy — the client stays
+    connected on stdio while the backend leg heals and re-bridges onto a
+    replacement. That loop, its bound and the herd live in ``proxy_selfheal``.
     """
     import anyio
     from mcp.client.streamable_http import streamablehttp_client
@@ -840,15 +844,12 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
         JSONRPCResponse,
     )
 
-    url = _backend_http_url(port)
+    from stealth_chrome_devtools_mcp.embedded import proxy_selfheal
+
     to_backend_tx, to_backend_rx = anyio.create_memory_object_stream(1024)
     init_request_id = {"value": None}
-    init_swallowed = {"done": False}
-    backend_initialized = anyio.Event()
-    # Set once the backend has answered a real initialize (it is genuinely up).
-    # The liveness monitor stays disarmed until then so it never tears the proxy
-    # down during the backend's normal cold start.
-    backend_ready = anyio.Event()
+    init_message = {"value": None}
+    pending = proxy_selfheal.PendingCalls()
 
     async def pump_client():
         try:
@@ -874,6 +875,7 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                         SessionMessage(message=JSONRPCMessage(response))
                     )
                     init_request_id["value"] = inner.id
+                    init_message["value"] = msg  # F-838 replays it on a re-bridge
                 # Forward everything (including initialize) so the backend session
                 # initializes with the client's real params. Buffered until the
                 # backend connects.
@@ -881,34 +883,35 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
         finally:
             await to_backend_tx.aclose()
 
-    async def run_backend():
+    async def run_backend(url, replay, armed):
         if not await _await_backend_http(url):
-            # Before M3 this returned silently (F-183): a 120s cold-start
-            # failure gave the teardown no cause on disk. Later requests
-            # simply won't answer; the sentinel behavior is unchanged.
+            # F-183: this used to return silently, leaving no cause on disk.
             _logger.error(
                 "backend did not become ready within %.0fs", BACKEND_READY_TIMEOUT
             )
             return
 
-        backend_ready.set()  # arm the liveness monitor now that it is genuinely up
+        armed.set()  # arm the liveness monitor now that it is genuinely up
+        init_swallowed = {"done": False}  # per generation: each backend answers
+        backend_initialized = anyio.Event()  # our initialize exactly once
         async with streamablehttp_client(url) as (backend_read, backend_write, _):
 
             async def to_backend():
                 # Forward the initialize first, then hold every later message
                 # until the backend's initialize response establishes the
-                # streamable-HTTP session id. streamablehttp_client dispatches
-                # requests concurrently and stamps each with the *current*
-                # session id, so sending tools/list before that id exists yields
-                # a 400. The real client gets this sequencing for free by waiting
-                # on the initialize response; we answered it locally, so we must
-                # reproduce the wait here.
-                first = await to_backend_rx.receive()
+                # streamable-HTTP session id: streamablehttp_client stamps each
+                # concurrent request with the CURRENT id, so a tools/list sent
+                # before it exists yields 400. A real client gets that
+                # sequencing by awaiting the initialize response; we answered
+                # locally, so we reproduce the wait. ``replay`` is F-838's
+                # re-bridge: generation 2+ re-sends the client's own initialize.
+                first = replay or await to_backend_rx.receive()
                 await backend_write.send(first)
                 inner = first.message.root
                 if isinstance(inner, JSONRPCRequest) and inner.method == "initialize":
                     await backend_initialized.wait()
                 async for msg in to_backend_rx:
+                    pending.track(msg.message.root)
                     await backend_write.send(msg)
 
             async def from_backend():
@@ -926,41 +929,38 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                             init_swallowed["done"] = True
                             backend_initialized.set()
                             continue  # client already got a local initialize result
+                        pending.settle(inner)
                         await client_write.send(msg)
                 finally:
-                    # Never leave to_backend blocked if the backend died before
-                    # its initialize response arrived.
+                    # never leave to_backend blocked on a never-answered init
                     backend_initialized.set()
 
             async with anyio.create_task_group() as tg:
                 tg.start_soon(to_backend)
                 tg.start_soon(from_backend)
 
-    async def run_backend_guarded():
-        # A backend that dies mid-session surfaces as a read/connection error out
-        # of run_backend. Don't let it crash (or hang) the proxy — swallow it and
-        # tear down so the client sees a clean disconnect and reconnects to a
-        # freshly spawned backend instead of blocking forever on a request the
-        # dead backend can never answer.
-        try:
-            await run_backend()
-        except Exception:
-            _logger.warning("backend connection lost", exc_info=True)
-        finally:
-            tg.cancel_scope.cancel()
-
-    async def monitor_backend():
-        # Armed only after the backend is confirmed up. Covers the case where the
-        # backend vanishes while run_backend is parked forwarding (no error is
-        # raised, so run_backend_guarded alone would never fire).
-        await backend_ready.wait()
-        await _watch_backend_liveness(port)
+    async def backend_leg():
+        # F-838: the leg outlives any single backend. proxy_selfheal owns the
+        # generation loop — connect, watch, and on a CONFIRMED-dead verdict heal
+        # via ensure_server_running (the SAME startup path, so the same reuse
+        # gate and cold-start lock) before re-bridging. It returns only when
+        # nothing is left to heal; then the pre-F-838 teardown below runs.
+        await proxy_selfheal.drive(
+            port=port,
+            url_for=_backend_http_url,
+            connect=run_backend,
+            watch=_watch_backend_liveness,
+            replay=lambda: init_message["value"],
+            pending=pending,
+            client_write=client_write,
+            ensure_running=ensure_server_running,
+            await_ready=_await_backend_http,
+        )
         _logger.warning("backend became unreachable; tearing down for reconnect")
         tg.cancel_scope.cancel()
 
     async with anyio.create_task_group() as tg:
-        tg.start_soon(run_backend_guarded)
-        tg.start_soon(monitor_backend)
+        tg.start_soon(backend_leg)
         # Drive the client pump in the main task. When the client (Claude Code)
         # disconnects, stdin hits EOF and pump_client returns — at which point we
         # cancel everything. Otherwise run_backend's from_backend loop stays

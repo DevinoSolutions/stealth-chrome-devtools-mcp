@@ -49,6 +49,32 @@ The backend now installs `SIG_IGN` for SIGBREAK. SIGTERM and SIGINT keep the
 F-809 hand-off unchanged, so every deliberate stop — including Ctrl+C on a
 foreground `serve --http` — behaves exactly as before.
 
+### Fixed — a dead backend no longer takes your session with it (F-838)
+
+When the liveness watchdog confirmed the shared backend was genuinely dead (not
+merely busy — that distinction is F-820's and is untouched), the stdio proxy
+logged `backend became unreachable; tearing down for reconnect` and exited, on
+the assumption that the MCP client would respawn it. Clients do not reliably
+respawn a stdio server mid-session, so every real backend death — an OOM crash,
+a console `CTRL_BREAK` on a backend born through the foreground `serve --http`
+path — showed up as a dead `stealth` server until you reconnected by hand.
+
+The proxy now **heals in place**. On a confirmed death it obtains a replacement
+through the very same startup path it used at boot — the same reuse gate, the
+same F-808 adoption order, the same cold-start lock — and re-bridges onto it
+with a fresh `initialize` handshake, while your stdio connection never drops.
+When a shared backend dies and every proxy on it reacts at once, that lock does
+what it already does for a startup herd: one cold-starts, the rest adopt.
+
+Calls that were in flight when the backend died are answered with a clear error
+naming the method, and are deliberately **not** replayed against the
+replacement. Healing is bounded (two attempts, and at most three back-to-back
+recoveries before a long-lived generation earns the budget back); when it is
+spent, the pre-existing teardown runs exactly as before. Net effect: one slow or
+failed call instead of a dead server. New home: `embedded/proxy_selfheal.py`.
+
+Full write-up: `audit/stage2/finding_F838_proxy_exits_instead_of_healing.md`.
+
 ## 2.0.7
 
 ### Fixed — the watchdog no longer disconnects every session when the shared backend is briefly slow (F-820)
