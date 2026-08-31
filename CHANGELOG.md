@@ -228,6 +228,42 @@ as one code point, never as a pair, so a surrogate in a payload is always
 broken. U+FFFD rather than `errors="replace"`'s `?`, so the loss is visible and
 not confusable with a question mark the page really contained. Details in
 `audit/stage2/finding_F823_lone_surrogates_crash_tool_returns.md`.
+### Fixed — the nodriver race classifier now reaches `navigate` (F-824)
+
+F-817 taught `element_resolution` to recover from nodriver's two known races:
+the CDP `-32000` stale-document error, and the `KeyError(<cdp event class>)`
+that `Tab.wait`'s bare `del self.handlers[evt_dom]` raises when two waits
+overlap on one tab. Every selector-driven tool inherited that recovery —
+**but `navigate` never resolves a selector**, so it never passed through it.
+It classified its own errors from a substring list ("connection dropped",
+"target closed", …), and a `KeyError` whose argument is a CDP event class
+matches none of them: `STEALTH-CHROME-DEVTOOLS-MCP-3N` is exactly that error
+escaping `navigate` → `tab.get(url)` → `Tab.wait` → `remove_handler` on the
+first of its two attempts, as a raw `KeyError` at the caller.
+
+The fix is reach, not a second classifier. `element_resolution.recoverable_race`
+is now the public, single home for "is this one of the known nodriver races",
+and `BrowserManager._is_recoverable_navigation_error` asks it instead of
+re-listing the signals. Retry budgets are untouched on both sides: `navigate`
+still makes at most two attempts, `element_resolution` still re-resolves at
+most three times. A genuinely fatal navigation error is still refused on the
+first attempt.
+
+### Fixed — a stale document that says "DOM Error while querying" is now recovered (F-828)
+
+The stale-document classifier matched one exact CDP message, "Could not find
+node with given id". Chromium has a second reply for the same situation: when
+the query reaches the renderer and fails there, Blink answers with its blanket
+`DOM Error while querying`. Two live Sentry issues are that message
+(`STEALTH-CHROME-DEVTOOLS-MCP-3F`, `-23`) — one of them carrying no numeric
+code at all, because nodriver only fills `ProtocolException.code` when the CDP
+error object supplies it. Both escaped the retry and crashed the calling tool
+(`wait_for_element`, `query_elements`).
+
+The one classifier now matches either message, on message text and never on the
+numeric code, so both code-carrying and code-less variants are recovered. The
+bound is unchanged: after `_MAX_RESOLVES` re-resolves the original
+`ProtocolException` surfaces to the caller exactly as before.
 
 ## 2.0.7
 

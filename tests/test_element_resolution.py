@@ -41,6 +41,19 @@ def _other():
     return ProtocolException({"message": "Some unrelated CDP failure", "code": -32601})
 
 
+def _dom_error(code=None):
+    # F-828 / STEALTH-CHROME-DEVTOOLS-MCP-3F: Blink's OTHER reply for a query it
+    # could not complete. `DOM.querySelector` reached the renderer and the query
+    # itself failed there, so Chromium answers with its blanket
+    # ``ServerError("DOM Error while querying")`` instead of the node-id text.
+    # 3F arrives with no ``code`` key at all (bare ``str()``); the same message
+    # in STEALTH-…-23 carries -32000 — so the MESSAGE is the only stable signal.
+    error = {"message": "DOM Error while querying"}
+    if code is not None:
+        error["code"] = code
+    return ProtocolException(error)
+
+
 def _handler_race():
     # Mirrors nodriver's own bookkeeping race: Tab.wait() registers the
     # page-event handlers and its finally-block does a bare
@@ -196,6 +209,51 @@ async def test_key_error_naming_a_non_nodriver_class_is_not_retried():
     with pytest.raises(KeyError):
         await resolve_elements(tab, ".row")
     assert tab.select_all_calls == 1
+
+
+def test_the_codeless_dom_error_is_the_shape_sentry_reports():
+    """The library contract, measured: ``ProtocolException.__str__`` appends
+    ``[code: N]`` only when the CDP error object carried one, so the same failure
+    reaches the classifier as two different strings. A classifier that matched on
+    the code would miss half of them; one that matches the message sees both."""
+    assert str(_dom_error()) == "DOM Error while querying"
+    assert "[code" not in str(_dom_error())
+    assert str(_dom_error(code=-32000)) == "DOM Error while querying [code: -32000]"
+
+
+@pytest.mark.asyncio
+async def test_resolve_element_recovers_from_a_codeless_dom_error():
+    # F-828: the exact 3F shape — no code, a message the -32000 marker misses.
+    sentinel = object()
+    tab = _FakeTab(select=[_dom_error(), sentinel])
+    assert await resolve_element(tab, "#btn") is sentinel
+    assert tab.select_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_elements_recovers_from_a_dom_error_carrying_the_code():
+    # The same message WITH -32000 (STEALTH-…-23, the select_all path).
+    nodes = [object()]
+    tab = _FakeTab(select_all=[_dom_error(code=-32000), nodes])
+    assert await resolve_elements(tab, ".row") == nodes
+    assert tab.select_all_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_dom_error_recovery_is_bounded_exactly_like_the_node_id_one():
+    tab = _FakeTab(select=[_dom_error() for _ in range(_MAX_RESOLVES)])
+    with pytest.raises(ProtocolException, match="DOM Error while querying"):
+        await resolve_element(tab, "#btn")
+    assert tab.select_calls == _MAX_RESOLVES  # widened reach, unchanged bound
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_runtime_error_is_never_retried():
+    # A genuinely fatal error is not a race: it must surface on the first try.
+    tab = _FakeTab(select=[RuntimeError("boom")])
+    with pytest.raises(RuntimeError, match="boom"):
+        await resolve_element(tab, "#btn")
+    assert tab.select_calls == 1
 
 
 @pytest.mark.asyncio

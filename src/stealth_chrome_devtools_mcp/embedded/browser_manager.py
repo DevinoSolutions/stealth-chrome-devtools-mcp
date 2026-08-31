@@ -22,6 +22,7 @@ from stealth_chrome_devtools_mcp.embedded import (
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
+from stealth_chrome_devtools_mcp.embedded.element_resolution import recoverable_race
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
 from stealth_chrome_devtools_mcp.embedded.models import (
     BrowserInstance,
@@ -997,11 +998,10 @@ class BrowserManager:
 
     @staticmethod
     def _is_recoverable_navigation_error(error: Exception) -> bool:
-        """Return whether a navigation error should trigger one stale-tab
-        recovery attempt."""
-        if isinstance(error, asyncio.TimeoutError):
+        """Whether a navigation error earns one stale-tab recovery attempt (the
+        nodriver races are classified in element_resolution, not re-listed; F-824)."""
+        if isinstance(error, asyncio.TimeoutError) or recoverable_race(error):
             return True
-
         message = f"{type(error).__name__}: {error}".lower()
         recoverable_markers = (
             "connection dropped",

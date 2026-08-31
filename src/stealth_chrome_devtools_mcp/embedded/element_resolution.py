@@ -28,6 +28,12 @@ The recovery is keyed to those two exact signals and bounded: a genuinely
 absent selector still surfaces as the normal not-found/timeout after the final
 attempt, and any other ``ProtocolException`` -- or any ``KeyError`` not naming a
 ``nodriver.cdp`` event class -- propagates unchanged.
+
+``recoverable_race`` is the one home for "is this exception one of those two".
+Paths that resolve no selector ask it too rather than re-listing the signals:
+``browser_manager.navigate`` reaches the handler-cleanup ``KeyError`` through
+``Tab.get`` (which awaits the tab) and consults this function to decide whether
+its own single stale-tab retry applies (F-824).
 """
 
 from __future__ import annotations
@@ -49,10 +55,22 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-# Exact CDP message fragment for a stale/invalidated document or node id
-# (JSON-RPC code -32000). Matched on message text: nodriver surfaces the numeric
-# code only inside the stringified exception.
-_STALE_NODE_MARKER = "Could not find node with given id"
+# Exact CDP message fragments for a query the document invalidated underneath.
+# Matched on message TEXT and never on the numeric code: nodriver only fills
+# ``ProtocolException.code`` from the CDP error object, and the same failure
+# arrives both ways -- STEALTH-CHROME-DEVTOOLS-MCP-23 carries -32000 while
+# STEALTH-CHROME-DEVTOOLS-MCP-3F carries no code at all (F-828).
+_STALE_NODE_MARKERS = (
+    # The nodeId fetched by DOM.getDocument no longer exists when
+    # DOM.querySelector[All] uses it.
+    "Could not find node with given id",
+    # Blink's blanket reply when the query reached the renderer and failed
+    # THERE (``ServerError("DOM Error while querying")``) -- what a document
+    # swapped out mid-query surfaces as. A re-resolve against a fresh document
+    # is the same correct handling; a query that fails for a permanent reason
+    # simply fails again and surfaces unchanged after the bounded retries.
+    "DOM Error while querying",
+)
 
 # Package of the CDP event classes nodriver keys its handler table by. A KeyError
 # carrying one of these classes is nodriver's own bookkeeping race, never a
@@ -67,7 +85,8 @@ _SETTLE_SECONDS = 0.05
 
 
 def _is_stale_node_error(exc: ProtocolException) -> bool:
-    return _STALE_NODE_MARKER in str(exc)
+    message = str(exc)
+    return any(marker in message for marker in _STALE_NODE_MARKERS)
 
 
 def _raced_cdp_event(exc: KeyError) -> str | None:
@@ -87,16 +106,24 @@ def _raced_cdp_event(exc: KeyError) -> str | None:
     return key.__name__
 
 
-def _recoverable_race(exc: ProtocolException | KeyError) -> str | None:
-    """Describe ``exc`` if it is one of the two known nodriver resolve races."""
+def recoverable_race(exc: BaseException) -> str | None:
+    """Describe ``exc`` if it is one of the two known nodriver races, else ``None``.
+
+    THE one place that question is answered. It takes any exception (not just the
+    two types this module catches) because the same races surface on paths that
+    resolve no selector at all: ``Tab.get`` awaits the tab, so
+    ``browser_manager.navigate`` hits the identical handler-cleanup ``KeyError``
+    and asks this function rather than listing the signals a second time (F-824).
+    """
     if isinstance(exc, ProtocolException):
         if _is_stale_node_error(exc):
             return "document node invalidated mid-resolve"
         return None
-    event = _raced_cdp_event(exc)
-    if event is None:
-        return None
-    return f"transient nodriver event-handler race ({event})"
+    if isinstance(exc, KeyError):
+        event = _raced_cdp_event(exc)
+        if event is not None:
+            return f"transient nodriver event-handler race ({event})"
+    return None
 
 
 async def _resolve_with_recovery(what: str, resolve: Callable[[], Awaitable[_T]]) -> _T:
@@ -110,7 +137,7 @@ async def _resolve_with_recovery(what: str, resolve: Callable[[], Awaitable[_T]]
         try:
             return await resolve()
         except (ProtocolException, KeyError) as exc:
-            race = _recoverable_race(exc)
+            race = recoverable_race(exc)
             if race is None:
                 raise
             attempt += 1
