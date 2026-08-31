@@ -36,13 +36,16 @@ from __future__ import annotations
 import re
 
 from stealth_chrome_devtools_mcp.embedded.animation_advice import (
+    EditTarget,
     apply_stagger_groups,
     applying_rule,
     build_edits,
     build_interactions,
     build_overview,
     build_pending,
+    rule_declaring,
     source_by_id,
+    source_span,
     summarize,
     trigger_from_rules,
 )
@@ -161,7 +164,10 @@ def resolve_keyframes(rule: Record) -> tuple[list[Record], bool]:
             if composite:
                 record["composite"] = composite
             record["properties"] = properties
-            record["raw_css_text"] = as_text(frame.get("css_text"))
+            # Chrome's re-serialization, NOT the author's bytes (it expands
+            # `.7` to `0.7` and respaces): named so nothing treats it as a
+            # find/replace target. Author text lives on the edit recipes.
+            record["computed_css_text"] = as_text(frame.get("css_text"))
             records.append(record)
     records.sort(key=lambda r: as_number(r["offset"]) or 0.0)
     return records[:KEYFRAME_CAP], len(records) > KEYFRAME_CAP
@@ -357,10 +363,46 @@ def build_animations(facts: Facts) -> tuple[list[Record], bool]:
                     }
                 )
         record["warnings"] = warnings
-        record["edits"] = build_edits(record, rule, rule_source, keyframe_source)
+        record["edits"] = build_edits(
+            record,
+            rule,
+            EditTarget(rule_source, source_span(facts, rule_source)),
+            EditTarget(keyframe_source, source_span(facts, keyframe_source)),
+            index,
+        )
         record["source_refs"] = [ref for ref in source_refs if ref]
         records.append(record)
     return records, truncated
+
+
+def attach_css_edits(facts: Facts, record: Record) -> None:
+    """Recipes for a LIVE animation that also has a CSS origin, in place.
+
+    A ``::before`` or descendant animation reaches us through
+    ``getAnimations()``, not through the element's own computed style, so it
+    misses ``build_animations``. Its rule and ``@keyframes`` are readable all
+    the same — usually in the very same stylesheet — and handing back an empty
+    ``edits`` list with no reason was silence where an answer existed (F-849).
+    """
+    name = as_text(record.get("name"))
+    pseudo = as_text(as_obj(record.get("target")).get("pseudo_element"))
+    rule = rule_declaring(facts, name, pseudo)
+    rule_source = source_by_id(facts, rule.get("source_ref") if rule else None)
+    keyframe_rule = keyframe_rule_for(facts, name)
+    keyframe_source = source_by_id(
+        facts, keyframe_rule.get("source_ref") if keyframe_rule else None
+    )
+    if keyframe_rule is not None and not as_rows(record.get("keyframes")):
+        record["keyframes"], _ = resolve_keyframes(keyframe_rule)
+    record["edits"] = build_edits(
+        record,
+        rule,
+        EditTarget(rule_source, source_span(facts, rule_source)),
+        EditTarget(keyframe_source, source_span(facts, keyframe_source)),
+    )
+    record["source_refs"] = [
+        source.get("id") for source in (rule_source, keyframe_source) if source
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +687,19 @@ def _attach_trigger(facts: Facts, animation: Record) -> None:
         animation["trigger"] = trigger_from_rules(facts, properties)
 
 
+def _with_author_text(facts: Facts, source: Record) -> Record:
+    """A source record carrying the author's own rule text when it is readable.
+
+    ``computed_css_text`` is Chrome's re-serialization; ``source_text`` is what
+    is actually on disk. Both are useful, but only one of them is safe to
+    find/replace against, so they are never conflated (F-849).
+    """
+    span = source_span(facts, source)
+    if span is None:
+        return source
+    return {**source, "source_text": span.strip()}
+
+
 def analyze(facts: Facts, options: Record | None = None) -> Record:
     """Collected facts -> the schema-v2 payload. THE one composition site."""
     options = options or {}
@@ -655,12 +710,16 @@ def analyze(facts: Facts, options: Record | None = None) -> Record:
             # A live animation with no CSS declaration has no CSS to edit, and
             # saying so IS the point (M10's negative case): a weak model handed a
             # stylesheet pointer will edit CSS that cannot affect what is running.
+            record["edits"] = []
+            record["source_refs"] = []
             record["editable"] = False
             record["not_editable_reason"] = (
                 "set by element.animate() in JS; no CSS declaration to edit"
             )
-        record["edits"] = []
-        record["source_refs"] = []
+        else:
+            # A CSS animation reaching us live (::before, a descendant) still has
+            # a rule and a @keyframes block to edit — find them (F-849).
+            attach_css_edits(facts, record)
         animations.append(record)
 
     adopt_live_timelines(facts, animations)
@@ -670,6 +729,14 @@ def analyze(facts: Facts, options: Record | None = None) -> Record:
     for animation in animations:
         _attach_trigger(facts, animation)
         animation["summary"] = summarize(animation)
+        if not as_rows(animation.get("edits")) and "editable" not in animation:
+            # Never hand back an empty edits list with no explanation: silence
+            # reads as "nothing to do here", which is the failure M11 forbids.
+            animation["editable"] = False
+            animation["not_editable_reason"] = (
+                "no readable CSS rule declares this animation; its stylesheet is "
+                "likely cross-origin, so there is nothing here to find/replace"
+            )
 
     warnings = as_rows(facts.get("warnings"))
     if anim_truncated:
@@ -698,7 +765,7 @@ def analyze(facts: Facts, options: Record | None = None) -> Record:
         "pending_animations": build_pending(facts),
         "interactions": build_interactions(facts, animations),
         "transforms": as_obj(facts.get("transforms")),
-        "sources": as_rows(facts.get("sources")),
+        "sources": [_with_author_text(facts, s) for s in as_rows(facts.get("sources"))],
         "warnings": warnings,
         "caps": {
             "animations": ANIMATION_CAP,

@@ -74,6 +74,7 @@ def facts(**over):
         "matched_rules": [],
         "candidate_rules": [],
         "sources": [],
+        "raw_sources": {},
         "warnings": [],
         "caps_hit": {},
     }
@@ -81,10 +82,35 @@ def facts(**over):
     return base
 
 
+# The AUTHOR'S bytes for TWO_ANIMATIONS, deliberately NOT in Chrome's CSSOM
+# serialization (F-849): the animation NAME comes first in the shorthand, the
+# decimals are bare (`.2s`, `.5`), the cubic-bezier is tightly spaced, and there
+# is no `running` keyword. A fixture written in CSSOM shape could not fail the
+# find-literal assertions, because the fixture and the assertion would share one
+# serialization -- which is exactly how this defect survived the first round.
+AUTHOR_SOURCE = """
+.hero {
+  animation: pulse 2s cubic-bezier(.34,1.56,.64,1) .2s infinite alternate both,
+             spin 3s linear .2s 2 normal both;
+  animation-duration: 2s, 3s;
+  transition: opacity .3s ease-in-out;
+}
+@keyframes pulse {
+  0%,50% { transform: scale(1) }
+  100%   { transform: scale(1.08); opacity: .5 }
+}
+@keyframes spin {
+  from { transform: rotate(0deg) }
+  to   { transform: rotate(360deg) }
+}
+"""
+
+
 # Two CSS animations on ONE element with per-animation lists of DIFFERENT
 # lengths, so the CSS list-cycling rule is actually exercised: 2 names, 2
 # durations, 1 delay (cycles), 2 iteration counts.
 TWO_ANIMATIONS = facts(
+    raw_sources={"0": AUTHOR_SOURCE},
     computed=computed(
         animation_name="pulse, spin",
         animation_duration="2s, 3s",
@@ -162,11 +188,12 @@ TWO_ANIMATIONS = facts(
             "kind": "rule",
             "stylesheet": {
                 "index": 0,
-                "href": "https://fake.test/app.css",
-                "kind": "link",
+                "href": None,
+                "kind": "style",
                 "origin": "author",
                 "disabled": False,
             },
+            "source_text_available": True,
             "rule_path": [3],
             "at_rule_context": [],
             "name": None,
@@ -183,11 +210,12 @@ TWO_ANIMATIONS = facts(
             "kind": "keyframes",
             "stylesheet": {
                 "index": 0,
-                "href": "https://fake.test/app.css",
-                "kind": "link",
+                "href": None,
+                "kind": "style",
                 "origin": "author",
                 "disabled": False,
             },
+            "source_text_available": True,
             "rule_path": [4],
             "at_rule_context": [],
             "name": "pulse",
@@ -202,11 +230,12 @@ TWO_ANIMATIONS = facts(
             "kind": "keyframes",
             "stylesheet": {
                 "index": 0,
-                "href": "https://fake.test/app.css",
-                "kind": "link",
+                "href": None,
+                "kind": "style",
                 "origin": "author",
                 "disabled": False,
             },
+            "source_text_available": True,
             "rule_path": [5],
             "at_rule_context": [],
             "name": "spin",
@@ -391,20 +420,62 @@ class TestSourcesAndRecipes:
         assert "src-0" in pulse["source_refs"]  # the rule that applied it
         by_id = {s["id"]: s for s in result["sources"]}
         assert by_id["src-1"]["kind"] == "keyframes"
-        assert by_id["src-1"]["stylesheet"]["href"] == "https://fake.test/app.css"
+        assert by_id["src-1"]["stylesheet"]["kind"] == "style"
         assert by_id["src-1"]["rule_path"] == [4]
+        # The author's own rule text, sliced out of the sheet's raw source.
+        assert "transform: scale(1.08)" in by_id["src-1"]["source_text"]
 
     async def test_duration_recipe_is_a_verified_find_literal(self):
+        """F-849: verified against the AUTHOR's bytes, not Chrome's cssText."""
         result = await extract(TWO_ANIMATIONS)
         pulse = result["animations"][0]
         duration = only(pulse["edits"], knob="duration")
+        # The longhand IS a comma list covering both animations; this record is
+        # animation 0, so its current value is the first item, not "2s, 3s".
         assert duration["current"] == "2s"
-        assert duration["file"] == "https://fake.test/app.css"
+        assert duration["file"] == "<style> #0"
         assert duration["source_ref"] == "src-0"
-        # The find literal must OCCUR in the rule it points at — never invented.
-        rule_text = TWO_ANIMATIONS["matched_rules"][0]["css_text"]
-        assert duration["find"] in rule_text
+        # The find literal must occur in what the author actually wrote.
+        assert duration["find"] in AUTHOR_SOURCE
         assert duration["find_unique_in_rule"] is True
+
+    async def test_a_shorthand_only_knob_points_at_the_authored_shorthand(self):
+        """`easing` has no longhand here, so the recipe addresses the shorthand
+        the author wrote -- name first, bare decimals, tight bezier -- and says
+        which component to change."""
+        result = await extract(TWO_ANIMATIONS)
+        easing = only(result["animations"][0]["edits"], knob="easing")
+        assert easing["find"] in AUTHOR_SOURCE
+        assert "pulse 2s cubic-bezier(.34,1.56,.64,1)" in easing["find"]
+        assert "running" not in easing["find"]
+        assert "component" in easing["note"]
+
+    async def test_a_linked_sheet_degrades_to_a_pointer(self):
+        """No author bytes (we do not re-fetch, Q5) means no find literal --
+        never a CSSOM literal dressed up as one."""
+        payload = dict(TWO_ANIMATIONS)
+        payload["raw_sources"] = {}
+        result = await extract(payload)
+        for recipe in result["animations"][0]["edits"]:
+            assert "find" not in recipe
+            assert recipe["confidence"] == "low"
+            assert recipe["source_ref"]
+            assert recipe["note"]
+
+    async def test_a_selector_declared_twice_is_ambiguous_not_guessed(self):
+        """Two `.hero` blocks is ordinary CSS, and we cannot tell which one the
+        CSSOM record came from. Picking the first would be a coin flip dressed
+        as a verified address."""
+        payload = dict(TWO_ANIMATIONS)
+        payload["raw_sources"] = {"0": AUTHOR_SOURCE + "\n.hero { color: red }"}
+        result = await extract(payload)
+        timing_edits = [
+            e
+            for e in result["animations"][0]["edits"]
+            if not e["knob"].startswith("keyframe[")
+        ]
+        assert timing_edits
+        assert all("find" not in e for e in timing_edits)
 
     async def test_keyframe_declarations_get_their_own_recipes(self):
         result = await extract(TWO_ANIMATIONS)
@@ -417,8 +488,8 @@ class TestSourcesAndRecipes:
         assert recipe["source_ref"] == "src-1"
 
     async def test_a_find_that_is_not_unique_says_so(self):
-        """Two identical declarations in one rule: the model must be warned off a
-        blind replace rather than handed a risky literal."""
+        """The same declaration twice inside ONE keyframe block: the model must
+        be warned off a blind replace rather than handed a risky literal."""
         payload = facts(
             computed=computed(animation_name="dup", animation_duration="1s"),
             keyframe_rules=[
@@ -445,23 +516,32 @@ class TestSourcesAndRecipes:
                 {
                     "id": "src-1",
                     "kind": "keyframes",
-                    "stylesheet": {"index": 0, "href": "a.css", "kind": "link"},
+                    "stylesheet": {"index": 0, "href": None, "kind": "style"},
                     "rule_path": [1],
                     "at_rule_context": [],
                     "name": "dup",
                     "selector_text": None,
+                    "source_text_available": True,
                     "css_text": "@keyframes dup { 0% { opacity: 1 } 100% { opacity: 1 } }",
                 }
             ],
+            raw_sources={
+                "0": "@keyframes dup { 0% { opacity: 1; opacity: 1 } 100% { opacity: 1 } }"
+            },
         )
         result = await extract(payload)
-        recipes = [
-            e
-            for e in result["animations"][0]["edits"]
-            if e["knob"].startswith("keyframe")
-        ]
-        assert recipes
-        assert all(r["find_unique_in_rule"] is False for r in recipes)
+        edits = result["animations"][0]["edits"]
+        # The 0% block declares opacity TWICE, so a blind replace is unsafe.
+        risky = only(edits, knob="keyframe[0.0].opacity")
+        assert risky["find_unique_in_rule"] is False
+        assert risky["confidence"] == "medium"
+        assert "position" in risky["note"]
+        # The 100% block declares it once. Scoping per keyframe block is what
+        # keeps this one safe: a body-wide search would see both and call it
+        # ambiguous, or worse, hand back the 0% block's declaration.
+        safe = only(edits, knob="keyframe[1.0].opacity")
+        assert safe["find_unique_in_rule"] is True
+        assert safe["confidence"] == "high"
 
     async def test_no_css_origin_is_reported_as_not_editable(self):
         """The negative case (M10): editing CSS that has no effect on a running

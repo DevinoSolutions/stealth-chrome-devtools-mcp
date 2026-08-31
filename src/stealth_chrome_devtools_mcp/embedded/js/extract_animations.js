@@ -30,11 +30,36 @@
     if (!element) return JSON.stringify({ error: 'Element not found' });
 
     const TRIGGER_SCAN_CAP = 500;
+    // Author text is only worth carrying if an edit recipe could use it; a
+    // multi-hundred-KB sheet is a transport cost with no payoff.
+    const RAW_SOURCE_CAP = 150000;
     const warnings = [];
     const sources = [];
+    const rawSources = {};
     const capsHit = {};
     let sourceSeq = 0;
     let rulesScanned = 0;
+
+    /**
+     * The stylesheet's AUTHOR text, or null (F-849).
+     *
+     * Chrome's rule.cssText is a re-serialization: it reorders the animation
+     * shorthand, expands `.68` to `0.68`, adds spaces after commas and injects
+     * `running`. An edit recipe built from it matches nothing on disk. Only an
+     * inline <style> exposes the bytes the author wrote -- a linked sheet's
+     * ownerNode is the <link>, whose textContent is empty, and we do NOT
+     * re-fetch it (owner ruling Q5: name the href and stop).
+     */
+    function rawSourceFor(sheet) {
+        try {
+            const node = sheet.ownerNode;
+            if (!node || node.tagName !== 'STYLE') return null;
+            const text = node.textContent || '';
+            return text.length > RAW_SOURCE_CAP ? null : text;
+        } catch (e) {
+            return null;
+        }
+    }
 
     function warn(code, message, detail) {
         warnings.push({ code: code, message: message, detail: detail || {} });
@@ -125,6 +150,9 @@
         matched_rules: [],
         candidate_rules: [],
         sources: sources,
+        // {sheetIndex: authorText | null} -- Python slices each rule's span out
+        // of this, so the text is carried ONCE rather than per rule.
+        raw_sources: rawSources,
         warnings: warnings,
         caps_hit: capsHit
     };
@@ -157,7 +185,10 @@
             at_rule_context: atContext.slice(),
             name: name || null,
             selector_text: selectorText || null,
-            css_text: cssText || ''
+            // Chrome's re-serialization, NOT the author's text -- named so no
+            // reader mistakes it for something to find/replace against (F-849).
+            computed_css_text: cssText || '',
+            source_text_available: rawSources[sheetIdx] != null
         });
         return id;
     }
@@ -276,6 +307,14 @@
                 continue;
             }
             if (!rules) continue;
+            // Capture BEFORE walking: addSource stamps source_text_available.
+            rawSources[s] = rawSourceFor(sheet);
+            if (rawSources[s] == null && sheet.href) {
+                warn('author_source_unavailable',
+                    'Author text is not readable for this linked stylesheet, so edit '
+                    + 'recipes for it carry a rule pointer instead of a find literal',
+                    { index: s, href: sheet.href });
+            }
             if (!sheet.href && !sheet.ownerNode) {
                 warn('constructed_stylesheet_no_href',
                     'Constructed stylesheet has no href; edits must target the script that adopts it',

@@ -75,26 +75,28 @@
           "iteration_ms": 2000.0,
           "total_ms": "infinite"
         },
+        "editable": false,
         "edits": [],
         "id": "anim-0",
         "keyframes": [
           {
+            "computed_css_text": "transform: scale(1);",
             "offset": 0.0,
             "properties": {
               "transform": "scale(1)"
-            },
-            "raw_css_text": "transform: scale(1);"
+            }
           },
           {
+            "computed_css_text": "transform: scale(1.08);",
             "offset": 1.0,
             "properties": {
               "transform": "scale(1.08)"
-            },
-            "raw_css_text": "transform: scale(1.08);"
+            }
           }
         ],
         "kind": "css-animation",
         "name": "pulse",
+        "not_editable_reason": "no readable CSS rule declares this animation; its stylesheet is likely cross-origin, so there is nothing here to find/replace",
         "semantics": {
           "easing_class": "ease-in-out",
           "easing_confidence": "high",

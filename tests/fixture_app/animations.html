@@ -4,6 +4,37 @@
     <meta charset="utf-8" />
     <title>fixture-animations-page</title>
     <link rel="stylesheet" href="animations.css" />
+    <!-- AUTHOR TEXT, deliberately NOT in Chrome's CSSOM serialization (F-849).
+         Chrome's rule.cssText rewrites all of this: it moves the animation NAME
+         to the end of the shorthand, expands `.68` to `0.68`, adds spaces after
+         commas and injects `running`. An edit recipe built from cssText
+         therefore matches NOTHING in this file. Every oddity below is load
+         bearing -- normalizing this block would make the tests pass for the
+         wrong reason, because the fixture and the assertion would then share
+         one serialization. This is an inline <style> on purpose: it is the case
+         where ownerNode.textContent gives us the author's real bytes. -->
+    <style>
+      #torture {
+        width: 120px;
+        height: 60px;
+        animation: torture-pulse 2.4s cubic-bezier(.68,-0.55,.27,1.55) 0.3s infinite alternate both;
+        transition: opacity .45s ease-in-out;
+      }
+      #torture::before {
+        content: "";
+        display: block;
+        height: 4px;
+        animation: torture-spin 1.2s linear infinite;
+      }
+      @keyframes torture-pulse {
+        0%,50% { transform: scale(1) rotate(0deg); opacity: .8 }
+        100%   { transform: scale(.7) rotate(-10deg); opacity: 1 }
+      }
+      @keyframes torture-spin {
+        from { transform: rotate(0deg) }
+        to   { transform: rotate(360deg) }
+      }
+    </style>
   </head>
   <body>
     <h1 id="page-title">ANIMATIONS</h1>
@@ -11,6 +42,9 @@
 
     <!-- Two CSS animations + a ::before animation + a transition. -->
     <div id="hero"></div>
+
+    <!-- Styled by the inline <style> above, in author text Chrome rewrites. -->
+    <div id="torture"></div>
 
     <ul id="stagger">
       <li class="stagger-item">one</li>

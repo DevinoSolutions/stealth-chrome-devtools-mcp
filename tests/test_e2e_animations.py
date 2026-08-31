@@ -16,6 +16,7 @@ timeline, a transition and a uniform stagger.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -46,6 +47,13 @@ def _by_name(payload, name):
     assert len(found) == 1, (
         f"expected one '{name}', got {[a['name'] for a in payload['animations']]}"
     )
+    return found[0]
+
+
+def only(items, **match):
+    """The one item matching ``match``, with a readable failure."""
+    found = [i for i in items if all(i.get(k) == v for k, v in match.items())]
+    assert len(found) == 1, f"expected exactly one {match}, got {list(items)}"
     return found[0]
 
 
@@ -118,14 +126,18 @@ async def test_schema_v2_end_to_end_over_the_real_transport(fixture_app_server):
         )
         assert all(isinstance(s["rule_path"], list) for s in payload["sources"])
 
-        # --- M10 edit recipes point at literals that really exist ---
-        recipes = [e for e in pulse["edits"] if e.get("find")]
-        assert recipes, "at least one verified find literal"
+        # --- M10 edit recipes address every knob and name their file ---
+        # #hero is styled by a LINKED sheet, whose author text we cannot read and
+        # deliberately do not re-fetch (Q5), so these are honest rule pointers
+        # rather than find literals. The inline-<style> case, where real literals
+        # ARE recovered, is test_every_find_literal_occurs_in_the_author_source.
+        assert {e["knob"] for e in pulse["edits"]} >= {"duration", "delay", "easing"}
         keyframe_recipe = [
             e for e in pulse["edits"] if e["knob"].startswith("keyframe[")
         ]
         assert keyframe_recipe
         assert all(str(e["file"]).endswith("animations.css") for e in keyframe_recipe)
+        assert all("find" not in e for e in pulse["edits"])
 
         # --- D3/M8: the UA default transition is gone, the real one survives ---
         assert [t["property"] for t in payload["transitions"]] == ["opacity"]
@@ -227,6 +239,113 @@ async def test_stagger_group_is_computed_across_siblings(fixture_app_server):
         assert group["uniform"] is True
         assert group["delta_ms"] == 80
         assert group["delays_ms"] == [0, 80, 160]
+    finally:
+        await close(instance_id=iid)
+
+
+FIXTURE_HTML = Path(__file__).resolve().parent / "fixture_app" / "animations.html"
+
+
+async def test_every_find_literal_occurs_in_the_author_source(fixture_app_server):
+    """F-849: a `find` literal must match the bytes ON DISK, not Chrome's CSSOM.
+
+    Chrome's ``rule.cssText`` rewrites the author's text -- it moves the
+    animation name to the end of the shorthand, expands `.68` to `0.68`, adds
+    spaces after commas and injects `running`. A recipe built from cssText
+    advertises ``confidence: high`` and then matches NOTHING, which is exactly
+    the lying-derived-field M11 forbids. This test reads the real fixture file
+    and checks every literal against it, so it cannot pass by sharing a
+    serialization with the payload.
+    """
+    author_text = FIXTURE_HTML.read_text(encoding="utf-8")
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+    result = await spawn(headless=True, **sandbox_kwargs())
+    iid = result["instance_id"]
+    try:
+        payload = await _extract(iid, base, "#torture")
+        pulse = _by_name(payload, "torture-pulse")
+
+        recipes = [e for e in pulse["edits"] if e.get("find")]
+        assert recipes, "the inline <style> case must yield verified recipes"
+        for recipe in recipes:
+            assert recipe["find"] in author_text, (
+                f"knob {recipe['knob']}: find literal is not in the author's "
+                f"source, so find/replace would do nothing -- {recipe['find']!r}"
+            )
+
+        # The specific normalizations the report caught, each asserted directly.
+        duration = only(pulse["edits"], knob="duration")
+        assert "torture-pulse 2.4s" in duration["find"]  # name FIRST, as authored
+        assert "running" not in duration["find"]  # not Chrome's injected keyword
+        assert (
+            "cubic-bezier(.68,-0.55,.27,1.55)" in duration["find"]
+        )  # tight, as authored
+
+        # Keyframe declarations keep the author's bare decimals.
+        opacity = only(pulse["edits"], knob="keyframe[0.0].opacity")
+        assert opacity["find"] == "opacity: .8"
+        transform = only(pulse["edits"], knob="keyframe[1.0].transform")
+        assert transform["find"] == "transform: scale(.7) rotate(-10deg)"
+    finally:
+        await close(instance_id=iid)
+
+
+async def test_a_pseudo_element_animation_is_never_silently_unactionable(
+    fixture_app_server,
+):
+    """F-849 defect 2: `edits: []` with no `editable: false` and no reason is
+    silence, and silence is what M11 forbids. The ::before rule is in the same
+    <style> block, so this one should get REAL recipes."""
+    author_text = FIXTURE_HTML.read_text(encoding="utf-8")
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+    result = await spawn(headless=True, **sandbox_kwargs())
+    iid = result["instance_id"]
+    try:
+        payload = await _extract(iid, base, "#torture")
+        spin = _by_name(payload, "torture-spin")
+        assert spin["target"]["relation"] == "pseudo"
+        # Either it is editable with recipes, or it says why not -- never blank.
+        if spin["edits"]:
+            for recipe in spin["edits"]:
+                if recipe.get("find"):
+                    assert recipe["find"] in author_text
+            assert spin.get("editable") is not False
+        else:
+            assert spin["editable"] is False
+            assert spin["not_editable_reason"]
+        # This rule IS readable, so it must be the editable branch.
+        assert spin["edits"], "the ::before rule is in the same <style> block"
+        assert spin["source_refs"]
+    finally:
+        await close(instance_id=iid)
+
+
+async def test_a_linked_stylesheet_degrades_honestly(fixture_app_server):
+    """Author text is unavailable for a linked sheet (we do not re-fetch, Q5).
+    That must degrade to a low-confidence pointer, never to a CSSOM literal
+    dressed as a find target."""
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+    result = await spawn(headless=True, **sandbox_kwargs())
+    iid = result["instance_id"]
+    try:
+        payload = await _extract(iid, base, "#hero")  # styled by animations.css
+        pulse = _by_name(payload, "hero-pulse")
+        for recipe in pulse["edits"]:
+            if "find" in recipe:
+                pytest.fail(
+                    f"emitted an unverifiable find for a linked sheet: {recipe!r}"
+                )
+            assert recipe["confidence"] == "low"
+            assert recipe["source_ref"]
+            assert recipe["note"]
+        source = only(payload["sources"], id=pulse["source_refs"][0])
+        assert source["source_text_available"] is False
     finally:
         await close(instance_id=iid)
 

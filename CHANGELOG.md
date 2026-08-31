@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Fixed — edit recipes pointed at text that is not in your stylesheet (F-849)
+
+The `find` literals in `edits[]` were built from Chrome's `cssText`, which is a
+re-serialization rather than the author's source. For a rule written as
+
+    animation: pulse 2.4s cubic-bezier(.68,-0.55,.27,1.55) 0.3s infinite alternate both;
+
+Chrome reports it with the animation NAME moved to the end, `.68` expanded to
+`0.68`, spaces added after commas and a `running` keyword injected — so the
+recipe advertised `confidence: "high"` for a string that occurs zero times in
+the file. Same for values: `opacity: .8` became `opacity: 0.8`. A find/replace
+found nothing, which is the failure mode the honesty rule exists to prevent
+(the edit fails safely, but M10's entire value proposition was gone).
+
+Recipes are now resolved against the author's real bytes, read from
+`<style>` elements via `ownerNode.textContent` — nothing is re-fetched over the
+network. A `find` is emitted only when the declaration was located in that text,
+scoped to the rule's own span (and, inside `@keyframes`, to the individual
+keyframe block, so a recipe for the `100%` frame stops returning the `0%`
+frame's declaration). Where the author's text is unavailable (a linked or
+cross-origin sheet) or the rule is ambiguous (the same selector declared twice),
+the recipe degrades to a rule pointer with `confidence: "low"` and no `find`;
+Chrome's form is still carried, but as `computed_declaration`, which is never a
+find target. A `sources[]` entry now reports `source_text_available` and carries
+the author's `source_text` when it is readable.
+
+Two related honesty fixes: an animation applied through a pseudo-element rule
+(`#hero::before`) came back with `edits: []`, no `editable: false` and no reason
+— silence where its rule was sitting in the same `<style>` block; it now gets
+real recipes, and any animation that genuinely has nothing to edit says so.
+`keyframes[].raw_css_text` is renamed to `computed_css_text`, because it was
+never raw author text and the name invited exactly the mistake above.
+
+**Breaking:** `keyframes[].raw_css_text` → `computed_css_text`;
+`sources[].css_text` → `computed_css_text`.
+
 ### Fixed — animation keyframes arrived as unusable serialization garbage (F-846)
 
 `extract_element_animations` returned a nested object from `tab.evaluate`, and

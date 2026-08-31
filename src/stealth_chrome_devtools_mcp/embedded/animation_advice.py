@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from itertools import pairwise
+from typing import NamedTuple
 
 from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     Facts,
@@ -32,6 +33,8 @@ from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     as_rows,
     as_strings,
     as_text,
+    cycle_get,
+    keyframe_offsets,
     split_css_list,
 )
 
@@ -84,6 +87,53 @@ def source_by_id(facts: Facts, source_id: object) -> Record | None:
     return None
 
 
+def rule_declaring(facts: Facts, name: str, pseudo: str = "") -> Record | None:
+    """The rule that declares animation ``name``, optionally on ``pseudo``.
+
+    A ``::before`` animation's rule never "matches" the element itself, so it
+    lands in ``candidate_rules``; both lists are searched. Without this, a
+    pseudo-element animation came back with empty ``edits`` and no reason —
+    silence, where its rule was sitting in the same ``<style>`` block (F-849).
+    """
+    rules = as_rows(facts.get("matched_rules")) + as_rows(facts.get("candidate_rules"))
+    found = None
+    for rule in rules:
+        declared = " ".join(
+            str(value) for value in as_obj(rule.get("declares")).values()
+        )
+        if name not in split_css_list(declared) and name not in declared.split():
+            continue
+        selector = as_text(rule.get("selector_text"))
+        has_pseudo = "::" in selector
+        if pseudo:
+            if pseudo not in selector and pseudo.replace("::", ":") not in selector:
+                continue
+        elif has_pseudo:
+            continue
+        found = rule
+    return found
+
+
+def source_span(facts: Facts, source: Record | None) -> str | None:
+    """The AUTHOR's text of the rule ``source`` points at, or ``None``.
+
+    The sheet's raw text is carried once in ``facts["raw_sources"]``; each rule's
+    span is sliced out here rather than shipped per rule.
+    """
+    if not source:
+        return None
+    raw_by_sheet = as_obj(facts.get("raw_sources"))
+    index = as_obj(source.get("stylesheet")).get("index")
+    raw = raw_by_sheet.get(str(index))
+    if not isinstance(raw, str):
+        return None
+    if source.get("kind") == "keyframes":
+        header = f"@keyframes {as_text(source.get('name'))}"
+    else:
+        header = as_text(source.get("selector_text"))
+    return rule_span(raw, header)
+
+
 def stylesheet_file(source: Record | None) -> str | None:
     """A human-usable file name for a source: the href, else the sheet index."""
     if not source:
@@ -100,59 +150,189 @@ def stylesheet_file(source: Record | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def find_literal(css_text: str, candidates: list[str]) -> tuple[str | None, bool]:
-    """The first candidate that ACTUALLY OCCURS in ``css_text``, and whether it
-    occurs exactly once.
+def _whitespace_tolerant(text: str) -> str:
+    """A regex matching ``text`` with any whitespace run where it has one."""
+    return re.sub(r"\\?\s+", r"\\s+", re.escape(text.strip()))
 
-    Never emit a ``find`` we did not verify: a literal that is not in the rule
-    turns a find/replace into a silent no-op, and a weak model will report the
-    edit as done.
+
+def rule_span(raw: str, header: str) -> str | None:
+    """The AUTHOR's text of one rule body, located in the sheet's raw source.
+
+    ``header`` is the CSSOM selector (or ``@keyframes name``). CSSOM normalizes
+    whitespace inside a selector, so the search is whitespace-tolerant; the
+    braces are then counted in the ORIGINAL text, which keeps every offset
+    honest. Returns ``None`` when the rule cannot be located — a caller must
+    then degrade, never guess.
+
+    A header that occurs MORE THAN ONCE also returns ``None``: declaring the
+    same selector twice is ordinary CSS, and we have no way to tell which block
+    the CSSOM record came from. Picking the first would be a coin flip dressed
+    as a verified address.
     """
-    for candidate in candidates:
-        count = (css_text or "").count(candidate)
-        if count:
-            return candidate, count == 1
-    return None, False
+    if not raw or not header:
+        return None
+    pattern = r"(?<![\w.#\-])" + _whitespace_tolerant(header) + r"\s*\{"
+    matches = list(re.finditer(pattern, raw))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    depth = 0
+    for index in range(match.end() - 1, len(raw)):
+        if raw[index] == "{":
+            depth += 1
+        elif raw[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[match.end() : index]
+    return None
 
 
-def _recipe(
-    knob: str,
-    current: str,
-    source: Record | None,
-    css_text: str,
-    candidates: list[str],
-) -> Record:
-    """One edit recipe. ``find`` is omitted (not guessed) when unverifiable."""
-    literal, unique = find_literal(css_text, candidates)
-    recipe: Record = {"knob": knob, "current": current}
-    if source:
-        recipe["source_ref"] = source.get("id")
-        recipe["file"] = stylesheet_file(source)
-    if literal is None:
+def keyframe_spans(span: str) -> list[tuple[list[float], str]]:
+    """Each keyframe block inside a ``@keyframes`` body: its offsets, its text.
+
+    Needed so a recipe for the keyframe at 1.0 does not hand back the ``0%``
+    block's declaration: the property name repeats in every block, so a
+    body-wide search always returns the first one.
+    """
+    blocks: list[tuple[list[float], str]] = []
+    index = 0
+    while index < len(span):
+        brace = span.find("{", index)
+        if brace == -1:
+            break
+        selector = span[index:brace]
+        depth = 0
+        end = len(span) - 1
+        for pos in range(brace, len(span)):
+            if span[pos] == "{":
+                depth += 1
+            elif span[pos] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = pos
+                    break
+        blocks.append((keyframe_offsets(selector.strip()), span[brace + 1 : end]))
+        index = end + 1
+    return blocks
+
+
+def keyframe_span_for(span: str | None, offset: float) -> str | None:
+    """The author's text of the keyframe block that declares ``offset``."""
+    if not span:
+        return None
+    for offsets, text in keyframe_spans(span):
+        if offset in offsets:
+            return text
+    return None
+
+
+def author_declaration(span: str, properties: list[str]) -> tuple[str, str, int] | None:
+    """The author's own declaration for the first of ``properties`` present.
+
+    Returns ``(literal, value, occurrences)`` where ``literal`` is the text
+    exactly as the author typed it — the thing a find/replace must look for.
+    ``None`` when no listed property is declared in the span.
+
+    The lookbehind matters: searching for ``animation`` must not match inside
+    ``animation-duration``, or the shorthand fallback would hijack every knob.
+    """
+    for prop in properties:
+        pattern = rf"(?<![\w-]){re.escape(prop)}\s*:\s*([^;{{}}]+)"
+        matches = list(re.finditer(pattern, span or ""))
+        if matches:
+            first = matches[0]
+            return first.group(0).strip(), first.group(1).strip(), len(matches)
+    return None
+
+
+class EditTarget(NamedTuple):
+    """Where a recipe points: the source record, and the AUTHOR's text of its
+    rule when that text is readable at all (``None`` for a linked sheet)."""
+
+    source: Record | None
+    span: str | None
+
+
+class Knob(NamedTuple):
+    """One tweakable thing: what to call it, its current value, which CSS
+    properties can carry it, and — for a comma-list longhand — which item of
+    that list belongs to this animation."""
+
+    name: str
+    current: str
+    properties: list[str]
+    computed_declaration: str = ""
+    list_index: int | None = None
+
+
+def _recipe(knob: Knob, target: EditTarget) -> Record:
+    """One edit recipe, addressed to the AUTHOR'S text (F-849).
+
+    ``find`` is emitted ONLY when it was located in the author's source, so a
+    find/replace against the file on disk actually hits. Chrome's re-serialized
+    ``cssText`` is never used as a find target — it reorders the animation
+    shorthand, expands ``.68`` to ``0.68`` and injects ``running``, so a recipe
+    built from it advertises ``confidence: high`` and then matches nothing.
+    That is precisely the lying-derived-field M11 forbids.
+
+    When the author's text is unavailable (a linked or cross-origin sheet, which
+    we do not re-fetch) or the declaration cannot be located in it, the recipe
+    degrades to a rule pointer with ``confidence: low`` and no ``find``.
+    """
+    recipe: Record = {"knob": knob.name, "current": knob.current}
+    if target.source:
+        recipe["source_ref"] = target.source.get("id")
+        recipe["file"] = stylesheet_file(target.source)
+    found = author_declaration(target.span, knob.properties) if target.span else None
+    if found is None:
         recipe["confidence"] = "low"
-        recipe["note"] = "no verifiable literal; edit the rule at source_ref by hand"
+        recipe["note"] = (
+            "the author's text for this rule is not readable, so no find literal "
+            "is offered; open the rule at source_ref and edit it there"
+        )
+        if knob.computed_declaration:
+            # Context only. Named so it can never be mistaken for a find target.
+            recipe["computed_declaration"] = knob.computed_declaration
         return recipe
+    literal, value, occurrences = found
+    unique = occurrences == 1
     recipe["find"] = literal
     recipe["find_unique_in_rule"] = unique
     recipe["confidence"] = "high" if unique else "medium"
+    if knob.properties and literal.split(":", 1)[0].strip() == knob.properties[0]:
+        # The knob's own longhand, so the author's text IS the current value —
+        # but a longhand can be a comma list covering EVERY animation on the
+        # element, so take this animation's item under the same cycling rule
+        # the rest of the schema applies. Taking the whole list would report
+        # "2s, 3s" as one animation's duration.
+        recipe["current"] = (
+            value
+            if knob.list_index is None
+            else cycle_get(split_css_list(value), knob.list_index, value)
+        )
+    else:
+        recipe["note"] = (
+            f"set inside the shorthand; change the {knob.name} component "
+            f"({knob.current!r}) within `find`"
+        )
     if not unique:
-        recipe["note"] = "this literal repeats in the rule; match by position"
+        recipe["note"] = "this declaration repeats in the rule; match by position"
     return recipe
 
 
 def build_edits(
     record: Record,
     rule: Record | None,
-    rule_source: Record | None,
-    keyframe_source: Record | None,
+    rule_target: EditTarget,
+    keyframe_target: EditTarget,
+    list_index: int = 0,
 ) -> list[Record]:
     """Edit recipes for one animation: the timing knobs plus every keyframe
-    declaration, each with a verified write-back literal."""
+    declaration, each addressed to a literal verified in the author's source."""
     edits: list[Record] = []
     timing = as_obj(record.get("timing"))
     if rule is not None:
-        rule_text = as_text(rule.get("css_text"))
-        shorthand = as_obj(rule.get("declares")).get("animation")
+        computed = as_text(as_obj(rule.get("declares")).get("animation"))
         iterations = timing.get("iterations")
         for knob, current in (
             ("duration", timing.get("duration_raw")),
@@ -163,25 +343,40 @@ def build_edits(
         ):
             if not isinstance(current, str) or not current:
                 continue
-            longhand = _KNOB_LONGHAND[knob]
-            candidates = [f"{longhand}: {current}", f"{longhand}:{current}"]
-            if isinstance(shorthand, str) and shorthand:
-                candidates.append(f"animation: {shorthand}")
-            edits.append(_recipe(knob, current, rule_source, rule_text, candidates))
-    if keyframe_source is not None:
-        kf_text = as_text(keyframe_source.get("css_text"))
+            edits.append(
+                _recipe(
+                    Knob(
+                        knob,
+                        current,
+                        [_KNOB_LONGHAND[knob], "animation"],
+                        f"animation: {computed}" if computed else "",
+                        list_index,
+                    ),
+                    rule_target,
+                )
+            )
+    if keyframe_target.source is not None:
         for frame in as_rows(record.get("keyframes")):
+            offset = as_number(frame.get("offset"))
+            # Scope to THIS keyframe's block: every block declares the same
+            # property names, so a body-wide search always returns the first.
+            block = keyframe_span_for(keyframe_target.span, offset or 0.0)
             for prop, value in as_obj(frame.get("properties")).items():
                 if len(edits) >= EDIT_CAP:
                     return edits
                 text = as_text(value)
                 edits.append(
                     _recipe(
-                        f"keyframe[{frame['offset']}].{prop}",
-                        text,
-                        keyframe_source,
-                        kf_text,
-                        [f"{prop}: {text}", f"{prop}:{text}"],
+                        # No list_index: a keyframe declaration's value is whole
+                        # (`box-shadow: a, b` is one value, not a per-animation
+                        # list), so it is adopted as the author wrote it.
+                        Knob(
+                            f"keyframe[{frame['offset']}].{prop}",
+                            text,
+                            [prop],
+                            f"{prop}: {text}",
+                        ),
+                        EditTarget(keyframe_target.source, block),
                     )
                 )
     return edits
