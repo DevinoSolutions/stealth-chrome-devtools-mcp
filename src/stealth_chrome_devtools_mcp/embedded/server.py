@@ -1916,34 +1916,41 @@ async def extract_element_events(
 async def extract_element_animations(
     instance_id: str,
     selector: str,
-    include_css_animations: bool = True,
-    include_transitions: bool = True,
-    include_transforms: bool = True,
-    analyze_keyframes: bool = True,
+    include_subtree: bool = True,
+    include_waapi: bool = True,
 ) -> dict[str, Any]:
     """
-    Extract CSS animations, transitions, and transforms.
+    Extract everything needed to retime or restyle an element's motion (schema v2).
 
     Args:
         instance_id (str): Browser instance ID.
         selector (str): CSS selector for the element.
-        include_css_animations (bool): Include CSS @keyframes animations.
-        include_transitions (bool): Include CSS transitions.
-        include_transforms (bool): Include CSS transforms.
-        analyze_keyframes (bool): Analyze keyframe rules.
+        include_subtree (bool): Include descendant and pseudo-element animations.
+        include_waapi (bool): Include live getAnimations() records (element.animate).
 
     Returns:
-        Dict[str, Any]: Animation data, transition data, transform data, keyframe rules.
+        Dict[str, Any]: `schema_version: 2`, `has_motion`, `overview` prose,
+        `animations[]`, `transitions[]`, `interactions[]` (conflicts + remedies),
+        `sources[]` (href, rule path, author text), `transforms`, `warnings[]`.
+        Per animation: `summary`, `kind`, `target`, `trigger`, `semantics` (each
+        a `{value, confidence}` claim), `timeline` (time|scroll|view — duration
+        edits are IGNORED on scroll/view), `timing` (`*_ms` numbers beside
+        `*_raw` tokens; `iterations` may be "infinite"), `derived` (cycle_ms,
+        active window, total_ms, stagger_group), `keyframes[]` (numeric `offset`
+        + parsed properties), `checkpoints[]` (declared values, never
+        interpolated), `edits[]` (per knob: the author's declaration as `find`,
+        the one `token` in it this knob owns, and `replace` — that declaration
+        with only the token swapped for `edit_protocol.placeholder`; no `find`
+        means a pointer, not an edit). Capped at 25 animations / 20 keyframes;
+        subtree records carry `detail_level: "summary"`. Undecidable: omitted.
     """
     tab = await _require_tab(browser_manager, instance_id)
     return await _with_cdp_timeout(
         cdp_element_cloner.extract_element_animations(
             tab,
             selector=selector,
-            include_css_animations=include_css_animations,
-            include_transitions=include_transitions,
-            include_transforms=include_transforms,
-            analyze_keyframes=analyze_keyframes,
+            include_subtree=include_subtree,
+            include_waapi=include_waapi,
         ),
         instance_id=instance_id,
     )
@@ -2274,13 +2281,14 @@ async def expand_pseudo_elements(element_id: str) -> dict[str, Any]:
 @section_tool("progressive-cloning")
 async def expand_animations(element_id: str) -> dict[str, Any]:
     """
-    Expand animations and fonts data for a stored element.
+    Expand the animations slice (schema v2) and fonts for a stored element.
 
     Args:
         element_id (str): Element ID from clone_element_progressive().
 
     Returns:
-        Dict[str, Any]: Animations, transitions, and fonts data.
+        Dict[str, Any]: `animations` — the same schema-v2 object
+        extract_element_animations() documents — plus `fonts`.
     """
     return progressive_element_cloner.expand_animations(element_id)
 
@@ -2540,34 +2548,30 @@ async def extract_element_events_to_file(
 async def extract_element_animations_to_file(
     instance_id: str,
     selector: str,
-    include_css_animations: bool = True,
-    include_transitions: bool = True,
-    include_transforms: bool = True,
-    analyze_keyframes: bool = True,
+    include_subtree: bool = True,
+    include_waapi: bool = True,
 ) -> dict[str, Any]:
     """
-    Extract element animations and save to file, returning file path.
+    Extract element animations (schema v2) to a file, returning the file path.
 
     Args:
         instance_id (str): Browser instance ID.
         selector (str): CSS selector for the element.
-        include_css_animations (bool): Include CSS animations.
-        include_transitions (bool): Include CSS transitions.
-        include_transforms (bool): Include CSS transforms.
-        analyze_keyframes (bool): Analyze keyframe rules.
+        include_subtree (bool): Include descendant and pseudo-element animations.
+        include_waapi (bool): Include live getAnimations() records.
 
     Returns:
-        Dict[str, Any]: File path and summary of extracted animations.
+        Dict[str, Any]: File path plus a summary (has_motion and the animation,
+        transition, keyframe and interaction counts). The file holds the full
+        schema-v2 payload extract_element_animations() documents.
     """
     tab = await _require_tab(browser_manager, instance_id)
     return await _with_cdp_timeout(
         file_based_element_cloner.extract_element_animations_to_file(
             tab,
             selector=selector,
-            include_css_animations=include_css_animations,
-            include_transitions=include_transitions,
-            include_transforms=include_transforms,
-            analyze_keyframes=analyze_keyframes,
+            include_subtree=include_subtree,
+            include_waapi=include_waapi,
         ),
         instance_id=instance_id,
     )

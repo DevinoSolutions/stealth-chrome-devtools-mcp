@@ -27,6 +27,7 @@ import pytest
 from fakes import (
     FakeStorage,
     FakeTab,
+    animation_evaluate_map,
     as_jsonable,
     fake_element,
     load_or_capture_golden,
@@ -54,6 +55,71 @@ CANNED_JS_ELEMENT = {
     "eventListeners": [{"type": "click", "source": "inline", "handler": "f()"}],
     "cssRules": [],
     "children": [],
+}
+
+
+# What the animations collector returns — a FACT payload, delivered as the JSON
+# string a real tab delivers (F-846). Deliberately small: this file pins the
+# COMPOSED clone's shape; the animations schema itself is pinned in
+# test_animation_schema_v2.py.
+CANNED_ANIMATION_FACTS = {
+    "facts_version": 1,
+    "selector": "#demo",
+    "url": "https://fake.test/page",
+    "captured_at_ms": 100.0,
+    "element": {
+        "tag": "div",
+        "id": "demo",
+        "classes": ["box"],
+        "inline_properties": [],
+        "is_canvas": False,
+    },
+    "computed": {
+        "animation_name": "pulse",
+        "animation_duration": "2s",
+        "animation_delay": "0s",
+        "animation_timing_function": "ease-in-out",
+        "animation_iteration_count": "infinite",
+        "animation_direction": "alternate",
+        "animation_fill_mode": "both",
+        "animation_play_state": "running",
+        "animation_composition": "replace",
+        "animation_timeline": "auto",
+        "animation_range_start": "normal",
+        "animation_range_end": "normal",
+        "transition_property": "all",
+        "transition_duration": "0s",
+        "transition_delay": "0s",
+        "transition_timing_function": "ease",
+        "transition_behavior": "normal",
+    },
+    "transforms": {"transform": "none", "transform_origin": "50% 50%"},
+    "keyframe_rules": [
+        {
+            "name": "pulse",
+            "source_ref": "src-0",
+            "keyframes": [
+                {
+                    "key_text": "0%",
+                    "css_text": "transform: scale(1);",
+                    "easing": "",
+                    "composite": "",
+                },
+                {
+                    "key_text": "100%",
+                    "css_text": "transform: scale(1.08);",
+                    "easing": "",
+                    "composite": "",
+                },
+            ],
+        }
+    ],
+    "waapi": [],
+    "matched_rules": [],
+    "candidate_rules": [],
+    "sources": [],
+    "warnings": [],
+    "caps_hit": {},
 }
 
 
@@ -298,13 +364,17 @@ class TestCanonicalEngine:
         [
             "extract_element_structure",
             "extract_element_events",
-            "extract_element_animations",
             "extract_element_assets",
         ],
     )
     async def test_js_aspect_passes_dict_through(self, method):
-        # Structure/events/animations/assets stay on JS-eval (§2.1 + 2026-07-18
-        # structure ruling) — zero capability loss vs the retired ElementCloner.
+        # Structure/events/assets stay on JS-eval (§2.1 + 2026-07-18 structure
+        # ruling) — zero capability loss vs the retired ElementCloner.
+        #
+        # ``extract_element_animations`` deliberately LEFT this list in F-846:
+        # it no longer passes a dict through, because a dict is exactly what the
+        # transport corrupts. It now asks the page for one JSON string and
+        # derives schema v2 from it — pinned in test_animation_schema_v2.py.
         tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
         result = await getattr(_cdc.cdp_element_cloner, method)(tab, selector="#demo")
         assert result == CANNED_JS_ELEMENT
@@ -364,6 +434,10 @@ class TestCanonicalEngine:
     async def test_complete_composes_all_six_aspects(self):
         tab = FakeTab(
             evaluate_result=dict(CANNED_JS_ELEMENT),
+            # The animations script alone answers with a JSON STRING (F-846), so
+            # the composed clone carries a real schema-v2 block rather than the
+            # generic canned element every other JS aspect gets.
+            evaluate_map=animation_evaluate_map(CANNED_ANIMATION_FACTS),
             cdp_responses=_cdp_responses(),
             select_result=fake_element(node_id=2),
         )
@@ -386,6 +460,8 @@ class TestCanonicalEngine:
         assert result["styles"]["method"] == "cdp_direct"
         assert result["structure"] == CANNED_JS_ELEMENT
         assert result["events"] == CANNED_JS_ELEMENT
-        assert result["animations"] == CANNED_JS_ELEMENT
         assert result["assets"] == CANNED_JS_ELEMENT
+        # The animations aspect is the one with its own schema (v2, F-848).
+        assert result["animations"]["schema_version"] == 2
+        assert result["animations"]["animations"][0]["name"] == "pulse"
         _assert_golden("canonical_engine", result)

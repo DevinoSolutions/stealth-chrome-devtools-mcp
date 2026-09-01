@@ -169,7 +169,9 @@ class FileBasedElementCloner:
                 else 0,
                 "has_pseudo_elements": bool(d.get("styles", {}).get("pseudo_elements")),
                 "css_rules_count": len(d.get("styles", {}).get("css_rules", [])),
-                "animations_count": len(d.get("animations", {})),
+                # Schema v2 (F-848): count the animation RECORDS, not the keys
+                # of the aspect payload — the latter is a fixed 15 either way.
+                "animations_count": len(d.get("animations", {}).get("animations", [])),
                 "file_size_kb": round(len(json.dumps(d)) / 1024, 2),
             },
         )
@@ -244,34 +246,29 @@ class FileBasedElementCloner:
         tab,
         element=None,
         selector: str = None,
-        include_css_animations: bool = True,
-        include_transitions: bool = True,
-        include_transforms: bool = True,
-        analyze_keyframes: bool = True,
+        include_subtree: bool = True,
+        include_waapi: bool = True,
     ) -> dict[str, Any]:
-        """Extract animations (engine, JS) and save to file."""
+        """Extract animations (engine, JS) and save to file.
+
+        The summary counts the schema-v2 records (F-848). The keys it read
+        before — ``d["animations"]["animation_name"]`` — never existed on any
+        payload the engine produced, so every summary reported False.
+        """
         return await self._extract_and_save(
             "animations",
             cdp_element_cloner.extract_element_animations(
-                tab,
-                element,
-                selector,
-                include_css_animations,
-                include_transitions,
-                include_transforms,
-                analyze_keyframes,
+                tab, element, selector, include_subtree, include_waapi
             ),
             lambda d: {
                 "selector": selector,
-                "has_animations": d.get("animations", {}).get("animation_name", "none")
-                != "none",
-                "has_transitions": d.get("transitions", {}).get(
-                    "transition_property", "none"
-                )
-                != "none",
-                "has_transforms": d.get("transforms", {}).get("transform", "none")
-                != "none",
-                "keyframes_count": len(d.get("keyframes", [])),
+                "has_motion": bool(d.get("has_motion")),
+                "animations_count": len(d.get("animations", [])),
+                "transitions_count": len(d.get("transitions", [])),
+                "keyframes_count": sum(
+                    len(a.get("keyframes", [])) for a in d.get("animations", [])
+                ),
+                "interactions_count": len(d.get("interactions", [])),
             },
         )
 
@@ -372,13 +369,20 @@ class FileBasedElementCloner:
                     "detected_frameworks": events.get("detected_frameworks", []),
                 }
             if "animations" in d:
+                # Schema v2 (F-848): ``animations`` is a LIST of records, and
+                # keyframes live per record. The keys read here before —
+                # ``["animations"]["animation_name"]`` and a top-level
+                # ``keyframes`` — never existed on any payload the engine
+                # produced, so this summary raised (or reported False) rather
+                # than describing the clone.
                 animations = d["animations"]
+                records = animations.get("animations", [])
                 components["animations"] = {
-                    "has_animations": animations.get("animations", {}).get(
-                        "animation_name", "none"
-                    )
-                    != "none",
-                    "keyframes_count": len(animations.get("keyframes", [])),
+                    "has_animations": bool(animations.get("has_motion")),
+                    "animations_count": len(records),
+                    "keyframes_count": sum(
+                        len(a.get("keyframes", [])) for a in records
+                    ),
                 }
             if "assets" in d:
                 assets = d["assets"]

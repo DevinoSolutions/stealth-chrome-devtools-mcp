@@ -1,30 +1,223 @@
 {
   "animations": {
-    "children": [],
-    "computedStyles": {
-      "color": "rgb(0, 0, 0)",
-      "display": "block"
-    },
-    "cssRules": [],
-    "eventListeners": [
+    "animations": [
       {
-        "handler": "f()",
-        "source": "inline",
-        "type": "click"
+        "animated_properties": [
+          "transform"
+        ],
+        "checkpoints": [
+          {
+            "exact": true,
+            "offset": 0.0,
+            "time_ms": 0.0,
+            "values": {
+              "transform": "scale(1)"
+            }
+          },
+          {
+            "between": {
+              "from_offset": 0.0,
+              "to_offset": 1.0
+            },
+            "exact": false,
+            "from": {
+              "transform": "scale(1)"
+            },
+            "offset": 0.25,
+            "time_ms": 500.0,
+            "to": {
+              "transform": "scale(1.08)"
+            }
+          },
+          {
+            "between": {
+              "from_offset": 0.0,
+              "to_offset": 1.0
+            },
+            "exact": false,
+            "from": {
+              "transform": "scale(1)"
+            },
+            "offset": 0.5,
+            "time_ms": 1000.0,
+            "to": {
+              "transform": "scale(1.08)"
+            }
+          },
+          {
+            "between": {
+              "from_offset": 0.0,
+              "to_offset": 1.0
+            },
+            "exact": false,
+            "from": {
+              "transform": "scale(1)"
+            },
+            "offset": 0.75,
+            "time_ms": 1500.0,
+            "to": {
+              "transform": "scale(1.08)"
+            }
+          },
+          {
+            "exact": true,
+            "offset": 1.0,
+            "time_ms": 2000.0,
+            "values": {
+              "transform": "scale(1.08)"
+            }
+          }
+        ],
+        "derived": {
+          "active_end_ms": "infinite",
+          "active_start_ms": 0.0,
+          "cycle_ms": 4000.0,
+          "iteration_ms": 2000.0,
+          "total_ms": "infinite"
+        },
+        "editable": false,
+        "edits": [
+          {
+            "confidence": "low",
+            "current": "2s",
+            "knob": "duration",
+            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+          },
+          {
+            "confidence": "low",
+            "current": "0s",
+            "knob": "delay",
+            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+          },
+          {
+            "confidence": "low",
+            "current": "ease-in-out",
+            "knob": "easing",
+            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+          },
+          {
+            "confidence": "low",
+            "current": "infinite",
+            "knob": "iterations",
+            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+          },
+          {
+            "confidence": "low",
+            "current": "pulse",
+            "knob": "name",
+            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+          },
+          {
+            "confidence": "low",
+            "current": "scale(1)",
+            "knob": "keyframe[0.0].transform",
+            "note": "the author's text for this rule is not readable, so no find literal is offered; open the rule at source_ref and edit it there"
+          },
+          {
+            "confidence": "low",
+            "current": "scale(1.08)",
+            "knob": "keyframe[1.0].transform",
+            "note": "the author's text for this rule is not readable, so no find literal is offered; open the rule at source_ref and edit it there"
+          }
+        ],
+        "id": "anim-0",
+        "keyframes": [
+          {
+            "computed_css_text": "transform: scale(1);",
+            "offset": 0.0,
+            "properties": {
+              "transform": "scale(1)"
+            }
+          },
+          {
+            "computed_css_text": "transform: scale(1.08);",
+            "offset": 1.0,
+            "properties": {
+              "transform": "scale(1.08)"
+            }
+          }
+        ],
+        "kind": "css-animation",
+        "name": "pulse",
+        "not_editable_reason": "no readable CSS rule declares this animation; its stylesheet is likely cross-origin, so there is nothing here to find/replace",
+        "semantics": {
+          "easing_class": {
+            "confidence": "high",
+            "value": "ease-in-out"
+          },
+          "motion_kind": {
+            "confidence": "high",
+            "value": "scale"
+          },
+          "motion_properties": [
+            "transform"
+          ]
+        },
+        "source_refs": [
+          "src-0"
+        ],
+        "summary": "pulse scales, over 2s, infinite, alternate, with ease-in-out easing",
+        "target": {
+          "relation": "self",
+          "selector": "#demo"
+        },
+        "timeline": {
+          "raw": "auto",
+          "type": "time"
+        },
+        "timing": {
+          "composition": "replace",
+          "delay_ms": 0.0,
+          "delay_raw": "0s",
+          "direction": "alternate",
+          "duration_ms": 2000.0,
+          "duration_raw": "2s",
+          "easing": "ease-in-out",
+          "fill": "both",
+          "iterations": "infinite",
+          "play_state": "running"
+        },
+        "trigger": {
+          "confidence": "low",
+          "kind": "unknown"
+        },
+        "warnings": []
       }
     ],
-    "html": {
-      "attributes": [
-        {
-          "name": "id",
-          "value": "demo"
-        }
-      ],
-      "className": "box",
-      "id": "demo",
-      "outerHTML": "<div id=\"demo\">hi</div>",
-      "tagName": "DIV"
-    }
+    "caps": {
+      "animations": 25,
+      "keyframes_per_animation": 20,
+      "truncated": {
+        "animations": false,
+        "keyframes": false
+      }
+    },
+    "captured_at_ms": 100.0,
+    "detail_note": "Records with detail_level: 'summary' are animations on DESCENDANTS of the selected element. They carry identity, timing, semantics and trigger; keyframes, checkpoints and edit recipes are not computed for them. To get the full record for one, call this tool again with that record's target.selector.",
+    "edit_protocol": {
+      "how": "To apply an edit: find the recipe's `find` string in the file named by `file`, inside the rule named by `rule_selector`, and replace it with the recipe's `replace` string, putting your new value where {{NEW_VALUE}} appears. The rest of the declaration is carried in `replace` for you, so nothing else can be lost. `token` is the exact text being replaced, if you want to check it first. A recipe with no `find` is a pointer, not an edit: open it at `source_ref` yourself.",
+      "placeholder": "{{NEW_VALUE}}"
+    },
+    "has_motion": true,
+    "interactions": [],
+    "options": {
+      "include_subtree": true,
+      "include_waapi": true,
+      "max_animations": 25,
+      "max_keyframes": 20
+    },
+    "overview": "1 animation and 0 transitions. Running: 'pulse' on #demo.",
+    "pending_animations": [],
+    "schema_version": 2,
+    "selector": "#demo",
+    "sources": [],
+    "transforms": {
+      "transform": "none",
+      "transform_origin": "50% 50%"
+    },
+    "transitions": [],
+    "url": "https://fake.test/page",
+    "warnings": []
   },
   "assets": {
     "children": [],
@@ -82,7 +275,7 @@
   },
   "extraction_options": {
     "animations": {
-      "analyze_keyframes": true
+      "include_subtree": true
     },
     "assets": {
       "fetch_external": false

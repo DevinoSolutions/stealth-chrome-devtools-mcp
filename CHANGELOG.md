@@ -1,5 +1,291 @@
 # Changelog
 
+## Unreleased
+
+### Changed — the animations payload is sized for the model that reads it (F-853)
+
+The caps added in F-849 bounded the payload and still produced something no
+model could read. A page with 400 animated children returned **4,910,005 bytes**
+— roughly 1.2M tokens, about 24.5 KB per animation record. A cap that prevents
+unboundedness but yields an unconsumable payload has met the letter of the rule
+and missed its purpose.
+
+The same page now returns **31,646 bytes**, a 155x reduction, from three changes
+each sized by measuring where the bytes actually went rather than by picking
+round numbers:
+
+* **The default caps drop to 25 animations and 20 keyframes** (from 200 and 60).
+  An element with more than 25 animations *of its own* does not exist in
+  practice — that cap is really a subtree bound — and 20 keyframes is four times
+  over the `0/25/50/75/100` vocabulary, while keyframes were 75-83% of every
+  oversized payload measured. Both are overridable per call as
+  `max_animations` / `max_keyframes` — but only on the engine path,
+  `clone_element_complete(extraction_options={"animations": {...}})`, and not as
+  arguments to the two `extract_element_animations` tools (see the known
+  limitation below). They are module constants and deliberately **not**
+  `STEALTH_MCP_*` env knobs, being payload shape rather than deployment config.
+* **The edit protocol is stated once for the payload** instead of once per
+  recipe. The `how` sentence and `replace_placeholder` were 6,960 bytes of a
+  single 24,759-byte record — 36% of its `edits` block — repeated verbatim. They
+  now live in a top-level `edit_protocol`, and the per-call recipe cap halves to
+  20.
+* **Records the caller did not select are summarized.** The blowup is always the
+  subtree: ask about a grid and every animated cell arrives at full weight. A
+  descendant keeps its identity, timing, semantics and trigger — enough to decide
+  whether to look closer — and drops keyframes, checkpoints and edit recipes.
+  This is stamped in the record as `detail_level: "summary"`, never left as a
+  silent shape difference: a model seeing `edits` on one record and none on
+  another would otherwise conclude the second is not editable.
+
+Truncation stays loud, and now fires far more often, so each warning says how
+many were dropped and names a remedy the reader can actually act on: narrow the
+selector, which works from every path, and — where the caller is on the engine
+path — raise the cap. A truncated list also no longer reports stagger groups; a
+stagger inferred from an arbitrary prefix of the animations is an artifact of
+the cap, not a fact about the page.
+
+A test pins a busy page's payload under a stated byte budget, so the sizing
+cannot silently regress the way it did here.
+
+The truncation message names a remedy the reader can actually act on. It first
+said "raise it by passing `max_animations` to this tool", and the two tools a
+model actually calls — `extract_element_animations` and its `_to_file` twin —
+do not accept that parameter; a truncated payload is precisely when a model is
+most motivated to follow the advice, so a remedy that gets rejected is worse
+than none. It now leads with narrowing the selector (the only lever those
+callers have) and names the option against the path it is genuinely settable
+on. A test reads the real tool signatures, so the message and the parameters
+cannot drift apart in either direction.
+
+**Known limitation:** `max_animations` / `max_keyframes` are settable only on
+the engine path — `clone_element_complete(extraction_options={"animations":
+{...}})` — and not as arguments to the two `extract_element_animations` tools.
+`server.py` is at its grandfathered line budget with no room to add them; they
+become tool arguments when that module is split.
+
+**Internal:** `animation_analysis.py` reached its 1000-line budget, so the live
+`Animation` half moved to a new leaf, `animation_waapi.py` (timeline typing,
+live timing and keyframes, and the declared-vs-live reconciliation). The shared
+value types it and `analyze()` both need — `Caps`, `cap_message`, `warn` — moved
+down to `animation_facts.py`. Behaviour is unchanged by the move.
+
+### Fixed — an edit recipe now names the token to change and the rule that wins (F-852)
+
+Two defects that compounded, both worse than a missing recipe.
+
+**Every timing knob got the same `find`.** For a rule written as
+
+    animation: pulse 2.4s cubic-bezier(.68,-0.55,.27,1.55) 0.3s infinite alternate both;
+
+the duration, delay, easing, iteration-count and name recipes all carried that
+entire declaration as `find`, each at `confidence: "high"`, differing only in
+`current`. A model told "find this, replace it with the new duration" turns
+`.card { animation: fade 2s ease; }` into `.card { 3s; }` — a file-corrupting
+instruction delivered at the highest confidence the schema has.
+
+A recipe now carries three things instead of one: the author's whole declaration
+as `find`, the single `token` inside it that this knob owns, and `replace` — the
+same declaration with only that token swapped for `replace_placeholder`
+(`{{NEW_VALUE}}`). Applying it cannot drop the rest of the declaration, because
+the rest is carried in the replacement. Times are read positionally, the way CSS
+defines the shorthand (first `<time>` is the duration, second is the delay), and
+the identified token is checked against what the browser computed before it is
+offered. Anything ambiguous — an animation literally named `ease`, say — degrades
+rather than rewriting the wrong part of a working declaration.
+
+**The recipe could point at a rule that cannot change the rendering.** The rule
+was chosen as the last document-order rule declaring anything `animation*`,
+ignoring specificity and `!important`, while `current` came from computed style.
+With `.card { animation: fade 2s ease }` before `#hero { animation-duration: 5s }`
+it reported `current: "5s"` with a `find` inside `.card`. Selection is now
+per knob and follows the cascade: `!important`, then specificity, then document
+order. Two situations degrade instead of guessing. The first is a selector whose
+specificity cannot be computed exactly from its own text, because it is borrowed
+from something that text does not resolve: `:is`/`:where`/`:not`/`:has(S)` and
+`:nth-child(An+B of S)` take it from their argument, and `&` takes it from the
+parent rule — so under CSS nesting a best-effort count made `& .card` tie with a
+bare `.card`, and document order then handed the win to a rule that cannot change
+the rendering. The second is a winner whose declared value disagrees with what the
+element computes, which means an inline style, a UA sheet or an unreadable
+stylesheet is in charge. (Plain `:nth-child(2)` stays decidable.) Recipes
+also carry `rule_selector` and `at_rule_context`, so the rule-scoped
+`find_unique_in_rule` claim can actually be checked.
+
+Transitions get the same treatment rather than an `editable: false`, and the
+collector no longer ships every `@keyframes` block in the document — only those
+something on or under the element references.
+
+**Breaking:** the recipe shape gains `token`, `replace`, `replace_placeholder`,
+`how`, `rule_selector` and `at_rule_context`; the prose note "change the X
+component within `find`" is gone, superseded by `token`/`replace`. The
+`extract_element_animations` docstring no longer describes `find` as "verified
+unique in its rule" — that claim only ever held for the recipes reporting
+`find_unique_in_rule: true`.
+
+### Changed — every derived animation field now carries the confidence it was derived with (F-850)
+
+Ten separately reported defects in the animations schema shared one root cause:
+confidence was stamped **after** the fact. The code wrote
+`easing_confidence: "high"` onto whatever a heuristic returned — including a
+fall-through branch that had decided nothing — the edit recipes defaulted to
+`"high"`, and the live-animation path hardcoded `warnings: []`. The honesty rule
+says every derived field carries a confidence or is omitted; the code said it and
+then routed around it.
+
+Derivations now return their value and their confidence together, so a branch
+that reached no conclusion cannot inherit a caller's optimism. Where the honest
+answer is "I do not know", the field is **omitted** rather than emitted hedged.
+
+**Breaking:** `semantics.motion_kind` and `semantics.easing_class` are now
+claim objects — `{"value": "overshoot", "confidence": "high"}` — instead of bare
+strings, as is `transitions[].easing_class`. `semantics.easing_confidence` is
+gone; the confidence lives inside the claim it belongs to.
+
+Concrete consequences:
+
+- `cubic-bezier(0.1, 0.9, 0.9, 0.1)` (fast at both ends) was classified
+  `"linear"` at `"high"` confidence. It has no name in this vocabulary, so it
+  now has none.
+- `semantics.easing_class` read only the animation-level curve. An animation
+  whose keyframes each declare their own `animation-timing-function` reported
+  that unused curve confidently while its own `checkpoints[].between.segment_easing`
+  said otherwise. Segments that disagree now report `"per-keyframe"`.
+- `transform: translateX(10px) scale(1.2)` was classified `"scale"` alone
+  (first-match-wins substring scanning), and `matrix3d(...)` was asserted to be
+  a `"translate"`. Transform functions are now read as functions; a matrix is
+  not decoded rather than guessed at.
+
+### Fixed — caps, checkpoints, delays, triggers and stale options (F-851)
+
+- **Caps are enforced and surfaced.** `include_subtree` defaults on, so one call
+  can pull in hundreds of live animations; that path had no cap at all while
+  `caps.truncated` reported `false`, and keyframes were cut to the cap silently.
+  Both now stop at the cap and say so in `warnings`.
+- **Checkpoints respect `animation-direction`.** With `reverse` or
+  `alternate-reverse`, `time_ms` claimed offset 0 renders at t=0 — where the
+  element actually shows the 100% keyframe. A non-zero iteration-start now omits
+  `time_ms` entirely with a warning naming why.
+- **A negative delay is not a wait.** `animation-delay: -0.5s` produced
+  `active_start_ms: -500` and the prose "after a -0.5s delay". It starts
+  immediately, already 500ms in, and now says so.
+- **`pending_animations` no longer advises an impossible edit.** For
+  `.gallery .card` matched against a `.card` outside any `.gallery`, it said "add
+  the 'gallery' class to run it" — which cannot make that rule match. Only a
+  class on the element's own compound selector is offered; an ancestor or sibling
+  requirement is described as one.
+- **`prefers-reduced-motion: no-preference` no longer fires the reduced-motion
+  warning.** The check matched the feature name as a substring, so a block that
+  applies only when motion IS allowed got a warning whose remedy is backwards.
+- **Staggers that are not staggers.** Identical delays across siblings produced
+  `{uniform: true, delta_ms: 0.0}`, and an unreadable delay was coerced to 0
+  before differencing, turning an unknown into a confident invented spacing.
+  Neither is reported now.
+- **`editable` is mandatory wherever there are no usable recipes**, whatever the
+  record's kind — absence read as "editable". Transitions now carry edit recipes
+  of their own, or an explicit `editable: false` with a reason.
+- **A retired extraction option degrades instead of destroying the whole clone.**
+  `extraction_options={"animations": {"analyze_keyframes": True}}` (a real v1
+  option) bound against the new signature and raised `TypeError` at the call
+  site — before any coroutine existed, so the per-aspect isolation never saw it —
+  turning one stale string into a single error payload for the entire complete
+  clone, losing structure, styles, events, assets and related_files. Unknown
+  per-aspect options are now dropped and reported in that aspect's `warnings`,
+  naming the option and its replacement.
+
+### Fixed — edit recipes pointed at text that is not in your stylesheet (F-849)
+
+The `find` literals in `edits[]` were built from Chrome's `cssText`, which is a
+re-serialization rather than the author's source. For a rule written as
+
+    animation: pulse 2.4s cubic-bezier(.68,-0.55,.27,1.55) 0.3s infinite alternate both;
+
+Chrome reports it with the animation NAME moved to the end, `.68` expanded to
+`0.68`, spaces added after commas and a `running` keyword injected — so the
+recipe advertised `confidence: "high"` for a string that occurs zero times in
+the file. Same for values: `opacity: .8` became `opacity: 0.8`. A find/replace
+found nothing, which is the failure mode the honesty rule exists to prevent
+(the edit fails safely, but M10's entire value proposition was gone).
+
+Recipes are now resolved against the author's real bytes, read from
+`<style>` elements via `ownerNode.textContent` — nothing is re-fetched over the
+network. A `find` is emitted only when the declaration was located in that text,
+scoped to the rule's own span (and, inside `@keyframes`, to the individual
+keyframe block, so a recipe for the `100%` frame stops returning the `0%`
+frame's declaration). Where the author's text is unavailable (a linked or
+cross-origin sheet) or the rule is ambiguous (the same selector declared twice),
+the recipe degrades to a rule pointer with `confidence: "low"` and no `find`;
+Chrome's form is still carried, but as `computed_declaration`, which is never a
+find target. A `sources[]` entry now reports `source_text_available` and carries
+the author's `source_text` when it is readable.
+
+Two related honesty fixes: an animation applied through a pseudo-element rule
+(`#hero::before`) came back with `edits: []`, no `editable: false` and no reason
+— silence where its rule was sitting in the same `<style>` block; it now gets
+real recipes, and any animation that genuinely has nothing to edit says so.
+`keyframes[].raw_css_text` is renamed to `computed_css_text`, because it was
+never raw author text and the name invited exactly the mistake above.
+
+**Breaking:** `keyframes[].raw_css_text` → `computed_css_text`;
+`sources[].css_text` → `computed_css_text`.
+
+### Fixed — animation keyframes arrived as unusable serialization garbage (F-846)
+
+`extract_element_animations` returned a nested object from `tab.evaluate`, and
+`tab.evaluate` deep-serializes anything non-primitive: `keyframe_rules` reached
+callers as `{"type": "object", "value": [["pulse", {...}]]}` rather than as
+keyframes. This is the same hazard class as the fixed F-844 viewport bug, and
+it is why nothing downstream could depend on the field. The page now builds one
+`JSON.stringify` payload and the engine `json.loads` it, so a keyframe arrives
+as a real parsed object with a numeric `offset` and a property map.
+
+`Infinity` is normalized to the string `"infinite"` in the page *before*
+stringify: `JSON.stringify` silently turns it into `null`, and a null reads as
+"unknown" rather than "forever".
+
+### Fixed — keyframes came back empty whenever an element had 2+ animations (F-847)
+
+The lookup compared the whole computed `animation-name` list — the literal
+string `"pulse, spin"` — against each `CSSKeyframesRule.name`. It therefore
+matched nothing in exactly the case the feature exists for. Animations are now
+split into one record per animation, with the CSS list-cycling rule applied
+where it belongs (a single `animation-delay` against two names now gives both
+animations that delay, instead of dropping one). The UA-default `all 0s ease
+0s` transition every element reports is suppressed, so `transitions` carries
+motion rather than noise.
+
+### Added — animation extraction rebuilt for models that have to edit the CSS (F-848)
+
+Schema v2, aimed at a consumer that will open the stylesheet and change it. Per
+animation: a generated `summary`; `semantics` (motion kind, easing class);
+`timeline` typed `time`/`scroll`/`view`; `timing` with every duration as a
+`*_ms` number beside its `*_raw` CSS token; `derived` (cycle, active window,
+total, stagger deltas) so no arithmetic is needed; `trigger` attribution;
+resolved `keyframes`; `checkpoints`; and `edits` — per knob, the file plus a
+`find` literal *verified unique in its rule*, which turns an edit from CSS
+comprehension into find/replace. Alongside them: `interactions[]`, the
+precomputed conflicts with remedies (a scroll-driven animation whose duration
+edits would do nothing; two animations writing one property; an inline style
+that overrides the rule you were about to edit), `sources[]` with stylesheet
+href and rule path, and named `warnings[]` where a cross-origin sheet used to
+be swallowed by a bare `catch {}`.
+
+`getAnimations({subtree: true})` is now covered, so a running
+`element.animate()`, a `::before` animation and descendant animations are
+reported at all — previously the payload said an element was static while it
+was visibly moving. A live animation with no CSS declaration is marked
+`editable: false` with the reason, because editing CSS would not affect it.
+
+Every derived field is emitted only when it is mechanically decidable, carries a
+`confidence`, or is omitted — no value is interpolated by this tool and
+presented as if it were measured.
+
+**Breaking:** `css_animations`, `css_transitions` and `keyframe_rules` are
+removed (the last of these only ever carried the F-846 garbage). The
+`include_css_animations` / `include_transitions` / `include_transforms` /
+`analyze_keyframes` arguments are replaced by `include_subtree` and
+`include_waapi`; the removed flags gated v1 keys that no longer exist, and the
+stylesheet walk they toggled now also feeds sources, triggers and edit recipes.
+
 ## 2.0.9
 
 ### Fixed — a backend that dies with a call in flight now heals instead of disconnecting (F-843)

@@ -26,6 +26,11 @@ from urllib.parse import urljoin
 import nodriver as uc
 import requests
 
+from stealth_chrome_devtools_mcp.embedded import (
+    animation_analysis,
+    animation_facts,
+    aspect_options,
+)
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     query_selector_all,
@@ -667,39 +672,43 @@ class CDPElementCloner:
         tab,
         element=None,
         selector: str | None = None,
-        include_css_animations: bool = True,
-        include_transitions: bool = True,
-        include_transforms: bool = True,
-        analyze_keyframes: bool = True,
+        include_subtree: bool = True,
+        include_waapi: bool = True,
+        max_animations: int = animation_facts.ANIMATION_CAP,
+        max_keyframes: int = animation_facts.KEYFRAME_CAP,
     ) -> dict[str, Any]:
-        """Extract CSS animations/transitions/transforms via JS-eval (verbatim
-        move; KEEP-JS — CDP has no synchronous per-node ``@keyframes`` read)."""
+        """Extract the animations aspect as schema v2 (KEEP-JS — CDP has no
+        synchronous per-node ``@keyframes`` read).
+
+        The page returns ONE JSON **string** of collected facts (F-846: a
+        non-primitive comes back CDP-deep-serialized and unusable), and every
+        derivation lives in ``animation_analysis``. Engine -> analysis is the
+        only call path, so DOM extraction keeps its one home.
+        """
         try:
             if not selector:
                 return {"error": "Selector is required"}
-
             options = {
-                "include_css_animations": include_css_animations,
-                "include_transitions": include_transitions,
-                "include_transforms": include_transforms,
-                "analyze_keyframes": analyze_keyframes,
+                "include_subtree": include_subtree,
+                "include_waapi": include_waapi,
+                # Defaults are sized for a language model, not a machine (R12).
+                # Raise them per call for a page you know is busy.
+                "max_animations": max_animations,
+                "max_keyframes": max_keyframes,
             }
-
             js_code = self._load_js_file("extract_animations.js", selector, options)
-            animation_data = await tab.evaluate(js_code)
-
-            if hasattr(animation_data, "exception_details"):
+            raw = await tab.evaluate(js_code)
+            if hasattr(raw, "exception_details"):
+                return {"error": f"JavaScript error: {raw.exception_details}"}
+            if not isinstance(raw, str):
                 return {
-                    "error": f"JavaScript error: {animation_data.exception_details}"
+                    "error": f"Unexpected return type: {type(raw)}",
+                    "raw_data": str(raw)[:400],
                 }
-            if isinstance(animation_data, dict):
-                return animation_data
-            if isinstance(animation_data, list):
-                return self._convert_nodriver_result(animation_data)
-            return {
-                "error": f"Unexpected return type: {type(animation_data)}",
-                "raw_data": str(animation_data),
-            }
+            facts = json.loads(raw)
+            if "error" in facts:
+                return facts
+            return animation_analysis.analyze(facts, options)
         except Exception as e:
             debug_logger.log_error("cdp_cloner", "extract_animations", e)
             return {"error": str(e)}
@@ -905,7 +914,7 @@ class CDPElementCloner:
                 },
                 "structure": {"include_children": False, "include_attributes": True},
                 "events": {"include_framework": True, "analyze_handlers": False},
-                "animations": {"analyze_keyframes": True},
+                "animations": {"include_subtree": True},
                 "assets": {"fetch_external": False},
                 "related_files": {"follow_imports": False},
             }
@@ -921,76 +930,33 @@ class CDPElementCloner:
                 "selector": selector,
                 "extraction_options": default_options,
             }
+            # One table, one loop: the six aspects differ only in whether they
+            # take a target. Per-aspect options are filtered through the
+            # aspect's OWN signature, so a retired option name degrades with a
+            # warning instead of raising TypeError right here — a synchronous
+            # raise at this call site happens before any coroutine exists, which
+            # puts it outside gather's per-aspect isolation and failed the whole
+            # clone (F-851).
+            aspects = (
+                ("styles", self.extract_element_styles, True),
+                ("structure", self.extract_element_structure, True),
+                ("events", self.extract_element_events, True),
+                ("animations", self.extract_element_animations, True),
+                ("assets", self.extract_element_assets, True),
+                ("related_files", self.extract_related_files, False),
+            )
             tasks = []
-            if "styles" in default_options:
-                tasks.append(
-                    (
-                        "styles",
-                        self.extract_element_styles(
-                            tab,
-                            element=element,
-                            selector=selector,
-                            **default_options["styles"],
-                        ),
-                    )
+            retired: dict[str, list[dict[str, Any]]] = {}
+            for name, method, targeted in aspects:
+                if name not in default_options:
+                    continue
+                kept, reports = aspect_options.accepted(
+                    method, default_options[name], name
                 )
-            if "structure" in default_options:
-                tasks.append(
-                    (
-                        "structure",
-                        self.extract_element_structure(
-                            tab,
-                            element=element,
-                            selector=selector,
-                            **default_options["structure"],
-                        ),
-                    )
-                )
-            if "events" in default_options:
-                tasks.append(
-                    (
-                        "events",
-                        self.extract_element_events(
-                            tab,
-                            element=element,
-                            selector=selector,
-                            **default_options["events"],
-                        ),
-                    )
-                )
-            if "animations" in default_options:
-                tasks.append(
-                    (
-                        "animations",
-                        self.extract_element_animations(
-                            tab,
-                            element=element,
-                            selector=selector,
-                            **default_options["animations"],
-                        ),
-                    )
-                )
-            if "assets" in default_options:
-                tasks.append(
-                    (
-                        "assets",
-                        self.extract_element_assets(
-                            tab,
-                            element=element,
-                            selector=selector,
-                            **default_options["assets"],
-                        ),
-                    )
-                )
-            if "related_files" in default_options:
-                tasks.append(
-                    (
-                        "related_files",
-                        self.extract_related_files(
-                            tab, **default_options["related_files"]
-                        ),
-                    )
-                )
+                if reports:
+                    retired[name] = reports
+                target = {"element": element, "selector": selector} if targeted else {}
+                tasks.append((name, method(tab, **target, **kept)))
             results = await asyncio.gather(
                 *[task[1] for task in tasks], return_exceptions=True
             )
@@ -999,6 +965,7 @@ class CDPElementCloner:
                     result[name] = {"error": str(results[i])}
                 else:
                     result[name] = results[i]
+                aspect_options.note(result[name], retired.get(name, []))
             debug_logger.log_info(
                 "cdp_cloner",
                 "extract_complete_element",
