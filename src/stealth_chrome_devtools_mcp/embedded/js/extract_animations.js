@@ -434,6 +434,43 @@
         }
     }
 
+    // ── shadow roots: motion we can see happening and cannot describe ──
+    //
+    // `getAnimations({subtree: true})` does NOT cross a shadow boundary, and
+    // `document.styleSheets` does not list a shadow root's own <style>. So a
+    // host whose shadow content is visibly animating reports has_motion: false
+    // with nothing else to go on -- a SILENT FALSE NEGATIVE, which is the one
+    // failure mode M11 ranks below saying nothing at all: a model told an
+    // element is static will not look again. Say we cannot see in there.
+    (function () {
+        try {
+            const hosts = [];
+            if (element.shadowRoot) hosts.push(element);
+            const inner = element.querySelectorAll ? element.querySelectorAll('*') : [];
+            for (let i = 0; i < inner.length && hosts.length < 20; i++) {
+                if (inner[i].shadowRoot) hosts.push(inner[i]);
+            }
+            if (!hosts.length) return;
+            let moving = 0;
+            hosts.forEach(function (host) {
+                try {
+                    const kids = host.shadowRoot.querySelectorAll('*');
+                    for (let k = 0; k < kids.length; k++) {
+                        if (typeof kids[k].getAnimations === 'function'
+                            && kids[k].getAnimations().length) moving++;
+                    }
+                } catch (e) { /* a closed root answers nothing */ }
+            });
+            warn('shadow_root_not_traversed',
+                hosts.length + ' shadow root(s) under this element were not traversed: '
+                + 'getAnimations({subtree:true}) does not cross a shadow boundary and '
+                + 'document.styleSheets does not list a shadow root\'s <style>, so any '
+                + 'motion declared inside them is NOT in this payload'
+                + (moving ? ' (' + moving + ' element(s) in there are animating now)' : ''),
+                { hosts: hosts.length, animating_elements: moving });
+        } catch (e) { /* never let the warning break the collection */ }
+    })();
+
     // ── @keyframes: emit only the blocks anything here could reference ──
     //
     // Every @keyframes block in the document used to be shipped with its full
