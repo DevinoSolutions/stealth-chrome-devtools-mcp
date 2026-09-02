@@ -20,6 +20,7 @@ on:
       - "v*"
 
 permissions:
+  id-token: write
   contents: read
 
 jobs:
@@ -45,7 +46,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download the gated dist artifact (no rebuild)
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        uses: DevinoSolutions/artifact/download@v1
         with:
           name: dist
 
