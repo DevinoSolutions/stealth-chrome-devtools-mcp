@@ -13,7 +13,6 @@ Race condition handling:
 
 from __future__ import annotations
 
-import inspect
 import logging
 import os
 import socket
@@ -26,7 +25,12 @@ from pathlib import Path
 
 import psutil
 
-from stealth_chrome_devtools_mcp.embedded import backend_registry, display_context
+from stealth_chrome_devtools_mcp.embedded import (
+    backend_registry,
+    backend_watchdog,
+    display_context,
+    scheduling_lag,
+)
 from stealth_chrome_devtools_mcp.embedded.backend_registry import (
     PORT_FILE,
     SERVER_STATE_FILE,
@@ -194,6 +198,15 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     version- or source-stale record gets NO patience and is evicted at once.
     ``patience=0.0`` (discovery) probes once and never sleeps; ``None`` means
     ``REUSE_PATIENCE_SECONDS``, read at call time so tests can shrink it.
+
+    F-856: the window is spent in FAIRLY SCHEDULED seconds, not wall seconds.
+    A probe timeout is evidence about the backend only while this process is
+    itself being scheduled, and on a machine at 100% CPU it is not — the
+    2026-09-02 incident condemned a backend that had answered its six previous
+    confirmations. ``scheduling_lag.FairWindow`` measures that lateness from
+    the loop's own naps and discounts the budget by it, bounded at
+    ``MAX_STRETCH``. On an idle machine the measurement is 1.0 and this is
+    exactly the wall-clock deadline it replaced.
     """
     # The entry recorded ON THIS PORT, not merely the first: under F-808's
     # per-context record another desktop's backend says nothing about `port`.
@@ -206,13 +219,13 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     # Busy backends answer slowly, so the patient path probes with the wider
     # per-attempt budget; the single-shot hot path keeps the pinned 2s.
     per_attempt = REUSE_PROBE_TIMEOUT if patience else LIVENESS_PROBE_TIMEOUT
-    deadline = time.monotonic() + patience
+    window = scheduling_lag.FairWindow(patience)
     while not _backend_http_ready(port, timeout=per_attempt):
         if not _server_is_healthy(port) and not _is_our_backend(entry.get("pid")):
             return False  # no socket and no live process: dead, not busy
-        if time.monotonic() >= deadline:
+        if window.expired():
             return False
-        time.sleep(0.25)
+        window.nap(0.25)
     return True
 
 
@@ -756,69 +769,23 @@ async def _await_backend_http(
     return False
 
 
-async def _watch_backend_liveness(  # noqa: PLR0913  PERMANENT(function interface)
-    port: int,
-    *,
-    interval: float = 2.0,
-    failures_before_teardown: int = 3,
-    is_healthy=None,
-    sleep=None,
-    confirm_probe=None,
-) -> None:
-    """Return once the backend on ``port`` is CONFIRMED unusable; the caller
-    tears the proxy down then, converting a backend death mid-session into a
-    clean client reconnect (which respawns a fresh backend) instead of an
-    unbounded hang on requests a dead backend can never answer. Armed only
-    after the backend was confirmed up; one healthy check resets the failure
-    run, so a transient blip never tears down a live backend. ``is_healthy``/
-    ``sleep``/``confirm_probe`` are injectable, sync or awaitable.
+async def _watch_backend_liveness(port: int, **kwargs: object) -> None:
+    """The F-820 watchdog, wired to THIS module's probes.
 
-    F-501: the fast check used to be a bare socket connect
-    (``_server_is_healthy``), which a wedged backend (dispatch loop dead,
-    socket still open) always passes - so the sole auto-recovery watchdog never
-    armed against the exact failure it exists for. It now runs the app-level
-    ``_backend_http_ready`` off-thread (plan_M1 SS2.2 rejected alternative #3:
-    a blocking httpx call run inline would freeze the stdio pump for up to
-    ``LIVENESS_PROBE_TIMEOUT`` every ``interval``).
-
-    F-820: those strikes no longer condemn on their own. Under fleet load a
-    healthy shared backend answers ``initialize`` slower than 2s for 20-40s at
-    a time, and whole waves of proxies tore down in the same second while it
-    went on serving (evidence in the finding). They now only open a
-    CONFIRMATION phase whose verdict comes from the SAME gate the cold-start
-    lock trusts - ``_same_identity_backend_ready``, driven off-thread, so there
-    is no second busy-vs-dead policy: dead (no socket, no process of ours)
-    fails in ms, keeping the human-pinned ~12s hard-down window; busy gets
-    ``REUSE_PATIENCE_SECONDS`` of ``REUSE_PROBE_TIMEOUT`` probes and survives;
-    only a backend silent for that whole window is condemned, ~12s + 60s in.
+    The loop moved to ``backend_watchdog`` (F-856, which needed the lines); what
+    stays here is the only part of it that has to know which probes are ours —
+    the fast app-level check and the patient dead-vs-busy verdict, each driven
+    off-thread because both block (plan_M1 SS2.2 rejected alternative #3: run
+    inline they would freeze the stdio pump for up to ``LIVENESS_PROBE_TIMEOUT``
+    every tick). Bound at call time, so patching either probe still steers the
+    watchdog and an injected ``is_healthy``/``confirm_probe`` still wins.
     """
     import anyio
 
-    async def _ask(probe):
-        res = probe()
-        return await res if inspect.isawaitable(res) else res
-
     run = anyio.to_thread.run_sync
-    check = is_healthy or (lambda: run(_backend_http_ready, port))
-    confirm = confirm_probe or (lambda: run(_same_identity_backend_ready, port))
-    nap = sleep or anyio.sleep
-    consecutive = 0
-    while True:
-        await nap(interval)
-        if await _ask(check):
-            consecutive = 0
-            continue
-        consecutive += 1
-        _logger.warning(
-            "probe failed %d/%d on port %d", consecutive, failures_before_teardown, port
-        )
-        if consecutive < failures_before_teardown:
-            continue
-        if not await _ask(confirm):
-            _logger.warning("backend on port %d confirmed unusable", port)
-            return
-        _logger.info("backend on port %d was busy, not dead", port)
-        consecutive = 0
+    kwargs.setdefault("is_healthy", lambda: run(_backend_http_ready, port))
+    kwargs.setdefault("confirm_probe", lambda: run(_same_identity_backend_ready, port))
+    await backend_watchdog.watch_liveness(port, **kwargs)
 
 
 async def _proxy_streams(client_read, client_write, port: int) -> None:

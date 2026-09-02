@@ -82,6 +82,68 @@ load-bearing test checks **every** `find` literal against
 against a string the test composes — the one check Chrome's re-serialization
 cannot pass by accident.
 
+### Fixed — a starved machine no longer manufactures its own backend death (F-856)
+
+On 2026-09-02, on a machine at 3,445 processes with the CPU pegged at 100%,
+every Claude Code session sharing one backend saw `CONNECTION_CLOSED`. Nothing
+had died. The product's own logs show the failure assembling itself out of two
+halves that each look reasonable alone:
+
+* **A timeout was treated as evidence by a prober that was not being
+  scheduled.** F-820's confirmation gate correctly held off six times across
+  eleven minutes — `backend on port 52554 was busy, not dead` — and then, on the
+  seventh strike run, spent its whole 60-second patience without hearing the
+  backend and returned `confirmed unusable`. The backend had not changed; the
+  prober's 60 wall-clock seconds no longer contained 60 seconds of the attention
+  the window was sized for.
+* **The recovery that followed had a deadline the same starvation guaranteed it
+  would miss.** The replacement backend was born at 12:37:47 and did not serve
+  until ~12:39:41, because `process_cleanup`'s orphan reap ran *inside* the
+  lifespan the first `initialize` awaits — ~90 seconds of it, several 5s
+  force-kill waits per orphan — while the healing proxy held a 45s readiness
+  budget. The heal could not have succeeded at any level of patience.
+
+Both halves are fixed, and neither adds a knob or a second recovery path:
+
+* **Patience is now spent in fairly scheduled seconds.** The reuse gate's own
+  naps are the measurement — ask for 0.25s, wake at 0.25s + delta — so the
+  process reads its own lateness with a monotonic clock and no system polling.
+  Elapsed time is discounted by that lag before it is charged, bounded at 4x, so
+  a window widens *only* in the conditions that make a narrow window wrong; on an
+  idle machine the measurement is 1.0 and the behaviour is line-for-line what it
+  was. One home (`embedded/scheduling_lag.py`), applied at one site — the gate
+  three callers already share (the F-820 watchdog's confirmation, F-843's bridge
+  verdict, F-807's cold-start grace). `proxy_selfheal` is untouched: starvation
+  moves *when* a verdict is reached, never what happens after one.
+* **Readiness comes before reaping.** `process_cleanup.activate()` still arms
+  its atexit/signal handlers synchronously — one armed after the first browser
+  exists was not there when it counted — and hands the reap to
+  `embedded/serve_startup.py`, which runs it off the first-serve path. Nothing
+  about the reap needed to precede the first tool call: ownership, not timing, is
+  what makes it safe to kill a browser (F-808), the registry write drops reaped
+  ids *by name* through the shared read-merge-write, and the temp-profile sweep
+  already skips anything a live browser holds or anything younger than the orphan
+  age.
+* A **`proxy: patience extended under starvation`** lifecycle report (F-827)
+  fires at most once per window, and only on material lag, so the
+  CONDEMNED/HEALED/TEARDOWN series finally has a denominator for how often
+  starvation nearly caused one.
+
+Rejected on the way: "the recorded pid is alive, therefore not dead" as a veto
+over a condemnation — a *wedged* backend (dispatch loop dead, socket open,
+process resident) passes that forever, which is the exact failure F-301/F-501
+exist for. That signal already has its one sound use inside the gate, as the
+fast-fail for the genuinely dead. Also rejected: simply raising
+`REUSE_PATIENCE_SECONDS` and `HEAL_ATTEMPT_SECONDS`, which buys starvation
+tolerance by making every real hard-down slower to detect on every machine
+forever.
+
+Internal: the proxy's liveness watchdog moved out of `singleton.py` (at its LOC
+budget) into `embedded/backend_watchdog.py`, taking both probes as arguments so
+it stays a leaf; `singleton._watch_backend_liveness` remains as the wiring that
+knows which probes are ours. `process_cleanup.py`'s budget was ratcheted DOWN,
+1023 → 1017.
+
 ### Changed — the animations payload is sized for the model that reads it (F-853)
 
 The caps added in F-849 bounded the payload and still produced something no
