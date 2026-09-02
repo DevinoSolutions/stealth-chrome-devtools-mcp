@@ -430,9 +430,9 @@ def test_the_canary_has_no_write_permission_anywhere():
         perms = job.get("permissions")
         if perms is None:
             continue
-        assert "write" not in str({k: v for k, v in dict(perms).items() if k != "id-token"}), (
-            f"canary job {name!r} requests write permission: {perms}"
-        )
+        assert "write" not in str(
+            {k: v for k, v in dict(perms).items() if k != "id-token"}
+        ), f"canary job {name!r} requests write permission: {perms}"
 
 
 def test_the_canary_never_reaches_outside_the_run():
