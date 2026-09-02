@@ -48,6 +48,7 @@ from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     keyframe_offsets,
     specificity,
     split_css_list,
+    warn,
 )
 
 # Measured, not chosen round (R12). After the boilerplate hoist below a recipe
@@ -103,6 +104,24 @@ _EASING_WORDS = {
     "step-end",
 }
 _EASING_FUNCTIONS = ("cubic-bezier(", "steps(", "linear(")
+
+# ``!important`` belongs to the DECLARATION, not to any comma item of its value,
+# so no knob's token may include it. A ``replace`` that swallowed the priority
+# would turn "set the duration to 3s" into "set the duration to 3s AND stop
+# winning the cascade" — precisely the "applying it cannot drop the rest of the
+# declaration" promise this module exists to keep. It is not a rare path either:
+# ``winning_rule`` ranks ``!important`` FIRST, so an important rule is the one a
+# recipe most often points at.
+_PRIORITY = re.compile(r"\s*!\s*important\s*$", re.IGNORECASE)
+
+
+def value_body(value: str) -> str:
+    """A declaration's value without its ``!important`` priority.
+
+    A prefix of ``value``, so an offset into it is also an offset into ``value``
+    and ``_swap``'s arithmetic is unchanged.
+    """
+    return _PRIORITY.sub("", value)
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +343,22 @@ def rule_declaring(facts: Facts, name: str, pseudo: str = "") -> Record | None:
     return found
 
 
+def _layer_of(rule: Record) -> str | None:
+    """Which ``@layer`` block this rule sits in, or ``None`` when unlayered.
+
+    Membership only. Layer ORDER is deliberately not inferred: a bare
+    ``@layer a, b;`` statement declares it, that rule has no ``cssRules``, and
+    the collector's walk therefore never sees it. Which is exactly why a
+    disagreement between candidates is undecidable here rather than rankable —
+    the cascade puts every layered declaration below every unlayered one, so
+    ranking by specificity would hand the win to a rule that cannot render.
+    """
+    for context in as_strings(rule.get("at_rule_context")):
+        if context.strip().lower().startswith("@layer"):
+            return context.strip()
+    return None
+
+
 def contributed_value(knob: Knob, rule: Record, props: list[str]) -> str | None:
     """What ``rule`` gives this knob, or ``None`` when it cannot be read.
 
@@ -391,6 +426,16 @@ def winning_rule(facts: Facts, knob: Knob, rules: list[Record] | None = None) ->
         return (int(important), spec, position)
 
     _, rule, props = max(candidates, key=rank)
+    if len({_layer_of(other) for _, other, _ in candidates}) > 1:
+        return Winner(
+            rule,
+            props,
+            "low",
+            "these rules are not all in the same @layer: an unlayered "
+            "declaration beats a layered one however specific the layered "
+            "selector is, and the layer ORDER is not readable from here, so "
+            "which of them renders is not decidable — open them at source_ref",
+        )
     undecidable = any(
         specificity(as_text(other.get("selector_text"))) is None
         for _, other, _ in candidates
@@ -684,14 +729,17 @@ def knob_recipe(facts: Facts, knob: Knob, rules: list[Record] | None = None) -> 
     if not located.literal:
         return recipe
     literal, value = located.literal, located.value
+    # Spans are taken against the value WITHOUT its priority, so `!important`
+    # can never end up inside a token a caller is told to replace.
+    body = value_body(value)
     if prop == knob.longhand:
         # The knob's own longhand: the token is this animation's item of the
         # comma list. Taking the whole list would report "2s, 3s" as one
         # animation's duration and rewrite both.
-        start, end = item_span(value, knob.list_index)
+        start, end = item_span(body, knob.list_index)
     else:
-        item_start, item_end = item_span(value, knob.list_index)
-        inside = token_verdict(knob, value[item_start:item_end])
+        item_start, item_end = item_span(body, knob.list_index)
+        inside = token_verdict(knob, body[item_start:item_end])
         if not inside.found:
             recipe["confidence"] = inside.confidence
             recipe["note"] = inside.reason
@@ -723,7 +771,9 @@ def keyframe_recipe(
     if not located.literal:
         return recipe
     recipe["find_unique_in_rule"] = located.confidence == "high"
-    recipe.update(_swap(located.literal, located.value, 0, len(located.value)))
+    recipe.update(
+        _swap(located.literal, located.value, 0, len(value_body(located.value)))
+    )
     return recipe
 
 
@@ -769,6 +819,21 @@ def build_edits(
         block = keyframe_span_for(span, offset)
         for prop, value in as_obj(frame.get("properties")).items():
             if len(edits) >= EDIT_CAP:
+                # Announced, never silent (F-853/F-855). ``caps.truncated``
+                # reports animations and keyframes only, so a model handed 20 of
+                # 38 recipes would otherwise conclude the keyframes it can find
+                # no recipe for are not editable. EDIT_CAP is not caller-
+                # settable, so the remedy named here is one the reader has.
+                warn(
+                    record,
+                    "edit_cap_reached",
+                    f"edit recipes truncated at {EDIT_CAP}; the keyframes "
+                    f"without a recipe are still listed in this record's "
+                    f"keyframes array, and their @keyframes block is at "
+                    f"source_ref — edit it there. Extract a narrower selector "
+                    f"for fewer animations per call.",
+                    {"cap": EDIT_CAP, "name": record.get("name")},
+                )
                 return edits
             recipe = keyframe_recipe(source, block, prop, as_text(value))
             recipe["knob"] = f"keyframe[{frame['offset']}].{prop}"

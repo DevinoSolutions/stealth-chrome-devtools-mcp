@@ -354,17 +354,25 @@ def build_animations(facts: Facts, caps: Caps) -> tuple[list[Record], bool]:
     for a model that cannot know which duration belongs to which name.
     """
     computed = as_obj(facts.get("computed"))
-    names = [
-        name
-        for name in split_css_list(as_text(computed.get("animation_name")))
-        if name and name != "none"
+    # The SLOT index is kept, not the position in the filtered list. Every other
+    # ``animation-*`` list stays as long as ``animation-name`` and is read
+    # positionally, so dropping a ``none`` slot without keeping its index hands
+    # every later animation the switched-off slot's duration, delay, easing and
+    # iteration count -- and addresses its edit recipe at the wrong comma item.
+    # That is F-847's list-cycling defect returning by a side door: the cycling
+    # rule applied correctly, to the wrong index.
+    declared = split_css_list(as_text(computed.get("animation_name")))
+    slots = [
+        (slot, name) for slot, name in enumerate(declared) if name and name != "none"
     ]
-    truncated = len(names) > caps.animations
+    truncated = len(slots) > caps.animations
     rule = applying_rule(facts)
     records: list[Record] = []
-    for index, name in enumerate(names[: caps.animations]):
+    # ``id`` counts RECORDS, not slots: ``build_waapi`` numbers the live records
+    # from ``len(animations)``, so a hole here would collide with anim-N.
+    for position, (index, name) in enumerate(slots[: caps.animations]):
         record: Record = {
-            "id": f"anim-{index}",
+            "id": f"anim-{position}",
             "kind": "css-animation",
             "name": name,
             "target": {"relation": "self", "selector": facts.get("selector")},
