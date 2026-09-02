@@ -97,9 +97,15 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # re-install guard spends +3 (one loop line, two docstring lines for why a
     # second install must not record our own handler). 1023 stays the actual
     # post-ruff-format LOC, so this is a ratchet to actual, NOT a raise.
+    # plan_F856 RATCHETS DOWN 1023 -> 1017. `activate()` grew +6 (the reap moved
+    # to serve_startup.after_serving, and the WHY of an ordering change has to
+    # sit with it); that was paid for twice over by collapsing two boilerplate
+    # Args:/Returns: blocks that only restated their own signatures
+    # (_extract_profile_dir_from_cmdline, untrack_browser_process) — the same
+    # payment mechanism the plan_F809 row above already records. Cap == actual.
     "embedded/process_cleanup.py": (
-        1023,
-        "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809",
+        1017,
+        "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809 + plan_F856",
     ),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
     # + honest message + debug_logger.log_info on failure) + 1 (plan_M4ph1
