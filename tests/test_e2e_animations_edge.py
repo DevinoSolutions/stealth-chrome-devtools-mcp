@@ -24,6 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from e2e_helpers import (
     get_fn,
@@ -54,9 +55,18 @@ def author_bytes() -> str:
     return PAGE.read_text(encoding="utf-8")
 
 
-@pytest.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def payloads(fixture_app_server):
-    """One extraction per target element, taken in a single browser session."""
+    """One extraction per target element, taken in a single browser session.
+
+    ``loop_scope`` is stated rather than inherited. This is the suite's only
+    non-function-scoped async fixture, and pytest-asyncio currently falls the
+    loop scope back to the caching scope only under a deprecation warning
+    (``asyncio_default_fixture_loop_scope`` is unset); once that default flips
+    to function scope, the browser would be spawned on a loop that closes
+    before the teardown that has to await ``close_instance`` on it. Stating it
+    keeps the session's setup and teardown on one loop under either default.
+    """
     spawn, close = get_fn("spawn_browser"), get_fn("close_instance")
     extract = get_fn("extract_element_animations")
     instance = await spawn(headless=True, **sandbox_kwargs())
