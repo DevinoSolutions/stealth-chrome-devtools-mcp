@@ -98,6 +98,7 @@ def test_publish_requires_the_green_gate_and_downloads_that_runs_artifact():
         step
         for step in publish["steps"]
         if "download-artifact" in str(step.get("uses", ""))
+        or "/artifact/download@" in str(step.get("uses", ""))
     ]
     assert len(downloads) == 1, "publish must download the one gated dist artifact"
     assert downloads[0]["with"]["name"] == "dist"
@@ -308,7 +309,10 @@ def test_every_emitting_job_uploads_what_it_emitted(gate_jobs):
         uploads = [
             s
             for s in steps
-            if str(s.get("uses", "")).startswith("actions/upload-artifact")
+            if (
+                str(s.get("uses", "")).startswith("actions/upload-artifact")
+                or str(s.get("uses", "")).startswith("DevinoSolutions/artifact/upload")
+            )
             and s.get("with", {}).get("path") == "release-evidence"
         ]
         assert uploads, f"job {name!r} emits a record but never uploads it"
@@ -416,14 +420,17 @@ def test_the_canary_reuses_the_gate_instead_of_restating_it(canary_jobs):
 
 def test_the_canary_has_no_write_permission_anywhere():
     doc = _load(CANARY)
-    assert doc["permissions"] == {"contents": "read"}, (
+    # `id-token: write` is not a repository write scope: it only lets the job
+    # mint an OIDC token, which DevinoSolutions/artifact exchanges for
+    # short-lived credentials on the self-hosted artifact store.
+    assert doc["permissions"] == {"contents": "read", "id-token": "write"}, (
         "the canary is read-only by construction, not by convention"
     )
     for name, job in doc["jobs"].items():
         perms = job.get("permissions")
         if perms is None:
             continue
-        assert "write" not in str(perms), (
+        assert "write" not in str({k: v for k, v in dict(perms).items() if k != "id-token"}), (
             f"canary job {name!r} requests write permission: {perms}"
         )
 
