@@ -1,6 +1,86 @@
 # Changelog
 
-## Unreleased
+## 2.1.0
+
+Animation extraction is rebuilt as **schema v2** (F-846..F-855), and the result
+was then audited adversarially before shipping. The new capability plus the
+breaking payload change for `extract_element_animations` is why this is a minor
+bump rather than a patch.
+
+### Fixed — five defects schema v2's own tests could not see (audit of PR #72)
+
+An independent adversarial review audited the animation-parsing work from a
+clean worktree, under the rule that nothing changes on a code-read alone: every
+fix below is here because a new test reproduced it first, red on the merged code
+and green after. All five share one signature — the payload was **confident and
+wrong**, which F-850's own premise ranks below saying nothing — and in each case
+the fact needed to catch it was already *in* the payload, just never read.
+
+- **A `none` slot shifted every list after it.** Filtering
+  `animation-name: fade, none, spin` down to the live names dropped the slot
+  *index* along with the slot, so `spin` was handed slot 1's duration, delay,
+  easing and iteration count, and its edit recipe addressed the wrong comma item
+  of `animation-duration: 1s, 2s, 3s` — at `confidence: "high"`. F-847's
+  list-cycling rule was applied correctly, to the wrong index. The list index
+  now stays the CSS slot, while a record's `id` counts records, because
+  `build_waapi` numbers live records from the record count and a hole here would
+  collide with them.
+- **`!important` was swallowed by the replace template.** For
+  `animation-duration: 2s !important` the token was `2s !important` and the
+  replacement `animation-duration: {{NEW_VALUE}}`, so applying the recipe
+  silently dropped the priority — turning a retime into a cascade edit, and
+  breaking F-852's promise that `replace` carries the rest of the declaration.
+  Not a rare path either: `winning_rule` ranks `!important` first, so an
+  important rule is the one a recipe most often points at. Spans are now taken
+  against the value without its priority, at both knob branches and in the
+  keyframe recipe.
+- **`@layer` reversed the cascade unnoticed.** Ranking went `!important` →
+  specificity → document order and never read `at_rule_context`, which the
+  recipe itself carries. An unlayered declaration beats a layered one however
+  specific the layered selector is, so a layered `#hero` outranked an unlayered
+  `.hero` here and lost in the browser — and the computed-value cross-check
+  cannot catch it when both declare the same value. Layer *order* is not
+  recoverable (a bare `@layer a, b;` statement has no `cssRules`, so the
+  collector's walk never sees it), so candidates spanning different layers now
+  degrade to a rule pointer at `confidence: "low"` — the vocabulary the module
+  already had for `:is`/`:where`.
+- **The 20-recipe edit cap truncated silently.** `caps.truncated` reports
+  animations and keyframes only, so 20 of 38 recipes arrived with nothing said —
+  against F-853 and F-855, and leaving a model to conclude that the keyframes it
+  can find no recipe for are not editable. A per-record `edit_cap_reached`
+  warning now names a remedy the reader actually has: `EDIT_CAP` is not
+  caller-settable, so the message points at the `@keyframes` block's
+  `source_ref` and at narrowing the selector, rather than inviting a raise.
+- **A shadow host was reported as static.** `getAnimations({subtree: true})`
+  does not cross a shadow boundary and `document.styleSheets` does not list a
+  shadow root's `<style>`, so a host whose shadow content was visibly animating
+  returned `has_motion: false`, zero animations and not one warning. It does not
+  have to be captured; it has to be admitted. A named
+  `shadow_root_not_traversed` warning now says how many roots were skipped and,
+  where the root is open, how many elements inside them are animating right now.
+
+**Reported, not fixed** — both degrade safely, so neither emits a wrong value:
+
+- Three distinct causes — a value behind `var()`, an inline `style=""`
+  animation, and an adopted constructed stylesheet — all share the one fallback
+  reason "likely cross-origin; edit that instead", which sends a reader hunting
+  for a file that is not involved. The payload already carries the facts that
+  tell the three apart.
+- `editable` is a whole-record verdict, so a record whose timing knobs are all
+  pointers but whose keyframes are editable emits no `editable: false`. Pinned
+  as a test rather than changed.
+
+**Tests:** 50 new. `tests/test_animation_v2_audit.py` adds 28 hermetic — 9
+proved the defects above by failing on the merged code, and the other 19 pin
+contracts that were already correct, each proved falsifiable by briefly mutating
+the product (the red condition is documented in the file). Notably, `var()`
+degradation survived removing `token_verdict` alone: it is defense-in-depth, and
+only lied once the computed-value cross-check was also removed.
+`tests/test_e2e_animations_edge.py` adds 22 against real Chrome, and its
+load-bearing test checks **every** `find` literal against
+`tests/fixture_app/animations_edge.html`'s own bytes read off disk, never
+against a string the test composes — the one check Chrome's re-serialization
+cannot pass by accident.
 
 ### Changed — the animations payload is sized for the model that reads it (F-853)
 
