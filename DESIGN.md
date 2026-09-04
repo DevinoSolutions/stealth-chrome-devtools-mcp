@@ -481,8 +481,14 @@ it to a raise would be the defect:
 - result-envelope success dicts: `execute_script`, `create_python_binding`
   (the `{"success": …, "result"/"error": …}` shape a caller destructures);
 - the diagnostic dict: `validate_browser_environment_tool`;
-- input-validation value-returns: `expand_children`, `clone_element_to_file` bad-arg
-  paths;
+- input-validation value-returns: `expand_children`'s bad-arg paths (pinned by
+  `test_tool_errors.py::test_expand_children_invalid_arg_returns_error_dict`);
+- embedded failure RECORDS inside a payload the caller asked for — not tool returns:
+  `cdp_element_cloner.extract_complete_element`'s per-aspect isolation (a failed
+  aspect is embedded so the other five still land) and `_get_element_html`'s
+  sub-field degradation. Both are named in
+  `test_cloner_error_convention.py::KEEP_EMBEDDED_ERROR_RECORDS`, which is also the
+  AST gate that keeps every OTHER cloner site on the raise;
 - deliberate resilience/fallbacks: `query_elements` (loop resilience),
   `get_response_content` (base64 alternative / nullable), `get_instance_state`
   (blessed partial), `clear_debug_view` (bool), `export_debug_logs` (guidance string).
@@ -490,6 +496,21 @@ it to a raise would be the defect:
 If you are adding a tool, the default is *raise `ToolError` on failure, return the
 value on success*. Reach for a dict only to join one of the KEEP families above, and
 say so.
+
+**F-858 (the cloner sweep).** The cloner subsystem was the last block still on the
+retired shape: 29 `return {"error": ...}` sites across the engine, the progressive
+adapter and the to-file adapter. All now raise, with message text byte-preserved.
+Two consequences worth knowing before you touch it:
+
+* **Per-aspect isolation did not change home.** `extract_complete_element` already
+  gathered with `return_exceptions=True`, so an aspect that RAISES lands in exactly
+  the record an aspect that RETURNED an error dict used to land in. There is one
+  isolation mechanism, not two.
+* **`clone_element_to_file` lost its KEEP.** Its bad-arg path returned
+  `{"error": "Invalid extraction_options JSON"}` while its sibling
+  `clone_element_complete` — same argument, same `json.loads`, same failure —
+  raised. One question, two answers, is convention 4's defect; it raises now.
+  `expand_children` keeps its KEEP because a test, not just this list, pins it.
 
 ---
 

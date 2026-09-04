@@ -88,9 +88,9 @@ Package root: `src/stealth_chrome_devtools_mcp/`. Two console scripts (`pyprojec
 **Cloner subsystem** (one engine + thin adapters + disk storage)
 | File | Owns |
 |---|---|
-| `cdp_element_cloner.py` | **THE cloner engine** (`CDPElementCloner`) — the complete-element **clone schema** (its shape lives here, **not** in `models.py`) + every aspect (`styles` via CDP; `structure`/`events`/`animations`/`assets`/`related_files` via JS-eval) |
-| `file_based_element_cloner.py` | thin to-file adapter (`FileBasedElementCloner`, name KEPT) — owns `output_dir` only |
-| `progressive_element_cloner.py` | thin adapter (`ProgressiveElementCloner`) — `expand_*` slices from cached extraction |
+| `cdp_element_cloner.py` | **THE cloner engine** (`CDPElementCloner`) — the complete-element **clone schema** (its shape lives here, **not** in `models.py`) + every aspect (`styles` via CDP; `structure`/`events`/`animations`/`assets`/`related_files` via JS-eval). Every aspect **raises** `ToolError` on failure (F-858, convention 2); the only two `{"error": ...}` dicts left are EMBEDDED payload records, not tool returns — `extract_complete_element`'s per-aspect isolation and `_get_element_html`'s sub-field degradation, both named in `tests/test_cloner_error_convention.py` and gated there by AST |
+| `file_based_element_cloner.py` | thin to-file adapter (`FileBasedElementCloner`, name KEPT) — owns `output_dir` only. A delegated extraction failure **propagates** (F-858): it used to be swallowed into a `{file_path, …}` answer with an empty summary, i.e. a file claiming to be a clone that failed |
+| `progressive_element_cloner.py` | thin adapter (`ProgressiveElementCloner`) — `expand_*` slices from cached extraction; `_require_stored` is the one store-miss guard (raises, F-858) |
 | `clone_storage.py` | on-disk **profile/clone quota + GC** (NOT extraction — see glossary "clone") |
 | `aspect_options.py` | **THE one home for "a caller passed an option this aspect no longer has"** (F-851) — the retired-option table (`RETIRED`), the signature filter (`accepted`) and the per-aspect warning (`note`). A NAMED tolerance, never a widened `except`: a stale kwarg used to raise `TypeError` at the kwarg-binding site, which is OUTSIDE `gather`'s per-aspect isolation, so one retired string failed the whole complete clone |
 | `js/` | the 7 browser-side extraction scripts (`extract_styles.js`, `extract_structure.js`, `extract_events.js`, `extract_animations.js`, `extract_assets.js`, `extract_related_files.js`, `comprehensive_element_extractor.js`) |

@@ -245,10 +245,18 @@ ban-relative-imports = "all"
 "src/stealth_chrome_devtools_mcp/embedded/cdp_element_cloner.py" = [
     "ANN001", "ANN202", "ANN204", "ARG002", "ASYNC210", "BLE001", "C901",
     "DTZ005", "E501", "PERF401", "PLR0912", "PLR0913", "PLR2004", "TID251",
-    "TRY300",
+    "TRY300", "TRY301",
 ]  # plan_M5b (canonical engine; absorbed element_cloner.py's verbatim-moved
 # JS/HTTP-extraction debt at the 5->1 consolidation — element_cloner.py deleted
 # in M5b-5 with its per-file-ignore entry, so net repo debt is unchanged)
+# + TRY301 (F-858): the aspect methods joined the ONE error convention, so each
+# validates its JS-eval answer with `raise ToolError(...)` INSIDE the try that
+# converts an operational failure — 15 sites, past the ">3 sites → file-wide"
+# rule above. Same code, same reason, already file-wide on server.py,
+# dom_handler.py and python_binding.py, and inline-noqa'd at the four
+# browser_manager/cdp_function_executor/dynamic_hook_system sites. TRY301's
+# "abstract the raise to an inner function" would put each aspect's answer
+# check somewhere other than the aspect — a second home for one decision.
 "src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py" = [
     "ANN001", "ANN202", "ANN204", "BLE001", "DTZ005", "DTZ006", "E402",
     "PLR0913", "PTH123", "RET504", "RUF013", "TID251", "TID252", "TRY300",

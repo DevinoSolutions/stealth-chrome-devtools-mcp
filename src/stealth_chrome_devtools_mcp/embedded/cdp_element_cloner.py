@@ -36,6 +36,7 @@ from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     query_selector_all,
     resolve_element,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 
 class CDPElementCloner:
@@ -79,7 +80,7 @@ class CDPElementCloner:
             await tab.send(uc.cdp.runtime.enable())
             nodes = await query_selector_all(tab, selector)
             if not nodes:
-                return {"error": f"Element not found: {selector}"}
+                raise ToolError(f"Element not found: {selector}")
             node_id = nodes[0]
             element_html = await self._get_element_html(tab, node_id)
             computed_styles = await self._get_computed_styles_cdp(tab, node_id)
@@ -113,11 +114,15 @@ class CDPElementCloner:
                 "CDP extraction completed successfully",
             )
             return result
+        except ToolError:
+            # A missing selector is not a transport failure — relabelling it
+            # "CDP extraction failed" would name a cause it does not have.
+            raise
         except Exception as e:
             debug_logger.log_error(
                 "cdp_cloner", "extract_complete", f"CDP extraction failed: {e!s}"
             )
-            return {"error": f"CDP extraction failed: {e!s}"}
+            raise ToolError(f"CDP extraction failed: {e!s}") from e
 
     async def _get_element_html(self, tab, node_id) -> dict[str, Any]:
         """
@@ -151,6 +156,13 @@ class CDPElementCloner:
                 else [],
             }
         except Exception as e:
+            # KEEP (F-858): an EMBEDDED payload record, not a tool return. This
+            # lands in the clone's ``element.html`` field beside siblings that
+            # degrade to ``{}`` (_get_computed_styles_cdp) and ``[]``
+            # (_get_event_listeners_cdp) — a per-node CDP miss must not take the
+            # surrounding clone with it, and this is the only one of the three
+            # whose shape can say WHAT went wrong. Named in
+            # tests/test_cloner_error_convention.py::KEEP_EMBEDDED_ERROR_RECORDS.
             debug_logger.log_error("cdp_cloner", "_get_element_html", f"Failed: {e!s}")
             return {"error": str(e)}
 
@@ -414,7 +426,11 @@ class CDPElementCloner:
     # onto. Transport per aspect (§2.1 + 2026-07-18 structure ruling): styles
     # via CDP; structure/events/animations/assets/related_files via JS-eval
     # (bounded by _with_cdp_timeout; zero capability loss). Every public aspect
-    # method is a thin ``try/except -> {"error": ...}`` delegator.
+    # method is a thin ``try/except -> raise ToolError`` delegator (F-858: the
+    # ONE error convention; the former ``{"error": ...}`` returns were a second
+    # one). The complete-clone composer keeps per-aspect isolation through the
+    # ``return_exceptions=True`` gather it already had, so a raising aspect is
+    # embedded as ``result[aspect]["error"]`` exactly as before.
     # =====================================================================
 
     async def _resolve_node_id(self, tab, element=None, selector: str | None = None):
@@ -457,6 +473,17 @@ class CDPElementCloner:
             js_code = js_code.replace(placeholder_key, placeholder_value)
 
         return js_code
+
+    @staticmethod
+    def _unexpected_type(value: object) -> ToolError:
+        """THE one way an aspect reports a payload shape it cannot read (F-858).
+
+        The offending value rides in the message because a raise has no second
+        field to carry it — it used to sit in a ``raw_data`` key beside the
+        error, and dropping it would leave "unexpected type" undebuggable. Same
+        400-char clamp the animations aspect already applied, now uniform.
+        """
+        return ToolError(f"Unexpected return type: {type(value)} (raw: {value!s:.400})")
 
     def _convert_nodriver_result(self, data):
         """Convert nodriver's array result format back to a dict."""
@@ -508,7 +535,7 @@ class CDPElementCloner:
 
             node_id = await self._resolve_node_id(tab, element, selector)
             if node_id is None:
-                return {"error": "Element not found"}
+                raise ToolError("Element not found")
 
             result = {"method": "cdp_direct"}
 
@@ -581,9 +608,13 @@ class CDPElementCloner:
                         )
 
             return result
+        except ToolError:
+            # An unresolved selector is not a CDP transport failure — see
+            # extract_complete_element_cdp for the same pass-through.
+            raise
         except Exception as e:
             debug_logger.log_error("cdp_cloner", "extract_styles", e)
-            return {"error": f"CDP extraction failed: {e!s}"}
+            raise ToolError(f"CDP extraction failed: {e!s}") from e
 
     async def extract_element_structure(
         self,
@@ -597,10 +628,9 @@ class CDPElementCloner:
     ) -> dict[str, Any]:
         """Extract HTML structure + DOM info via JS-eval (verbatim move from
         ``ElementCloner``; kept on JS per the 2026-07-18 ruling — zero loss)."""
+        if not selector:
+            raise ToolError("Selector is required")
         try:
-            if not selector:
-                return {"error": "Selector is required"}
-
             options = {
                 "include_children": include_children,
                 "include_attributes": include_attributes,
@@ -612,20 +642,17 @@ class CDPElementCloner:
             structure_data = await tab.evaluate(js_code)
 
             if hasattr(structure_data, "exception_details"):
-                return {
-                    "error": f"JavaScript error: {structure_data.exception_details}"
-                }
+                raise ToolError(f"JavaScript error: {structure_data.exception_details}")
             if isinstance(structure_data, dict):
                 return structure_data
             if isinstance(structure_data, list):
                 return self._convert_nodriver_result(structure_data)
-            return {
-                "error": f"Unexpected return type: {type(structure_data)}",
-                "raw_data": str(structure_data),
-            }
+            raise self._unexpected_type(structure_data)
+        except ToolError:
+            raise
         except Exception as e:
             debug_logger.log_error("cdp_cloner", "extract_structure", e)
-            return {"error": str(e)}
+            raise ToolError(str(e)) from e
 
     async def extract_element_events(
         self,
@@ -639,10 +666,9 @@ class CDPElementCloner:
     ) -> dict[str, Any]:
         """Extract event listeners + JS handlers via JS-eval (verbatim move;
         KEEP-JS per gate Q1 — CDP cannot see inline/framework handlers)."""
+        if not selector:
+            raise ToolError("Selector is required")
         try:
-            if not selector:
-                return {"error": "Selector is required"}
-
             options = {
                 "include_inline": include_inline,
                 "include_listeners": include_listeners,
@@ -654,18 +680,17 @@ class CDPElementCloner:
             event_data = await tab.evaluate(js_code)
 
             if hasattr(event_data, "exception_details"):
-                return {"error": f"JavaScript error: {event_data.exception_details}"}
+                raise ToolError(f"JavaScript error: {event_data.exception_details}")
             if isinstance(event_data, dict):
                 return event_data
             if isinstance(event_data, list):
                 return self._convert_nodriver_result(event_data)
-            return {
-                "error": f"Unexpected return type: {type(event_data)}",
-                "raw_data": str(event_data),
-            }
+            raise self._unexpected_type(event_data)
+        except ToolError:
+            raise
         except Exception as e:
             debug_logger.log_error("cdp_cloner", "extract_events", e)
-            return {"error": str(e)}
+            raise ToolError(str(e)) from e
 
     async def extract_element_animations(
         self,
@@ -685,9 +710,9 @@ class CDPElementCloner:
         derivation lives in ``animation_analysis``. Engine -> analysis is the
         only call path, so DOM extraction keeps its one home.
         """
+        if not selector:
+            raise ToolError("Selector is required")
         try:
-            if not selector:
-                return {"error": "Selector is required"}
             options = {
                 "include_subtree": include_subtree,
                 "include_waapi": include_waapi,
@@ -699,19 +724,21 @@ class CDPElementCloner:
             js_code = self._load_js_file("extract_animations.js", selector, options)
             raw = await tab.evaluate(js_code)
             if hasattr(raw, "exception_details"):
-                return {"error": f"JavaScript error: {raw.exception_details}"}
+                raise ToolError(f"JavaScript error: {raw.exception_details}")
             if not isinstance(raw, str):
-                return {
-                    "error": f"Unexpected return type: {type(raw)}",
-                    "raw_data": str(raw)[:400],
-                }
+                raise self._unexpected_type(raw)
             facts = json.loads(raw)
             if "error" in facts:
-                return facts
+                # The collector reports its own miss inside the JSON. Q4 asked
+                # this aspect to keep PARITY with the other five; the five now
+                # raise, so parity is a raise carrying the collector's words.
+                raise ToolError(str(facts["error"]))
             return animation_analysis.analyze(facts, options)
+        except ToolError:
+            raise
         except Exception as e:
             debug_logger.log_error("cdp_cloner", "extract_animations", e)
-            return {"error": str(e)}
+            raise ToolError(str(e)) from e
 
     async def extract_element_assets(
         self,
@@ -725,15 +752,14 @@ class CDPElementCloner:
     ) -> dict[str, Any]:
         """Extract element assets (images/backgrounds/fonts) via JS-eval
         (verbatim move; KEEP-JS — CDP has no media/font enumerator)."""
+        if not selector:
+            raise ToolError("Selector is required")
         try:
-            if not selector:
-                return {"error": "Selector is required"}
-
             js_dir = Path(__file__).parent / "js"
             js_file = js_dir / "extract_assets.js"
 
             if not js_file.exists():
-                return {"error": f"JavaScript file not found: {js_file}"}
+                raise ToolError(f"JavaScript file not found: {js_file}")
 
             with js_file.open(encoding="utf-8") as f:
                 js_code = f.read()
@@ -754,16 +780,13 @@ class CDPElementCloner:
 
             asset_data = await tab.evaluate(js_code)
             if hasattr(asset_data, "exception_details"):
-                return {"error": f"JavaScript error: {asset_data.exception_details}"}
+                raise ToolError(f"JavaScript error: {asset_data.exception_details}")
             if isinstance(asset_data, dict):
                 pass
             elif isinstance(asset_data, list):
                 asset_data = self._convert_nodriver_result(asset_data)
             else:
-                return {
-                    "error": f"Unexpected return type: {type(asset_data)}",
-                    "raw_data": str(asset_data),
-                }
+                raise self._unexpected_type(asset_data)
 
             if fetch_external and isinstance(asset_data, dict):
                 asset_data["external_assets"] = {}
@@ -785,9 +808,11 @@ class CDPElementCloner:
                         )
 
             return asset_data
+        except ToolError:
+            raise
         except Exception as e:
             debug_logger.log_error("cdp_cloner", "extract_assets", e)
-            return {"error": str(e)}
+            raise ToolError(str(e)) from e
 
     async def extract_related_files(
         self,
@@ -806,7 +831,7 @@ class CDPElementCloner:
             js_file = js_dir / "extract_related_files.js"
 
             if not js_file.exists():
-                return {"error": f"JavaScript file not found: {js_file}"}
+                raise ToolError(f"JavaScript file not found: {js_file}")
 
             with js_file.open(encoding="utf-8") as f:
                 js_code = f.read()
@@ -822,24 +847,23 @@ class CDPElementCloner:
 
             file_data = await tab.evaluate(js_code)
             if hasattr(file_data, "exception_details"):
-                return {"error": f"JavaScript error: {file_data.exception_details}"}
+                raise ToolError(f"JavaScript error: {file_data.exception_details}")
             if isinstance(file_data, dict):
                 pass
             elif isinstance(file_data, list):
                 file_data = self._convert_nodriver_result(file_data)
             else:
-                return {
-                    "error": f"Unexpected return type: {type(file_data)}",
-                    "raw_data": str(file_data),
-                }
+                raise self._unexpected_type(file_data)
 
             if follow_imports and max_depth > 0 and isinstance(file_data, dict):
                 await self._fetch_and_analyze_files(file_data)
 
             return file_data
+        except ToolError:
+            raise
         except Exception as e:
             debug_logger.log_error("cdp_cloner", "extract_related_files", e)
-            return {"error": str(e)}
+            raise ToolError(str(e)) from e
 
     async def _fetch_and_analyze_files(self, file_data: dict) -> None:
         """Fetch + analyze external CSS/JS for extra context (verbatim move)."""
@@ -962,6 +986,12 @@ class CDPElementCloner:
             )
             for i, (name, _) in enumerate(tasks):
                 if isinstance(results[i], Exception):
+                    # KEEP (F-858): per-aspect ISOLATION, not a second error
+                    # convention. ``return_exceptions=True`` above is what makes
+                    # a raising aspect (every aspect now raises) land here as an
+                    # EMBEDDED record instead of failing the whole clone — the
+                    # same one home the isolation already had. Named in
+                    # tests/test_cloner_error_convention.py.
                     result[name] = {"error": str(results[i])}
                 else:
                     result[name] = results[i]
@@ -973,8 +1003,10 @@ class CDPElementCloner:
             )
             return result
         except Exception as e:
+            # Reached only when COMPOSITION itself fails — an aspect's own
+            # failure is isolated above and never arrives here.
             debug_logger.log_error("cdp_cloner", "extract_complete_element", e)
-            return {"error": str(e)}
+            raise ToolError(str(e)) from e
 
 
 cdp_element_cloner = CDPElementCloner()
