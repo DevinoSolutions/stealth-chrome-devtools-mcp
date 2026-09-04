@@ -128,14 +128,14 @@ async def test_declarations_still_reach_the_page_unwrapped():
 
 
 @pytest.mark.asyncio
-async def test_the_tool_returns_the_value_of_a_top_level_return(monkeypatch):
+async def test_the_tool_returns_the_value_of_a_top_level_return(patched_server):
     """End of the path the Sentry issue was reported from: the MCP tool answers
     with the script's value instead of raising."""
     tab = FakeTab(
         evaluate_result=ILLEGAL_RETURN,
         evaluate_map={WRAPPED: js_result("Fake Page", type_="string")},
     )
-    monkeypatch.setattr(server, "browser_manager", FakeBrowserManager(tabs={"i1": tab}))
+    patched_server(browser_manager=FakeBrowserManager(tabs={"i1": tab}))
 
     result = await call_tool(
         server, "execute_script", instance_id="i1", script="return document.title;"

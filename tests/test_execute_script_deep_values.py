@@ -137,10 +137,10 @@ async def test_a_legitimately_falsy_value_survives(answer, expected):
 
 
 @pytest.mark.asyncio
-async def test_a_falsy_value_reaches_the_tool_payload(monkeypatch):
+async def test_a_falsy_value_reaches_the_tool_payload(patched_server):
     """End of the path a caller sees: ``success`` true and the value intact."""
     tab = FakeTab(evaluate_result=js_result(0, type_="number"))
-    monkeypatch.setattr(server, "browser_manager", FakeBrowserManager(tabs={"i1": tab}))
+    patched_server(browser_manager=FakeBrowserManager(tabs={"i1": tab}))
 
     result = await call_tool(
         server, "execute_script", instance_id="i1", script="document.scrollTop"

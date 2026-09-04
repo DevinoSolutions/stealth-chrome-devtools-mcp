@@ -10,7 +10,7 @@ benign async/DOM code is allowed through unchanged.
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import server
-from stealth_chrome_devtools_mcp.embedded.server import (
+from stealth_chrome_devtools_mcp.embedded.tool_runtime import (
     EXECUTE_SCRIPT_TIMEOUT,
     MAX_USER_SCRIPT_BYTES,
     _script_rejection_reason,

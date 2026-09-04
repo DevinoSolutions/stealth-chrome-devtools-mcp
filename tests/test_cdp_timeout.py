@@ -17,13 +17,13 @@ import pytest
 from pydantic import ValidationError
 
 from stealth_chrome_devtools_mcp.embedded.models import NavigationOptions
-from stealth_chrome_devtools_mcp.embedded.server import (
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_runtime import (
     CDP_OPERATION_TIMEOUT,
     MAX_TIMEOUT_MS,
     _clamp_timeout,
     _with_cdp_timeout,
 )
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 # ---------------------------------------------------------------------------
 # Unit tests: _with_cdp_timeout mechanism
@@ -436,20 +436,34 @@ class TestWithCdpTimeoutIsCanonical:
 
     EXEMPTION_MARKER = "# F-164 non-CDP"
 
-    def _server_source_lines(self):
-        import stealth_chrome_devtools_mcp.embedded.server as srv
+    def _tool_source_lines(self):
+        """Every file that can hold a tool body, not just ``server.py``.
 
-        return Path(srv.__file__).read_text(encoding="utf-8").splitlines()
+        plan_SERVERSPLIT §1.4: ``_with_cdp_timeout`` now lives in
+        ``tool_runtime.py`` and the 94 bodies move into ``tool_sections/`` one
+        section at a time. A guard hard-wired to ``server.py`` would not fail
+        when the code it polices leaves that file — it would pass, over an
+        emptier file. ``tests/source_scan.py`` derives the set and carries the
+        floor assertion that makes a collapsed set red rather than green.
+        """
+        from source_scan import tool_source_files
+
+        return {
+            path: path.read_text(encoding="utf-8").splitlines()
+            for path in tool_source_files()
+        }
 
     def _wrapper_line_range(self, lines):
         """Return the [start, end) line index range of the ``_with_cdp_timeout``
-        definition (its own ``asyncio.wait_for`` is the canonical one)."""
+        definition in *lines*, or ``None`` if this file does not define it (its
+        own ``asyncio.wait_for`` is the canonical one)."""
         start = None
         for i, line in enumerate(lines):
             if re.match(r"async def _with_cdp_timeout\b", line):
                 start = i
                 break
-        assert start is not None, "_with_cdp_timeout must be defined in server.py"
+        if start is None:
+            return None
         end = len(lines)
         for j in range(start + 1, len(lines)):
             # next module-level (column-0) statement ends the function body.
@@ -459,30 +473,39 @@ class TestWithCdpTimeoutIsCanonical:
         return start, end
 
     def test_with_cdp_timeout_defined_exactly_once(self):
-        lines = self._server_source_lines()
-        defs = [
-            line
-            for line in lines
-            if re.match(r"\s*async def _with_cdp_timeout\b", line)
-        ]
-        assert len(defs) == 1, f"expected one _with_cdp_timeout, found {len(defs)}"
+        """Exactly once ACROSS the tool-source set — it lives in tool_runtime.py
+        now, and a copy re-appearing in a section module is the defect."""
+        by_file = self._tool_source_lines()
+        defs = {
+            path: [
+                line
+                for line in lines
+                if re.match(r"\s*async def _with_cdp_timeout\b", line)
+            ]
+            for path, lines in by_file.items()
+        }
+        total = sum(len(v) for v in defs.values())
+        assert total == 1, (
+            f"expected one _with_cdp_timeout across {sorted(p.name for p in by_file)}, "
+            f"found {total}: { {p.name: len(v) for p, v in defs.items() if v} }"
+        )
 
     def test_raw_wait_for_sites_are_wrapper_or_marked_non_cdp(self):
-        lines = self._server_source_lines()
-        w_start, w_end = self._wrapper_line_range(lines)
         offenders = []
-        for i, line in enumerate(lines):
-            if "asyncio.wait_for(" not in line:
-                continue
-            if w_start <= i < w_end:
-                continue  # the canonical wrapper's own wait_for — allowed.
-            # A raw wait_for anywhere else must be an explicit non-CDP guard.
-            window = "\n".join(lines[max(0, i - 6) : i + 1])
-            if self.EXEMPTION_MARKER not in window:
-                offenders.append(i + 1)  # 1-based line number
+        for path, lines in self._tool_source_lines().items():
+            wrapper = self._wrapper_line_range(lines)
+            for i, line in enumerate(lines):
+                if "asyncio.wait_for(" not in line:
+                    continue
+                if wrapper and wrapper[0] <= i < wrapper[1]:
+                    continue  # the canonical wrapper's own wait_for — allowed.
+                # A raw wait_for anywhere else must be an explicit non-CDP guard.
+                window = "\n".join(lines[max(0, i - 6) : i + 1])
+                if self.EXEMPTION_MARKER not in window:
+                    offenders.append(f"{path.name}:{i + 1}")
         assert not offenders, (
             "raw asyncio.wait_for outside _with_cdp_timeout without a "
-            f"'{self.EXEMPTION_MARKER}' exemption at server.py line(s) {offenders}; "
+            f"'{self.EXEMPTION_MARKER}' exemption at {offenders}; "
             "CDP awaits must go through _with_cdp_timeout (F-164)."
         )
 

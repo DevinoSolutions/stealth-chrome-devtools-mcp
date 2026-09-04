@@ -207,19 +207,28 @@ def fake_browser_manager():
 
 @pytest.fixture()
 def patched_server(monkeypatch):
-    """Return a helper that swaps ``server``'s module-global singletons for fakes
-    and hands back the ``server`` module.
+    """Swap the tool singletons for fakes and hand back the ``server`` module.
 
-    Tools resolve ``browser_manager``/``cdp_element_cloner``/``in_memory_storage``/…
-    as names in ``server``'s namespace at call time, so ``setattr(server, name,
-    fake)`` is a clean hermetic seam needing no production change. ``monkeypatch``
-    restores every attr at teardown.
+    ``embedded/tool_runtime.py`` is THE one patchable home: a tool body resolves
+    ``rt.<name>`` against that module at CALL time, from whichever file it lives
+    in, so one ``setattr`` there reaches all 94 bodies. ``server`` is still what
+    is returned, because tool LOOKUP is still a ``server`` attribute read
+    (``fakes.call_tool``, ``e2e_helpers.get_fn``).
+
+    While the plan_SERVERSPLIT migration is in flight (slices 0-11), ``server``
+    also carries import aliases for the not-yet-moved bodies, which bound the
+    object into ITS namespace at import time; patching both keeps the two eras
+    consistent. ``tests/test_tool_sections_contract.py``'s alias-identity pin
+    fails the moment the two homes could diverge, and the ``server`` half — like
+    the aliases — is deleted by slice 12.
     """
-    from stealth_chrome_devtools_mcp.embedded import server
+    from stealth_chrome_devtools_mcp.embedded import server, tool_runtime
 
     def _patch(**singletons):
         for name, obj in singletons.items():
-            monkeypatch.setattr(server, name, obj)
+            monkeypatch.setattr(tool_runtime, name, obj, raising=False)
+            if hasattr(server, name):
+                monkeypatch.setattr(server, name, obj)
         return server
 
     return _patch

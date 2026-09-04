@@ -4,7 +4,6 @@ import asyncio
 import base64
 import json
 import os
-import re
 import sys
 import tempfile
 from contextlib import asynccontextmanager
@@ -14,22 +13,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from stealth_chrome_devtools_mcp.embedded import clone_storage, display_context
-from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
-from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import cdp_element_cloner
-from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
-    CDPFunctionExecutor,
-)
-from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
-from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
-from stealth_chrome_devtools_mcp.embedded.dynamic_hook_ai_interface import (
-    dynamic_hook_ai,
-)
-from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
-from stealth_chrome_devtools_mcp.embedded.file_based_element_cloner import (
-    file_based_element_cloner,
-)
-from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
+from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.logging_setup import (
     backend_uvicorn_config,
     bootstrap_backend_process_logging,
@@ -37,18 +21,12 @@ from stealth_chrome_devtools_mcp.embedded.logging_setup import (
 from stealth_chrome_devtools_mcp.embedded.models import (
     BrowserOptions,
 )
-from stealth_chrome_devtools_mcp.embedded.network_interceptor import NetworkInterceptor
 from stealth_chrome_devtools_mcp.embedded.platform_utils import (
     get_platform_info,
     is_running_as_root,
     is_running_in_container,
     validate_browser_environment,
 )
-from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
-from stealth_chrome_devtools_mcp.embedded.progressive_element_cloner import (
-    progressive_element_cloner,
-)
-from stealth_chrome_devtools_mcp.embedded.response_handler import response_handler
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     InstanceNotFoundError,
     ToolError,
@@ -61,95 +39,39 @@ from stealth_chrome_devtools_mcp.embedded.tool_registry import (
     SECTION_TOOLS,  # used by --list-sections + the derived tool-count (F-108); also re-exported as server.SECTION_TOOLS
     ToolRegistry,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_runtime import (
+    CDP_OPERATION_TIMEOUT,
+    EXECUTE_SCRIPT_TIMEOUT,
+    _clamp_timeout,
+    _script_rejection_reason,
+    _with_cdp_timeout,
+    browser_manager,
+    cdp_element_cloner,
+    cdp_function_executor,
+    clone_storage,
+    debug_logger,
+    display_context,
+    dom_handler,
+    dynamic_hook_ai,
+    dynamic_hook_system,
+    file_based_element_cloner,
+    in_memory_storage,
+    network_interceptor,
+    progressive_element_cloner,
+    response_handler,
+)
+from stealth_chrome_devtools_mcp.embedded.tool_sections import SECTION_MODULES
 from stealth_chrome_devtools_mcp.observability import sentry_init
 from stealth_chrome_devtools_mcp.settings import get_settings
 
-CDP_OPERATION_TIMEOUT = get_settings().cdp_operation_timeout_seconds
-MAX_TIMEOUT_MS = 60_000
-
-# User-supplied JS (execute_script) gets a short, dedicated timeout so a blocking
-# script fails fast instead of freezing the tab for the full CDP_OPERATION_TIMEOUT
-# window and stalling every subsequent call.
-EXECUTE_SCRIPT_TIMEOUT = get_settings().execute_script_timeout_seconds
-
-# Reject user scripts larger than this. Huge inline payloads (e.g. base64-encoded
-# files) overflow the transport and are almost always an upload hack — callers
-# should use the upload_file tool instead.
-MAX_USER_SCRIPT_BYTES = get_settings().max_user_script_bytes
-
-# High-confidence denylist of patterns that block the renderer's main thread or
-# overflow the page. This is NOT a JS sandbox — just a guard against the handful
-# of foot-guns that wedge the browser for every later call.
-_BLOCKING_SCRIPT_PATTERNS = [
-    (
-        re.compile(r"\.open\s*\([^)]*,\s*false\s*\)", re.IGNORECASE),
-        "Synchronous XMLHttpRequest (xhr.open(url, false)) blocks the page's main "
-        "thread and freezes every later call. Use 'await fetch(url)' instead.",
-    ),
-    (
-        re.compile(r"while\s*\(\s*(?:true|1)\s*\)"),
-        "Infinite 'while(true)' loop freezes the renderer. Use a bounded loop or an "
-        "async delay: 'await new Promise(r => setTimeout(r, ms))'.",
-    ),
-    (
-        re.compile(r"for\s*\(\s*;\s*;\s*\)"),
-        "Infinite 'for(;;)' loop freezes the renderer. Use a bounded loop instead.",
-    ),
-    (
-        re.compile(r"\b(?:alert|confirm|prompt)\s*\("),
-        "Modal dialogs (alert/confirm/prompt) block the renderer and cannot be "
-        "dismissed by automation. Remove them.",
-    ),
-]
-
-
-def _script_rejection_reason(script: str) -> str | None:
-    """Return a corrective message if a user script is unsafe to run, else None.
-
-    Guards against the common foot-guns that freeze the tab or overflow the
-    transport (sync XHR, infinite loops, blocking dialogs, oversized payloads).
-    Intentionally small and high-confidence — not a JavaScript sandbox.
-    """
-    if not isinstance(script, str):
-        return None
-    size = len(script.encode("utf-8", errors="ignore"))
-    if size > MAX_USER_SCRIPT_BYTES:
-        return (
-            f"Script too large ({size} bytes > {MAX_USER_SCRIPT_BYTES} limit). "
-            "Inline payloads such as base64-encoded files overflow the transport — "
-            "use the 'upload_file' tool for files, or a file-based approach."
-        )
-    for pattern, message in _BLOCKING_SCRIPT_PATTERNS:
-        if pattern.search(script):
-            return f"Rejected: {message}"
-    return None
-
-
-def _clamp_timeout(timeout_ms: int, default: int = 30_000) -> int:
-    """Clamp a user-provided timeout (ms) to [1, MAX_TIMEOUT_MS]."""
-    if isinstance(timeout_ms, str):
-        timeout_ms = int(timeout_ms)
-    return max(1, min(timeout_ms, MAX_TIMEOUT_MS))
-
-
-async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
-    """Wrap a CDP coroutine with asyncio.wait_for to prevent infinite hangs.
-
-    When a Chrome DevTools Protocol connection is stale or dead, awaiting a
-    CDP operation blocks forever.  This wrapper raises a clear error after
-    *timeout* seconds so the caller (and the MCP client) gets a response
-    instead of hanging indefinitely.
-    """
-    t = timeout or CDP_OPERATION_TIMEOUT
-    try:
-        return await asyncio.wait_for(coro, timeout=t)
-    except TimeoutError:
-        tag = f" (instance {instance_id})" if instance_id else ""
-        raise ToolError(
-            f"CDP operation timed out after {t:.0f}s{tag}. "
-            "The browser may have crashed or the connection dropped. "
-            "Try closing the instance with close_instance and spawning a new one."
-        )
+# plan_SERVERSPLIT slice 0: the knobs, the script/timeout guards and the four
+# constructed singletons now live in ``tool_runtime`` — THE one patchable home
+# (a module attribute resolved at call time, in a module that is imported once
+# rather than re-executed by every runpy/spec load). The block above is a
+# MIGRATION ALIAS: the 94 tool bodies still in this file read these as bare
+# names, and ``tests/conftest.py``'s ``patched_server`` patches both homes until
+# slice 12 deletes the aliases. ``app_lifespan`` below deliberately does NOT use
+# them — it reads ``rt.*`` so a patched singleton reaches the lifespan too.
 
 
 def _install_asyncio_close_noise_filter() -> None:
@@ -243,12 +165,12 @@ async def app_lifespan(server):
         debug_logger.log_info(
             "server", "startup", "Starting Browser Automation MCP Server..."
         )
-        process_cleanup.activate()
-        await browser_manager.start_idle_reaper()
+        rt.process_cleanup.activate()
+        await rt.browser_manager.start_idle_reaper()
         # Reclaim leaked auto-clones and trim oversized idle named profiles left
         # by a previous run. Fire-and-forget so a large first sweep never delays
         # server readiness.
-        clone_storage.spawn_background_sweep("startup")
+        rt.clone_storage.spawn_background_sweep("startup")
     try:
         yield
     finally:
@@ -263,11 +185,11 @@ async def app_lifespan(server):
                 "server", "shutdown", "Shutting down Browser Automation MCP Server..."
             )
             try:
-                await browser_manager.stop_idle_reaper()
+                await rt.browser_manager.stop_idle_reaper()
             except Exception as e:
                 debug_logger.log_error("server", "cleanup", e)
             try:
-                await browser_manager.close_all()
+                await rt.browser_manager.close_all()
                 debug_logger.log_info(
                     "server", "cleanup", "All browser instances closed"
                 )
@@ -275,21 +197,21 @@ async def app_lifespan(server):
                 debug_logger.log_error("server", "cleanup", e)
 
             try:
-                process_cleanup._cleanup_all_tracked()
+                rt.process_cleanup._cleanup_all_tracked()
                 debug_logger.log_info("server", "cleanup", "Process cleanup complete")
             except Exception as e:
                 debug_logger.log_error(
                     "server", "cleanup", f"Process cleanup failed: {e}"
                 )
             try:
-                persistent_instances = in_memory_storage.list_instances()
+                persistent_instances = rt.in_memory_storage.list_instances()
                 if persistent_instances.get("instances"):
                     debug_logger.log_info(
                         "server",
                         "storage_cleanup",
                         f"Clearing in-memory storage with {len(persistent_instances['instances'])} instances...",
                     )
-                    in_memory_storage.clear_all()
+                    rt.in_memory_storage.clear_all()
                     debug_logger.log_info(
                         "server", "storage_cleanup", "In-memory storage cleared"
                     )
@@ -322,10 +244,19 @@ registry = ToolRegistry(mcp)
 section_tool = registry.section_tool
 apply_disabled_sections = registry.apply_disabled_sections
 
-browser_manager = BrowserManager()
-network_interceptor = NetworkInterceptor()
-dom_handler = DOMHandler()
-cdp_function_executor = CDPFunctionExecutor()
+# Registration is driven from HERE, once per execution of this module body, so the
+# canonical import, the bare-name spec load and the runpy __main__ load each get a
+# fully-populated `mcp`. A @section_tool decorator inside a section module would
+# run on the FIRST import only and leave every later execution with a zero-tool
+# app — the mirror image of the 282 == 3 x 94 accumulation this repo has already
+# paid for, and invisible to the count tripwire. Binding into globals() is what
+# keeps `getattr(server, tool_name)` — the mechanism tests/fakes.py's call_tool
+# and tests/e2e_helpers.py's get_fn both use — working after a body moves out.
+# Must stay AHEAD of the xpool-safe gate at the foot of this file, or the
+# cdp-functions tools would register into a gate that had already closed.
+for _section_module in SECTION_MODULES:
+    for _tool in _section_module.TOOLS:
+        globals()[_tool.__name__] = section_tool(_section_module.SECTION)(_tool)
 
 if DEBUG_LOGGING_ENABLED:
     debug_logger.enable()

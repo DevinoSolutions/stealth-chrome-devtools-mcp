@@ -362,10 +362,18 @@ class TestDiagnosticOracle:
         assert "capture.json" in str(exc)
         assert MSG_INSTANCE_NOT_FOUND[:8] not in str(exc)
 
-    def test_the_oversize_script_guard_pins_its_exact_bytes(self, w15_server):
-        limit = w15_server.MAX_USER_SCRIPT_BYTES
+    def test_the_oversize_script_guard_pins_its_exact_bytes(self):
+        # Read from ``tool_runtime``, the guard's one home (plan_SERVERSPLIT
+        # slice 0). ``server.py`` re-exports only the names its still-in-file
+        # tool bodies actually use, and ``MAX_USER_SCRIPT_BYTES`` is read solely
+        # by ``_script_rejection_reason`` — which moved with it. Aliasing it back
+        # onto ``server`` just to keep this read working would be an import with
+        # no consumer.
+        from stealth_chrome_devtools_mcp.embedded import tool_runtime
+
+        limit = tool_runtime.MAX_USER_SCRIPT_BYTES
         oversized = "x" * (limit + 1)
-        assert w15_server._script_rejection_reason(
+        assert tool_runtime._script_rejection_reason(
             oversized
         ) == MSG_SCRIPT_TOO_LARGE.format(size=limit + 1, limit=limit)
 
@@ -1012,9 +1020,14 @@ class TestRecoveryGuidance:
 
     def test_the_export_timeout_names_its_alternative_format(self, w15_server):
         assert "gzip-pickle" in MSG_EXPORT_TIMEOUT
-        import inspect
+        # Scanned across the tool-source set, not just ``server.py``
+        # (plan_SERVERSPLIT §1.4): ``export_debug_logs`` moves to
+        # ``tool_sections/debugging.py`` in slice 3, and an ``inspect.getsource``
+        # pinned to one module would then pass over a file the message had
+        # already left. ``tests/source_scan.py`` carries the floor assertion.
+        from source_scan import tool_source_text
 
-        assert MSG_EXPORT_TIMEOUT in inspect.getsource(w15_server)
+        assert MSG_EXPORT_TIMEOUT in tool_source_text()
 
     @pytest.mark.characterization
     def test_the_commonest_failures_offer_no_next_step(self):

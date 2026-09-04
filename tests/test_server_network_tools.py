@@ -23,10 +23,15 @@ from test_network_interceptor import (  # noqa: E402  PERMANENT(import follows t
 
 
 @pytest.fixture()
-def fresh_interceptor(monkeypatch):
-    """Swap the server's shared interceptor for an empty one per test."""
+def fresh_interceptor(patched_server):
+    """Swap the shared interceptor for an empty one per test.
+
+    Via ``patched_server`` (plan_SERVERSPLIT §3.4): the singleton's one patchable
+    home is ``tool_runtime``, and a body that has moved to a section module would
+    not see a direct ``setattr(server, …)``.
+    """
     ni = NetworkInterceptor()
-    monkeypatch.setattr(server, "network_interceptor", ni)
+    patched_server(network_interceptor=ni)
     return ni
 
 

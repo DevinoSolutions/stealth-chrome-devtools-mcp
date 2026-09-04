@@ -73,17 +73,24 @@ class _SpyCloneStorage:
 
 
 @pytest.fixture()
-def spies(monkeypatch):
+def spies(monkeypatch, patched_server):
     """Swap the four teardown/startup singletons for spies and reset the
-    once-per-process startup guard so each test drives a fresh lifespan."""
+    once-per-process startup guard so each test drives a fresh lifespan.
+
+    Routed through ``patched_server`` (plan_SERVERSPLIT §3.4): ``app_lifespan``
+    reads these four as ``rt.*`` against ``tool_runtime``, THE one patchable
+    home, so a direct ``setattr(server, …)`` here would substitute the tool
+    bodies' singletons while the lifespan kept driving the real ones.
+    ``_LIFESPAN_STARTED`` stays a direct ``server`` write — it is per-execution
+    process state, not tool state, and does not live in ``tool_runtime``.
+    """
     bm = _SpyBrowserManager()
     pc = _SpyProcessCleanup()
     ims = _SpyStorage()
     cs = _SpyCloneStorage()
-    monkeypatch.setattr(server, "browser_manager", bm)
-    monkeypatch.setattr(server, "process_cleanup", pc)
-    monkeypatch.setattr(server, "in_memory_storage", ims)
-    monkeypatch.setattr(server, "clone_storage", cs)
+    patched_server(
+        browser_manager=bm, process_cleanup=pc, in_memory_storage=ims, clone_storage=cs
+    )
     # raising=False so the RED run (before the guard exists) fails on the
     # behavioral assertions below, not on a missing-attribute setup error.
     monkeypatch.setattr(server, "_LIFESPAN_STARTED", False, raising=False)
