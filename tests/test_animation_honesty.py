@@ -183,6 +183,10 @@ class TestSummaryRecordsSayTheyAreSummaries:
         record = (await extract(busy_page(count=2, keyframes=4)))["animations"][0]
         assert "editable" not in record
         assert "not_editable_reason" not in record
+        # Every verdict derived from the recipes goes when the recipes go: a
+        # `not_editable` list on a record carrying no `edits` would be a claim
+        # about something the reader cannot see (F-857 / D7).
+        assert "not_editable" not in record
 
     async def test_the_selected_element_keeps_its_full_record(self):
         payload = await extract(facts(waapi=[waapi_entry("mine", "#hero")]))

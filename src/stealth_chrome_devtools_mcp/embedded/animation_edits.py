@@ -25,8 +25,13 @@ carried in the replacement.
 Every step that cannot be completed degrades to a rule pointer with no ``find``
 rather than guessing, and says which step failed.
 
-A leaf between ``animation_facts`` and ``animation_advice``: it reads CSS tokens
-and source text, and imports no other embedded module beyond ``animation_facts``.
+WHERE those bytes are — locating a rule's author text in the sheet, the openable
+location, and which of the three causes it is when nothing is locatable — is
+``animation_source``, the leaf below this one. This module composes recipes out
+of what that returns; it never goes looking for a rule's text itself.
+
+A leaf between ``animation_source`` and ``animation_advice``: it reads CSS
+tokens, and imports no embedded module beyond those two levels.
 """
 
 from __future__ import annotations
@@ -45,10 +50,20 @@ from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     cycle_get,
     duration_ms,
     iteration_count,
-    keyframe_offsets,
     specificity,
     split_css_list,
     warn,
+)
+from stealth_chrome_devtools_mcp.embedded.animation_source import (
+    Span,
+    author_declaration,
+    indirect_property,
+    inline_declarations,
+    keyframe_span_for,
+    line_column,
+    source_by_id,
+    source_span,
+    stylesheet_file,
 )
 
 # Measured, not chosen round (R12). After the boilerplate hoist below a recipe
@@ -74,6 +89,19 @@ EDIT_PROTOCOL = {
         "`replace` for you, so nothing else can be lost. `token` is the exact "
         "text being replaced, if you want to check it first. A recipe with no "
         "`find` is a pointer, not an edit: open it at `source_ref` yourself."
+    ),
+    # Said ONCE, for the same reason `how` is (R12): a frame-of-reference
+    # sentence repeated on 20 recipes is pure payload tax, and the frame is a
+    # property of the SHEET, not of any one recipe.
+    "open": (
+        "A recipe that has a `find` also has `char_offset`, `line` and `column`: "
+        "where that literal starts. They are measured in the text named by "
+        "`open.offsets_in` on this recipe's `source_ref` entry in `sources`. "
+        "`style_element_text` means the text INSIDE that <style> element, NOT "
+        "the bytes of the document at `open.url` — open the url, find the "
+        "element, then count from there. `open.url` is a page URL and not a "
+        "path on disk: map it with extract_related_files, which is the one tool "
+        "that answers URL -> file."
     ),
 }
 
@@ -122,145 +150,6 @@ def value_body(value: str) -> str:
     and ``_swap``'s arithmetic is unchanged.
     """
     return _PRIORITY.sub("", value)
-
-
-# ---------------------------------------------------------------------------
-# Source addressing — locating a rule's AUTHOR text (F-849)
-# ---------------------------------------------------------------------------
-
-
-def source_by_id(facts: Facts, source_id: object) -> Record | None:
-    if not source_id:
-        return None
-    for source in as_rows(facts.get("sources")):
-        if source.get("id") == source_id:
-            return source
-    return None
-
-
-def stylesheet_file(source: Record | None) -> str | None:
-    """A human-usable file name for a source: the href, else the sheet index."""
-    if not source:
-        return None
-    sheet = as_obj(source.get("stylesheet"))
-    href = sheet.get("href")
-    if isinstance(href, str) and href:
-        return href
-    return f"<style> #{sheet.get('index')}"
-
-
-def _whitespace_tolerant(text: str) -> str:
-    """A regex matching ``text`` with any whitespace run where it has one."""
-    return re.sub(r"\\?\s+", r"\\s+", re.escape(text.strip()))
-
-
-def rule_span(raw: str, header: str) -> str | None:
-    """The AUTHOR's text of one rule body, located in the sheet's raw source.
-
-    ``header`` is the CSSOM selector (or ``@keyframes name``). CSSOM normalizes
-    whitespace inside a selector, so the search is whitespace-tolerant; the
-    braces are then counted in the ORIGINAL text, which keeps every offset
-    honest. Returns ``None`` when the rule cannot be located — a caller must
-    then degrade, never guess.
-
-    A header that occurs MORE THAN ONCE also returns ``None``: declaring the
-    same selector twice is ordinary CSS, and we have no way to tell which block
-    the CSSOM record came from. Picking the first would be a coin flip dressed
-    as a verified address.
-    """
-    if not raw or not header:
-        return None
-    pattern = r"(?<![\w.#\-])" + _whitespace_tolerant(header) + r"\s*\{"
-    matches = list(re.finditer(pattern, raw))
-    if len(matches) != 1:
-        return None
-    match = matches[0]
-    depth = 0
-    for index in range(match.end() - 1, len(raw)):
-        if raw[index] == "{":
-            depth += 1
-        elif raw[index] == "}":
-            depth -= 1
-            if depth == 0:
-                return raw[match.end() : index]
-    return None
-
-
-def source_span(facts: Facts, source: Record | None) -> str | None:
-    """The AUTHOR's text of the rule ``source`` points at, or ``None``.
-
-    The sheet's raw text is carried once in ``facts["raw_sources"]``; each rule's
-    span is sliced out here rather than shipped per rule.
-    """
-    if not source:
-        return None
-    raw_by_sheet = as_obj(facts.get("raw_sources"))
-    index = as_obj(source.get("stylesheet")).get("index")
-    raw = raw_by_sheet.get(str(index))
-    if not isinstance(raw, str):
-        return None
-    if source.get("kind") == "keyframes":
-        header = f"@keyframes {as_text(source.get('name'))}"
-    else:
-        header = as_text(source.get("selector_text"))
-    return rule_span(raw, header)
-
-
-def keyframe_spans(span: str) -> list[tuple[list[float], str]]:
-    """Each keyframe block inside a ``@keyframes`` body: its offsets, its text.
-
-    Needed so a recipe for the keyframe at 1.0 does not hand back the ``0%``
-    block's declaration: the property name repeats in every block, so a
-    body-wide search always returns the first one.
-    """
-    blocks: list[tuple[list[float], str]] = []
-    index = 0
-    while index < len(span):
-        brace = span.find("{", index)
-        if brace == -1:
-            break
-        selector = span[index:brace]
-        depth = 0
-        end = len(span) - 1
-        for pos in range(brace, len(span)):
-            if span[pos] == "{":
-                depth += 1
-            elif span[pos] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = pos
-                    break
-        blocks.append((keyframe_offsets(selector.strip()), span[brace + 1 : end]))
-        index = end + 1
-    return blocks
-
-
-def keyframe_span_for(span: str | None, offset: float) -> str | None:
-    """The author's text of the keyframe block that declares ``offset``."""
-    if not span:
-        return None
-    for offsets, text in keyframe_spans(span):
-        if offset in offsets:
-            return text
-    return None
-
-
-def author_declaration(span: str, prop: str) -> tuple[str, str, int] | None:
-    """The author's own declaration of ``prop``: ``(literal, value, count)``.
-
-    ``literal`` is the text exactly as typed — the thing a find/replace looks
-    for — and ``literal`` always ENDS with ``value``, which is what lets a token
-    offset inside the value map onto the literal.
-
-    The lookbehind matters: searching for ``animation`` must not match inside
-    ``animation-duration``.
-    """
-    pattern = rf"(?<![\w-]){re.escape(prop)}\s*:\s*([^;{{}}]+)"
-    matches = list(re.finditer(pattern, span or ""))
-    if not matches:
-        return None
-    first = matches[0]
-    return first.group(0).strip(), first.group(1).strip(), len(matches)
 
 
 # ---------------------------------------------------------------------------
@@ -398,8 +287,9 @@ def winning_rule(facts: Facts, knob: Knob, rules: list[Record] | None = None) ->
       specificity depends on its argument, with more than one candidate — we did
       not compute that cascade and will not pretend to;
     * a winner whose declared value disagrees with what the element actually
-      computes, which means something we never saw (an inline style, a UA sheet,
-      an unreadable stylesheet) is in charge.
+      computes, which means the knob is set somewhere this rule cannot reach —
+      ``_mismatch_reason`` decides WHICH somewhere, from the facts, rather than
+      listing suspects (D6).
     """
     scope = as_rows(facts.get("matched_rules")) if rules is None else rules
     candidates: list[tuple[int, Record, list[str]]] = []
@@ -409,12 +299,16 @@ def winning_rule(facts: Facts, knob: Knob, rules: list[Record] | None = None) ->
         if props:
             candidates.append((position, rule, props))
     if not candidates:
+        # Short on purpose, and it does NOT name a cause: the cause is the same
+        # for every knob on the record and is a property of the document, so it
+        # is discriminated once in the record's not_editable_reason rather than
+        # guessed five times here (D6).
         return Winner(
             None,
             [],
             "low",
-            "no readable CSS rule declares this knob; it may come from a "
-            "cross-origin stylesheet, a UA default, or JavaScript",
+            "no readable CSS rule declares this knob; this record's "
+            "not_editable_reason says where the declaration actually lives",
         )
 
     def rank(
@@ -452,15 +346,54 @@ def winning_rule(facts: Facts, knob: Knob, rules: list[Record] | None = None) ->
     contributed = contributed_value(knob, rule, props)
     if contributed is None or not knob_matches(knob.name, contributed, knob.current):
         return Winner(
-            rule,
-            props,
-            "low",
-            f"the rule that should win declares {contributed!r} for this knob but "
-            f"the element computes {knob.current!r}, so something not captured "
-            f"here (an inline style, a UA sheet, an unreadable stylesheet) is in "
-            f"charge; edit that instead",
+            rule, props, "low", _mismatch_reason(facts, knob, rule, props, contributed)
         )
     return Winner(rule, props, "high")
+
+
+def _mismatch_reason(
+    facts: Facts, knob: Knob, rule: Record, props: list[str], contributed: str | None
+) -> str:
+    """Why the rule that should win cannot be edited to move this knob.
+
+    Reached when the declared value and the computed one disagree, which used to
+    be answered with one sentence listing three suspects ("an inline style, a UA
+    sheet, an unreadable stylesheet") and telling the reader to "edit that
+    instead" — without saying which, or where. Two of those three are decidable
+    from facts already in the payload, so they are decided here (D6); only the
+    genuinely unknown case keeps a list, and it no longer pretends to name a
+    remedy it cannot.
+    """
+    declares = as_obj(rule.get("declares"))
+    custom = indirect_property(" ".join(as_text(declares.get(p)) for p in props))
+    if custom:
+        # Not a missing stylesheet: an indirection the author WANTED, which the
+        # payload named. The custom property is the whole answer.
+        return (
+            f"this rule sets the {knob.name} through {custom}, so the author's "
+            f"text has no {knob.name} literal to swap — Chrome resolves it to "
+            f"what `current` reports. Change {custom}'s own declaration, or add "
+            f"an override for it on this selector"
+        )
+    inline = [
+        prop
+        for prop in inline_declarations(facts)
+        if prop in {knob.longhand, knob.shorthand}
+    ]
+    if inline:
+        # An inline declaration outranks every rule, and the collector saw it.
+        return (
+            f'this element\'s style="" attribute sets {", ".join(inline)}, which '
+            f"outranks every rule, so editing this rule would not change what "
+            f"renders; edit the attribute (or the JavaScript that sets "
+            f"element.style)"
+        )
+    return (
+        f"the rule that should win declares {contributed!r} for this knob but "
+        f"the element computes {knob.current!r}; something this capture did not "
+        f"see (a UA stylesheet, or a sheet whose rules were unreadable) is in "
+        f"charge, so editing this rule would not change what renders"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -621,20 +554,24 @@ class Located(NamedTuple):
     """A declaration found in the author's text, welded to the confidence the
     branch that found it produced. ``literal`` is empty when nothing was found —
     the confidence still travels, because "I could not read the source" is a
-    conclusion about the edit, not the absence of one."""
+    conclusion about the edit, not the absence of one.
+
+    ``offset`` is where ``literal`` starts in the sheet, or ``-1`` when there is
+    nothing to point at."""
 
     literal: str
     value: str
     confidence: str
     reason: str = ""
+    offset: int = -1
 
 
-def locate(span: str | None, prop: str) -> Located:
+def locate(span: Span | None, prop: str) -> Located:
     """Whether ``prop``'s declaration is findable in the author's text, and how
     sure. The confidence is produced HERE, by the branch that actually looked,
     and no caller can upgrade it (F-850)."""
-    found = author_declaration(span, prop) if span else None
-    if found is None:
+    found = author_declaration(span.text, prop) if span else None
+    if found is None or span is None:
         return Located(
             "",
             "",
@@ -642,15 +579,34 @@ def locate(span: str | None, prop: str) -> Located:
             "the author's text for this rule is not readable, so no find literal "
             "is offered; open the rule at source_ref and edit it there",
         )
-    literal, value, occurrences = found
+    literal, value, occurrences, at = found
     if occurrences == 1:
-        return Located(literal, value, "high")
+        return Located(literal, value, "high", "", span.start + at)
     return Located(
         literal,
         value,
         "medium",
         "this declaration repeats in the rule; match by position",
+        span.start + at,
     )
+
+
+def _stamp_position(recipe: Record, span: Span | None, located: Located) -> None:
+    """Where the ``find`` literal IS, not just what it says.
+
+    Without this the strongest thing a recipe could say was "look for this
+    string somewhere inside <style> #0" — the offset that answers it was already
+    computed by ``rule_span`` and discarded. The numbers are only ever stamped
+    beside a ``find``, so there is no position without a literal to check it
+    against; what they are measured IN is stated once, on the source
+    (``open.offsets_in``), because it is a property of the sheet.
+    """
+    if span is None or located.offset < 0:
+        return
+    line, column = line_column(span.raw, located.offset)
+    recipe["char_offset"] = located.offset
+    recipe["line"] = line
+    recipe["column"] = column
 
 
 def _pointer(knob: Knob, rule: Record, source: Record | None) -> Record:
@@ -747,11 +703,12 @@ def knob_recipe(facts: Facts, knob: Knob, rules: list[Record] | None = None) -> 
         start, end = item_start + inside.start, item_start + inside.end
     recipe["find_unique_in_rule"] = located.confidence == "high"
     recipe.update(_swap(literal, value, start, end))
+    _stamp_position(recipe, span, located)
     return recipe
 
 
 def keyframe_recipe(
-    source: Record | None, block: str | None, prop: str, value: str
+    source: Record | None, block: Span | None, prop: str, value: str
 ) -> Record:
     """A recipe for one keyframe declaration.
 
@@ -774,6 +731,7 @@ def keyframe_recipe(
     recipe.update(
         _swap(located.literal, located.value, 0, len(value_body(located.value)))
     )
+    _stamp_position(recipe, block, located)
     return recipe
 
 
