@@ -56,8 +56,6 @@ from stealth_chrome_devtools_mcp.embedded.animation_edits import (
     build_edits,
     build_transition_edits,
     rule_declaring,
-    source_by_id,
-    source_span,
 )
 from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     Caps,
@@ -81,6 +79,13 @@ from stealth_chrome_devtools_mcp.embedded.animation_facts import (
     put,
     split_css_list,
     warn,
+)
+from stealth_chrome_devtools_mcp.embedded.animation_source import (
+    missing_source_reason,
+    open_location,
+    pointer_reason,
+    source_by_id,
+    source_span,
 )
 from stealth_chrome_devtools_mcp.embedded.animation_waapi import (
     adopt_live_timelines,
@@ -128,6 +133,35 @@ def usable_edits(record: Record) -> bool:
     pointers is exactly the case that has to say ``editable: false`` and why.
     """
     return any("find" in edit for edit in as_rows(record.get("edits")))
+
+
+def stamp_editable(facts: Facts, record: Record, subject: str) -> None:
+    """The record's editability verdict, at the granularity its recipes have.
+
+    ``editable`` answers "can ANY recipe on this record be applied"; the
+    ``not_editable`` list names the ones that cannot. The pair exists because
+    the flag alone was read as a promise about every knob: a record whose
+    keyframe declarations were applicable while its five timing knobs were all
+    pointers emitted no verdict at all, and absence reads as "editable" (R10) —
+    so a reader that stopped at the flag concluded it could retime an animation
+    it cannot (D7).
+
+    The list is omitted where nothing is a pointer: there is no false all-clear
+    to break, and an empty array on every healthy record is noise. The reason is
+    derived from the recipes rather than written here, so no site authors prose
+    about a cause it did not establish (D6).
+    """
+    edits = as_rows(record.get("edits"))
+    if not edits:
+        record["editable"] = False
+        record["not_editable_reason"] = missing_source_reason(facts, subject)
+        return
+    record["editable"] = usable_edits(record)
+    pointers = [as_text(edit.get("knob")) for edit in edits if "find" not in edit]
+    if not pointers:
+        return
+    record["not_editable"] = pointers
+    record["not_editable_reason"] = pointer_reason(facts, edits, subject)
 
 
 def derive_timing(timing: Record) -> Record:
@@ -507,14 +541,10 @@ def build_transitions(facts: Facts) -> list[Record]:
         record["edits"] = build_transition_edits(facts, record, index)
         if rule is not None:
             record["source_refs"] = [rule.get("source_ref")]
-        if not usable_edits(record):
-            # Mandatory on any record with no usable recipes, whatever its kind:
-            # an absent verdict reads as "editable" (R10).
-            record["editable"] = False
-            record["not_editable_reason"] = (
-                "no readable CSS rule declares this transition; its stylesheet "
-                "is likely cross-origin, so there is nothing here to find/replace"
-            )
+        # Mandatory on every record whatever its kind: an absent verdict reads
+        # as "editable" (R10), and a whole-record one reads as a promise about
+        # every knob (D7).
+        stamp_editable(facts, record, "this transition")
         records.append(record)
     return records
 
@@ -537,6 +567,7 @@ _FIELD_ORDER = (
     "derived",
     "trigger",
     "editable",
+    "not_editable",
     "not_editable_reason",
     "keyframes",
     "checkpoints",
@@ -626,6 +657,7 @@ _ELIDED_FOR_SUMMARY = (
     "checkpoints",
     "keyframes",
     "editable",
+    "not_editable",
     "not_editable_reason",
 )
 
@@ -677,17 +709,23 @@ def _attach_trigger(facts: Facts, animation: Record) -> None:
         animation["trigger"] = trigger_from_rules(facts, properties)
 
 
-def _with_author_text(facts: Facts, source: Record) -> Record:
-    """A source record carrying the author's own rule text when it is readable.
+def _with_source_location(facts: Facts, source: Record) -> Record:
+    """A source record carrying the author's own rule text, and where to open it.
 
     ``computed_css_text`` is Chrome's re-serialization; ``source_text`` is what
     is actually on disk. Both are useful, but only one of them is safe to
-    find/replace against, so they are never conflated (F-849).
+    find/replace against, so they are never conflated (F-849). Where to OPEN it
+    is ``animation_source.open_location``; this is the site that attaches it,
+    once per source rather than once per recipe.
     """
     span = source_span(facts, source)
-    if span is None:
-        return source
-    return {**source, "source_text": span.strip()}
+    opened = open_location(facts, source)
+    extra: Record = {}
+    if span is not None:
+        extra["source_text"] = span.text.strip()
+    if opened is not None:
+        extra["open"] = opened
+    return {**source, **extra} if extra else source
 
 
 def analyze(facts: Facts, options: Record | None = None) -> Record:
@@ -728,14 +766,11 @@ def analyze(facts: Facts, options: Record | None = None) -> Record:
         if not wants_full_detail(animation):
             summarize_detail(animation)
             continue
-        if not usable_edits(animation) and "editable" not in animation:
-            # Never hand back an empty edits list with no explanation: silence
-            # reads as "nothing to do here", which is the failure M11 forbids.
-            animation["editable"] = False
-            animation["not_editable_reason"] = (
-                "no readable CSS rule declares this animation; its stylesheet is "
-                "likely cross-origin, so there is nothing here to find/replace"
-            )
+        if "editable" not in animation:
+            # Never hand back recipes with no verdict on them: silence reads as
+            # "nothing to do here", which is the failure M11 forbids — and a
+            # whole-record yes reads as a promise about every knob (D7).
+            stamp_editable(facts, animation, "this animation")
 
     warnings = as_rows(facts.get("warnings"))
     if anim_truncated:
@@ -764,7 +799,9 @@ def analyze(facts: Facts, options: Record | None = None) -> Record:
         "pending_animations": build_pending(facts),
         "interactions": build_interactions(facts, animations),
         "transforms": as_obj(facts.get("transforms")),
-        "sources": [_with_author_text(facts, s) for s in as_rows(facts.get("sources"))],
+        "sources": [
+            _with_source_location(facts, s) for s in as_rows(facts.get("sources"))
+        ],
         "warnings": warnings,
         "edit_protocol": EDIT_PROTOCOL,
         "detail_note": (

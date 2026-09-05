@@ -432,6 +432,26 @@ class TestValuesBehindACustomPropertyDegrade:
         payload = await extract(self.VAR_SHORTHAND)
         assert _timing(payload, "fade")["timing"]["duration_ms"] == 400.0
 
+    async def test_the_note_names_the_custom_property_it_defers_to(self):
+        """D6. RED before this PR: the note read "something not captured here
+        (an inline style, a UA sheet, an unreadable stylesheet) is in charge;
+        edit that instead" — three wrong places, while the rule that IS in
+        charge is right there in ``matched_rules`` and names ``--dur`` itself.
+
+        A weak model reading that goes looking for a stylesheet it will not
+        find. The custom property is the ONE thing to change, and the payload
+        already carried it.
+        """
+        found = await recipes(self.VAR_SHORTHAND, name="fade")
+        note = found["duration"]["note"]
+        assert "--dur" in note, note
+        assert "cross-origin" not in note, note
+        assert "inline style" not in note, note
+
+    async def test_the_note_never_invites_an_edit_to_the_resolved_value(self):
+        found = await recipes(self.VAR_SHORTHAND, name="fade")
+        assert "0.4s" not in found["duration"]["note"]
+
 
 class TestDuplicateKeyframesResolveToTheLastBlock:
     """Two ``@keyframes fade`` blocks is ordinary CSS and the LAST one wins.
@@ -516,8 +536,9 @@ class TestAnInlineAnimationIsNotBlamedOnACrossOriginSheet:
     is, and telling the reader its stylesheet is "likely cross-origin" sends a
     weak model looking for a file that is not involved.
 
-    This pins the safe half (no ``find``) and records the misdirection as the
-    thing to fix, rather than asserting a message we have not fixed yet.
+    The safe half (no ``find``) was pinned when this file was written; the
+    misdirection was recorded as D6 and is fixed here — the reason now names the
+    ``style=""`` attribute the collector actually saw.
     """
 
     INLINE = facts(
@@ -541,6 +562,74 @@ class TestAnInlineAnimationIsNotBlamedOnACrossOriginSheet:
     async def test_the_timing_is_still_read_from_computed_style(self):
         payload = await extract(self.INLINE)
         assert _timing(payload, "fade")["timing"]["duration_ms"] == 2000.0
+
+    async def test_the_reason_names_the_style_attribute_the_collector_saw(self):
+        """D6. RED before this PR: ``not_editable_reason`` said "its stylesheet
+        is likely cross-origin", which is a guess, and a wrong one — no
+        stylesheet is involved at all and ``element.inline_properties`` says
+        so."""
+        payload = await extract(self.INLINE)
+        reason = _timing(payload, "fade")["not_editable_reason"]
+        assert 'style=""' in reason, reason
+        assert "cross-origin" not in reason, reason
+
+    async def test_the_reason_names_the_properties_that_are_actually_inline(self):
+        payload = await extract(self.INLINE)
+        reason = _timing(payload, "fade")["not_editable_reason"]
+        assert "animation-name" in reason and "animation-duration" in reason
+
+
+class TestAnUnreachableRuleIsNotCalledCrossOriginWithoutEvidence:
+    """ "Likely cross-origin" was asserted for every unreadable declaration.
+
+    The third of D6's three causes: an adopted constructed sheet
+    (``new CSSStyleSheet()`` + ``replaceSync``) is not in ``document.styleSheets``
+    at all, so the collector enumerates every sheet, reads every one of them
+    successfully, and finds no rule. "Its stylesheet is likely cross-origin" is
+    then a claim contradicted by the payload's own warnings — there is no
+    ``cross_origin_stylesheet`` warning, because nothing was blocked.
+
+    The discriminating fact is already there: whether a CORS failure was
+    actually WITNESSED. When it was, the message may say so, and may name the
+    href it was witnessed on; when it was not, it may not.
+    """
+
+    UNREACHABLE = facts(
+        selector="#hero",
+        computed=computed(animation_name="adopted", animation_duration="2.5s"),
+    )
+
+    BLOCKED = facts(
+        selector="#hero",
+        computed=computed(animation_name="adopted", animation_duration="2.5s"),
+        warnings=[
+            {
+                "code": "cross_origin_stylesheet",
+                "message": "Stylesheet rules unreadable (CORS)",
+                "detail": {"index": 0, "href": "https://cdn.test/site.css"},
+            }
+        ],
+    )
+
+    async def test_no_cors_failure_was_seen_so_none_is_alleged(self):
+        payload = await extract(self.UNREACHABLE)
+        reason = _timing(payload, "adopted")["not_editable_reason"]
+        assert "cross-origin" not in reason, reason
+
+    async def test_the_reason_names_the_causes_that_are_actually_left(self):
+        """Every enumerable sheet WAS read, so the declaration is not in a
+        document stylesheet: a constructed/adopted sheet, a shadow-root
+        ``<style>``, or JS. Naming those is the difference between a pointer
+        and a shrug."""
+        payload = await extract(self.UNREACHABLE)
+        reason = _timing(payload, "adopted")["not_editable_reason"]
+        assert "constructed" in reason.lower(), reason
+
+    async def test_a_witnessed_cors_failure_is_named_with_its_href(self):
+        payload = await extract(self.BLOCKED)
+        reason = _timing(payload, "adopted")["not_editable_reason"]
+        assert "cross-origin" in reason, reason
+        assert "https://cdn.test/site.css" in reason, reason
 
 
 class TestStepsEasingAndNegativeDelayStayMechanical:
@@ -592,3 +681,253 @@ class TestStepsEasingAndNegativeDelayStayMechanical:
         found = await recipes(self.STEPPED, name="tick")
         assert found["delay"]["token"] == "-0.5s"
         assert found["duration"]["token"] == "2s"
+
+
+class TestARecipeSaysWhereToOpenTheFileNotJustWhatToFind:
+    """The audit's closing recommendation: the addressing stopped one step short.
+
+    ``file`` was ``"<style> #0"`` or an href — neither of which an editor can
+    open at the right place — while ``rule_span`` had already computed the byte
+    offset of the rule inside the sheet and thrown it away. Joining the two is
+    what makes a recipe mechanically applicable rather than a search hint.
+
+    Two things are pinned here, and they are pinned separately on purpose:
+
+    * the OFFSET is verified by slicing the sheet's own bytes at it, never by
+      recomputing the number the way the product does;
+    * the offset's FRAME OF REFERENCE is stated once, on the source, because
+      offsets into a ``<style>`` element's text are not offsets into the HTML
+      document that contains it, and a reader who assumes otherwise lands in the
+      wrong place with no error.
+    """
+
+    SHEET = "#hero {\n  animation-name: fade;\n  animation-duration: 2s;\n}\n"
+
+    LOCATED = facts(
+        selector="#hero",
+        raw_sources={"0": SHEET},
+        computed=computed(animation_name="fade", animation_duration="2s"),
+        matched_rules=[
+            rule("#hero", {"animation-name": "fade", "animation-duration": "2s"})
+        ],
+        sources=[source("src-0", selector="#hero")],
+    )
+
+    LINKED = facts(
+        selector="#hero",
+        computed=computed(animation_name="fade", animation_duration="2s"),
+        matched_rules=[
+            rule("#hero", {"animation-name": "fade", "animation-duration": "2s"})
+        ],
+        sources=[
+            {
+                **source("src-0", selector="#hero"),
+                "stylesheet": {
+                    "index": 0,
+                    "href": "https://cdn.test/site.css",
+                    "kind": "link",
+                },
+                "source_text_available": False,
+            }
+        ],
+    )
+
+    async def test_the_offset_lands_on_the_find_literal_in_the_sheets_own_bytes(self):
+        edit = (await recipes(self.LOCATED, name="fade"))["duration"]
+        start = edit["char_offset"]
+        assert self.SHEET[start : start + len(edit["find"])] == edit["find"], (
+            f"char_offset {start} points at "
+            f"{self.SHEET[start : start + len(edit['find'])]!r}, not at the find "
+            f"literal — an offset that is off by anything is worse than none"
+        )
+
+    async def test_the_line_and_column_are_one_based_like_an_editor(self):
+        edit = (await recipes(self.LOCATED, name="fade"))["duration"]
+        assert (edit["line"], edit["column"]) == (3, 3)
+
+    async def test_the_source_says_which_document_the_offsets_are_measured_in(self):
+        payload = await extract(self.LOCATED)
+        opened = payload["sources"][0]["open"]
+        assert opened["url"] == payload["url"], (
+            "a <style> block is reached by opening the DOCUMENT; the sheet has "
+            "no url of its own"
+        )
+        assert opened["offsets_in"] == "style_element_text"
+
+    async def test_the_frame_of_reference_is_explained_once_in_the_protocol(self):
+        """The R12 rule: an instruction repeated per recipe is a payload tax.
+        ``edit_protocol`` is where the one copy lives."""
+        payload = await extract(self.LOCATED)
+        protocol = payload["edit_protocol"]["open"]
+        assert "char_offset" in protocol and "style_element_text" in protocol
+        for edit in _timing(payload, "fade")["edits"]:
+            assert "style_element_text" not in str(edit)
+
+    async def test_a_linked_sheet_names_its_own_url_and_promises_no_offsets(self):
+        """Author text for a linked sheet is not readable (owner ruling Q5: name
+        the href and stop), so there is no offset to give — and claiming a frame
+        of reference for offsets that do not exist would be the same defect in
+        the other direction."""
+        payload = await extract(self.LINKED)
+        opened = payload["sources"][0]["open"]
+        assert opened["url"] == "https://cdn.test/site.css"
+        assert "offsets_in" not in opened
+        for edit in _timing(payload, "fade")["edits"]:
+            assert "char_offset" not in edit and "line" not in edit
+
+
+class TestEditableSaysWhichPARTSAreEditable:
+    """D7: ``editable`` was a whole-record verdict, and its absence read as yes.
+
+    A record whose five timing knobs are all pointers but whose keyframe
+    declarations are applicable emitted NO ``editable`` field at all — so a
+    reader that stops at the flag concludes it can retime the animation, which
+    is exactly the false all-clear the flag exists to prevent.
+
+    The verdict is now granular: ``editable`` says whether ANY recipe here can
+    be applied, and ``not_editable`` names the ones that cannot, so the two
+    together cannot be read as a promise about a knob that is a pointer.
+    """
+
+    MIXED = facts(
+        selector="#hero",
+        raw_sources={
+            "0": "@layer base {\n"
+            "  #hero { animation-name: fade; animation-duration: 2s; }\n"
+            "}\n"
+            ".hero { animation-name: fade; animation-duration: 2s; }\n"
+            "@keyframes fade { from { opacity: 0 } to { opacity: 1 } }\n"
+        },
+        computed=computed(animation_name="fade", animation_duration="2s"),
+        matched_rules=[
+            rule(
+                "#hero",
+                {"animation-name": "fade", "animation-duration": "2s"},
+                at_rule_context=["@layer base"],
+            ),
+            rule(
+                ".hero",
+                {"animation-name": "fade", "animation-duration": "2s"},
+                source_ref="src-1",
+            ),
+        ],
+        keyframe_rules=[
+            {
+                "name": "fade",
+                "source_ref": "src-2",
+                "keyframes": [
+                    {
+                        "key_text": "from",
+                        "css_text": "opacity: 0;",
+                        "easing": "",
+                        "composite": "",
+                    },
+                    {
+                        "key_text": "to",
+                        "css_text": "opacity: 1;",
+                        "easing": "",
+                        "composite": "",
+                    },
+                ],
+            }
+        ],
+        sources=[
+            source("src-0", selector="#hero"),
+            source("src-1", selector=".hero"),
+            source("src-2", name="fade", kind="keyframes"),
+        ],
+    )
+
+    # Every knob spelled out in the shorthand. A bare ``animation: fade 2s ease``
+    # is NOT fully applicable and never was: the delay and iteration count come
+    # from the initial values, so no rule declares them and both degrade to
+    # pointers — which is itself half of why D7 matters.
+    PLAIN = facts(
+        selector="#hero",
+        raw_sources={
+            "0": "#hero { animation: fade 2s ease 0s 1; }\n"
+            "@keyframes fade { from { opacity: 0 } to { opacity: 1 } }\n"
+        },
+        computed=computed(animation_name="fade", animation_duration="2s"),
+        matched_rules=[
+            rule(
+                "#hero",
+                {"animation": "fade 2s ease 0s 1", "animation-duration": "2s"},
+            )
+        ],
+        keyframe_rules=[
+            {
+                "name": "fade",
+                "source_ref": "src-1",
+                "keyframes": [
+                    {
+                        "key_text": "from",
+                        "css_text": "opacity: 0;",
+                        "easing": "",
+                        "composite": "",
+                    },
+                    {
+                        "key_text": "to",
+                        "css_text": "opacity: 1;",
+                        "easing": "",
+                        "composite": "",
+                    },
+                ],
+            }
+        ],
+        sources=[
+            source("src-0", selector="#hero"),
+            source("src-1", name="fade", kind="keyframes"),
+        ],
+    )
+
+    async def test_the_mixed_record_really_is_mixed(self):
+        """Asserted first: if the keyframe recipes were pointers too this class
+        would pass for the wrong reason."""
+        payload = await extract(self.MIXED)
+        found = {e["knob"]: e for e in _timing(payload, "fade")["edits"]}
+        assert all(
+            "find" not in found[knob]
+            for knob in ("duration", "delay", "easing", "iterations", "name")
+        )
+        assert any(
+            "find" in edit
+            for knob, edit in found.items()
+            if knob.startswith("keyframe[")
+        )
+
+    async def test_a_record_whose_timing_is_all_pointers_says_so(self):
+        """RED before this PR: no ``editable`` key at all on this record."""
+        payload = await extract(self.MIXED)
+        fade = _timing(payload, "fade")
+        assert fade["editable"] is True
+        assert set(fade["not_editable"]) == {
+            "duration",
+            "delay",
+            "easing",
+            "iterations",
+            "name",
+        }
+        assert fade["not_editable_reason"]
+
+    async def test_a_fully_applicable_record_carries_no_pointer_list(self):
+        """The list exists to break a false all-clear. Where every recipe
+        applies there is no all-clear to break, and an empty list would be
+        noise on every healthy record."""
+        payload = await extract(self.PLAIN)
+        fade = _timing(payload, "fade")
+        assert fade["editable"] is True
+        assert "not_editable" not in fade
+        assert "not_editable_reason" not in fade
+
+    async def test_a_record_with_nothing_applicable_still_lists_its_parts(self):
+        payload = await extract(
+            facts(
+                selector="#hero",
+                computed=computed(animation_name="fade", animation_duration="2s"),
+            )
+        )
+        fade = _timing(payload, "fade")
+        assert fade["editable"] is False
+        assert "duration" in fade["not_editable"]
+        assert fade["not_editable_reason"]

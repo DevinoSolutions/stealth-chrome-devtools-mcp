@@ -38,6 +38,83 @@ safe, and the guards that prove it:
 
 `server.py`: 3411 → **3342** LOC, cap ratcheted down to the measured actual.
 
+### Changed — the cloner subsystem joins the one error convention (F-858)
+
+Every tool in this package reports failure by raising `ToolError`, so a client
+sees a real error. The cloner subsystem did not: 29 sites across the engine, the
+progressive adapter and the to-file adapter answered a failure by RETURNING
+`{"error": ...}`, which reaches an MCP client as a **successful** call whose
+result happens to contain the word "error". Those 29 now raise. Message text is
+byte-preserved everywhere, so nothing a caller reads got worse.
+
+Two of them were more than cosmetic:
+
+* **`clone_element_to_file` with malformed `extraction_options`** returned an
+  error dict while its sibling `clone_element_complete` — same argument, same
+  `json.loads`, same failure — raised. Whether a bad option string was an error
+  depended on which of two tools you called.
+* **`*_to_file` swallowed a failed extraction.** It wrote the engine's error
+  payload to a JSON file and answered with the normal
+  `{file_path, extraction_type, summary}` shape and an all-empty summary — a
+  file claiming to be a clone of an element that was never extracted, and a
+  summary indistinguishable from a genuinely empty element. A failed extraction
+  now propagates and writes nothing.
+
+What deliberately did NOT change: a complete clone still survives one bad aspect.
+`extract_complete_element` already gathered its six aspects with
+`return_exceptions=True`, so a raising aspect lands in the same embedded
+`{"error": ...}` record it landed in before — one isolation mechanism, not two.
+The other five aspects still populate.
+
+### Fixed — an edit recipe now says WHERE, and stops guessing WHY (F-857)
+
+Three follow-ups recorded by the animation-v2 adversarial audit (PR #73), all in
+the same seam: the payload knew the answer and printed a guess instead.
+
+* **D6 — three causes, one wrong sentence.** A `var()`-indirect value, an
+  animation declared in the element's own `style=""`, and a rule that lives in
+  an adopted constructed stylesheet all degraded with *"its stylesheet is likely
+  cross-origin, so there is nothing here to find/replace"* — a guess, and a
+  wrong one in two of the three, which sends a weak model hunting through a file
+  that is not involved. Each is now decided from a fact the collector already
+  sent: the declared value names the custom property (`var(--dur)` →
+  "change `--dur`'s own declaration"), `element.inline_properties` names the
+  attribute, and a *witnessed* `cross_origin_stylesheet` warning — not the
+  absence of a rule — is what licenses saying "cross-origin" at all, with the
+  href it was witnessed on. With no such witness the message says what is
+  actually left: a constructed sheet adopted at runtime, a shadow root's own
+  `<style>`, or JavaScript.
+* **Openable source location.** `rule_span` computed the offset of a rule inside
+  the sheet and threw it away, so the strongest thing a recipe could say was
+  "find this string somewhere in `<style> #0`". A recipe that carries a `find`
+  now also carries `char_offset`, `line` and `column`, and its `sources` entry
+  carries `open`: the url an editor opens (a linked sheet's href, else the
+  DOCUMENT that contains the `<style>`) plus `offsets_in`, because offsets into
+  a `<style>` element's text are not offsets into the HTML around it. A
+  constructed sheet gets no `open` at all — a url there would be a fabricated
+  address. Resolving a url to a path on disk stays with `extract_related_files`,
+  the one URL→file answerer; the payload surfaces the halves rather than growing
+  a second one.
+* **D7 — `editable` was whole-record, and its absence read as yes.** A record
+  whose keyframe declarations were applicable while every timing knob was a
+  pointer emitted no verdict at all, so a reader that stopped at the flag
+  concluded it could retime an animation it cannot. `editable` still answers
+  "can ANY recipe here be applied"; `not_editable` now names the ones that
+  cannot, and is omitted where nothing is a pointer.
+
+Payload shape (SOFT golden, updated in the same commit): animation and
+transition records always carry `editable`; `not_editable` is new; the recipe
+`note` for "no rule declares this" is now short and defers to the record's
+`not_editable_reason`, which carries the discriminated cause. `edit_protocol`
+gains one `open` paragraph, stated once rather than per recipe.
+
+`embedded/animation_source.py` is new — THE one home for *where a declaration
+lives* (the locating, the openable location, and the three causes when it cannot
+be located), extracted from `animation_edits.py` because the additions took that
+file past the 1000-LOC budget. No cap was raised.
+
+## 2.1.1
+
 ### Fixed — a starved machine no longer manufactures its own backend death (F-856)
 
 On 2026-09-02, on a machine at 3,445 processes with the CPU pegged at 100%,

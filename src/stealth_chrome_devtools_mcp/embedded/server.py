@@ -2287,8 +2287,8 @@ async def clone_element_to_file(
     if extraction_options:
         try:
             parsed_options = json.loads(extraction_options)
-        except json.JSONDecodeError:
-            return {"error": "Invalid extraction_options JSON"}
+        except json.JSONDecodeError as exc:
+            raise ToolError("Invalid extraction_options JSON") from exc
     return await _with_cdp_timeout(
         file_based_element_cloner.clone_element_complete_to_file(
             tab, selector=selector, extraction_options=parsed_options
