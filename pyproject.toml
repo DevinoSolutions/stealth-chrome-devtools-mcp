@@ -310,6 +310,21 @@ ban-relative-imports = "all"
 # per-aspect toggles are the WIRE surface and so cannot be regrouped by a pure
 # move. Carried verbatim, nothing widened: no E501 here, because none of the
 # moved docstring lines is long.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/browser_management.py" = [
+    "ANN401", "ARG001", "ASYNC109", "B904", "BLE001", "C901", "E501",
+    "PERF401", "PLR0912", "PLR0913", "RUF013", "TID251", "TRY002", "TRY300",
+    "TRY301",
+]  # plan_SERVERSPLIT slice 10 (the browser-management bodies moved VERBATIM out
+# of server.py — the browser's own lifecycle, spawn_browser included. Every code
+# is the exact subset of server.py's file-wide list the moved lines fire, and
+# every one is carried, not authored: C901/PLR0912/TRY002/TRY301/BLE001/B904/
+# TRY300 are spawn_browser's three-attempt retry loop and its
+# `except Exception as e: raise ToolError(...)` envelope; ANN401/RUF013/TID251/
+# PLR0913 are its `sandbox: Any | None`, its two implicit-Optional list defaults
+# and its twelve parameters, all WIRE surface a pure move may not narrow;
+# ARG001 is reload_page's `ignore_cache`, ASYNC109 navigate's `timeout`,
+# PERF401 list_instances' append loop and E501 eleven docstring lines. Nothing
+# widened.)
 "src/stealth_chrome_devtools_mcp/embedded/clone_storage.py" = [
     "ANN001", "ANN202", "ANN401", "ARG001", "ARG005", "ASYNC240",
     "BLE001", "DTZ005", "DTZ006", "E501", "PIE810", "PLR2004", "PTH100",

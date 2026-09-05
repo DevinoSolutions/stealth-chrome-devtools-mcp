@@ -144,8 +144,27 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # The one-line `cdp_function_executor` alias import they were the last
     # consumer of was pruned with them. Cap == the measured post-ruff-format
     # actual, no padding.
+    # plan_SERVERSPLIT slice 10 RATCHETS DOWN 1371 -> 986. The eight
+    # browser-management bodies moved VERBATIM into
+    # embedded/tool_sections/browser_management.py — the browser's own
+    # lifecycle, including spawn_browser (the plan's largest single tool) with
+    # the F-808/F-810 headed-visibility guard that runs BEFORE and outside its
+    # try, and close_instance, the other end of the on-disk profile/clone
+    # lifecycle. get_instance_state's `# F-164 non-CDP` marker comment moved
+    # byte-unchanged with it, and tests/test_cdp_timeout.py follows it into the
+    # new file through tests/source_scan.py rather than passing vacuously over
+    # an emptier server.py. Four alias/name imports they were the last consumer
+    # of were pruned with them: BrowserOptions, the two platform_utils
+    # predicates and _require_landing_ok, plus the three tool_runtime aliases
+    # named display_context, dynamic_hook_system and in_memory_storage.
+    # clone_storage STAYS, carrying an explicit keep-reason, because
+    # tests/test_clone_storage.py pins `server.clone_storage is clone_storage`
+    # until slice 12. This is the slice that takes server.py under the 1000-LOC
+    # default — the row survives one more slice only because it is deleted, not
+    # merely satisfied, in slice 12. Cap == the measured post-ruff-format
+    # actual, no padding.
     "embedded/server.py": (
-        1371,
+        986,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an

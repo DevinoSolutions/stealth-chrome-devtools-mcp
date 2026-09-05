@@ -33,8 +33,9 @@ from pathlib import Path
 #: (``debugging``) to 5, slice 4 (``dynamic_hooks``) to 6, slice 5
 #: (``progressive_cloning``) to 7, slice 6 (``network_debugging``) to 8 and
 #: slice 7 (``file_extraction``) to 9, slice 8 (``element_extraction``) to 10
-#: and slice 9 (``cdp_functions``) to 11; slice 11 ends at 13.
-MIN_TOOL_SOURCE_FILES = 11
+#: and slice 9 (``cdp_functions``) to 11 and slice 10
+#: (``browser_management``) to 12; slice 11 ends at 13.
+MIN_TOOL_SOURCE_FILES = 12
 
 
 def collect_tool_source_files(server_mod, runtime_mod, section_modules, floor):

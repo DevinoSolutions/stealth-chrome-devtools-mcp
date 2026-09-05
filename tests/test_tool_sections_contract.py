@@ -273,11 +273,12 @@ def test_the_alias_set_is_not_empty():
     ``server.py`` prunes that import, and the parametrize legitimately loses a
     case. It started at 17 (slices 0-6, floor 15) and slices 7, 8 and 9 each
     pruned one — ``file_based_element_cloner``, ``cdp_element_cloner``,
-    ``cdp_function_executor`` — leaving 14. Set to the measured actual, never
-    padded, so the pin still cannot vanish silently but a deliberate prune is
-    not read as one.
+    ``cdp_function_executor`` — leaving 14. Slice 10 pruned three at once
+    (``display_context``, ``dynamic_hook_system``, ``in_memory_storage``),
+    leaving 11. Set to the measured actual, never padded, so the pin still
+    cannot vanish silently but a deliberate prune is not read as one.
     """
-    assert len(MIGRATION_ALIASES) >= 14, MIGRATION_ALIASES
+    assert len(MIGRATION_ALIASES) >= 11, MIGRATION_ALIASES
 
 
 @pytest.mark.parametrize("name", MIGRATION_ALIASES)

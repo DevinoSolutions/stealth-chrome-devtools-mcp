@@ -28,6 +28,7 @@ silently.
 """
 
 from stealth_chrome_devtools_mcp.embedded.tool_sections import (
+    browser_management,
     cdp_functions,
     cookies_storage,
     debugging,
@@ -50,6 +51,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_sections import (
 #: that ordering (``release_evidence`` and the contract generator both sort, and
 #: ``--list-sections`` only totals), and it settles once every section has moved.
 SECTION_MODULES = (
+    browser_management,
     network_debugging,
     cookies_storage,
     debugging,
