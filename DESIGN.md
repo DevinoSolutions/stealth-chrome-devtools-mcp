@@ -461,6 +461,26 @@ disposition), not a bug — do not rewrite it into a middleware chain.
   would trigger a **double registration** of every tool under runpy. Helpers that need
   the browser manager take it as an **argument** (e.g. `tool_errors._require_tab`),
   which is exactly why the error helpers live in a leaf module.
+- **The section-module corollary: a module that holds tool bodies must not register
+  them either.** The rule above forbids importing `server`; this one forbids the thing
+  the import would have been for. The 94 bodies live in `embedded/tool_sections/*.py`,
+  and every one of those modules is a plain module — imported **once** per process,
+  into one `sys.modules` entry. `embedded/server.py` is not: its body runs up to three
+  times (canonical import, bare-name `spec_from_file_location` load, `runpy` `__main__`),
+  building a fresh `FastMCP` app each time. So a `@section_tool(...)` at a section
+  module's own scope would run on the FIRST of those executions and never again,
+  registering into that app and leaving the runpy `__main__` load — the one that actually
+  serves — with **zero** tools. That failure is invisible to the 94-count tripwire,
+  because `SECTION_TOOLS` lives in `tool_registry.py` and is shared: it would still say
+  94 (see `tests/test_tool_module_reload.py`, which asserts per-identity app counts for
+  exactly this reason). Registration is therefore **driven from `server.py`'s module
+  body** by a four-line binding loop over `SECTION_MODULES`, so each execution registers
+  into its own `mcp` and binds all 94 names into its own namespace. A section module
+  exports only `SECTION` and `TOOLS`, imports no `mcp`/`registry`/`server`, and resolves
+  every singleton as `rt.<name>` against `embedded/tool_runtime.py` at call time (an
+  import-time `from ... import browser_manager` would create a second patchable home and
+  silently defeat `tests/conftest.py`'s `patched_server`). All three properties are
+  enforced by AST in `tests/test_tool_sections_contract.py`.
 - There is **exactly one** sanctioned `sys.path` shim (`embedded/__init__.py`, which
   puts `embedded/` on the path). Do not add a second `sys.path` insert anywhere.
 

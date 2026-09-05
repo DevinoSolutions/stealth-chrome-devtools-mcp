@@ -141,6 +141,50 @@ backend subprocess over HTTP — control 94, `--xpool-safe` 81,
 `--disable-cdp-functions` 81, `XPOOL_SAFE_MODE=1` 81 — still exactly thirteen
 removed by each, unchanged from the pre-move baseline.
 
+### Internal — the split is complete; the scaffolding is gone (plan_SERVERSPLIT slice 12, closing)
+
+**plan_SERVERSPLIT is COMPLETE.** All 94 tool bodies live in
+`embedded/tool_sections/`, and this closing slice removes the migration machinery
+that made the move reviewable. No behaviour change, no tool renamed, added or
+removed: the served surface is still byte-identical to
+`tests/goldens/tool_surface.json`, and all three loaded identities of `server.py`
+still build a full 94-tool app.
+
+- **The migration alias block is deleted.** Through slices 0–11 `server.py`
+  re-exported a shrinking set of `tool_runtime` names, so a fake handed to
+  `tests/conftest.py`'s `patched_server` had to be written into two places at once
+  (a dual-patch guarded by an alias-identity pin). `server.py`'s own non-tool
+  readers — `app_lifespan`, the four `@mcp.resource` handlers and the `__main__`
+  block — now read `rt.<name>` exactly as a tool body does, so the dual-patch and
+  the pin go with the block. `tool_runtime` is the one patchable home again, with
+  no era to keep in step.
+- **"One home" is a guard now, not a convention.** A new parametrized test asserts
+  the four constructed singletons (`browser_manager`, `network_interceptor`,
+  `dom_handler`, `cdp_function_executor`) are **not** attributes of `server`.
+  An alias that came back would fail nothing else: every test would stay green
+  while a `setattr` on `tool_runtime` silently stopped reaching whatever read the
+  `server` copy. `tests/test_observability.py`'s four `_with_cdp_timeout` calls and
+  two `debug_logger` reads are re-pointed to `tool_runtime`, and
+  `tests/test_tool_module_reload.py`'s shared-runtime check now asserts through
+  each identity's own `rt` binding.
+- **`embedded/server.py` leaves `GRANDFATHER`.** The row is *deleted*, not merely
+  satisfied: a grandfathered cap is a standing permission to exceed the budget, and
+  the file — **523 LOC**, down from the 3411-line god file the plan started against
+  — is governed by the 1000-LOC default like every other module. What is left in it
+  is `mcp` and the registry, the binding loop that registers all 94 functions once
+  per execution of its module body, `app_lifespan`, the four `@mcp.resource`
+  handlers, the xpool-safe gate, `build_arg_parser` and the `__main__` block. The
+  one import that is not a runtime read is `clone_storage`, kept as the positive
+  delegation handle `tests/test_clone_storage.py`'s F-201 negative-surface pin needs.
+- **Docs.** `CLAUDE.md`'s `server.py` / `tool_runtime.py` / `tool_sections/` rows
+  and its "Tool count = 94" paragraph now state the finished shape (the count
+  derives from `SECTION_TOOLS`, filled by `server.py`'s binding loop over
+  `SECTION_MODULES`); `DESIGN.md` §8 gains the section-module corollary — *a module
+  that holds tool bodies must not register them either*, with the zero-registration
+  failure mode spelled out; `CONTRIBUTING.md` gains an "Adding a tool" section
+  saying what that now means: a function in a section module and an entry in its
+  `TOOLS` tuple.
+
 ### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
 
 No behaviour change and no tool renamed, added or removed: the served surface is

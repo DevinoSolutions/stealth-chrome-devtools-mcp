@@ -60,8 +60,8 @@ from e2e_helpers import (
     get_fn,
     integration_pytestmark,
     navigate_and_settle,
+    runtime,
     sandbox_kwargs,
-    server_mod,
     warmup_once,
 )
 from stealth_chrome_devtools_mcp.embedded.platform_utils import (
@@ -520,7 +520,7 @@ async def _collect_probe(base_url: str, *, control: bool) -> dict:
 
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
-    bm = server_mod.browser_manager
+    bm = runtime.browser_manager
 
     patched_orig = None
     if control:
@@ -700,7 +700,7 @@ async def _collect_ua_facts(base_url: str, *, user_agent: str | None) -> dict:
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
     open_tab = get_fn("new_tab")
-    bm = server_mod.browser_manager
+    bm = runtime.browser_manager
 
     explicit = {"user_agent": user_agent} if user_agent else {}
     url = f"{base_url}/stealth_probe.html"
@@ -1291,7 +1291,7 @@ async def test_f806_a_stale_version_memo_is_repaired_by_the_launched_browser(
 
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
-    bm = server_mod.browser_manager
+    bm = runtime.browser_manager
 
     _pu.reset_browser_version_memo()
     monkeypatch.setattr(_pu, "_probe_browser_major_version", lambda _exe: stale_major)
@@ -1342,7 +1342,7 @@ async def test_f806_a_stale_version_memo_is_repaired_by_the_launched_browser(
 async def _drive_online(url: str) -> dict:
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
-    bm = server_mod.browser_manager
+    bm = runtime.browser_manager
     spawned = await spawn(headless=True, **sandbox_kwargs())
     iid = spawned["instance_id"]
     try:

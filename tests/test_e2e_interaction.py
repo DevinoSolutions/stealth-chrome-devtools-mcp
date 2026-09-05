@@ -26,8 +26,8 @@ from e2e_helpers import (
     integration_pytestmark,
     navigate_and_settle,
     read_actions,
+    runtime,
     sandbox_kwargs,
-    server_mod,
     wait_for_js,
     warmup_once,
 )
@@ -614,7 +614,7 @@ async def test_navigation_survives_a_forced_rediscovery(fixture_app_server):
     list_tabs = get_fn("list_tabs")
     close = get_fn("close_instance")
 
-    manager = server_mod.browser_manager
+    manager = runtime.browser_manager
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
@@ -658,7 +658,7 @@ async def test_close_and_switch_survive_a_forced_rediscovery(fixture_app_server)
     close_tab = get_fn("close_tab")
     close = get_fn("close_instance")
 
-    manager = server_mod.browser_manager
+    manager = runtime.browser_manager
     result = await spawn(headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
