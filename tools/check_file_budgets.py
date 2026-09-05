@@ -74,8 +74,35 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # what makes module <-> section a clean 1:1. The two platform_utils imports
     # it was the last consumer of were pruned with it. Cap == the measured
     # post-ruff-format actual, no padding.
+    # plan_SERVERSPLIT slice 4 RATCHETS DOWN 3014 -> 2839. The ten dynamic-hooks
+    # bodies (174 lines) moved VERBATIM into
+    # embedded/tool_sections/dynamic_hooks.py — the only section carrying
+    # SYNCHRONOUS tool bodies, so this slice is what proves tool_registry's
+    # _surrogate_safe_returns sync branch still wraps a function whose
+    # __globals__ is a section module. The one-line `dynamic_hook_ai` alias
+    # import they were the last consumer of was pruned with them. Cap == the
+    # measured post-ruff-format actual, no padding.
+    # plan_SERVERSPLIT slice 5 RATCHETS DOWN 2839 -> 2660. The ten
+    # progressive-cloning bodies (178 lines) moved VERBATIM into
+    # embedded/tool_sections/progressive_cloning.py — the first golden-backed
+    # section: tests/goldens/progressive_expand_styles.json and
+    # progressive_list_stored_elements.json belong to the ADAPTER one layer
+    # below the tool bodies, so they neither move nor change, and they are
+    # re-run to prove it. The one-line `progressive_element_cloner` alias import
+    # they were the last consumer of was pruned with them. Cap == the measured
+    # post-ruff-format actual, no padding.
+    # plan_SERVERSPLIT slice 6 RATCHETS DOWN 2660 -> 2391. The ten
+    # network-debugging bodies moved VERBATIM into
+    # embedded/tool_sections/network_debugging.py, and so did the
+    # _CAPTURE_OFF_NOTE constant that sat WEDGED between get_request_details and
+    # get_response_details — a module constant embedded mid-section, which lands
+    # at the top of its own module. The string is byte-identical; only its
+    # position moved, and it is now beside the three capture_note tools that are
+    # its only readers. No import was pruned this time: server.py still drives
+    # network_interceptor from spawn_browser, close_instance and two resource
+    # handlers. Cap == the measured post-ruff-format actual, no padding.
     "embedded/server.py": (
-        3014,
+        2391,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an

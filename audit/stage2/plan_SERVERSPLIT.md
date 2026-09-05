@@ -1046,3 +1046,38 @@ a loop-responsiveness assertion sensitive to machine load. It passes on a re-run
 its own file and passed in all three slice lanes (**2334 passed, 1 skipped** each).
 Measuring the base before the first edit is what made that attributable rather than
 a suspected regression.
+
+---
+
+## Execution log — slices 4-6 (branch `refactor/serversplit-slices-4-6`, based on `6c3b616` = slices 1-3 merged to `main`)
+
+**Status:** slices 4, 5 and 6 EXECUTED, one commit each, each independently green on
+the full §5 battery before the next began. 43 of 94 bodies moved; `server.py`
+**3014 → 2391** LOC (cap ratcheted DOWN to the measured actual in every commit,
+`tests/source_scan.py`'s floor ratcheted UP 5 → 8).
+
+| Slice | Module | Tools | `server.py` before → after | Plan projected | Also moved / removed |
+|---|---|---|---|---|---|
+| 4 | `dynamic_hooks.py` | 10 | 3014 → **2839** | ~2851 | the now-unused `dynamic_hook_ai` alias import |
+| 5 | `progressive_cloning.py` | 10 | 2839 → **2660** | ~2674 | the now-unused `progressive_element_cloner` alias import |
+| 6 | `network_debugging.py` | 10 | 2660 → **2391** | ~2405 | `_CAPTURE_OFF_NOTE` moved WITH the section; no import pruned |
+
+### Drift between the plan and reality, and how it was resolved
+
+| Plan says | Reality | Resolution |
+|---|---|---|
+| §5.0 treats the unit-lane count as a stable number a slice must not lower | the lane count **DROPS BY ONE** on any slice that prunes a `tool_runtime` alias from `server.py`: §5.5's pin is parametrized over `tool_runtime.__all__` ∩ `dir(server)`, so a pruned alias deletes a parametrize case. Base 2334 → slice 4 **2333** (`dynamic_hook_ai`) → slice 5 **2332** (`progressive_element_cloner`) → slice 6 **2332** (nothing pruned) | not a regression and not to be "fixed": the pin's whole job is to shrink as the migration retires aliases, and its `test_the_alias_set_is_not_empty` floor is what stops it vanishing. Recorded here so slices 7-11 do not read a −1 as a lost test. Slices 1-3 never saw it because the imports they pruned (`_require_browser`, `platform_utils`) are not `tool_runtime` aliases |
+| §5.0's battery does not mention `ty` moving | `ty` counts **rise** as bodies move: 77 (base) → 77 (slice 4) → 78 (slice 5) → 80 (slice 6). `server.py` is listed in `[tool.ty.src] exclude`; a section module is not, so annotations the exclusion hid become visible the moment a body moves | all are WARNINGS under the existing warnings-only baseline (`missing-type-argument`/`deprecated` are `warn` in `[tool.ty.rules]`) and `ty` still exits 0. Every one is WIRE surface a pure move may not touch: slice 5's `expand_children(depth_range: list)` and slice 6's two `response.dict()` / `request.dict()` pydantic-v1 calls. Narrowing them is a behaviour change (§8 non-goal 2) and belongs to a later plan; the honest record is that the split makes pre-existing debt visible rather than creating it |
+| §4.2 step 6 expects test re-points for the moved symbols | **zero** again across all three slices. Census re-run per slice (`server.<tool>` reads, `from …embedded.server import …`, `patch("…server.<name>")` string targets, `inspect.getsource`, raw `.fn` calls): slice 6's `tests/test_server_network_tools.py` holds the plan's heaviest coupling — 15 `server.<tool>.fn(...)` sites plus two `server.search_network_requests.description` reads — and every one is a module-attribute read the binding loop still satisfies. There is no `patch("…server.<tool>")` string target anywhere in `tests/` | the census stays a per-slice step, not an assumption. Note slices 1-3 had already converted `test_server_network_tools.py`'s one direct `setattr(server, "network_interceptor", …)` to `patched_server`, which is why the heaviest file needed nothing here |
+| §2.2 records `_CAPTURE_OFF_NOTE` as "a module constant embedded mid-section" without saying where it lands | it sat between `get_request_details` and `get_response_details` | it moves to the TOP of `network_debugging.py`, beside the three `capture_note` tools that are its only readers. The string is byte-identical; only its position changed — stated in the module docstring and in the `GRANDFATHER` note so the relocation is not mistaken for a rewrite |
+| §2.5 orders `SECTION_MODULES` canonically; slices 1-3 recorded that mid-migration `SECTION_TOOLS` therefore lists the moved sections first | slice 6 moves a section that is canonically FIRST (`network-debugging`), so the `SECTION_TOOLS` key order changed again mid-migration | verified harmless a second time: `gen_release_contract --check` clean, `--list-sections` totals only, `release_evidence.registry_sections()` sorts, and the HARD wire golden is keyed by tool name. `SECTION_MODULES` is kept in canonical order (`network_debugging, cookies_storage, debugging, tabs, progressive_cloning, dynamic_hooks`) rather than landing order, so the tuple never needs re-sorting at slice 11 |
+| §5.0 lists the transport lane as `pytest -m transport` | as in slices 1-3, the real-Chrome coverage for these three sections is not in the `transport`-marked files. dynamic-hooks lives in `test_e2e_functions_hooks.py`; progressive-cloning and network-debugging in `test_e2e_data_tools.py`, with `test_e2e_network_capture_shape.py` and `test_e2e_extra_headers.py` covering capture shape and header modification | each slice ran its own coverage file(s) **plus** the canonical real-stdio journey (`test_e2e_transport.py`), one file at a time, Chrome counted before each (107-110 live processes, R8). All green: slice 4 `test_e2e_functions_hooks.py` 7 + transport 1; slice 5 `test_e2e_data_tools.py` 5 + transport 1; slice 6 `test_e2e_network_capture_shape.py` 1 + `test_e2e_data_tools.py` 5 + `test_e2e_extra_headers.py` 2 + transport 1 |
+| §4.2 slice 5 says "goldens must not move" without saying how that is shown | the two progressive goldens are driven by `tests/test_cloner_schemas.py` against `progressive_element_cloner` DIRECTLY, one layer below the tool bodies, so a tool-body move cannot reach them | shown rather than asserted: the file is re-run in the slice-5 lane and `git status -- tests/goldens/` is empty in the slice-5 commit. Slices 7 and 8 carry goldens of the same shape and can use the same evidence |
+| §5.0 says to measure the base lane first, without saying to do it on a CLEAN tree | measuring the base in the BACKGROUND while editing corrupted it: `test_tool_module_reload.py` re-executes `server.py` FROM DISK, so the two per-identity assertions failed against a half-edited tree and reported a fake 2-failure base | the base was re-measured on a stashed tree — **2334 passed, 1 skipped, 180 deselected, fully green** (no `test_close_instance_offload` flake this time). A base lane must be a foreground run on an unmodified tree; a source-re-reading test suite has no snapshot of the tree it started against |
+
+### Baseline note
+
+Unlike the slices 1-3 base, this one was clean: **2334 passed, 1 skipped** with no
+`test_close_instance_offload.py::test_loop_stays_responsive_during_stuck_kill`
+flake. Every slice lane below it is accounted for line by line in the first drift
+row above.

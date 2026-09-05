@@ -256,6 +256,31 @@ ban-relative-imports = "all"
 # is the exact subset of server.py's file-wide list the moved lines fire —
 # notably A002 for export_debug_logs' `format` parameter, which is part of the
 # WIRE surface and so cannot be renamed by a pure move. Carried verbatim.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/network_debugging.py" = [
+    "E501", "PLR0913", "TID251",
+]  # plan_SERVERSPLIT slice 6 (the network-debugging bodies moved VERBATIM out of
+# server.py, together with the _CAPTURE_OFF_NOTE constant that sat wedged between
+# two of them. Each code is the exact subset of server.py's file-wide list the
+# moved lines fire — TID251 the `typing.Any` annotations, PLR0913
+# search_network_requests' nine filter/pagination fields, which are the WIRE
+# surface and so cannot be regrouped by a pure move, E501 five docstring lines.
+# Carried verbatim, nothing widened.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/progressive_cloning.py" = [
+    "ANN401", "E501", "TID251",
+]  # plan_SERVERSPLIT slice 5 (the progressive-cloning bodies moved VERBATIM out
+# of server.py; the exact subset of that file's file-wide list they fire —
+# TID251 the `typing.Any` annotations, ANN401 expand_children's `max_count:
+# Any | None`, which is part of the WIRE surface and so cannot be narrowed by a
+# pure move, E501 four docstring lines. Carried verbatim, nothing widened.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/dynamic_hooks.py" = [
+    "E501", "PLR0913", "TID251",
+]  # plan_SERVERSPLIT slice 4 (the dynamic-hooks bodies moved VERBATIM out of
+# server.py — the only section with SYNCHRONOUS tool bodies. Each code is the
+# exact subset of server.py's file-wide list the moved lines fire: TID251 the
+# `typing.Any` annotations, PLR0913 create_simple_dynamic_hook's six template
+# fields, E501 three docstring lines in create_dynamic_hook's Args block. The
+# docstrings are byte-identical to server.py's because FastMCP serves them and
+# tests/goldens/tool_surface.json is a HARD golden. Carried verbatim.)
 "src/stealth_chrome_devtools_mcp/embedded/clone_storage.py" = [
     "ANN001", "ANN202", "ANN401", "ARG001", "ARG005", "ASYNC240",
     "BLE001", "DTZ005", "DTZ006", "E501", "PIE810", "PLR2004", "PTH100",
