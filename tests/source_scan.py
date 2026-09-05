@@ -30,8 +30,9 @@ from pathlib import Path
 #: waiting until slice 11 to raise it in one jump would leave ten slices during
 #: which a dropped section module reads as a legitimately smaller set. Slice 1
 #: (``cookies_storage``) took it to 3, slice 2 (``tabs``) to 4, slice 3
-#: (``debugging``) to 5 and slice 4 (``dynamic_hooks``) to 6; slice 11 ends at 13.
-MIN_TOOL_SOURCE_FILES = 6
+#: (``debugging``) to 5, slice 4 (``dynamic_hooks``) to 6 and slice 5
+#: (``progressive_cloning``) to 7; slice 11 ends at 13.
+MIN_TOOL_SOURCE_FILES = 7
 
 
 def collect_tool_source_files(server_mod, runtime_mod, section_modules, floor):

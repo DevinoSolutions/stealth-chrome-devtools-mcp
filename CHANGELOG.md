@@ -17,6 +17,14 @@ loaded identities of `server.py` (canonical import, bare-name spec load, runpy
   `rt.dynamic_hook_ai`, so the sync branch is proven in isolation. `server.py`:
   3014 → **2839** LOC (174 bodies plus the now-unused `dynamic_hook_ai` alias
   import).
+- **`tool_sections/progressive_cloning.py`** (slice 5, 10 tools) — the first
+  golden-backed section. Its two goldens
+  (`tests/goldens/progressive_expand_styles.json`,
+  `progressive_list_stored_elements.json`) belong to
+  `progressive_element_cloner`, one layer BELOW the tool bodies, so a pure move
+  cannot touch them; they are re-run byte-unchanged as part of the slice to prove
+  exactly that. `server.py`: 2839 → **2660** LOC (178 bodies plus the now-unused
+  `progressive_element_cloner` alias import).
 
 ### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
 

@@ -82,8 +82,17 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # __globals__ is a section module. The one-line `dynamic_hook_ai` alias
     # import they were the last consumer of was pruned with them. Cap == the
     # measured post-ruff-format actual, no padding.
+    # plan_SERVERSPLIT slice 5 RATCHETS DOWN 2839 -> 2660. The ten
+    # progressive-cloning bodies (178 lines) moved VERBATIM into
+    # embedded/tool_sections/progressive_cloning.py — the first golden-backed
+    # section: tests/goldens/progressive_expand_styles.json and
+    # progressive_list_stored_elements.json belong to the ADAPTER one layer
+    # below the tool bodies, so they neither move nor change, and they are
+    # re-run to prove it. The one-line `progressive_element_cloner` alias import
+    # they were the last consumer of was pruned with them. Cap == the measured
+    # post-ruff-format actual, no padding.
     "embedded/server.py": (
-        2839,
+        2660,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
