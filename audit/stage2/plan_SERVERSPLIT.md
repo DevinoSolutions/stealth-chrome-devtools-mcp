@@ -1,12 +1,21 @@
 # plan_SERVERSPLIT — shrink `embedded/server.py` by extracting the 94 tool bodies
 
-**Status:** **Slices 0-11 EXECUTED** — all 94 tool bodies have left
-`embedded/server.py` and `server.py` is at 524 LOC. Only **slice 12** (delete the
-migration alias block, delete the `GRANDFATHER` row, re-point
-`tests/test_observability.py`, docs) remains. Each group of slices has its own
-execution log at the foot of this file, and every number in those logs is a
-measurement. Slice 0 was branch `refactor/serversplit-slice0` on `bb8b5ce`
-(= release 2.1.1); the per-group branches and bases are named in their logs.
+**Status: COMPLETE — all thirteen slices (0-12) EXECUTED.**
+
+| Closing number | Value |
+|---|---|
+| Tool bodies in `embedded/server.py` | **0** (all 94 in `embedded/tool_sections/`, eleven modules) |
+| `embedded/server.py` LOC | **523** — from **3411** at `bb8b5ce`, i.e. −2888 (−84.7%) |
+| `embedded/server.py` LOC governance | the **1000-LOC default**; its `GRANDFATHER` row is DELETED, not merely satisfied |
+| Migration scaffolding | **gone** — no alias block, no `patched_server` dual-patch, no §5.5 alias-identity pin |
+| Patchable homes for a singleton | **1** (`tool_runtime`), now guarded rather than conventional |
+| Served tool surface | **byte-identical** to `tests/goldens/tool_surface.json` at every one of the thirteen commits |
+| Tools re-pointed for a moved BODY, across the whole plan | **0** — the binding loop kept every `getattr(server, …)` true |
+
+Each group of slices has its own execution log at the foot of this file, and every
+number in those logs is a measurement. Slice 0 was branch
+`refactor/serversplit-slice0` on `bb8b5ce` (= release 2.1.1); the per-group branches
+and bases are named in their logs.
 **Measured at:** working tree on branch `fix/2.0.9-batch`, HEAD `6ce62fb`
 (`git worktree list` also shows two sibling agents on `fix/F844-F845-tab-state` @ `de948a2`
 and `fix/F843-fast-death-heal` @ `000e497` — see §7 R5).
@@ -1170,3 +1179,92 @@ of `tool_runtime` aliases that slice pruned. `git diff c3aef6e HEAD -- tests/gol
 is **empty** across both commits, and the wire surface is IDENTICAL to
 `tests/goldens/tool_surface.json` at each. Every number in this log is a
 measurement.
+
+---
+
+## Execution log — slice 12, closing (branch `refactor/serversplit-slice-12`, based on `995fe31` = slices 10-11, PR #84)
+
+**Status: EXECUTED. plan_SERVERSPLIT is COMPLETE.** No tool body moved (there were
+none left); what left is the migration scaffolding itself. `server.py`
+**524 → 523** LOC and its `GRANDFATHER` row is **deleted** — the file is governed by
+the 1000-LOC default. The served surface is still IDENTICAL to
+`tests/goldens/tool_surface.json`, and `git diff 995fe31 HEAD -- tests/goldens/` is
+**empty**.
+
+| §4.3 step | What was done |
+|---|---|
+| 1 — delete the alias block | The five-name `tool_runtime` import block is gone. `server.py`'s own non-tool readers — `_install_nodriver_cookie_compat`, `app_lifespan`, the four `@mcp.resource` handlers, the `DEBUG_LOGGING_ENABLED` branch and the `__main__` block — were re-pointed to `rt.<name>` (24 reads across `debug_logger` / `browser_manager` / `network_interceptor`). **One** import survives: `clone_storage`, owner-tagged, with the keep-reason inline |
+| 2 — delete the dual-patch and the §5.5 pin | `conftest.patched_server` lost its `if hasattr(server, name)` half; `tests/test_tool_sections_contract.py` lost `MIGRATION_ALIASES`, `test_the_alias_set_is_not_empty` and the parametrized `test_server_alias_is_the_tool_runtime_object`. Census of `patched_server` uses first: **40 call sites across 13 files, none of which depended on the `server` half** — every one passes a name that is in `tool_runtime.__all__`, which the first `setattr` already covers |
+| 3 — re-point `tests/test_observability.py` | 4 `w15_server._with_cdp_timeout(...)` **and 2 `w15_server.debug_logger` reads the brief did not name** now go to `tool_runtime`. Four tests lost a `w15_server` parameter that had become dead setup |
+| 4 — the one-home guard | `test_a_constructed_singleton_has_exactly_one_home`, parametrized over `browser_manager` / `network_interceptor` / `dom_handler` / `cdp_function_executor`, asserts `not hasattr(server, name)` **and** `hasattr(tool_runtime, name)`. RED/GREEN evidence below |
+| 5 — leave `GRANDFATHER` | `"embedded/server.py"` and its 166-line comment history are removed from `tools/check_file_budgets.py`; a note in their place says the row was DELETED, not satisfied, and that no row may be re-added for a file under the default. `check_file_budgets.py` now prints five grandfathered files, `server.py` not among them, and exits 0. No test asserts on the grandfather list (verified by grep), so nothing needed updating "deliberately" |
+| 6 — docs | `CLAUDE.md` (the `server.py` / `tool_runtime.py` / `tool_sections/` rows + the "Tool count = 94" paragraph, which now says the count is filled by `server.py`'s binding loop over `SECTION_MODULES`), `DESIGN.md` §8 (the section-module corollary), `CONTRIBUTING.md` (a new "Adding a tool" section), `CHANGELOG.md` (one `### Internal` entry under `## Unreleased`). `RELEASE_CONTRACT.md` needed **no** regeneration: `gen_release_contract.py --check` exits 0, as slice 9 predicted it would (the contract names no file paths) |
+
+### Drift between the plan and reality, and how it was resolved
+
+| Plan says | Reality | Resolution |
+|---|---|---|
+| §4.3 step 3 scopes the `test_observability.py` re-point to `w15_server.<helper>`, and slices 10-11 named exactly four `_with_cdp_timeout` reads as the reason `_with_cdp_timeout` survived | there are **six** such reads, not four: `w15_server.debug_logger` is read twice more (`:728` clears the ring, `:758` dumps the view for the canary sweep). The slice-11 census counted the reads that justified ONE alias and stopped there | both re-pointed to `tool_runtime`. The lesson is that a keep-reason recorded per-alias is not a census: it answers "why does this one stay", not "what else reaches this file". Slice 12's census enumerated `tool_runtime.__all__` × the whole of `tests/` before touching anything |
+| §4.2 step 6 has recorded **zero** test re-points for eleven consecutive slices, and slices 10-11 concluded "not one test needed re-pointing for a moved tool" | slice 12 needed **eight**, in five files — and they are not a contradiction, they are the other half of the same rule. A moved BODY never needed a re-point because tool lookup is `getattr(server, name)` and the binding loop keeps that true. A deleted ALIAS does, because singleton lookup was `getattr(server, name)` and nothing replaces that. Seven of the eight are `<module>.browser_manager` in the INTEGRATION tier: `test_browser_integration.py:775` (`_server_mod.browser_manager`), `test_e2e_interaction.py:617,661` and `test_stealth.py:523,703,1294,1345` (`server_mod.browser_manager`) | the first census missed all seven because it anchored on the literal token `server.` — these files hold the module under an ALIAS (`server_mod` / `_server_mod`, the bare-name spec load). The unit lane cannot see them either: all three files are `integration`-marked, so the 180 deselected tests hid the breakage until `test_browser_integration.py` was run with real Chrome. **A census for an attribute must be written against the attribute, not the holder.** Fixed by giving `tests/e2e_helpers.py` a `runtime` re-export (the one home, for the E2E tier too) and re-pointing all seven; the eighth is `test_tool_module_reload.py`'s shared-runtime check, below |
+| §5.1's `test_tool_module_reload.py` is listed among the tests that "stay green untouched" | `test_the_probe_identities_share_the_one_tool_runtime` asserted the R4 property (the three identities do not each build their own `BrowserManager`) THROUGH `module.browser_manager` — i.e. through the alias slice 12 deletes | re-pointed to each identity's own `rt` binding, which is now the only way any of the three reaches a singleton, and strengthened: it first asserts `module.rt is tool_runtime`. The subject is unchanged; only the handle is, and the new handle is the one the property is actually about |
+| §4.3 step 1 says to keep `clone_storage` because `tests/test_clone_storage.py` pins it | true, and worth stating plainly rather than quietly: after slice 11 `server.py` does not touch `clone_storage` at all (`app_lifespan` reads `rt.clone_storage`). The import is pure test scaffolding | KEPT per the plan, with the keep-reason spelled out in `server.py`: `test_server_keeps_no_reexport_or_alias` is F-201's NEGATIVE-surface guard — it asserts `server` exposes none of the fifty moved clone-storage names — and `server.clone_storage is clone_storage` is the positive handle that keeps it from being vacuous. Removing the import means re-pointing that pin, not deleting a line, and that is a different plan's call. Recorded here so a future reader does not read it as a missed prune |
+| §6.2 declines `GRANDFATHER` rows for the new modules and §6.1 says slice 12 deletes `server.py`'s | slice 10 had already taken the file under 1000, so by slice 12 the row was satisfied anyway | deleted on POLICY, and the replacement comment says why: a grandfathered cap is a standing permission to be over budget. Leaving a 523-line row would say "this file is allowed 523 lines" when the truth is "this file is allowed 1000, like every other module". The `GRANDFATHER` dict now holds five entries, all genuinely over the default |
+| §5.0's battery does not say what a re-export inside `tests/` does to `ruff` | `tests/e2e_helpers.py`'s new `runtime` handle is `F401` there — `e2e_helpers` itself never uses it; its three consumers import it FROM that module, the same shape `get_fn` and `server_mod` already have | the inherited slices 10-11 rule applied verbatim: ruff's "imported but unused" is not the prune authority, the LAST CONSUMER is. Suppressed with an owner-tagged `# noqa: F401 PERMANENT(...)` naming the three files. `check_suppression_owners.py` clean |
+| §5.0 treats a red in the lane as a result | the FIRST full unit lane after the edits reported `test_tool_registry.py::TestCountTripwire::test_list_sections_printed_total_matches_registry` failed, in **510s** | attributed, not guessed: that test shells out to `python -m stealth_chrome_devtools_mcp --list-sections` with a 90s timeout, and the box was loaded hard enough that `Get-Process` itself timed out at 120s. It passes in isolation, and the lane re-run is fully green in **210s** — same tree, half the wall clock. Same class as slice 7's `test_close_instance_offload` flake and the recorded `boot_crash` subprocess mode |
+
+### The one-home guard is RED before it is GREEN
+
+The guard replaces a convention, so it was proven to fail. `__pycache__` was cleared
+**verifiably** first (`find -name __pycache__ -exec rm -rf`, then `find -name '*.pyc'`
+counted → **0**), because a same-second mutate-and-revert can otherwise run stale
+bytecode:
+
+```
+# re-add ONE alias to server.py's import block
+FAILED tests/test_tool_sections_contract.py::test_a_constructed_singleton_has_exactly_one_home[browser_manager]
+E  AssertionError: server.browser_manager is back. The one patchable home is
+E  tool_runtime; an import alias here binds the object at import time and re-creates
+E  the second home plan_SERVERSPLIT slice 12 removed (read it as rt.browser_manager
+E  instead).
+1 failed, 3 passed
+```
+
+Reverted (pycache cleared again, `git diff --stat` back to the pre-check
+41 insertions / 42 deletions), re-run: **15 passed**.
+
+### Battery — every number a measurement
+
+| Check | Result |
+|---|---|
+| Base unit lane, FOREGROUND on the unmodified tree at `995fe31` | **2320 passed, 1 skipped, 180 deselected** — identical to slice 11's closing figure |
+| Slice-12 unit lane | **2318 passed, 1 skipped, 180 deselected** |
+| Unit-lane arithmetic | 2320 − 6 + 4 = **2318**. −6 is §5.5's deleted pin: `test_the_alias_set_is_not_empty` plus its parametrize over the five surviving aliases (`_with_cdp_timeout`, `browser_manager`, `clone_storage`, `debug_logger`, `network_interceptor`, measured before the edit). +4 is the new one-home guard, one case per constructed singleton |
+| Wire surface | `dump_tool_surface.py --check` → **IDENTICAL to the golden** |
+| `git diff 995fe31 HEAD -- tests/goldens/` | **empty** |
+| Three-identity load | `SECTION_TOOLS: 94`, per-app `[94, 94, 94]` |
+| `--list-sections` subprocess | `Total: 94 tools` |
+| xpool gate (real backend subprocess over HTTP, slice-9 method) | control **94**, `--xpool-safe` **81**, `--disable-cdp-functions` **81**, `XPOOL_SAFE_MODE=1` **81** — thirteen removed by each, unchanged since the pre-move baseline |
+| `tests/test_tool_module_reload.py` | green (all four identity checks plus the detector's own RED conditions) |
+| `ruff format --check` / `ruff check` | 230 files formatted, all checks passed |
+| `check_file_budgets.py` | "All files within 1000-LOC budget"; five grandfathered files listed, `server.py` **not** among them |
+| `check_suppression_owners.py` | all suppressions have owner tags |
+| `vulture` | exit 0, no output. The deleted aliases unmasked **nothing** — `tool_runtime.__all__` is what vulture resolves those names against, and it did not change |
+| `ty --exit-zero-on-warning` | **96 warnings, 0 errors**, exit 0 — unchanged from slice 11, which is the expected shape: this slice moved no annotated code |
+| `gen_release_contract.py --check` | exit 0, no drift; `RELEASE_CONTRACT.md` untouched |
+| E2E, real Chrome, one file at a time (120 live Chrome counted first, R8) | `test_e2e_transport.py` **1 passed**; `test_browser_integration.py` **19 passed**; `test_e2e_interaction.py` **11 passed**; `test_stealth.py` **26 passed, 1 xfailed** |
+
+`test_e2e_interaction.py` and `test_stealth.py` were not on the brief's list but were
+run because slice 12 edits them — the re-point census is what put them there, which is
+the whole argument for doing the census before the battery rather than after.
+
+### Closing note
+
+Thirteen slices, thirteen commits, one plan. The plan projected `server.py` would land
+at "roughly 545 LOC" and leave `GRANDFATHER` entirely; it landed at **523** and did.
+Across all thirteen the served tool surface never changed by one byte, no golden moved,
+and the tool count was 94 at every commit. The single genuinely new lesson is the one in
+the second drift row: for eleven slices a moved BODY cost zero test re-points, which made
+"the census finds nothing" feel like a property of the plan rather than a property of
+`getattr(server, tool_name)`. The alias deletion has no such mechanism behind it, and
+seven of the eight re-points it needed were hiding in the `integration`-marked tier the
+unit lane deselects.

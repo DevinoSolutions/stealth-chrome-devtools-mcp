@@ -162,12 +162,23 @@ def test_the_probe_identities_share_the_one_tool_runtime(three_identities):
     """The singletons must NOT be rebuilt per execution: ``tool_runtime`` is a
     normal module, imported once, so all three identities drive one
     ``BrowserManager`` (plan_SERVERSPLIT §7 R4) and ONE patch reaches all of them.
+
+    Asserted through each identity's own ``rt`` binding rather than through a
+    re-exported ``server.browser_manager``: plan_SERVERSPLIT slice 12 deleted the
+    migration alias block, so ``rt`` is now the ONLY way any of the three reaches
+    a singleton — which is the property this test is really about. Reading it off
+    ``rt`` also keeps the check honest if an alias is ever re-added, because
+    ``tests/test_tool_sections_contract.py`` fails outright on that.
     """
     from stealth_chrome_devtools_mcp.embedded import tool_runtime
 
     for module in three_identities:
-        assert module.browser_manager is tool_runtime.browser_manager
-        assert module.network_interceptor is tool_runtime.network_interceptor
+        assert module.rt is tool_runtime, (
+            f"{module.__name__} bound a DIFFERENT tool_runtime — the one home "
+            "would be re-created per execution and one patch would reach one third"
+        )
+        assert module.rt.browser_manager is tool_runtime.browser_manager
+        assert module.rt.network_interceptor is tool_runtime.network_interceptor
 
 
 # ---------------------------------------------------------------------------

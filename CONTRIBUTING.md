@@ -183,10 +183,34 @@ golden exists to give.
 
 ---
 
-## Where the naming rule lives
+## Adding a tool
+
+A tool is a **plain `async def` in a section module**, plus an entry in that module's
+`TOOLS` tuple. That is the whole mechanism:
+
+1. Write the function in `src/stealth_chrome_devtools_mcp/embedded/tool_sections/<section>.py`
+   — the module whose `SECTION` matches the section you want it in. Resolve every
+   singleton and knob as `rt.<name>` (`tool_runtime` is the one patchable home, resolved
+   at call time); raise `ToolError` on failure (DESIGN §9).
+2. Add it to that module's `TOOLS` tuple, in the surface order you want.
+
+That is all. **Do not** apply `@section_tool` (or any `mcp.*` decorator) in a section
+module, and do not import `mcp`, `registry` or `server` there — `server.py`'s binding
+loop over `SECTION_MODULES` applies the decorator and binds the name, once per execution
+of `server.py`'s module body, and that is what keeps the `runpy` `__main__` load serving
+a full app. DESIGN §8 has the why; `tests/test_tool_sections_contract.py` enforces it by
+AST, and `tests/test_tool_module_reload.py` catches the failure the count tripwire cannot
+see. A whole new *section* additionally means a new module and an entry in
+`tool_sections/__init__.py`'s `SECTION_MODULES` (and `tests/source_scan.py`'s floor
+moves with it).
+
+The tool count is derived from `SECTION_TOOLS`, so adding to a `TOOLS` tuple updates it
+by itself — but the served surface is pinned by the HARD golden
+`tests/goldens/tool_surface.json`, so a new tool means a deliberate regeneration
+(`PYTHONUTF8=1 python tools/dump_tool_surface.py --write`) with a justification, and the
+`94` in the root docs moves in the same PR.
 
 The canonical **verb taxonomy** — the one tool-naming rule new tools follow (`list_*`,
 `get_*`, `create_*`/`spawn_*`, `execute_*`/`call_*`, `extract_*`/`clone_*`,
 `set_*`/`modify_*`/`clear_*`, `discover_*`/`inspect_*`) — is the module docstring of
-`embedded/tool_registry.py`. Follow it when adding a tool; do not restate it elsewhere
-(one home per rule).
+`embedded/tool_registry.py`. Follow it; do not restate it elsewhere (one home per rule).

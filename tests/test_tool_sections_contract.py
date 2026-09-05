@@ -1,4 +1,4 @@
-"""plan_SERVERSPLIT slice 0 — the mechanism guards.
+"""plan_SERVERSPLIT slices 0 and 12 — the mechanism guards.
 
 Four things this file pins, none of which any existing test covers:
 
@@ -7,6 +7,10 @@ Four things this file pins, none of which any existing test covers:
        ``tests/e2e_helpers.py``'s ``get_fn`` both reach a tool by ``getattr`` on
        that module, so a name that registers without binding there is invisible
        to the entire hermetic and E2E tiers — a silent, green-looking hole.
+       Its slice-12 counterpart is the NEGATIVE half: the four constructed
+       singletons must NOT be ``server`` attributes, because an import alias
+       binds at import time and re-creates the second patchable home the
+       migration spent twelve slices removing.
 
   §5.4 SECTION-MODULE CONTRACT — rules 2 and 3 of
        ``tool_sections/__init__.py``, enforced by AST. Rule 2 (never decorate)
@@ -18,11 +22,13 @@ Four things this file pins, none of which any existing test covers:
        is what converts "a source-text guard went vacuous" from a silent pass into
        a red test.
 
-  §5.5 ALIAS-IDENTITY PIN — while the tool bodies still live in ``server.py`` and
-       reach the singletons through an alias import, the two homes must be the
-       SAME OBJECT, or ``conftest.patched_server``'s dual-patch would be papering
-       over a divergence. **This block is deleted in slice 12** together with the
-       alias import block it guards.
+  §5.5 ALIAS-IDENTITY PIN — **gone.** While the tool bodies still lived in
+       ``server.py`` and reached the singletons through an alias import, the two
+       homes had to be the SAME OBJECT or ``conftest.patched_server``'s
+       dual-patch would have papered over a divergence. Slice 12 deleted the
+       alias block, the dual-patch and this pin together; what stands in its
+       place is the one-home guard under §5.3, which asserts the second home
+       cannot come back rather than that the two agree.
 
 ``SECTION_MODULES`` was empty in slice 0 — the mechanism shipped before any tool
 moved — and fills one section per slice. A guard whose subject set can be empty is
@@ -69,6 +75,44 @@ def test_every_registered_tool_is_a_server_attribute():
             bound = getattr(server, name, None)
             assert bound is not None, f"{section}/{name} is registered but not bound"
             assert hasattr(bound, "fn"), f"{name} is not a FastMCP tool object"
+
+
+#: The four singletons ``tool_runtime`` CONSTRUCTS (as opposed to the module
+#: objects it re-exports). Derived from nothing on purpose: these are the names
+#: whose "one home" the guard below is about, and listing them here is what makes
+#: the failure message say which one came back.
+CONSTRUCTED_SINGLETONS = (
+    "browser_manager",
+    "network_interceptor",
+    "dom_handler",
+    "cdp_function_executor",
+)
+
+
+@pytest.mark.parametrize("name", CONSTRUCTED_SINGLETONS)
+def test_a_constructed_singleton_has_exactly_one_home(name):
+    """plan_SERVERSPLIT slice 12 — the closing guard.
+
+    Through slices 0-11 ``server.py`` re-exported these as import aliases, so a
+    fake handed to ``conftest.patched_server`` had to be written into two places
+    at once, and the dual-patch's correctness rested on an identity pin. Slice 12
+    deleted the alias block: ``server.py``'s own readers (``app_lifespan``, the
+    four ``@mcp.resource`` handlers, the ``__main__`` block) resolve ``rt.<name>``
+    at call time like every tool body does.
+
+    This turns "there is one home" from a convention into a guard. An alias that
+    comes back would not fail anything else — every test would keep passing while
+    a ``setattr`` on ``tool_runtime`` silently stopped reaching whatever read the
+    ``server`` copy. That is the exact shape of the divergence the migration's
+    identity pin existed to catch, and this is what replaces it.
+    """
+    assert not hasattr(server, name), (
+        f"server.{name} is back. The one patchable home is tool_runtime; an "
+        "import alias here binds the object at import time and re-creates the "
+        "second home plan_SERVERSPLIT slice 12 removed (read it as rt."
+        f"{name} instead)."
+    )
+    assert hasattr(tool_runtime, name), f"tool_runtime.{name} went missing"
 
 
 def test_the_binding_loop_is_driven_from_server_not_from_a_section_module():
@@ -252,41 +296,3 @@ def test_the_floor_fires_when_the_set_collapses():
     """
     with pytest.raises(AssertionError, match="collapsed to 2 file"):
         collect_tool_source_files(server, tool_runtime, (), floor=3)
-
-
-# ---------------------------------------------------------------------------
-# §5.5 — the migration alias pin. DELETED IN SLICE 12 with the alias block.
-# ---------------------------------------------------------------------------
-
-#: Derived from ``tool_runtime.__all__``, so a singleton added to the one home
-#: cannot escape the pin by not being listed here.
-MIGRATION_ALIASES = sorted(n for n in tool_runtime.__all__ if hasattr(server, n))
-
-
-def test_the_alias_set_is_not_empty():
-    """Slice 0 through 11 keep aliases on ``server``; a zero-length parametrize
-    would make the pin below silently disappear rather than fail.
-
-    The floor RATCHETS DOWN as the migration retires aliases, the mirror of
-    ``server.py``'s LOC cap and the opposite of ``source_scan``'s floor: every
-    slice that takes the last consumer of a ``tool_runtime`` name out of
-    ``server.py`` prunes that import, and the parametrize legitimately loses a
-    case. It started at 17 (slices 0-6, floor 15) and slices 7, 8 and 9 each
-    pruned one — ``file_based_element_cloner``, ``cdp_element_cloner``,
-    ``cdp_function_executor`` — leaving 14. Slice 10 pruned three at once
-    (``display_context``, ``dynamic_hook_system``, ``in_memory_storage``),
-    leaving 11, and slice 11 pruned six more, leaving 5: the three the four
-    ``@mcp.resource`` handlers, ``app_lifespan`` and the ``__main__`` block
-    still read, plus ``clone_storage`` and ``_with_cdp_timeout``, which survive
-    only because a test reads them off ``server`` until slice 12 re-points it.
-    Set to the measured actual, never padded, so the pin still cannot vanish
-    silently but a deliberate prune is not read as one.
-    """
-    assert len(MIGRATION_ALIASES) >= 5, MIGRATION_ALIASES
-
-
-@pytest.mark.parametrize("name", MIGRATION_ALIASES)
-def test_server_alias_is_the_tool_runtime_object(name):
-    """While bodies live in both places the two homes must be the same object —
-    otherwise ``patched_server``'s dual-patch is hiding a divergence."""
-    assert getattr(server, name) is getattr(tool_runtime, name)
