@@ -1011,3 +1011,38 @@ empty `SECTION_MODULES`, so any lint objection surfaces before a single tool has
    binding loop's braces.
 7. **No `GRANDFATHER` rows for the new modules** — see §6.2 for the reasoning and the escape
    hatch if the team lead disagrees.
+
+---
+
+## Execution log — slices 1-3 (branch `refactor/serversplit-slices-1-3`, based on `da087f9` = slice 0 on `main`)
+
+**Status:** slices 1, 2 and 3 EXECUTED, one commit each, each independently green on
+the full §5 battery before the next began. 13 of 94 bodies moved; `server.py`
+**3342 → 3014** LOC (cap ratcheted DOWN to the measured actual in every commit).
+
+| Slice | Module | Tools | `server.py` before → after | Plan projected | Also removed |
+|---|---|---|---|---|---|
+| 1 | `cookies_storage.py` | 3 | 3342 → **3248** | ~3256 | — |
+| 2 | `tabs.py` | 5 | 3248 → **3144** | ~3153 | the now-unused `_require_browser` import |
+| 3 | `debugging.py` | 5 | 3144 → **3014** | ~3025 | the now-unused `get_platform_info` / `validate_browser_environment` imports |
+
+### Drift between the plan and reality, and how it was resolved
+
+| Plan says | Reality | Resolution |
+|---|---|---|
+| §5.4's checker asserts `"section_tool" not in ast.dump(tree)` | `ast.dump` renders string CONSTANTS, so a section module whose **docstring** narrates its own dropped decorator by name fails contract rule 2 — a false positive on prose, hit on the first module written | the section-module docstrings paraphrase ("the dropped registration decorator"); the trap is now stated in `tests/test_tool_sections_contract.py`'s module docstring so slices 4-11 do not rediscover it. The checker was NOT loosened: a name-only check would stop catching a decorator applied through an alias |
+| §4.1 step 6 / §4.2 slice 11 raise `MIN_TOOL_SOURCE_FILES` once, at slice 11 (and disagree on 12 vs 13) | a floor of 2 held across ten slices would let a section module dropped from `SECTION_MODULES` read as a legitimately smaller set — precisely the R3 failure mode the floor exists to convert into a red test | the floor RATCHETS UP one per slice, the mirror of the LOC cap's ratchet down: 2 → 3 → 4 → **5** after slice 3, ending at 13. `test_the_tool_source_set_is_server_plus_tool_runtime_plus_the_sections` (`== 2 + len(SECTION_MODULES)`) and the collapse RED test both keep working unchanged |
+| §4.2 slice 3 calls for an `inspect.getsource` retarget in `tests/test_observability.py` | slice 0 had already re-pointed that pin to `source_scan.tool_source_text()`; there is no `inspect.getsource` left anywhere in `tests/` or `tools/` | no test change was needed. Verified the guard is not vacuous: `"Export timeout - file too large"` now appears in `tool_sections/debugging.py` and **nowhere in `server.py`**, so slice 0's widening was load-bearing exactly here |
+| §4.2 step 6 expects test re-points for the moved symbols | **zero** were needed across all three slices: no test name-imports a tool from `server`, no `patch("...server.<tool>")` string target exists, and every lookup is a module-attribute read the binding loop still satisfies | the census (`server.<tool>` reads, `from ...server import`, `patch(...)` string targets, `inspect.getsource`) is recorded here so slices 4-11 re-run it rather than assuming the same answer — `test_server_network_tools.py`'s 15 raw `.fn` sites land in slice 6 |
+| §6.2 declines `GRANDFATHER` rows for the new modules, and says nothing about their **lint** profile | each module fires a subset of `server.py`'s file-wide per-file-ignore list the moment it exists (`ruff check` is repo-wide, so even an un-wired module is already checked) | one `per-file-ignores` entry per section module, owner-tagged `plan_SERVERSPLIT slice N`, listing the EXACT subset the moved lines fire and nothing more — 3 codes for `cookies_storage`, 3 for `tabs`, 8 for `debugging`, against `server.py`'s 41. Same carry-verbatim discipline as the `clone_storage.py` / `tool_runtime.py` extractions. Note `debugging.py`'s `A002`: `export_debug_logs`' `format` parameter is part of the WIRE surface and so cannot be renamed by a pure move |
+| §2.5 orders `SECTION_MODULES` in canonical section order without noting the consequence | the binding loop runs BEFORE the bodies still decorated in `server.py`, so mid-migration `SECTION_TOOLS` lists the MOVED sections first (`['cookies-storage', 'debugging', 'tabs', 'browser-management', …]`) | harmless and verified: `release_evidence.registry_sections()` and `gen_release_contract` both sort, `--list-sections` only totals, and no golden pins the key order. `gen_release_contract --check` is clean at every slice. Stated in `tool_sections/__init__.py` so it is not rediscovered as a bug |
+| §5.0 lists the transport lane as `pytest -m transport` | the tabs churn (`new_tab → switch_tab → close_tab → list_tabs`) has its ONLY real-transport coverage in `test_soak_stability.py`'s soak cycle, not in the canonical journey | slice 2 ran `test_e2e_transport.py` **and** `test_soak_stability.py`, one file at a time, Chrome counted before each (84-88 live processes, R8). Slice 1 ran `test_e2e_transport_cookies.py`; slice 3 re-ran the canonical journey. All green — R7's `get_cookies` `.fn`-seam quirk appeared neither on the seam nor on the wire |
+
+### Baseline note
+
+The unit lane on the base commit reported **2333 passed, 1 failed** —
+`tests/test_close_instance_offload.py::test_loop_stays_responsive_during_stuck_kill`,
+a loop-responsiveness assertion sensitive to machine load. It passes on a re-run of
+its own file and passed in all three slice lanes (**2334 passed, 1 skipped** each).
+Measuring the base before the first edit is what made that attributable rather than
+a suspected regression.

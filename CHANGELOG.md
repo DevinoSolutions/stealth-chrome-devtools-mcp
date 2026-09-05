@@ -23,6 +23,22 @@ before it is trusted with four hundred lines.
   which is what proves a knob stays patchable from a section module: it is
   resolved against `tool_runtime` at call time, not bound at import. `server.py`:
   3248 → **3144** LOC (103 bodies plus the now-unused `_require_browser` import).
+- **`tool_sections/debugging.py`** (slice 3, 5 tools) — the first slice that
+  RELOCATES rather than only moves: `validate_browser_environment_tool` sat among
+  the element-extraction bodies in `server.py` while registering into
+  `debugging`, and joins its own section here, which is what makes module ↔
+  section a clean 1:1. It is also the first slice to move a string a source-TEXT
+  guard is pinned to (`MSG_EXPORT_TIMEOUT`, in `export_debug_logs`): slice 0's
+  derived file set carries the pin into the new module, where an
+  `inspect.getsource(server)` pin would now have passed over a file the message
+  had already left. `server.py`: 3144 → **3014** LOC (128 bodies plus the two
+  now-unused `platform_utils` imports).
+
+After slice 3, 13 of the 94 bodies have moved and `server.py` is down 328 lines
+from the slice-0 baseline; the LOC cap ratchets DOWN to the measured actual in
+each commit, and `tests/source_scan.py`'s floor ratchets UP by one, so a section
+module dropped from `SECTION_MODULES` reads as a collapsed source set rather than
+a legitimately smaller one.
 
 ### Internal — the mechanism for splitting `embedded/server.py` (plan_SERVERSPLIT slice 0)
 

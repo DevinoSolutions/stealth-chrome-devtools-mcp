@@ -248,6 +248,14 @@ ban-relative-imports = "all"
 # `typing.Any` annotations, BLE001/B904 new_tab's one `except Exception as e:
 # raise ToolError(...)`, which is F-833's error-envelope idiom and is carried,
 # not authored, here. Same discipline as slice 1.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/debugging.py" = [
+    "A002", "B904", "BLE001", "E501", "PLR0913", "RET504", "TID251", "TRY300",
+]  # plan_SERVERSPLIT slice 3 (the debugging bodies moved VERBATIM out of
+# server.py, including validate_browser_environment_tool, which was filed among
+# the element-extraction bodies while registering into this section. Every code
+# is the exact subset of server.py's file-wide list the moved lines fire —
+# notably A002 for export_debug_logs' `format` parameter, which is part of the
+# WIRE surface and so cannot be renamed by a pure move. Carried verbatim.)
 "src/stealth_chrome_devtools_mcp/embedded/clone_storage.py" = [
     "ANN001", "ANN202", "ANN401", "ARG001", "ARG005", "ASYNC240",
     "BLE001", "DTZ005", "DTZ006", "E501", "PIE810", "PLR2004", "PTH100",
