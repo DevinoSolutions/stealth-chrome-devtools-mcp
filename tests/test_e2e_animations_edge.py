@@ -55,6 +55,19 @@ def author_bytes() -> str:
     return PAGE.read_text(encoding="utf-8")
 
 
+@pytest.fixture(scope="module")
+def style_element_text(author_bytes: str) -> str:
+    """The text INSIDE the page's one ``<style>`` element, cut from the file.
+
+    ``document.styleSheets`` lists exactly one sheet for this page (the adopted
+    constructed sheet is not enumerable and the shadow root's ``<style>`` is not
+    in the document), so this is what a recipe's ``char_offset`` is counted in.
+    Cut from the bytes on disk rather than read back out of the payload: the
+    point of every check in this file is that the two agree.
+    """
+    return author_bytes.split("<style>", 1)[1].split("</style>", 1)[0]
+
+
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def payloads(fixture_app_server):
     """One extraction per target element, taken in a single browser session.
@@ -131,6 +144,42 @@ class TestEveryFindLiteralIsInTheFileOnDisk:
                     checked += 1
         assert checked >= 10, f"only {checked} applicable recipes — fixture too thin"
 
+    async def test_every_offset_lands_on_its_own_find_literal(
+        self, payloads, style_element_text
+    ):
+        """The other half of the same property, for the addressing the audit
+        asked for: a ``char_offset`` is only worth having if slicing the file at
+        it produces the literal. One that is off by anything is worse than none,
+        because a search for the literal would have worked.
+        """
+        checked = 0
+        for selector, payload in payloads.items():
+            for record in payload["animations"]:
+                for edit in record.get("edits", []):
+                    if "char_offset" not in edit:
+                        continue
+                    start = edit["char_offset"]
+                    assert (
+                        style_element_text[start : start + len(edit["find"])]
+                        == edit["find"]
+                    ), f"{selector} / {edit['knob']}: char_offset {start} misses"
+                    line = style_element_text[:start].count("\n") + 1
+                    assert edit["line"] == line, edit["knob"]
+                    checked += 1
+        assert checked >= 10, f"only {checked} located recipes — fixture too thin"
+
+    async def test_the_sources_say_what_the_offsets_are_counted_in(self, payloads):
+        """``<style> #0`` is not an openable path; the DOCUMENT that contains it
+        is, and the offsets are into the element's own text rather than the
+        document's bytes. Both halves have to be said or neither is usable."""
+        for payload in payloads.values():
+            for source in payload["sources"]:
+                if not source.get("source_text_available"):
+                    continue
+                opened = source["open"]
+                assert opened["url"] == payload["url"]
+                assert opened["offsets_in"] == "style_element_text"
+
     async def test_applying_a_recipe_yields_a_declaration_not_a_fragment(
         self, payloads
     ):
@@ -177,6 +226,15 @@ class TestAValueBehindACustomProperty:
         record = animation(payloads["#var-target"], "edge-fade")
         assert record["timing"]["duration_ms"] == 750.0
 
+    async def test_the_note_names_the_custom_property_chrome_reported(self, payloads):
+        """D6, settled against the real CSSOM rather than a fixture's guess:
+        Chrome keeps ``var(--edge-dur)`` in the DECLARED value even though the
+        computed one resolves it, so the payload has the property's name and the
+        note has no excuse for sending anyone to look for a stylesheet."""
+        note = knobs(payloads["#var-target"], "edge-fade")["duration"]["note"]
+        assert "--edge-dur" in note, note
+        assert "cross-origin" not in note, note
+
 
 class TestALayeredRuleDoesNotOutrankAnUnlayeredOne:
     """``@layer edge-base { #layer-target { … } }`` vs an unlayered
@@ -214,28 +272,27 @@ class TestALayeredRuleDoesNotOutrankAnUnlayeredOne:
         ]
         assert frames and all("find" in edit for edit in frames)
 
-    async def test_editable_is_a_whole_record_verdict_not_a_per_knob_one(
-        self, payloads
-    ):
-        """Worth pinning because it is the shape most likely to be misread.
+    async def test_the_record_names_the_knobs_that_are_only_pointers(self, payloads):
+        """The D7 conversion, made deliberately (F-857).
 
-        ``editable`` means "some recipe here can be applied", and the editable
-        recipes on this record are the KEYFRAMES — every timing knob is a
-        pointer. So the record carries no ``editable: false``, and a reader that
-        stops at that flag would conclude it can retime this animation.
+        This test used to pin the opposite: ``"editable" not in record``, with a
+        note saying that if a later change made the verdict per-part, this is the
+        test to revisit rather than to silently update. This is that change, so
+        this is that revisit.
 
-        That is not a lie (the per-recipe ``confidence`` is right there and
-        says low), but it is the reason the flag must never be read alone. If a
-        later change makes ``editable`` per-knob, this test is the one that
-        should be revisited deliberately rather than silently.
+        The shape it pinned was the misreadable one. ``editable`` means "some
+        recipe here can be applied", and the applicable recipes on THIS record
+        are the keyframes — every timing knob is a pointer. Emitting no verdict
+        at all left a reader that stops at the flag concluding it could retime
+        this animation. ``not_editable`` now names the five knobs it cannot.
         """
         record = animation(payloads["#layer-target"], "edge-fade")
-        assert "editable" not in record
+        timing = ("duration", "delay", "easing", "iterations", "name")
+        assert record["editable"] is True, "the keyframe recipes here DO apply"
+        assert set(record["not_editable"]) >= set(timing)
+        assert record["not_editable_reason"]
         timing_knobs = knobs(payloads["#layer-target"], "edge-fade")
-        assert all(
-            "find" not in timing_knobs[knob]
-            for knob in ("duration", "delay", "easing", "iterations", "name")
-        )
+        assert all("find" not in timing_knobs[knob] for knob in timing)
 
 
 class TestImportantSurvivesTheRoundTrip:
@@ -310,6 +367,22 @@ class TestAConstructedStylesheetHasNoFileToPointAt:
                 "there is no file: these bytes exist only inside the script that "
                 "called replaceSync()"
             )
+
+    async def test_the_reason_does_not_blame_a_cross_origin_sheet(self, payloads):
+        """D6's third cause, in the one place only real Chrome can settle it.
+
+        Every stylesheet this page enumerates was read successfully — there is
+        no ``cross_origin_stylesheet`` warning in the payload to support the old
+        "its stylesheet is likely cross-origin", and the sheet that declares
+        this animation is not enumerable at all. The remaining causes are the
+        ones the reason must name.
+        """
+        record = animation(payloads["#adopted-host"], "edge-adopted")
+        reason = record["not_editable_reason"]
+        codes = [w["code"] for w in payloads["#adopted-host"]["warnings"]]
+        assert "cross_origin_stylesheet" not in codes, codes
+        assert "cross-origin" not in reason, reason
+        assert "constructed" in reason.lower(), reason
 
     async def test_the_missing_keyframes_are_announced_not_merely_empty(self, payloads):
         record = animation(payloads["#adopted-host"], "edge-adopted")
