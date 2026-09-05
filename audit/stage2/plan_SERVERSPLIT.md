@@ -1,7 +1,12 @@
 # plan_SERVERSPLIT — shrink `embedded/server.py` by extracting the 94 tool bodies
 
-**Status:** **Slice 0 EXECUTED** (branch `refactor/serversplit-slice0`, based on
-`bb8b5ce` = release 2.1.1). Slices 1-12 not started.
+**Status:** **Slices 0-11 EXECUTED** — all 94 tool bodies have left
+`embedded/server.py` and `server.py` is at 524 LOC. Only **slice 12** (delete the
+migration alias block, delete the `GRANDFATHER` row, re-point
+`tests/test_observability.py`, docs) remains. Each group of slices has its own
+execution log at the foot of this file, and every number in those logs is a
+measurement. Slice 0 was branch `refactor/serversplit-slice0` on `bb8b5ce`
+(= release 2.1.1); the per-group branches and bases are named in their logs.
 **Measured at:** working tree on branch `fix/2.0.9-batch`, HEAD `6ce62fb`
 (`git worktree list` also shows two sibling agents on `fix/F844-F845-tab-state` @ `de948a2`
 and `fix/F843-fast-death-heal` @ `000e497` — see §7 R5).
@@ -1122,3 +1127,46 @@ slices 4 and 5 pruned, exactly as that log predicted. The per-slice lanes then r
 `test_close_instance_offload.py::test_loop_stays_responsive_during_stuck_kill`,
 green on a re-run of its own file), **2330** (slice 8) and **2329** (slice 9),
 each −1 for the alias that slice pruned. Every number in this log is a measurement.
+
+---
+
+## Execution log — slices 10-11 (branch `refactor/serversplit-slices-10-11`, based on `c3aef6e` = slices 7-9, PR #83)
+
+**Status:** slices 10 and 11 EXECUTED, one commit each, each independently green on
+the full §5 battery before the next began. **All 94 bodies have moved**;
+`server.py` **1371 → 524** LOC and holds ZERO tool bodies. `tests/source_scan.py`'s
+floor reached its FINAL value (11 → 13); §5.5's `MIGRATION_ALIASES` floor ratcheted
+DOWN 14 → 11 → 5. Only slice 12 (delete the alias block, delete the `GRANDFATHER`
+row, re-point `test_observability.py`, docs) remains.
+
+| Slice | Module | Tools | `server.py` before → after | Plan projected | New module LOC | Also removed |
+|---|---|---|---|---|---|---|
+| 10 | `browser_management.py` | 8 | 1371 → **986** | ~1014 | 438 | `BrowserOptions`, the two `platform_utils` predicates, `_require_landing_ok`, and the `display_context` / `dynamic_hook_system` / `in_memory_storage` aliases |
+| 11 | `element_interaction.py` | 12 | 986 → **524** | ~562 | 509 | `base64`, `os`, `tempfile`, `datetime`, `Path`, `ToolError`, `_require_tab`, and the `CDP_OPERATION_TIMEOUT` / `EXECUTE_SCRIPT_TIMEOUT` / `_clamp_timeout` / `_script_rejection_reason` / `dom_handler` / `response_handler` aliases |
+
+### Drift between the plan and reality, and how it was resolved
+
+| Plan says | Reality | Resolution |
+|---|---|---|
+| §4.2 step 5 says to prune "any `server.py` import that no longer has a consumer (`ruff` will flag it)" | `ruff` flags an import with no consumer **in `server.py`**, but two of the aliases it flagged have a consumer in `tests/`: `tests/test_clone_storage.py` pins `server.clone_storage is clone_storage`, and `tests/test_observability.py` makes four `w15_server._with_cdp_timeout(...)` calls. Pruning on ruff's word alone would have gone red — or worse, been "fixed" by re-pointing a test that §4.3 step 3 explicitly schedules for slice 12 | the prune rule is stated as **"the slice that takes its LAST consumer out of this file — prod OR test"**, and both survivors carry an inline suppressed keep-reason naming the exact test and the slice that retires it. The census (`server.<name>` reads across `tests/` and `tools/`) is therefore not optional even when ruff appears to have answered; recorded here because slice 12 inherits exactly these two |
+| §6.1's table has `server.py` at ~1014 after slice 10 and still above 1000 "so the `GRANDFATHER` row survives until Slice 11" | the measured actual is **986** — slice 10 already takes the file under the 1000-LOC default | harmless and worth naming: the row now survives on policy, not on need. It is DELETED in slice 12 rather than merely satisfied, which is the difference between "this file is governed by the default" and "this file happens to fit" |
+| §5.0's `ty` note from slices 4-9 records a steady rise as `server.py`-excluded debt surfaces (77 → 88) | slice 10 added **8** (`spawn_browser`'s implicit-Optional list defaults and untyped generics: 88 → 96) but slice 11 added **ZERO** — `element_interaction.py` contributes not one diagnostic | not a measurement error and not a change: the element-interaction bodies were already fully parameterised (`dict[str, Any]`, `list[dict[str, Any]]`, no implicit Optionals), so there was no hidden debt for the exclusion to have been hiding. The honest closing number for the whole plan is **96 warnings, 0 errors**, `ty` exits 0 |
+| §4.2 slice 10 flags "any test that reads `server.spawn_browser` sub-seams" as a census hazard, naming `tests/test_bug_prone_tools.py::TestSpawnBrowserSubMethodSeam` | that class pins `BrowserManager._build_instance` / `_resolve_proxy` / `_resolve_launch_args` / `_launch_browser` / `_apply_post_launch` — the C4/M13 pipeline INSIDE `browser_manager.py`, one layer below the tool body | no re-point needed, and the distinction is the same one slices 7-9 drew: a body move should never require a test to learn a new name. It is worth having checked rather than assumed — the hazard was real in shape, just not in this file |
+| §4.2 step 6 expects test re-points for the moved symbols | **zero** again, for the twelfth and thirteenth sections running and for the plan as a whole. Across all eleven slices, not one test needed re-pointing for a moved tool | the binding loop is why: every lookup in `tests/` is a module-attribute read on `server` (`fakes.call_tool`, `e2e_helpers.get_fn`, or a raw `server.<tool>.fn`), and the loop keeps satisfying all 94 of them. The only things a move ever broke were INVENTORIES of where code lives (`release_evidence.HOST_EXEC_SITES` in slice 9), not tests |
+| §4.1 step 1 says the moved lines are "verbatim"; §4.2 step 1 says only that bare singleton reads become `rt.<name>` | slice 10's mechanical rewrite also caught a **comment** — `get_instance_state`'s F-164 rationale names `_with_cdp_timeout` in prose | reverted to the bare name: a comment is not a read, so "verbatim" governs. The `# F-164 non-CDP` MARKER on the same block is byte-identical for the same reason, and it is load-bearing — after slice 10, `server.py` contains no `asyncio.wait_for` at all, so `tests/test_cdp_timeout.py` would scan an empty file if `tests/source_scan.py` had not been widened in slice 0 |
+| §4.2 slice 9's row is the only place the plan specifies HOW to check the xpool gate | re-measured post-move by the same method (a real backend subprocess over HTTP, throwaway port, `HOME`/`USERPROFILE` redirected at a temp dir): control **94**, `--xpool-safe` **81**, `--disable-cdp-functions` **81**, `XPOOL_SAFE_MODE=1` **81** | identical to the slice-9 baseline, so R6 holds with `browser-management` and `element-interaction` also registered through the loop. One Windows detail worth recording: the probe cannot use `tempfile.TemporaryDirectory` as a context manager, because the backend still holds `<home>/.stealth-mcp/logs/backend-*-fault.log` open when the block exits and cleanup raises `PermissionError` |
+| §5.0 lists the transport lane as `pytest -m transport` | as in every earlier slice, the real-Chrome coverage lives elsewhere: browser-management in `test_browser_integration.py` (spawn/close/navigate) and `test_stateful_i18n.py` (profile persistence); element-interaction in `test_e2e_hard_dom.py`, `test_e2e_interaction.py` and `test_e2e_interaction_fidelity.py` | each slice ran its own coverage files **plus** the canonical real-stdio journey (`test_e2e_transport.py`), one file at a time, Chrome counted before each (120-122 live processes, R8). All green: slice 10 transport 1 + browser-integration 19 + clean-shutdown 1 skipped/16 deselected; slice 11 hard-dom 4 + interaction 11 + interaction-fidelity 7 + transport 1 |
+| §5.0 does not say what to do with an integration failure that predates the branch (slices 7-9 recorded one) | the slice-10 `test_stateful_i18n.py` lane reported **two** failures. `test_storage_and_cookies_survive_one_profile_and_no_other` is the SAME environmental failure slices 7-9 recorded — the restored named profile carries `_ga` / `_ga_GPM4NSQVSC` Google Analytics cookies from earlier agent runs, so "exactly the max-age cookie survives" sees three. `test_service_worker_installs_activates_controls_and_unregisters` was new | both attributed rather than guessed: the cookie one was re-run in isolation and produced the identical `_ga` values (contamination of this machine's persistent browser-session root, and nothing in slices 10-11 touches cookies or profile persistence); the service-worker one PASSES on a re-run of itself — a load flake on a box carrying 122 live Chrome processes, the same class as slice 7's `test_close_instance_offload` flake |
+| slices 4-9 record the unit-lane count dropping by ONE per pruned alias | slice 10 dropped **three** (2329 → 2326) and slice 11 dropped **six** (2326 → 2320) | the rule is unchanged, only the rate: §5.5's pin is parametrized over `tool_runtime.__all__ ∩ dir(server)`, and these two slices retired nine aliases between them. Base measured **2329 passed, 1 skipped, 180 deselected** in the FOREGROUND on an unmodified tree (the slices 4-6 lesson), matching slice 9's closing figure exactly |
+| §2.5 warns that mid-migration `SECTION_TOOLS` lists the MOVED sections first, and slices 1-9 verified that was harmless three times over | slice 11 completes `SECTION_MODULES`, so the ordering **settles** — the live key order is now exactly the canonical one the tuple declares | the note in `tool_sections/__init__.py` is updated from "it settles once every section has moved" to a statement that it has. Verified: `gen_release_contract --check` clean, `--list-sections` Total 94, and the HARD wire golden is keyed by tool name, so nothing observed the transition in either direction |
+
+### Baseline note
+
+The base lane on `c3aef6e` was measured in the foreground on an unmodified tree
+and came in at **2329 passed, 1 skipped, 180 deselected** — identical to slice 9's
+closing figure, with no `test_close_instance_offload` flake. The per-slice lanes
+then read **2326** (slice 10) and **2320** (slice 11), each down exactly the number
+of `tool_runtime` aliases that slice pruned. `git diff c3aef6e HEAD -- tests/goldens/`
+is **empty** across both commits, and the wire surface is IDENTICAL to
+`tests/goldens/tool_surface.json` at each. Every number in this log is a
+measurement.
