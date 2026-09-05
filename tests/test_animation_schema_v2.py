@@ -23,6 +23,7 @@ import pytest
 
 from fakes import ANIMATION_JS_MARKER, FakeTab, animation_evaluate_map
 from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 # ---------------------------------------------------------------------------
 # Fact payloads (test DATA; the transport MECHANISM lives in fakes.py)
@@ -315,22 +316,22 @@ class TestTransport:
 
     async def test_non_json_answer_is_an_honest_error_not_a_crash(self):
         tab = FakeTab(evaluate_result="<html>not json</html>")
-        result = await _cdc.cdp_element_cloner.extract_element_animations(
-            tab, selector="#hero"
-        )
-        assert "error" in result
+        with pytest.raises(ToolError):
+            await _cdc.cdp_element_cloner.extract_element_animations(
+                tab, selector="#hero"
+            )
 
     async def test_element_not_found_keeps_the_aspect_error_shape(self):
-        # Q4: this aspect keeps parity with the other five — a dict, not a raise.
-        result = await extract({"error": "Element not found"})
-        assert result == {"error": "Element not found"}
+        # Q4 asked this aspect to keep PARITY with the other five. Under F-858
+        # all six raise ToolError, so parity is now a raise carrying the
+        # collector's own words — not the collector payload handed back verbatim.
+        with pytest.raises(ToolError, match=r"^Element not found$"):
+            await extract({"error": "Element not found"})
 
     async def test_selector_is_required(self):
         tab = anim_tab(TWO_ANIMATIONS)
-        result = await _cdc.cdp_element_cloner.extract_element_animations(
-            tab, selector=None
-        )
-        assert result == {"error": "Selector is required"}
+        with pytest.raises(ToolError, match=r"^Selector is required$"):
+            await _cdc.cdp_element_cloner.extract_element_animations(tab, selector=None)
 
 
 # ===========================================================================

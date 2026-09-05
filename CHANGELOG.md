@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Changed — the cloner subsystem joins the one error convention (F-858)
+
+Every tool in this package reports failure by raising `ToolError`, so a client
+sees a real error. The cloner subsystem did not: 29 sites across the engine, the
+progressive adapter and the to-file adapter answered a failure by RETURNING
+`{"error": ...}`, which reaches an MCP client as a **successful** call whose
+result happens to contain the word "error". Those 29 now raise. Message text is
+byte-preserved everywhere, so nothing a caller reads got worse.
+
+Two of them were more than cosmetic:
+
+* **`clone_element_to_file` with malformed `extraction_options`** returned an
+  error dict while its sibling `clone_element_complete` — same argument, same
+  `json.loads`, same failure — raised. Whether a bad option string was an error
+  depended on which of two tools you called.
+* **`*_to_file` swallowed a failed extraction.** It wrote the engine's error
+  payload to a JSON file and answered with the normal
+  `{file_path, extraction_type, summary}` shape and an all-empty summary — a
+  file claiming to be a clone of an element that was never extracted, and a
+  summary indistinguishable from a genuinely empty element. A failed extraction
+  now propagates and writes nothing.
+
+What deliberately did NOT change: a complete clone still survives one bad aspect.
+`extract_complete_element` already gathered its six aspects with
+`return_exceptions=True`, so a raising aspect lands in the same embedded
+`{"error": ...}` record it landed in before — one isolation mechanism, not two.
+The other five aspects still populate.
+
 ### Fixed — an edit recipe now says WHERE, and stops guessing WHY (F-857)
 
 Three follow-ups recorded by the animation-v2 adversarial audit (PR #73), all in
