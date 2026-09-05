@@ -101,8 +101,51 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # its only readers. No import was pruned this time: server.py still drives
     # network_interceptor from spawn_browser, close_instance and two resource
     # handlers. Cap == the measured post-ruff-format actual, no padding.
+    # plan_SERVERSPLIT slice 7 RATCHETS DOWN 2391 -> 2116. The nine
+    # file-extraction bodies moved VERBATIM into
+    # embedded/tool_sections/file_extraction.py. They were physically SPLIT in
+    # this file — two above extract_complete_element_cdp and five below it,
+    # because that element-extraction body was misfiled among them — and they
+    # close up in their registration (surface) order in the new module; the
+    # stray itself is relocated by slice 8. The one-line
+    # `file_based_element_cloner` alias import they were the last consumer of
+    # was pruned with them. The two goldens under this section's subsystem
+    # (file_based_structure_to_file.json, extract_element_structure_list_convert
+    # .json) belong to the ADAPTER one layer below the tool bodies, so they
+    # neither move nor change, and they are re-run to prove it. Cap == the
+    # measured post-ruff-format actual, no padding.
+    # plan_SERVERSPLIT slice 8 RATCHETS DOWN 2116 -> 1748. The nine
+    # element-extraction bodies moved VERBATIM into
+    # embedded/tool_sections/element_extraction.py — the plan's SECOND stray
+    # relocation: extract_complete_element_cdp was physically filed among the
+    # file-extraction bodies while registering into `element-extraction` all
+    # along, and it lands in its own section's module in its own section's
+    # surface order. Three of these bodies return through the SYNCHRONOUS
+    # response_handler.handle_response, so F-202's AST guard follows them into
+    # the new file via tests/source_scan.py rather than passing vacuously over
+    # an emptier server.py. The one-line `cdp_element_cloner` alias import they
+    # were the last consumer of was pruned with them. The three goldens under
+    # this section's subsystem (extract_element_styles.json,
+    # cdp_complete_element.json, canonical_engine.json) belong to the ENGINE one
+    # layer below the tool bodies, so they neither move nor change, and they are
+    # re-run to prove it. Cap == the measured post-ruff-format actual, no
+    # padding.
+    # plan_SERVERSPLIT slice 9 RATCHETS DOWN 1748 -> 1371. The thirteen
+    # cdp-functions bodies moved VERBATIM into
+    # embedded/tool_sections/cdp_functions.py — the one section a runtime GATE
+    # switches off. server.py keeps BOTH gate sites (the module-scope
+    # xpool_safe_mode branch and the __main__ block's --xpool-safe /
+    # --disable-cdp-functions), and both still sit AFTER the binding loop, which
+    # is what plan_SERVERSPLIT R6 requires: apply_disabled_sections works by
+    # mcp.remove_tool, so it can only remove tools that are already registered.
+    # Verified against a real backend subprocess over HTTP rather than in
+    # process: control serves 94, --xpool-safe 81, --disable-cdp-functions 81 —
+    # exactly thirteen removed by each, unchanged from the pre-move baseline.
+    # The one-line `cdp_function_executor` alias import they were the last
+    # consumer of was pruned with them. Cap == the measured post-ruff-format
+    # actual, no padding.
     "embedded/server.py": (
-        2391,
+        1371,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an

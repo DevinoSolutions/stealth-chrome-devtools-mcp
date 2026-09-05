@@ -1081,3 +1081,44 @@ Unlike the slices 1-3 base, this one was clean: **2334 passed, 1 skipped** with 
 `test_close_instance_offload.py::test_loop_stays_responsive_during_stuck_kill`
 flake. Every slice lane below it is accounted for line by line in the first drift
 row above.
+
+---
+
+## Execution log — slices 7-9 (branch `refactor/serversplit-slices-7-9`, based on `d340075` = slices 4-6, PR #82)
+
+**Status:** slices 7, 8 and 9 EXECUTED, one commit each, each independently green on
+the full §5 battery before the next began. **73 of 94** bodies moved; `server.py`
+**2391 → 1371** LOC (cap ratcheted DOWN to the measured actual in every commit,
+`tests/source_scan.py`'s floor ratcheted UP 8 → 11). Only `browser-management` (8)
+and `element-interaction` (12) are left in `server.py`.
+
+| Slice | Module | Tools | `server.py` before → after | Plan projected | Also moved / removed |
+|---|---|---|---|---|---|
+| 7 | `file_extraction.py` | 9 | 2391 → **2116** | ~2127 | the now-unused `file_based_element_cloner` alias import |
+| 8 | `element_extraction.py` | 9 | 2116 → **1748** | ~1767 | the stray `extract_complete_element_cdp` RELOCATED; the now-unused `cdp_element_cloner` alias import |
+| 9 | `cdp_functions.py` | 13 | 1748 → **1371** | ~1391 | the now-unused `cdp_function_executor` alias import; `HOST_EXEC_SITES` re-pointed |
+
+### Drift between the plan and reality, and how it was resolved
+
+| Plan says | Reality | Resolution |
+|---|---|---|
+| §4.2 slice 9 asks to "verify `--xpool-safe` and `--disable-cdp-functions` still remove exactly 13 tools" without saying against WHAT | `--list-sections` cannot answer it: that branch exits before `apply_disabled_sections()` runs and prints `SECTION_TOOLS` (the registry map), which the gate never shrinks — it always says 94. A gate check read off `--list-sections` would be vacuous | measured against a **real backend subprocess over HTTP**, counted through a FastMCP client: control **94**, `--xpool-safe` **81**, `--disable-cdp-functions` **81**, and `XPOOL_SAFE_MODE=1` **81** (the module-scope branch, a third site the plan does not name). Taken as a **pre-move baseline on `d340075` first**, so "13 removed" is a comparison and not an assertion about one run. R6 is therefore confirmed empirically, not by reading the loop's position |
+| §5.0's battery does not mention `release_evidence.HOST_EXEC_SITES` | `tests/test_security_boundary.py` declares the modules that `exec` caller Python on the HOST, and named `embedded/server.py` because of `create_python_binding`. Slice 9 moved that `exec`, so the inventory went red — **correctly**: it is the one guard in the repo whose whole job is to notice a host-exec site changing file | `HOST_EXEC_SITES` re-pointed to `embedded/tool_sections/cdp_functions.py` in the same commit, with a comment stating the SITE is unchanged (same tool, same caller text, same host privileges) and only its file moved. `RELEASE_CONTRACT.md` names no file paths, so `gen_release_contract --check` stayed clean and needed no regeneration. Slices 10-11 will not hit this again — `exec` has no other tool-body site |
+| slices 4-6 recorded that the unit-lane count drops by one per pruned `tool_runtime` alias, but §5.5's floor is a fixed `>= 15` | three consecutive slices each pruned one alias, so `MIGRATION_ALIASES` fell 17 → 16 → 15 → **14** and the floor itself went red on slice 9 | the floor RATCHETS DOWN to the measured actual (14) — the mirror of `server.py`'s LOC cap, and the opposite of `source_scan`'s floor, which ratchets up. Both are "cap == actual, never padded": the pin still cannot vanish silently, while a deliberate prune is not read as one. Slices 10-11 should expect to lower it again (the remaining aliases include `dom_handler`, `network_interceptor`, `browser_manager` and `clone_storage`, several of which have non-tool consumers in `server.py` and will survive to slice 12) |
+| §4.2 step 6 expects test re-points for the moved symbols | **zero** again across all three slices, for the ninth through eleventh sections running. Census re-run per slice (`server.<tool>` reads, `from …embedded.server import …`, `patch("…server.<name>")` string targets, `inspect.getsource`, raw `.fn`): every lookup is `get_fn(...)` / `call_tool(server, "<name>", …)` / a bare name string, all module-attribute reads the binding loop still satisfies. The only `monkeypatch.setattr(server, …)` sites left in `tests/` are `conftest`'s dual-patch and `test_lifespan_reentrancy`'s `_LIFESPAN_STARTED` / `_SERVE_TRANSPORT`, both of which stay on `server` by design | the two guards that DID need updating (above) are not test re-points: they are inventories of where code lives, which is exactly what a move changes. The distinction is worth keeping — a body move should never require a test to learn a new name, but it may require an inventory to learn a new file |
+| §4.2 slices 7 and 8 say the goldens "must stay byte-unchanged" without saying how that is shown | as in slice 5, all five goldens (`file_based_structure_to_file.json`, `extract_element_structure_list_convert.json`, `extract_element_styles.json`, `cdp_complete_element.json`, `canonical_engine.json`) are driven by `tests/test_cloner_schemas.py` / `tests/test_cdp_element_cloner.py` against `file_based_element_cloner` and `cdp_element_cloner` DIRECTLY, one layer below the tool bodies | shown rather than asserted: those files run in each slice's unit lane and `git diff d340075 HEAD -- tests/goldens/` is **empty** across all three commits |
+| §2.2 files `extract_complete_element_cdp` under element-extraction without noting that slice 7 changes what "stray" means | slice 7 removed the file-extraction bodies that SURROUNDED it, so by the time slice 8 ran, the stray was already adjacent to its own section | recorded so the slice-8 diff is not misread as "nothing was relocated". The relocation is real — the body's registration order (LAST in `element-extraction`) is preserved in `TOOLS`, which is what keeps the wire golden identical — but slice 7 did half the physical work |
+| §5.0's `ty` note from slices 4-6 (77 → 80) implies a slow drift | `ty` rose 80 → **81** (slice 7) → 81 (slice 8) → **88** (slice 9). The slice-9 jump is seven at once: `cdp_functions.py` carries five implicit-`Optional` defaults (`params`, `context_id` ×2, `args`, `instance_id`) plus two untyped-generic returns that `[tool.ty.src] exclude`'s `server.py` entry had been hiding | all WARNINGS under the existing warnings-only baseline; `ty` still exits 0. Every one is WIRE surface a pure move may not touch (§8 non-goal 2). The honest record stays the same as slices 4-6: the split makes pre-existing debt visible rather than creating it, and narrowing it belongs to a later plan |
+| §5.0 lists the transport lane as `pytest -m transport` | as in every earlier slice, the real-Chrome coverage for these sections is elsewhere: file-extraction and element-extraction in `test_e2e_data_tools.py` / `test_e2e_hard_dom.py` / `test_e2e_animations.py` / `test_e2e_animations_edge.py`; cdp-functions in `test_e2e_functions_hooks.py` | each slice ran its own coverage files **plus** the canonical real-stdio journey (`test_e2e_transport.py`), one file at a time, Chrome counted before each (115-125 live processes, R8). All green: slice 7 data-tools 5 + animations 8 + transport 1; slice 8 data-tools 5 + hard-dom 4 + animations 8 + animations-edge 26 + transport 1; slice 9 functions-hooks 7 + transport 1 |
+| §5.0 does not say what to do with an integration failure that predates the branch | `tests/test_stateful_i18n.py::test_storage_and_cookies_survive_one_profile_and_no_other` failed in the slice-9 lane: the restored named profile carried `_ga` / `_ga_*` Google Analytics cookies alongside the expected `w16_persistent`, so the "exactly the max-age cookie survives" assertion saw three cookies | attributed, not guessed: the SAME test fails identically on the base commit `d340075` with the same `_ga` values. It is contamination of the machine's persistent browser-session root by earlier agent runs, not a product change — nothing in slices 7-9 touches cookies or profile persistence. Recorded here so slices 10-11 do not rediscover it as a regression |
+
+### Baseline note
+
+The base lane on `d340075` was measured **in the foreground on an unmodified tree**
+(the slices 4-6 lesson) and came in at **2332 passed, 1 skipped, 180 deselected** —
+two below the slices 4-6 figure of 2334, which is the two `tool_runtime` aliases
+slices 4 and 5 pruned, exactly as that log predicted. The per-slice lanes then read
+**2331** (slice 7, one flake: the load-sensitive
+`test_close_instance_offload.py::test_loop_stays_responsive_during_stuck_kill`,
+green on a re-run of its own file), **2330** (slice 8) and **2329** (slice 9),
+each −1 for the alias that slice pruned. Every number in this log is a measurement.

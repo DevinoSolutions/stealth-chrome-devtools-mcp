@@ -42,6 +42,57 @@ commit and `tests/source_scan.py`'s floor ratchets UP by one, so a section modul
 dropped from `SECTION_MODULES` reads as a collapsed source set rather than a
 legitimately smaller one.
 
+### Internal — the extraction sections leave `embedded/server.py` (plan_SERVERSPLIT slices 7–9)
+
+No behaviour change and no tool renamed, added or removed: the served surface stays
+byte-identical to `tests/goldens/tool_surface.json` at every commit, and all three
+loaded identities of `server.py` (canonical import, bare-name spec load, runpy
+`__main__`) keep building a full 94-tool app.
+
+- **`tool_sections/file_extraction.py`** (slice 7, 9 tools) — the to-file twin of
+  `element-extraction`. The nine bodies were physically SPLIT in `server.py`, two
+  above `extract_complete_element_cdp` and five below it, because that
+  element-extraction body was misfiled among them; here they close up in their
+  registration order and the stray is left for slice 8. The section's two goldens
+  (`tests/goldens/file_based_structure_to_file.json`,
+  `extract_element_structure_list_convert.json`) belong to
+  `file_based_element_cloner`, one layer BELOW the tool bodies, so a pure move
+  cannot touch them; they are re-run byte-unchanged to prove it. `server.py`:
+  2391 → **2116** LOC (274 body lines plus the now-unused
+  `file_based_element_cloner` alias import).
+- **`tool_sections/element_extraction.py`** (slice 8, 9 tools) — the inline half
+  of the cloner surface, and the plan's SECOND stray relocation:
+  `extract_complete_element_cdp` was physically filed among the file-extraction
+  bodies in `server.py` while registering into `element-extraction` all along,
+  and now lives in its own section's module. Three of these bodies return
+  through the SYNCHRONOUS `response_handler.handle_response` — awaiting it
+  raises `TypeError` and silently broke these very tools once (F-202) — so this
+  is the slice that proves that guard follows the bodies: it re-derives its AST
+  scan from `tests/source_scan.py` instead of being hard-wired to `server.py`.
+  The section's three goldens (`tests/goldens/extract_element_styles.json`,
+  `cdp_complete_element.json`, `canonical_engine.json`) belong to
+  `cdp_element_cloner`, one layer BELOW the tool bodies, and are re-run
+  byte-unchanged. `server.py`: 2116 → **1748** LOC (367 body lines plus the
+  now-unused `cdp_element_cloner` alias import).
+- **`tool_sections/cdp_functions.py`** (slice 9, 13 tools) — the one section a
+  runtime GATE switches off. Both gate sites stay in `server.py` (the
+  module-scope `xpool_safe_mode` branch and the `__main__` block's
+  `--xpool-safe` / `--disable-cdp-functions`) and both still run AFTER the
+  binding loop, because `apply_disabled_sections` works by `mcp.remove_tool` and
+  so can only remove tools that are already registered — plan_SERVERSPLIT R6.
+  Verified against a REAL backend subprocess over HTTP rather than in process:
+  control serves 94, `--xpool-safe` 81, `--disable-cdp-functions` 81 and
+  `XPOOL_SAFE_MODE=1` 81 — exactly thirteen removed by each, identical to the
+  pre-move baseline. `server.py`: 1748 → **1371** LOC (376 body lines plus the
+  now-unused `cdp_function_executor` alias import).
+
+After slice 9, 73 of the 94 bodies have moved and only `browser-management`
+(8 tools) and `element-interaction` (12) are left in `server.py`, which is down
+1971 lines from the slice-0 baseline (3342). As in every earlier slice the LOC
+cap ratchets DOWN to the measured actual and `tests/source_scan.py`'s floor
+ratchets UP by one (8 → 11), so a section module dropped from `SECTION_MODULES`
+reads as a collapsed source set rather than a legitimately smaller one.
+
 ### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
 
 No behaviour change and no tool renamed, added or removed: the served surface is
