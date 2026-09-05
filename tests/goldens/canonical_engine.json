@@ -81,31 +81,31 @@
             "confidence": "low",
             "current": "2s",
             "knob": "duration",
-            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+            "note": "no readable CSS rule declares this knob; this record's not_editable_reason says where the declaration actually lives"
           },
           {
             "confidence": "low",
             "current": "0s",
             "knob": "delay",
-            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+            "note": "no readable CSS rule declares this knob; this record's not_editable_reason says where the declaration actually lives"
           },
           {
             "confidence": "low",
             "current": "ease-in-out",
             "knob": "easing",
-            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+            "note": "no readable CSS rule declares this knob; this record's not_editable_reason says where the declaration actually lives"
           },
           {
             "confidence": "low",
             "current": "infinite",
             "knob": "iterations",
-            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+            "note": "no readable CSS rule declares this knob; this record's not_editable_reason says where the declaration actually lives"
           },
           {
             "confidence": "low",
             "current": "pulse",
             "knob": "name",
-            "note": "no readable CSS rule declares this knob; it may come from a cross-origin stylesheet, a UA default, or JavaScript"
+            "note": "no readable CSS rule declares this knob; this record's not_editable_reason says where the declaration actually lives"
           },
           {
             "confidence": "low",
@@ -139,7 +139,16 @@
         ],
         "kind": "css-animation",
         "name": "pulse",
-        "not_editable_reason": "no readable CSS rule declares this animation; its stylesheet is likely cross-origin, so there is nothing here to find/replace",
+        "not_editable": [
+          "duration",
+          "delay",
+          "easing",
+          "iterations",
+          "name",
+          "keyframe[0.0].transform",
+          "keyframe[1.0].transform"
+        ],
+        "not_editable_reason": "no rule declares this animation in any stylesheet this page enumerates, and every one of those WAS readable \u2014 so the declaration is not in a document stylesheet at all. What is left: a constructed sheet adopted at runtime (new CSSStyleSheet + replaceSync, which document.styleSheets does not list), a shadow root's own <style>, or JavaScript. Edit the code that creates it",
         "semantics": {
           "easing_class": {
             "confidence": "high",
@@ -196,6 +205,7 @@
     "detail_note": "Records with detail_level: 'summary' are animations on DESCENDANTS of the selected element. They carry identity, timing, semantics and trigger; keyframes, checkpoints and edit recipes are not computed for them. To get the full record for one, call this tool again with that record's target.selector.",
     "edit_protocol": {
       "how": "To apply an edit: find the recipe's `find` string in the file named by `file`, inside the rule named by `rule_selector`, and replace it with the recipe's `replace` string, putting your new value where {{NEW_VALUE}} appears. The rest of the declaration is carried in `replace` for you, so nothing else can be lost. `token` is the exact text being replaced, if you want to check it first. A recipe with no `find` is a pointer, not an edit: open it at `source_ref` yourself.",
+      "open": "A recipe that has a `find` also has `char_offset`, `line` and `column`: where that literal starts. They are measured in the text named by `open.offsets_in` on this recipe's `source_ref` entry in `sources`. `style_element_text` means the text INSIDE that <style> element, NOT the bytes of the document at `open.url` \u2014 open the url, find the element, then count from there. `open.url` is a page URL and not a path on disk: map it with extract_related_files, which is the one tool that answers URL -> file.",
       "placeholder": "{{NEW_VALUE}}"
     },
     "has_motion": true,
