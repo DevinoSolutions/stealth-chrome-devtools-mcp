@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
+
+No behaviour change and no tool renamed, added or removed: the served surface is
+byte-identical to `tests/goldens/tool_surface.json` at every commit, and all three
+loaded identities of `server.py` (canonical import, bare-name spec load, runpy
+`__main__`) keep building a full 94-tool app.
+
+Slice 0 shipped the machinery; these three slices are the first bodies to use it,
+ordered smallest-and-most-isolated first so the mechanism is proven on three tools
+before it is trusted with four hundred lines.
+
+- **`tool_sections/cookies_storage.py`** (slice 1, 3 tools) — the smallest section
+  that still exercises the whole shared-dependency set a body reaches for
+  (`browser_manager`, `network_interceptor`, `_with_cdp_timeout`, `_require_tab`,
+  `ToolError`). `server.py`: 3342 → **3248** LOC.
+- **`tool_sections/tabs.py`** (slice 2, 5 tools) — the first section to use
+  `_require_browser`/`_require_landing_ok` and the first to read a tuned knob
+  DIRECTLY (`new_tab` hands `CDP_OPERATION_TIMEOUT` to `_require_landing_ok`),
+  which is what proves a knob stays patchable from a section module: it is
+  resolved against `tool_runtime` at call time, not bound at import. `server.py`:
+  3248 → **3144** LOC (103 bodies plus the now-unused `_require_browser` import).
+- **`tool_sections/debugging.py`** (slice 3, 5 tools) — the first slice that
+  RELOCATES rather than only moves: `validate_browser_environment_tool` sat among
+  the element-extraction bodies in `server.py` while registering into
+  `debugging`, and joins its own section here, which is what makes module ↔
+  section a clean 1:1. It is also the first slice to move a string a source-TEXT
+  guard is pinned to (`MSG_EXPORT_TIMEOUT`, in `export_debug_logs`): slice 0's
+  derived file set carries the pin into the new module, where an
+  `inspect.getsource(server)` pin would now have passed over a file the message
+  had already left. `server.py`: 3144 → **3014** LOC (128 bodies plus the two
+  now-unused `platform_utils` imports).
+
+After slice 3, 13 of the 94 bodies have moved and `server.py` is down 328 lines
+from the slice-0 baseline; the LOC cap ratchets DOWN to the measured actual in
+each commit, and `tests/source_scan.py`'s floor ratchets UP by one, so a section
+module dropped from `SECTION_MODULES` reads as a collapsed source set rather than
+a legitimately smaller one.
+
 ### Internal — the mechanism for splitting `embedded/server.py` (plan_SERVERSPLIT slice 0)
 
 No behaviour change and no tool moved: the served surface is byte-identical to

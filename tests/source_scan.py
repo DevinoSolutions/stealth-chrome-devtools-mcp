@@ -24,10 +24,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-#: The smallest tool-source set that still means something. plan_SERVERSPLIT
-#: slice 0: ``server.py`` + ``tool_runtime.py`` and no section modules yet.
-#: Slice 11 raises this to 13 (both of those plus the 11 section modules).
-MIN_TOOL_SOURCE_FILES = 2
+#: The smallest tool-source set that still means something: ``server.py`` +
+#: ``tool_runtime.py`` + one entry per section module that has landed so far.
+#: It RATCHETS UP one per slice, the mirror of the LOC cap's ratchet down —
+#: waiting until slice 11 to raise it in one jump would leave ten slices during
+#: which a dropped section module reads as a legitimately smaller set. Slice 1
+#: (``cookies_storage``) took it to 3, slice 2 (``tabs``) to 4 and slice 3
+#: (``debugging``) to 5; slice 11 ends at 13.
+MIN_TOOL_SOURCE_FILES = 5
 
 
 def collect_tool_source_files(server_mod, runtime_mod, section_modules, floor):

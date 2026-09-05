@@ -24,12 +24,18 @@ Four things this file pins, none of which any existing test covers:
        over a divergence. **This block is deleted in slice 12** together with the
        alias import block it guards.
 
-SLICE-0 TRUTH: ``SECTION_MODULES`` is empty on purpose — the mechanism ships
-before any tool moves. So the per-module AST walk has nothing to walk yet. A guard
-with nothing to check is exactly the vacuous pass this plan is most afraid of, so
-the checker is factored into ``_check_section_module_source`` and driven here
-against synthetic compliant / violating modules. Those self-tests are what prove
-the walk works; slices 1-11 then hand it real modules.
+``SECTION_MODULES`` was empty in slice 0 — the mechanism shipped before any tool
+moved — and fills one section per slice. A guard whose subject set can be empty is
+exactly the vacuous pass this plan is most afraid of, so the checker is factored
+into ``_check_section_module_source`` and driven here BOTH ways: against synthetic
+compliant / violating modules (which is what proves the walk actually detects
+something) and against whatever real modules have landed. The synthetic pair stays
+after the last slice; it is what keeps the checker from rotting into a no-op.
+
+One consequence of ``ast.dump`` worth knowing before you write a section module:
+it renders string CONSTANTS too, so the rule-2 check sees docstrings. A module
+whose docstring narrates its own dropped registration decorator by name fails the
+guard. Say it in a ``#`` comment, which the AST does not carry, or paraphrase.
 """
 
 from __future__ import annotations
@@ -205,7 +211,7 @@ class TestTheContractCheckerDetects:
 
 
 def test_every_section_module_obeys_the_contract():
-    """Inert while ``SECTION_MODULES`` is empty (slice 0); live from slice 1."""
+    """Live from slice 1, over every section module that has landed."""
     for module in SECTION_MODULES:
         _check_section_module_source(
             module.__name__, Path(module.__file__).read_text(encoding="utf-8")
@@ -214,7 +220,9 @@ def test_every_section_module_obeys_the_contract():
 
 
 def test_the_section_modules_cover_whole_sections_and_nothing_else():
-    """Derived, never typed. Also inert until the first module lands."""
+    """Derived, never typed. A section is whole or it has not moved: a module
+    that carried only SOME of its section's tools would leave the rest
+    registered from ``server.py`` and the two halves patchable in two places."""
     sections = {m.SECTION for m in SECTION_MODULES}
     assert sections <= set(SECTION_TOOLS), f"unknown section(s): {sections}"
     for module in SECTION_MODULES:

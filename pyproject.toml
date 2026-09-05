@@ -233,6 +233,29 @@ ban-relative-imports = "all"
 # VERBATIM out of server.py; these five codes are the exact subset of that
 # file's file-wide list the moved lines fire. Carried verbatim, nothing widened
 # — same discipline as the clone_storage.py / tool_registry.py extractions.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/cookies_storage.py" = [
+    "E501", "PLR0913", "TID251",
+]  # plan_SERVERSPLIT slice 1 (the cookies-storage bodies moved VERBATIM out of
+# server.py; each code is the exact subset of that file's file-wide list the
+# moved lines fire — TID251 the `typing.Any` return annotations, PLR0913
+# set_cookie's nine CDP cookie fields, E501 one docstring line. Carried
+# verbatim, nothing widened: a suppression the moved lines do not fire is not
+# inherited, which is why this list is three codes and not thirty-six.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/tabs.py" = [
+    "B904", "BLE001", "TID251",
+]  # plan_SERVERSPLIT slice 2 (the tabs bodies moved VERBATIM out of server.py;
+# the exact subset of that file's file-wide list they fire — TID251 the
+# `typing.Any` annotations, BLE001/B904 new_tab's one `except Exception as e:
+# raise ToolError(...)`, which is F-833's error-envelope idiom and is carried,
+# not authored, here. Same discipline as slice 1.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/debugging.py" = [
+    "A002", "B904", "BLE001", "E501", "PLR0913", "RET504", "TID251", "TRY300",
+]  # plan_SERVERSPLIT slice 3 (the debugging bodies moved VERBATIM out of
+# server.py, including validate_browser_environment_tool, which was filed among
+# the element-extraction bodies while registering into this section. Every code
+# is the exact subset of server.py's file-wide list the moved lines fire —
+# notably A002 for export_debug_logs' `format` parameter, which is part of the
+# WIRE surface and so cannot be renamed by a pure move. Carried verbatim.)
 "src/stealth_chrome_devtools_mcp/embedded/clone_storage.py" = [
     "ANN001", "ANN202", "ANN401", "ARG001", "ARG005", "ASYNC240",
     "BLE001", "DTZ005", "DTZ006", "E501", "PIE810", "PLR2004", "PTH100",

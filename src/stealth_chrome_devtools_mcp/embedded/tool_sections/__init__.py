@@ -17,17 +17,30 @@
 Rules 2 and 3 are enforced by AST in ``tests/test_tool_sections_contract.py``;
 ``tests/test_tool_module_reload.py`` proves the property rule 2 exists to protect.
 
-plan_SERVERSPLIT slice 0 (the mechanism slice) creates this subpackage EMPTY:
-``SECTION_MODULES`` is ``()`` and all 94 tool bodies still live in ``server.py``.
-Slices 1-11 add one module each. The name is ``tool_sections`` and not ``tools``
+plan_SERVERSPLIT slice 0 (the mechanism slice) created this subpackage EMPTY;
+slices 1-11 add one module each, smallest and most isolated first, and the
+remaining bodies stay in ``server.py`` until their slice. The name is
+``tool_sections`` and not ``tools``
 on purpose: ``embedded/__init__.py`` puts ``embedded/`` on ``sys.path`` and the
 repo root already has a ``tools/`` directory, so a bare ``import tools`` would be
 ambiguous between two directories and namespace-package semantics can merge them
 silently.
 """
 
+from stealth_chrome_devtools_mcp.embedded.tool_sections import (
+    cookies_storage,
+    debugging,
+    tabs,
+)
+
 #: THE one enumeration of the section modules. ``server.py``'s binding loop walks
 #: this, and the source-scanning guards derive their file set from it (see
 #: ``tests/source_scan.py``). Adding a section module means adding it here — and
 #: the 94-count tripwire fires if you forget.
-SECTION_MODULES = ()
+#:
+#: Held in the canonical section order the migration finishes in. Note the
+#: binding loop runs before the bodies still decorated in ``server.py``, so
+#: mid-migration ``SECTION_TOOLS`` lists the MOVED sections first; nothing reads
+#: that ordering (``release_evidence`` and the contract generator both sort, and
+#: ``--list-sections`` only totals), and it settles once every section has moved.
+SECTION_MODULES = (cookies_storage, debugging, tabs)
