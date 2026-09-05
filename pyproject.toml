@@ -233,6 +233,14 @@ ban-relative-imports = "all"
 # VERBATIM out of server.py; these five codes are the exact subset of that
 # file's file-wide list the moved lines fire. Carried verbatim, nothing widened
 # — same discipline as the clone_storage.py / tool_registry.py extractions.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/cookies_storage.py" = [
+    "E501", "PLR0913", "TID251",
+]  # plan_SERVERSPLIT slice 1 (the cookies-storage bodies moved VERBATIM out of
+# server.py; each code is the exact subset of that file's file-wide list the
+# moved lines fire — TID251 the `typing.Any` return annotations, PLR0913
+# set_cookie's nine CDP cookie fields, E501 one docstring line. Carried
+# verbatim, nothing widened: a suppression the moved lines do not fire is not
+# inherited, which is why this list is three codes and not thirty-six.)
 "src/stealth_chrome_devtools_mcp/embedded/clone_storage.py" = [
     "ANN001", "ANN202", "ANN401", "ARG001", "ARG005", "ASYNC240",
     "BLE001", "DTZ005", "DTZ006", "E501", "PIE810", "PLR2004", "PTH100",

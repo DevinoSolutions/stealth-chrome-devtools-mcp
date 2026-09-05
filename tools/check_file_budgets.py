@@ -56,8 +56,14 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # comments; net -69. Cap == the measured post-ruff-format actual, no
     # padding. Slices 1-11 move one section each and ratchet this row further
     # down; slice 12 DELETES it, putting server.py under the 1000-LOC default.
+    # plan_SERVERSPLIT slice 1 RATCHETS DOWN 3342 -> 3248. The three
+    # cookies-storage bodies (get_cookies / set_cookie / clear_cookies, 94
+    # lines) moved VERBATIM into embedded/tool_sections/cookies_storage.py; the
+    # registration decorators they carried are replaced by server.py's binding
+    # loop, which already existed, so this slice buys back nothing. Cap == the
+    # measured post-ruff-format actual, no padding.
     "embedded/server.py": (
-        3342,
+        3248,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an

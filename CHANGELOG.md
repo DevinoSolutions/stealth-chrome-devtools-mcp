@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
+
+No behaviour change and no tool renamed, added or removed: the served surface is
+byte-identical to `tests/goldens/tool_surface.json` at every commit, and all three
+loaded identities of `server.py` (canonical import, bare-name spec load, runpy
+`__main__`) keep building a full 94-tool app.
+
+Slice 0 shipped the machinery; these three slices are the first bodies to use it,
+ordered smallest-and-most-isolated first so the mechanism is proven on three tools
+before it is trusted with four hundred lines.
+
+- **`tool_sections/cookies_storage.py`** (slice 1, 3 tools) — the smallest section
+  that still exercises the whole shared-dependency set a body reaches for
+  (`browser_manager`, `network_interceptor`, `_with_cdp_timeout`, `_require_tab`,
+  `ToolError`). `server.py`: 3342 → **3248** LOC.
+
 ### Internal — the mechanism for splitting `embedded/server.py` (plan_SERVERSPLIT slice 0)
 
 No behaviour change and no tool moved: the served surface is byte-identical to
