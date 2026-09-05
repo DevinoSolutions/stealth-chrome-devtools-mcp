@@ -281,6 +281,14 @@ ban-relative-imports = "all"
 # fields, E501 three docstring lines in create_dynamic_hook's Args block. The
 # docstrings are byte-identical to server.py's because FastMCP serves them and
 # tests/goldens/tool_surface.json is a HARD golden. Carried verbatim.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/file_extraction.py" = [
+    "PLR0913", "TID251",
+]  # plan_SERVERSPLIT slice 7 (the file-extraction bodies moved VERBATIM out of
+# server.py; the exact subset of that file's file-wide list they fire — TID251
+# the `typing.Any` annotations, PLR0913 the four to-file extractors whose six
+# per-aspect toggles are the WIRE surface and so cannot be regrouped by a pure
+# move. Carried verbatim, nothing widened: no E501 here, because none of the
+# moved docstring lines is long.)
 "src/stealth_chrome_devtools_mcp/embedded/clone_storage.py" = [
     "ANN001", "ANN202", "ANN401", "ARG001", "ARG005", "ASYNC240",
     "BLE001", "DTZ005", "DTZ006", "E501", "PIE810", "PLR2004", "PTH100",

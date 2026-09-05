@@ -42,6 +42,25 @@ commit and `tests/source_scan.py`'s floor ratchets UP by one, so a section modul
 dropped from `SECTION_MODULES` reads as a collapsed source set rather than a
 legitimately smaller one.
 
+### Internal — the extraction sections leave `embedded/server.py` (plan_SERVERSPLIT slices 7–9)
+
+No behaviour change and no tool renamed, added or removed: the served surface stays
+byte-identical to `tests/goldens/tool_surface.json` at every commit, and all three
+loaded identities of `server.py` (canonical import, bare-name spec load, runpy
+`__main__`) keep building a full 94-tool app.
+
+- **`tool_sections/file_extraction.py`** (slice 7, 9 tools) — the to-file twin of
+  `element-extraction`. The nine bodies were physically SPLIT in `server.py`, two
+  above `extract_complete_element_cdp` and five below it, because that
+  element-extraction body was misfiled among them; here they close up in their
+  registration order and the stray is left for slice 8. The section's two goldens
+  (`tests/goldens/file_based_structure_to_file.json`,
+  `extract_element_structure_list_convert.json`) belong to
+  `file_based_element_cloner`, one layer BELOW the tool bodies, so a pure move
+  cannot touch them; they are re-run byte-unchanged to prove it. `server.py`:
+  2391 → **2116** LOC (274 body lines plus the now-unused
+  `file_based_element_cloner` alias import).
+
 ### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
 
 No behaviour change and no tool renamed, added or removed: the served surface is

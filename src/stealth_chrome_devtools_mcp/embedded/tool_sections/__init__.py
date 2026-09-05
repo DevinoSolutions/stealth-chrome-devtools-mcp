@@ -31,6 +31,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_sections import (
     cookies_storage,
     debugging,
     dynamic_hooks,
+    file_extraction,
     network_debugging,
     progressive_cloning,
     tabs,
@@ -52,5 +53,6 @@ SECTION_MODULES = (
     debugging,
     tabs,
     progressive_cloning,
+    file_extraction,
     dynamic_hooks,
 )

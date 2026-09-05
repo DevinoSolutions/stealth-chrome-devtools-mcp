@@ -101,8 +101,21 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # its only readers. No import was pruned this time: server.py still drives
     # network_interceptor from spawn_browser, close_instance and two resource
     # handlers. Cap == the measured post-ruff-format actual, no padding.
+    # plan_SERVERSPLIT slice 7 RATCHETS DOWN 2391 -> 2116. The nine
+    # file-extraction bodies moved VERBATIM into
+    # embedded/tool_sections/file_extraction.py. They were physically SPLIT in
+    # this file — two above extract_complete_element_cdp and five below it,
+    # because that element-extraction body was misfiled among them — and they
+    # close up in their registration (surface) order in the new module; the
+    # stray itself is relocated by slice 8. The one-line
+    # `file_based_element_cloner` alias import they were the last consumer of
+    # was pruned with them. The two goldens under this section's subsystem
+    # (file_based_structure_to_file.json, extract_element_structure_list_convert
+    # .json) belong to the ADAPTER one layer below the tool bodies, so they
+    # neither move nor change, and they are re-run to prove it. Cap == the
+    # measured post-ruff-format actual, no padding.
     "embedded/server.py": (
-        2391,
+        2116,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
