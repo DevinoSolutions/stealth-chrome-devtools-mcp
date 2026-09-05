@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Internal — three more sections leave `embedded/server.py` (plan_SERVERSPLIT slices 4–6)
+
+No behaviour change and no tool renamed, added or removed: the served surface stays
+byte-identical to `tests/goldens/tool_surface.json` at every commit, and all three
+loaded identities of `server.py` (canonical import, bare-name spec load, runpy
+`__main__`) keep building a full 94-tool app.
+
+- **`tool_sections/dynamic_hooks.py`** (slice 4, 10 tools) — the only section with
+  SYNCHRONOUS tool bodies, which is what this slice proves: `tool_registry`'s
+  `_surrogate_safe_returns` branches on `inspect.iscoroutinefunction`, and its sync
+  wrapper is now applied by `server.py`'s binding loop to a function whose
+  `__globals__` is a section module. Zero shared dependencies beyond
+  `rt.dynamic_hook_ai`, so the sync branch is proven in isolation. `server.py`:
+  3014 → **2839** LOC (174 bodies plus the now-unused `dynamic_hook_ai` alias
+  import).
+
 ### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
 
 No behaviour change and no tool renamed, added or removed: the served surface is

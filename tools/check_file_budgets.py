@@ -74,8 +74,16 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # what makes module <-> section a clean 1:1. The two platform_utils imports
     # it was the last consumer of were pruned with it. Cap == the measured
     # post-ruff-format actual, no padding.
+    # plan_SERVERSPLIT slice 4 RATCHETS DOWN 3014 -> 2839. The ten dynamic-hooks
+    # bodies (174 lines) moved VERBATIM into
+    # embedded/tool_sections/dynamic_hooks.py — the only section carrying
+    # SYNCHRONOUS tool bodies, so this slice is what proves tool_registry's
+    # _surrogate_safe_returns sync branch still wraps a function whose
+    # __globals__ is a section module. The one-line `dynamic_hook_ai` alias
+    # import they were the last consumer of was pruned with them. Cap == the
+    # measured post-ruff-format actual, no padding.
     "embedded/server.py": (
-        3014,
+        2839,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
