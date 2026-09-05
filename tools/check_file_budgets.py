@@ -114,8 +114,24 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # .json) belong to the ADAPTER one layer below the tool bodies, so they
     # neither move nor change, and they are re-run to prove it. Cap == the
     # measured post-ruff-format actual, no padding.
+    # plan_SERVERSPLIT slice 8 RATCHETS DOWN 2116 -> 1748. The nine
+    # element-extraction bodies moved VERBATIM into
+    # embedded/tool_sections/element_extraction.py — the plan's SECOND stray
+    # relocation: extract_complete_element_cdp was physically filed among the
+    # file-extraction bodies while registering into `element-extraction` all
+    # along, and it lands in its own section's module in its own section's
+    # surface order. Three of these bodies return through the SYNCHRONOUS
+    # response_handler.handle_response, so F-202's AST guard follows them into
+    # the new file via tests/source_scan.py rather than passing vacuously over
+    # an emptier server.py. The one-line `cdp_element_cloner` alias import they
+    # were the last consumer of was pruned with them. The three goldens under
+    # this section's subsystem (extract_element_styles.json,
+    # cdp_complete_element.json, canonical_engine.json) belong to the ENGINE one
+    # layer below the tool bodies, so they neither move nor change, and they are
+    # re-run to prove it. Cap == the measured post-ruff-format actual, no
+    # padding.
     "embedded/server.py": (
-        2116,
+        1748,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an

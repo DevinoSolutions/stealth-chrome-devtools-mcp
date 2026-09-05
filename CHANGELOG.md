@@ -60,6 +60,20 @@ loaded identities of `server.py` (canonical import, bare-name spec load, runpy
   cannot touch them; they are re-run byte-unchanged to prove it. `server.py`:
   2391 → **2116** LOC (274 body lines plus the now-unused
   `file_based_element_cloner` alias import).
+- **`tool_sections/element_extraction.py`** (slice 8, 9 tools) — the inline half
+  of the cloner surface, and the plan's SECOND stray relocation:
+  `extract_complete_element_cdp` was physically filed among the file-extraction
+  bodies in `server.py` while registering into `element-extraction` all along,
+  and now lives in its own section's module. Three of these bodies return
+  through the SYNCHRONOUS `response_handler.handle_response` — awaiting it
+  raises `TypeError` and silently broke these very tools once (F-202) — so this
+  is the slice that proves that guard follows the bodies: it re-derives its AST
+  scan from `tests/source_scan.py` instead of being hard-wired to `server.py`.
+  The section's three goldens (`tests/goldens/extract_element_styles.json`,
+  `cdp_complete_element.json`, `canonical_engine.json`) belong to
+  `cdp_element_cloner`, one layer BELOW the tool bodies, and are re-run
+  byte-unchanged. `server.py`: 2116 → **1748** LOC (367 body lines plus the
+  now-unused `cdp_element_cloner` alias import).
 
 ### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
 
