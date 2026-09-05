@@ -163,8 +163,21 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # default — the row survives one more slice only because it is deleted, not
     # merely satisfied, in slice 12. Cap == the measured post-ruff-format
     # actual, no padding.
+    # plan_SERVERSPLIT slice 11 RATCHETS DOWN 986 -> 524. The twelve
+    # element-interaction bodies moved VERBATIM into
+    # embedded/tool_sections/element_interaction.py — the LAST section to leave
+    # this file and the largest, execute_script included. With it server.py
+    # holds ZERO tool bodies: what remains is mcp + registry + the binding loop
+    # that registers all 94 of them once per execution of this module body,
+    # app_lifespan, the four @mcp.resource handlers, the xpool-safe gate,
+    # build_arg_parser and the __main__ block, plus the migration alias block
+    # slice 12 deletes. Thirteen imports server.py was the last consumer of were
+    # pruned with the bodies; the five aliases left all still have a named
+    # reader, two of them a test's. Cap == the measured post-ruff-format actual,
+    # no padding. The row itself is DELETED in slice 12, which is what puts
+    # server.py under the 1000-LOC default by policy rather than by luck.
     "embedded/server.py": (
-        986,
+        524,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an

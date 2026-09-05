@@ -34,8 +34,11 @@ from pathlib import Path
 #: (``progressive_cloning``) to 7, slice 6 (``network_debugging``) to 8 and
 #: slice 7 (``file_extraction``) to 9, slice 8 (``element_extraction``) to 10
 #: and slice 9 (``cdp_functions``) to 11 and slice 10
-#: (``browser_management``) to 12; slice 11 ends at 13.
-MIN_TOOL_SOURCE_FILES = 12
+#: (``browser_management``) to 12. Slice 11 (``element_interaction``) is the
+#: last section to move and takes it to its FINAL value, 13: ``server.py`` +
+#: ``tool_runtime.py`` + all eleven section modules. From here the floor only
+#: changes if a section is added or removed.
+MIN_TOOL_SOURCE_FILES = 13
 
 
 def collect_tool_source_files(server_mod, runtime_mod, section_modules, floor):
