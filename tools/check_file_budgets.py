@@ -91,8 +91,18 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # re-run to prove it. The one-line `progressive_element_cloner` alias import
     # they were the last consumer of was pruned with them. Cap == the measured
     # post-ruff-format actual, no padding.
+    # plan_SERVERSPLIT slice 6 RATCHETS DOWN 2660 -> 2391. The ten
+    # network-debugging bodies moved VERBATIM into
+    # embedded/tool_sections/network_debugging.py, and so did the
+    # _CAPTURE_OFF_NOTE constant that sat WEDGED between get_request_details and
+    # get_response_details — a module constant embedded mid-section, which lands
+    # at the top of its own module. The string is byte-identical; only its
+    # position moved, and it is now beside the three capture_note tools that are
+    # its only readers. No import was pruned this time: server.py still drives
+    # network_interceptor from spawn_browser, close_instance and two resource
+    # handlers. Cap == the measured post-ruff-format actual, no padding.
     "embedded/server.py": (
-        2660,
+        2391,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an

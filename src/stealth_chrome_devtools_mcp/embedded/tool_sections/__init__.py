@@ -31,6 +31,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_sections import (
     cookies_storage,
     debugging,
     dynamic_hooks,
+    network_debugging,
     progressive_cloning,
     tabs,
 )
@@ -46,6 +47,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_sections import (
 #: that ordering (``release_evidence`` and the contract generator both sort, and
 #: ``--list-sections`` only totals), and it settles once every section has moved.
 SECTION_MODULES = (
+    network_debugging,
     cookies_storage,
     debugging,
     tabs,

@@ -25,6 +25,22 @@ loaded identities of `server.py` (canonical import, bare-name spec load, runpy
   cannot touch them; they are re-run byte-unchanged as part of the slice to prove
   exactly that. `server.py`: 2839 → **2660** LOC (178 bodies plus the now-unused
   `progressive_element_cloner` alias import).
+- **`tool_sections/network_debugging.py`** (slice 6, 10 tools) — the first
+  section to take a module CONSTANT with it: `_CAPTURE_OFF_NOTE`, which sat
+  wedged between two tool bodies in `server.py`, now sits at the top of the module
+  whose three `capture_note` tools are its only readers (the string is
+  byte-identical; only its position moved). It is also the heaviest raw-`.fn`
+  test coupling in the plan — `tests/test_server_network_tools.py` reaches fifteen
+  call sites as `server.<tool>.fn(...)` — and every one of them is a
+  module-attribute read the binding loop still satisfies, so none needed
+  re-pointing. `server.py`: 2660 → **2391** LOC.
+
+After slice 6, 43 of the 94 bodies have moved and `server.py` is down 951 lines
+from the slice-0 baseline (3342), i.e. 1020 from the 3411-line god file the plan
+started against. The LOC cap ratchets DOWN to the measured actual in every
+commit and `tests/source_scan.py`'s floor ratchets UP by one, so a section module
+dropped from `SECTION_MODULES` reads as a collapsed source set rather than a
+legitimately smaller one.
 
 ### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
 

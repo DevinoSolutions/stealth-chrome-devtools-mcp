@@ -256,6 +256,15 @@ ban-relative-imports = "all"
 # is the exact subset of server.py's file-wide list the moved lines fire —
 # notably A002 for export_debug_logs' `format` parameter, which is part of the
 # WIRE surface and so cannot be renamed by a pure move. Carried verbatim.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/network_debugging.py" = [
+    "E501", "PLR0913", "TID251",
+]  # plan_SERVERSPLIT slice 6 (the network-debugging bodies moved VERBATIM out of
+# server.py, together with the _CAPTURE_OFF_NOTE constant that sat wedged between
+# two of them. Each code is the exact subset of server.py's file-wide list the
+# moved lines fire — TID251 the `typing.Any` annotations, PLR0913
+# search_network_requests' nine filter/pagination fields, which are the WIRE
+# surface and so cannot be regrouped by a pure move, E501 five docstring lines.
+# Carried verbatim, nothing widened.)
 "src/stealth_chrome_devtools_mcp/embedded/tool_sections/progressive_cloning.py" = [
     "ANN401", "E501", "TID251",
 ]  # plan_SERVERSPLIT slice 5 (the progressive-cloning bodies moved VERBATIM out
