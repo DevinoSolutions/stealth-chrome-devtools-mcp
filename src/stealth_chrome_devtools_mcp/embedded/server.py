@@ -30,7 +30,6 @@ from stealth_chrome_devtools_mcp.embedded.platform_utils import (
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     InstanceNotFoundError,
     ToolError,
-    _require_browser,
     _require_landing_ok,
     _require_tab,
 )
@@ -1533,109 +1532,6 @@ async def get_debug_lock_status() -> dict[str, Any]:
         return debug_logger.get_lock_status()
     except Exception as e:
         raise ToolError(str(e))
-
-
-@section_tool("tabs")
-async def list_tabs(instance_id: str) -> list[dict[str, str]]:
-    """
-    List all tabs for a browser instance.
-
-    Args:
-        instance_id (str): Browser instance ID.
-
-    Returns:
-        List[Dict[str, str]]: List of tabs with their details.
-    """
-    return await _with_cdp_timeout(
-        browser_manager.list_tabs(instance_id), instance_id=instance_id
-    )
-
-
-@section_tool("tabs")
-async def switch_tab(instance_id: str, tab_id: str) -> bool:
-    """
-    Switch to a specific tab by bringing it to front.
-
-    Args:
-        instance_id (str): Browser instance ID.
-        tab_id (str): Target tab ID to switch to.
-
-    Returns:
-        bool: True if switched successfully.
-    """
-    return await _with_cdp_timeout(
-        browser_manager.switch_to_tab(instance_id, tab_id), instance_id=instance_id
-    )
-
-
-@section_tool("tabs")
-async def close_tab(instance_id: str, tab_id: str) -> bool:
-    """
-    Close a specific tab.
-
-    Args:
-        instance_id (str): Browser instance ID.
-        tab_id (str): Tab ID to close.
-
-    Returns:
-        bool: True if closed successfully.
-    """
-    return await _with_cdp_timeout(
-        browser_manager.close_tab(instance_id, tab_id), instance_id=instance_id
-    )
-
-
-@section_tool("tabs")
-async def get_active_tab(instance_id: str) -> dict[str, Any]:
-    """
-    Get information about the currently active tab.
-
-    Args:
-        instance_id (str): Browser instance ID.
-
-    Returns:
-        Dict[str, Any]: Active tab information.
-    """
-    tab = await _with_cdp_timeout(
-        browser_manager.get_active_tab(instance_id), instance_id=instance_id
-    )
-    if not tab:
-        raise ToolError("No active tab found")
-    await _with_cdp_timeout(tab, instance_id=instance_id)
-    return {
-        "tab_id": str(tab.target.target_id),
-        "url": getattr(tab, "url", "") or "",
-        "title": getattr(tab.target, "title", "") or "Untitled",
-        "type": getattr(tab.target, "type_", "page"),
-    }
-
-
-@section_tool("tabs")
-async def new_tab(instance_id: str, url: str = "about:blank") -> dict[str, Any]:
-    """
-    Open a new tab in the browser instance.
-
-    Args:
-        instance_id (str): Browser instance ID.
-        url (str): URL to open in the new tab.
-
-    Returns:
-        Dict[str, Any]: New tab information. A Chrome error page raises (F-833).
-    """
-    browser = await _require_browser(browser_manager, instance_id)
-    try:
-        tab = await _with_cdp_timeout(
-            browser.get(url, new_tab=True), instance_id=instance_id
-        )
-        await _require_landing_ok(tab, url, CDP_OPERATION_TIMEOUT, close_on_error=True)
-        return {
-            "tab_id": str(tab.target.target_id),
-            "url": getattr(tab, "url", "") or url,
-            "title": getattr(tab.target, "title", "") or "New Tab",
-            "type": getattr(tab.target, "type_", "page"),
-        }
-    except Exception as e:
-        raise ToolError(f"Failed to create new tab: {e!s}")
 
 
 @section_tool("element-extraction")

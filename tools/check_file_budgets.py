@@ -62,8 +62,12 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # registration decorators they carried are replaced by server.py's binding
     # loop, which already existed, so this slice buys back nothing. Cap == the
     # measured post-ruff-format actual, no padding.
+    # plan_SERVERSPLIT slice 2 RATCHETS DOWN 3248 -> 3144. The five tabs bodies
+    # (103 lines) moved VERBATIM into embedded/tool_sections/tabs.py, and the
+    # one-line `_require_browser` import they were the last consumer of was
+    # pruned with them. Cap == the measured post-ruff-format actual, no padding.
     "embedded/server.py": (
-        3248,
+        3144,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an

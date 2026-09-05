@@ -27,7 +27,7 @@ ambiguous between two directories and namespace-package semantics can merge them
 silently.
 """
 
-from stealth_chrome_devtools_mcp.embedded.tool_sections import cookies_storage
+from stealth_chrome_devtools_mcp.embedded.tool_sections import cookies_storage, tabs
 
 #: THE one enumeration of the section modules. ``server.py``'s binding loop walks
 #: this, and the source-scanning guards derive their file set from it (see
@@ -39,4 +39,4 @@ from stealth_chrome_devtools_mcp.embedded.tool_sections import cookies_storage
 #: mid-migration ``SECTION_TOOLS`` lists the MOVED sections first; nothing reads
 #: that ordering (``release_evidence`` and the contract generator both sort, and
 #: ``--list-sections`` only totals), and it settles once every section has moved.
-SECTION_MODULES = (cookies_storage,)
+SECTION_MODULES = (cookies_storage, tabs)

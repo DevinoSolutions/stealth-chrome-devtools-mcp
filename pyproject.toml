@@ -241,6 +241,13 @@ ban-relative-imports = "all"
 # set_cookie's nine CDP cookie fields, E501 one docstring line. Carried
 # verbatim, nothing widened: a suppression the moved lines do not fire is not
 # inherited, which is why this list is three codes and not thirty-six.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/tabs.py" = [
+    "B904", "BLE001", "TID251",
+]  # plan_SERVERSPLIT slice 2 (the tabs bodies moved VERBATIM out of server.py;
+# the exact subset of that file's file-wide list they fire — TID251 the
+# `typing.Any` annotations, BLE001/B904 new_tab's one `except Exception as e:
+# raise ToolError(...)`, which is F-833's error-envelope idiom and is carried,
+# not authored, here. Same discipline as slice 1.)
 "src/stealth_chrome_devtools_mcp/embedded/clone_storage.py" = [
     "ANN001", "ANN202", "ANN401", "ARG001", "ARG005", "ASYNC240",
     "BLE001", "DTZ005", "DTZ006", "E501", "PIE810", "PLR2004", "PTH100",

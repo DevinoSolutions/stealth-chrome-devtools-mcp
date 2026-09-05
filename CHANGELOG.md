@@ -17,6 +17,12 @@ before it is trusted with four hundred lines.
   that still exercises the whole shared-dependency set a body reaches for
   (`browser_manager`, `network_interceptor`, `_with_cdp_timeout`, `_require_tab`,
   `ToolError`). `server.py`: 3342 → **3248** LOC.
+- **`tool_sections/tabs.py`** (slice 2, 5 tools) — the first section to use
+  `_require_browser`/`_require_landing_ok` and the first to read a tuned knob
+  DIRECTLY (`new_tab` hands `CDP_OPERATION_TIMEOUT` to `_require_landing_ok`),
+  which is what proves a knob stays patchable from a section module: it is
+  resolved against `tool_runtime` at call time, not bound at import. `server.py`:
+  3248 → **3144** LOC (103 bodies plus the now-unused `_require_browser` import).
 
 ### Internal — the mechanism for splitting `embedded/server.py` (plan_SERVERSPLIT slice 0)
 

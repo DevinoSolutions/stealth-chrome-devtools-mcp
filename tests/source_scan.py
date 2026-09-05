@@ -29,8 +29,8 @@ from pathlib import Path
 #: It RATCHETS UP one per slice, the mirror of the LOC cap's ratchet down —
 #: waiting until slice 11 to raise it in one jump would leave ten slices during
 #: which a dropped section module reads as a legitimately smaller set. Slice 1
-#: (``cookies_storage``) takes it to 3; slice 11 ends at 13.
-MIN_TOOL_SOURCE_FILES = 3
+#: (``cookies_storage``) took it to 3, slice 2 (``tabs``) to 4; slice 11 ends at 13.
+MIN_TOOL_SOURCE_FILES = 4
 
 
 def collect_tool_source_files(server_mod, runtime_mod, section_modules, floor):
