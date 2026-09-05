@@ -93,6 +93,54 @@ cap ratchets DOWN to the measured actual and `tests/source_scan.py`'s floor
 ratchets UP by one (8 → 11), so a section module dropped from `SECTION_MODULES`
 reads as a collapsed source set rather than a legitimately smaller one.
 
+### Internal — the last tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 10–11)
+
+No behaviour change and no tool renamed, added or removed: the served surface stays
+byte-identical to `tests/goldens/tool_surface.json` at every commit, and all three
+loaded identities of `server.py` (canonical import, bare-name spec load, runpy
+`__main__`) keep building a full 94-tool app.
+
+- **`tool_sections/browser_management.py`** (slice 10, 8 tools) — the browser's own
+  lifecycle. `spawn_browser` is the plan's largest single tool and carries the
+  F-808/F-810 headed-visibility guard, which runs BEFORE its `try` and outside it so
+  a spawn nobody could ever see refuses without first cloning a profile dir onto
+  disk; it reads `rt.display_context.display_context()` for the refusal message and
+  reaches `desktop_launch.can_deliver_headed_window()` through a function-local
+  import, carried rather than hoisted. `spawn_browser` and `close_instance` are the
+  two ends of the on-disk profile/clone lifecycle, so six calls land in
+  `rt.clone_storage` — resolved at call time, which keeps
+  `tests/test_clone_storage.py`'s "patch it THERE, not on `server`" pin true of a
+  body that has left `server.py`. `get_instance_state`'s `# F-164 non-CDP` marker
+  moved byte-unchanged with it, and `tests/test_cdp_timeout.py` follows it into the
+  new file through `tests/source_scan.py` — load-bearing exactly here, because after
+  this slice `server.py` contains no `asyncio.wait_for` at all. `server.py`:
+  1371 → **986** LOC (377 body lines plus seven imports it was the last consumer of).
+- **`tool_sections/element_interaction.py`** (slice 11, 12 tools) — the largest
+  section and the last to move. `execute_script` is why it went last: it is the only
+  body that reads three runtime knobs at once (`rt._script_rejection_reason` and
+  through it `MAX_USER_SCRIPT_BYTES`, `rt.EXECUTE_SCRIPT_TIMEOUT`,
+  `rt._clamp_timeout`), all resolved against `tool_runtime` at CALL time so
+  `patched_server` still reaches a guard whose caller no longer lives in `server.py`.
+  `take_screenshot`'s two function-local imports (`io`, `PIL.Image`) are carried as
+  they stood, keeping Pillow off the module's import graph at binding time.
+  `server.py`: 986 → **524** LOC (452 body lines plus thirteen imports it was the
+  last consumer of).
+
+**`embedded/server.py` now holds no tool bodies.** What remains is `mcp`, the
+registry, the binding loop that registers all 94 functions once per execution of its
+module body, `app_lifespan`, the four `@mcp.resource` handlers, the xpool-safe gate,
+`build_arg_parser` and the `__main__` block — plus the migration alias block that
+slice 12 deletes. The file is down 2887 lines from the 3411-line god file the plan
+started against. Its LOC cap ratcheted DOWN to the measured actual in both
+commits; `tests/source_scan.py`'s floor ratcheted UP to its FINAL value 13
+(`server.py` + `tool_runtime.py` + all eleven section modules), and §5.5's
+`MIGRATION_ALIASES` floor ratcheted DOWN 14 → 11 → 5, the five aliases left all
+having a named reader. `SECTION_MODULES` is complete, so `SECTION_TOOLS`' key order
+has settled back to the canonical one. The xpool gate was re-measured against a real
+backend subprocess over HTTP — control 94, `--xpool-safe` 81,
+`--disable-cdp-functions` 81, `XPOOL_SAFE_MODE=1` 81 — still exactly thirteen
+removed by each, unchanged from the pre-move baseline.
+
 ### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
 
 No behaviour change and no tool renamed, added or removed: the served surface is

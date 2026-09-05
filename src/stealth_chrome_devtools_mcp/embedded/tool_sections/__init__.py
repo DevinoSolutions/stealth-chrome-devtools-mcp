@@ -28,11 +28,13 @@ silently.
 """
 
 from stealth_chrome_devtools_mcp.embedded.tool_sections import (
+    browser_management,
     cdp_functions,
     cookies_storage,
     debugging,
     dynamic_hooks,
     element_extraction,
+    element_interaction,
     file_extraction,
     network_debugging,
     progressive_cloning,
@@ -44,12 +46,15 @@ from stealth_chrome_devtools_mcp.embedded.tool_sections import (
 #: ``tests/source_scan.py``). Adding a section module means adding it here — and
 #: the 94-count tripwire fires if you forget.
 #:
-#: Held in the canonical section order the migration finishes in. Note the
-#: binding loop runs before the bodies still decorated in ``server.py``, so
-#: mid-migration ``SECTION_TOOLS`` lists the MOVED sections first; nothing reads
-#: that ordering (``release_evidence`` and the contract generator both sort, and
-#: ``--list-sections`` only totals), and it settles once every section has moved.
+#: Held in the canonical section order the migration finishes in. Through slices
+#: 1-10 the binding loop ran BEFORE the bodies still decorated in ``server.py``,
+#: so mid-migration ``SECTION_TOOLS`` listed the moved sections first; nothing
+#: reads that ordering (``release_evidence`` and the contract generator both
+#: sort, and ``--list-sections`` only totals). As of slice 11 every section has
+#: moved, so this tuple alone decides the order and it is settled.
 SECTION_MODULES = (
+    browser_management,
+    element_interaction,
     network_debugging,
     cookies_storage,
     debugging,
