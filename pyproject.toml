@@ -281,6 +281,17 @@ ban-relative-imports = "all"
 # fields, E501 three docstring lines in create_dynamic_hook's Args block. The
 # docstrings are byte-identical to server.py's because FastMCP serves them and
 # tests/goldens/tool_surface.json is a HARD golden. Carried verbatim.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/cdp_functions.py" = [
+    "B904", "BLE001", "E501", "PERF401", "RUF013", "S102", "TID251", "TRY301",
+]  # plan_SERVERSPLIT slice 9 (the cdp-functions bodies moved VERBATIM out of
+# server.py — the thirteen the xpool-safe gate removes as a unit. Every code is
+# the exact subset of server.py's file-wide list the moved lines fire: TID251
+# the `typing.Any` annotations, RUF013 five implicit-Optional defaults that are
+# the WIRE surface and so cannot be narrowed by a pure move, E501 three
+# docstring/message lines, PERF401 execute_function_sequence's append loop, and
+# S102/TRY301/BLE001/B904 create_python_binding's `exec` plus the
+# try/raise/except-Exception around it — the exec IS the python binding, and all
+# four are carried, not authored, here. Carried verbatim, nothing widened.)
 "src/stealth_chrome_devtools_mcp/embedded/tool_sections/element_extraction.py" = [
     "B904", "E501", "PLR0913", "TID251",
 ]  # plan_SERVERSPLIT slice 8 (the element-extraction bodies moved VERBATIM out

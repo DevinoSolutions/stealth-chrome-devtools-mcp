@@ -28,6 +28,7 @@ silently.
 """
 
 from stealth_chrome_devtools_mcp.embedded.tool_sections import (
+    cdp_functions,
     cookies_storage,
     debugging,
     dynamic_hooks,
@@ -56,5 +57,6 @@ SECTION_MODULES = (
     element_extraction,
     progressive_cloning,
     file_extraction,
+    cdp_functions,
     dynamic_hooks,
 )

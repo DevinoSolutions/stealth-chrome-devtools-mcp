@@ -265,8 +265,19 @@ MIGRATION_ALIASES = sorted(n for n in tool_runtime.__all__ if hasattr(server, n)
 
 def test_the_alias_set_is_not_empty():
     """Slice 0 through 11 keep aliases on ``server``; a zero-length parametrize
-    would make the pin below silently disappear rather than fail."""
-    assert len(MIGRATION_ALIASES) >= 15, MIGRATION_ALIASES
+    would make the pin below silently disappear rather than fail.
+
+    The floor RATCHETS DOWN as the migration retires aliases, the mirror of
+    ``server.py``'s LOC cap and the opposite of ``source_scan``'s floor: every
+    slice that takes the last consumer of a ``tool_runtime`` name out of
+    ``server.py`` prunes that import, and the parametrize legitimately loses a
+    case. It started at 17 (slices 0-6, floor 15) and slices 7, 8 and 9 each
+    pruned one — ``file_based_element_cloner``, ``cdp_element_cloner``,
+    ``cdp_function_executor`` — leaving 14. Set to the measured actual, never
+    padded, so the pin still cannot vanish silently but a deliberate prune is
+    not read as one.
+    """
+    assert len(MIGRATION_ALIASES) >= 14, MIGRATION_ALIASES
 
 
 @pytest.mark.parametrize("name", MIGRATION_ALIASES)

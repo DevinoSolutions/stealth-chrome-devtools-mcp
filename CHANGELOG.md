@@ -74,6 +74,24 @@ loaded identities of `server.py` (canonical import, bare-name spec load, runpy
   `cdp_element_cloner`, one layer BELOW the tool bodies, and are re-run
   byte-unchanged. `server.py`: 2116 → **1748** LOC (367 body lines plus the
   now-unused `cdp_element_cloner` alias import).
+- **`tool_sections/cdp_functions.py`** (slice 9, 13 tools) — the one section a
+  runtime GATE switches off. Both gate sites stay in `server.py` (the
+  module-scope `xpool_safe_mode` branch and the `__main__` block's
+  `--xpool-safe` / `--disable-cdp-functions`) and both still run AFTER the
+  binding loop, because `apply_disabled_sections` works by `mcp.remove_tool` and
+  so can only remove tools that are already registered — plan_SERVERSPLIT R6.
+  Verified against a REAL backend subprocess over HTTP rather than in process:
+  control serves 94, `--xpool-safe` 81, `--disable-cdp-functions` 81 and
+  `XPOOL_SAFE_MODE=1` 81 — exactly thirteen removed by each, identical to the
+  pre-move baseline. `server.py`: 1748 → **1371** LOC (376 body lines plus the
+  now-unused `cdp_function_executor` alias import).
+
+After slice 9, 73 of the 94 bodies have moved and only `browser-management`
+(8 tools) and `element-interaction` (12) are left in `server.py`, which is down
+1971 lines from the slice-0 baseline (3342). As in every earlier slice the LOC
+cap ratchets DOWN to the measured actual and `tests/source_scan.py`'s floor
+ratchets UP by one (8 → 11), so a section module dropped from `SECTION_MODULES`
+reads as a collapsed source set rather than a legitimately smaller one.
 
 ### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
 

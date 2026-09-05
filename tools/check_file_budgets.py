@@ -130,8 +130,22 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # layer below the tool bodies, so they neither move nor change, and they are
     # re-run to prove it. Cap == the measured post-ruff-format actual, no
     # padding.
+    # plan_SERVERSPLIT slice 9 RATCHETS DOWN 1748 -> 1371. The thirteen
+    # cdp-functions bodies moved VERBATIM into
+    # embedded/tool_sections/cdp_functions.py — the one section a runtime GATE
+    # switches off. server.py keeps BOTH gate sites (the module-scope
+    # xpool_safe_mode branch and the __main__ block's --xpool-safe /
+    # --disable-cdp-functions), and both still sit AFTER the binding loop, which
+    # is what plan_SERVERSPLIT R6 requires: apply_disabled_sections works by
+    # mcp.remove_tool, so it can only remove tools that are already registered.
+    # Verified against a real backend subprocess over HTTP rather than in
+    # process: control serves 94, --xpool-safe 81, --disable-cdp-functions 81 —
+    # exactly thirteen removed by each, unchanged from the pre-move baseline.
+    # The one-line `cdp_function_executor` alias import they were the last
+    # consumer of was pruned with them. Cap == the measured post-ruff-format
+    # actual, no padding.
     "embedded/server.py": (
-        1748,
+        1371,
         "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an

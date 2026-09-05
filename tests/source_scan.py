@@ -32,9 +32,9 @@ from pathlib import Path
 #: (``cookies_storage``) took it to 3, slice 2 (``tabs``) to 4, slice 3
 #: (``debugging``) to 5, slice 4 (``dynamic_hooks``) to 6, slice 5
 #: (``progressive_cloning``) to 7, slice 6 (``network_debugging``) to 8 and
-#: slice 7 (``file_extraction``) to 9 and slice 8 (``element_extraction``) to
-#: 10; slice 11 ends at 13.
-MIN_TOOL_SOURCE_FILES = 10
+#: slice 7 (``file_extraction``) to 9, slice 8 (``element_extraction``) to 10
+#: and slice 9 (``cdp_functions``) to 11; slice 11 ends at 13.
+MIN_TOOL_SOURCE_FILES = 11
 
 
 def collect_tool_source_files(server_mod, runtime_mod, section_modules, floor):
