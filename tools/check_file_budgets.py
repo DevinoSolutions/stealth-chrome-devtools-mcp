@@ -44,9 +44,21 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # padding. Cap raise 3401->3411 RATIFIED per the maintainer's release
     # directive 2026-08-03 ("ship both; go for it, you can release"), executed
     # by the PR #60 merge.
+    # plan_SERVERSPLIT slice 0 RATCHETS DOWN 3411 -> 3342. The mechanism slice
+    # moves ZERO tool bodies; what left the file is the shared substrate they
+    # all reach for — the four tuned knobs, the script/timeout guards
+    # (_BLOCKING_SCRIPT_PATTERNS / _script_rejection_reason / _clamp_timeout /
+    # _with_cdp_timeout) and the four singleton constructions — into the new
+    # embedded/tool_runtime.py leaf, which is THE one patchable home a tool body
+    # resolves at call time. server.py buys back an alias-import block, the
+    # binding loop that keeps registration driven from this file (so the runpy
+    # __main__ load still gets a full 94-tool app), and their rationale
+    # comments; net -69. Cap == the measured post-ruff-format actual, no
+    # padding. Slices 1-11 move one section each and ratchet this row further
+    # down; slice 12 DELETES it, putting server.py under the 1000-LOC default.
     "embedded/server.py": (
-        3411,
-        "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809",
+        3342,
+        "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809 + plan_SERVERSPLIT",
     ),
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
     # irreducibly ~1024-line contiguous block, landing this module over the

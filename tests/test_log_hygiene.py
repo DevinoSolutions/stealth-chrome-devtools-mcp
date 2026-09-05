@@ -32,13 +32,16 @@ import os
 import sys
 import threading
 import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
 
+if TYPE_CHECKING:  # ``Path`` is annotation-only here since the uvicorn-config
+    # guard started deriving its file set from tests/source_scan.py.
+    from pathlib import Path
+
 from stealth_chrome_devtools_mcp.embedded import logging_setup, singleton
-from stealth_chrome_devtools_mcp.embedded import server as server_module
 from stealth_chrome_devtools_mcp.embedded.logging_setup import (
     BOOT_LOG_NAME,
     backend_uvicorn_config,
@@ -181,10 +184,17 @@ class TestBackendUvicornConfig:
     def test_the_http_run_call_uses_the_composed_config(self):
         """Source-level: the ``mcp.run`` call lives under
         ``if __name__ == "__main__":`` and is unreachable by import."""
-        tree = ast.parse(Path(server_module.__file__).read_text(encoding="utf-8"))
+        # Derived from tests/source_scan.py rather than hard-wired to server.py:
+        # plan_SERVERSPLIT §1.4 — a source-text guard naming ONE file goes
+        # vacuous, not red, when what it polices moves. The ``mcp.run`` call
+        # itself stays in server.py's __main__ block, so the expected count is
+        # still exactly 1 across the whole set.
+        from source_scan import tool_source_files
+
         composed = [
             kw.value
-            for node in ast.walk(tree)
+            for path in tool_source_files()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
             if isinstance(node, ast.Call)
             for kw in node.keywords
             if kw.arg == "uvicorn_config"

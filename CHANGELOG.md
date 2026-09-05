@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Internal — the mechanism for splitting `embedded/server.py` (plan_SERVERSPLIT slice 0)
+
+No behaviour change and no tool moved: the served surface is byte-identical to
+`tests/goldens/tool_surface.json`, a new HARD golden taken in this commit.
+
+`embedded/server.py` is a 3411-line god file whose 94 tool bodies are due to move
+into one module per section. Slice 0 ships only the machinery that makes that move
+safe, and the guards that prove it:
+
+- **`embedded/tool_runtime.py`** — the one home for what a tool body reaches for
+  beyond its own arguments (the four constructed singletons, the re-exported
+  module singletons, the four tuned knobs and the script/timeout guards). A body
+  resolves `rt.<name>` at CALL time against a module that is loaded once, so the
+  whole surface has exactly one patchable seam no matter which file it ends up in.
+- **`embedded/tool_sections/`** — the subpackage the bodies move into, carrying
+  the contract that a section module never decorates its own tools.
+  `SECTION_MODULES` is empty in this slice.
+- **`server.py`'s binding loop** — registration is driven from `server.py`'s
+  module body, so all three loaded identities (canonical import, bare-name spec
+  load, runpy `__main__`) each build a full 94-tool app. A section module that
+  decorated itself would register into the first execution only — and the existing
+  94-count tripwire cannot see that, because `SECTION_TOOLS` is shared and would
+  still read 94.
+- **`tests/test_tool_module_reload.py`** — the detector for both failure modes,
+  each demonstrated red in place: removing the registry's idempotent append yields
+  `282 tools ... (3x registration)`, and moving one tool into a self-decorating
+  section module leaves the second and third identities at 93 while the count
+  tripwire stays green.
+- **`tests/source_scan.py`** — four guards read `server.py`'s source TEXT
+  (F-164 CDP-timeout discipline, F-202 call convention, the uvicorn run-config,
+  the export-timeout message pin). A source-text guard does not fail when the code
+  it polices leaves the file; it passes, over an emptier file. All four now derive
+  their file set from one helper carrying a floor assertion.
+
+`server.py`: 3411 → **3342** LOC, cap ratcheted down to the measured actual.
+
 ### Changed — the cloner subsystem joins the one error convention (F-858)
 
 Every tool in this package reports failure by raising `ToolError`, so a client

@@ -227,6 +227,12 @@ ban-relative-imports = "all"
     "PTH105", "PTH108", "PTH109", "PTH123", "RET504", "RUF013", "S102",
     "S112", "SIM105", "T201", "TID251", "TRY002", "TRY300", "TRY301", "W293",
 ]  # plan_M4ph1 (F-101 god-file split + M3/M10a except surface)
+"src/stealth_chrome_devtools_mcp/embedded/tool_runtime.py" = [
+    "ANN001", "ANN202", "ARG001", "ASYNC109", "B904",
+]  # plan_SERVERSPLIT slice 0 (the knobs + the script/timeout guards moved
+# VERBATIM out of server.py; these five codes are the exact subset of that
+# file's file-wide list the moved lines fire. Carried verbatim, nothing widened
+# — same discipline as the clone_storage.py / tool_registry.py extractions.)
 "src/stealth_chrome_devtools_mcp/embedded/clone_storage.py" = [
     "ANN001", "ANN202", "ANN401", "ARG001", "ARG005", "ASYNC240",
     "BLE001", "DTZ005", "DTZ006", "E501", "PIE810", "PLR2004", "PTH100",
