@@ -24,8 +24,8 @@ import pytest
 from stealth_chrome_devtools_mcp import observability
 from stealth_chrome_devtools_mcp.embedded import dom_handler as dom_handler_mod
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
-from stealth_chrome_devtools_mcp.embedded.server import _with_cdp_timeout
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_runtime import _with_cdp_timeout
 
 SELECTOR = "#no-such-element"
 

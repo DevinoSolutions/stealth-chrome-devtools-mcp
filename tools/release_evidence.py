@@ -1102,7 +1102,12 @@ DEFAULT_BIND_HOST = "127.0.0.1"
 #: privileges. Declared here so a NEW one is a test failure, not a discovery.
 #: (module path relative to the package, symbol that receives the caller text).
 HOST_EXEC_SITES: tuple[tuple[str, str], ...] = (
-    ("embedded/server.py", "create_python_binding"),
+    # plan_SERVERSPLIT slice 9: the `exec` moved with create_python_binding's
+    # body out of embedded/server.py into the cdp-functions section module. The
+    # SITE is unchanged — same tool, same caller text, same host privileges;
+    # only the file that holds it moved, which is exactly what this inventory
+    # is here to make a reviewed decision rather than a discovery.
+    ("embedded/tool_sections/cdp_functions.py", "create_python_binding"),
     ("embedded/dynamic_hook_system.py", "function_code"),
     ("embedded/dynamic_hook_system.py", "custom_condition"),
 )

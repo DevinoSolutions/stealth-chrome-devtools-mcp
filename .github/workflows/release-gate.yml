@@ -318,11 +318,18 @@ jobs:
         # gap rather than either hide or pretend to cover. The step above prints
         # it on every macOS run so a green gate can never be read as "macOS
         # navigation verified".
+        #
+        # --timeout=300, not 180: the startup herd's own backstop is 240s
+        # (HERD_HARD_TIMEOUT_SECONDS), so a wedged herd was being killed by
+        # pytest-timeout at 180s BEFORE it could report — no test name, no
+        # junit.xml, and a second red from release_evidence's `pytest: null`
+        # that was pure consequence (F-859 §7.2; same class as F-780). The
+        # transport cell already runs at 300.
         shell: bash
         run: >-
           uv run pytest
           -m "${{ runner.os == 'macOS' && 'integration and not transport' || 'integration' }}"
-          -v --tb=short --timeout=180
+          -v --tb=short --timeout=300
           --junitxml=junit.xml -o junit_family=xunit1
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}

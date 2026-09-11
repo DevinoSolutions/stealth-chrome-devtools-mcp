@@ -14,40 +14,17 @@ SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
 LOC_BUDGET = 1000
 
 GRANDFATHER: dict[str, tuple[int, str]] = {
-    # plan_M4ph1 C1 (F-201): extracted the 50-def clone-storage subsystem into
-    # clone_storage.py, shrinking server.py from its 4425 grandfathered cap to
-    # its actual 3389 LOC (measured after ruff format). Ratcheted DOWN per the
-    # no-grow discipline; the prior M3/M10a except-surface bumps are folded into
-    # this post-extraction baseline. Owner string unchanged.
-    # + 12 (plan_F808 step 5: spawn_browser's headed-visibility guard — 10 lines
-    # for the pre-try refusal + its message, 2 for the F-804 docstring clamp
-    # correction). The two candidate homes are documented leaves whose stated
-    # contracts a ToolError-raising display guard would violate:
-    # display_context.py declares "imports no embedded module except
-    # debug_logger" and is deliberately observational; tool_errors.py declares
-    # itself dependency-free three times over (it is why _require_* take
-    # browser_manager as an argument). The ~7 lines a tool_errors._require_*-
-    # style helper would save do not justify amending one. Same minimal-bump
-    # rationale as the M10a rows below. Cap == actual ruff-clean LOC, no
-    # padding; no-grow applies from this commit forward. Cap raise 3389->3401
-    # RATIFIED per the human gate ruling 2026-08-02 (PR #57 merge).
-    # + 10 (plan_F809 / F-809: the graceful-shutdown timeout FastMCP hard-codes
-    # to 0, which ERROR-logs "timeout graceful shutdown exceeded" — and ships it
-    # to Sentry — on every clean HTTP stop). 5 lines are the
-    # _GRACEFUL_SHUTDOWN_SECONDS constant and the rationale comment that has to
-    # sit with it; 5 are ruff's 88-col expansion of the one-line
-    # mcp.run(transport="http", ...) once it carries the uvicorn_config kwarg.
-    # There is no honest in-file offset left here. The spec's rejected
-    # alternative — a new shutdown_signals.py leaf to dodge the gate — would
-    # split the timeout from the run call it configures, i.e. a second home for
-    # one concern (CLAUDE.md convention 4). Cap == actual ruff-clean LOC, no
-    # padding. Cap raise 3401->3411 RATIFIED per the maintainer's release
-    # directive 2026-08-03 ("ship both; go for it, you can release"), executed
-    # by the PR #60 merge.
-    "embedded/server.py": (
-        3411,
-        "plan_M4ph1 + plan_M3 + plan_M10a + plan_F808 + plan_F809",
-    ),
+    # plan_SERVERSPLIT slice 12 (closing) DELETES the ``embedded/server.py``
+    # row that stood here through plan_M4ph1 / M3 / M10a / F808 / F809 and the
+    # twelve ratchets of the split itself (4425 -> 3411 -> 524). The file is
+    # governed by the 1000-LOC default now, and the row is removed rather than
+    # merely satisfied: a grandfathered cap is a standing permission to be over
+    # budget, and leaving one on a 523-line file would say this file is allowed
+    # 523 lines when what is true is that it is allowed 1000 like every other.
+    # Slice 10 already took it under the default (986); slices 11 and 12 are why
+    # deleting it is honest rather than lucky. Do NOT re-add a row for a file
+    # that fits the default (plan_SERVERSPLIT §6.2).
+    #
     # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
     # irreducibly ~1024-line contiguous block, landing this module over the
     # 1000-LOC budget. GRANDFATHERED at its actual post-ruff-format LOC per the
@@ -71,9 +48,17 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # so it is a net increase. GRANDFATHERED at the actual ruff-clean LOC (cap
     # == actual, no padding) per the human gate ruling 2026-07-17. No-grow
     # applies from this commit forward.
+    # F-860 RATCHETS DOWN 1532 -> 1529. The reap of a Chrome that nodriver
+    # launched but never handed back lives in the new spawn_leak.py leaf; what
+    # this file gained is the ONE _teardown_failed_spawn helper the cancel and
+    # error handlers now share (they were the same eleven lines twice) plus the
+    # launch timestamp it needs. Paid for by collapsing four boilerplate
+    # Args:/Returns: blocks that only restated their own signatures
+    # (_resolve_idle_timeout_seconds, touch_instance, spawn_browser,
+    # get_instance) — the plan_F856 payment mechanism. Cap == actual.
     "embedded/browser_manager.py": (
-        1532,
-        "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1",
+        1529,
+        "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
@@ -97,16 +82,27 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # re-install guard spends +3 (one loop line, two docstring lines for why a
     # second install must not record our own handler). 1023 stays the actual
     # post-ruff-format LOC, so this is a ratchet to actual, NOT a raise.
+    # plan_F856 RATCHETS DOWN 1023 -> 1017. `activate()` grew +6 (the reap moved
+    # to serve_startup.after_serving, and the WHY of an ordering change has to
+    # sit with it); that was paid for twice over by collapsing two boilerplate
+    # Args:/Returns: blocks that only restated their own signatures
+    # (_extract_profile_dir_from_cmdline, untrack_browser_process) — the same
+    # payment mechanism the plan_F809 row above already records. Cap == actual.
     "embedded/process_cleanup.py": (
-        1023,
-        "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809",
+        1017,
+        "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809 + plan_F856",
     ),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
     # + honest message + debug_logger.log_info on failure) + 1 (plan_M4ph1
     # STEP 0: isort emits a first-party group-separator blank line once
     # debug_logger's import is the absolute
     # stealth_chrome_devtools_mcp.embedded.debug_logger form).
-    "embedded/cdp_function_executor.py": (1012, "plan_M7 + plan_M4ph1"),
+    # F-861 RATCHETS DOWN 1012 -> 1004. Typing a caller's JSON onto the
+    # parameter types a nodriver wrapper declares lives in the new cdp_params.py
+    # leaf; build_cdp_call gained one call and one docstring line, paid for by
+    # collapsing ExecutionContext's Args: block that only restated its own
+    # signature (the plan_F856 payment mechanism). Cap == actual.
+    "embedded/cdp_function_executor.py": (1004, "plan_M7 + plan_M4ph1 + F-861"),
     # plan_M5b-1 (F-140/F-203/F-601 5->1 cloner consolidation): CDPElementCloner
     # is the canonical extraction engine the five cloner modules converge onto,
     # so it absorbs the six per-aspect methods + the composing extract_complete_

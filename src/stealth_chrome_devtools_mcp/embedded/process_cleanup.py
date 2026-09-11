@@ -15,7 +15,11 @@ from typing import Any
 
 import psutil
 
-from stealth_chrome_devtools_mcp.embedded import browser_pid_registry, singleton
+from stealth_chrome_devtools_mcp.embedded import (
+    browser_pid_registry,
+    serve_startup,
+    singleton,
+)
 from stealth_chrome_devtools_mcp.embedded.browser_pid_registry import Entries
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.singleton import STATE_DIR
@@ -59,11 +63,19 @@ class ProcessCleanup:
         self._shutdown_in_progress = False
 
     def activate(self) -> None:
-        """Install cleanup handlers and run orphan recovery once at serve startup."""
+        """Arm the cleanup handlers now; reap orphans OFF the first-serve path.
+
+        The handlers must be installed synchronously — one armed after the first
+        browser exists was not there when it counted. The reap must not be: it
+        ran inside the lifespan the first ``initialize`` awaits, and at ~90s
+        under load (F-856) that made a freshly cold-started backend unreachable
+        for longer than the healing proxy's readiness budget. ``serve_startup``
+        is its one new home and carries the safety argument for concurrency.
+        """
         if get_settings().no_auto_recovery:
             return
         self._setup_cleanup_handlers()
-        self._recover_orphaned_processes()
+        serve_startup.after_serving(self._recover_orphaned_processes, name="orphans")
 
     def recover_orphans(self, force: bool = False) -> None:
         """Public seam for CLI kill-orphans.
@@ -94,15 +106,7 @@ class ProcessCleanup:
         cls,
         cmdline: list[str],
     ) -> str | None:
-        """
-        Extract the user-data-dir argument from a browser command line.
-
-        Args:
-            cmdline (list[str]): Process command line.
-
-        Returns:
-            Optional[str]: Normalized user-data-dir path if present.
-        """
+        """The normalized ``--user-data-dir`` this command line names, or None."""
         for index, arg in enumerate(cmdline):
             if arg.startswith("--user-data-dir="):
                 return cls._normalize_path(arg.split("=", 1)[1])
@@ -730,15 +734,7 @@ class ProcessCleanup:
             return False
 
     def untrack_browser_process(self, instance_id: str) -> bool:
-        """
-        Stop tracking a browser process and persist the updated metadata file.
-
-        Args:
-            instance_id: Browser instance identifier.
-
-        Returns:
-            bool: True if untracking was successful.
-        """
+        """Stop tracking one browser and persist the updated metadata file."""
         try:
             metadata = self.browser_processes.get(instance_id)
             if metadata is None:

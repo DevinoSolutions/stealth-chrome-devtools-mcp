@@ -63,6 +63,7 @@ from unittest.mock import patch
 import pytest
 
 from stealth_chrome_devtools_mcp import observability
+from stealth_chrome_devtools_mcp.embedded import tool_runtime
 
 # ── W12's canonical policy API and W6's bundle writer, imported, never re-declared ──
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
@@ -316,7 +317,7 @@ class TestDiagnosticOracle:
         assert str(exc) == MSG_INSTANCE_NOT_FOUND.format(instance_id="ghost")
 
     @pytest.mark.asyncio
-    async def test_timeout_failure_pins_its_exact_bytes(self, w15_server):
+    async def test_timeout_failure_pins_its_exact_bytes(self):
         import asyncio
 
         from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -325,7 +326,7 @@ class TestDiagnosticOracle:
             await asyncio.sleep(30)
 
         with pytest.raises(ToolError) as caught:
-            await w15_server._with_cdp_timeout(
+            await tool_runtime._with_cdp_timeout(
                 never(), timeout=0.01, instance_id="w15-dead"
             )
         assert str(caught.value) == MSG_CDP_TIMEOUT.format(
@@ -333,7 +334,7 @@ class TestDiagnosticOracle:
         )
 
     @pytest.mark.asyncio
-    async def test_the_timeout_tag_is_omitted_without_an_instance(self, w15_server):
+    async def test_the_timeout_tag_is_omitted_without_an_instance(self):
         import asyncio
 
         from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -342,7 +343,7 @@ class TestDiagnosticOracle:
             await asyncio.sleep(30)
 
         with pytest.raises(ToolError) as caught:
-            await w15_server._with_cdp_timeout(never(), timeout=0.01)
+            await tool_runtime._with_cdp_timeout(never(), timeout=0.01)
         assert str(caught.value) == MSG_CDP_TIMEOUT.format(t=0.01, tag="")
 
     @pytest.mark.asyncio
@@ -362,10 +363,18 @@ class TestDiagnosticOracle:
         assert "capture.json" in str(exc)
         assert MSG_INSTANCE_NOT_FOUND[:8] not in str(exc)
 
-    def test_the_oversize_script_guard_pins_its_exact_bytes(self, w15_server):
-        limit = w15_server.MAX_USER_SCRIPT_BYTES
+    def test_the_oversize_script_guard_pins_its_exact_bytes(self):
+        # Read from ``tool_runtime``, the guard's one home (plan_SERVERSPLIT
+        # slice 0). ``server.py`` re-exports only the names its still-in-file
+        # tool bodies actually use, and ``MAX_USER_SCRIPT_BYTES`` is read solely
+        # by ``_script_rejection_reason`` — which moved with it. Aliasing it back
+        # onto ``server`` just to keep this read working would be an import with
+        # no consumer.
+        from stealth_chrome_devtools_mcp.embedded import tool_runtime
+
+        limit = tool_runtime.MAX_USER_SCRIPT_BYTES
         oversized = "x" * (limit + 1)
-        assert w15_server._script_rejection_reason(
+        assert tool_runtime._script_rejection_reason(
             oversized
         ) == MSG_SCRIPT_TOO_LARGE.format(size=limit + 1, limit=limit)
 
@@ -467,9 +476,7 @@ class TestErrorConventionGaps:
         assert InstanceNotFoundError.__mro__[1] is ToolError
 
     @pytest.mark.asyncio
-    async def test_the_timeout_path_now_joins_the_one_error_convention(
-        self, w15_server
-    ):
+    async def test_the_timeout_path_now_joins_the_one_error_convention(self):
         """route:F-783 — CLOSED in 2.0.8: ``_with_cdp_timeout`` raises ``ToolError``.
 
         This class characterizes gaps; this one is no longer a gap, so the pin is
@@ -487,7 +494,7 @@ class TestErrorConventionGaps:
             await asyncio.sleep(30)
 
         with pytest.raises(ToolError) as caught:
-            await w15_server._with_cdp_timeout(never(), timeout=0.01)
+            await tool_runtime._with_cdp_timeout(never(), timeout=0.01)
         assert type(caught.value) is ToolError
 
     @pytest.mark.characterization
@@ -520,7 +527,7 @@ class TestErrorConventionGaps:
 
     @pytest.mark.characterization
     @pytest.mark.asyncio
-    async def test_cancellation_propagates_unconverted(self, w15_server):
+    async def test_cancellation_propagates_unconverted(self):
         """route:F-783 — nothing turns ``CancelledError`` into a tool failure.
 
         A cancelled call raises ``asyncio.CancelledError`` (a ``BaseException``)
@@ -538,7 +545,7 @@ class TestErrorConventionGaps:
             raise asyncio.CancelledError
 
         with pytest.raises(asyncio.CancelledError) as caught:
-            await w15_server._with_cdp_timeout(cancelled(), timeout=5)
+            await tool_runtime._with_cdp_timeout(cancelled(), timeout=5)
         assert not isinstance(caught.value, ToolError)
         assert correlation_id_var.get() == "-"
 
@@ -717,7 +724,7 @@ class TestSecretCanaries:
         # the session, including the canary-bearing ones other tests in this file
         # drive. Scope it to THIS test's three failures, the way the
         # per-test ``backend_records`` handler already scopes the log.
-        w15_server.debug_logger.clear_debug_view()
+        tool_runtime.debug_logger.clear_debug_view()
         missing = tmp_path / CANARIES["sensitive-path-component"] / "capture.json"
         told = [
             str(
@@ -747,7 +754,7 @@ class TestSecretCanaries:
         ]
         captured = capsys.readouterr()
         log_text = "\n".join(r.getMessage() for r in backend_records)
-        view_text = json.dumps(w15_server.debug_logger.get_debug_view(), default=str)
+        view_text = json.dumps(tool_runtime.debug_logger.get_debug_view(), default=str)
 
         for surface, text in (
             ("stdout", captured.out),
@@ -1012,9 +1019,14 @@ class TestRecoveryGuidance:
 
     def test_the_export_timeout_names_its_alternative_format(self, w15_server):
         assert "gzip-pickle" in MSG_EXPORT_TIMEOUT
-        import inspect
+        # Scanned across the tool-source set, not just ``server.py``
+        # (plan_SERVERSPLIT §1.4): ``export_debug_logs`` moves to
+        # ``tool_sections/debugging.py`` in slice 3, and an ``inspect.getsource``
+        # pinned to one module would then pass over a file the message had
+        # already left. ``tests/source_scan.py`` carries the floor assertion.
+        from source_scan import tool_source_text
 
-        assert MSG_EXPORT_TIMEOUT in inspect.getsource(w15_server)
+        assert MSG_EXPORT_TIMEOUT in tool_source_text()
 
     @pytest.mark.characterization
     def test_the_commonest_failures_offer_no_next_step(self):

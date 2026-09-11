@@ -18,6 +18,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     desktop_launch,
     spawn_contention,
     spawn_exhaustion,
+    spawn_leak,
     tool_errors,
     window_sizing,
 )
@@ -327,15 +328,7 @@ class BrowserManager:
         self,
         override: int | None,
     ) -> int:
-        """
-        Resolve the effective idle timeout for a browser instance.
-
-        Args:
-            override (Optional[int]): Optional per-instance override.
-
-        Returns:
-            int: Effective idle timeout in seconds. Zero disables reaping.
-        """
+        """Effective idle timeout for an instance in seconds; zero disables reaping."""
         if self._idle_timeout_seconds_default == 0:
             return 0
         if override is None:
@@ -343,15 +336,7 @@ class BrowserManager:
         return max(int(override), 0)
 
     async def touch_instance(self, instance_id: str) -> bool:
-        """
-        Update the last-activity timestamp for a browser instance.
-
-        Args:
-            instance_id (str): Browser instance id.
-
-        Returns:
-            bool: True if the instance exists and was touched.
-        """
+        """Refresh an instance's last-activity stamp; False if it does not exist."""
         async with self._lock:
             if instance_id not in self._instances:
                 return False
@@ -616,7 +601,39 @@ class BrowserManager:
             f"{what} failed during {phase} cleanup for {instance_id}: {error}",
         )
 
-    async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)
+    async def _teardown_failed_spawn(  # noqa: PLR0913  PERMANENT(function interface)
+        self,
+        phase: str,
+        instance_id: str,
+        browser: Browser | None,
+        proxy_forwarder: AuthenticatedProxyForwarder | None,
+        options: BrowserOptions,
+        launch_started_at: float | None,
+    ) -> None:
+        """Release what a failed spawn had already created, on cancel or error.
+
+        A ``Browser`` we hold is stopped through nodriver. With NO handle but a
+        launch that STARTED, the failure landed inside ``_launch_browser`` —
+        after nodriver spawned Chrome and before it handed the object back — and
+        the only thing that still identifies that process is the profile it was
+        launched on (F-860). ``None`` means the launch was never reached.
+        """
+        if browser is not None:
+            try:
+                await self._stop_browser(browser)
+            except (OSError, RuntimeError, ConnectionError) as err:
+                self._warn_spawn_cleanup("browser.stop()", phase, instance_id, err)
+        elif launch_started_at is not None:
+            spawn_leak.reap_launched_browsers(
+                process_cleanup, options.user_data_dir, launch_started_at, instance_id
+            )
+        if proxy_forwarder is not None:
+            try:
+                await proxy_forwarder.close()
+            except (OSError, ConnectionError) as err:
+                self._warn_spawn_cleanup("Proxy close", phase, instance_id, err)
+
+    async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:  # noqa: PLR0915  DEBT(F-702)
         """
         Spawn a new browser instance with given options.
 
@@ -625,12 +642,6 @@ class BrowserManager:
         under one try/except that owns the cancel/error cleanup. ``browser`` and
         ``proxy_forwarder`` are held as orchestrator locals so a failure at any
         phase tears down whatever was already created.
-
-        Args:
-            options (BrowserOptions): Options for browser configuration.
-
-        Returns:
-            BrowserInstance: The spawned browser instance.
         """
         instance_id = str(uuid.uuid4())
         instance = self._build_instance(instance_id, options)
@@ -641,6 +652,7 @@ class BrowserManager:
 
         browser: Browser | None = None
         proxy_forwarder: AuthenticatedProxyForwarder | None = None
+        launch_started_at: float | None = None
         try:
             platform_info = get_platform_info()
             idle_timeout_seconds = self._resolve_idle_timeout_seconds(
@@ -657,6 +669,7 @@ class BrowserManager:
                 self._resolve_launch_args(options, launch_proxy_server, platform_info)
             )
 
+            launch_started_at = time.time()
             browser = await self._launch_browser(
                 options, browser_executable, launch_args
             )
@@ -725,18 +738,14 @@ class BrowserManager:
             )
 
         except asyncio.CancelledError:
-            if browser is not None:
-                try:
-                    await self._stop_browser(browser)
-                except (OSError, RuntimeError, ConnectionError) as err:
-                    self._warn_spawn_cleanup(
-                        "browser.stop()", "cancel", instance_id, err
-                    )
-            if proxy_forwarder is not None:
-                try:
-                    await proxy_forwarder.close()
-                except (OSError, ConnectionError) as err:
-                    self._warn_spawn_cleanup("Proxy close", "cancel", instance_id, err)
+            await self._teardown_failed_spawn(
+                "cancel",
+                instance_id,
+                browser,
+                proxy_forwarder,
+                options,
+                launch_started_at,
+            )
             try:
                 process_cleanup.kill_browser_process(instance_id)
                 process_cleanup.finalize_browser_process(instance_id)
@@ -750,18 +759,14 @@ class BrowserManager:
             instance.state = BrowserState.CLOSED
             raise
         except Exception as e:
-            if browser is not None:
-                try:
-                    await self._stop_browser(browser)
-                except (OSError, RuntimeError, ConnectionError) as err:
-                    self._warn_spawn_cleanup(
-                        "browser.stop()", "error", instance_id, err
-                    )
-            if proxy_forwarder is not None:
-                try:
-                    await proxy_forwarder.close()
-                except (OSError, ConnectionError) as err:
-                    self._warn_spawn_cleanup("Proxy close", "error", instance_id, err)
+            await self._teardown_failed_spawn(
+                "error",
+                instance_id,
+                browser,
+                proxy_forwarder,
+                options,
+                launch_started_at,
+            )
             try:
                 process_cleanup.kill_browser_process(instance_id)
             except (OSError, psutil.Error, ProcessLookupError) as err:
@@ -806,15 +811,7 @@ class BrowserManager:
             return False
 
     async def get_instance(self, instance_id: str) -> dict | None:
-        """
-        Get browser instance by ID.
-
-        Args:
-            instance_id (str): The ID of the browser instance.
-
-        Returns:
-            Optional[dict]: The browser instance data if found, else None.
-        """
+        """Instance data by id, or None; a browser whose process died is discarded."""
         async with self._lock:
             data = self._instances.get(instance_id)
             if data and not self._browser_process_is_alive(data["browser"]):

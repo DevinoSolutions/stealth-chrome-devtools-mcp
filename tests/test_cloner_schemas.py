@@ -6,9 +6,10 @@ value-level fidelity, which needs real Chrome (integration). Two tiers per the
 approved design:
 
 * **(a) hard structural assertions** — invariant top-level key sets, the
-  ``{"error": ...}`` shape, and the F-140 nesting divergence that distinguishes
-  the three "complete element" engines (flat vs flat+selector/url/timestamp vs
-  nested-under-``element``).
+  failure shape (a raised ``ToolError`` since F-858; it was a returned
+  ``{"error": ...}`` dict up to 2.1.1), and the F-140 nesting divergence that
+  distinguishes the three "complete element" engines (flat vs
+  flat+selector/url/timestamp vs nested-under-``element``).
 * **(b) soft golden JSON per engine** (``tests/goldens/``) captured from this
   tree — a consolidation PR (M5b) diffs and updates these deliberately.
 
@@ -36,6 +37,7 @@ from fakes import (
 from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
 from stealth_chrome_devtools_mcp.embedded import file_based_element_cloner as _fbc
 from stealth_chrome_devtools_mcp.embedded import progressive_element_cloner as _pec
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 GOLDENS_DIR = Path(__file__).resolve().parent / "goldens"
 
@@ -184,13 +186,13 @@ class TestCompleteElementEngines:
         assert {"extraction_stats", "selector", "url", "timestamp"} <= set(result)
         _assert_golden("cdp_complete_element", result)
 
-    async def test_cdp_returns_error_shape_when_element_missing(self):
-        # query_selector_all → [] → the F-140 error contract.
+    async def test_cdp_raises_when_element_missing(self):
+        # query_selector_all → [] → the F-140 error contract, which F-858 moved
+        # onto the ONE convention: the message text is byte-preserved, only the
+        # transport changed (returned dict → raised ToolError).
         tab = FakeTab(cdp_responses={**_cdp_responses(), "query_selector_all": []})
-        result = await _cdc.CDPElementCloner().extract_complete_element_cdp(
-            tab, "#missing"
-        )
-        assert result == {"error": "Element not found: #missing"}
+        with pytest.raises(ToolError, match=r"^Element not found: #missing$"):
+            await _cdc.CDPElementCloner().extract_complete_element_cdp(tab, "#missing")
 
 
 # ===========================================================================
@@ -265,10 +267,9 @@ class TestProgressiveCloner:
         assert result["stored_elements"][0]["element_id"] == ELEMENT_ID
         _assert_golden("progressive_list_stored_elements", result)
 
-    def test_expand_missing_element_error_shape(self, seeded_progressive_store):
-        assert seeded_progressive_store.expand_styles("nope") == {
-            "error": "Element nope not found"
-        }
+    def test_expand_missing_element_raises(self, seeded_progressive_store):
+        with pytest.raises(ToolError, match=r"^Element nope not found$"):
+            seeded_progressive_store.expand_styles("nope")
 
 
 # ===========================================================================
@@ -303,24 +304,26 @@ class TestFileBasedCloner:
         assert not inspect.iscoroutine(result)
         _assert_golden("file_based_structure_to_file", result, volatile=("file_path",))
 
-    async def test_structure_to_file_swallows_delegated_error(
+    async def test_structure_to_file_propagates_a_delegated_failure(
         self, tmp_path, monkeypatch
     ):
-        """The unified to-file contract (F-141) swallows a delegated extractor
-        error rather than propagating it: when the engine returns
-        ``{"error": ...}`` (here: no selector), ``_extract_and_save`` still writes
-        that payload to disk and returns the normal
-        ``{file_path, extraction_type, summary}`` shape with an all-empty summary
-        (``tag_name`` None). This is now the deliberate one-contract behavior —
-        previously only 7 of 8 copies swallowed; clone_complete propagated."""
+        """SOFT-GOLDEN UPDATE (F-858, deliberate): the unified to-file contract
+        (F-141) used to SWALLOW a delegated extractor error — it wrote the
+        engine's ``{"error": ...}`` payload to disk and answered with the normal
+        ``{file_path, extraction_type, summary}`` shape and an all-empty summary
+        (``tag_name`` None). F-141 chose that for CONSISTENCY across the 8 copies
+        (7 swallowed, clone_complete propagated), not because a caller wanted it,
+        and the result is the F-795/F-802 defect class: a payload whose shape
+        says the clone worked, with an empty summary no caller can tell from a
+        genuinely empty element. The engine raises now, so the failure reaches
+        the caller and no file claims to be a clone that does not exist."""
         monkeypatch.setattr(_fbc.file_based_element_cloner, "output_dir", tmp_path)
         tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
-        result = await _fbc.file_based_element_cloner.extract_element_structure_to_file(
-            tab, selector=None
-        )
-        assert set(result) == {"file_path", "extraction_type", "summary"}
-        assert "error" not in result
-        assert result["summary"]["tag_name"] is None
+        with pytest.raises(ToolError, match=r"^Selector is required$"):
+            await _fbc.file_based_element_cloner.extract_element_structure_to_file(
+                tab, selector=None
+            )
+        assert list(tmp_path.glob("*.json")) == []
 
 
 # ===========================================================================
@@ -352,12 +355,10 @@ class TestCanonicalEngine:
         # schema change). A drift in either implementation reds this.
         _assert_golden("extract_element_styles", result)
 
-    async def test_styles_error_shape_when_unresolved(self):
+    async def test_styles_raises_when_unresolved(self):
         tab = FakeTab(cdp_responses=_cdp_responses(), select_result=None)
-        result = await _cdc.cdp_element_cloner.extract_element_styles(
-            tab, selector="#demo"
-        )
-        assert result == {"error": "Element not found"}
+        with pytest.raises(ToolError, match=r"^Element not found$"):
+            await _cdc.cdp_element_cloner.extract_element_styles(tab, selector="#demo")
 
     @pytest.mark.parametrize(
         "method",
@@ -383,10 +384,8 @@ class TestCanonicalEngine:
 
     async def test_structure_requires_selector(self):
         tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
-        result = await _cdc.cdp_element_cloner.extract_element_structure(
-            tab, selector=None
-        )
-        assert result == {"error": "Selector is required"}
+        with pytest.raises(ToolError, match=r"^Selector is required$"):
+            await _cdc.cdp_element_cloner.extract_element_structure(tab, selector=None)
 
     async def test_structure_converts_nodriver_array_result(self):
         # nodriver's [[key, {type,value}], ...] array format → dict via the

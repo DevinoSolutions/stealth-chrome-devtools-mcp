@@ -182,7 +182,7 @@ async def test_an_unknown_command_is_reported_as_an_expected_tool_failure(monkey
 
 
 @pytest.mark.asyncio
-async def test_the_tool_surfaces_one_unwrapped_failure(monkeypatch):
+async def test_the_tool_surfaces_one_unwrapped_failure(patched_server):
     """What the caller actually receives: ONE message, wrapped exactly zero times.
 
     The executor catches its own raise, so the ToolError never reaches the tool
@@ -192,7 +192,7 @@ async def test_the_tool_surfaces_one_unwrapped_failure(monkeypatch):
     message into a second error shape on the way out.
     """
     tab = FakeTab(cdp_responses={"enable": None})
-    monkeypatch.setattr(server, "browser_manager", FakeBrowserManager(tabs={"i1": tab}))
+    patched_server(browser_manager=FakeBrowserManager(tabs={"i1": tab}))
 
     result = await call_tool(
         server, "execute_cdp_command", instance_id="i1", command="Runtime.noSuchThing"

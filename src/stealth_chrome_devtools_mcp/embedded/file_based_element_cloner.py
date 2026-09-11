@@ -9,6 +9,7 @@ from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.response_handler import (
     default_clone_output_dir,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 
 class FileBasedElementCloner:
@@ -88,10 +89,16 @@ class FileBasedElementCloner:
 
         Extract via the engine coroutine, persist the raw payload under
         ``output_dir``, and return ``{file_path, extraction_type, summary}``.
-        A delegated ``{"error": ...}`` payload is still written to disk and its
-        (empty) summary returned — the to-file layer never propagates a
-        delegated extractor error (unified swallow, was inconsistent across the
-        8 copies). An exception in extraction/save yields ``{"error": str(e)}``.
+
+        A failed extraction PROPAGATES (F-858). It used to be swallowed: the
+        engine's ``{"error": ...}`` payload was written to disk and answered
+        with the normal ``{file_path, extraction_type, summary}`` shape and an
+        all-empty summary — every Python-side step had succeeded, so the tool
+        claimed a clone that did not exist, and no caller can tell that summary
+        from a genuinely empty element. That is the F-795/F-802 defect class
+        (a payload whose shape says it worked) landing in the cloner. The
+        engine now raises, so there is no error payload left to swallow, and a
+        clone that failed leaves no file pretending to be one.
         """
         op = f"{prefix}_to_file"
         try:
@@ -106,9 +113,11 @@ class FileBasedElementCloner:
                 "extraction_type": prefix,
                 "summary": summary_fn(data),
             }
+        except ToolError:
+            raise
         except Exception as e:
             debug_logger.log_error("file_element_cloner", op, e)
-            return {"error": str(e)}
+            raise ToolError(str(e)) from e
 
     async def extract_element_styles_to_file(
         self,

@@ -1,0 +1,99 @@
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>fixture-animations-edge-page</title>
+    <!-- The CSS shapes only a real Chrome can settle. Every one of these is a
+         question about the COLLECTOR, not about the Python derivation: what the
+         CSSOM actually reports for a var() shorthand, whether an adopted
+         constructed sheet is even enumerable, what a @layer block looks like in
+         at_rule_context. A hermetic fixture answers all three by assertion,
+         which is how a fixture ends up agreeing with the bug.
+
+         AUTHOR TEXT, deliberately un-normalized (bare decimals, name-first
+         shorthand, tight spacing). Chrome's cssText rewrites all of it, so a
+         recipe built from cssText matches nothing here. -->
+    <style>
+      /* --- 1. A value hidden behind a custom property. Chrome resolves
+             animation-duration to .75s in computed style while the file says
+             var(--edge-dur). There is no `.75s` in this file to find. --- */
+      :root { --edge-dur: 750ms; }
+      #var-target {
+        height: 20px;
+        animation: edge-fade var(--edge-dur) ease-in;
+      }
+
+      /* --- 2. @layer. An UNLAYERED declaration beats a layered one however
+             specific the layered selector is, so #layer-target.layered (inside
+             the layer) LOSES to .layer-plain (outside it). Both declare 4s, so
+             there is no value disagreement to catch a wrong pick. --- */
+      @layer edge-base {
+        #layer-target { animation-name: edge-fade; animation-duration: 4s; }
+      }
+      .layer-plain { animation-name: edge-fade; animation-duration: 4s; }
+
+      /* --- 3. !important on a longhand: the priority must survive a recipe. --- */
+      #important-target {
+        animation-name: edge-fade;
+        animation-duration: 1.5s !important;
+      }
+
+      /* --- 4. A `none` slot between two live ones. Every other animation-*
+             list stays three items long and is read positionally. --- */
+      #none-slot {
+        animation-name: edge-fade, none, edge-slide;
+        animation-duration: 1s, 2s, 3s;
+        animation-delay: 0s, 0s, 5s;
+        animation-iteration-count: 1, 1, infinite;
+      }
+
+      @keyframes edge-fade {
+        from { opacity: .1 }
+        to   { opacity: 1 }
+      }
+      @keyframes edge-slide {
+        from { transform: translateX(0) }
+        to   { transform: translateX(40px) }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="var-target">var</div>
+    <div id="layer-target" class="layer-plain">layer</div>
+    <div id="important-target">important</div>
+    <div id="none-slot">none-slot</div>
+
+    <!-- 5. A constructed stylesheet, adopted. There is NO author file for these
+         bytes at all: the rule exists only inside the script below. A recipe
+         that handed back a file pointer here would be pointing at nothing. -->
+    <div id="adopted-host">adopted</div>
+
+    <!-- 6. Shadow DOM. getAnimations({subtree:true}) crosses into a shadow
+         root, but document.styleSheets does not, so the live animation is
+         visible while its @keyframes is not. -->
+    <div id="shadow-host"></div>
+
+    <script>
+      // --- constructed + adopted (no author file) ---
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(
+        "@keyframes edge-adopted { from { opacity: .2 } to { opacity: .9 } }" +
+        "#adopted-host { animation: edge-adopted 2.5s linear infinite; }"
+      );
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+
+      // --- shadow root with its own <style> and its own @keyframes ---
+      const root = document.getElementById("shadow-host").attachShadow({ mode: "open" });
+      root.innerHTML =
+        "<style>" +
+        "  @keyframes edge-shadow { from { opacity: 0 } to { opacity: 1 } }" +
+        "  .inner { animation: edge-shadow 1.75s ease-out infinite; }" +
+        "</style>" +
+        "<div class='inner'>inner</div>";
+
+      // Marker the test waits on, so no assertion races the script.
+      window.__edgeReady = true;
+    </script>
+  </body>
+</html>

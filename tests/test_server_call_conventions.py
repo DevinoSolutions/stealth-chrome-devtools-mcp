@@ -14,20 +14,30 @@ which tool it lands in.
 """
 
 import ast
-from pathlib import Path
 
-from stealth_chrome_devtools_mcp.embedded import server
+from source_scan import tool_source_files
 
 
-def _server_tree() -> ast.AST:
-    return ast.parse(Path(server.__file__).read_text(encoding="utf-8"))
+def _tool_trees() -> dict[str, ast.AST]:
+    """Every file that can hold a tool body, not just ``server.py``.
+
+    plan_SERVERSPLIT §1.4: as bodies move into ``tool_sections/`` a guard hard-
+    wired to ``server.py`` would not go red — it would pass over an emptier
+    file. ``tests/source_scan.py`` derives the set and carries the floor
+    assertion that makes a collapsed set red rather than green.
+    """
+    return {
+        path.name: ast.parse(path.read_text(encoding="utf-8"))
+        for path in tool_source_files()
+    }
 
 
 class TestHandleResponseCallConvention:
     def test_handle_response_is_never_awaited(self):
         offenders = [
-            node.value.lineno
-            for node in ast.walk(_server_tree())
+            f"{name}:{node.value.lineno}"
+            for name, tree in _tool_trees().items()
+            for node in ast.walk(tree)
             if isinstance(node, ast.Await)
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Attribute)
@@ -35,17 +45,21 @@ class TestHandleResponseCallConvention:
         ]
         assert offenders == [], (
             f"handle_response is synchronous — awaiting its dict return raises "
-            f"TypeError and breaks the tool. Offending server.py lines: {offenders}"
+            f"TypeError and breaks the tool. Offending site(s): {offenders}"
         )
 
     def test_handle_response_is_actually_called(self):
-        # Guard against this suite going vacuous if the helper gets renamed:
-        # the convention test only means something while call sites exist.
+        # Guard against this suite going vacuous if the helper gets renamed OR
+        # if every call site moves to a file the scan does not cover: the
+        # convention test only means something while call sites exist.
         calls = [
             node
-            for node in ast.walk(_server_tree())
+            for tree in _tool_trees().values()
+            for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "handle_response"
         ]
-        assert len(calls) >= 5, "expected handle_response call sites in server.py"
+        assert len(calls) >= 5, (
+            "expected handle_response call sites across the tool-source set"
+        )

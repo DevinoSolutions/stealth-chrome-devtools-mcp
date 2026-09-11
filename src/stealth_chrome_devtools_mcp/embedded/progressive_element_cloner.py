@@ -13,6 +13,22 @@ from typing import Any
 from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import cdp_element_cloner
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
+
+def _require_stored(
+    store: dict[str, dict[str, Any]], element_id: str
+) -> dict[str, Any]:
+    """Return the stored element, or raise — the ONE store-miss shape (F-858).
+
+    An ``element_id`` naming nothing is the ``InstanceNotFoundError`` case one
+    level down: the caller passed a handle that does not resolve, which is a
+    failure to report, not a value to destructure. Message text is byte-
+    preserved from the seven hand-rolled dicts this replaces.
+    """
+    if element_id not in store:
+        raise ToolError(f"Element {element_id} not found")
+    return store[element_id]
 
 
 class ProgressiveElementCloner:
@@ -48,12 +64,10 @@ class ProgressiveElementCloner:
                     "structure": {"include_children": include_children}
                 },
             )
-            if not isinstance(full_data, dict) or "error" in full_data:
-                return {
-                    "error": "Element not found or extraction failed",
-                    "selector": selector,
-                }
-
+            # The engine raises on a failed clone (F-858), so the guard that
+            # used to sit here — flattening every cause into "Element not found
+            # or extraction failed", which named neither the element nor the
+            # failure — is both unreachable and worse than what it replaced.
             store = self._get_store()
             store[element_id] = {
                 "full_data": full_data,
@@ -102,9 +116,11 @@ class ProgressiveElementCloner:
                 "selector": selector,
                 "timestamp": time.time(),
             }
+        except ToolError:
+            raise
         except Exception as e:
             debug_logger.log_error("progressive_cloner", "clone_progressive", e)
-            return {"error": str(e)}
+            raise ToolError(str(e)) from e
 
     def expand_styles(
         self,
@@ -112,10 +128,7 @@ class ProgressiveElementCloner:
         categories: list[str] | None = None,
         properties: list[str] | None = None,
     ) -> dict[str, Any]:
-        store = self._get_store()
-        if element_id not in store:
-            return {"error": f"Element {element_id} not found"}
-        data = store[element_id]["full_data"]
+        data = _require_stored(self._get_store(), element_id)["full_data"]
         styles = data.get("styles", {}).get("computed_styles", {})
         if properties:
             filtered = {k: v for k, v in styles.items() if k in properties}
@@ -156,10 +169,7 @@ class ProgressiveElementCloner:
     def expand_events(
         self, element_id: str, event_types: list[str] | None = None
     ) -> dict[str, Any]:
-        store = self._get_store()
-        if element_id not in store:
-            return {"error": f"Element {element_id} not found"}
-        data = store[element_id]["full_data"]
+        data = _require_stored(self._get_store(), element_id)["full_data"]
         events = data.get("events", {}).get("event_listeners", [])
         if event_types:
             events = [
@@ -181,10 +191,7 @@ class ProgressiveElementCloner:
         depth_range: tuple[int, int] | None = None,
         max_count: int | None = None,
     ) -> dict[str, Any]:
-        store = self._get_store()
-        if element_id not in store:
-            return {"error": f"Element {element_id} not found"}
-        data = store[element_id]["full_data"]
+        data = _require_stored(self._get_store(), element_id)["full_data"]
         children = data.get("structure", {}).get("children", [])
 
         # Ensure children is a list that can be sliced
@@ -220,10 +227,7 @@ class ProgressiveElementCloner:
     def expand_css_rules(
         self, element_id: str, source_types: list[str] | None = None
     ) -> dict[str, Any]:
-        store = self._get_store()
-        if element_id not in store:
-            return {"error": f"Element {element_id} not found"}
-        data = store[element_id]["full_data"]
+        data = _require_stored(self._get_store(), element_id)["full_data"]
         rules = data.get("styles", {}).get("css_rules", [])
         if source_types:
             rules = [
@@ -238,10 +242,7 @@ class ProgressiveElementCloner:
         }
 
     def expand_pseudo_elements(self, element_id: str) -> dict[str, Any]:
-        store = self._get_store()
-        if element_id not in store:
-            return {"error": f"Element {element_id} not found"}
-        data = store[element_id]["full_data"]
+        data = _require_stored(self._get_store(), element_id)["full_data"]
         pseudos = data.get("styles", {}).get("pseudo_elements", {})
         return {
             "element_id": element_id,
@@ -251,10 +252,7 @@ class ProgressiveElementCloner:
         }
 
     def expand_animations(self, element_id: str) -> dict[str, Any]:
-        store = self._get_store()
-        if element_id not in store:
-            return {"error": f"Element {element_id} not found"}
-        data = store[element_id]["full_data"]
+        data = _require_stored(self._get_store(), element_id)["full_data"]
         animations = data.get("animations", {})
         fonts = data.get("assets", {}).get("fonts", {})
         return {
@@ -286,11 +284,14 @@ class ProgressiveElementCloner:
 
     def clear_stored_element(self, element_id: str) -> dict[str, Any]:
         store = self._get_store()
-        if element_id in store:
-            del store[element_id]
-            self._save_store(store)
-            return {"success": True, "message": f"Element {element_id} cleared"}
-        return {"error": f"Element {element_id} not found"}
+        _require_stored(store, element_id)
+        del store[element_id]
+        self._save_store(store)
+        # RESIDUAL (F-858): ``success`` can no longer be False — the only path
+        # that set it so is now a raise. Collapsing it to the bare message is a
+        # response-shape change the sweep deliberately did not make; flagged for
+        # the owner rather than folded in silently.
+        return {"success": True, "message": f"Element {element_id} cleared"}
 
     def clear_all_elements(self) -> dict[str, Any]:
         self._save_store({})

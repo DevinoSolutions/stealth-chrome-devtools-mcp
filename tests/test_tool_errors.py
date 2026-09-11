@@ -118,9 +118,9 @@ class TestInstanceNotFoundCluster:
                 function_path="x",
             )
 
-    async def test_g1prime_resource_raises_instead_of_json(self, monkeypatch):
+    async def test_g1prime_resource_raises_instead_of_json(self, patched_server):
         # G1': was ``return json.dumps({"error": "Instance not found"})``.
-        monkeypatch.setattr(server, "browser_manager", _NoInstances())
+        patched_server(browser_manager=_NoInstances())
         with pytest.raises(InstanceNotFoundError, match=r"Instance not found: missing"):
             await server.get_browser_state_resource.fn("missing")
 

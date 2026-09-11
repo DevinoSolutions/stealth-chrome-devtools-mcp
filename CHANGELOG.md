@@ -1,6 +1,624 @@
 # Changelog
 
-## Unreleased
+## 2.1.2
+
+### Fixed — the backend no longer keeps every abandoned MCP session forever (F-862)
+
+A backend serving 62 Claude Code sessions reached 6.7 GB resident in 18.5 h with five
+browsers, empty body stores and bounded request rings. The growth was MCP sessions:
+every stdio proxy's watchdog opens a throwaway session on the backend every 2 s (a real
+`initialize`) and DELETEs it best-effort, and the MCP layer NEVER unlists a session: a
+DELETE only marks its transport terminated (so the id answers 404) and the list is pruned
+solely on an idle timeout FastMCP never sets. Every probe therefore left 2–7 KB listed for
+good, and every probe whose DELETE was lost under load — or any proxy that died — left the
+whole session behind at 0.12 MB (0.4 MB with a `tools/list`). At 31 probes a second that is
+two million listings a day: the 6.7 GB, with no lost DELETE assumed. Measured hermetically
+with `tools/probe_backend_memory.py`: abandoned sessions grow the backend linearly at 0.12
+MB each, DELETE'd ones at a few KB each; navigation and tool-call churn barely move it.
+
+The new `embedded/session_hygiene.py` leaf makes the backend defend itself:
+`HygienicSessionManager` sweeps every 30 s and unlists any session that has no
+standing GET event stream (the MCP client opens one right after `initialize` and holds it
+for the session's life, so a live proxy — even one idle for hours — is never touched) and
+has made no request for five minutes — both the terminated transports the layer kept and
+the sessions whose client simply vanished. Reaping goes through the transport's own
+`terminate()` (idempotent), so a reaped id answers 404 exactly as a deleted one. On a
+source-built backend the first sweep past the window reaped 916 sessions and RSS stayed
+flat for the seven minutes that followed. `install()` binds the
+class to the name FastMCP constructs by module attribute, called from `server.py`'s http
+branch before `mcp.run()`; `tests/test_session_hygiene.py` pins the sweep against fake
+transports with an injected clock, the install seam, and an in-process end-to-end run
+over real streamable HTTP. Universal; no knob. The probes' churn itself is a separate
+follow-up (F-864).
+
+### Fixed — `execute_cdp_command` types a caller's JSON onto the CDP wrapper's parameters (F-861)
+
+A caller sending what the CDP docs show — `Input.dispatchMouseEvent` with
+`button: "left"`, `Browser.grantPermissions` with `["geolocation"]`,
+`Browser.setWindowBounds` with `windowId: 7` — got `'str' object has no attribute
+'to_json'` (Sentry STEALTH-CHROME-DEVTOOLS-MCP-4T, 74 events; -79) or its `int`
+twin. nodriver's generated wrappers take their own typed classes (`MouseButton`,
+`PermissionType`, `WindowID`, `Bounds`, …) and call `.to_json()` on whatever they
+are handed, so a raw value crashed one frame inside nodriver with nothing to say
+which parameter wanted what.
+
+The new `embedded/cdp_params.py` leaf (`typed`) builds each argument into the type
+the wrapper's OWN signature declares, read from its resolved type hints — nothing is
+typed by hand, so a nodriver upgrade is covered the moment it lands. `from_json` for
+the generated classes, through `Optional[..]` and `List[..]`; primitives and
+already-typed values pass through untouched, so every frame F-816 pinned is
+byte-identical. A value the type cannot take is now a `ToolError` naming the param
+and the type (dropped by `before_send` as an expected failure), instead of
+nodriver's AttributeError shipping to Sentry. Wired at the one composition site,
+`build_cdp_call`, after the F-816 name folding. `tests/test_cdp_params.py` pins the
+three Sentry shapes plus the dataclass, str-newtype, list and enum cases; the
+executor's cap ratchets 1012 -> 1004.
+
+### Docs — the fleet story, with the numbers behind it
+
+Docs and one test constant; no product code. The README, the package description,
+`DESIGN.md` and `RUNBOOK.md` now say what the architecture was built for and what it
+measures: a Claude Code session costs a thin stdio proxy (≈ 60 MB resident), not a
+browser, so memory scales with the Chromes a fleet actually spawns rather than the
+sessions it opens. The new README section *Built for fleets: 50+ Claude Code
+sessions, one backend* carries the measurements it rests on — 62 sessions attached
+at once on one workstation, ≈ 3.7 GB of proxies against ≈ 46 GB had each session run
+its own Chrome, one backend per desktop context, and the startup herd's own cold-start
+and warm-join times. The backend's own footprint is deliberately not quoted as a
+constant: it depends on what the sessions do with it.
+
+The startup herd (`tests/test_startup_herd.py`) now runs 50 sessions on a
+workstation instead of 40, so the scale the docs claim is the scale the gate proves;
+the CI fleet stays at 12 (hosted runners) and every invariant is unchanged.
+
+### Internal — the startup herd's wedge now speaks, and the integration cell lets it (F-859 §7.1/§7.2)
+
+Test and CI only; no product code. The Windows integration cell had been going red
+at a 15–22% rate since 2026-09-02 with one shape every time: the 40-session (12 in
+CI) startup herd wedged at its own 240s backstop and died as a bare `TimeoutError`
+with nothing attached — the pytest-timeout of 180s killed the process before the
+test could report, so there was no test name, no `junit.xml`, and a second red from
+`release_evidence`'s `pytest: null` that was pure consequence. The full
+investigation is committed as
+`audit/stage2/finding_F859_windows_herd_stall_rate.md`.
+
+* **§7.1 — the wedge fails by name.** `tests/test_startup_herd.py` now catches the
+  herd's own timeout and fails with which sessions never came back, the phase each
+  one stopped in (`spawning proxy` / `initialized@Ns, awaiting tools/list` / `done`),
+  the usual percentile summary, and the backend's own log — exactly what the
+  neighbouring asserts already attach for the shapes they catch. The phase marker
+  is what settles the finding's open question on the next red: whether
+  `initialize` completed and `tools/list` never returned (§3.1), or the proxy
+  never came up.
+* **§7.2 — the integration cell's `pytest --timeout` is 300, not 180.** Above the
+  herd's 240s backstop, like the transport cell already was, so the report from
+  §7.1 can actually be written. Same defect class as F-780.
+* **§7.3 — the confound is separated.** Draft PR #85 re-ran the gate on the last
+  pre-F-856 main (`2da61c0`) three times on today's runner pool: 6/6 Windows herd
+  samples green, against 15–22% red on post-F-856 trees the same days. The
+  evidence points at F-856's 240.0s == 240.0s backstop identity, not the runner
+  pool. §7.4 (decoupling the herd backstop from
+  `REUSE_PATIENCE_SECONDS × MAX_STRETCH`) is a product decision and is
+  deliberately NOT made here.
+
+### Fixed — a spawn that failed after Chrome launched no longer leaks it (F-860)
+
+A `spawn_browser` that failed AFTER nodriver had started Chrome but BEFORE it
+handed a `Browser` back — nodriver's own *"Failed to connect to browser"* after
+its `/json/version` polls, or the websocket's *"timed out during opening
+handshake"* — left that Chrome running, untracked and invisible to
+`list_instances`. The failure handler only ever stopped a `Browser` it held, and
+`process_cleanup.kill_browser_process` returned early because tracking happens in
+`_apply_post_launch`, after a successful launch. On a clone the cost was a stray
+process tree until the next backend start's orphan reap. On `master` it was
+worse: the leaked Chrome held the profile, so every later spawn cloned, the
+master snapshot never refreshed, and nothing in `list_instances` explained why —
+until a backend restart. Observed once under a 12-way concurrent spawn burst; the
+evidence and the independent audit of the mechanism are in
+`audit/stage2/finding_F860_failed_spawn_leaks_untracked_chrome.md`, committed
+here.
+
+* **The attempt's profile directory identifies the process.** The orchestrator
+  holds no pid for a launch that raised; what it still knows is the
+  `--user-data-dir` it launched on. The new `embedded/spawn_leak.py` leaf
+  composes `process_cleanup`'s existing cmdline scan and escalating kill with the
+  ONE fact that makes the reap safe: **only a browser that started at or after
+  the attempt began is ours**. An explicit `user_data_dir` may name a profile a
+  real Chrome already holds (its singleton is then exactly why the launch
+  failed); that process predates the attempt and is spared. A browser on any
+  other directory is never touched.
+* **One teardown for both failure phases.** The cancel and error handlers in
+  `spawn_browser` carried the same eleven lines twice; they now share
+  `_teardown_failed_spawn`, which stops a held `Browser` as before and otherwise
+  reaps by profile. The reap never raises: the caller still sees the launch
+  failure, never a cleanup failure in its place, and a Chrome that refuses to die
+  is logged, not fatal.
+* Left alone on purpose: a failed clone attempt's directory is still released to
+  the `auto_clean` sweep rather than deleted inline (bounded, and the sweep is
+  the one home for that), and nothing changes for a spawn that failed before the
+  launch was reached.
+
+`browser_manager.py`'s LOC cap ratchets DOWN 1532 → 1529 (cap == actual): the
+shared helper was paid for by collapsing four boilerplate `Args:/Returns:`
+docstring blocks that only restated their signatures.
+
+### Internal — three more sections leave `embedded/server.py` (plan_SERVERSPLIT slices 4–6)
+
+No behaviour change and no tool renamed, added or removed: the served surface stays
+byte-identical to `tests/goldens/tool_surface.json` at every commit, and all three
+loaded identities of `server.py` (canonical import, bare-name spec load, runpy
+`__main__`) keep building a full 94-tool app.
+
+- **`tool_sections/dynamic_hooks.py`** (slice 4, 10 tools) — the only section with
+  SYNCHRONOUS tool bodies, which is what this slice proves: `tool_registry`'s
+  `_surrogate_safe_returns` branches on `inspect.iscoroutinefunction`, and its sync
+  wrapper is now applied by `server.py`'s binding loop to a function whose
+  `__globals__` is a section module. Zero shared dependencies beyond
+  `rt.dynamic_hook_ai`, so the sync branch is proven in isolation. `server.py`:
+  3014 → **2839** LOC (174 bodies plus the now-unused `dynamic_hook_ai` alias
+  import).
+- **`tool_sections/progressive_cloning.py`** (slice 5, 10 tools) — the first
+  golden-backed section. Its two goldens
+  (`tests/goldens/progressive_expand_styles.json`,
+  `progressive_list_stored_elements.json`) belong to
+  `progressive_element_cloner`, one layer BELOW the tool bodies, so a pure move
+  cannot touch them; they are re-run byte-unchanged as part of the slice to prove
+  exactly that. `server.py`: 2839 → **2660** LOC (178 bodies plus the now-unused
+  `progressive_element_cloner` alias import).
+- **`tool_sections/network_debugging.py`** (slice 6, 10 tools) — the first
+  section to take a module CONSTANT with it: `_CAPTURE_OFF_NOTE`, which sat
+  wedged between two tool bodies in `server.py`, now sits at the top of the module
+  whose three `capture_note` tools are its only readers (the string is
+  byte-identical; only its position moved). It is also the heaviest raw-`.fn`
+  test coupling in the plan — `tests/test_server_network_tools.py` reaches fifteen
+  call sites as `server.<tool>.fn(...)` — and every one of them is a
+  module-attribute read the binding loop still satisfies, so none needed
+  re-pointing. `server.py`: 2660 → **2391** LOC.
+
+After slice 6, 43 of the 94 bodies have moved and `server.py` is down 951 lines
+from the slice-0 baseline (3342), i.e. 1020 from the 3411-line god file the plan
+started against. The LOC cap ratchets DOWN to the measured actual in every
+commit and `tests/source_scan.py`'s floor ratchets UP by one, so a section module
+dropped from `SECTION_MODULES` reads as a collapsed source set rather than a
+legitimately smaller one.
+
+### Internal — the extraction sections leave `embedded/server.py` (plan_SERVERSPLIT slices 7–9)
+
+No behaviour change and no tool renamed, added or removed: the served surface stays
+byte-identical to `tests/goldens/tool_surface.json` at every commit, and all three
+loaded identities of `server.py` (canonical import, bare-name spec load, runpy
+`__main__`) keep building a full 94-tool app.
+
+- **`tool_sections/file_extraction.py`** (slice 7, 9 tools) — the to-file twin of
+  `element-extraction`. The nine bodies were physically SPLIT in `server.py`, two
+  above `extract_complete_element_cdp` and five below it, because that
+  element-extraction body was misfiled among them; here they close up in their
+  registration order and the stray is left for slice 8. The section's two goldens
+  (`tests/goldens/file_based_structure_to_file.json`,
+  `extract_element_structure_list_convert.json`) belong to
+  `file_based_element_cloner`, one layer BELOW the tool bodies, so a pure move
+  cannot touch them; they are re-run byte-unchanged to prove it. `server.py`:
+  2391 → **2116** LOC (274 body lines plus the now-unused
+  `file_based_element_cloner` alias import).
+- **`tool_sections/element_extraction.py`** (slice 8, 9 tools) — the inline half
+  of the cloner surface, and the plan's SECOND stray relocation:
+  `extract_complete_element_cdp` was physically filed among the file-extraction
+  bodies in `server.py` while registering into `element-extraction` all along,
+  and now lives in its own section's module. Three of these bodies return
+  through the SYNCHRONOUS `response_handler.handle_response` — awaiting it
+  raises `TypeError` and silently broke these very tools once (F-202) — so this
+  is the slice that proves that guard follows the bodies: it re-derives its AST
+  scan from `tests/source_scan.py` instead of being hard-wired to `server.py`.
+  The section's three goldens (`tests/goldens/extract_element_styles.json`,
+  `cdp_complete_element.json`, `canonical_engine.json`) belong to
+  `cdp_element_cloner`, one layer BELOW the tool bodies, and are re-run
+  byte-unchanged. `server.py`: 2116 → **1748** LOC (367 body lines plus the
+  now-unused `cdp_element_cloner` alias import).
+- **`tool_sections/cdp_functions.py`** (slice 9, 13 tools) — the one section a
+  runtime GATE switches off. Both gate sites stay in `server.py` (the
+  module-scope `xpool_safe_mode` branch and the `__main__` block's
+  `--xpool-safe` / `--disable-cdp-functions`) and both still run AFTER the
+  binding loop, because `apply_disabled_sections` works by `mcp.remove_tool` and
+  so can only remove tools that are already registered — plan_SERVERSPLIT R6.
+  Verified against a REAL backend subprocess over HTTP rather than in process:
+  control serves 94, `--xpool-safe` 81, `--disable-cdp-functions` 81 and
+  `XPOOL_SAFE_MODE=1` 81 — exactly thirteen removed by each, identical to the
+  pre-move baseline. `server.py`: 1748 → **1371** LOC (376 body lines plus the
+  now-unused `cdp_function_executor` alias import).
+
+After slice 9, 73 of the 94 bodies have moved and only `browser-management`
+(8 tools) and `element-interaction` (12) are left in `server.py`, which is down
+1971 lines from the slice-0 baseline (3342). As in every earlier slice the LOC
+cap ratchets DOWN to the measured actual and `tests/source_scan.py`'s floor
+ratchets UP by one (8 → 11), so a section module dropped from `SECTION_MODULES`
+reads as a collapsed source set rather than a legitimately smaller one.
+
+### Internal — the last tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 10–11)
+
+No behaviour change and no tool renamed, added or removed: the served surface stays
+byte-identical to `tests/goldens/tool_surface.json` at every commit, and all three
+loaded identities of `server.py` (canonical import, bare-name spec load, runpy
+`__main__`) keep building a full 94-tool app.
+
+- **`tool_sections/browser_management.py`** (slice 10, 8 tools) — the browser's own
+  lifecycle. `spawn_browser` is the plan's largest single tool and carries the
+  F-808/F-810 headed-visibility guard, which runs BEFORE its `try` and outside it so
+  a spawn nobody could ever see refuses without first cloning a profile dir onto
+  disk; it reads `rt.display_context.display_context()` for the refusal message and
+  reaches `desktop_launch.can_deliver_headed_window()` through a function-local
+  import, carried rather than hoisted. `spawn_browser` and `close_instance` are the
+  two ends of the on-disk profile/clone lifecycle, so six calls land in
+  `rt.clone_storage` — resolved at call time, which keeps
+  `tests/test_clone_storage.py`'s "patch it THERE, not on `server`" pin true of a
+  body that has left `server.py`. `get_instance_state`'s `# F-164 non-CDP` marker
+  moved byte-unchanged with it, and `tests/test_cdp_timeout.py` follows it into the
+  new file through `tests/source_scan.py` — load-bearing exactly here, because after
+  this slice `server.py` contains no `asyncio.wait_for` at all. `server.py`:
+  1371 → **986** LOC (377 body lines plus seven imports it was the last consumer of).
+- **`tool_sections/element_interaction.py`** (slice 11, 12 tools) — the largest
+  section and the last to move. `execute_script` is why it went last: it is the only
+  body that reads three runtime knobs at once (`rt._script_rejection_reason` and
+  through it `MAX_USER_SCRIPT_BYTES`, `rt.EXECUTE_SCRIPT_TIMEOUT`,
+  `rt._clamp_timeout`), all resolved against `tool_runtime` at CALL time so
+  `patched_server` still reaches a guard whose caller no longer lives in `server.py`.
+  `take_screenshot`'s two function-local imports (`io`, `PIL.Image`) are carried as
+  they stood, keeping Pillow off the module's import graph at binding time.
+  `server.py`: 986 → **524** LOC (452 body lines plus thirteen imports it was the
+  last consumer of).
+
+**`embedded/server.py` now holds no tool bodies.** What remains is `mcp`, the
+registry, the binding loop that registers all 94 functions once per execution of its
+module body, `app_lifespan`, the four `@mcp.resource` handlers, the xpool-safe gate,
+`build_arg_parser` and the `__main__` block — plus the migration alias block that
+slice 12 deletes. The file is down 2887 lines from the 3411-line god file the plan
+started against. Its LOC cap ratcheted DOWN to the measured actual in both
+commits; `tests/source_scan.py`'s floor ratcheted UP to its FINAL value 13
+(`server.py` + `tool_runtime.py` + all eleven section modules), and §5.5's
+`MIGRATION_ALIASES` floor ratcheted DOWN 14 → 11 → 5, the five aliases left all
+having a named reader. `SECTION_MODULES` is complete, so `SECTION_TOOLS`' key order
+has settled back to the canonical one. The xpool gate was re-measured against a real
+backend subprocess over HTTP — control 94, `--xpool-safe` 81,
+`--disable-cdp-functions` 81, `XPOOL_SAFE_MODE=1` 81 — still exactly thirteen
+removed by each, unchanged from the pre-move baseline.
+
+### Internal — the split is complete; the scaffolding is gone (plan_SERVERSPLIT slice 12, closing)
+
+**plan_SERVERSPLIT is COMPLETE.** All 94 tool bodies live in
+`embedded/tool_sections/`, and this closing slice removes the migration machinery
+that made the move reviewable. No behaviour change, no tool renamed, added or
+removed: the served surface is still byte-identical to
+`tests/goldens/tool_surface.json`, and all three loaded identities of `server.py`
+still build a full 94-tool app.
+
+- **The migration alias block is deleted.** Through slices 0–11 `server.py`
+  re-exported a shrinking set of `tool_runtime` names, so a fake handed to
+  `tests/conftest.py`'s `patched_server` had to be written into two places at once
+  (a dual-patch guarded by an alias-identity pin). `server.py`'s own non-tool
+  readers — `app_lifespan`, the four `@mcp.resource` handlers and the `__main__`
+  block — now read `rt.<name>` exactly as a tool body does, so the dual-patch and
+  the pin go with the block. `tool_runtime` is the one patchable home again, with
+  no era to keep in step.
+- **"One home" is a guard now, not a convention.** A new parametrized test asserts
+  the four constructed singletons (`browser_manager`, `network_interceptor`,
+  `dom_handler`, `cdp_function_executor`) are **not** attributes of `server`.
+  An alias that came back would fail nothing else: every test would stay green
+  while a `setattr` on `tool_runtime` silently stopped reaching whatever read the
+  `server` copy. `tests/test_observability.py`'s four `_with_cdp_timeout` calls and
+  two `debug_logger` reads are re-pointed to `tool_runtime`, and
+  `tests/test_tool_module_reload.py`'s shared-runtime check now asserts through
+  each identity's own `rt` binding.
+- **`embedded/server.py` leaves `GRANDFATHER`.** The row is *deleted*, not merely
+  satisfied: a grandfathered cap is a standing permission to exceed the budget, and
+  the file — **523 LOC**, down from the 3411-line god file the plan started against
+  — is governed by the 1000-LOC default like every other module. What is left in it
+  is `mcp` and the registry, the binding loop that registers all 94 functions once
+  per execution of its module body, `app_lifespan`, the four `@mcp.resource`
+  handlers, the xpool-safe gate, `build_arg_parser` and the `__main__` block. The
+  one import that is not a runtime read is `clone_storage`, kept as the positive
+  delegation handle `tests/test_clone_storage.py`'s F-201 negative-surface pin needs.
+- **Docs.** `CLAUDE.md`'s `server.py` / `tool_runtime.py` / `tool_sections/` rows
+  and its "Tool count = 94" paragraph now state the finished shape (the count
+  derives from `SECTION_TOOLS`, filled by `server.py`'s binding loop over
+  `SECTION_MODULES`); `DESIGN.md` §8 gains the section-module corollary — *a module
+  that holds tool bodies must not register them either*, with the zero-registration
+  failure mode spelled out; `CONTRIBUTING.md` gains an "Adding a tool" section
+  saying what that now means: a function in a section module and an entry in its
+  `TOOLS` tuple.
+
+### Internal — the first tool bodies leave `embedded/server.py` (plan_SERVERSPLIT slices 1–3)
+
+No behaviour change and no tool renamed, added or removed: the served surface is
+byte-identical to `tests/goldens/tool_surface.json` at every commit, and all three
+loaded identities of `server.py` (canonical import, bare-name spec load, runpy
+`__main__`) keep building a full 94-tool app.
+
+Slice 0 shipped the machinery; these three slices are the first bodies to use it,
+ordered smallest-and-most-isolated first so the mechanism is proven on three tools
+before it is trusted with four hundred lines.
+
+- **`tool_sections/cookies_storage.py`** (slice 1, 3 tools) — the smallest section
+  that still exercises the whole shared-dependency set a body reaches for
+  (`browser_manager`, `network_interceptor`, `_with_cdp_timeout`, `_require_tab`,
+  `ToolError`). `server.py`: 3342 → **3248** LOC.
+- **`tool_sections/tabs.py`** (slice 2, 5 tools) — the first section to use
+  `_require_browser`/`_require_landing_ok` and the first to read a tuned knob
+  DIRECTLY (`new_tab` hands `CDP_OPERATION_TIMEOUT` to `_require_landing_ok`),
+  which is what proves a knob stays patchable from a section module: it is
+  resolved against `tool_runtime` at call time, not bound at import. `server.py`:
+  3248 → **3144** LOC (103 bodies plus the now-unused `_require_browser` import).
+- **`tool_sections/debugging.py`** (slice 3, 5 tools) — the first slice that
+  RELOCATES rather than only moves: `validate_browser_environment_tool` sat among
+  the element-extraction bodies in `server.py` while registering into
+  `debugging`, and joins its own section here, which is what makes module ↔
+  section a clean 1:1. It is also the first slice to move a string a source-TEXT
+  guard is pinned to (`MSG_EXPORT_TIMEOUT`, in `export_debug_logs`): slice 0's
+  derived file set carries the pin into the new module, where an
+  `inspect.getsource(server)` pin would now have passed over a file the message
+  had already left. `server.py`: 3144 → **3014** LOC (128 bodies plus the two
+  now-unused `platform_utils` imports).
+
+After slice 3, 13 of the 94 bodies have moved and `server.py` is down 328 lines
+from the slice-0 baseline; the LOC cap ratchets DOWN to the measured actual in
+each commit, and `tests/source_scan.py`'s floor ratchets UP by one, so a section
+module dropped from `SECTION_MODULES` reads as a collapsed source set rather than
+a legitimately smaller one.
+
+### Internal — the mechanism for splitting `embedded/server.py` (plan_SERVERSPLIT slice 0)
+
+No behaviour change and no tool moved: the served surface is byte-identical to
+`tests/goldens/tool_surface.json`, a new HARD golden taken in this commit.
+
+`embedded/server.py` is a 3411-line god file whose 94 tool bodies are due to move
+into one module per section. Slice 0 ships only the machinery that makes that move
+safe, and the guards that prove it:
+
+- **`embedded/tool_runtime.py`** — the one home for what a tool body reaches for
+  beyond its own arguments (the four constructed singletons, the re-exported
+  module singletons, the four tuned knobs and the script/timeout guards). A body
+  resolves `rt.<name>` at CALL time against a module that is loaded once, so the
+  whole surface has exactly one patchable seam no matter which file it ends up in.
+- **`embedded/tool_sections/`** — the subpackage the bodies move into, carrying
+  the contract that a section module never decorates its own tools.
+  `SECTION_MODULES` is empty in this slice.
+- **`server.py`'s binding loop** — registration is driven from `server.py`'s
+  module body, so all three loaded identities (canonical import, bare-name spec
+  load, runpy `__main__`) each build a full 94-tool app. A section module that
+  decorated itself would register into the first execution only — and the existing
+  94-count tripwire cannot see that, because `SECTION_TOOLS` is shared and would
+  still read 94.
+- **`tests/test_tool_module_reload.py`** — the detector for both failure modes,
+  each demonstrated red in place: removing the registry's idempotent append yields
+  `282 tools ... (3x registration)`, and moving one tool into a self-decorating
+  section module leaves the second and third identities at 93 while the count
+  tripwire stays green.
+- **`tests/source_scan.py`** — four guards read `server.py`'s source TEXT
+  (F-164 CDP-timeout discipline, F-202 call convention, the uvicorn run-config,
+  the export-timeout message pin). A source-text guard does not fail when the code
+  it polices leaves the file; it passes, over an emptier file. All four now derive
+  their file set from one helper carrying a floor assertion.
+
+`server.py`: 3411 → **3342** LOC, cap ratcheted down to the measured actual.
+
+### Changed — the cloner subsystem joins the one error convention (F-858)
+
+Every tool in this package reports failure by raising `ToolError`, so a client
+sees a real error. The cloner subsystem did not: 29 sites across the engine, the
+progressive adapter and the to-file adapter answered a failure by RETURNING
+`{"error": ...}`, which reaches an MCP client as a **successful** call whose
+result happens to contain the word "error". Those 29 now raise. Message text is
+byte-preserved everywhere, so nothing a caller reads got worse.
+
+Two of them were more than cosmetic:
+
+* **`clone_element_to_file` with malformed `extraction_options`** returned an
+  error dict while its sibling `clone_element_complete` — same argument, same
+  `json.loads`, same failure — raised. Whether a bad option string was an error
+  depended on which of two tools you called.
+* **`*_to_file` swallowed a failed extraction.** It wrote the engine's error
+  payload to a JSON file and answered with the normal
+  `{file_path, extraction_type, summary}` shape and an all-empty summary — a
+  file claiming to be a clone of an element that was never extracted, and a
+  summary indistinguishable from a genuinely empty element. A failed extraction
+  now propagates and writes nothing.
+
+What deliberately did NOT change: a complete clone still survives one bad aspect.
+`extract_complete_element` already gathered its six aspects with
+`return_exceptions=True`, so a raising aspect lands in the same embedded
+`{"error": ...}` record it landed in before — one isolation mechanism, not two.
+The other five aspects still populate.
+
+### Fixed — an edit recipe now says WHERE, and stops guessing WHY (F-857)
+
+Three follow-ups recorded by the animation-v2 adversarial audit (PR #73), all in
+the same seam: the payload knew the answer and printed a guess instead.
+
+* **D6 — three causes, one wrong sentence.** A `var()`-indirect value, an
+  animation declared in the element's own `style=""`, and a rule that lives in
+  an adopted constructed stylesheet all degraded with *"its stylesheet is likely
+  cross-origin, so there is nothing here to find/replace"* — a guess, and a
+  wrong one in two of the three, which sends a weak model hunting through a file
+  that is not involved. Each is now decided from a fact the collector already
+  sent: the declared value names the custom property (`var(--dur)` →
+  "change `--dur`'s own declaration"), `element.inline_properties` names the
+  attribute, and a *witnessed* `cross_origin_stylesheet` warning — not the
+  absence of a rule — is what licenses saying "cross-origin" at all, with the
+  href it was witnessed on. With no such witness the message says what is
+  actually left: a constructed sheet adopted at runtime, a shadow root's own
+  `<style>`, or JavaScript.
+* **Openable source location.** `rule_span` computed the offset of a rule inside
+  the sheet and threw it away, so the strongest thing a recipe could say was
+  "find this string somewhere in `<style> #0`". A recipe that carries a `find`
+  now also carries `char_offset`, `line` and `column`, and its `sources` entry
+  carries `open`: the url an editor opens (a linked sheet's href, else the
+  DOCUMENT that contains the `<style>`) plus `offsets_in`, because offsets into
+  a `<style>` element's text are not offsets into the HTML around it. A
+  constructed sheet gets no `open` at all — a url there would be a fabricated
+  address. Resolving a url to a path on disk stays with `extract_related_files`,
+  the one URL→file answerer; the payload surfaces the halves rather than growing
+  a second one.
+* **D7 — `editable` was whole-record, and its absence read as yes.** A record
+  whose keyframe declarations were applicable while every timing knob was a
+  pointer emitted no verdict at all, so a reader that stopped at the flag
+  concluded it could retime an animation it cannot. `editable` still answers
+  "can ANY recipe here be applied"; `not_editable` now names the ones that
+  cannot, and is omitted where nothing is a pointer.
+
+Payload shape (SOFT golden, updated in the same commit): animation and
+transition records always carry `editable`; `not_editable` is new; the recipe
+`note` for "no rule declares this" is now short and defers to the record's
+`not_editable_reason`, which carries the discriminated cause. `edit_protocol`
+gains one `open` paragraph, stated once rather than per recipe.
+
+`embedded/animation_source.py` is new — THE one home for *where a declaration
+lives* (the locating, the openable location, and the three causes when it cannot
+be located), extracted from `animation_edits.py` because the additions took that
+file past the 1000-LOC budget. No cap was raised.
+
+## 2.1.1
+
+### Fixed — a starved machine no longer manufactures its own backend death (F-856)
+
+On 2026-09-02, on a machine at 3,445 processes with the CPU pegged at 100%,
+every Claude Code session sharing one backend saw `CONNECTION_CLOSED`. Nothing
+had died. The product's own logs show the failure assembling itself out of two
+halves that each look reasonable alone:
+
+* **A timeout was treated as evidence by a prober that was not being
+  scheduled.** F-820's confirmation gate correctly held off six times across
+  eleven minutes — `backend on port 52554 was busy, not dead` — and then, on the
+  seventh strike run, spent its whole 60-second patience without hearing the
+  backend and returned `confirmed unusable`. The backend had not changed; the
+  prober's 60 wall-clock seconds no longer contained 60 seconds of the attention
+  the window was sized for.
+* **The recovery that followed had a deadline the same starvation guaranteed it
+  would miss.** The replacement backend was born at 12:37:47 and did not serve
+  until ~12:39:41, because `process_cleanup`'s orphan reap ran *inside* the
+  lifespan the first `initialize` awaits — ~90 seconds of it, several 5s
+  force-kill waits per orphan — while the healing proxy held a 45s readiness
+  budget. The heal could not have succeeded at any level of patience.
+
+Both halves are fixed, and neither adds a knob or a second recovery path:
+
+* **Patience is now spent in fairly scheduled seconds.** The reuse gate's own
+  naps are the measurement — ask for 0.25s, wake at 0.25s + delta — so the
+  process reads its own lateness with a monotonic clock and no system polling.
+  Elapsed time is discounted by that lag before it is charged, bounded at 4x, so
+  a window widens *only* in the conditions that make a narrow window wrong; on an
+  idle machine the measurement is 1.0 and the behaviour is line-for-line what it
+  was. One home (`embedded/scheduling_lag.py`), applied at one site — the gate
+  three callers already share (the F-820 watchdog's confirmation, F-843's bridge
+  verdict, F-807's cold-start grace). `proxy_selfheal` is untouched: starvation
+  moves *when* a verdict is reached, never what happens after one.
+* **Readiness comes before reaping.** `process_cleanup.activate()` still arms
+  its atexit/signal handlers synchronously — one armed after the first browser
+  exists was not there when it counted — and hands the reap to
+  `embedded/serve_startup.py`, which runs it off the first-serve path. Nothing
+  about the reap needed to precede the first tool call: ownership, not timing, is
+  what makes it safe to kill a browser (F-808), the registry write drops reaped
+  ids *by name* through the shared read-merge-write, and the temp-profile sweep
+  already skips anything a live browser holds or anything younger than the orphan
+  age.
+* A **`proxy: patience extended under starvation`** lifecycle report (F-827)
+  fires at most once per window, and only on material lag, so the
+  CONDEMNED/HEALED/TEARDOWN series finally has a denominator for how often
+  starvation nearly caused one.
+
+Rejected on the way: "the recorded pid is alive, therefore not dead" as a veto
+over a condemnation — a *wedged* backend (dispatch loop dead, socket open,
+process resident) passes that forever, which is the exact failure F-301/F-501
+exist for. That signal already has its one sound use inside the gate, as the
+fast-fail for the genuinely dead. Also rejected: simply raising
+`REUSE_PATIENCE_SECONDS` and `HEAL_ATTEMPT_SECONDS`, which buys starvation
+tolerance by making every real hard-down slower to detect on every machine
+forever.
+
+Internal: the proxy's liveness watchdog moved out of `singleton.py` (at its LOC
+budget) into `embedded/backend_watchdog.py`, taking both probes as arguments so
+it stays a leaf; `singleton._watch_backend_liveness` remains as the wiring that
+knows which probes are ours. `process_cleanup.py`'s budget was ratcheted DOWN,
+1023 → 1017.
+
+## 2.1.0
+
+Animation extraction is rebuilt as **schema v2** (F-846..F-855), and the result
+was then audited adversarially before shipping. The new capability plus the
+breaking payload change for `extract_element_animations` is why this is a minor
+bump rather than a patch.
+
+### Fixed — five defects schema v2's own tests could not see (audit of PR #72)
+
+An independent adversarial review audited the animation-parsing work from a
+clean worktree, under the rule that nothing changes on a code-read alone: every
+fix below is here because a new test reproduced it first, red on the merged code
+and green after. All five share one signature — the payload was **confident and
+wrong**, which F-850's own premise ranks below saying nothing — and in each case
+the fact needed to catch it was already *in* the payload, just never read.
+
+- **A `none` slot shifted every list after it.** Filtering
+  `animation-name: fade, none, spin` down to the live names dropped the slot
+  *index* along with the slot, so `spin` was handed slot 1's duration, delay,
+  easing and iteration count, and its edit recipe addressed the wrong comma item
+  of `animation-duration: 1s, 2s, 3s` — at `confidence: "high"`. F-847's
+  list-cycling rule was applied correctly, to the wrong index. The list index
+  now stays the CSS slot, while a record's `id` counts records, because
+  `build_waapi` numbers live records from the record count and a hole here would
+  collide with them.
+- **`!important` was swallowed by the replace template.** For
+  `animation-duration: 2s !important` the token was `2s !important` and the
+  replacement `animation-duration: {{NEW_VALUE}}`, so applying the recipe
+  silently dropped the priority — turning a retime into a cascade edit, and
+  breaking F-852's promise that `replace` carries the rest of the declaration.
+  Not a rare path either: `winning_rule` ranks `!important` first, so an
+  important rule is the one a recipe most often points at. Spans are now taken
+  against the value without its priority, at both knob branches and in the
+  keyframe recipe.
+- **`@layer` reversed the cascade unnoticed.** Ranking went `!important` →
+  specificity → document order and never read `at_rule_context`, which the
+  recipe itself carries. An unlayered declaration beats a layered one however
+  specific the layered selector is, so a layered `#hero` outranked an unlayered
+  `.hero` here and lost in the browser — and the computed-value cross-check
+  cannot catch it when both declare the same value. Layer *order* is not
+  recoverable (a bare `@layer a, b;` statement has no `cssRules`, so the
+  collector's walk never sees it), so candidates spanning different layers now
+  degrade to a rule pointer at `confidence: "low"` — the vocabulary the module
+  already had for `:is`/`:where`.
+- **The 20-recipe edit cap truncated silently.** `caps.truncated` reports
+  animations and keyframes only, so 20 of 38 recipes arrived with nothing said —
+  against F-853 and F-855, and leaving a model to conclude that the keyframes it
+  can find no recipe for are not editable. A per-record `edit_cap_reached`
+  warning now names a remedy the reader actually has: `EDIT_CAP` is not
+  caller-settable, so the message points at the `@keyframes` block's
+  `source_ref` and at narrowing the selector, rather than inviting a raise.
+- **A shadow host was reported as static.** `getAnimations({subtree: true})`
+  does not cross a shadow boundary and `document.styleSheets` does not list a
+  shadow root's `<style>`, so a host whose shadow content was visibly animating
+  returned `has_motion: false`, zero animations and not one warning. It does not
+  have to be captured; it has to be admitted. A named
+  `shadow_root_not_traversed` warning now says how many roots were skipped and,
+  where the root is open, how many elements inside them are animating right now.
+
+**Reported, not fixed** — both degrade safely, so neither emits a wrong value:
+
+- Three distinct causes — a value behind `var()`, an inline `style=""`
+  animation, and an adopted constructed stylesheet — all share the one fallback
+  reason "likely cross-origin; edit that instead", which sends a reader hunting
+  for a file that is not involved. The payload already carries the facts that
+  tell the three apart.
+- `editable` is a whole-record verdict, so a record whose timing knobs are all
+  pointers but whose keyframes are editable emits no `editable: false`. Pinned
+  as a test rather than changed.
+
+**Tests:** 50 new. `tests/test_animation_v2_audit.py` adds 28 hermetic — 9
+proved the defects above by failing on the merged code, and the other 19 pin
+contracts that were already correct, each proved falsifiable by briefly mutating
+the product (the red condition is documented in the file). Notably, `var()`
+degradation survived removing `token_verdict` alone: it is defense-in-depth, and
+only lied once the computed-value cross-check was also removed.
+`tests/test_e2e_animations_edge.py` adds 22 against real Chrome, and its
+load-bearing test checks **every** `find` literal against
+`tests/fixture_app/animations_edge.html`'s own bytes read off disk, never
+against a string the test composes — the one check Chrome's re-serialization
+cannot pass by accident.
 
 ### Changed — the animations payload is sized for the model that reads it (F-853)
 

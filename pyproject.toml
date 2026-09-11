@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stealth-chrome-devtools-mcp"
-version = "2.0.9"
-description = "Undetectable browser automation for AI agents via the Model Context Protocol."
+version = "2.1.2"
+description = "Undetectable browser automation for AI agents via the Model Context Protocol — one shared backend built for 50+ concurrent Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "AGPL-3.0-only"
@@ -227,6 +227,119 @@ ban-relative-imports = "all"
     "PTH105", "PTH108", "PTH109", "PTH123", "RET504", "RUF013", "S102",
     "S112", "SIM105", "T201", "TID251", "TRY002", "TRY300", "TRY301", "W293",
 ]  # plan_M4ph1 (F-101 god-file split + M3/M10a except surface)
+"src/stealth_chrome_devtools_mcp/embedded/tool_runtime.py" = [
+    "ANN001", "ANN202", "ARG001", "ASYNC109", "B904",
+]  # plan_SERVERSPLIT slice 0 (the knobs + the script/timeout guards moved
+# VERBATIM out of server.py; these five codes are the exact subset of that
+# file's file-wide list the moved lines fire. Carried verbatim, nothing widened
+# — same discipline as the clone_storage.py / tool_registry.py extractions.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/cookies_storage.py" = [
+    "E501", "PLR0913", "TID251",
+]  # plan_SERVERSPLIT slice 1 (the cookies-storage bodies moved VERBATIM out of
+# server.py; each code is the exact subset of that file's file-wide list the
+# moved lines fire — TID251 the `typing.Any` return annotations, PLR0913
+# set_cookie's nine CDP cookie fields, E501 one docstring line. Carried
+# verbatim, nothing widened: a suppression the moved lines do not fire is not
+# inherited, which is why this list is three codes and not thirty-six.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/tabs.py" = [
+    "B904", "BLE001", "TID251",
+]  # plan_SERVERSPLIT slice 2 (the tabs bodies moved VERBATIM out of server.py;
+# the exact subset of that file's file-wide list they fire — TID251 the
+# `typing.Any` annotations, BLE001/B904 new_tab's one `except Exception as e:
+# raise ToolError(...)`, which is F-833's error-envelope idiom and is carried,
+# not authored, here. Same discipline as slice 1.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/debugging.py" = [
+    "A002", "B904", "BLE001", "E501", "PLR0913", "RET504", "TID251", "TRY300",
+]  # plan_SERVERSPLIT slice 3 (the debugging bodies moved VERBATIM out of
+# server.py, including validate_browser_environment_tool, which was filed among
+# the element-extraction bodies while registering into this section. Every code
+# is the exact subset of server.py's file-wide list the moved lines fire —
+# notably A002 for export_debug_logs' `format` parameter, which is part of the
+# WIRE surface and so cannot be renamed by a pure move. Carried verbatim.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/network_debugging.py" = [
+    "E501", "PLR0913", "TID251",
+]  # plan_SERVERSPLIT slice 6 (the network-debugging bodies moved VERBATIM out of
+# server.py, together with the _CAPTURE_OFF_NOTE constant that sat wedged between
+# two of them. Each code is the exact subset of server.py's file-wide list the
+# moved lines fire — TID251 the `typing.Any` annotations, PLR0913
+# search_network_requests' nine filter/pagination fields, which are the WIRE
+# surface and so cannot be regrouped by a pure move, E501 five docstring lines.
+# Carried verbatim, nothing widened.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/progressive_cloning.py" = [
+    "ANN401", "E501", "TID251",
+]  # plan_SERVERSPLIT slice 5 (the progressive-cloning bodies moved VERBATIM out
+# of server.py; the exact subset of that file's file-wide list they fire —
+# TID251 the `typing.Any` annotations, ANN401 expand_children's `max_count:
+# Any | None`, which is part of the WIRE surface and so cannot be narrowed by a
+# pure move, E501 four docstring lines. Carried verbatim, nothing widened.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/dynamic_hooks.py" = [
+    "E501", "PLR0913", "TID251",
+]  # plan_SERVERSPLIT slice 4 (the dynamic-hooks bodies moved VERBATIM out of
+# server.py — the only section with SYNCHRONOUS tool bodies. Each code is the
+# exact subset of server.py's file-wide list the moved lines fire: TID251 the
+# `typing.Any` annotations, PLR0913 create_simple_dynamic_hook's six template
+# fields, E501 three docstring lines in create_dynamic_hook's Args block. The
+# docstrings are byte-identical to server.py's because FastMCP serves them and
+# tests/goldens/tool_surface.json is a HARD golden. Carried verbatim.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/cdp_functions.py" = [
+    "B904", "BLE001", "E501", "PERF401", "RUF013", "S102", "TID251", "TRY301",
+]  # plan_SERVERSPLIT slice 9 (the cdp-functions bodies moved VERBATIM out of
+# server.py — the thirteen the xpool-safe gate removes as a unit. Every code is
+# the exact subset of server.py's file-wide list the moved lines fire: TID251
+# the `typing.Any` annotations, RUF013 five implicit-Optional defaults that are
+# the WIRE surface and so cannot be narrowed by a pure move, E501 three
+# docstring/message lines, PERF401 execute_function_sequence's append loop, and
+# S102/TRY301/BLE001/B904 create_python_binding's `exec` plus the
+# try/raise/except-Exception around it — the exec IS the python binding, and all
+# four are carried, not authored, here. Carried verbatim, nothing widened.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/element_extraction.py" = [
+    "B904", "E501", "PLR0913", "TID251",
+]  # plan_SERVERSPLIT slice 8 (the element-extraction bodies moved VERBATIM out
+# of server.py, including extract_complete_element_cdp, which was filed among
+# the file-extraction bodies while registering into this section. Every code is
+# the exact subset of server.py's file-wide list the moved lines fire — TID251
+# the `typing.Any` annotations, PLR0913 the five extractors whose six per-aspect
+# toggles are the WIRE surface, E501 six docstring lines, B904 the one
+# `except json.JSONDecodeError: raise ToolError(...)` in clone_element_complete,
+# which is carried, not authored, here. Carried verbatim, nothing widened.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/file_extraction.py" = [
+    "PLR0913", "TID251",
+]  # plan_SERVERSPLIT slice 7 (the file-extraction bodies moved VERBATIM out of
+# server.py; the exact subset of that file's file-wide list they fire — TID251
+# the `typing.Any` annotations, PLR0913 the four to-file extractors whose six
+# per-aspect toggles are the WIRE surface and so cannot be regrouped by a pure
+# move. Carried verbatim, nothing widened: no E501 here, because none of the
+# moved docstring lines is long.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/browser_management.py" = [
+    "ANN401", "ARG001", "ASYNC109", "B904", "BLE001", "C901", "E501",
+    "PERF401", "PLR0912", "PLR0913", "RUF013", "TID251", "TRY002", "TRY300",
+    "TRY301",
+]  # plan_SERVERSPLIT slice 10 (the browser-management bodies moved VERBATIM out
+# of server.py — the browser's own lifecycle, spawn_browser included. Every code
+# is the exact subset of server.py's file-wide list the moved lines fire, and
+# every one is carried, not authored: C901/PLR0912/TRY002/TRY301/BLE001/B904/
+# TRY300 are spawn_browser's three-attempt retry loop and its
+# `except Exception as e: raise ToolError(...)` envelope; ANN401/RUF013/TID251/
+# PLR0913 are its `sandbox: Any | None`, its two implicit-Optional list defaults
+# and its twelve parameters, all WIRE surface a pure move may not narrow;
+# ARG001 is reload_page's `ignore_cache`, ASYNC109 navigate's `timeout`,
+# PERF401 list_instances' append loop and E501 eleven docstring lines. Nothing
+# widened.)
+"src/stealth_chrome_devtools_mcp/embedded/tool_sections/element_interaction.py" = [
+    "A002", "ANN401", "ARG001", "ASYNC109", "ASYNC230", "ASYNC240", "B904",
+    "BLE001", "DTZ005", "E501", "PLR0913", "PLR2004", "PLW2901", "PTH108",
+    "PTH123", "TID251", "TRY300",
+]  # plan_SERVERSPLIT slice 11 (the element-interaction bodies moved VERBATIM
+# out of server.py — the LAST section to leave it, and the largest. Every code
+# is the exact subset of server.py's file-wide list the moved lines fire, and
+# every one is carried, not authored: A002 is take_screenshot's `format`
+# parameter and ARG001 its `full_page`, both WIRE surface a pure move may not
+# rename; ANN401/TID251 are query_elements' and select_option's `Any` params,
+# ASYNC109 the three `timeout` params, PLR0913 type_text's seven; the whole
+# ASYNC230/ASYNC240/DTZ005/PLR2004/PLW2901/PTH108/PTH123 cluster is
+# take_screenshot's Pillow-and-tempfile compression path; B904/BLE001/TRY300 are
+# execute_script's and select_option's ToolError envelopes; E501 eight docstring
+# lines. Carried verbatim, nothing widened.)
 "src/stealth_chrome_devtools_mcp/embedded/clone_storage.py" = [
     "ANN001", "ANN202", "ANN401", "ARG001", "ARG005", "ASYNC240",
     "BLE001", "DTZ005", "DTZ006", "E501", "PIE810", "PLR2004", "PTH100",
@@ -245,10 +358,18 @@ ban-relative-imports = "all"
 "src/stealth_chrome_devtools_mcp/embedded/cdp_element_cloner.py" = [
     "ANN001", "ANN202", "ANN204", "ARG002", "ASYNC210", "BLE001", "C901",
     "DTZ005", "E501", "PERF401", "PLR0912", "PLR0913", "PLR2004", "TID251",
-    "TRY300",
+    "TRY300", "TRY301",
 ]  # plan_M5b (canonical engine; absorbed element_cloner.py's verbatim-moved
 # JS/HTTP-extraction debt at the 5->1 consolidation — element_cloner.py deleted
 # in M5b-5 with its per-file-ignore entry, so net repo debt is unchanged)
+# + TRY301 (F-858): the aspect methods joined the ONE error convention, so each
+# validates its JS-eval answer with `raise ToolError(...)` INSIDE the try that
+# converts an operational failure — 15 sites, past the ">3 sites → file-wide"
+# rule above. Same code, same reason, already file-wide on server.py,
+# dom_handler.py and python_binding.py, and inline-noqa'd at the four
+# browser_manager/cdp_function_executor/dynamic_hook_system sites. TRY301's
+# "abstract the raise to an inner function" would put each aspect's answer
+# check somewhere other than the aspect — a second home for one decision.
 "src/stealth_chrome_devtools_mcp/embedded/file_based_element_cloner.py" = [
     "ANN001", "ANN202", "ANN204", "BLE001", "DTZ005", "DTZ006", "E402",
     "PLR0913", "PTH123", "RET504", "RUF013", "TID251", "TID252", "TRY300",

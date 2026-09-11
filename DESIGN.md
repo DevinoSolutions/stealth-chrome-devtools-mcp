@@ -90,7 +90,7 @@ stale record still evicts immediately so an upgrade takes effect now, and a dead
 (no socket, no live process) fails the first probe so crash recovery stays fast.
 Discovery's hot path stays single-shot (`patience=0`) and the watchdog's 2 s
 `LIVENESS_PROBE_TIMEOUT` is untouched; `tests/test_startup_herd.py` proves the result
-at scale — 40 simultaneous real stdio sessions, exactly one logical backend.
+at scale — 50 simultaneous real stdio sessions, exactly one logical backend.
 
 ### 2.2 The port is the CHOSEN port — never re-hardcode it
 
@@ -461,6 +461,26 @@ disposition), not a bug — do not rewrite it into a middleware chain.
   would trigger a **double registration** of every tool under runpy. Helpers that need
   the browser manager take it as an **argument** (e.g. `tool_errors._require_tab`),
   which is exactly why the error helpers live in a leaf module.
+- **The section-module corollary: a module that holds tool bodies must not register
+  them either.** The rule above forbids importing `server`; this one forbids the thing
+  the import would have been for. The 94 bodies live in `embedded/tool_sections/*.py`,
+  and every one of those modules is a plain module — imported **once** per process,
+  into one `sys.modules` entry. `embedded/server.py` is not: its body runs up to three
+  times (canonical import, bare-name `spec_from_file_location` load, `runpy` `__main__`),
+  building a fresh `FastMCP` app each time. So a `@section_tool(...)` at a section
+  module's own scope would run on the FIRST of those executions and never again,
+  registering into that app and leaving the runpy `__main__` load — the one that actually
+  serves — with **zero** tools. That failure is invisible to the 94-count tripwire,
+  because `SECTION_TOOLS` lives in `tool_registry.py` and is shared: it would still say
+  94 (see `tests/test_tool_module_reload.py`, which asserts per-identity app counts for
+  exactly this reason). Registration is therefore **driven from `server.py`'s module
+  body** by a four-line binding loop over `SECTION_MODULES`, so each execution registers
+  into its own `mcp` and binds all 94 names into its own namespace. A section module
+  exports only `SECTION` and `TOOLS`, imports no `mcp`/`registry`/`server`, and resolves
+  every singleton as `rt.<name>` against `embedded/tool_runtime.py` at call time (an
+  import-time `from ... import browser_manager` would create a second patchable home and
+  silently defeat `tests/conftest.py`'s `patched_server`). All three properties are
+  enforced by AST in `tests/test_tool_sections_contract.py`.
 - There is **exactly one** sanctioned `sys.path` shim (`embedded/__init__.py`, which
   puts `embedded/` on the path). Do not add a second `sys.path` insert anywhere.
 
@@ -481,8 +501,14 @@ it to a raise would be the defect:
 - result-envelope success dicts: `execute_script`, `create_python_binding`
   (the `{"success": …, "result"/"error": …}` shape a caller destructures);
 - the diagnostic dict: `validate_browser_environment_tool`;
-- input-validation value-returns: `expand_children`, `clone_element_to_file` bad-arg
-  paths;
+- input-validation value-returns: `expand_children`'s bad-arg paths (pinned by
+  `test_tool_errors.py::test_expand_children_invalid_arg_returns_error_dict`);
+- embedded failure RECORDS inside a payload the caller asked for — not tool returns:
+  `cdp_element_cloner.extract_complete_element`'s per-aspect isolation (a failed
+  aspect is embedded so the other five still land) and `_get_element_html`'s
+  sub-field degradation. Both are named in
+  `test_cloner_error_convention.py::KEEP_EMBEDDED_ERROR_RECORDS`, which is also the
+  AST gate that keeps every OTHER cloner site on the raise;
 - deliberate resilience/fallbacks: `query_elements` (loop resilience),
   `get_response_content` (base64 alternative / nullable), `get_instance_state`
   (blessed partial), `clear_debug_view` (bool), `export_debug_logs` (guidance string).
@@ -490,6 +516,21 @@ it to a raise would be the defect:
 If you are adding a tool, the default is *raise `ToolError` on failure, return the
 value on success*. Reach for a dict only to join one of the KEEP families above, and
 say so.
+
+**F-858 (the cloner sweep).** The cloner subsystem was the last block still on the
+retired shape: 29 `return {"error": ...}` sites across the engine, the progressive
+adapter and the to-file adapter. All now raise, with message text byte-preserved.
+Two consequences worth knowing before you touch it:
+
+* **Per-aspect isolation did not change home.** `extract_complete_element` already
+  gathered with `return_exceptions=True`, so an aspect that RAISES lands in exactly
+  the record an aspect that RETURNED an error dict used to land in. There is one
+  isolation mechanism, not two.
+* **`clone_element_to_file` lost its KEEP.** Its bad-arg path returned
+  `{"error": "Invalid extraction_options JSON"}` while its sibling
+  `clone_element_complete` — same argument, same `json.loads`, same failure —
+  raised. One question, two answers, is convention 4's defect; it raises now.
+  `expand_children` keeps its KEEP because a test, not just this list, pins it.
 
 ---
 

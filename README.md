@@ -6,7 +6,8 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
 
-> Undetectable browser automation for AI agents via the Model Context Protocol.
+> Undetectable browser automation for AI agents via the Model Context Protocol —
+> one shared backend built for 50+ concurrent Claude Code sessions.
 
 A self-contained **stealth Chrome DevTools MCP server** with smart profile management, anti-detection stealth arg filtering, and robust process lifecycle handling. Built on [nodriver](https://github.com/AminDhouib/nodriver) (CDP-based) for full anti-bot evasion.
 
@@ -34,10 +35,12 @@ https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
 - **Smart profile management** — master/snapshot/clone strategy preserves logins across sessions
 - **Stealth arg filtering** — automatically strips 30+ detectable Chrome flags (Puppeteer/Playwright signatures, automation markers)
 - **Multi-instance support** — spawn and manage multiple browsers simultaneously
-- **A shared backend across sessions** — every client session proxies to a shared
-  backend process rather than starting its own, one per desktop so a headed spawn
-  lands on a real screen; simultaneous cold start is scale-tested at 40 concurrent
-  sessions, all usable in seconds against one backend
+- **Built for fleets of Claude Code sessions** — a session costs a thin stdio proxy
+  (≈ 60 MB resident), not a browser: every session shares one backend per desktop,
+  and a Chrome exists only where a session spawned one. Measured with 62 sessions
+  attached at once; simultaneous cold start is scale-tested at 50 concurrent
+  sessions, all usable in seconds against one backend — see
+  [Built for fleets](#built-for-fleets-50-claude-code-sessions-one-backend)
 - **Auto-suffix busy profiles** — `github-session` auto-becomes `github-session-2` when occupied
 - **Orphan recovery** — safely cleans up leaked browser processes without killing live ones
 - **Session persistence** — cloned profiles carry cookies, logins, and Web Data from master
@@ -49,7 +52,7 @@ https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
 ### The right way — `uv tool install` (persistent, fleet-safe)
 
 ```bash
-uv tool install stealth-chrome-devtools-mcp==2.0.9
+uv tool install stealth-chrome-devtools-mcp==2.1.2
 ```
 
 This installs a version-pinned executable at `~/.local/bin/stealth-chrome-devtools-mcp`
@@ -76,7 +79,7 @@ claude mcp add --scope user stealth-chrome-devtools-mcp -- ~/.local/bin/stealth-
 **Why not `uvx` in the config?** It works, but `uvx` re-resolves the package on
 **every client session start**. Each Claude Code session launches its own stdio
 proxy, so a fleet of concurrent sessions (the shared backend is scale-tested at
-40) turns startup into a package-resolution storm. A `uv tool install` gives
+50) turns startup into a package-resolution storm. A `uv tool install` gives
 every proxy an instant, pinned executable — the shared backend, profile
 handling, and per-session browser isolation behave identically.
 
@@ -92,13 +95,13 @@ Zero-install trial (fine for a first look, not for fleets):
   "mcpServers": {
     "stealth-chrome-devtools-mcp": {
       "command": "uvx",
-      "args": ["stealth-chrome-devtools-mcp==2.0.9"]
+      "args": ["stealth-chrome-devtools-mcp==2.1.2"]
     }
   }
 }
 ```
 
-Or via pip (`pip install stealth-chrome-devtools-mcp==2.0.9`), then use the
+Or via pip (`pip install stealth-chrome-devtools-mcp==2.1.2`), then use the
 `stealth-chrome-devtools-mcp` console script from that environment as the
 `command`.
 
@@ -123,6 +126,48 @@ report contains and how to turn it off.
 ```
 
 ## How It Works
+
+### Built for fleets: 50+ Claude Code sessions, one backend
+
+The usual MCP browser server runs one server process and one Chrome per client
+session. That is fine for one session and ruinous for fifty: every session pays
+for a whole browser before it has done anything. This server is shaped
+differently. A Claude Code session runs only a thin stdio proxy. The browsers
+live in one shared backend per desktop, and a Chrome exists only where a session
+asked for one.
+
+Measured on a Windows 11 workstation (2026-09-11) with 62 Claude Code sessions
+attached at once:
+
+| | Measured |
+|---|---|
+| Claude Code sessions attached to the shared backends | 62 |
+| Resident memory per session (its stdio proxy process tree) | ≈ 60 MB, ≈ 3.7 GB across all 62 |
+| The same 62 sessions if each ran its own Chrome (≈ 750 MB per browser) | ≈ 46 GB |
+| Backends on the machine | 3 — one per desktop context, plus headless |
+| Live Chrome instances | 5 — only the ones sessions had spawned |
+| Cold start: 50 sessions at once, every one usable (`initialize` + `tools/list`) | 7.3 s (`tests/test_startup_herd.py`) |
+| A 51st session joining the warm backend | 1.0 s |
+
+What that buys a fleet:
+
+- **Memory scales with the browsers you use, not the sessions you open.** An
+  idle session holds a proxy, not a Chrome. Sixty sessions with five browsers
+  between them pay for five browsers and sixty proxies, not sixty browsers.
+- **One cold start per backend.** The first session boots the backend under a file
+  lock; every other session converges on it and is usable in seconds. A session
+  that arrives later joins in about a second.
+- **Nothing is left behind.** Orphaned Chrome processes are reaped without
+  killing live ones, and a spawn that fails after Chrome launched cleans up its
+  own browser.
+- **Startup is not a package-resolution storm.** With `uv tool install` every
+  proxy is a pinned executable, so fifty sessions starting together do not
+  re-resolve the package fifty times.
+
+The per-session and per-browser figures above are the ones to plan capacity
+around. The backend's own footprint depends on what the sessions do with it
+(captured network bodies, stored element clones, live tabs), so it is not quoted
+as a constant.
 
 ### Browser Profile Strategy
 

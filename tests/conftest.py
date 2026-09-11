@@ -207,19 +207,29 @@ def fake_browser_manager():
 
 @pytest.fixture()
 def patched_server(monkeypatch):
-    """Return a helper that swaps ``server``'s module-global singletons for fakes
-    and hands back the ``server`` module.
+    """Swap the tool singletons for fakes and hand back the ``server`` module.
 
-    Tools resolve ``browser_manager``/``cdp_element_cloner``/``in_memory_storage``/…
-    as names in ``server``'s namespace at call time, so ``setattr(server, name,
-    fake)`` is a clean hermetic seam needing no production change. ``monkeypatch``
-    restores every attr at teardown.
+    ``embedded/tool_runtime.py`` is THE one patchable home: a tool body resolves
+    ``rt.<name>`` against that module at CALL time, from whichever file it lives
+    in, so one ``setattr`` there reaches all 94 bodies — and ``server.py``'s own
+    non-tool readers (``app_lifespan``, the four ``@mcp.resource`` handlers, the
+    ``__main__`` block) too, because plan_SERVERSPLIT slice 12 re-pointed those to
+    ``rt.<name>`` as well. ``server`` is still what is RETURNED, because tool
+    lookup is still a ``server`` attribute read (``fakes.call_tool``,
+    ``e2e_helpers.get_fn``); the binding loop is what keeps that true.
+
+    Slices 0-11 also patched a second home — ``server.py``'s migration alias
+    block, which bound the objects into ITS namespace at import time — under an
+    ``if hasattr(server, name)`` guard, with an alias-identity pin to fail the
+    moment the two could diverge. Slice 12 deleted the alias block, so both the
+    guard and the pin are gone with it: there is exactly one home again, and a
+    ``setattr`` that reached only one of two places is no longer possible.
     """
-    from stealth_chrome_devtools_mcp.embedded import server
+    from stealth_chrome_devtools_mcp.embedded import server, tool_runtime
 
     def _patch(**singletons):
         for name, obj in singletons.items():
-            monkeypatch.setattr(server, name, obj)
+            monkeypatch.setattr(tool_runtime, name, obj, raising=False)
         return server
 
     return _patch

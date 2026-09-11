@@ -32,6 +32,7 @@ MODULES = (
     "animation_advice.py",
     "animation_analysis.py",
     "animation_edits.py",
+    "animation_source.py",
 )
 
 
