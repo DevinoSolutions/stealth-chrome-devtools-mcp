@@ -119,6 +119,7 @@ dependency order — each imports only the ones above it, and none imports `serv
 | `dynamic_hook_ai_interface.py` | AI-facing API for creating/managing hooks |
 | `hook_learning_system.py` | hook examples/training surface |
 | `cdp_function_executor.py` | direct JS function execution via CDP |
+| `cdp_params.py` | **THE one home for "a caller's JSON, as the type a CDP wrapper declares"** (F-861) — `typed`, which builds each `execute_cdp_command` argument into the type nodriver's generated wrapper declares for it (`from_json` for the generated classes, through `Optional[..]` and `List[..]`), read from the wrapper's own type hints so nothing is typed by hand; primitives and already-typed values pass through untouched, and a value the type cannot take raises `ToolError` naming the param and the type. Called from the ONE site `cdp_function_executor.build_cdp_call`, after F-816's name folding. A leaf: imports only `tool_errors` |
 | `response_handler.py` | large-response handling + file fallbacks; **the one home for "can this payload survive the transport"** — `json_safe` (serializable, F-822) and `surrogate_safe` (utf-8-encodable, F-823) |
 | `in_memory_storage.py` | `InMemoryStorage` — deliberately non-durable instance cross-check |
 | `debug_logger.py` | in-memory debug log ring/view; `log_tool_failure` is the ring entry point for a failed tool call (ring only — the durable/Sentry-bridged log line is deliberately NOT written, F-835/F-782) |

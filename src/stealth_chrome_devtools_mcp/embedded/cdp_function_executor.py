@@ -20,7 +20,7 @@ from typing import Any
 import nodriver as uc
 from nodriver import Tab
 
-from stealth_chrome_devtools_mcp.embedded import python_binding
+from stealth_chrome_devtools_mcp.embedded import cdp_params, python_binding
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -84,10 +84,12 @@ def resolve_cdp_command(command: str) -> tuple[Any, str]:
 
 
 def build_cdp_call(method: Callable, params: dict[str, Any]) -> Generator:
-    """Build ``method``'s call, folding the wire's param names onto its own (F-816)."""
+    """Build ``method``'s call, folding the wire's param names onto its own (F-816)
+    and its JSON values onto the types it declares (F-861, ``cdp_params.typed``)."""
     real = {_lookup_key(name): name for name in inspect.signature(method).parameters}
+    kwargs = {real.get(_lookup_key(k), k): v for k, v in params.items()}
     try:
-        return method(**{real.get(_lookup_key(k), k): v for k, v in params.items()})
+        return method(**cdp_params.typed(method, kwargs))
     except TypeError as exc:
         raise ToolError(f"{exc}; valid params: {', '.join(real.values())}") from exc
 
@@ -103,14 +105,6 @@ class ExecutionContext:
         unique_id: str,
         aux_data: dict | None = None,
     ):
-        """
-        Args:
-            ctx_id: Execution context identifier.
-            name: Name of the context.
-            origin: Origin URL of the context.
-            unique_id: Unique identifier for the context.
-            aux_data: Auxiliary data for the context.
-        """
         self.id = ctx_id
         self.name = name
         self.origin = origin
