@@ -175,7 +175,7 @@ so a backend that is simply busy absorbing the herd is never terminated out from
 the sessions using it. A version- or source-stale record gets no such grace and evicts
 immediately (an upgrade or code edit still takes effect now), and a dead record (no
 socket, no live process) skips the wait, so crash-recovery cold starts stay fast.
-`tests/test_startup_herd.py` is the gate: 40 concurrent sessions, one logical backend,
+`tests/test_startup_herd.py` is the gate: 50 concurrent sessions, one logical backend,
 all usable inside 30 s.
 
 ### Port already in use
