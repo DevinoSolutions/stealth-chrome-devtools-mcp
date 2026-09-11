@@ -16,3 +16,4 @@ fi
 "$PY" -m vulture src/stealth_chrome_devtools_mcp/ tools/vulture_allowlist.py || exit 1
 "$PY" tools/check_suppression_owners.py || exit 1
 "$PY" tools/check_file_budgets.py || exit 1
+"$PY" tools/check_pinned_imports.py || exit 1

@@ -94,6 +94,7 @@ ty check --exit-zero-on-warning src/stealth_chrome_devtools_mcp/   # types (a ba
 vulture src/stealth_chrome_devtools_mcp/ tools/vulture_allowlist.py   # dead code (min_confidence 80)
 python tools/check_suppression_owners.py              # every lint suppression must be owner-tagged
 python tools/check_file_budgets.py                    # grandfathered files may not grow past their recorded LOC
+python tools/check_pinned_imports.py                  # every third-party import is pinned at the uv.lock version (F-865)
 ```
 
 **3. Integration tests** (`ubuntu` + `google-chrome-stable` + `Xvfb`)
@@ -117,6 +118,16 @@ bare tool names (or `uv run …` on a clean checkout path).
 - **Every suppression is owner-tagged.** A `# noqa` / per-file-ignore must carry an
   owner tag (a plan id or `PERMANENT(reason)` / `DEBT(finding)`), enforced by
   `tools/check_suppression_owners.py`.
+- **What the source imports is pinned at what the lock resolved.** Every direct
+  dependency is an exact `==` pin, and so is every third-party module the source
+  imports even when it arrives transitively (`mcp`, `anyio`, `starlette`, `httpx`).
+  `uv.lock` is a universal resolution — one version per package for every Python we
+  support — while a user's installer re-resolves the wheel's metadata for one Python and
+  can land on a newer transitive version than any gate cell ran (F-865: the gate ran
+  `mcp 1.27.1`, `uv tool install ==2.1.2` on 3.12 got `1.30.0`). `tools/check_pinned_imports.py`
+  fails when an imported distribution is unpinned or its pin disagrees with `uv.lock`;
+  CI installs with `uv sync --locked`, so a lock that lags `pyproject.toml` fails too. To
+  move a dependency, change the pin and run `uv lock` in the same commit.
 - **`ty` runs with `--exit-zero-on-warning`.** There is a tolerated baseline of typing
   warnings on pre-typing modules; *new* modules must be error-free.
 

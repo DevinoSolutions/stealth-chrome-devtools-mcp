@@ -1596,8 +1596,11 @@ name = "stealth-chrome-devtools-mcp"
 version = "2.1.2"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "fastmcp" },
+    { name = "httpx" },
     { name = "jsbeautifier" },
+    { name = "mcp" },
     { name = "nodriver" },
     { name = "pillow" },
     { name = "psutil" },
@@ -1606,6 +1609,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "sentry-sdk" },
+    { name = "starlette" },
     { name = "strbuilder" },
     { name = "strinpy" },
     { name = "uvicorn", extra = ["standard"] },
@@ -1618,7 +1622,6 @@ dev = [
     { name = "vulture" },
 ]
 test = [
-    { name = "mcp" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -1631,9 +1634,11 @@ transpiler = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = "==4.13.0" },
     { name = "fastmcp", specifier = "==2.11.2" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "jsbeautifier", specifier = "==1.15.4" },
-    { name = "mcp", marker = "extra == 'test'", specifier = ">=1.12" },
+    { name = "mcp", specifier = "==1.27.1" },
     { name = "nodriver", specifier = "==0.47.0" },
     { name = "pillow", specifier = "==11.3.0" },
     { name = "psutil", specifier = "==7.0.0" },
@@ -1646,9 +1651,10 @@ requires-dist = [
     { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.3" },
     { name = "python-dotenv", specifier = "==1.1.1" },
     { name = "pyyaml", marker = "extra == 'test'", specifier = ">=6.0" },
-    { name = "requests", specifier = ">=2.32.0,<4" },
+    { name = "requests", specifier = "==2.34.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.20" },
     { name = "sentry-sdk", specifier = "==2.64.0" },
+    { name = "starlette", specifier = "==1.0.0" },
     { name = "strbuilder", specifier = "==1.1.3" },
     { name = "strinpy", specifier = "==0.0.4" },
     { name = "ty", marker = "extra == 'dev'", specifier = "==0.0.56" },
