@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — the wheel installs the dependency versions the gate tested (F-865)
+
+Every direct dependency was already an exact pin, but four packages the source imports
+arrive only transitively — `mcp` (through `fastmcp`), `anyio`, `starlette`, `httpx` — and
+`requests` was a range. `uv.lock` is a universal resolution, one version per package for
+every Python the project supports, so a transitive dependency that needs a newer pin on a
+newer Python is held back for ALL Pythons in the lock; a user's installer re-resolves the
+wheel's metadata for one Python and takes the newest version that fits. On 2026-09-11 every
+gate cell ran `mcp 1.27.1` while `uv tool install stealth-chrome-devtools-mcp==2.1.2` on
+Python 3.12 installed `mcp 1.30.0` — a library whose private session manager the F-862
+reaper subclasses, and whose 1.30 line changes session behaviour (a session is forgotten on
+the client's DELETE, a 4 MiB request-body cap, a 30-minute idle timeout) that no test had
+seen. The five packages are now pinned in `[project.dependencies]` at the locked versions,
+so what installs is what the gate ran. `tools/check_pinned_imports.py` (pre-commit and the
+quality cell) fails when a third-party import is unpinned or its pin disagrees with
+`uv.lock`; CI installs with `uv sync --locked`, so a lock that lags `pyproject.toml` fails
+too. Moving a dependency is now a deliberate commit: change the pin, run `uv lock`, and
+the gate tests the new version before anyone installs it.
+
 ## 2.1.2
 
 ### Fixed — the backend no longer keeps every abandoned MCP session forever (F-862)

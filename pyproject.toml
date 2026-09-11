@@ -35,12 +35,20 @@ dependencies = [
     "strbuilder==1.1.3",
     "psutil==7.0.0",
     "pillow==11.3.0",
-    "requests>=2.32.0,<4",
+    "requests==2.34.2",
     "uvicorn[standard]==0.35.0",
     # Error reporting is ON by default against a hardcoded DSN (observability.py),
     # so the SDK is a first-class dependency rather than an extra: a default-on
     # feature that only works when you remember to install something is not on.
     "sentry-sdk==2.64.0",
+    # Imported by the source but reached only transitively (mcp through fastmcp,
+    # anyio/starlette/httpx through mcp). Pinned at the locked versions so the
+    # wheel installs what the gate tested; tools/check_pinned_imports.py enforces
+    # it (F-865).
+    "mcp==1.27.1",
+    "anyio==4.13.0",
+    "starlette==1.0.0",
+    "httpx==0.28.1",
 ]
 
 [project.urls]
@@ -79,7 +87,6 @@ test = [
     # `mcp.client.streamable_http` through it), so this adds NO runtime
     # dependency — it declares the pin so the interoperability client cannot
     # vanish silently if fastmcp's own dependency changes.
-    "mcp>=1.12",
 ]
 dev = [
     "ruff==0.15.20",

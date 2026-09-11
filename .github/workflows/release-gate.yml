@@ -61,7 +61,7 @@ jobs:
       - name: Set up Python 3.11
         run: uv python install 3.11
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
       - name: ruff format --check
         run: uv run ruff format --check
       - name: ruff check
@@ -74,6 +74,8 @@ jobs:
         run: uv run python tools/check_suppression_owners.py
       - name: check file budgets
         run: uv run python tools/check_file_budgets.py
+      - name: check pinned imports (F-865)
+        run: uv run python tools/check_pinned_imports.py
       - name: The generated release contract is not stale
         # W5: RELEASE_CONTRACT.md is generated from the ledger's required cells,
         # the per-tool claim ledger and the live registry. Drift is a red gate,
@@ -136,7 +138,7 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
       - name: Install dependencies
-        run: uv sync --extra test --extra sentry
+        run: uv sync --locked --extra test --extra sentry
       - name: Assert qualified runner + record identity
         shell: bash
         run: >-
@@ -202,7 +204,7 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Install dependencies
-        run: uv sync --extra test --extra sentry
+        run: uv sync --locked --extra test --extra sentry
       - name: Assert qualified runner + record identity
         shell: bash
         run: >-
@@ -277,7 +279,7 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Install dependencies
-        run: uv sync --extra test --extra sentry
+        run: uv sync --locked --extra test --extra sentry
       - name: Assert qualified runner + record identity
         shell: bash
         run: >-
@@ -473,7 +475,7 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Install dependencies
-        run: uv sync --extra test --extra sentry
+        run: uv sync --locked --extra test --extra sentry
       - name: Assert qualified runner + record identity
         shell: bash
         run: >-
@@ -653,7 +655,7 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Install dependencies
-        run: uv sync --extra test --extra sentry
+        run: uv sync --locked --extra test --extra sentry
       - name: Assert qualified runner + record identity
         shell: bash
         run: >-
@@ -947,7 +949,7 @@ jobs:
         # Client side only: the harness needs fastmcp/psutil to DRIVE the smoke.
         # The server side under test comes exclusively from the fresh venv the
         # smoke builds out of the downloaded artifact.
-        run: uv sync --extra test --extra sentry
+        run: uv sync --locked --extra test --extra sentry
       - name: Assert qualified runner + record identity
         shell: bash
         run: >-
@@ -1073,7 +1075,7 @@ jobs:
       - name: Install dependencies
         # The aggregate derives the served tool surface from the live registry,
         # so it needs the package importable -- the count is never typed.
-        run: uv sync --extra test --extra sentry
+        run: uv sync --locked --extra test --extra sentry
       - name: Download every cell's evidence record
         uses: DevinoSolutions/artifact/download@v1
         with:
