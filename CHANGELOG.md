@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Fixed — the backend no longer keeps every abandoned MCP session forever (F-862)
+
+A backend serving 62 Claude Code sessions reached 6.7 GB resident in 18.5 h with five
+browsers, empty body stores and bounded request rings. The growth was MCP sessions:
+every stdio proxy's watchdog opens a throwaway session on the backend every 2 s (a real
+`initialize`) and DELETEs it best-effort, and the MCP layer NEVER unlists a session: a
+DELETE only marks its transport terminated (so the id answers 404) and the list is pruned
+solely on an idle timeout FastMCP never sets. Every probe therefore left 2–7 KB listed for
+good, and every probe whose DELETE was lost under load — or any proxy that died — left the
+whole session behind at 0.12 MB (0.4 MB with a `tools/list`). At 31 probes a second that is
+two million listings a day: the 6.7 GB, with no lost DELETE assumed. Measured hermetically
+with `tools/probe_backend_memory.py`: abandoned sessions grow the backend linearly at 0.12
+MB each, DELETE'd ones at a few KB each; navigation and tool-call churn barely move it.
+
+The new `embedded/session_hygiene.py` leaf makes the backend defend itself:
+`HygienicSessionManager` sweeps every 30 s and unlists any session that has no
+standing GET event stream (the MCP client opens one right after `initialize` and holds it
+for the session's life, so a live proxy — even one idle for hours — is never touched) and
+has made no request for five minutes — both the terminated transports the layer kept and
+the sessions whose client simply vanished. Reaping goes through the transport's own
+`terminate()` (idempotent), so a reaped id answers 404 exactly as a deleted one. On a
+source-built backend the first sweep past the window reaped 916 sessions and RSS stayed
+flat for the seven minutes that followed. `install()` binds the
+class to the name FastMCP constructs by module attribute, called from `server.py`'s http
+branch before `mcp.run()`; `tests/test_session_hygiene.py` pins the sweep against fake
+transports with an injected clock, the install seam, and an in-process end-to-end run
+over real streamable HTTP. Universal; no knob. The probes' churn itself is a separate
+follow-up (F-864).
+
 ### Fixed — `execute_cdp_command` types a caller's JSON onto the CDP wrapper's parameters (F-861)
 
 A caller sending what the CDP docs show — `Input.dispatchMouseEvent` with

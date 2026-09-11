@@ -401,3 +401,47 @@ Recommend: land §7.1 and §7.2 as a test/CI-only change immediately — they co
 cannot regress the product, and they convert the next occurrence into the evidence this
 finding could not obtain. Run §7.3 in parallel to break the confound. Hold §7.4 until §7.3
 answers, and do not touch `scheduling_lag.py` before then.
+
+
+## 9. First red WITH the §7.1 phase markers (2026-09-11, run 34627494081, PR #91 head `d38c864`)
+
+**OBSERVED** (integration cell, Windows/X64, `--timeout=300` so the herd could report itself):
+
+```
+herd wedged at 240s: 2/12 sessions finished; stuck sessions by phase:
+{0: 'initialized@6.8s, awaiting tools/list', 1: 'initialized@7.0s, awaiting tools/list',
+ 4: 'initialized@6.7s, awaiting tools/list', 5: 'initialized@7.0s, awaiting tools/list',
+ 6: 'initialized@7.0s, awaiting tools/list', 7: 'initialized@7.0s, awaiting tools/list',
+ 8: 'initialized@6.6s, aw...'}
+2/12 sessions | initialize p50=6.86s | tools/list p50=8.42s max=8.42s
+[proxy-8552.log]
+2026-09-11 17:35:33,100 ERROR stealth.proxy: backend did not become ready within 120s
+2026-09-11 17:35:33,100 WARNING stealth.proxy: backend became unreachable; tearing down for reconnect
+[proxy-5792.log]
+2026-09-11 17:35:33,132 ERROR stealth.proxy: backend did not become ready within 120s
+2026-09-11 17:35:33,134 WARNING stealth.proxy: backend became unreachable; tearing down for reconnect
+```
+
+What this settles that §6 could not:
+
+* **§3.1 is the shape, by name.** Every stuck session had completed `initialize` (answered locally by
+  its proxy at 6.6–7.0 s) and was waiting on `tools/list` — the first call that reaches the backend.
+* **The backend WAS serving.** Two sessions got their full `tools/list` at 8.42 s. The other ten
+  never did.
+* **The stuck proxies were inside the readiness gate, and its wall budget was exactly 120 s.** Their
+  logs say `backend did not become ready within 120s` at 17:35:33, i.e. 120 s after they answered
+  `initialize` (17:33:33). 120 s is `REUSE_PATIENCE_SECONDS = 60` × a measured lag factor of 2 — the
+  first row of §3.1's table. They then tore down "for reconnect"; a second identical attempt ends at
+  240 s, which is the herd's backstop, so the observation is censored again (§3.3) — but this time
+  the censoring is visible rather than inferred.
+* **Not the code under test.** The same tree passed the 50-session herd locally twice in a row
+  (6.8 s / 6.9 s, 50/50). The PR (F-862, `session_hygiene.py`) touches only the backend's session
+  list sweep, which first runs 30 s after boot; nothing in the readiness path changed.
+* **Still not known:** why ten proxies' `initialize` probes saw no 200 for 120 s while two sessions
+  were served at 8 s. The wedge report carried proxy logs only — no `backend-<pid>.log` section was
+  found in the workspace, which is itself a datum for §7.3 (the backend's own view of those 120 s is
+  what would decide between "the backend stopped answering `initialize`" and "the probes never
+  reached it").
+
+This is the §7.4 evidence the maintainer asked to see before deciding on `MAX_STRETCH`; the
+decision remains theirs.

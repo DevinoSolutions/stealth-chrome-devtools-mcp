@@ -35,7 +35,11 @@ are deleted in slice 12.
 import asyncio
 import re
 
-from stealth_chrome_devtools_mcp.embedded import clone_storage, display_context
+from stealth_chrome_devtools_mcp.embedded import (
+    clone_storage,
+    display_context,
+    session_hygiene,
+)
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import cdp_element_cloner
 from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
@@ -84,6 +88,7 @@ __all__ = [
     "process_cleanup",
     "progressive_element_cloner",
     "response_handler",
+    "session_hygiene",
 ]
 
 CDP_OPERATION_TIMEOUT = get_settings().cdp_operation_timeout_seconds
