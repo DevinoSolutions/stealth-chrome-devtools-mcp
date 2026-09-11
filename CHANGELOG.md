@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.2
 
 ### Fixed — the backend no longer keeps every abandoned MCP session forever (F-862)
 
