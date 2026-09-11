@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Internal — the startup herd's wedge now speaks, and the integration cell lets it (F-859 §7.1/§7.2)
+
+Test and CI only; no product code. The Windows integration cell had been going red
+at a 15–22% rate since 2026-09-02 with one shape every time: the 40-session (12 in
+CI) startup herd wedged at its own 240s backstop and died as a bare `TimeoutError`
+with nothing attached — the pytest-timeout of 180s killed the process before the
+test could report, so there was no test name, no `junit.xml`, and a second red from
+`release_evidence`'s `pytest: null` that was pure consequence. The full
+investigation is committed as
+`audit/stage2/finding_F859_windows_herd_stall_rate.md`.
+
+* **§7.1 — the wedge fails by name.** `tests/test_startup_herd.py` now catches the
+  herd's own timeout and fails with which sessions never came back, the phase each
+  one stopped in (`spawning proxy` / `initialized@Ns, awaiting tools/list` / `done`),
+  the usual percentile summary, and the backend's own log — exactly what the
+  neighbouring asserts already attach for the shapes they catch. The phase marker
+  is what settles the finding's open question on the next red: whether
+  `initialize` completed and `tools/list` never returned (§3.1), or the proxy
+  never came up.
+* **§7.2 — the integration cell's `pytest --timeout` is 300, not 180.** Above the
+  herd's 240s backstop, like the transport cell already was, so the report from
+  §7.1 can actually be written. Same defect class as F-780.
+* **§7.3 — the confound is separated.** Draft PR #85 re-ran the gate on the last
+  pre-F-856 main (`2da61c0`) three times on today's runner pool: 6/6 Windows herd
+  samples green, against 15–22% red on post-F-856 trees the same days. The
+  evidence points at F-856's 240.0s == 240.0s backstop identity, not the runner
+  pool. §7.4 (decoupling the herd backstop from
+  `REUSE_PATIENCE_SECONDS × MAX_STRETCH`) is a product decision and is
+  deliberately NOT made here.
+
 ### Fixed — a spawn that failed after Chrome launched no longer leaks it (F-860)
 
 A `spawn_browser` that failed AFTER nodriver had started Chrome but BEFORE it
