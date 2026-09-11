@@ -20,32 +20,29 @@ from stealth_chrome_devtools_mcp.embedded.tool_registry import (
     ToolRegistry,
 )
 from stealth_chrome_devtools_mcp.embedded.tool_runtime import (
-    _with_cdp_timeout,  # noqa: F401  plan_SERVERSPLIT slice 11 — kept for tests/test_observability.py's four `w15_server._with_cdp_timeout` reads; re-pointed and deleted in slice 12
-    browser_manager,
-    clone_storage,  # noqa: F401  plan_SERVERSPLIT slice 10 — kept for tests/test_clone_storage.py's "server delegates via the imported module" pin; deleted in slice 12
-    debug_logger,
-    network_interceptor,
+    clone_storage,  # noqa: F401  plan_SERVERSPLIT slice 12 — see the keep-reason below
 )
 from stealth_chrome_devtools_mcp.embedded.tool_sections import SECTION_MODULES
 from stealth_chrome_devtools_mcp.observability import sentry_init
 from stealth_chrome_devtools_mcp.settings import get_settings
 
-# plan_SERVERSPLIT slice 0: the knobs, the script/timeout guards and the four
-# constructed singletons now live in ``tool_runtime`` — THE one patchable home
-# (a module attribute resolved at call time, in a module that is imported once
-# rather than re-executed by every runpy/spec load). The block above is a
-# MIGRATION ALIAS block. An alias is pruned by the slice that takes its LAST
-# consumer out of this file — prod or test — which is why it shrank with every
-# slice. As of slice 11 this file holds NO tool bodies, so what is left is only
-# what still has a named reader: ``browser_manager`` / ``network_interceptor`` /
-# ``debug_logger`` for the four ``@mcp.resource`` handlers, ``app_lifespan`` and
-# the ``__main__`` block, plus the two suppressed above that exist purely to keep
-# a test's attribute read working until slice 12 re-points it. Note the aliases
-# bind the OBJECT at import time; ``tests/conftest.py``'s ``patched_server``
-# therefore still patches both homes, and
-# ``tests/test_tool_sections_contract.py``'s alias-identity pin fails the moment
-# the two could diverge. ``app_lifespan`` below deliberately does NOT use them —
-# it reads ``rt.*`` so a patched singleton reaches the lifespan too.
+# plan_SERVERSPLIT slice 12 (closing): the migration alias block is GONE. Every
+# singleton, knob and guard this file still drives — the four ``@mcp.resource``
+# handlers, ``app_lifespan`` and the ``__main__`` block — is read as ``rt.<name>``
+# against ``tool_runtime``, THE one patchable home: a module attribute resolved
+# at CALL time, in a module that is imported once rather than re-executed by
+# every runpy/spec load. An import alias would bind the object into THIS file's
+# namespace at import time and hand ``tests/conftest.py``'s ``patched_server`` a
+# second home to keep in step, which is the whole reason the dual-patch and its
+# identity pin existed for slices 0-11; both are deleted with this block.
+#
+# ``clone_storage`` above is the ONE survivor and it is not a runtime read: this
+# file never touches it. It is kept solely so
+# ``tests/test_clone_storage.py::test_server_keeps_no_reexport_or_alias`` — F-201's
+# negative-surface guard, which asserts server exposes none of the fifty moved
+# clone-storage NAMES — still has the positive delegation handle
+# (``server.clone_storage is clone_storage``) that makes it non-vacuous. Removing
+# it means re-pointing that pin, not deleting a line.
 
 
 def _install_asyncio_close_noise_filter() -> None:
@@ -90,7 +87,7 @@ def _install_nodriver_cookie_compat() -> None:
     try:
         import nodriver.cdp.network as cdp_network
     except Exception as e:
-        debug_logger.log_warning("server", "_install_nodriver_cookie_compat", str(e))
+        rt.debug_logger.log_warning("server", "_install_nodriver_cookie_compat", str(e))
         return
 
     marker = "_stealth_chrome_devtools_cookie_compat"
@@ -136,7 +133,7 @@ async def app_lifespan(server):
         _LIFESPAN_STARTED = True
         _install_asyncio_close_noise_filter()
         _install_nodriver_cookie_compat()
-        debug_logger.log_info(
+        rt.debug_logger.log_info(
             "server", "startup", "Starting Browser Automation MCP Server..."
         )
         rt.process_cleanup.activate()
@@ -155,43 +152,45 @@ async def app_lifespan(server):
         # An ``if`` guard (not an early ``return``) is deliberate: a ``return`` in
         # a ``finally`` would suppress an exception propagating from the session.
         if _SERVE_TRANSPORT != "http":
-            debug_logger.log_info(
+            rt.debug_logger.log_info(
                 "server", "shutdown", "Shutting down Browser Automation MCP Server..."
             )
             try:
                 await rt.browser_manager.stop_idle_reaper()
             except Exception as e:
-                debug_logger.log_error("server", "cleanup", e)
+                rt.debug_logger.log_error("server", "cleanup", e)
             try:
                 await rt.browser_manager.close_all()
-                debug_logger.log_info(
+                rt.debug_logger.log_info(
                     "server", "cleanup", "All browser instances closed"
                 )
             except Exception as e:
-                debug_logger.log_error("server", "cleanup", e)
+                rt.debug_logger.log_error("server", "cleanup", e)
 
             try:
                 rt.process_cleanup._cleanup_all_tracked()
-                debug_logger.log_info("server", "cleanup", "Process cleanup complete")
+                rt.debug_logger.log_info(
+                    "server", "cleanup", "Process cleanup complete"
+                )
             except Exception as e:
-                debug_logger.log_error(
+                rt.debug_logger.log_error(
                     "server", "cleanup", f"Process cleanup failed: {e}"
                 )
             try:
                 persistent_instances = rt.in_memory_storage.list_instances()
                 if persistent_instances.get("instances"):
-                    debug_logger.log_info(
+                    rt.debug_logger.log_info(
                         "server",
                         "storage_cleanup",
                         f"Clearing in-memory storage with {len(persistent_instances['instances'])} instances...",
                     )
                     rt.in_memory_storage.clear_all()
-                    debug_logger.log_info(
+                    rt.debug_logger.log_info(
                         "server", "storage_cleanup", "In-memory storage cleared"
                     )
             except Exception as e:
-                debug_logger.log_error("server", "storage_cleanup", e)
-            debug_logger.log_info(
+                rt.debug_logger.log_error("server", "storage_cleanup", e)
+            rt.debug_logger.log_info(
                 "server", "shutdown", "Browser Automation MCP Server shutdown complete"
             )
 
@@ -233,7 +232,7 @@ for _section_module in SECTION_MODULES:
         globals()[_tool.__name__] = section_tool(_section_module.SECTION)(_tool)
 
 if DEBUG_LOGGING_ENABLED:
-    debug_logger.enable()
+    rt.debug_logger.enable()
 
 
 @mcp.resource("browser://{instance_id}/state")
@@ -247,7 +246,7 @@ async def get_browser_state_resource(instance_id: str) -> str:
     Returns:
         str: JSON string of the browser state or error message.
     """
-    state = await browser_manager.get_page_state(instance_id)
+    state = await rt.browser_manager.get_page_state(instance_id)
     if state:
         return json.dumps(state.dict(), indent=2)
     raise InstanceNotFoundError(f"Instance not found: {instance_id}")
@@ -264,9 +263,9 @@ async def get_cookies_resource(instance_id: str) -> str:
     Returns:
         str: JSON string of cookies or error message.
     """
-    tab = await browser_manager.get_tab(instance_id)
+    tab = await rt.browser_manager.get_tab(instance_id)
     if tab:
-        cookies = await network_interceptor.get_cookies(tab)
+        cookies = await rt.network_interceptor.get_cookies(tab)
         return json.dumps(cookies, indent=2)
     raise InstanceNotFoundError(f"Instance not found: {instance_id}")
 
@@ -282,7 +281,7 @@ async def get_network_resource(instance_id: str) -> str:
     Returns:
         str: JSON string of network requests.
     """
-    requests = await network_interceptor.list_requests(instance_id)
+    requests = await rt.network_interceptor.list_requests(instance_id)
     return json.dumps([req.dict() for req in requests], indent=2)
 
 
@@ -297,7 +296,7 @@ async def get_console_resource(instance_id: str) -> str:
     Returns:
         str: JSON string of console logs or error message.
     """
-    state = await browser_manager.get_page_state(instance_id)
+    state = await rt.browser_manager.get_page_state(instance_id)
     if state:
         return json.dumps(state.console_logs, indent=2)
     raise InstanceNotFoundError(f"Instance not found: {instance_id}")
@@ -427,8 +426,8 @@ if __name__ == "__main__":
     bootstrap_backend_process_logging()
     args = build_arg_parser().parse_args()
 
-    if args.debug and not debug_logger._enabled:
-        debug_logger.enable()
+    if args.debug and not rt.debug_logger._enabled:
+        rt.debug_logger.enable()
 
     if args.list_sections:
         # F-108: per-section counts + total are DERIVED from the live
@@ -500,7 +499,7 @@ if __name__ == "__main__":
     apply_disabled_sections()
 
     if DISABLED_SECTIONS:
-        debug_logger.log_info(
+        rt.debug_logger.log_info(
             "server",
             "startup",
             f"Disabled tool sections: {', '.join(sorted(DISABLED_SECTIONS))}",

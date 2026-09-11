@@ -211,24 +211,25 @@ def patched_server(monkeypatch):
 
     ``embedded/tool_runtime.py`` is THE one patchable home: a tool body resolves
     ``rt.<name>`` against that module at CALL time, from whichever file it lives
-    in, so one ``setattr`` there reaches all 94 bodies. ``server`` is still what
-    is returned, because tool LOOKUP is still a ``server`` attribute read
-    (``fakes.call_tool``, ``e2e_helpers.get_fn``).
+    in, so one ``setattr`` there reaches all 94 bodies — and ``server.py``'s own
+    non-tool readers (``app_lifespan``, the four ``@mcp.resource`` handlers, the
+    ``__main__`` block) too, because plan_SERVERSPLIT slice 12 re-pointed those to
+    ``rt.<name>`` as well. ``server`` is still what is RETURNED, because tool
+    lookup is still a ``server`` attribute read (``fakes.call_tool``,
+    ``e2e_helpers.get_fn``); the binding loop is what keeps that true.
 
-    While the plan_SERVERSPLIT migration is in flight (slices 0-11), ``server``
-    also carries import aliases for the not-yet-moved bodies, which bound the
-    object into ITS namespace at import time; patching both keeps the two eras
-    consistent. ``tests/test_tool_sections_contract.py``'s alias-identity pin
-    fails the moment the two homes could diverge, and the ``server`` half — like
-    the aliases — is deleted by slice 12.
+    Slices 0-11 also patched a second home — ``server.py``'s migration alias
+    block, which bound the objects into ITS namespace at import time — under an
+    ``if hasattr(server, name)`` guard, with an alias-identity pin to fail the
+    moment the two could diverge. Slice 12 deleted the alias block, so both the
+    guard and the pin are gone with it: there is exactly one home again, and a
+    ``setattr`` that reached only one of two places is no longer possible.
     """
     from stealth_chrome_devtools_mcp.embedded import server, tool_runtime
 
     def _patch(**singletons):
         for name, obj in singletons.items():
             monkeypatch.setattr(tool_runtime, name, obj, raising=False)
-            if hasattr(server, name):
-                monkeypatch.setattr(server, name, obj)
         return server
 
     return _patch

@@ -33,7 +33,7 @@ import pytest
 # import. The second exec is unconditional — both modules load server.py under
 # their own module object in every lane; what this import changed is that it now
 # also happens when this file runs alone.
-from e2e_helpers import await_visible_window
+from e2e_helpers import await_visible_window, runtime
 
 # We need to import server.py as a module (it uses bare imports internally)
 _spec = importlib.util.spec_from_file_location(
@@ -772,7 +772,7 @@ class TestChromeIdentity:
         )
         iid = result["instance_id"]
         try:
-            tab = await _server_mod.browser_manager.get_tab(iid)
+            tab = await runtime.browser_manager.get_tab(iid)
             assert tab is not None, "no tab for launched instance"
             # get_version() -> (protocolVersion, product, revision, userAgent, jsVersion)
             version = await tab.send(uc.cdp.browser.get_version())
