@@ -1,14 +1,14 @@
 """Pins for F-862: the backend reaps MCP sessions their client abandoned.
 
 Every stdio proxy's watchdog opens a throwaway MCP session on the backend every
-2 s (``singleton._backend_http_ready``: a real ``initialize``) and terminates it
-best-effort with a DELETE on the same 2 s budget. A DELETE that times out leaves
-a session the MCP layer keeps FOREVER — ``StreamableHTTPSessionManager`` removes
-a session only on its own DELETE or on an idle timeout FastMCP never sets — and
-each one holds a transport, a ``ServerSession``, its task group and the
-per-session lifespan: measured at ~0.11 MB for an initialize-only session, ~0.4
-MB with a ``tools/list``. Sixty-two proxies probe 31 times a second; a 3 % DELETE
-failure rate is 6.7 GB in 18.5 h, which is what the 2026-09-11 backend showed.
+2 s (``singleton._backend_http_ready``: a real ``initialize``) and DELETEs it
+best-effort. ``StreamableHTTPSessionManager`` never unlists it: a DELETE only
+marks the transport terminated (the id answers 404 from then on) and the list is
+pruned solely on an idle timeout FastMCP never sets or for a CRASHED session,
+which skips terminated ones. Measured: 2-7 KB per DELETE'd session, 0.12 MB per
+session whose client just went away (0.4 MB with a ``tools/list``). Sixty-two
+proxies probe 31 times a second — two million listings a day — which is the 6.7
+GB the 2026-09-11 backend showed after 18.5 h.
 
 ``session_hygiene.HygienicSessionManager`` is the MCP session manager with a
 sweep: a session with NO standing GET stream (a live proxy always holds one —

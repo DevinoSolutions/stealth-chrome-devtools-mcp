@@ -1,16 +1,18 @@
 """THE one home for "this MCP session was abandoned by its client — reap it" (F-862).
 
-The backend's MCP layer (``mcp.server.streamable_http_manager``) keeps one
-transport, one ``ServerSession``, one task group and one run of the per-session
-lifespan for every ``mcp-session-id`` it ever handed out, and forgets a session
-in exactly two cases: the client's own DELETE, or an idle timeout FastMCP never
-configures. Nothing else ends it — not the client's TCP connection closing, not
-its process dying. Every stdio proxy's watchdog opens such a session on the
-backend every 2 s (``singleton._backend_http_ready`` sends a real ``initialize``)
-and DELETEs it best-effort on the same 2 s budget, so a DELETE that times out
-under load is a session the backend keeps forever, at ~0.11 MB each. Sixty-two
-proxies issue 31 of those a second; a 3 % failure rate is 6.7 GB in 18.5 h, which
-is what the 2026-09-11 backend measured (finding F-862).
+The backend's MCP layer (``mcp.server.streamable_http_manager``) lists one
+transport per ``mcp-session-id`` it ever handed out and prunes that list in
+exactly two places: an idle timeout FastMCP never configures, and a crashed
+session — which explicitly SKIPS terminated ones. A client's DELETE only marks
+the transport terminated (so the id answers 404); the entry stays forever. A
+client that simply goes away — TCP closed, process dead — leaves everything:
+transport, ``ServerSession``, task group, the per-session lifespan. Every stdio
+proxy's watchdog opens such a session on the backend every 2 s
+(``singleton._backend_http_ready`` sends a real ``initialize``) and DELETEs it
+best-effort, so on a 62-session fleet 31 sessions a second join the list for
+good: measured at 2-7 KB each when the DELETE lands and 0.12 MB each when it is
+lost. Two million probes a day is the 6.7 GB the 2026-09-11 backend showed after
+18.5 h, with no lost DELETE assumed (finding F-862).
 
 :class:`HygienicSessionManager` is that manager with a sweep. Every
 ``SWEEP_INTERVAL_SECONDS`` it walks the live sessions; one that has NO standing
@@ -20,8 +22,10 @@ takes, so a reaped id answers 404 exactly as a deleted one). The GET stream is
 the discriminator: the MCP client opens it right after ``initialize`` and holds
 it for the life of the session, so a live proxy — even one idle for hours — is
 never touched, while a probe whose DELETE was lost, or a proxy that died, has no
-stream and goes quiet. The window is long on purpose (a probe session lives
-milliseconds) so nothing a real client does can look abandoned.
+stream and goes quiet — and so does a session the client DID delete, whose
+terminated transport the layer would otherwise list forever. The window is long
+on purpose (a probe session lives milliseconds) so nothing a real client does
+can look abandoned.
 
 :func:`install` is the seam: FastMCP builds the manager as
 ``fastmcp.server.http.StreamableHTTPSessionManager(...)`` inside
@@ -125,7 +129,7 @@ class HygienicSessionManager(StreamableHTTPSessionManager):
             self.reaped_total += len(reaped)
             _logger.info(
                 "session hygiene: reaped %d abandoned MCP session(s) "
-                "(no event stream, silent > %.0fs); %d live remain, %d reaped so far",
+                "(no event stream, silent > %.0fs); %d still listed, %d reaped so far",
                 len(reaped),
                 ABANDONED_AFTER_SECONDS,
                 len(self._server_instances),
