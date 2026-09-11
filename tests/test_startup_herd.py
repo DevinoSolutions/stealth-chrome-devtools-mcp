@@ -182,12 +182,18 @@ async def _one_session(launcher: Path, space: dict, herd_t0: float, slot: list) 
     )
     async with Client(transport, init_timeout=INIT_TIMEOUT) as client:
         initialize_s = time.monotonic() - herd_t0
+        # Phase marker for the wedge report (F-859 §7.1): a session that never
+        # finishes leaves behind WHERE it stopped, which is the one fact the
+        # finding could not settle from CI logs — did `initialize` complete and
+        # `tools/list` never return (§3.1), or did the proxy never come up?
+        slot[1] = f"initialized@{initialize_s:.1f}s, awaiting tools/list"
         tools = await client.list_tools()
         slot[0] = {
             "initialize_s": initialize_s,
             "tools_list_s": time.monotonic() - herd_t0,
             "tool_count": len(tools),
         }
+        slot[1] = "done"
 
 
 async def test_forty_cold_sessions_are_all_usable_within_30s(tmp_path):
@@ -196,17 +202,36 @@ async def test_forty_cold_sessions_are_all_usable_within_30s(tmp_path):
     work_dir = gate_work_dir(tmp_path)
     try:
         with gate_workspace(work_dir) as space:
-            slots: list[list] = [[None] for _ in range(HERD_SIZE)]
+            # slot[0]: the completed record; slot[1]: the phase the session is
+            # in, read only when the herd wedges.
+            slots: list[list] = [[None, "spawning proxy"] for _ in range(HERD_SIZE)]
             herd_t0 = time.monotonic()
-            await asyncio.wait_for(
-                asyncio.gather(
-                    *(
-                        _one_session(launcher, space, herd_t0, slots[i])
-                        for i in range(HERD_SIZE)
-                    )
-                ),
-                timeout=HERD_HARD_TIMEOUT_SECONDS,
-            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *(
+                            _one_session(launcher, space, herd_t0, slots[i])
+                            for i in range(HERD_SIZE)
+                        )
+                    ),
+                    timeout=HERD_HARD_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                # F-859 §7.1: a wedged herd used to die as a bare TimeoutError
+                # with nothing attached — 240s of silence and no evidence. Fail
+                # by name, say which sessions never came back and where each
+                # stopped, and hand over the backend's own log, exactly as the
+                # asserts below already do for the shapes they catch.
+                results = [slot[0] for slot in slots]
+                stuck = {
+                    i: slots[i][1] for i in range(HERD_SIZE) if slots[i][0] is None
+                }
+                pytest.fail(
+                    f"herd wedged at {HERD_HARD_TIMEOUT_SECONDS:.0f}s: "
+                    f"{HERD_SIZE - len(stuck)}/{HERD_SIZE} sessions finished; "
+                    f"stuck sessions by phase: {stuck}\n"
+                    f"{_summary(results)}\n{workspace_backend_logs(space)}"
+                )
             herd_seconds = time.monotonic() - herd_t0
             results = [slot[0] for slot in slots]
             booted = _booted_backend_logs(space)
@@ -237,11 +262,17 @@ async def test_forty_cold_sessions_are_all_usable_within_30s(tmp_path):
 
             # A 41st session joining the warm backend pays only its own spawn.
             warm_t0 = time.monotonic()
-            warm_slot: list = [None]
-            await asyncio.wait_for(
-                _one_session(launcher, space, warm_t0, warm_slot),
-                timeout=HERD_HARD_TIMEOUT_SECONDS,
-            )
+            warm_slot: list = [None, "spawning proxy"]
+            try:
+                await asyncio.wait_for(
+                    _one_session(launcher, space, warm_t0, warm_slot),
+                    timeout=HERD_HARD_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                pytest.fail(
+                    f"warm join wedged at {HERD_HARD_TIMEOUT_SECONDS:.0f}s in phase "
+                    f"{warm_slot[1]!r}\n{workspace_backend_logs(space)}"
+                )
             warm_seconds = time.monotonic() - warm_t0
             assert warm_seconds <= WARM_JOIN_DEADLINE_SECONDS, (
                 f"warm join took {warm_seconds:.1f}s "
