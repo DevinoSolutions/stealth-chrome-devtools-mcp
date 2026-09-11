@@ -513,6 +513,11 @@ if __name__ == "__main__":
     _SERVE_TRANSPORT = args.transport
 
     if args.transport == "http":
+        # F-862: the backend reaps MCP sessions their client abandoned (a
+        # liveness probe whose DELETE was lost, a proxy that died). Bound
+        # BEFORE run() builds the app, because FastMCP constructs the
+        # manager by module attribute inside create_streamable_http_app.
+        rt.session_hygiene.install()
         mcp.run(
             transport="http",
             host=args.host,

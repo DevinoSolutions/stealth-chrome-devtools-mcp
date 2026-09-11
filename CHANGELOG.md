@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Fixed — the backend no longer keeps every abandoned MCP session forever (F-862)
+
+A backend serving 62 Claude Code sessions reached 6.7 GB resident in 18.5 h with five
+browsers, empty body stores and bounded request rings. The growth was MCP sessions:
+every stdio proxy's watchdog opens a throwaway session on the backend every 2 s (a real
+`initialize`) and DELETEs it best-effort on the same 2 s budget, and the MCP layer forgets
+a session ONLY on that DELETE — never because the client went away. A DELETE lost under
+load, or a proxy that died, left a transport, a `ServerSession`, a task group and a
+lifespan behind at ~0.11 MB each (0.4 MB with a `tools/list`); at 31 probes a second a
+3 % loss rate is exactly 6.7 GB. Measured hermetically with `tools/probe_backend_memory.py`:
+abandoned sessions grow the backend linearly, terminated ones do not; navigation and
+tool-call churn barely move it.
+
+The new `embedded/session_hygiene.py` leaf makes the backend defend itself:
+`HygienicSessionManager` sweeps every 30 s and terminates any session that has no
+standing GET event stream (the MCP client opens one right after `initialize` and holds it
+for the session's life, so a live proxy — even one idle for hours — is never touched) and
+has made no request for five minutes. Reaping goes through the transport's own
+`terminate()`, so a reaped id answers 404 exactly as a deleted one. `install()` binds the
+class to the name FastMCP constructs by module attribute, called from `server.py`'s http
+branch before `mcp.run()`; `tests/test_session_hygiene.py` pins the sweep against fake
+transports with an injected clock, the install seam, and an in-process end-to-end run
+over real streamable HTTP. Universal; no knob. The probes' churn itself is a separate
+follow-up (F-864).
+
 ### Fixed — `execute_cdp_command` types a caller's JSON onto the CDP wrapper's parameters (F-861)
 
 A caller sending what the CDP docs show — `Input.dispatchMouseEvent` with
