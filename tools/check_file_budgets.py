@@ -203,9 +203,17 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # so it is a net increase. GRANDFATHERED at the actual ruff-clean LOC (cap
     # == actual, no padding) per the human gate ruling 2026-07-17. No-grow
     # applies from this commit forward.
+    # F-860 RATCHETS DOWN 1532 -> 1529. The reap of a Chrome that nodriver
+    # launched but never handed back lives in the new spawn_leak.py leaf; what
+    # this file gained is the ONE _teardown_failed_spawn helper the cancel and
+    # error handlers now share (they were the same eleven lines twice) plus the
+    # launch timestamp it needs. Paid for by collapsing four boilerplate
+    # Args:/Returns: blocks that only restated their own signatures
+    # (_resolve_idle_timeout_seconds, touch_instance, spawn_browser,
+    # get_instance) — the plan_F856 payment mechanism. Cap == actual.
     "embedded/browser_manager.py": (
-        1532,
-        "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1",
+        1529,
+        "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
