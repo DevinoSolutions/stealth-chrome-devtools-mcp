@@ -15,4 +15,5 @@ jobs:
   # W3's publish.yml calls the SAME workflow for tags. The stable required check a
   # ruleset pins is this job's aggregate child: `release-gate / release-gate`.
   release-gate:
+    permissions: write-all # GITHUB_TOKEN defaults + id-token for DevinoSolutions/artifact (OIDC)
     uses: ./.github/workflows/release-gate.yml
