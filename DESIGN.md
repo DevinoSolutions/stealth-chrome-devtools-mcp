@@ -90,7 +90,7 @@ stale record still evicts immediately so an upgrade takes effect now, and a dead
 (no socket, no live process) fails the first probe so crash recovery stays fast.
 Discovery's hot path stays single-shot (`patience=0`) and the watchdog's 2 s
 `LIVENESS_PROBE_TIMEOUT` is untouched; `tests/test_startup_herd.py` proves the result
-at scale — 40 simultaneous real stdio sessions, exactly one logical backend.
+at scale — 50 simultaneous real stdio sessions, exactly one logical backend.
 
 ### 2.2 The port is the CHOSEN port — never re-hardcode it
 

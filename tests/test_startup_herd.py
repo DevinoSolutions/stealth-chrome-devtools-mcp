@@ -1,12 +1,12 @@
-"""Startup herd — 40 concurrent Claude Code sessions must all be up in 30s.
+"""Startup herd — 50 concurrent Claude Code sessions must all be up in 30s.
 
 The claim under test is the singleton architecture's founding promise
 (``singleton.py``: "When multiple Claude Code sessions start simultaneously"):
 every stdio proxy answers ``initialize`` locally and instantly, exactly one
 backend cold-starts under the file lock, and everyone else converges on it.
 Every existing transport node starts ONE client, so the promise has never been
-measured at the scale it was written for. This module starts **40 launcher
-processes at once against a cold workspace** — the "40+ Claude instances"
+measured at the scale it was written for. This module starts **50 launcher
+processes at once against a cold workspace** — the "50+ Claude Code sessions"
 deployment shape — and requires the whole herd to finish ``initialize`` AND a
 real ``tools/list`` (which, unlike the locally-answered handshake, genuinely
 waits on the backend) within 30 seconds.
@@ -63,12 +63,12 @@ if not CAN_RUN:
     pytestmark.append(pytest.mark.skip("Chrome not available or server failed to load"))
 
 # The deployment shape the user actually runs: a fleet of Claude Code sessions
-# starting together, each spawning its own stdio proxy. The full 40 is a
+# starting together, each spawning its own stdio proxy. The full 50 is a
 # workstation-class claim; hosted CI cells have 3-4 cores and would spend the
 # whole budget just starting interpreters, so they run a reduced fleet against
 # the SAME invariants (cf. the Linux headed-sizing skip: a premise the lane's
 # hardware cannot express belongs where the hardware exists).
-HERD_SIZE = 12 if os.environ.get("CI") else 40
+HERD_SIZE = 12 if os.environ.get("CI") else 50
 # The spec: the ENTIRE herd — cold backend start included — is usable within
 # this. Chosen to match Claude Code's own 30s MCP connect timeout: if the herd
 # fits, no individual session can have timed out.
@@ -196,8 +196,8 @@ async def _one_session(launcher: Path, space: dict, herd_t0: float, slot: list) 
         slot[1] = "done"
 
 
-async def test_forty_cold_sessions_are_all_usable_within_30s(tmp_path):
-    """THE herd pin: 40 simultaneous cold starts, one backend, 30s to usable."""
+async def test_fifty_cold_sessions_are_all_usable_within_30s(tmp_path):
+    """THE herd pin: 50 simultaneous cold starts, one backend, 30s to usable."""
     launcher = resolve_launcher()
     work_dir = gate_work_dir(tmp_path)
     try:
@@ -260,7 +260,7 @@ async def test_forty_cold_sessions_are_all_usable_within_30s(tmp_path):
                 f"{_summary(results)}\n{workspace_backend_logs(space)}"
             )
 
-            # A 41st session joining the warm backend pays only its own spawn.
+            # A 51st session joining the warm backend pays only its own spawn.
             warm_t0 = time.monotonic()
             warm_slot: list = [None, "spawning proxy"]
             try:

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Docs — the fleet story, with the numbers behind it
+
+Docs and one test constant; no product code. The README, the package description,
+`DESIGN.md` and `RUNBOOK.md` now say what the architecture was built for and what it
+measures: a Claude Code session costs a thin stdio proxy (≈ 60 MB resident), not a
+browser, so memory scales with the Chromes a fleet actually spawns rather than the
+sessions it opens. The new README section *Built for fleets: 50+ Claude Code
+sessions, one backend* carries the measurements it rests on — 62 sessions attached
+at once on one workstation, ≈ 3.7 GB of proxies against ≈ 46 GB had each session run
+its own Chrome, one backend per desktop context, and the startup herd's own cold-start
+and warm-join times. The backend's own footprint is deliberately not quoted as a
+constant: it depends on what the sessions do with it.
+
+The startup herd (`tests/test_startup_herd.py`) now runs 50 sessions on a
+workstation instead of 40, so the scale the docs claim is the scale the gate proves;
+the CI fleet stays at 12 (hosted runners) and every invariant is unchanged.
+
 ### Internal — the startup herd's wedge now speaks, and the integration cell lets it (F-859 §7.1/§7.2)
 
 Test and CI only; no product code. The Windows integration cell had been going red
