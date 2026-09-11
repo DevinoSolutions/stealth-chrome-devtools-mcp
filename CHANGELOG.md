@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.3
 
 ### Fixed — the wheel installs the dependency versions the gate tested (F-865)
 
