@@ -471,3 +471,37 @@ Two phase-marked reds, both Windows, both with 2–3 sessions served at 7–8 s 
 starve inside the readiness gate for exactly its budget: the readiness path, not the
 backend, is where the remaining question (§7.3, the backend's own view of those 120 s)
 has to be answered.
+
+## 11. A THIRD Windows red today, and a different shape: the backend died mid-flight (2026-09-11, PR #94 head `93e62ba`, attempt 1)
+
+`transport (Windows/X64)` again, on the release PR (docs + version pins only). This time the
+herd did not wedge: 29 s after the herd started (22:53:04 → 22:53:33) one session's
+`tools/list` failed with the proxy's own in-flight verdict —
+
+```
+McpError: the backend on port 55079 died while 'tools/list' was in flight; the call was
+NOT retried against its replacement — reissue it if it is safe to repeat
+```
+
+— and the captured stderr shows the proxy's `post_writer` hitting `httpx.ReadError`
+(`httpcore.ReadError` under it): the TCP connection to the backend dropped while the POST was
+waiting for headers. Because the herd failed on an exception rather than on its 240 s
+backstop, the phase report and the proxy-log excerpts were NOT emitted; this section
+therefore has less to say than §9/§10 about the other eleven sessions.
+
+What this adds to the picture:
+
+* Three Windows reds in one day (integration on `d38c864`, transport on `69cdc8a`, transport
+  on `93e62ba`) across three PRs none of which touched the readiness or serving path. On the
+  same day the Linux and macOS cells ran the same herd green every time.
+* Two shapes now, not one: (a) the §3.1 wedge — proxies starve inside the readiness gate for
+  exactly its budget while 2–3 sessions are served; (b) a backend that stops answering an
+  in-flight request within 30 s of a 12-session cold start. (b) is what `proxy_selfheal`
+  reports as `CONNECTION_LOST_CAUSE`; whether the backend process actually exited, or a
+  sibling proxy's teardown/heal took it down, is exactly the §7.3 question (the backend's own
+  log for those seconds), which the herd only prints on the wedge path.
+* Recovery is still a FULL rerun (a `rerun-failed-jobs` cannot turn the aggregate green:
+  `release_evidence` refuses records from an earlier attempt).
+
+Suggested next step for the herd test itself, no product change: on ANY failure — exception
+or timeout — dump the backend log(s) and every proxy log, not only on the 240 s wedge.
