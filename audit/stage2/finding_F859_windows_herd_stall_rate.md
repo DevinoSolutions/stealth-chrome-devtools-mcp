@@ -445,3 +445,29 @@ What this settles that §6 could not:
 
 This is the §7.4 evidence the maintainer asked to see before deciding on `MAX_STRETCH`; the
 decision remains theirs.
+
+## 10. Second phase-marked red, same shape, different cell (2026-09-11, run 34652563307 attempt 1, PR #93 head `69cdc8a`)
+
+`transport (Windows/X64)` this time — the F-862 red (§9) was the integration cell. The PR
+under test changes no runtime path (it pins the dependency versions the lock already
+resolved and adds a check script), so this is the wedge on an unchanged tree:
+
+```
+herd wedged at 240s: 3/12 sessions finished; stuck sessions by phase:
+{0: 'initialized@5.9s, awaiting tools/list', 2: ..., 4: ..., 5: ..., 6: ..., 7: ..., 9: ..., 10: ..., 11: ...}
+3/12 sessions | initialize p50=5.94s p95=5.97s max=5.97s | tools/list p50=7.06s p95=7.16s max=7.16s
+[proxy-5764.log] 22:11:38,343 ERROR stealth.proxy: backend did not become ready within 120s
+[proxy-7512.log] 22:11:38,976 ERROR stealth.proxy: backend did not become ready within 120s
+```
+
+Same three facts as §9: every stuck session finished `initialize` locally (5.8–5.9 s); the
+backend WAS serving (three sessions got `tools/list` at 7.1 s); the stuck proxies spent the
+full 120 s readiness budget (`REUSE_PATIENCE_SECONDS` × lag 2) and tore down. Nine stuck
+instead of ten. The rerun of that cell alone passed; the evidence aggregator then refused
+attempt 1's records ("foreign evidence: workflow.run_attempt '1' != '2'"), so the practical
+recovery remains a FULL rerun of the run, as on 2026-09-04.
+
+Two phase-marked reds, both Windows, both with 2–3 sessions served at 7–8 s while the rest
+starve inside the readiness gate for exactly its budget: the readiness path, not the
+backend, is where the remaining question (§7.3, the backend's own view of those 120 s)
+has to be answered.
