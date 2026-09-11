@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Fixed — `execute_cdp_command` types a caller's JSON onto the CDP wrapper's parameters (F-861)
+
+A caller sending what the CDP docs show — `Input.dispatchMouseEvent` with
+`button: "left"`, `Browser.grantPermissions` with `["geolocation"]`,
+`Browser.setWindowBounds` with `windowId: 7` — got `'str' object has no attribute
+'to_json'` (Sentry STEALTH-CHROME-DEVTOOLS-MCP-4T, 74 events; -79) or its `int`
+twin. nodriver's generated wrappers take their own typed classes (`MouseButton`,
+`PermissionType`, `WindowID`, `Bounds`, …) and call `.to_json()` on whatever they
+are handed, so a raw value crashed one frame inside nodriver with nothing to say
+which parameter wanted what.
+
+The new `embedded/cdp_params.py` leaf (`typed`) builds each argument into the type
+the wrapper's OWN signature declares, read from its resolved type hints — nothing is
+typed by hand, so a nodriver upgrade is covered the moment it lands. `from_json` for
+the generated classes, through `Optional[..]` and `List[..]`; primitives and
+already-typed values pass through untouched, so every frame F-816 pinned is
+byte-identical. A value the type cannot take is now a `ToolError` naming the param
+and the type (dropped by `before_send` as an expected failure), instead of
+nodriver's AttributeError shipping to Sentry. Wired at the one composition site,
+`build_cdp_call`, after the F-816 name folding. `tests/test_cdp_params.py` pins the
+three Sentry shapes plus the dataclass, str-newtype, list and enum cases; the
+executor's cap ratchets 1012 -> 1004.
+
 ### Docs — the fleet story, with the numbers behind it
 
 Docs and one test constant; no product code. The README, the package description,

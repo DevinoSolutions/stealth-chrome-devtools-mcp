@@ -97,7 +97,12 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # STEP 0: isort emits a first-party group-separator blank line once
     # debug_logger's import is the absolute
     # stealth_chrome_devtools_mcp.embedded.debug_logger form).
-    "embedded/cdp_function_executor.py": (1012, "plan_M7 + plan_M4ph1"),
+    # F-861 RATCHETS DOWN 1012 -> 1004. Typing a caller's JSON onto the
+    # parameter types a nodriver wrapper declares lives in the new cdp_params.py
+    # leaf; build_cdp_call gained one call and one docstring line, paid for by
+    # collapsing ExecutionContext's Args: block that only restated its own
+    # signature (the plan_F856 payment mechanism). Cap == actual.
+    "embedded/cdp_function_executor.py": (1004, "plan_M7 + plan_M4ph1 + F-861"),
     # plan_M5b-1 (F-140/F-203/F-601 5->1 cloner consolidation): CDPElementCloner
     # is the canonical extraction engine the five cloner modules converge onto,
     # so it absorbs the six per-aspect methods + the composing extract_complete_
