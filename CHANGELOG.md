@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Fixed — a spawn that failed after Chrome launched no longer leaks it (F-860)
+
+A `spawn_browser` that failed AFTER nodriver had started Chrome but BEFORE it
+handed a `Browser` back — nodriver's own *"Failed to connect to browser"* after
+its `/json/version` polls, or the websocket's *"timed out during opening
+handshake"* — left that Chrome running, untracked and invisible to
+`list_instances`. The failure handler only ever stopped a `Browser` it held, and
+`process_cleanup.kill_browser_process` returned early because tracking happens in
+`_apply_post_launch`, after a successful launch. On a clone the cost was a stray
+process tree until the next backend start's orphan reap. On `master` it was
+worse: the leaked Chrome held the profile, so every later spawn cloned, the
+master snapshot never refreshed, and nothing in `list_instances` explained why —
+until a backend restart. Observed once under a 12-way concurrent spawn burst; the
+evidence and the independent audit of the mechanism are in
+`audit/stage2/finding_F860_failed_spawn_leaks_untracked_chrome.md`, committed
+here.
+
+* **The attempt's profile directory identifies the process.** The orchestrator
+  holds no pid for a launch that raised; what it still knows is the
+  `--user-data-dir` it launched on. The new `embedded/spawn_leak.py` leaf
+  composes `process_cleanup`'s existing cmdline scan and escalating kill with the
+  ONE fact that makes the reap safe: **only a browser that started at or after
+  the attempt began is ours**. An explicit `user_data_dir` may name a profile a
+  real Chrome already holds (its singleton is then exactly why the launch
+  failed); that process predates the attempt and is spared. A browser on any
+  other directory is never touched.
+* **One teardown for both failure phases.** The cancel and error handlers in
+  `spawn_browser` carried the same eleven lines twice; they now share
+  `_teardown_failed_spawn`, which stops a held `Browser` as before and otherwise
+  reaps by profile. The reap never raises: the caller still sees the launch
+  failure, never a cleanup failure in its place, and a Chrome that refuses to die
+  is logged, not fatal.
+* Left alone on purpose: a failed clone attempt's directory is still released to
+  the `auto_clean` sweep rather than deleted inline (bounded, and the sweep is
+  the one home for that), and nothing changes for a spawn that failed before the
+  launch was reached.
+
+`browser_manager.py`'s LOC cap ratchets DOWN 1532 → 1529 (cap == actual): the
+shared helper was paid for by collapsing four boilerplate `Args:/Returns:`
+docstring blocks that only restated their signatures.
+
 ### Internal — three more sections leave `embedded/server.py` (plan_SERVERSPLIT slices 4–6)
 
 No behaviour change and no tool renamed, added or removed: the served surface stays
