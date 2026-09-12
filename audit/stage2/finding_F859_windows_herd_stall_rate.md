@@ -576,6 +576,20 @@ Method: for every `CI` run created 2026-09-11 (22 runs, 27 attempts), the conclu
 | Windows (integration + transport) | 5 | 5 | 5/54 = 9.3 % |
 | Linux + macOS | 1 | 0 | 1/81 (the macOS headed-spawn connect above) |
 
+The same survey over 2026-09-04 → 2026-09-12 (every `CI` run, every attempt; the pool had no runs on
+09-06 … 09-10) puts today next to the last busy day:
+
+| day | Windows integration + transport cells | red | rate |
+|---|---|---|---|
+| 09-04 | 8 | 0 | 0 % |
+| 09-05 | 44 | 4 | 9.1 % |
+| 09-11 | 54 | 5 | 9.3 % |
+
+So the per-cell rate is NOT rising: it is ~9 % on both busy days, which with two Windows cells per
+run is ~17 % of first-attempt runs red from the herd alone. Linux + macOS across the same eight days:
+4 red cells of 594, none of them the herd (a service-worker node and a SIGTERM node on macOS on
+09-04/09-05, then the two nodriver connect failures above).
+
 By time of day (UTC), Windows cells only: 1/38 before 22:00 (`d38c864`, §9); **4/16 between 22:07
 and 23:27** (`69cdc8a` §10, `93e62ba` ×2 §11/§12.2, `b8ea954` §12.2). The evening cluster is the
 strongest single datum so far for the runner-starvation reading in §3: the tree did not change in
