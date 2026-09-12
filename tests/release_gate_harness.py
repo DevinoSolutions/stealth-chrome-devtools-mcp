@@ -56,6 +56,7 @@ import json
 import logging
 import math
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -463,6 +464,12 @@ def gate_work_dir(fallback: Path) -> Path:
     return fallback
 
 
+def _log_dirs(dirs: tuple[Path, ...]) -> list[Path]:
+    return [
+        d for d in (*dirs, *(p / ".stealth-mcp" / "logs" for p in dirs)) if d.is_dir()
+    ]
+
+
 def _backend_logs(*dirs: Path) -> str:
     """The isolated backend's own logs, for failures the exception text alone
     cannot explain.
@@ -472,18 +479,66 @@ def _backend_logs(*dirs: Path) -> str:
     orphan-recovery lines that root-caused B1) is only in the backend's log
     files, which die with the throwaway home. Cheap on the happy path: only
     read when the journey has already failed.
+
+    Every ``backend-*.log`` (the per-boot logs and the shared boot log) is
+    included, THEN the two newest other logs. Selecting "the two newest logs"
+    alone was right for a one-proxy journey and wrong for the startup herd:
+    twelve proxies write after the backend does, so three wedge reports in a
+    row (F-859 §9-§11) carried two proxy logs and no backend log, and the
+    absence was read as a fact about the workspace. The proxy fleet's own view
+    is :func:`_proxy_warnings`.
     """
     seen: set[Path] = set()
     chunks: list[str] = []
-    for d in (*dirs, *(p / ".stealth-mcp" / "logs" for p in dirs)):
-        if not d.is_dir():
-            continue
-        for log in sorted(d.glob("*.log"), key=lambda p: p.stat().st_mtime)[-2:]:
+    for d in _log_dirs(dirs):
+        by_age = sorted(d.glob("*.log"), key=lambda p: p.stat().st_mtime)
+        backend = [p for p in by_age if p.name.startswith("backend-")]
+        others = [p for p in by_age if not p.name.startswith("backend-")][-2:]
+        for log in (*backend, *others):
             if log in seen:
                 continue
             seen.add(log)
             chunks.append(f"[{log.name}]\n{_read_capped(log)}")
     return "\n".join(chunks) if chunks else "(no backend log files found)"
+
+
+# The proxy digest keeps this many WARNING-or-worse lines, newest last: the end
+# of a wedge is where every proxy says what it concluded.
+_PROXY_DIGEST_LINES = 120
+_WARNING_LINE_RE = re.compile(r"^\S+ \S+ (WARNING|ERROR|CRITICAL) ")
+
+
+def _proxy_warnings(*dirs: Path) -> str:
+    """Every proxy's WARNING-or-worse lines, by file, capped — the fleet's view.
+
+    A herd's proxies write mostly DEBUG probe noise; what decides "one
+    connection dropped" from "every proxy lost the backend in the same second"
+    is which of them warned, and when. One digest instead of twelve raw logs.
+    """
+    entries: list[tuple[str, str]] = []  # (log file, warning line), oldest first
+    for d in _log_dirs(dirs):
+        for log in sorted(d.glob("proxy-*.log"), key=lambda p: p.stat().st_mtime):
+            try:
+                text = log.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            entries.extend(
+                (log.name, ln) for ln in text.splitlines() if _WARNING_LINE_RE.match(ln)
+            )
+    if not entries:
+        return "(no proxy warnings)"
+    elided = len(entries) - _PROXY_DIGEST_LINES
+    out: list[str] = []
+    if elided > 0:
+        entries = entries[-_PROXY_DIGEST_LINES:]
+        out.append(f"(+{elided} earlier warning line(s) elided)")
+    current = None
+    for name, line in entries:
+        if name != current:
+            out.append(f"[{name}]")
+            current = name
+        out.append(line)
+    return "\n".join(out)
 
 
 def _backend_pid_from_state(home_dir: Path) -> int | None:
@@ -1796,6 +1851,11 @@ def gate_workspace(
 def workspace_backend_logs(space: dict[str, Any]) -> str:
     """The isolated backend's own logs for a failed W13 node (capped)."""
     return _backend_logs(space["log_dir"], space["home_dir"])
+
+
+def workspace_proxy_warnings(space: dict[str, Any]) -> str:
+    """Every proxy's WARNING-or-worse lines for a failed W13 node (capped)."""
+    return _proxy_warnings(space["log_dir"], space["home_dir"])
 
 
 class RawStdioWire:
