@@ -18,7 +18,17 @@ What a red here means, by symptom:
 * a few stragglers — the lock race or the readiness-poll backoff left someone
   behind (the F-509 window where a half-born backend's port can be
   misclassified as foreign lives here);
-* more than one backend counted — the exclusive lock failed at its one job.
+* more than one backend counted — the exclusive lock failed at its one job;
+* a session's call failed outright (the proxy's "backend died mid-flight"
+  verdict, F-859 §11) — the backend went away UNDER the herd, which is a
+  different question from the readiness stall above.
+
+Whatever the shape — the 240 s backstop, an assertion, or an exception out of
+a session — the failure carries the same evidence: where each session stopped,
+the booted-backend census, every ``backend-*.log`` and the proxies' WARNING+
+digest (:func:`release_gate_harness.workspace_proxy_warnings`). Three wedge
+reports carried proxy logs only (§9-§11), and the one question the finding
+could not settle (§7.3) is what the backend's own log says for those seconds.
 
 No Chrome is spawned: ``tools/list`` needs the backend up, not a browser, so
 the herd is cheap enough to run everywhere. The machinery is the ONE release
@@ -52,6 +62,7 @@ from release_gate_harness import (
     gate_workspace,
     resolve_launcher,
     workspace_backend_logs,
+    workspace_proxy_warnings,
 )
 
 if TYPE_CHECKING:
@@ -128,6 +139,21 @@ def _booted_backend_logs(space: dict) -> list[str]:
         for p in space["log_dir"].glob("backend-*.log")
         if _BACKEND_LOG_RE.match(p.name)
     )
+
+
+def _evidence(space: dict) -> str:
+    """What every failure shape hands over: the census, the backend's own logs,
+    and the fleet's WARNING+ digest — the same block whichever assert fired."""
+    return (
+        f"booted backend logs: {_booted_backend_logs(space)}\n"
+        f"{workspace_backend_logs(space)}\n"
+        f"--- proxy warnings ---\n{workspace_proxy_warnings(space)}"
+    )
+
+
+def _phases(slots: list[list]) -> dict[int, str]:
+    """Where each unfinished session stopped (F-859 §7.1's phase markers)."""
+    return {i: slot[1] for i, slot in enumerate(slots) if slot[0] is None}
 
 
 def _our_backends_on_port(port: int) -> list[int]:
@@ -223,14 +249,26 @@ async def test_fifty_cold_sessions_are_all_usable_within_30s(tmp_path):
                 # stopped, and hand over the backend's own log, exactly as the
                 # asserts below already do for the shapes they catch.
                 results = [slot[0] for slot in slots]
-                stuck = {
-                    i: slots[i][1] for i in range(HERD_SIZE) if slots[i][0] is None
-                }
+                stuck = _phases(slots)
                 pytest.fail(
                     f"herd wedged at {HERD_HARD_TIMEOUT_SECONDS:.0f}s: "
                     f"{HERD_SIZE - len(stuck)}/{HERD_SIZE} sessions finished; "
                     f"stuck sessions by phase: {stuck}\n"
-                    f"{_summary(results)}\n{workspace_backend_logs(space)}"
+                    f"{_summary(results)}\n{_evidence(space)}"
+                )
+            except Exception as error:  # noqa: BLE001  PERMANENT(any session failure is the herd's failure; the shape is in the message)
+                # F-859 §11: a session whose call FAILED (the proxy's "backend
+                # died mid-flight" verdict) used to end the herd as a bare
+                # exception — no phases, no census, no logs. Same evidence as
+                # the wedge, plus the exception by name.
+                results = [slot[0] for slot in slots]
+                unfinished = _phases(slots)
+                pytest.fail(
+                    f"herd failed at {time.monotonic() - herd_t0:.1f}s with "
+                    f"{type(error).__name__}: {error}\n"
+                    f"{HERD_SIZE - len(unfinished)}/{HERD_SIZE} sessions finished; "
+                    f"unfinished sessions by phase: {unfinished}\n"
+                    f"{_summary(results)}\n{_evidence(space)}"
                 )
             herd_seconds = time.monotonic() - herd_t0
             results = [slot[0] for slot in slots]
@@ -242,11 +280,10 @@ async def test_fifty_cold_sessions_are_all_usable_within_30s(tmp_path):
             # it see anything at all — never shows a second one.
             assert len(booted) == 1, (
                 f"expected exactly one booted backend, found {booted}\n"
-                f"{workspace_backend_logs(space)}"
+                f"{_evidence(space)}"
             )
             assert len(live) <= 1, (
-                f"live census found {live} for port {space['port']}\n"
-                f"{workspace_backend_logs(space)}"
+                f"live census found {live} for port {space['port']}\n{_evidence(space)}"
             )
 
             # Every session is genuinely usable — the full registry answered,
@@ -257,7 +294,7 @@ async def test_fifty_cold_sessions_are_all_usable_within_30s(tmp_path):
             # The spec itself.
             assert herd_seconds <= HERD_DEADLINE_SECONDS, (
                 f"herd took {herd_seconds:.1f}s (> {HERD_DEADLINE_SECONDS:.0f}s): "
-                f"{_summary(results)}\n{workspace_backend_logs(space)}"
+                f"{_summary(results)}\n{_evidence(space)}"
             )
 
             # A 51st session joining the warm backend pays only its own spawn.
@@ -271,7 +308,13 @@ async def test_fifty_cold_sessions_are_all_usable_within_30s(tmp_path):
             except TimeoutError:
                 pytest.fail(
                     f"warm join wedged at {HERD_HARD_TIMEOUT_SECONDS:.0f}s in phase "
-                    f"{warm_slot[1]!r}\n{workspace_backend_logs(space)}"
+                    f"{warm_slot[1]!r}\n{_evidence(space)}"
+                )
+            except Exception as error:  # noqa: BLE001  PERMANENT(same evidence contract as the herd above)
+                pytest.fail(
+                    f"warm join failed at {time.monotonic() - warm_t0:.1f}s in phase "
+                    f"{warm_slot[1]!r} with {type(error).__name__}: {error}\n"
+                    f"{_evidence(space)}"
                 )
             warm_seconds = time.monotonic() - warm_t0
             assert warm_seconds <= WARM_JOIN_DEADLINE_SECONDS, (

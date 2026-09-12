@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Internal — a failed startup herd hands over the backend's own log (F-859 §12)
+
+Three Windows wedge reports in a row (F-859 §9-§11) showed two proxy logs and no
+`backend-<pid>.log`, and §9 recorded the absence as a fact about the workspace. It
+was the harness: `release_gate_harness._backend_logs` printed the two NEWEST log
+files, which in a twelve-proxy herd are always two proxy logs. The one question the
+finding could not settle — what the backend saw during the 120 s the proxies starved
+in its readiness gate (§7.3) — was answerable every time and lost with the throwaway
+home. Test-side only, no runtime change:
+
+* `_backend_logs` includes every `backend-*.log` (per-boot logs and the boot log a
+  crash traceback lands in), then the two newest other logs; a journey's report is
+  unchanged.
+* New `workspace_proxy_warnings`: every proxy's WARNING-or-worse lines, by file,
+  newest 120 kept — the fleet's view, which separates "one connection dropped" from
+  "all twelve lost the backend in the same second".
+* `tests/test_startup_herd.py` attaches the same evidence block (booted-backend
+  census, backend logs, proxy digest) to EVERY failure shape, including an exception
+  out of a session — the "backend died mid-flight" red of §11 ended as a bare
+  `McpError` with nothing attached.
+* `tests/test_release_gate_harness_logs.py` pins the selection and the digest.
+* Finding §12: the release PR's attempt 1 was red in BOTH Windows cells, the `main`
+  push for the 2.1.3 merge is red (Windows herd wedge + a macOS nodriver
+  "Failed to connect to browser" that is not the herd), and today's measured rate
+  across every attempt: Windows herd cells 5/54, Linux+macOS 0/81, four of the five
+  between 22:07 and 23:27 UTC.
+
 ## 2.1.3
 
 ### Fixed — the wheel installs the dependency versions the gate tested (F-865)

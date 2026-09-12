@@ -505,3 +505,106 @@ What this adds to the picture:
 
 Suggested next step for the herd test itself, no product change: on ANY failure — exception
 or timeout — dump the backend log(s) and every proxy log, not only on the 240 s wedge.
+
+## 12. The day's full count, a correction to §9-§11, and why the wedge reports never had a backend log (2026-09-11, written after the 2.1.3 release)
+
+### 12.1 §9-§11 read an artefact of the harness as a fact about the workspace
+
+Every wedge report in §9-§11 shows two `proxy-*.log` sections and no `backend-<pid>.log`, and §9
+recorded that absence as "itself a datum for §7.3". It was not. `release_gate_harness._backend_logs`
+selected **the two newest `*.log` files by mtime** — right for the single-client journey it was
+written for (one backend log, one proxy log) and wrong for a herd, whose twelve proxies all write
+after the backend does. The backend log was in the workspace every time; the report simply never
+included it. The §7.3 question ("what did the backend see during those 120 s") was answerable on
+all three occasions and was lost with the throwaway home each time.
+
+Fixed in this PR, test-side only:
+
+* `_backend_logs` now includes every `backend-*.log` (the per-boot logs AND `backend-boot.log`,
+  which is where a crash traceback or a uvicorn exit would land), then the two newest other logs.
+* New `_proxy_warnings` / `workspace_proxy_warnings`: every proxy's WARNING-or-worse lines, by
+  file, capped at the newest 120 — the fleet's view, which is what tells "one proxy's connection
+  dropped" from "all twelve lost the backend in the same second".
+* The herd hands the same evidence block over on EVERY failure shape — the 240 s backstop, each
+  assertion, and (new) an exception out of a session, which is how §11's mid-flight death ended.
+  The block also carries the booted-backend census, so a heal-and-respawn (two `backend-*.log`
+  files) is visible in the message.
+* `tests/test_release_gate_harness_logs.py` pins the selection (a backend log survives twelve newer
+  proxy logs; a journey still shows both of its logs; the digest names only proxies that warned,
+  keeps the newest lines and says how many it elided).
+
+### 12.2 §11 undercounted: BOTH Windows cells were red on the release PR
+
+Attempt 1 of the `93e62ba` gate (PR #94) failed the herd in **both** Windows cells, not one:
+
+| cell | shape | detail |
+|---|---|---|
+| transport (Windows/X64) | mid-flight death (§11) | `tools/list` failed 28 s after the herd started; the proxy's session DELETE then got "All connection attempts failed" |
+| integration (Windows/X64) | wedge (§3.1) | 4/12 finished (`tools/list` at 9.1-9.3 s); 8 stuck at `initialized@7.9s, awaiting tools/list`; two proxies logged `backend did not become ready within 120s` at 23:01:47-49 |
+
+And the `main` push run for the merge commit `b8ea954` (the 2.1.3 release, 23:27 UTC) is red too:
+integration (Windows/X64) wedged again (2/12 finished, stuck at `initialized@4.9s`), and
+integration (macOS/ARM64) failed `test_window_sizing.py::…::test_headed_spawn_honours_a_size_that_fits`
+with nodriver's "Failed to connect to browser" (Chrome launched — F-860's reaper found five of its
+pids — but CDP never attached; not the herd, not F-859). So the released commit's own CI on `main`
+did not go green; the tag's publish gate did.
+
+### 12.3 What the mid-flight verdict implies, read against the code
+
+"the backend on port 55079 died while 'tools/list' was in flight" is `proxy_selfheal`'s
+`CONNECTION_LOST_CAUSE`, and it is only reached after `_confirm_bridge_verdict` has asked
+`singleton._same_identity_backend_ready(port)` — the 60-fair-second patient gate. Inside a test that
+ended 28 s after it started, that gate can only have returned False on its FAST exit: no socket on
+the port AND the recorded pid no longer a live `--transport` process. The proxy's own session
+DELETE confirms it ("All connection attempts failed" = nothing listening). So this was a backend
+PROCESS that went away, not a stalled one.
+
+No same-workspace path can do that so early: the record is written before the socket binds
+(`_start_server_process`), the lock-holder keeps the lock until the reuse gate passes, and a loser
+that later finds the gate failing still waits its 60 fair seconds before `_clear_stale_backend`
+evicts. That leaves the backend exiting on its own (a crash, a uvicorn lifespan failure) or a kill
+from outside the workspace — and only `backend-boot.log` / `backend-<pid>.log` can say which.
+Those are what 12.1 now captures.
+
+### 12.4 Today's measured rate, all CI runs, all attempts, every herd-bearing cell
+
+Method: for every `CI` run created 2026-09-11 (22 runs, 27 attempts), the conclusion of each
+`integration`/`transport` cell and, for a red one, the `FAILED` line of its log.
+
+| cells | red | of which the herd | rate |
+|---|---|---|---|
+| Windows (integration + transport) | 5 | 5 | 5/54 = 9.3 % |
+| Linux + macOS | 1 | 0 | 1/81 (the macOS headed-spawn connect above) |
+
+The same survey over 2026-09-04 → 2026-09-12 (every `CI` run, every attempt; the pool had no runs on
+09-06 … 09-10) puts today next to the last busy day:
+
+| day | Windows integration + transport cells | red | rate |
+|---|---|---|---|
+| 09-04 | 8 | 0 | 0 % |
+| 09-05 | 44 | 4 | 9.1 % |
+| 09-11 | 54 | 5 | 9.3 % |
+
+So the per-cell rate is NOT rising: it is ~9 % on both busy days, which with two Windows cells per
+run is ~17 % of first-attempt runs red from the herd alone. Linux + macOS across the same eight days:
+4 red cells of 594, none of them the herd (a service-worker node and a SIGTERM node on macOS on
+09-04/09-05, then the two nodriver connect failures above).
+
+By time of day (UTC), Windows cells only: 1/38 before 22:00 (`d38c864`, §9); **4/16 between 22:07
+and 23:27** (`69cdc8a` §10, `93e62ba` ×2 §11/§12.2, `b8ea954` §12.2). The evening cluster is the
+strongest single datum so far for the runner-starvation reading in §3: the tree did not change in
+a way that touches readiness between those runs, the shape did not change, only the hour did.
+
+Not F-859, seen in the same survey: `b6e1b6e` attempt 1's `unit-tests (Windows/X64 py3.13)` passed
+all 2342 tests and then the `release_evidence.py emit` step exited with `-2147483644`
+(`0x80000004`); `bc93d02`'s `offline-stealth (Linux/X64)` errored all three stealth nodes with the
+same nodriver "Failed to connect to browser" as the macOS red. Two of the day's eight red cells are
+therefore "Chrome launched, CDP never attached" on POSIX hosted runners — a family of its own.
+
+### 12.5 Operational
+
+Every recovery today was a FULL rerun (`POST …/actions/runs/<id>/rerun`); a `rerun-failed-jobs`
+turns the cell green and then fails `release-evidence` on "foreign evidence: run_attempt '1' != '2'"
+(§10, and `b6e1b6e` attempt 2 shows the same on six records). The §7.4 decision on `MAX_STRETCH`
+is unchanged and remains the maintainer's; what this section adds is that the next Windows red
+will carry the backend's own view of the stall, which is the evidence §7.3 said the decision needs.
