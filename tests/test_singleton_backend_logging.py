@@ -138,10 +138,13 @@ class TestBootLogRedirect:
 
     def test_server_process_cmd_unchanged_shape(self):
         # _start_server_process's extracted command-builder must still invoke
-        # the same module the same way (no change to what actually launches).
+        # the same module the same way. The interpreter is the one exception,
+        # deliberately: F-866 runs the backend on the REAL interpreter, never on
+        # a Windows venv's redirector (tests/test_backend_spawn_no_redirector.py
+        # pins which one and why); everything after it is unchanged.
         cmd = singleton._server_process_cmd(4321)
         assert cmd == [
-            sys.executable,
+            singleton._backend_interpreter(),
             "-m",
             "stealth_chrome_devtools_mcp",
             "--transport",
