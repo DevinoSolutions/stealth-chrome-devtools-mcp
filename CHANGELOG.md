@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Fixed — the backend is spawned on the real interpreter, not the venv redirector (F-866)
+
+On 2026-09-13 at 13:32 the backend serving 24 Claude Code sessions — 32 hours
+up, its last line a routine hygiene tick — stopped existing: no traceback, no
+uvicorn shutdown, an empty fault log, no eviction. Its replacement's orphan
+sweep then killed the one browser open on it. The cause was the spawn, not the
+backend. In a Windows venv `sys.executable` is CPython's venv **launcher**, not
+an interpreter: it re-spawns the real `python.exe` as a child, holds it in a
+Job Object with `KILL_ON_JOB_CLOSE`, and — being console-less itself after our
+`DETACHED_PROCESS` — hands that child a brand-new console, which the default
+terminal shows as a **visible Windows Terminal window titled with the python
+path**. Every detach flag, and F-839's SIGBREAK immunity, applied to the
+redirector; the process that served every session had its lifetime tied to a
+redirector nobody knew existed and to a terminal window anyone could close.
+`server.json` recorded the redirector's pid, not the backend's.
+
+The backend is now launched on `sys._base_executable` directly, with
+`__PYVENV_LAUNCHER__` naming the venv — the launcher's own hand-off, which
+`getpath` honours and CPython then drops from the environment before any code
+runs. No redirector, no job, no console, no window; the recorded pid is the
+serving process. POSIX venvs have no redirector and are unchanged.
+`tests/test_backend_spawn_no_redirector.py` pins the command, the environment,
+and — against a real spawn — job membership and console absence.
+
+Not fixed by this, and named so nobody reads more into it: a backend that dies
+for any other reason (an upgrade's source-change eviction, a deliberate
+`restart`) still **kills** the browsers it owned on the way back up rather than
+re-adopting them.
+
+Full write-up: `audit/stage2/finding_F866_backend_spawned_through_venv_redirector.md`.
+
 ### Internal — a failed startup herd hands over the backend's own log (F-859 §12)
 
 Three Windows wedge reports in a row (F-859 §9-§11) showed two proxy logs and no
