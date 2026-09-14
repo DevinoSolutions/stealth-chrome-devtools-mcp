@@ -43,6 +43,8 @@ from typing import TYPE_CHECKING
 import psutil
 import pytest
 
+from stealth_chrome_devtools_mcp.embedded import backend_launch, desktop_launch
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -66,23 +68,26 @@ from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="LOG %(message)s")
 
-from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
+from stealth_chrome_devtools_mcp.embedded import (
+    backend_launch,
+    backend_registry,
+    singleton,
+)
 
 # Read the rung off the line a post-mortem would read, on the one logger a
 # proxy's file handler is installed on. Reading the log rather than the return
 # value also pins that the line exists at all: without it, a CI cell could not
-# say which rung served there.
+# say which rung served there. The prefix comes from the leaf, so a rename
+# cannot silently turn this into "unlogged".
 rungs = []
-
-
-MARKER = "backend spawned via the "
 
 
 class RungHandler(logging.Handler):
     def emit(self, record):
         text = record.getMessage()
-        if MARKER in text:
-            rungs.append(text.split(MARKER, 1)[1].split(" rung", 1)[0])
+        prefix = backend_launch.SPAWN_LOG_PREFIX
+        if prefix in text:
+            rungs.append(text.split(prefix, 1)[1].split(" rung", 1)[0])
 
 
 logging.getLogger("stealth.proxy").addHandler(RungHandler())
@@ -203,6 +208,18 @@ def _read_until_pid(helper, sink: list[str]) -> None:
 
 @pytest.mark.parametrize("session_end", ["close_handle", "terminate_job"])
 def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
+    # The helper runs in THIS session, so the leaf's own gate answers for it. A
+    # runner with no logged-on console session has no scheduler rung at all, and
+    # rung 1 cannot escape the SDK's job — so there is nothing here to exercise,
+    # and saying the fix is unverified beats a red that means "not applicable".
+    if not backend_launch._same_session_as_console():
+        pytest.skip(
+            "F-867: this runner has no logged-on console session (own session "
+            f"{backend_launch._own_session_id()}, console "
+            f"{desktop_launch._active_console_session_id()}); the scheduler rung "
+            "cannot exist here, so the escape cannot be exercised — the fix is "
+            "UNVERIFIED on this cell"
+        )
     helper_py = tmp_path / "helper.py"
     helper_py.write_text(_HELPER.format(sleep=120), encoding="utf-8")
     state = tmp_path / "state"
@@ -243,9 +260,16 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
         rung = next(
             (line.split()[1] for line in lines if line.startswith("RUNG ")), "unlogged"
         )
-        # Named first, because it is the reason for everything below: only a rung
-        # that leaves the job can pass the escape assertions, and a cell that has
-        # no scheduler has to say so rather than just failing.
+        # Two different failures, so two different messages. This one is not
+        # about rungs at all: nothing matched backend_launch.SPAWN_LOG_PREFIX, so
+        # the line a post-mortem reads to learn which rung served is gone.
+        assert rung != "unlogged", (
+            "F-867: the spawn logged no "
+            f"{backend_launch.SPAWN_LOG_PREFIX!r} line, so no log can say which "
+            f"rung served:\n{transcript}"
+        )
+        # Named before the escape assertions, because it is the reason for them:
+        # only a rung that leaves the job can pass them.
         assert rung in {"breakaway", "scheduler"}, (
             f"F-867: rung {rung!r} served — the scheduler was unavailable on this "
             f"runner (F-867 §6), so the backend stayed inside the client's "

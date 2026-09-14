@@ -207,6 +207,9 @@ class TestSpawnEnvScrub:
         fake_proc = MagicMock()
         fake_proc.pid = 4242
         captured = MagicMock(return_value=fake_proc)
+        # F-867: singleton no longer imports subprocess (the spawn
+        # moved to backend_launch); patch the module itself, which
+        # both of them reach at call time.
         monkeypatch.setattr(subprocess, "Popen", captured)
 
         singleton._start_server_process(4321)
@@ -228,6 +231,9 @@ class TestSpawnEnvScrub:
         fake_proc = MagicMock()
         fake_proc.pid = 4242
         captured = MagicMock(return_value=fake_proc)
+        # F-867: singleton no longer imports subprocess (the spawn
+        # moved to backend_launch); patch the module itself, which
+        # both of them reach at call time.
         monkeypatch.setattr(subprocess, "Popen", captured)
 
         singleton._start_server_process(4321)

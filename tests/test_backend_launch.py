@@ -18,6 +18,7 @@ from __future__ import annotations
 import errno
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -34,7 +35,7 @@ _PYTHONW = "C:/base/pythonw.exe"
 
 
 class FakePopen:
-    """Records every spawn. Raises for the attempts named in *deny*.
+    """Records every spawn, and the teardown of any spawn that was discarded.
 
     ``_handle`` is deliberately absent: ``_proven_in_a_job`` can only prove
     membership through a real process handle, and "not proven" leaves the spawn
@@ -42,31 +43,58 @@ class FakePopen:
     rung-order tests want to see.
     """
 
-    def __init__(self, deny_first_winerror: int | None = None):
+    def __init__(
+        self,
+        deny_first_winerror: int | None = None,
+        message: str = "Access is denied",
+        deny_errno: int = errno.EACCES,
+    ):
         self.calls: list[dict] = []
         self._deny = deny_first_winerror
+        self._message = message
+        self._errno = deny_errno
         self.pid = 4242
+        self.killed = 0
+        self.waited: list[float] = []
 
     def __call__(self, cmd, **kwargs):
         self.calls.append({"cmd": cmd, **kwargs})
         if self._deny is not None and len(self.calls) == 1:
-            raise OSError(errno.EACCES, "Access is denied", None, self._deny)
+            raise OSError(self._errno, self._message, None, self._deny)
         return self
 
     def kill(self):  # a discarded breakaway spawn
-        self.calls.append({"killed": True})
+        self.killed += 1
+
+    def wait(self, timeout=None):
+        self.waited.append(timeout)
+        return 1
 
 
 class FakeSchtasks:
     """Plays the scheduler: on ``/Run`` it does what the launcher would do."""
 
-    def __init__(self, *, create_rc: int = 0, run_rc: int = 0, effect: str = "pid"):
+    def __init__(
+        self,
+        *,
+        create_rc: int = 0,
+        run_rc: int = 0,
+        effect: str = "pid",
+        existing: tuple[str, ...] = (),
+    ):
         self.calls: list[list[str]] = []
         self.command: str | None = None
         self._create_rc = create_rc
         self._run_rc = run_rc
         self._effect = effect
+        self._existing = existing
         self.pid = 7373
+
+    @property
+    def deleted(self) -> list[str]:
+        return [
+            call[call.index("/TN") + 1] for call in self.calls if call[0] == "/Delete"
+        ]
 
     def _script(self) -> Path:
         assert self.command is not None
@@ -75,6 +103,9 @@ class FakeSchtasks:
     def __call__(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(args))
         verb, rc = args[0], 0
+        if verb == "/Query":
+            listing = "".join(f'"{name}","N/A","Ready"\n' for name in self._existing)
+            return subprocess.CompletedProcess(args, 0, listing, "")
         if verb == "/Create":
             self.command = args[args.index("/TR") + 1]
             rc = self._create_rc
@@ -142,20 +173,76 @@ def test_a_refused_breakaway_falls_to_the_scheduler(windows, monkeypatch):
     assert launched == backend_launch.Launched(7373, "scheduler")
     # Exactly one Popen attempt: the refused one. The scheduler made the backend.
     assert len(popen.calls) == 1
-    assert [call[0] for call in schtasks.calls] == ["/Create", "/Run", "/Delete"]
+    # /Query is the orphan sweep that runs in front of every scheduler spawn.
+    assert [call[0] for call in schtasks.calls] == [
+        "/Query",
+        "/Create",
+        "/Run",
+        "/Delete",
+    ]
 
 
-def test_a_breakaway_that_stays_in_a_job_is_discarded(windows, in_a_job, monkeypatch):
+def test_a_partial_breakaway_is_discarded_when_rung_2_can_do_better(
+    windows, in_a_job, monkeypatch
+):
     popen, schtasks = FakePopen(), FakeSchtasks()
     launched = _spawn(popen, schtasks, monkeypatch)
 
     assert launched.rung == "scheduler"
-    assert popen.calls[-1] == {"killed": True}
+    # Killed AND waited for: the scheduler is about to start a backend on the
+    # same port, so a discarded one still exiting would race it.
+    assert popen.killed == 1
+    assert popen.waited == [backend_launch.DISCARD_WAIT_SECONDS]
+
+
+def test_a_partial_breakaway_is_kept_when_rung_2_could_not_do_better(
+    windows, in_a_job, monkeypatch, caplog
+):
+    # Out of one job beats out of none: discarding it for a plain spawn would
+    # replace it with something strictly worse.
+    monkeypatch.setattr(backend_launch, "_same_session_as_console", lambda: False)
+    popen, schtasks = FakePopen(), FakeSchtasks()
+    with caplog.at_level(logging.WARNING, logger="stealth.proxy"):
+        launched = _spawn(popen, schtasks, monkeypatch)
+
+    assert launched == backend_launch.Launched(4242, "breakaway-partial")
+    assert popen.killed == 0
+    assert len(popen.calls) == 1
+    assert schtasks.calls == []
+    assert "F-867" in caplog.text
+    assert "escaped the innermost job only" in caplog.text
+
+
+def test_the_plain_rung_keeps_a_breakaway_that_was_proven_permitted(
+    windows, in_a_job, monkeypatch, caplog
+):
+    # Rung 1 did not raise, so the flag IS allowed here; rung 2 then failed at
+    # runtime. Rung 3 must not spawn with fewer flags than we know work.
+    popen, schtasks = FakePopen(), FakeSchtasks(create_rc=1)
+    with caplog.at_level(logging.WARNING, logger="stealth.proxy"):
+        launched = _spawn(popen, schtasks, monkeypatch)
+
+    assert launched.rung == "plain"
+    assert popen.calls[-1]["creationflags"] == (
+        backend_launch._DETACHED_FLAGS | backend_launch._CREATE_BREAKAWAY_FROM_JOB
+    )
+
+
+def test_the_plain_rung_drops_the_flag_that_was_refused(windows, monkeypatch):
+    popen = FakePopen(deny_first_winerror=backend_launch._ACCESS_DENIED)
+    launched = _spawn(popen, FakeSchtasks(create_rc=1), monkeypatch)
+
+    assert launched.rung == "plain"
+    assert popen.calls[-1]["creationflags"] == backend_launch._DETACHED_FLAGS
 
 
 def test_any_other_oserror_is_a_real_spawn_failure(windows, monkeypatch):
-    popen = FakePopen(deny_first_winerror=2)  # ERROR_FILE_NOT_FOUND
-    with pytest.raises(OSError, match="Access is denied"):
+    popen = FakePopen(
+        deny_first_winerror=2,  # ERROR_FILE_NOT_FOUND
+        message="The system cannot find the file specified",
+        deny_errno=errno.ENOENT,
+    )
+    with pytest.raises(OSError, match="cannot find the file"):
         _spawn(popen, FakeSchtasks(), monkeypatch)
 
 
@@ -222,6 +309,11 @@ class TestHandOff:
         assert captured["spec"]["boot_log"] == str(
             windows / "logs" / "backend-boot.log"
         )
+
+    def test_the_working_directory_crosses_too(self, captured):
+        # A scheduled task starts in system32; clone_storage's last-resort clone
+        # seed reads the working directory, so it has to be the spawner's.
+        assert captured["spec"]["cwd"] == os.getcwd()
 
     def test_the_launcher_is_the_shipped_script(self, captured):
         assert captured["script"] == backend_launch._LAUNCHER_SCRIPT
@@ -347,6 +439,101 @@ class TestFallbacks:
         assert "F-866" in caplog.text
 
 
+class TestOrphanTaskSweep:
+    """A one-shot task created by a spawner that was then killed outlives it and
+    can fire later against a stale spec. A live sibling always has its spec on
+    disk, so spec-absent is the one safe signal."""
+
+    def test_only_the_task_with_no_spec_on_disk_is_deleted(self, windows, monkeypatch):
+        launch_dir = windows / backend_launch.LAUNCH_DIR_NAME
+        launch_dir.mkdir()
+        live = "aaaaaaaa"
+        stale = "bbbbbbbb"
+        (launch_dir / f"{live}.json").write_text("{}", encoding="utf-8")
+        schtasks = FakeSchtasks(
+            existing=(
+                f"\\{backend_launch.TASK_PREFIX}{live}",
+                f"\\{backend_launch.TASK_PREFIX}{stale}",
+                "\\SomeoneElsesTask",
+            )
+        )
+        popen = FakePopen(deny_first_winerror=backend_launch._ACCESS_DENIED)
+        launched = _spawn(popen, schtasks, monkeypatch)
+
+        assert launched.rung == "scheduler"
+        deleted = schtasks.deleted
+        assert f"\\{backend_launch.TASK_PREFIX}{stale}" in deleted
+        assert f"\\{backend_launch.TASK_PREFIX}{live}" not in deleted
+        assert "\\SomeoneElsesTask" not in deleted
+
+    def test_a_query_failure_never_stops_the_spawn(self, windows, monkeypatch):
+        class Refusing(FakeSchtasks):
+            def __call__(self, args):
+                if args[0] == "/Query":
+                    self.calls.append(list(args))
+                    return subprocess.CompletedProcess(args, 1, "", "denied")
+                return super().__call__(args)
+
+        popen = FakePopen(deny_first_winerror=backend_launch._ACCESS_DENIED)
+        launched = _spawn(popen, Refusing(), monkeypatch)
+
+        assert launched.rung == "scheduler"
+
+
+# ---------------------------------------------------------------------------
+# The membership probe that decides whether rung 1 escaped.
+# ---------------------------------------------------------------------------
+
+
+class TestProvenInAJob:
+    """The probe rung 1 trusts. The fakes elsewhere never reach it (they carry
+    no process handle) and the real pin never reaches it either (its client job
+    refuses breakaway), so it needs its own coverage against real handles."""
+
+    def test_a_double_with_no_process_handle_is_not_proof(self, caplog):
+        # Silent by design: a real Windows Popen always has ``_handle``, so this
+        # branch means a test double, not a probe that failed.
+        with caplog.at_level(logging.WARNING, logger="stealth.proxy"):
+            assert backend_launch._proven_in_a_job(FakePopen()) is False
+        assert caplog.text == ""
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Objects")
+    def test_a_real_process_in_our_own_job_reads_as_a_member(self, tmp_path):
+        import ctypes
+        from ctypes import wintypes
+
+        from test_backend_escapes_client_job import _make_kill_on_close_job
+
+        kernel = ctypes.windll.kernel32
+        job = _make_kill_on_close_job()
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        )
+        try:
+            assert kernel.AssignProcessToJobObject(
+                wintypes.HANDLE(job), wintypes.HANDLE(int(proc._handle))
+            )
+            # True either way if the harness itself is inside a job, so what
+            # this pins is that the query WORKS against a real handle and
+            # answers "member" — not that it can tell our job from theirs.
+            assert backend_launch._proven_in_a_job(proc) is True
+        finally:
+            kernel.CloseHandle(wintypes.HANDLE(job))
+            proc.kill()
+            proc.wait(timeout=10)
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Objects")
+    def test_a_refused_query_is_not_proof_and_says_so(self, caplog):
+        class BadHandle(FakePopen):
+            _handle = 0  # never a valid process handle
+
+        with caplog.at_level(logging.WARNING, logger="stealth.proxy"):
+            assert backend_launch._proven_in_a_job(BadHandle()) is False
+        assert "F-867" in caplog.text
+        assert "unverified" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # The intermediary itself.
 # ---------------------------------------------------------------------------
@@ -388,7 +575,7 @@ class TestTheLauncherScriptItself:
     """Run the real ``_LAUNCHER_SCRIPT`` against a real spec, with this
     interpreter standing in for the scheduler's pythonw."""
 
-    def _run_launcher(self, tmp_path, child_argv) -> tuple[Path, Path]:
+    def _run_launcher(self, tmp_path, child_argv, cwd=None) -> tuple[Path, Path]:
         # A hex name, like the real token: a script dir goes on sys.path[0],
         # so a stdlib-shadowing name (token.py!) breaks the interpreter.
         base = tmp_path / "b3f0aa"
@@ -396,7 +583,14 @@ class TestTheLauncherScriptItself:
         script.write_text(backend_launch._LAUNCHER_SCRIPT, encoding="utf-8")
         boot_log = tmp_path / "backend-boot.log"
         base.with_suffix(".json").write_text(
-            json.dumps({"cmd": child_argv, "env": {}, "boot_log": str(boot_log)}),
+            json.dumps(
+                {
+                    "cmd": child_argv,
+                    "env": {},
+                    "boot_log": str(boot_log),
+                    "cwd": str(cwd or tmp_path),
+                }
+            ),
             encoding="utf-8",
         )
         done = subprocess.run(
@@ -415,6 +609,20 @@ class TestTheLauncherScriptItself:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
         assert pid > 0
         _wait_for(boot_log, "hi")
+
+    def test_the_child_starts_in_the_spec_s_working_directory(self, tmp_path):
+        home = tmp_path / "seed dir"
+        home.mkdir()
+        _pid_file, boot_log = self._run_launcher(
+            tmp_path,
+            [
+                sys.executable,
+                "-c",
+                "import os, sys; print(os.getcwd()); sys.stdout.flush()",
+            ],
+            cwd=home,
+        )
+        _wait_for(boot_log, str(home))
 
     def test_an_import_time_crash_lands_in_the_boot_log(self, tmp_path):
         # F-303's whole point, preserved across the scheduler hand-off.

@@ -308,12 +308,17 @@ def _kill_delegated(pid: int, create_time: float | None) -> None:
         )
 
 
-def _cleanup(task_name: str, script: Path, pid_file: Path) -> None:
-    """Delete the task and the scratch files. Never raises — it runs in a
-    ``finally`` whose caller may already be raising the real error."""
+def _cleanup(task_name: str, *paths: Path) -> None:
+    """Delete the task and every scratch path given. Never raises — it runs in a
+    ``finally`` whose caller may already be raising the real error.
+
+    Variadic because ``backend_launch`` (F-867) runs the same round trip with a
+    different set of scratch files; one home for "undo a one-shot task" is worth
+    more than a signature that names this module's two.
+    """
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         _schtasks(["/Delete", "/F", "/TN", task_name])
-    for path in (script, pid_file):
+    for path in paths:
         with contextlib.suppress(OSError):
             path.unlink()
 

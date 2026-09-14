@@ -366,6 +366,9 @@ class TestServerStatePersistence:
         monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "test-fp")
         fake_proc = MagicMock()
         fake_proc.pid = 4242
+        # F-867: singleton no longer imports subprocess (the spawn
+        # moved to backend_launch); patch the module itself, which
+        # both of them reach at call time.
         monkeypatch.setattr(subprocess, "Popen", MagicMock(return_value=fake_proc))
 
         singleton._start_server_process(4321)

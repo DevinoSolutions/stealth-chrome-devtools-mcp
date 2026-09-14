@@ -24,11 +24,18 @@ kill a process GROUP, and the backend gets its own with ``start_new_session``.
    is not proof of escape**, which is measured, not assumed: in a NESTED job
    chain the flag leaves the innermost job only, so a proxy started through a
    console-script launcher (whose own job permits breakaway) spawns happily and
-   stays inside the client's outer job. So the rung is accepted only when the
-   new process is in NO job at all; otherwise the backend is discarded, at an
-   age where it has done nothing yet, and the next rung runs. If the caller was
-   in no job to begin with, the flag is a no-op and the check passes trivially —
-   which is exactly why trying it first is free.
+   stays inside the client's outer job. If the caller was in no job to begin
+   with, the flag is a no-op and the check passes trivially — which is exactly
+   why trying it first is free.
+
+   A PARTIAL escape (spawned, still in some job) is never discarded blindly:
+   rung 2's viability is decided FIRST, because a backend that got out of one
+   job is strictly better than the plain rung's, which got out of none. So:
+   rung 2 unavailable → keep the child and return the ``breakaway-partial``
+   rung with a WARNING; rung 2 available → discard the child (killed, then
+   waited for, bounded) and use the scheduler. And whenever breakaway was
+   proven PERMITTED, rung 3 keeps asking for it too — a partial escape is the
+   worst case there, not a reason to spawn with fewer flags than we know work.
 2. ``scheduler`` — hand the creation to Task Scheduler, the job-free
    intermediary the product already owns (F-810). A one-shot "run only when the
    user is logged on" task runs under the Task Scheduler service: outside every
@@ -46,12 +53,15 @@ kill a process GROUP, and the backend gets its own with ``start_new_session``.
      ``Scripts\\pythonw.exe`` is the redirector, and running the launcher under
      it would rebuild F-866's kill-on-close job around the backend. When only a
      redirector is available we drop a rung rather than reintroduce that.
-   * *Env and command hand-off.* A scheduled task inherits nothing. The ENTIRE
-     child env dict — exactly as the caller built it, nothing hand-picked — plus
-     the argv and the boot-log path travel in a JSON spec beside the launcher, in
-     the user-private state dir, deleted in a ``finally``. ``/TR`` truncates near
-     261 characters, so it carries only two paths (F-810's precedent) and the
-     launcher addresses its spec, pid and error files off its own path.
+   * *Env, command and cwd hand-off.* A scheduled task inherits nothing, and it
+     starts in system32. The ENTIRE child env dict — exactly as the caller built
+     it, nothing hand-picked — plus the argv, the boot-log path and the
+     spawner's working directory (``clone_storage``'s last-resort clone seed
+     reads it) travel in a JSON spec beside the launcher, in the user-private
+     state dir, deleted in a ``finally``. ``/TR`` truncates near 261 characters,
+     so it carries only two paths (F-810's precedent) and the launcher addresses
+     its spec, pid and error files off its own path. A task orphaned by a killed
+     spawner is swept before the next one: same prefix, no spec on disk.
    * *The boot log and the pid.* A ``Popen`` stdout handle cannot cross the
      scheduler, so the launcher re-opens the rolled boot log itself and hands the
      backend's stdout AND stderr to it — F-303's property (an import-time crash
@@ -59,14 +69,21 @@ kill a process GROUP, and the backend gets its own with ``start_new_session``.
      backend's real pid through a temp file and ``os.replace``, so the poller can
      never read half a number, and so the pid ``singleton`` records is the
      interpreter that serves (F-866), never the launcher's.
-3. ``plain`` — today's detached spawn, unchanged. A runner with no scheduler, no
-   console session, or a refusing service account still starts a backend; the
-   WARNING that precedes it names F-867, so the log says which rung served.
+3. ``plain`` — today's detached spawn (plus the breakaway flag when rung 1
+   proved it permitted). A runner with no scheduler, no console session, or a
+   refusing service account still starts a backend; the WARNING that precedes it
+   names F-867, so the log says which rung served.
 
 A leaf: it imports ``backend_registry`` for the state dir and reaches
-``desktop_launch`` lazily for the ONE ``schtasks`` seam and the ONE pid-file
-reader, so neither gets a second home. It never raises for a rung's own failure —
-only a genuine ``Popen`` error reaches the caller.
+``desktop_launch`` lazily for the ONE ``schtasks`` seam, the ONE pid-file reader
+and the ONE task-teardown, so none of them gets a second home. The laziness is
+not about import cost — ``desktop_launch`` pulls in nodriver, and in the only
+production caller (the proxy) ``embedded/server.py`` has already imported
+``browser_manager``, so nodriver is loaded long before anything is spawned and
+the import is free. It is lazy so that a bare ``singleton`` import (tests, the
+herd harness) does not pay ~0.5 s for a module it may never reach. It never
+raises for a rung's own failure — only a genuine ``Popen`` error reaches the
+caller.
 """
 
 from __future__ import annotations
@@ -100,6 +117,13 @@ PID_READY_TIMEOUT = 20.0
 POLL_INTERVAL = 0.1
 # schtasks truncates /TR around this many characters.
 TR_MAX_CHARS = 261
+# How long to wait for a discarded partial-breakaway child to actually die.
+# Bounded: a spawn must not hang on a teardown that is only tidiness.
+DISCARD_WAIT_SECONDS = 5.0
+# The one spelling of the line that says which rung served. A post-mortem greps
+# it and the F-867 pin parses it, so it is a constant rather than three
+# literals that could drift apart.
+SPAWN_LOG_PREFIX = "backend spawned via the "
 
 # Spelled out rather than read off ``subprocess``: typeshed exposes
 # DETACHED_PROCESS / CREATE_NEW_PROCESS_GROUP only under ``sys.platform ==
@@ -138,6 +162,10 @@ try:
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             env=spec["env"],
+            # A scheduled task starts in system32. The backend reads the working
+            # directory (clone_storage's last-resort clone seed), so it has to be
+            # the spawner's, exactly as it is on every other rung.
+            cwd=spec["cwd"],
             close_fds=True,
             creationflags=(
                 subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -163,6 +191,20 @@ class Launched(NamedTuple):
     rung: str
 
 
+class _SchedulerPlan(NamedTuple):
+    """Everything rung 2 needs, decided BEFORE anything is spawned or discarded.
+
+    Viability is a question about this machine — the session, the interpreter,
+    the command-line cap — and none of it depends on the attempt, so answering
+    it first is what lets rung 1 keep a partial escape when rung 2 could not
+    have done better anyway.
+    """
+
+    interpreter: Path
+    token: str
+    command: str
+
+
 def spawn(cmd: list[str], env: dict[str, str], boot_log: Path | None) -> Launched:
     """Create the backend process; return its pid and the rung that served.
 
@@ -171,56 +213,98 @@ def spawn(cmd: list[str], env: dict[str, str], boot_log: Path | None) -> Launche
     for life — or ``None`` when no log dir was writable, in which case output
     goes to ``DEVNULL`` exactly as it did before M3.
     """
+    # Captured here, not in the launcher: every rung but the scheduler's
+    # inherits it, so the scheduler has to be told what the others get for free.
+    cwd = str(Path.cwd())
     if sys.platform != "win32":
         posix = _popen(cmd, env, boot_log, start_new_session=True)
         return Launched(posix.pid, "posix")
-    return _spawn_windows(cmd, env, boot_log)
+    return _spawn_windows(cmd, env, boot_log, cwd)
 
 
 def _spawn_windows(
-    cmd: list[str], env: dict[str, str], boot_log: Path | None
+    cmd: list[str], env: dict[str, str], boot_log: Path | None, cwd: str
 ) -> Launched:
     """The three rungs, in order. Only rung 1 can raise, and only for a spawn
     failure that is NOT the client's job refusing to let go."""
-    flags = _DETACHED_FLAGS | _CREATE_BREAKAWAY_FROM_JOB
+    breakaway_flags = _DETACHED_FLAGS | _CREATE_BREAKAWAY_FROM_JOB
+    permitted, partial = True, None
     try:
-        breakaway = _popen(cmd, env, boot_log, creationflags=flags)
+        first = _popen(cmd, env, boot_log, creationflags=breakaway_flags)
     except OSError as error:
         if getattr(error, "winerror", None) != _ACCESS_DENIED:
             raise
+        permitted = False
         _logger.info(
             "F-867: this client's job refuses CREATE_BREAKAWAY_FROM_JOB; "
             "spawning the backend through Task Scheduler instead"
         )
     else:
-        if not _proven_in_a_job(breakaway):
-            _logger.info(
-                "backend spawned via the breakaway rung (pid %s)", breakaway.pid
-            )
-            return Launched(breakaway.pid, "breakaway")
+        if not _proven_in_a_job(first):
+            _log_rung("breakaway", first.pid)
+            return Launched(first.pid, "breakaway")
         # A nested job chain: the flag freed the innermost job (a console-script
-        # launcher's, say) and the client's still holds this backend. Discard it
-        # — it is microseconds old and has bound nothing — and drop a rung.
+        # launcher's, say) and something still holds this backend.
+        partial = first
+
+    plan = _scheduler_plan(cmd[0])
+    if partial is not None:
+        if plan is None:
+            # Keeping it beats every remaining option: it is out of one job, and
+            # anything we spawn now would be out of none.
+            _log_rung(
+                "breakaway-partial",
+                partial.pid,
+                ": it escaped the innermost job only, an enclosing "
+                "kill-on-close job would still take it, and no scheduler rung is "
+                "available here to do better (F-867)",
+                level=logging.WARNING,
+            )
+            return Launched(partial.pid, "breakaway-partial")
         _logger.info(
             "F-867: CREATE_BREAKAWAY_FROM_JOB left the backend (pid %s) inside a "
             "job; discarding it and spawning through Task Scheduler",
-            breakaway.pid,
+            partial.pid,
         )
-        with suppress(OSError):
-            breakaway.kill()
+        _discard(partial)
 
-    pid = _scheduler_spawn(cmd, env, boot_log)
-    if pid is not None:
-        _logger.info("backend spawned via the scheduler rung (pid %s)", pid)
-        return Launched(pid, "scheduler")
+    if plan is not None:
+        pid = _scheduler_spawn(plan, cmd, env, boot_log, cwd)
+        if pid is not None:
+            _log_rung("scheduler", pid)
+            return Launched(pid, "scheduler")
 
-    plain = _popen(cmd, env, boot_log, creationflags=_DETACHED_FLAGS)
-    _logger.info(
-        "backend spawned via the plain rung (pid %s): it is inside this client's "
-        "job and dies when this session ends (F-867)",
+    # Whatever rung 1 proved permitted is still permitted here: asking again
+    # cannot be worse than not asking, and on a client whose job allows it this
+    # is the difference between escaping one job and escaping none.
+    plain_flags = _DETACHED_FLAGS | (_CREATE_BREAKAWAY_FROM_JOB if permitted else 0)
+    plain = _popen(cmd, env, boot_log, creationflags=plain_flags)
+    _log_rung(
+        "plain",
         plain.pid,
+        ": it is inside this client's job and dies when this session ends (F-867)",
     )
     return Launched(plain.pid, "plain")
+
+
+def _log_rung(
+    rung: str, pid: int, detail: str = "", *, level: int = logging.INFO
+) -> None:
+    """The one line that says which rung served, in the one spelling."""
+    _logger.log(level, "%s%s rung (pid %s)%s", SPAWN_LOG_PREFIX, rung, pid, detail)
+
+
+def _discard(proc: subprocess.Popen[bytes]) -> None:
+    """Kill a spawn we are not going to use, and wait (bounded) for it to go.
+
+    Waiting matters: the next rung is about to start a backend on the same port,
+    and a discarded one that is still exiting would race it. Never raises — the
+    caller is mid-spawn and a teardown must not become the failure.
+    """
+    with suppress(OSError):
+        proc.kill()
+    with suppress(OSError, subprocess.SubprocessError):
+        proc.wait(timeout=DISCARD_WAIT_SECONDS)
 
 
 def _popen(
@@ -300,11 +384,23 @@ def _proven_in_a_job(proc: subprocess.Popen[bytes]) -> bool:
 
     try:
         member = wintypes.BOOL()
-        if not ctypes.windll.kernel32.IsProcessInJob(
+        answered = ctypes.windll.kernel32.IsProcessInJob(
             wintypes.HANDLE(handle), None, ctypes.byref(member)
-        ):
-            return False
+        )
     except Exception:  # noqa: BLE001  PERMANENT(a probe may never raise)
+        _logger.warning(
+            "F-867: could not ask whether the new backend is in a Job Object, so "
+            "the breakaway spawn stands unverified; if this client's job is a "
+            "kill-on-close one, the backend will die with this session",
+            exc_info=True,
+        )
+        return False
+    if not answered:
+        _logger.warning(
+            "F-867: IsProcessInJob refused for the new backend, so the breakaway "
+            "spawn stands unverified; if this client's job is a kill-on-close "
+            "one, the backend will die with this session"
+        )
         return False
     return bool(member.value)
 
@@ -322,6 +418,14 @@ def _own_session_id() -> int | None:
         ):
             return None
     except Exception:  # noqa: BLE001  PERMANENT(a probe may never raise)
+        # DEBUG, not WARNING: the ONE caller turns a missing session id into its
+        # own WARNING naming both ids and the rung it drops to, so raising the
+        # level here would report one fact twice.
+        _logger.debug(
+            "F-867: the session-id probe refused; the scheduler rung's session "
+            "gate will read this process as being in no known session",
+            exc_info=True,
+        )
         return None
     return int(session.value)
 
@@ -377,46 +481,38 @@ def _intermediary_interpreter(interpreter: str) -> Path | None:
     return candidate
 
 
-def _spec(cmd: list[str], env: dict[str, str], boot_log: Path | None) -> str:
-    """The launcher's whole input: argv, the ENTIRE child env, the boot log."""
+def _spec(cmd: list[str], env: dict[str, str], boot_log: Path | None, cwd: str) -> str:
+    """The launcher's whole input: argv, the ENTIRE child env, the boot log and
+    the working directory a scheduled task would otherwise not have."""
     return json.dumps(
         {
             "cmd": cmd,
             "env": env,
             "boot_log": None if boot_log is None else str(boot_log),
+            "cwd": cwd,
         }
     )
 
 
-def _scheduler_spawn(
-    cmd: list[str], env: dict[str, str], boot_log: Path | None
-) -> int | None:
-    """Create the backend through a one-shot scheduled task, or ``None`` to fall
-    through to the plain spawn.
+def _scheduler_plan(interpreter_of: str) -> _SchedulerPlan | None:
+    """Can this machine run the scheduler rung at all, and with what command?
 
-    Never raises: every failure here is a rung, not an error, and each one logs a
-    WARNING naming F-867. The scratch files go first in the cleanup, so a task
-    that has not read its spec yet fails instead of starting a second backend.
+    Answered before anything is spawned or discarded (see ``_spawn_windows``).
+    ``None`` means the rung does not exist here; each reason logs a WARNING
+    naming F-867, because it is the reason a backend ends up killable.
     """
     if not _same_session_as_console():
         return None
-    interpreter = _intermediary_interpreter(cmd[0])
+    interpreter = _intermediary_interpreter(interpreter_of)
     if interpreter is None:
         _logger.warning(
             "F-867: no job-free pythonw.exe beside %s (a venv redirector does not "
             "count — it would rebuild F-866's job); using the plain spawn",
-            cmd[0],
+            interpreter_of,
         )
         return None
-
     token = uuid.uuid4().hex
-    task_name = f"{TASK_PREFIX}{token}"
-    launch_dir = _launch_dir()
-    base = launch_dir / token
-    script = base.with_suffix(".py")
-    suffixes = (".py", ".json", ".pid", ".err", ".tmp")
-    scratch = [base.with_suffix(suffix) for suffix in suffixes]
-    command = f'"{interpreter}" "{script}"'
+    command = f'"{interpreter}" "{_launch_dir() / token}.py"'
     if len(command) > TR_MAX_CHARS:
         _logger.warning(
             "F-867: the scheduled-task command is %s characters, past the %s "
@@ -425,14 +521,72 @@ def _scheduler_spawn(
             TR_MAX_CHARS,
         )
         return None
+    return _SchedulerPlan(interpreter, token, command)
+
+
+def _sweep_orphan_tasks(launch_dir: Path) -> None:
+    """Delete backend-launch tasks left behind by a spawner that was killed.
+
+    A one-shot task created between ``/Create`` and ``/Delete`` outlives the
+    process that made it, and ``/SC ONCE /ST 00:00`` means it can fire later
+    against a stale spec. A live sibling spawn always has its ``<token>.json``
+    on disk, so a task whose spec is ABSENT is the only kind that is safe — and
+    necessary — to remove. Best effort throughout: this is hygiene running in
+    front of a spawn, so it may never raise and never delay one loudly.
+    """
+    from stealth_chrome_devtools_mcp.embedded import desktop_launch
+
+    try:
+        listed = desktop_launch._schtasks(["/Query", "/FO", "CSV", "/NH"])
+    except (OSError, subprocess.SubprocessError):
+        _logger.debug("F-867: could not list scheduled tasks to sweep", exc_info=True)
+        return
+    if listed.returncode != 0:
+        _logger.debug(
+            "F-867: schtasks /Query exited %s; skipping the orphan sweep",
+            listed.returncode,
+        )
+        return
+    for line in listed.stdout.splitlines():
+        name = line.split(",")[0].strip().strip('"')
+        leaf = name.rsplit("\\", 1)[-1]
+        if not leaf.startswith(TASK_PREFIX):
+            continue
+        if (launch_dir / f"{leaf[len(TASK_PREFIX) :]}.json").exists():
+            continue  # a sibling spawn is using it right now
+        _logger.debug("F-867: deleting the orphaned backend-launch task %s", name)
+        with suppress(OSError, subprocess.SubprocessError):
+            desktop_launch._schtasks(["/Delete", "/F", "/TN", name])
+
+
+def _scheduler_spawn(
+    plan: _SchedulerPlan,
+    cmd: list[str],
+    env: dict[str, str],
+    boot_log: Path | None,
+    cwd: str,
+) -> int | None:
+    """Create the backend through a one-shot scheduled task, or ``None`` to fall
+    through to the plain spawn.
+
+    Never raises: every failure here is a rung, not an error, and each one logs a
+    WARNING naming F-867.
+    """
+    task_name = f"{TASK_PREFIX}{plan.token}"
+    launch_dir = _launch_dir()
+    base = launch_dir / plan.token
+    suffixes = (".py", ".json", ".pid", ".err", ".tmp")
+    scratch = [base.with_suffix(suffix) for suffix in suffixes]
 
     try:
         launch_dir.mkdir(parents=True, exist_ok=True)
-        script.write_text(_LAUNCHER_SCRIPT, encoding="utf-8")
-        spec_file = base.with_suffix(".json")
-        spec_file.write_text(_spec(cmd, env, boot_log), encoding="utf-8")
+        _sweep_orphan_tasks(launch_dir)
+        base.with_suffix(".py").write_text(_LAUNCHER_SCRIPT, encoding="utf-8")
+        base.with_suffix(".json").write_text(
+            _spec(cmd, env, boot_log, cwd), encoding="utf-8"
+        )
         return _run_task(
-            task_name, command, base.with_suffix(".pid"), base.with_suffix(".err")
+            task_name, plan.command, base.with_suffix(".pid"), base.with_suffix(".err")
         )
     except (OSError, subprocess.SubprocessError):
         _logger.warning(
@@ -441,7 +595,9 @@ def _scheduler_spawn(
         )
         return None
     finally:
-        _cleanup(task_name, scratch)
+        from stealth_chrome_devtools_mcp.embedded import desktop_launch
+
+        desktop_launch._cleanup(task_name, *scratch)
 
 
 def _run_task(
@@ -506,15 +662,3 @@ def _run_task(
         PID_READY_TIMEOUT,
     )
     return None
-
-
-def _cleanup(task_name: str, scratch: list[Path]) -> None:
-    """Delete the task and every scratch file. Never raises — it runs in a
-    ``finally`` whose caller may already be handling the real failure."""
-    from stealth_chrome_devtools_mcp.embedded import desktop_launch
-
-    for path in scratch:
-        with suppress(OSError):
-            path.unlink(missing_ok=True)
-    with suppress(OSError, subprocess.SubprocessError):
-        desktop_launch._schtasks(["/Delete", "/F", "/TN", task_name])

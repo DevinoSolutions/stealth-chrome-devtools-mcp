@@ -232,6 +232,9 @@ class TestStartServerProcessRecordsSelectedPort:
             fake_proc = MagicMock()
             fake_proc.pid = 4242
             captured_popen = MagicMock(return_value=fake_proc)
+            # F-867: singleton no longer imports subprocess (the spawn
+            # moved to backend_launch); patch the module itself, which
+            # both of them reach at call time.
             monkeypatch.setattr(subprocess, "Popen", captured_popen)
 
             singleton._start_server_process(fallback)
@@ -373,6 +376,9 @@ class TestForbiddenFallbackReachesTheSpawn:
         fake_proc = MagicMock()
         fake_proc.pid = 4242
         captured_popen = MagicMock(return_value=fake_proc)
+        # F-867: singleton no longer imports subprocess (the spawn
+        # moved to backend_launch); patch the module itself, which
+        # both of them reach at call time.
         monkeypatch.setattr(subprocess, "Popen", captured_popen)
 
         singleton._start_server_process(fallback)
