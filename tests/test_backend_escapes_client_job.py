@@ -36,6 +36,7 @@ import os
 import subprocess
 import sys
 import threading
+import warnings
 from ctypes import wintypes
 from typing import TYPE_CHECKING
 
@@ -67,6 +68,26 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="LOG %(message
 
 from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
+# Read the rung off the line a post-mortem would read, on the one logger a
+# proxy's file handler is installed on. Reading the log rather than the return
+# value also pins that the line exists at all: without it, a CI cell could not
+# say which rung served there.
+rungs = []
+
+
+MARKER = "backend spawned via the "
+
+
+class RungHandler(logging.Handler):
+    def emit(self, record):
+        text = record.getMessage()
+        if MARKER in text:
+            rungs.append(text.split(MARKER, 1)[1].split(" rung", 1)[0])
+
+
+logging.getLogger("stealth.proxy").addHandler(RungHandler())
+logging.getLogger("stealth.proxy").setLevel(logging.INFO)
+
 state = Path(sys.argv[1])
 
 backend_registry.STATE_DIR = state
@@ -90,6 +111,7 @@ sys.stdin.readline()
 
 singleton._start_server_process(4321)
 
+print("RUNG", rungs[-1] if rungs else "unlogged", flush=True)
 print("PID", recorded["pid"], flush=True)
 import time
 
@@ -218,6 +240,17 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
         pid_lines = [line for line in lines if line.startswith("PID ")]
         assert pid_lines, f"helper never announced a pid:\n{transcript}"
         backend_pid = int(pid_lines[-1].split()[1])
+        rung = next(
+            (line.split()[1] for line in lines if line.startswith("RUNG ")), "unlogged"
+        )
+        # Named first, because it is the reason for everything below: only a rung
+        # that leaves the job can pass the escape assertions, and a cell that has
+        # no scheduler has to say so rather than just failing.
+        assert rung in {"breakaway", "scheduler"}, (
+            f"F-867: rung {rung!r} served — the scheduler was unavailable on this "
+            f"runner (F-867 §6), so the backend stayed inside the client's "
+            f"job:\n{transcript}"
+        )
 
         backend_handle = kernel.OpenProcess(
             _PROCESS_QUERY_LIMITED_INFORMATION, False, backend_pid
@@ -246,6 +279,13 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
         assert _still_running(backend_handle), (
             f"F-867: the backend (pid {backend_pid}) died when the client's job "
             f"ended ({session_end}):\n{transcript}"
+        )
+        # pytest prints the warnings summary for PASSING tests too, so this is
+        # how a CI cell's own log says which rung protected the backend there.
+        warnings.warn(
+            f"F-867 pin: backend escaped the client job via rung {rung!r} "
+            f"({session_end})",
+            stacklevel=1,
         )
     finally:
         if backend_handle:
