@@ -21,6 +21,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -74,20 +75,12 @@ class FakePopen:
 class FakeSchtasks:
     """Plays the scheduler: on ``/Run`` it does what the launcher would do."""
 
-    def __init__(
-        self,
-        *,
-        create_rc: int = 0,
-        run_rc: int = 0,
-        effect: str = "pid",
-        existing: tuple[str, ...] = (),
-    ):
+    def __init__(self, *, create_rc: int = 0, run_rc: int = 0, effect: str = "pid"):
         self.calls: list[list[str]] = []
         self.command: str | None = None
         self._create_rc = create_rc
         self._run_rc = run_rc
         self._effect = effect
-        self._existing = existing
         self.pid = 7373
 
     @property
@@ -103,9 +96,6 @@ class FakeSchtasks:
     def __call__(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(args))
         verb, rc = args[0], 0
-        if verb == "/Query":
-            listing = "".join(f'"{name}","N/A","Ready"\n' for name in self._existing)
-            return subprocess.CompletedProcess(args, 0, listing, "")
         if verb == "/Create":
             self.command = args[args.index("/TR") + 1]
             rc = self._create_rc
@@ -173,13 +163,9 @@ def test_a_refused_breakaway_falls_to_the_scheduler(windows, monkeypatch):
     assert launched == backend_launch.Launched(7373, "scheduler")
     # Exactly one Popen attempt: the refused one. The scheduler made the backend.
     assert len(popen.calls) == 1
-    # /Query is the orphan sweep that runs in front of every scheduler spawn.
-    assert [call[0] for call in schtasks.calls] == [
-        "/Query",
-        "/Create",
-        "/Run",
-        "/Delete",
-    ]
+    # The orphan sweep reads the launch dir, so a clean dir costs no schtasks
+    # call at all — only this spawn's own three.
+    assert [call[0] for call in schtasks.calls] == ["/Create", "/Run", "/Delete"]
 
 
 def test_a_partial_breakaway_is_discarded_when_rung_2_can_do_better(
@@ -440,42 +426,62 @@ class TestFallbacks:
 
 
 class TestOrphanTaskSweep:
-    """A one-shot task created by a spawner that was then killed outlives it and
-    can fire later against a stale spec. A live sibling always has its spec on
-    disk, so spec-absent is the one safe signal."""
+    """A spawner killed mid-launch leaves BOTH its task and its spec behind (the
+    teardown deletes the task first), so age is the predicate, not absence."""
 
-    def test_only_the_task_with_no_spec_on_disk_is_deleted(self, windows, monkeypatch):
+    def _seed(self, launch_dir: Path, token: str, age: float) -> list[Path]:
+        launch_dir.mkdir(parents=True, exist_ok=True)
+        written = []
+        for suffix in (".json", ".py", ".pid"):
+            path = launch_dir / f"{token}{suffix}"
+            path.write_text("{}", encoding="utf-8")
+            stamp = time.time() - age
+            os.utime(path, (stamp, stamp))
+            written.append(path)
+        return written
+
+    def test_a_spec_older_than_the_pid_deadline_takes_its_task_with_it(
+        self, windows, monkeypatch
+    ):
         launch_dir = windows / backend_launch.LAUNCH_DIR_NAME
-        launch_dir.mkdir()
-        live = "aaaaaaaa"
-        stale = "bbbbbbbb"
-        (launch_dir / f"{live}.json").write_text("{}", encoding="utf-8")
-        schtasks = FakeSchtasks(
-            existing=(
-                f"\\{backend_launch.TASK_PREFIX}{live}",
-                f"\\{backend_launch.TASK_PREFIX}{stale}",
-                "\\SomeoneElsesTask",
-            )
+        stale = self._seed(
+            launch_dir, "bbbbbbbb", backend_launch.STALE_SPEC_SECONDS + 30
         )
+        schtasks = FakeSchtasks()
         popen = FakePopen(deny_first_winerror=backend_launch._ACCESS_DENIED)
         launched = _spawn(popen, schtasks, monkeypatch)
 
         assert launched.rung == "scheduler"
-        deleted = schtasks.deleted
-        assert f"\\{backend_launch.TASK_PREFIX}{stale}" in deleted
-        assert f"\\{backend_launch.TASK_PREFIX}{live}" not in deleted
-        assert "\\SomeoneElsesTask" not in deleted
+        assert f"{backend_launch.TASK_PREFIX}bbbbbbbb" in schtasks.deleted
+        assert [path for path in stale if path.exists()] == []
 
-    def test_a_query_failure_never_stops_the_spawn(self, windows, monkeypatch):
-        class Refusing(FakeSchtasks):
-            def __call__(self, args):
-                if args[0] == "/Query":
-                    self.calls.append(list(args))
-                    return subprocess.CompletedProcess(args, 1, "", "denied")
-                return super().__call__(args)
-
+    def test_a_fresh_spec_belongs_to_a_live_sibling_and_is_untouched(
+        self, windows, monkeypatch
+    ):
+        launch_dir = windows / backend_launch.LAUNCH_DIR_NAME
+        live = self._seed(launch_dir, "aaaaaaaa", 1.0)
+        schtasks = FakeSchtasks()
         popen = FakePopen(deny_first_winerror=backend_launch._ACCESS_DENIED)
-        launched = _spawn(popen, Refusing(), monkeypatch)
+        _spawn(popen, schtasks, monkeypatch)
+
+        assert f"{backend_launch.TASK_PREFIX}aaaaaaaa" not in schtasks.deleted
+        assert all(path.exists() for path in live)
+
+    def test_a_clean_launch_dir_costs_no_schtasks_call(self, windows, monkeypatch):
+        # The normal case. A /Query here measured 0.85-0.89 s per cold start.
+        schtasks = FakeSchtasks()
+        popen = FakePopen(deny_first_winerror=backend_launch._ACCESS_DENIED)
+        _spawn(popen, schtasks, monkeypatch)
+
+        assert [call[0] for call in schtasks.calls] == ["/Create", "/Run", "/Delete"]
+
+    def test_an_unreadable_launch_dir_never_stops_the_spawn(self, windows, monkeypatch):
+        def explode(*_args, **_kwargs):
+            raise OSError("no")
+
+        monkeypatch.setattr(Path, "glob", explode)
+        popen = FakePopen(deny_first_winerror=backend_launch._ACCESS_DENIED)
+        launched = _spawn(popen, FakeSchtasks(), monkeypatch)
 
         assert launched.rung == "scheduler"
 

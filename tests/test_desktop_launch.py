@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import nodriver
 import psutil
 import pytest
 
@@ -297,7 +298,10 @@ def delegation(monkeypatch, tmp_path):
         started.append(config)
         return SimpleNamespace(_process=None, _process_pid=None)
 
-    monkeypatch.setattr(desktop_launch.uc, "start", fake_start)
+    # F-867: desktop_launch imports nodriver lazily now (the proxy reaches
+    # its schtasks seams and must not pay for a browser driver), so there is
+    # no module attribute to reach through — patch the library itself.
+    monkeypatch.setattr(nodriver, "start", fake_start)
     monkeypatch.setattr(
         desktop_launch,
         "_kill_delegated",
@@ -474,7 +478,10 @@ async def test_a_browser_we_could_not_attach_to_is_killed(delegation, monkeypatc
     async def exploding_start(config):
         raise RuntimeError("websocket handshake refused")
 
-    monkeypatch.setattr(desktop_launch.uc, "start", exploding_start)
+    # F-867: desktop_launch imports nodriver lazily now (the proxy reaches
+    # its schtasks seams and must not pay for a browser driver), so there is
+    # no module attribute to reach through — patch the library itself.
+    monkeypatch.setattr(nodriver, "start", exploding_start)
     with pytest.raises(RuntimeError):
         await desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
     # With the identity stamp the poll captured, so the kill can prove the pid

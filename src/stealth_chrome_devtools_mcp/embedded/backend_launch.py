@@ -60,8 +60,9 @@ kill a process GROUP, and the backend gets its own with ``start_new_session``.
      reads it) travel in a JSON spec beside the launcher, in the user-private
      state dir, deleted in a ``finally``. ``/TR`` truncates near 261 characters,
      so it carries only two paths (F-810's precedent) and the launcher addresses
-     its spec, pid and error files off its own path. A task orphaned by a killed
-     spawner is swept before the next one: same prefix, no spec on disk.
+     its spec, pid and error files off its own path. A spawner killed mid-launch
+     leaves its task AND its spec behind, so the next scheduler spawn deletes
+     any task whose spec is older than the pid deadline.
    * *The boot log and the pid.* A ``Popen`` stdout handle cannot cross the
      scheduler, so the launcher re-opens the rolled boot log itself and hands the
      backend's stdout AND stderr to it — F-303's property (an import-time crash
@@ -76,14 +77,13 @@ kill a process GROUP, and the backend gets its own with ``start_new_session``.
 
 A leaf: it imports ``backend_registry`` for the state dir and reaches
 ``desktop_launch`` lazily for the ONE ``schtasks`` seam, the ONE pid-file reader
-and the ONE task-teardown, so none of them gets a second home. The laziness is
-not about import cost — ``desktop_launch`` pulls in nodriver, and in the only
-production caller (the proxy) ``embedded/server.py`` has already imported
-``browser_manager``, so nodriver is loaded long before anything is spawned and
-the import is free. It is lazy so that a bare ``singleton`` import (tests, the
-herd harness) does not pay ~0.5 s for a module it may never reach. It never
-raises for a rung's own failure — only a genuine ``Popen`` error reaches the
-caller.
+and the ONE task-teardown, so none of them gets a second home. That reach used
+to cost the proxy a whole second of nodriver import for a browser it never
+launches — the stdio branch imports no ``browser_manager`` — so
+``desktop_launch`` now imports nodriver and requests inside the two delegation
+functions that use them, and reaching its seams costs ~175 ms warm (measured
+with ``-X importtime``; it was ~470 ms). It never raises for a rung's own
+failure — only a genuine ``Popen`` error reaches the caller.
 """
 
 from __future__ import annotations
@@ -115,6 +115,10 @@ TASK_PREFIX = "stealth-mcp-backend-"
 # interpreter start all fit inside it.
 PID_READY_TIMEOUT = 20.0
 POLL_INTERVAL = 0.1
+# A spec older than this cannot belong to a spawn still waiting for its pid, so
+# whatever task it names was orphaned. Twice the deadline, because the age is
+# read against a wall clock and the spawn it belongs to may have started late.
+STALE_SPEC_SECONDS = 2 * PID_READY_TIMEOUT
 # schtasks truncates /TR around this many characters.
 TR_MAX_CHARS = 261
 # How long to wait for a discarded partial-breakaway child to actually die.
@@ -135,6 +139,9 @@ _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 _DETACHED_FLAGS = _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
 _ACCESS_DENIED = 5
+# One launcher's worth of scratch, named off its token. ``.tmp`` is the pid's
+# pre-rename form; it exists only for the instant ``os.replace`` needs.
+_SCRATCH_SUFFIXES = (".py", ".json", ".pid", ".err", ".tmp")
 
 # stdlib only: the intermediary is a bare pythonw and must not import the
 # package it is about to start. Everything it needs is in the spec beside it.
@@ -164,7 +171,8 @@ try:
             env=spec["env"],
             # A scheduled task starts in system32. The backend reads the working
             # directory (clone_storage's last-resort clone seed), so it has to be
-            # the spawner's, exactly as it is on every other rung.
+            # the spawner's, exactly as it is on every other rung. None means the
+            # spawner could not read its own, which is what Popen does anyway.
             cwd=spec["cwd"],
             close_fds=True,
             creationflags=(
@@ -213,17 +221,14 @@ def spawn(cmd: list[str], env: dict[str, str], boot_log: Path | None) -> Launche
     for life — or ``None`` when no log dir was writable, in which case output
     goes to ``DEVNULL`` exactly as it did before M3.
     """
-    # Captured here, not in the launcher: every rung but the scheduler's
-    # inherits it, so the scheduler has to be told what the others get for free.
-    cwd = str(Path.cwd())
     if sys.platform != "win32":
         posix = _popen(cmd, env, boot_log, start_new_session=True)
         return Launched(posix.pid, "posix")
-    return _spawn_windows(cmd, env, boot_log, cwd)
+    return _spawn_windows(cmd, env, boot_log)
 
 
 def _spawn_windows(
-    cmd: list[str], env: dict[str, str], boot_log: Path | None, cwd: str
+    cmd: list[str], env: dict[str, str], boot_log: Path | None
 ) -> Launched:
     """The three rungs, in order. Only rung 1 can raise, and only for a spawn
     failure that is NOT the client's job refusing to let go."""
@@ -269,7 +274,7 @@ def _spawn_windows(
         _discard(partial)
 
     if plan is not None:
-        pid = _scheduler_spawn(plan, cmd, env, boot_log, cwd)
+        pid = _scheduler_spawn(plan, cmd, env, boot_log)
         if pid is not None:
             _log_rung("scheduler", pid)
             return Launched(pid, "scheduler")
@@ -481,7 +486,29 @@ def _intermediary_interpreter(interpreter: str) -> Path | None:
     return candidate
 
 
-def _spec(cmd: list[str], env: dict[str, str], boot_log: Path | None, cwd: str) -> str:
+def _spawner_cwd() -> str | None:
+    """The directory the backend should start in, or ``None`` if it cannot be
+    read.
+
+    Only the scheduler rung asks: every other rung inherits the spawner's
+    working directory for free, and a scheduled task would otherwise start in
+    system32 — which ``clone_storage``'s last-resort clone seed would then read.
+    Asked HERE and not in ``spawn`` so a deleted working directory cannot fail a
+    POSIX or plain spawn that never needed to know it.
+    """
+    try:
+        return str(Path.cwd())
+    except OSError:
+        _logger.debug(
+            "F-867: the working directory could not be read; the scheduled "
+            "backend will start wherever the task runs"
+        )
+        return None
+
+
+def _spec(
+    cmd: list[str], env: dict[str, str], boot_log: Path | None, cwd: str | None
+) -> str:
     """The launcher's whole input: argv, the ENTIRE child env, the boot log and
     the working directory a scheduled task would otherwise not have."""
     return json.dumps(
@@ -529,34 +556,44 @@ def _sweep_orphan_tasks(launch_dir: Path) -> None:
 
     A one-shot task created between ``/Create`` and ``/Delete`` outlives the
     process that made it, and ``/SC ONCE /ST 00:00`` means it can fire later
-    against a stale spec. A live sibling spawn always has its ``<token>.json``
-    on disk, so a task whose spec is ABSENT is the only kind that is safe — and
-    necessary — to remove. Best effort throughout: this is hygiene running in
-    front of a spawn, so it may never raise and never delay one loudly.
+    against a stale spec. That spawner leaves its spec behind TOO — the teardown
+    deletes the task before the files — so the orphan is recognised by AGE, not
+    by absence: a spec older than the pid deadline cannot belong to a spawn that
+    is still waiting, while a live sibling's is seconds old and is never touched.
+
+    Reading the directory instead of asking the scheduler is also what keeps
+    this free. The normal case is an empty dir and ZERO ``schtasks`` calls, where
+    a ``/Query`` cost 0.85-0.89 s on every cold start. Best effort throughout —
+    hygiene in front of a spawn may never raise and never delay one.
     """
     from stealth_chrome_devtools_mcp.embedded import desktop_launch
 
     try:
-        listed = desktop_launch._schtasks(["/Query", "/FO", "CSV", "/NH"])
-    except (OSError, subprocess.SubprocessError):
-        _logger.debug("F-867: could not list scheduled tasks to sweep", exc_info=True)
+        specs = sorted(launch_dir.glob("*.json"))
+    except OSError:
+        _logger.debug("F-867: could not read the launch dir to sweep", exc_info=True)
         return
-    if listed.returncode != 0:
-        _logger.debug(
-            "F-867: schtasks /Query exited %s; skipping the orphan sweep",
-            listed.returncode,
-        )
-        return
-    for line in listed.stdout.splitlines():
-        name = line.split(",")[0].strip().strip('"')
-        leaf = name.rsplit("\\", 1)[-1]
-        if not leaf.startswith(TASK_PREFIX):
+    now = time.time()
+    for spec in specs:
+        try:
+            age = now - spec.stat().st_mtime
+        except OSError:
             continue
-        if (launch_dir / f"{leaf[len(TASK_PREFIX) :]}.json").exists():
-            continue  # a sibling spawn is using it right now
-        _logger.debug("F-867: deleting the orphaned backend-launch task %s", name)
-        with suppress(OSError, subprocess.SubprocessError):
-            desktop_launch._schtasks(["/Delete", "/F", "/TN", name])
+        if age < STALE_SPEC_SECONDS:
+            continue  # a sibling spawn is still waiting on this one
+        token = spec.stem
+        _logger.debug(
+            "F-867: reaping the orphaned backend-launch task for %s (its spec is "
+            "%.0fs old, past the %.0fs pid deadline)",
+            token,
+            age,
+            STALE_SPEC_SECONDS,
+        )
+        base = launch_dir / token
+        desktop_launch._cleanup(
+            f"{TASK_PREFIX}{token}",
+            *(base.with_suffix(suffix) for suffix in _SCRATCH_SUFFIXES),
+        )
 
 
 def _scheduler_spawn(
@@ -564,7 +601,6 @@ def _scheduler_spawn(
     cmd: list[str],
     env: dict[str, str],
     boot_log: Path | None,
-    cwd: str,
 ) -> int | None:
     """Create the backend through a one-shot scheduled task, or ``None`` to fall
     through to the plain spawn.
@@ -575,15 +611,14 @@ def _scheduler_spawn(
     task_name = f"{TASK_PREFIX}{plan.token}"
     launch_dir = _launch_dir()
     base = launch_dir / plan.token
-    suffixes = (".py", ".json", ".pid", ".err", ".tmp")
-    scratch = [base.with_suffix(suffix) for suffix in suffixes]
+    scratch = [base.with_suffix(suffix) for suffix in _SCRATCH_SUFFIXES]
 
     try:
         launch_dir.mkdir(parents=True, exist_ok=True)
         _sweep_orphan_tasks(launch_dir)
         base.with_suffix(".py").write_text(_LAUNCHER_SCRIPT, encoding="utf-8")
         base.with_suffix(".json").write_text(
-            _spec(cmd, env, boot_log, cwd), encoding="utf-8"
+            _spec(cmd, env, boot_log, _spawner_cwd()), encoding="utf-8"
         )
         return _run_task(
             task_name, plan.command, base.with_suffix(".pid"), base.with_suffix(".err")
