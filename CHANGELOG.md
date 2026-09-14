@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.4
 
 ### Fixed — the backend is spawned on the real interpreter, not the venv redirector (F-866)
 
