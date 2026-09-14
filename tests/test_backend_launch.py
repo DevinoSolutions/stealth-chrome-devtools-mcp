@@ -110,7 +110,20 @@ class FakeSchtasks:
 
 @pytest.fixture()
 def windows(tmp_path, monkeypatch):
-    """A Windows spawn whose every seam is a double, on any host OS."""
+    """A Windows spawn with every seam doubled.
+
+    Windows-only, and the skip is the point rather than a shortcut: these tests
+    assert the RUNGS, and a rung is a sequence of Win32 behaviours — a Job Object
+    refusing ``CREATE_BREAKAWAY_FROM_JOB`` with winerror 5, a scheduled task, a
+    ``/TR`` the scheduler truncates. ``sys.platform`` can be monkeypatched but
+    ``OSError.winerror`` cannot: on POSIX the fourth ``OSError`` argument is
+    dropped, so the refusal a double raises has no winerror, the leaf correctly
+    reads it as a real spawn failure and re-raises, and the test asserts a
+    Windows path on a platform that never runs one. What DOES run everywhere is
+    below: the POSIX branch, the interpreter choice, and the handle-less probe.
+    """
+    if sys.platform != "win32":
+        pytest.skip("Windows Job Object / Task Scheduler rungs (F-867)")
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(backend_registry, "STATE_DIR", tmp_path)
     monkeypatch.setattr(backend_launch, "_same_session_as_console", lambda: True)
@@ -630,7 +643,8 @@ class TestIntermediaryInterpreter:
 
 
 @pytest.mark.skipif(
-    sys.platform != "win32", reason="the launcher's creationflags are Windows-only"
+    sys.platform != "win32",
+    reason="the launcher asks for DETACHED_PROCESS, which only exists on Windows",
 )
 class TestTheLauncherScriptItself:
     """Run the real ``_LAUNCHER_SCRIPT`` against a real spec, with this
