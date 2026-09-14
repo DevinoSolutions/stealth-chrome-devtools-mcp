@@ -300,28 +300,61 @@ re-point `singleton.subprocess.Popen` → `subprocess.Popen` because `singleton`
 imports `subprocess`. F-866's real-process pin still passes, now via rung 2, with
 `children() == []`.
 
-### 6.4 Not measured yet
+**The one red on that gate run was a Windows-only-verification gap, the second on this
+branch.** `34842210967` was red ONLY on the POSIX unit and coverage cells, and only in
+`tests/test_backend_launch.py`: the rung tests are about Windows behaviour and ran on
+Linux and macOS, where a faked `winerror=5` cannot exist. They are being made
+Windows-only — a test-only change, no product code. The reason it reached CI at all is
+structural and worth naming: F-867's own escape pin is Windows-only, so the leaf's unit
+tests were never exercised on POSIX locally, and a Windows-green local run said nothing
+about them. This is the same shape as the earlier gap on this branch, and the standing
+lesson holds — all-POSIX-red with Windows-green is platform divergence, not flake.
 
-<!-- TODO(F-867 CI): read the rung that served from each Windows gate cell's log (the `stealth.proxy` INFO line, surfaced in the pytest warnings summary) and record it here. If the runner's service account has no console session the pin SKIPS and rung `plain` serves, in which case CI is not protected and the follow-up in §6.5 applies. -->
+### 6.4 What CI measured, and what is still a prediction
 
-<!-- TODO(F-867 herd): re-measure the Windows herd rate over the next N gate runs and record it against F-859 §12.4's ~9 %/cell (Windows 5/54 on 2026-09-12; Linux+macOS 0/81). Expected 0 % on cells where the scheduler rung serves. NOT asserted. -->
+**Which rung serves on CI: read, and it is `scheduler`.** PR #100's first gate run
+(`34842210967`, head `07f11a9`, 2026-09-14 12:13 UTC) ran the escape pin on all three
+Windows unit cells — py3.11, py3.12, py3.13, runner root `D:\a\…` — and every one of
+them PASSED and emitted, for both the `close_handle` and `terminate_job`
+parametrizations:
 
-Neither number exists yet. What this change has is a mechanism that **explains** the
-Windows-only herd rate and a pin that **proves** the backend now survives the client's
-job on a machine with a console session. It does not prove the herd rate fell; that is a
-prediction, to be re-measured over the next gate runs.
+```
+UserWarning: F-867 pin: backend escaped the client job via rung 'scheduler'
+```
+
+Two things follow, and the first was genuinely open until now. GitHub-hosted Windows
+runners DO have a logged-on console session, so `_same_session_as_console` passes and
+the scheduler rung is available there; the pin did NOT skip, which means these cells
+verify the fix rather than merely failing to contradict it. §6.5's worry about a service
+account with no console session, and the harness-side `BREAKAWAY_OK` follow-up it
+proposed, do not apply to this runner image. Rung `breakaway` served nowhere: the
+runner's client job, like the SDK's, does not permit it.
+
+**The Windows cells are green.** `gate / transport (Windows/X64)`, the twelve-session
+herd cell, passed in 4m58s; `integration (Windows/X64)` in 12m57s; `coverage
+(Windows/X64)` passed.
+
+**The herd RATE is still a prediction.** One green run is a data point, not a rate.
+F-859 §12.4's baseline is Windows herd cells 5/54 (2026-09-12) against Linux+macOS
+0/81, and a ~9 %/cell failure mode is not disproved by a single pass — expected 0 %,
+to be re-measured over the next N gate runs.
+<!-- TODO(F-867 herd): record the Windows herd rate over the N gate runs after 2.1.5 against the 5/54 baseline. Expected 0 % where the scheduler rung serves. Still NOT asserted; 34842210967 is one run. -->
+
+So: a mechanism that **explains** the Windows-only herd rate, a pin that **proves** the
+backend survives the client's job on three CI cells and locally, and a rate that remains
+unmeasured.
 
 ### 6.5 What is NOT fixed
 
 * **A spawner outside the console session.** SSH, a Windows service, session 0, and some
   RDP layouts fall to `plain` (or `breakaway-partial`, if the client's job allowed a
-  partial escape) and remain exposed as before. This is deliberate: the
-  alternative is moving the backend to a desktop the caller did not ask for. If a CI
-  runner is such an environment, the Windows gate cell is not protected by this change
-  and its herd rate should be expected to stay where it was; a legitimate follow-up is
-  for the herd HARNESS — which is the client in that scenario — to build its job with
-  `BREAKAWAY_OK`, which rung 1 would then take for free. Not done here; it would widen
-  this change into the test harness.
+  partial escape) and remain exposed as before. This is deliberate: the alternative is
+  moving the backend to a desktop the caller did not ask for. This section previously
+  worried that CI was such an environment and proposed a harness-side `BREAKAWAY_OK`
+  follow-up; §6.4 measured it and the worry does not apply — GitHub-hosted Windows
+  runners have a logged-on console session and the scheduler rung serves there. The
+  follow-up is therefore NOT needed, and the exposure is limited to real
+  non-console-session hosts.
 * **Claude Code's own node client** was never captured using a job or naming its tree
   flags. The Python SDK case is the proven one; §3's local mass-disconnect observation
   remains consistent-with, not proven.

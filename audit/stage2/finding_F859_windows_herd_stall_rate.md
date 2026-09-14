@@ -649,9 +649,16 @@ Three things this section must NOT be read as saying:
   0 % on cells where the scheduler rung serves, because §13's mechanism is exactly what
   that rung removes. Expected is not measured. The baseline to beat is §12.4's: Windows
   herd cells 5/54 on 2026-09-12, Linux+macOS 0/81. Re-measure over the next N gate runs
-  before this section claims anything.
-* **Which rung serves on the CI Windows cell is unread.** The pin emits the rung as a
-  pytest warning, so every cell's log names it; nobody has read one yet.
+  before this section claims anything: the one post-fix Windows herd cell (run
+  34842210967, 4m58s, green) is a data point against a ~9 %/cell failure mode, which is
+  exactly the rate at which a single pass proves nothing.
+* **Which rung serves on the CI Windows cell: read, and it is `scheduler`.** PR #100's
+  first gate run (`34842210967`, head `07f11a9`, 2026-09-14 12:13 UTC) passed the F-867
+  escape pin on all three Windows unit cells, each emitting `F-867 pin: backend escaped
+  the client job via rung 'scheduler'` for both session-end paths. The pin did not skip,
+  so GitHub-hosted Windows runners do have a logged-on console session and this cell IS
+  protected — the "service account with no console session" worry in F-867 §6.5 does not
+  apply to this runner image. `gate / transport (Windows/X64)` passed in 4m58s.
 * **The local herd time after the fix, measured.** The herd is not just a gate here,
   it is the instrument: a 50-session run on 2026-09-14 is what caught `schtasks`
   silently truncating `/TR` at 253 characters, because the only symptom was the herd
@@ -662,11 +669,9 @@ Three things this section must NOT be read as saying:
   ≈ 11 s pre-F-867 local baseline, so the scheduler round trip costs the herd nothing
   it can measure. One run; not a rate.
 
-  <!-- TODO(F-859 §13.1): record the rung served on `gate / transport (Windows/X64)` from a
-  gate log, and the Windows herd rate over the N runs after 2.1.5. If the runner's service
-  account has no logged-on console session the pin SKIPS, rung `plain` serves, and this cell
-  is NOT protected — in which case the rate here should be expected to stay at ~9 % and the
-  harness-side follow-up in F-867 §6.5 is the remedy. -->
+  <!-- TODO(F-859 §13.1): record the Windows herd rate over the N gate runs after 2.1.5
+  against the 5/54 baseline. The rung question is now settled (`scheduler`, run
+  34842210967); this is the rate only, and 34842210967 is a single green run. -->
 * **This closes only the mid-flight death shape.** §7.3's readiness-gate starvation and the
   §7.4 `MAX_STRETCH` decision are a different failure and remain the maintainer's call; a
   red that is a genuine STALL is still a stall.

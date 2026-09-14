@@ -67,7 +67,12 @@ F-859 measured (~9 % per cell) is *expected* to fall to zero on cells where the
 scheduler rung serves; that is a prediction to be re-measured over the next gate
 runs, not a result.
 
-<!-- TODO(F-867 CI): name the rung that actually served on each CI Windows cell, read from a gate log, and the herd rate measured after this shipped. -->
+Measured on CI (gate run 34842210967, 2026-09-14): the escape pin passed on all three
+Windows unit cells and named rung `scheduler` on each, for both the handle-close and
+the `TerminateJobObject` session ends. GitHub-hosted Windows runners do have a
+logged-on console session, so the pin did not skip and the fix is verified there, not
+merely unfalsified. The Windows herd cell passed in 4m58s. That is one green run, not a
+rate.
 
 Full write-up: `audit/stage2/finding_F867_backend_inherits_the_clients_job_object.md`.
 
