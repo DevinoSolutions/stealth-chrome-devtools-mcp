@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import os
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -381,26 +380,25 @@ def _start_server_process(port: int):
 
     # F-303/F-503: stdout/stderr used to be DEVNULL, hiding every backend
     # crash - an import-time crash dies before configure_logging installs
-    # itself, so only a raw Popen redirect captures it. stdin stays DEVNULL.
-    from stealth_chrome_devtools_mcp.embedded import logging_setup
+    # itself, so only a raw redirect of the child's handles captures it.
+    from stealth_chrome_devtools_mcp.embedded import backend_launch, logging_setup
 
     boot_log = None
     try:
         log_dir = logging_setup.resolve_log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         # F-830: the launcher is the ONLY place this file can be rotated - once
-        # Popen inherits the fd, the child pins it for life (see roll_boot_log).
-        boot_log = logging_setup.roll_boot_log(log_dir).open("a", encoding="utf-8")
+        # a child inherits the fd, it pins it for life (see roll_boot_log).
+        boot_log = logging_setup.roll_boot_log(log_dir)
     except OSError:
         # Fail-open (plan_M3 §7: "M3's file setup is fail-open"): a log dir
-        # that can't be created/opened must never block the backend from
-        # spawning - fall back to the pre-M3 DEVNULL redirect instead.
+        # that can't be created must never block the backend from spawning -
+        # fall back to the pre-M3 DEVNULL redirect instead.
         _logger.warning(
             "backend-boot.log unavailable; falling back to DEVNULL", exc_info=True
         )
         boot_log = None
 
-    stdout_target = boot_log if boot_log is not None else subprocess.DEVNULL
     # A spawned backend must always own its lifecycle (reap its own orphaned
     # browsers on init) even when the CLI-invoking parent set this to skip
     # its own recovery-on-import (cli.py's os.environ.setdefault).
@@ -411,29 +409,16 @@ def _start_server_process(port: int):
         # to find ``pyvenv.cfg``, then CPython drops it from the environment before
         # any code runs, so the backend's Chrome children never inherit it.
         child_env["__PYVENV_LAUNCHER__"] = sys.executable
-    kwargs: dict = {
-        "stdout": stdout_target,
-        "stderr": stdout_target,
-        "stdin": subprocess.DEVNULL,
-        "env": child_env,
-    }
 
-    if sys.platform == "win32":
-        kwargs["creationflags"] = (
-            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-    else:
-        kwargs["start_new_session"] = True
-
-    try:
-        proc = subprocess.Popen(cmd, **kwargs)
-    finally:
-        if boot_log is not None:
-            boot_log.close()
+    # F-867: HOW the process is created is backend_launch's one job - the client
+    # job this proxy sits in must not be inherited by the backend every other
+    # session shares. The reuse gate, adoption order and cold-start lock stay
+    # here; only the spawn moved.
+    launched = backend_launch.spawn(cmd, child_env, boot_log)
 
     _ensure_state_dir()
     PORT_FILE.write_text(str(port))
-    _write_server_state(port, _server_version(), proc.pid, _source_fingerprint())
+    _write_server_state(port, _server_version(), launched.pid, _source_fingerprint())
 
 
 def _wait_for_server(port: int, timeout: int = STARTUP_TIMEOUT) -> bool:

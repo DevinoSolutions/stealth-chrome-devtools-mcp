@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import socket
+import subprocess
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
@@ -365,9 +366,7 @@ class TestServerStatePersistence:
         monkeypatch.setattr(singleton, "_source_fingerprint", lambda: "test-fp")
         fake_proc = MagicMock()
         fake_proc.pid = 4242
-        monkeypatch.setattr(
-            singleton.subprocess, "Popen", MagicMock(return_value=fake_proc)
-        )
+        monkeypatch.setattr(subprocess, "Popen", MagicMock(return_value=fake_proc))
 
         singleton._start_server_process(4321)
 

@@ -30,6 +30,7 @@ so no test reads or writes the real state file either.
 
 import logging
 import socket
+import subprocess
 import threading
 from unittest.mock import MagicMock
 
@@ -231,7 +232,7 @@ class TestStartServerProcessRecordsSelectedPort:
             fake_proc = MagicMock()
             fake_proc.pid = 4242
             captured_popen = MagicMock(return_value=fake_proc)
-            monkeypatch.setattr(singleton.subprocess, "Popen", captured_popen)
+            monkeypatch.setattr(subprocess, "Popen", captured_popen)
 
             singleton._start_server_process(fallback)
 
@@ -372,7 +373,7 @@ class TestForbiddenFallbackReachesTheSpawn:
         fake_proc = MagicMock()
         fake_proc.pid = 4242
         captured_popen = MagicMock(return_value=fake_proc)
-        monkeypatch.setattr(singleton.subprocess, "Popen", captured_popen)
+        monkeypatch.setattr(subprocess, "Popen", captured_popen)
 
         singleton._start_server_process(fallback)
 

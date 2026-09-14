@@ -207,7 +207,7 @@ class TestSpawnEnvScrub:
         fake_proc = MagicMock()
         fake_proc.pid = 4242
         captured = MagicMock(return_value=fake_proc)
-        monkeypatch.setattr(singleton.subprocess, "Popen", captured)
+        monkeypatch.setattr(subprocess, "Popen", captured)
 
         singleton._start_server_process(4321)
 
@@ -228,7 +228,7 @@ class TestSpawnEnvScrub:
         fake_proc = MagicMock()
         fake_proc.pid = 4242
         captured = MagicMock(return_value=fake_proc)
-        monkeypatch.setattr(singleton.subprocess, "Popen", captured)
+        monkeypatch.setattr(subprocess, "Popen", captured)
 
         singleton._start_server_process(4321)
 

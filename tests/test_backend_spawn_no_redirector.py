@@ -48,7 +48,7 @@ from unittest.mock import MagicMock
 import psutil
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import backend_launch, singleton
 
 _REDIRECTOR = sys.platform == "win32" and os.path.normcase(
     getattr(sys, "_base_executable", sys.executable)
@@ -101,7 +101,7 @@ def test_the_child_env_names_the_venv_exactly_when_the_redirector_is_bypassed(
     fake_proc = MagicMock()
     fake_proc.pid = 4242
     popen_mock = MagicMock(return_value=fake_proc)
-    monkeypatch.setattr(singleton.subprocess, "Popen", popen_mock)
+    monkeypatch.setattr(subprocess, "Popen", popen_mock)
     monkeypatch.setattr(singleton, "_write_server_state", lambda *a, **k: None)
 
     singleton._start_server_process(4321)
@@ -113,9 +113,12 @@ def test_the_child_env_names_the_venv_exactly_when_the_redirector_is_bypassed(
     else:
         assert "__PYVENV_LAUNCHER__" not in env
     # Unchanged from before F-866: still detached, still in its own group.
+    # F-867 added the breakaway flag to the first attempt (backend_launch).
     if sys.platform == "win32":
         assert kwargs["creationflags"] == (
-            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+            | backend_launch._CREATE_BREAKAWAY_FROM_JOB
         )
     else:
         assert kwargs["start_new_session"] is True
