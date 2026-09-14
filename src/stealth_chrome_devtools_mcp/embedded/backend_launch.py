@@ -58,9 +58,10 @@ kill a process GROUP, and the backend gets its own with ``start_new_session``.
      it, nothing hand-picked — plus the argv, the boot-log path and the
      spawner's working directory (``clone_storage``'s last-resort clone seed
      reads it) travel in a JSON spec beside the launcher, in the user-private
-     state dir, deleted in a ``finally``. ``/TR`` truncates near 261 characters,
-     so it carries only two paths (F-810's precedent) and the launcher addresses
-     its spec, pid and error files off its own path. A spawner killed mid-launch
+     state dir, deleted in a ``finally``. ``/TR`` is stored truncated at 253
+     characters — measured, see ``TR_MAX_CHARS`` — so it carries only two paths
+     (F-810's precedent), the token is short, and the launcher addresses its
+     spec, pid and error files off its own path. A spawner killed mid-launch
      leaves its task AND its spec behind, so the next scheduler spawn deletes
      any task whose spec is older than the pid deadline.
    * *The boot log and the pid.* A ``Popen`` stdout handle cannot cross the
@@ -119,8 +120,17 @@ POLL_INTERVAL = 0.1
 # whatever task it names was orphaned. Twice the deadline, because the age is
 # read against a wall clock and the spawn it belongs to may have started late.
 STALE_SPEC_SECONDS = 2 * PID_READY_TIMEOUT
-# schtasks truncates /TR around this many characters.
-TR_MAX_CHARS = 261
+# The longest /TR schtasks STORES. Measured, not documented: on Windows 11
+# 10.0.26200 (2026-09-14) a 255-character command came back from /Create with
+# exit 0 and was stored as its first 253 characters — the launcher path's
+# trailing `y"` cut off — so the task ran pythonw against `….p`, Last Result 2
+# (ERROR_FILE_NOT_FOUND), and every session in the startup herd waited out the
+# 20 s pid deadline before falling to the plain rung. A command past this is a
+# rung boundary, never something to send and hope.
+TR_MAX_CHARS = 253
+# Length of a per-attempt token. Every character here costs four against the
+# /TR budget (the task name is not in /TR, but the script path is).
+TOKEN_CHARS = 12
 # How long to wait for a discarded partial-breakaway child to actually die.
 # Bounded: a spawn must not hang on a teardown that is only tidiness.
 DISCARD_WAIT_SECONDS = 5.0
@@ -538,7 +548,11 @@ def _scheduler_plan(interpreter_of: str) -> _SchedulerPlan | None:
             interpreter_of,
         )
         return None
-    token = uuid.uuid4().hex
+    # 12 hex characters, not 32: the token appears in the task name, the five
+    # scratch file names and — the one that matters — the /TR command, which has
+    # 253 characters to fit two absolute paths into. 48 bits per attempt is
+    # ample for a name that lives for one spawn.
+    token = uuid.uuid4().hex[:TOKEN_CHARS]
     command = f'"{interpreter}" "{_launch_dir() / token}.py"'
     if len(command) > TR_MAX_CHARS:
         _logger.warning(

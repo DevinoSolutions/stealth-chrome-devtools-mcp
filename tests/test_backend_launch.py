@@ -388,8 +388,9 @@ class TestFallbacks:
         assert "boom in the launcher" in caplog.text
 
     def test_a_command_past_the_tr_cap_falls_back(self, windows, monkeypatch, caplog):
-        # schtasks truncates /TR near 261 characters; a truncated command would
-        # start nothing at all, so the cap is a rung boundary, not a warning.
+        # schtasks STORES only the first 253 characters of /TR and still exits 0;
+        # a truncated command starts nothing at all, so the cap is a rung
+        # boundary, not a warning.
         monkeypatch.setattr(backend_launch, "TR_MAX_CHARS", 10)
         schtasks = FakeSchtasks()
         with caplog.at_level(logging.WARNING, logger="stealth.proxy"):
@@ -423,6 +424,60 @@ class TestFallbacks:
         assert launched.rung == "plain"
         assert schtasks.calls == []
         assert "F-866" in caplog.text
+
+
+def _launch_dir_for(command_length: int) -> Path:
+    """A launch dir whose /TR command comes out exactly *command_length* long.
+
+    Built by search rather than arithmetic so a miscounted quote shows up as a
+    failure to construct the case, not as a test that quietly checks the wrong
+    length.
+    """
+    interpreter = Path(_PYTHONW)
+    for pad in range(1, 400):
+        candidate = Path("C:/" + "d" * pad)
+        token = "a" * backend_launch.TOKEN_CHARS
+        if len(f'"{interpreter}" "{candidate / token}.py"') == command_length:
+            return candidate
+    raise AssertionError(f"no launch dir gives a {command_length}-char command")
+
+
+class TestTheStoredCommandLengthCap:
+    """253 is what schtasks STORES, measured on Windows 11 10.0.26200: a
+    255-character command was accepted (/Create exit 0) and stored as its first
+    253 characters, so the task ran pythonw against a truncated path and every
+    herd session waited out the pid deadline."""
+
+    def test_a_command_of_exactly_the_cap_is_accepted(self, windows, monkeypatch):
+        monkeypatch.setattr(
+            backend_launch,
+            "_launch_dir",
+            lambda: _launch_dir_for(backend_launch.TR_MAX_CHARS),
+        )
+        plan = backend_launch._scheduler_plan(_PYTHONW)
+
+        assert plan is not None
+        assert len(plan.command) == backend_launch.TR_MAX_CHARS
+
+    def test_one_character_more_is_refused(self, windows, monkeypatch, caplog):
+        over = backend_launch.TR_MAX_CHARS + 1
+        monkeypatch.setattr(
+            backend_launch, "_launch_dir", lambda: _launch_dir_for(over)
+        )
+        with caplog.at_level(logging.WARNING, logger="stealth.proxy"):
+            assert backend_launch._scheduler_plan(_PYTHONW) is None
+
+        assert str(over) in caplog.text
+        assert str(backend_launch.TR_MAX_CHARS) in caplog.text
+
+    def test_the_real_state_dir_leaves_room(self, windows, monkeypatch):
+        # The shipped layout, not a constructed one: ~/.stealth-mcp with a
+        # 12-character token has to fit, or the scheduler rung never runs.
+        monkeypatch.setattr(backend_registry, "STATE_DIR", Path.home() / ".stealth-mcp")
+        plan = backend_launch._scheduler_plan(_PYTHONW)
+
+        assert plan is not None
+        assert len(plan.command) <= backend_launch.TR_MAX_CHARS
 
 
 class TestOrphanTaskSweep:
