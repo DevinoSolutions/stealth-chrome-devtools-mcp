@@ -77,7 +77,7 @@ All under `logging_setup.resolve_log_dir()` — `~/.stealth-mcp/logs` unless
 | File | What |
 |---|---|
 | `backend-<pid>.log` | the running backend's own rotating log (5 MB × 3) |
-| `backend-boot.log` | the parent's raw redirect of the child's stdout/stderr — **look here first** if the backend never reached `status`, because a crash *before* `main()` (bad import, bad env) lands here and nowhere else |
+| `backend-boot.log` | the raw redirect of the child's stdout/stderr, opened by whoever launched it — **look here first** if the backend never reached `status`, because a crash *before* `main()` (bad import, bad env) lands here and nowhere else |
 | `proxy-<pid>.log` | one per stdio proxy (a client connection) |
 
 Each backend log line carries a `[correlation_id]` tying one MCP request's lines
@@ -98,10 +98,38 @@ the whole directory while no backend runs costs you nothing but a cold start.
 | `singleton.lock` | the cold-start mutex; an empty file that persists between runs |
 | `browser_pids.json` | the **browser-pid registry**: which browser processes are tracked, and which backend owns each one (`owner_pid`, `owner_create_time`) |
 | `browser_pids.json.lock` | the sibling lock every writer of `browser_pids.json` takes so two backends cannot clobber each other's entries; empty and persistent, like `singleton.lock` |
+| `backend-launch/` | scratch for a Windows cold start's scheduler rung (F-867) — see below. Empty between spawns |
 | `logs/` | see "Where the logs are" above |
 
 Anything else in the directory is a leftover. Nothing in `src/` writes or reads a
 `.bak` file, so delete any you find.
+
+### How the backend is launched, and what it leaves behind (F-867)
+
+On Windows the cold start tries three ways to create the backend **outside** the MCP
+client's Job Object, and the spawning proxy's log names the one that served: grep
+`proxy-<pid>.log` for `backend spawned via the … rung`. `breakaway` and `scheduler`
+mean the backend outlives the session that started it. A **WARNING naming F-867**
+means a fallback — `breakaway-partial` and `plain` leave the backend inside the
+client's job, so it dies when that one session ends. The usual cause is a spawner
+outside the logged-on console session (SSH, a service, session 0, some RDP layouts);
+the plain rung there is deliberate, because the alternative is moving the backend to
+a desktop nobody asked for. POSIX logs rung `posix` and never needed any of this.
+
+The scheduler rung is visible only while it runs:
+
+- a one-shot task `stealth-mcp-backend-<token>`, where `<token>` is 12 hex characters,
+  created and deleted inside a single cold start;
+- `backend-launch/`, holding `<token>.py`, `.json`, `.pid` and `.err` during a launch
+  and nothing between spawns. The `.json` carries the backend's **entire
+  environment**, which is why the directory is user-private; `<token>.err` is where a
+  launch that produced no backend log at all explains itself.
+
+A leftover task and spec sharing a token mean the spawner was killed mid-launch. The
+next scheduler spawn sweeps them — it deletes the task by name for every spec older
+than twice the 20 s pid deadline, so a live sibling spawn is never caught — or clear
+them yourself with `schtasks /Delete /F /TN stealth-mcp-backend-<token>` and delete
+`backend-launch/<token>.*`.
 
 ---
 

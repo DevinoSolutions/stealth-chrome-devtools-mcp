@@ -631,3 +631,42 @@ session closes while siblings are still in flight. The §7.4 `MAX_STRETCH` quest
 now moot for this shape: it is not a stall.
 
 Attempt 2 (a full rerun, per §12.5) was green and published 2.1.4.
+
+### 13.1 F-867 is fixed in 2.1.5 — the rate must be RE-MEASURED, not assumed (2026-09-14)
+
+`embedded/backend_launch.py` (branch `fix/f867-backend-escapes-client-job`) now creates the
+backend outside every caller job: `CREATE_BREAKAWAY_FROM_JOB` when the client's job allows
+it, otherwise a one-shot Task Scheduler task (the F-810 intermediary), otherwise today's
+detached spawn. The scheduler rung is gated on the spawning process already being in the
+logged-on console session, so it protects real user machines and interactive runners.
+`tests/test_backend_escapes_client_job.py` is RED before the change and GREEN after, on
+rung `scheduler`, for both the `TerminateJobObject` and the handle-close session ends. See
+F-867 §6.
+
+Three things this section must NOT be read as saying:
+
+* **The ~9 %/cell Windows rate is not yet known to have fallen.** It is *expected* to reach
+  0 % on cells where the scheduler rung serves, because §13's mechanism is exactly what
+  that rung removes. Expected is not measured. The baseline to beat is §12.4's: Windows
+  herd cells 5/54 on 2026-09-12, Linux+macOS 0/81. Re-measure over the next N gate runs
+  before this section claims anything.
+* **Which rung serves on the CI Windows cell is unread.** The pin emits the rung as a
+  pytest warning, so every cell's log names it; nobody has read one yet.
+* **The local herd time after the fix, measured.** The herd is not just a gate here,
+  it is the instrument: a 50-session run on 2026-09-14 is what caught `schtasks`
+  silently truncating `/TR` at 253 characters, because the only symptom was the herd
+  going from ≈ 11 s to 25.8–26.0 s across three runs while every task reported success
+  (F-867 §6.3). After the cap fix (855e8c6), one local 50-session run: `herd=6.7s
+  warm_join=0.9s | 50/50 sessions | initialize p50=4.25s | tools/list p50=6.06s`, and the
+  winner proxy's only rung line was `backend spawned via the scheduler rung` — below the
+  ≈ 11 s pre-F-867 local baseline, so the scheduler round trip costs the herd nothing
+  it can measure. One run; not a rate.
+
+  <!-- TODO(F-859 §13.1): record the rung served on `gate / transport (Windows/X64)` from a
+  gate log, and the Windows herd rate over the N runs after 2.1.5. If the runner's service
+  account has no logged-on console session the pin SKIPS, rung `plain` serves, and this cell
+  is NOT protected — in which case the rate here should be expected to stay at ~9 % and the
+  harness-side follow-up in F-867 §6.5 is the remedy. -->
+* **This closes only the mid-flight death shape.** §7.3's readiness-gate starvation and the
+  §7.4 `MAX_STRETCH` decision are a different failure and remain the maintainer's call; a
+  red that is a genuine STALL is still a stall.

@@ -1,5 +1,76 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — the backend escapes the MCP client's Job Object (F-867)
+
+The 2.1.4 publish run's first attempt went red in the Windows transport cell with
+the shape F-859 had been chasing for weeks: twelve cold sessions, one backend, and
+0.4 s after uvicorn's `Application startup complete` every proxy at once logging
+`backend connection lost` — no traceback, no `Shutting down`, a 0-byte fault log.
+It was the first such red to carry the backend's own log (F-859 §12), and the
+timestamps named the killer: the backend died at the instant the first three of the
+twelve sessions finished `tools/list` and closed.
+
+The reference MCP Python SDK (`mcp/os/win32/utilities.py`) puts every stdio server
+it starts inside a Windows **Job Object** with `KILL_ON_JOB_CLOSE` and no
+`BREAKAWAY_OK`. Our per-session stdio proxy IS that server. The proxy that wins the
+cold-start lock spawns the shared backend, and job membership is inherited by
+children — `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` say nothing about jobs. So
+when that ONE session ends, `TerminateJobObject` — or merely the last `CloseHandle`
+— kills every member, and the backend serving every other session is a member.
+Verified 3/3 by experiment on both paths. F-866 could not have caught this: it
+removed the job the venv **redirector** created, and a job the **client** wraps
+around the proxy is a different one, outside the product's reach from inside. POSIX
+is immune: clients kill a process GROUP, and the backend is spawned with
+`start_new_session=True`, so it is in its own.
+
+How the backend is created is now a subsystem of its own,
+`embedded/backend_launch.py`, which climbs three rungs on Windows.
+`CREATE_BREAKAWAY_FROM_JOB` is asked for first — free, and correct for any client
+whose job permits it. A successful call is **not** accepted as proof: under a nested
+job chain the flag leaves the innermost job only, so the new process is asked whether
+it is in ANY job. One that is gets discarded microseconds old — but only after the
+next rung is known to be available, because a backend that escaped one job beats one
+that escaped none; where there is no scheduler rung it is kept, at WARNING, as
+`breakaway-partial`. Second,
+the creation is handed to Task Scheduler, the job-free intermediary the product
+already owns (F-810): a one-shot task runs a stdlib-only launcher under
+`pythonw.exe` — no console, so nothing can flash, and the BASE interpreter's, never
+a venv's redirector (F-866) — which reads the argv, the entire child environment and
+the boot-log path from a JSON spec in the user-private state dir, starts the backend
+detached, and hands the SERVING pid back through an atomically written pid file. It
+appends the backend's stdout **and** stderr to `backend-boot.log`, so F-303's
+property — an import-time crash leaves a trace — survives the hand-off. That rung is
+taken only when the spawning process is already in the logged-on console session, so
+the backend lands where it would have landed anyway and the display context recorded
+for it stays true (F-808: the tool still never PICKS a session). Third and last is
+today's detached spawn, unchanged, for a runner with no console session — carrying the breakaway
+bit anyway when rung 1 proved it permitted — and its line names F-867 and says the
+backend is inside this client's job. Every rung is logged in one spelling, so a
+post-mortem reads which one served.
+
+`singleton._start_server_process` keeps the env building, the boot-log rotation and
+the state record, and makes one call. `tests/test_backend_escapes_client_job.py`
+builds the SDK's job with `ctypes`, has a helper spawn a backend from inside it,
+ends the job both ways, and asserts the backend is alive and in no job — RED before
+this change, GREEN after, on the `scheduler` rung.
+
+What users see: a Claude Code session ending no longer takes the backend every other
+session on the machine is using down with it. What this does **not** fix, named so
+nobody reads more into it: a proxy whose session is not the console session (SSH, a
+service, session 0, some RDP layouts) falls to the `plain` rung and remains exposed; a
+backend that dies for any other reason still **kills** the browsers it owned on the
+way back up (unchanged from 2.1.4); and Claude Code's own node client was never
+captured using a job — the Python SDK case is the proven one. The Windows herd rate
+F-859 measured (~9 % per cell) is *expected* to fall to zero on cells where the
+scheduler rung serves; that is a prediction to be re-measured over the next gate
+runs, not a result.
+
+<!-- TODO(F-867 CI): name the rung that actually served on each CI Windows cell, read from a gate log, and the herd rate measured after this shipped. -->
+
+Full write-up: `audit/stage2/finding_F867_backend_inherits_the_clients_job_object.md`.
+
 ## 2.1.4
 
 ### Fixed — the backend is spawned on the real interpreter, not the venv redirector (F-866)
