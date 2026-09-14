@@ -608,3 +608,26 @@ turns the cell green and then fails `release-evidence` on "foreign evidence: run
 (§10, and `b6e1b6e` attempt 2 shows the same on six records). The §7.4 decision on `MAX_STRETCH`
 is unchanged and remains the maintainer's; what this section adds is that the next Windows red
 will carry the backend's own view of the stall, which is the evidence §7.3 said the decision needs.
+
+## 13. The first mid-flight red WITH the backend's log names the killer: the client's Job Object (2026-09-14, v2.1.4 publish run 34797141480 attempt 1)
+
+§12.1's harness change paid off on its first Windows red. `backend-4532.log` and
+`backend-boot.log` show a clean boot (`startup job 'orphans' finished 0.0s after serving
+began`, uvicorn `Application startup complete`) and then nothing — no traceback, no
+`Shutting down`, an empty fault log — while six proxies logged `backend connection lost`
+(`httpx.ReadError` mid-request) 0.4 s after serving began, at the same wall-clock instant
+the first three of twelve sessions finished `tools/list` and closed
+(`tools/list p50=7.44s`, herd start ≈ 01:51:40).
+
+That is a `TerminateProcess`-class death delivered by the client closing a session, and
+§12.3's "no same-workspace path can do that so early" was right about the PRODUCT's paths
+but did not consider the CLIENT's: the `mcp` Python SDK wraps every stdio server in a
+`KILL_ON_JOB_CLOSE` Job Object, the backend our proxy spawns inherits it, and the end of
+the spawner's session terminates the job. Verified by experiment (3/3, both the
+`TerminateJobObject` and the handle-close paths) and written up as **F-867**, which also
+explains why only Windows cells ever show this shape (POSIX clients `killpg` a process
+group the backend is not in). The rate in §12.4 is the probability that the lock-winner's
+session closes while siblings are still in flight. The §7.4 `MAX_STRETCH` question is
+now moot for this shape: it is not a stall.
+
+Attempt 2 (a full rerun, per §12.5) was green and published 2.1.4.
