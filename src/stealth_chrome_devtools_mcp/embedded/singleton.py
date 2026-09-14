@@ -340,9 +340,31 @@ def _clear_stale_backend(port: int) -> None:
     _terminate_backend(port)
 
 
+def _backend_interpreter() -> str:
+    """The interpreter the backend runs on: the REAL one, never a Windows venv's
+    redirector (F-866).
+
+    In a Windows venv ``sys.executable`` is CPython's venv launcher, which
+    re-spawns the real ``python.exe`` as a CHILD in a ``KILL_ON_JOB_CLOSE`` job
+    and — console-less itself after our ``DETACHED_PROCESS`` — hands it a fresh
+    console: a visible Windows Terminal window anyone can close. The detach flags
+    and F-839's SIGBREAK immunity never reached the process that served (the
+    2026-09-13 death: 32 h up, gone between two hygiene ticks, no trace).
+    Launching ``sys._base_executable`` puts the flags on the serving process —
+    no redirector, no job, no console; ``_start_server_process`` names the venv
+    the way the launcher does. POSIX venvs have no redirector: unchanged.
+    """
+    base = getattr(sys, "_base_executable", None) or sys.executable
+    if sys.platform == "win32" and os.path.normcase(base) != os.path.normcase(
+        sys.executable
+    ):
+        return base
+    return sys.executable
+
+
 def _server_process_cmd(port: int) -> list[str]:
     return [
-        sys.executable,
+        _backend_interpreter(),
         "-m",
         "stealth_chrome_devtools_mcp",
         "--transport",
@@ -384,6 +406,11 @@ def _start_server_process(port: int):
     # its own recovery-on-import (cli.py's os.environ.setdefault).
     child_env = dict(os.environ)
     child_env.pop("STEALTH_MCP_NO_AUTO_RECOVERY", None)
+    if cmd[0] != sys.executable:
+        # F-866: the bypassed redirector's own venv hand-off. ``getpath`` reads it
+        # to find ``pyvenv.cfg``, then CPython drops it from the environment before
+        # any code runs, so the backend's Chrome children never inherit it.
+        child_env["__PYVENV_LAUNCHER__"] = sys.executable
     kwargs: dict = {
         "stdout": stdout_target,
         "stderr": stdout_target,
