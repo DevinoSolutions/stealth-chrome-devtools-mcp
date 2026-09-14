@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import backend_launch, singleton
 
 
 @pytest.fixture()
@@ -66,7 +66,7 @@ class TestBootLogRedirect:
         fake_proc = MagicMock()
         fake_proc.pid = 4242
         popen_mock = MagicMock(return_value=fake_proc)
-        monkeypatch.setattr(singleton.subprocess, "Popen", popen_mock)
+        monkeypatch.setattr(subprocess, "Popen", popen_mock)
         monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
 
         singleton._start_server_process(4321)
@@ -84,27 +84,29 @@ class TestBootLogRedirect:
         fake_proc = MagicMock()
         fake_proc.pid = 4242
         popen_mock = MagicMock(return_value=fake_proc)
-        monkeypatch.setattr(singleton.subprocess, "Popen", popen_mock)
+        monkeypatch.setattr(subprocess, "Popen", popen_mock)
         monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
 
         singleton._start_server_process(4321)
 
         _, kwargs = popen_mock.call_args
         if sys.platform == "win32":
+            # F-867: the first attempt also asks to break out of the client's
+            # Job Object (backend_launch's breakaway rung).
             assert kwargs["creationflags"] == (
-                subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NEW_PROCESS_GROUP
+                | backend_launch._CREATE_BREAKAWAY_FROM_JOB
             )
-            assert "start_new_session" not in kwargs
+            assert kwargs["start_new_session"] is False
         else:
             assert kwargs["start_new_session"] is True
-            assert "creationflags" not in kwargs
+            assert kwargs["creationflags"] == 0
 
     def test_boot_log_path_under_resolved_log_dir(self, isolated_state, monkeypatch):
         fake_proc = MagicMock()
         fake_proc.pid = 4242
-        monkeypatch.setattr(
-            singleton.subprocess, "Popen", MagicMock(return_value=fake_proc)
-        )
+        monkeypatch.setattr(subprocess, "Popen", MagicMock(return_value=fake_proc))
         monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
 
         singleton._start_server_process(4321)
@@ -119,7 +121,7 @@ class TestBootLogRedirect:
         fake_proc = MagicMock()
         fake_proc.pid = 4242
         popen_mock = MagicMock(return_value=fake_proc)
-        monkeypatch.setattr(singleton.subprocess, "Popen", popen_mock)
+        monkeypatch.setattr(subprocess, "Popen", popen_mock)
         monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
 
         # A file where a directory is expected makes mkdir(parents=True)

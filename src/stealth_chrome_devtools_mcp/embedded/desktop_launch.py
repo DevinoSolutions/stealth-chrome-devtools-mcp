@@ -39,11 +39,9 @@ import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
-import nodriver as uc
 import psutil
-import requests
-from nodriver import Browser
 
 from stealth_chrome_devtools_mcp.embedded import (
     backend_registry,
@@ -52,6 +50,17 @@ from stealth_chrome_devtools_mcp.embedded import (
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
+if TYPE_CHECKING:
+    from nodriver import Browser
+
+# ``nodriver`` (~200 ms) and ``requests`` (~78 ms) are imported inside the two
+# functions that use them, not here. Both are on the DELEGATION path, while this
+# module's ``_schtasks`` / ``_read_pid`` / ``_cleanup`` seams are also the one
+# home ``backend_launch`` reaches for on every backend cold start (F-867) — and
+# the stdio proxy that does that never touches nodriver otherwise. Paying a
+# second of import for a browser it will not launch is a cost the proxy's
+# startup cannot justify.
 
 # Subdirectory of the state dir holding one launcher script + pid file per
 # in-flight delegation. Emptied in a finally, so it must never accumulate.
@@ -217,6 +226,8 @@ def _launcher_script(executable: str, args: list[str], pid_file: Path) -> str:
 
 def _devtools_ready(port: int) -> bool:
     """True once Chrome answers on its DevTools port. Blocking; call in a thread."""
+    import requests
+
     try:
         response = requests.get(
             f"http://127.0.0.1:{port}/json/version", timeout=DEVTOOLS_PROBE_TIMEOUT
@@ -308,12 +319,17 @@ def _kill_delegated(pid: int, create_time: float | None) -> None:
         )
 
 
-def _cleanup(task_name: str, script: Path, pid_file: Path) -> None:
-    """Delete the task and the scratch files. Never raises — it runs in a
-    ``finally`` whose caller may already be raising the real error."""
+def _cleanup(task_name: str, *paths: Path) -> None:
+    """Delete the task and every scratch path given. Never raises — it runs in a
+    ``finally`` whose caller may already be raising the real error.
+
+    Variadic because ``backend_launch`` (F-867) runs the same round trip with a
+    different set of scratch files; one home for "undo a one-shot task" is worth
+    more than a signature that names this module's two.
+    """
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         _schtasks(["/Delete", "/F", "/TN", task_name])
-    for path in (script, pid_file):
+    for path in paths:
         with contextlib.suppress(OSError):
             path.unlink()
 
@@ -401,6 +417,8 @@ async def launch_and_attach(
     script are always removed, success or failure, and a Chrome that started but
     could not be attached to is killed rather than left as an untracked orphan.
     """
+    import nodriver as uc
+
     # The port is chosen here but bound by Chrome SECONDS later (task create,
     # task run, browser start) — a far wider race window than the normal path's
     # milliseconds. Accepted deliberately: a squatter surfaces as the readiness

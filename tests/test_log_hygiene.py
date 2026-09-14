@@ -29,6 +29,7 @@ import ast
 import faulthandler
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -153,9 +154,10 @@ class TestLauncherRollsBeforeOpeningTheFd:
 
         fake_proc = MagicMock()
         fake_proc.pid = 4242
-        monkeypatch.setattr(
-            singleton.subprocess, "Popen", MagicMock(return_value=fake_proc)
-        )
+        # F-867: singleton no longer imports subprocess (the spawn
+        # moved to backend_launch); patch the module itself, which
+        # both of them reach at call time.
+        monkeypatch.setattr(subprocess, "Popen", MagicMock(return_value=fake_proc))
         monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
 
         singleton._start_server_process(4321)

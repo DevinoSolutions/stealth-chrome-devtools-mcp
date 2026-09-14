@@ -266,11 +266,15 @@ File logging exists on both fronts, all under `logging_setup.resolve_log_dir()`
 
 - `backend-<pid>.log` — the in-process `RotatingFileHandler` (installed by
   `logging_setup.configure_logging("backend")`);
-- `backend-boot.log` — the raw `Popen` stdout/stderr redirect the parent opens for the
-  child, so a crash **before** `main()` (bad import, syntax error) still leaves a trace
-  instead of vanishing into `DEVNULL`. Shared by every boot and held open by the
-  running child, so it can only be rotated by the **launcher**, between two backends:
-  `logging_setup.roll_boot_log` does that in `singleton._start_server_process` (F-830);
+- `backend-boot.log` — the raw `Popen` stdout/stderr redirect opened for the child, so a
+  crash **before** `main()` (bad import, syntax error) still leaves a trace instead of
+  vanishing into `DEVNULL`. Shared by every boot and held open by the running child, so
+  it can only be rotated by the **launcher**, between two backends:
+  `logging_setup.roll_boot_log` does that in `singleton._start_server_process` (F-830).
+  Which process opens the handle depends on the spawn rung (F-867): on the direct rungs
+  it is the proxy itself, and on the Task Scheduler rung the intermediary re-opens the
+  already-rolled path, because a `Popen` handle cannot cross the scheduler — either way
+  the child gets stdout **and** stderr, so F-303's property is the same;
 - `proxy-<pid>.log` — one per stdio proxy (`configure_logging("proxy")`).
 
 Every MCP request is stamped with a **correlation id** at the one chokepoint every
