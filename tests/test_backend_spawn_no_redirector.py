@@ -30,9 +30,11 @@ console. The pins below are, in order:
 * the environment pin — the child env carries ``__PYVENV_LAUNCHER__`` exactly
   when a redirector was bypassed, and never otherwise;
 * the real-process pin (Windows only) — a process spawned through the real
-  ``_start_server_process`` resolves the venv, is in no Job Object, and has no
-  console. The check for a console runs in a helper process so this test's own
-  console is never detached.
+  ``_start_server_process`` resolves the venv, has no redirector child, is in
+  no Job Object (asserted only when the test process is itself job-free — a
+  harness job is inherited by every child), and has no console. The check for
+  a console runs in a helper process so this test's own console is never
+  detached.
 """
 
 from __future__ import annotations
@@ -191,8 +193,14 @@ def test_the_spawned_backend_has_no_redirector_no_job_and_no_console(
         # The venv was resolved through __PYVENV_LAUNCHER__ ...
         assert os.path.normcase(prefix) == os.path.normcase(sys.prefix)
         assert os.path.normcase(executable) == os.path.normcase(sys.executable)
-        # ... without the redirector's KILL_ON_JOB_CLOSE job ...
-        assert not _in_job(pid)
+        # ... without the redirector's KILL_ON_JOB_CLOSE job. ``IsProcessInJob``
+        # with a NULL job answers "in ANY job", and a harness that runs this test
+        # inside a job of its own (Claude Code's tool shell does; a CI runner
+        # may) makes every child a member by inheritance — so the check only
+        # means something when the test itself is job-free. ``children() == []``
+        # above already pins the absence of the redirector that creates the job.
+        if not _in_job(os.getpid()):
+            assert not _in_job(pid)
         # ... and without a console for a closing terminal to reach it through.
         probe = subprocess.run(
             [sys.executable, "-c", _CONSOLE_PROBE, str(pid)],
