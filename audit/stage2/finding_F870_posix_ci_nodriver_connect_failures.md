@@ -558,36 +558,93 @@ that is the only one that matters.**
 | the probe | `tools/chrome_cold_start_probe.py` — stdlib only, imports no part of the package (pinned by a test that asserts so in a subprocess) |
 | its hermetic test | `tests/test_chrome_cold_start_probe.py` — a real **fake-browser subprocess** that writes `DevToolsActivePort` after a configurable delay and serves `/json/version` on loopback; no real Chrome in the unit lane |
 | the gate step | `Chrome cold-start probe (F-870)` in `.github/workflows/release-gate.yml`, on `integration`, `transport`, `offline-stealth` and `install-smoke` |
-| the evidence | artifact kind `chrome-cold-start` (`tools/release_evidence.py` `ARTIFACT_KINDS`), landing at `release-evidence/<sha>/<job>/artifacts/chrome-cold-start.json` |
+| the evidence | artifact kind `chrome-cold-start` (`tools/release_evidence.py` `ARTIFACT_KINDS`), landing at `release-evidence/<sha>/<job>/artifacts/<cell>/chrome-cold-start.json` (`_copy_artifacts` inserts the cell, `release_evidence.py:458-459`), plus the three per-cell human uploads |
 
 It launches Chrome **twice**, back to back, on a fresh profile each time, and
-reports per launch: `ms_to_active_port`, `ms_to_json_version`, `port_from_file`,
-`port_matches_request`, `pid`, `exit_code_if_died`, `listening` and a
-`stderr_tail`. The first/second delta is the whole question (§3.4): a page-in
-cause makes only launch #1 slow, a contention cause makes both slow.
+reports per launch: `ms_to_devtools_banner`, `ms_to_json_version`,
+`port_requested`, `port_from_banner`, `port_matches_request`, `pid`,
+`exit_code_if_died`, `listening` and an `output_excerpt`. The first/second delta
+is the whole question (§3.4): a page-in cause makes only launch #1 slow, a
+contention cause makes both slow.
 
-Four design choices worth recording, because each one was a fork:
+**Readiness is read from Chrome's own `DevTools listening on ws://…` banner**,
+not from `DevToolsActivePort`. The file was tried first and rejected *on
+measurement*: with a fixed `--remote-debugging-port=<n>` — which is what the
+product passes — Chrome does **not write that file at all** (it is a
+port-discovery mechanism for `--remote-debugging-port=0`). A first real run
+returned a null reading for every launch while Chrome was demonstrably
+listening. The banner works under both idioms, is Chrome's own statement, and
+carries the port Chrome actually bound.
 
-* **Placed after `Resolve image Chrome Stable identity`, not before it.** Before
-  would give a colder binary, but the *product's* first spawn also happens after
-  that step, so measuring there measures the conditions the product actually
-  meets — and `--freeze-updater` has already run, so Chrome cannot be swapped
-  under the measurement (F-819).
-* **It calls `resolve_chrome._resolve_path()`, not the public
-  `resolve_chrome()`.** The public function additionally shells out to the binary
-  for `--version`, and **that subprocess pages the binary in** — it would warm
-  the exact thing being timed. Identity stays single-homed in
-  `chrome-identity.json`; this record cites the path only.
+### 7.1 The placement decision, stated once
+
+**The probe runs AFTER `Resolve image Chrome Stable identity`, not before it.**
+
+Before would give a genuinely cold binary. It was rejected for two reasons.
+First, the *product's* own first spawn also happens after that step, so measuring
+there measures the conditions the product actually meets — and a number that does
+not describe the product's situation cannot be compared to the 2.75 s window.
+Second, `--freeze-updater` (F-819) has run by then; ahead of it, macOS Keystone
+can swap Chrome Stable mid-measurement, which is the exact failure F-819 exists
+to prevent and would make the reading describe two different binaries.
+
+**The cost of that choice is stated in the data rather than hidden.**
+`resolve_chrome._read_version` is not uniform across OSes: it execs
+`chrome --version` on **Linux** (`resolve_chrome.py:128`), while Windows reads a
+sibling version directory (`:110-117`) and macOS reads `Info.plist` (`:118-126`)
+— neither of which execs the binary. So on Linux the binary is already paged in
+when the probe runs, and **on Linux `ms_to_json_version` for launch #1 is a FLOOR
+on the true cold cost, not the cold cost.** The record carries
+`binary_prewarmed` (true on Linux, false on Windows/macOS) so the three OSes are
+never compared blindly, and a test pins that derivation.
+
+This supersedes the earlier draft of this section, which claimed the probe avoids
+warming the binary *and* sits after a step that warms it. Both halves could not
+be true; the second is.
+
+### 7.2 The other design choices
+
+* **The launch mirrors nodriver's, flag for flag.** `NODRIVER_DEFAULT_ARGS` is
+  nodriver 0.47.0's `_default_browser_args` verbatim and `chrome_command`
+  reproduces `Config.__call__` for the gate's `headless=True, sandbox=False`
+  spawn — **no `--disable-gpu`** (nodriver never passes it) and no positional
+  URL. This matters beyond tidiness: without `--password-store=basic` a headless
+  Linux Chrome probes the keyring, and without `--no-pings` it does GCM
+  registration work, neither of which the product's Chrome does — both would
+  inflate the number being measured. A test compares the command against a real
+  `nodriver.Config`, so a nodriver bump fails there instead of silently
+  re-defining what is measured.
+* **Ports use nodriver's own idiom**, not `--remote-debugging-port=0`:
+  `_reserve_port` binds `:0`, reads the number and closes the socket, exactly as
+  `nodriver/core/util.py:132-143` does, then hands it to Chrome. That reproduces
+  the lost-port race and makes `port_matches_request` a real boolean, so **H2 is
+  sized rather than merely asserted**. Both launches use it, so the only
+  difference between #1 and #2 stays the state of the machine.
+* **It calls `resolve_chrome._resolve_path()`, not `resolve_chrome()`** — the
+  public one shells out for `--version`, and this script should not add a second
+  exec of its own on top of §7.1's.
 * **Output goes to a temporary FILE, not a pipe and not `DEVNULL`.** A pipe's
   kernel buffer can fill and block the child forever, and the probe would then be
   measuring its own deadlock; `subprocess.DEVNULL` is banned repo-wide (TID251)
-  for exactly the habit this finding is about. Capturing the stream is also
-  §6.1(d) in miniature: `DevTools listening on ws://` now lands in evidence.
+  for exactly the habit this finding is about. The excerpt keeps **head 2000 +
+  tail 2000** bytes, because `DevTools listening on ws://` is among the *first*
+  lines Chrome writes and a tail-only excerpt would discard precisely the line
+  §6.1(d) is about.
+* **It cannot fail the job, and that is enforced at two levels.** Every narrow
+  `except` is a judgement about a specific failure; one outer guard in `main()`
+  is the contract — whatever escapes, a record naming it is still written and the
+  exit code is still 0. That guard is not theoretical: `http.client.HTTPException`
+  is **not** an `OSError` and urllib does not wrap it, so a socket that accepts
+  and answers with a non-HTTP line raises `BadStatusLine` straight through — and
+  that is reachable in exactly the case this probe studies. Both the narrow catch
+  and the outer guard are pinned by tests.
 * **It runs on Windows too.** Windows is the control, and "0 of 27 failed cells"
-  (§2.1) is *absence of evidence*; a measured number is evidence of absence. It
-  costs ~0.7 s. A local Windows reading already exists: **384 ms then 306 ms to
-  `/json/version`, against nodriver's 2750 ms budget — 7× headroom**, which is
-  the first direct explanation of why Windows never shows this family.
+  (§2.1) is *absence of evidence*; a measured number is evidence of absence, and
+  it costs ~0.7 s. One local Windows reading exists — **384 ms then 306 ms to
+  `/json/version` against a 2750 ms budget** — but that is **n=1 on a single
+  developer machine** (a second, loaded run measured ~441/433 ms). It is a
+  plausible first explanation of why Windows never shows this family, **not a
+  property of Windows**. The gate is what will produce the distribution.
 
 On the `install-smoke` macOS cells (`stages: handshake`, partial by F-773) the
 probe is the only Chrome the job launches. That is deliberate and harmless: it

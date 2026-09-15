@@ -376,6 +376,7 @@ jobs:
         with:
           name: identity-integration-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
           path: |
+            chrome-cold-start.json
             chrome-identity.json
             runner-identity.json
       - name: Emit this cell's release-evidence record
@@ -559,6 +560,7 @@ jobs:
         with:
           name: identity-transport-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
           path: |
+            chrome-cold-start.json
             chrome-identity.json
             runner-identity.json
       - name: Emit this cell's release-evidence record
@@ -1076,6 +1078,7 @@ jobs:
           name: install-smoke-${{ matrix.kind }}-${{ matrix.cell.runner_os }}-${{ matrix.cell.runner_arch }}
           path: |
             install-smoke-${{ matrix.kind }}.json
+            chrome-cold-start.json
             chrome-identity.json
             runner-identity.json
           if-no-files-found: warn
