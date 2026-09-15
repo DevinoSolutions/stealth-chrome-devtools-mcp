@@ -517,9 +517,14 @@ def _cmd_restart(_args) -> int:
             "respawn it, or try `restart` again."
         )
         return 1
-    # "down" (spawned but the socket never came up) or "none" (no state at
-    # all afterward) - both mean the restart did not produce a running
-    # backend. Report honestly rather than implying success.
+    # "down": spawned, but the socket on the port we spawned on never came up -
+    # the restart did not produce a running backend, so report honestly rather
+    # than implying success. It used to read "or 'none' (no state at all
+    # afterward)"; since F-868 restart reports `singleton._probe_port` for that
+    # one port, whose vocabulary is down/wedged/responsive and has no "none" -
+    # that word belonged to the record-wide walk, which restart no longer uses.
+    # The branch stays as written: it is the "down" arm, and a status this
+    # function does not recognise still has to land somewhere truthful.
     print(f"backend restart did not bring the backend up (state: {status}, pid {pid}).")
     return 1
 

@@ -25,6 +25,7 @@ from pathlib import Path
 import psutil
 
 from stealth_chrome_devtools_mcp.embedded import (
+    backend_liveness,
     backend_registry,
     backend_watchdog,
     display_context,
@@ -158,46 +159,31 @@ def _clear_server_state() -> None:
 
 
 def _probe_port(port: int) -> str:
-    """THE liveness ladder for ONE port — socket, then a real MCP `initialize`:
-    "down" | "wedged" | "responsive" (F-301's third state, which a bare socket
-    check cannot see). Read-only. THE one home for those four lines (F-868),
-    with three readers: the candidate walk below, `restart_backend`'s report of
-    the port it spawned on, and doctor's `cli._probe_recorded_backend`, which
-    adds only the one word this cannot reach ("no port recorded") and was a
-    verbatim copy of this ladder until now.
+    """OUR binding of `backend_liveness.probe_port` — the ladder, with THIS
+    module's two probes handed in. The reasoning lives with the leaf.
+
+    A wrapper on purpose, not a hop to delete: both probe names are resolved
+    HERE at call time, so `monkeypatch.setattr(singleton, "_server_is_healthy",
+    …)` still reaches the ladder. A caller importing the leaf's names directly
+    would bind them at import time and stop seeing such a patch.
     """
-    if not _server_is_healthy(port):
-        return "down"
-    return "responsive" if _backend_http_ready(port) else "wedged"
+    return backend_liveness.probe_port(
+        port, is_healthy=_server_is_healthy, http_ready=_backend_http_ready
+    )
 
 
 def _probe_backend_status() -> tuple[str, int | None]:
-    """Report the state of the backend THIS process would be served by, for
-    display (CLI status/doctor) and for `stop`: `_probe_port`'s verdict and the
-    port it was reached on, or ("none", None) when no adoptable entry names a
-    port. What this adds over that ladder is WHICH port to ask about.
+    """OUR binding of `backend_liveness.probe_recorded`: this module's record
+    path, this process's display context, and `_probe_port` above as the
+    per-port probe (so a test that patches THAT still drives the walk).
 
-    Candidates come in ADOPTION order (F-868) — `adoption_candidates`, the one
-    home `_find_running_server` already walks — never "whichever entry the
-    record lists first", which under one-entry-per-display-context is routinely
-    a dead sibling's: that is how `status` came to report "not running" beside
-    a backend serving 56 proxies, and `stop` to aim at the dead record. The
-    first candidate that ANSWERS wins, else the most informative verdict —
-    wedged over down: a wedged backend holds a port and will be evicted, a down
-    record names nothing running. The ORDER itself is not decided here.
+    `stop_backend` and the CLI's status/doctor/kill-orphans verbs all call it
+    through this name; the adoption-order policy is the leaf's, and the order
+    itself is `backend_registry`'s.
     """
-    best: tuple[str, int | None] = ("none", None)
-    own = display_context.display_context()
-    for entry in backend_registry.adoption_candidates(SERVER_STATE_FILE, own):
-        port = backend_registry.recorded_int(entry, "port")
-        if port is None:
-            continue
-        verdict = _probe_port(port)
-        if verdict == "responsive":
-            return verdict, port
-        if best[0] == "none" or (best[0] == "down" and verdict == "wedged"):
-            best = (verdict, port)
-    return best
+    return backend_liveness.probe_recorded(
+        SERVER_STATE_FILE, display_context.display_context(), probe=_probe_port
+    )
 
 
 def _same_identity_backend_ready(port: int, patience: float | None = None) -> bool:

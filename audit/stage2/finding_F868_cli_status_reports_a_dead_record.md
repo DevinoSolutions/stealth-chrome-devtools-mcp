@@ -123,14 +123,16 @@ lifetime. **Deliberately NOT changed here — see §6.**
 
 ## 4. The fix
 
-**The liveness ladder now has one home.** `singleton._probe_port(port)` — socket, then a
-real MCP `initialize`, returning `down` / `wedged` / `responsive` — was four lines
-duplicated in `cli._probe_recorded_backend`, justified there by a note saying
-`_probe_backend_status` "reads the FIRST recorded backend" and so could not answer
-per-entry. That justification dies with this fix, and a duplicated liveness ladder was a
-second way to answer one question regardless. It now has three callers: the candidate
-walk, `restart_backend`, and the CLI form, which keeps only the one word the ladder
-cannot reach ("no port recorded").
+**The liveness ladder now has one home.** The socket → `initialize` → `down` / `wedged` /
+`responsive` ladder was four lines duplicated in `cli._probe_recorded_backend`, justified
+there by a note saying `_probe_backend_status` "reads the FIRST recorded backend" and so
+could not answer per-entry. That justification dies with this fix, and a duplicated
+liveness ladder was a second way to answer one question regardless. It now has three
+callers: the candidate walk, `restart_backend`, and the CLI form, which keeps only the one
+word the ladder cannot reach ("no port recorded"). It lives in
+`embedded/backend_liveness.py` as `probe_port`, beside the adoption walk
+(`probe_recorded`), reached through `singleton._probe_port` / `_probe_backend_status` —
+see §6 for why those wrappers exist and why the leaf takes its probes as arguments.
 
 **One home, no second way.** `_probe_backend_status` now walks
 `backend_registry.adoption_candidates(SERVER_STATE_FILE, display_context.display_context())`
@@ -182,8 +184,8 @@ whose `port` is a string reads as `None` and would have matched a `None` reporte
 hiding itself in precisely the "nothing is running" case that needs it most.
 
 No new `STEALTH_MCP_*` knob, no new env read, no `typing.Any`, no LOC-budget change:
-`cli.py` 645 → 691, and `singleton.py` 979 → **999 of its 1000 default** — see §6, this
-is now the binding constraint on the file.
+`cli.py` 645 → 691, `singleton.py` 979 → 999 → **985** once the `backend_liveness`
+extraction landed (§6), and the new leaf is 91.
 
 ## 5. Verification
 
@@ -265,20 +267,18 @@ is now the binding constraint on the file.
   whose socket is open but silent (one `LIVENESS_PROBE_TIMEOUT`, 2 s), and the walk stops
   at the first responsive one. Not measured on a pathological record — `status` is an
   interactive verb with no deadline.
-- **`singleton.py` is at 999 of its 1000-LOC default — one line of headroom. This is the
-  most fragile thing in this change and it needs a decision, not a note.** The gate passes
-  and nothing here is over budget, but the next contributor to that file has nowhere to
-  put a line. Two of the +20 were paid for honestly (the F-856 paragraph in
-  `_same_identity_backend_ready` was retelling what `scheduling_lag.FairWindow` is THE one
-  home for, and now points at it instead); the rest is the F-868 reasoning, which belongs
-  with the code it justifies.
-
-  The right next change is an extraction, and it should be its own PR rather than more
-  prose-trimming, which is just padding a cap from the other side. The shape is already
-  proven in this tree: `backend_watchdog.py` takes **both probes as arguments** so it never
-  imports `singleton` and the dead-vs-busy policy stays single-homed. A `backend_liveness`
-  leaf holding `_probe_port` plus the adoption walk, with `_server_is_healthy` /
-  `_backend_http_ready` handed in, would move ~35 lines out and leave thin wrappers on
-  `singleton` so every existing `monkeypatch.setattr(singleton, …)` in the suite keeps
-  working. I did NOT do it here: it lands mid-review-cycle, touches patch surfaces across
-  a dozen test modules, and would bury a four-line truthfulness fix under a refactor.
+- **`singleton.py`'s LOC: DONE, in its own commit.** The fix left that file at 999 of its
+  1000-LOC default — one line of headroom, which is a gate that passes and a file nobody
+  can edit. On review this was escalated and the extraction was done as a SEPARATE commit,
+  so "the fix" and "the move" read independently: `embedded/backend_liveness.py` is now THE
+  one home for the ladder (`probe_port`) and the adoption walk (`probe_recorded`), on
+  `backend_watchdog`'s proven leaf pattern — the two primitives arrive as ARGUMENTS and the
+  record as a PATH, so it never imports `singleton`. `singleton` keeps thin
+  `_probe_port` / `_probe_backend_status` wrappers that bind OUR probes, OUR record path
+  and OUR display context, which is what keeps every existing
+  `monkeypatch.setattr(singleton, …)` in the suite reaching the code (a direct import would
+  bind at import time and silently stop seeing the patch — the standing lesson from the
+  "moving module globals breaks monkeypatch" incident). `singleton.py` 999 → **985**;
+  the new leaf is 91 lines. Two lines of the original growth were also paid for honestly:
+  the F-856 paragraph in `_same_identity_backend_ready` was retelling what
+  `scheduling_lag.FairWindow` is THE one home for, and now points at it instead.
