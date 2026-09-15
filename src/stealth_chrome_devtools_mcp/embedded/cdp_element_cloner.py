@@ -30,6 +30,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     animation_analysis,
     animation_facts,
     aspect_options,
+    js_aspect_answer,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
@@ -474,45 +475,6 @@ class CDPElementCloner:
 
         return js_code
 
-    @staticmethod
-    def _unexpected_type(value: object) -> ToolError:
-        """THE one way an aspect reports a payload shape it cannot read (F-858).
-
-        The offending value rides in the message because a raise has no second
-        field to carry it — it used to sit in a ``raw_data`` key beside the
-        error, and dropping it would leave "unexpected type" undebuggable. Same
-        400-char clamp the animations aspect already applied, now uniform.
-        """
-        return ToolError(f"Unexpected return type: {type(value)} (raw: {value!s:.400})")
-
-    def _convert_nodriver_result(self, data):
-        """Convert nodriver's array result format back to a dict."""
-        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
-            result = {}
-            for item in data:
-                if isinstance(item, list) and len(item) == 2:
-                    key = item[0]
-                    value_obj = item[1]
-                    if isinstance(value_obj, dict) and "type" in value_obj:
-                        if value_obj["type"] == "string":
-                            result[key] = value_obj.get("value", "")
-                        elif value_obj["type"] == "number":
-                            result[key] = value_obj.get("value", 0)
-                        elif value_obj["type"] == "null":
-                            result[key] = None
-                        elif value_obj["type"] == "array":
-                            result[key] = value_obj.get("value", [])
-                        elif value_obj["type"] == "object":
-                            result[key] = self._convert_nodriver_result(
-                                value_obj.get("value", [])
-                            )
-                        else:
-                            result[key] = value_obj.get("value")
-                    else:
-                        result[key] = value_obj
-            return result
-        return data
-
     async def extract_element_styles(
         self,
         tab,
@@ -639,15 +601,7 @@ class CDPElementCloner:
             }
 
             js_code = self._load_js_file("extract_structure.js", selector, options)
-            structure_data = await tab.evaluate(js_code)
-
-            if hasattr(structure_data, "exception_details"):
-                raise ToolError(f"JavaScript error: {structure_data.exception_details}")
-            if isinstance(structure_data, dict):
-                return structure_data
-            if isinstance(structure_data, list):
-                return self._convert_nodriver_result(structure_data)
-            raise self._unexpected_type(structure_data)
+            return js_aspect_answer.parsed(await tab.evaluate(js_code))
         except ToolError:
             raise
         except Exception as e:
@@ -677,15 +631,7 @@ class CDPElementCloner:
             }
 
             js_code = self._load_js_file("extract_events.js", selector, options)
-            event_data = await tab.evaluate(js_code)
-
-            if hasattr(event_data, "exception_details"):
-                raise ToolError(f"JavaScript error: {event_data.exception_details}")
-            if isinstance(event_data, dict):
-                return event_data
-            if isinstance(event_data, list):
-                return self._convert_nodriver_result(event_data)
-            raise self._unexpected_type(event_data)
+            return js_aspect_answer.parsed(await tab.evaluate(js_code))
         except ToolError:
             raise
         except Exception as e:
@@ -722,16 +668,21 @@ class CDPElementCloner:
                 "max_keyframes": max_keyframes,
             }
             js_code = self._load_js_file("extract_animations.js", selector, options)
-            raw = await tab.evaluate(js_code)
-            if hasattr(raw, "exception_details"):
-                raise ToolError(f"JavaScript error: {raw.exception_details}")
-            if not isinstance(raw, str):
-                raise self._unexpected_type(raw)
-            facts = json.loads(raw)
+            facts = js_aspect_answer.parsed(await tab.evaluate(js_code))
             if "error" in facts:
-                # The collector reports its own miss inside the JSON. Q4 asked
-                # this aspect to keep PARITY with the other five; the five now
-                # raise, so parity is a raise carrying the collector's words.
+                # The collector reports its own miss inside the JSON, and this
+                # aspect RAISES it rather than handing the record back.
+                #
+                # It is the only one of the five that does. The other four JS
+                # scripts still answer an unresolved selector with
+                # ``{"error": "Element not found"}`` and their aspects still
+                # RETURN it — a tool return in the shape convention 2 bans,
+                # outside any named KEEP. F-872 deliberately did not change it:
+                # that is an error-convention decision (F-858's unfinished
+                # business), not a transport one, and folding it into a
+                # transport fix would hide a behaviour change. Named as a
+                # follow-up in
+                # audit/stage2/finding_F872_cloner_nested_bidi_nodes.md §6.
                 raise ToolError(str(facts["error"]))
             return animation_analysis.analyze(facts, options)
         except ToolError:
@@ -778,15 +729,7 @@ class CDPElementCloner:
                 "$FETCH_EXTERNAL", "true" if fetch_external else "false"
             )
 
-            asset_data = await tab.evaluate(js_code)
-            if hasattr(asset_data, "exception_details"):
-                raise ToolError(f"JavaScript error: {asset_data.exception_details}")
-            if isinstance(asset_data, dict):
-                pass
-            elif isinstance(asset_data, list):
-                asset_data = self._convert_nodriver_result(asset_data)
-            else:
-                raise self._unexpected_type(asset_data)
+            asset_data = js_aspect_answer.parsed(await tab.evaluate(js_code))
 
             if fetch_external and isinstance(asset_data, dict):
                 asset_data["external_assets"] = {}
@@ -845,15 +788,7 @@ class CDPElementCloner:
             )
             js_code = js_code.replace("$MAX_DEPTH", str(max_depth))
 
-            file_data = await tab.evaluate(js_code)
-            if hasattr(file_data, "exception_details"):
-                raise ToolError(f"JavaScript error: {file_data.exception_details}")
-            if isinstance(file_data, dict):
-                pass
-            elif isinstance(file_data, list):
-                file_data = self._convert_nodriver_result(file_data)
-            else:
-                raise self._unexpected_type(file_data)
+            file_data = js_aspect_answer.parsed(await tab.evaluate(js_code))
 
             if follow_imports and max_depth > 0 and isinstance(file_data, dict):
                 await self._fetch_and_analyze_files(file_data)

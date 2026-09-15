@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from fakes import FakeTab, animation_evaluate_map
+from fakes import FakeTab, animation_evaluate_map, js_aspect_answer
 from stealth_chrome_devtools_mcp.embedded import animation_facts
 from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
 from test_animation_schema_v2 import TWO_ANIMATIONS, computed, extract, facts, only
@@ -583,8 +583,13 @@ MINIMAL_FACTS = facts(selector="#demo", computed=computed())
 
 
 def complete_tab():
+    # ``js_aspect_answer``, not a bare dict: a real tab answers every aspect
+    # script with ONE JSON string (F-872). Feeding a dict made the four
+    # non-animation aspects come back as ``{"error": "Unexpected return
+    # type…"}`` blocks, which this test's key-presence assertions could not
+    # see — the pin below asserts they are POPULATED for exactly that reason.
     return FakeTab(
-        evaluate_result=dict(CANNED_JS),
+        evaluate_result=js_aspect_answer(CANNED_JS),
         evaluate_map=animation_evaluate_map(MINIMAL_FACTS),
         select_result=None,
     )
@@ -605,14 +610,27 @@ class TestRetiredOptionsDegrade:
             extraction_options={"animations": {"analyze_keyframes": True}},
         )
         assert "error" not in result
-        assert {
+        aspects = {
             "styles",
             "structure",
             "events",
             "animations",
             "assets",
             "related_files",
-        } <= set(result)
+        }
+        assert aspects <= set(result)
+        # Key PRESENCE is not survival: ``gather``'s isolation writes a failed
+        # aspect back as ``{"error": …}``, so a hollow fixture satisfies the set
+        # check above while every sibling is in fact lost — which is what a bare
+        # dict ``evaluate_result`` did between F-872's fix and its fixture sweep.
+        # Each JS aspect must carry a real payload.
+        for aspect in aspects - {"styles"}:
+            assert "error" not in result[aspect], f"{aspect} degraded to an error"
+        # ``styles`` is the CDP aspect and this tab resolves no element
+        # (``select_result=None``), so its error is the FIXTURE's, not the
+        # retired option's — named rather than skipped, so a transport failure
+        # here could not hide behind the exemption.
+        assert result["styles"] == {"error": "Element not found"}
         assert result["animations"].get("schema_version") == 2
 
     async def test_the_retired_option_is_named_in_the_aspects_warnings(self):
