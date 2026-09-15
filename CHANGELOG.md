@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.5
 
 ### Fixed — the backend escapes the MCP client's Job Object (F-867)
 
