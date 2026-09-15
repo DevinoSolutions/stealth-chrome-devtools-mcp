@@ -331,8 +331,10 @@ jobs:
         #
         # Runs on EVERY cell INCLUDING Windows. Windows is F-870's control, and
         # "0 of 27 failed Windows cells" is absence of evidence; a measured
-        # number is evidence of absence. Cost is ~0.7 s on a warm machine
-        # (measured locally: 384 ms then 306 ms to /json/version).
+        # number is evidence of absence. Cost is well under a second per launch
+        # on a warm machine — /json/version at 340/322 ms and 379/333 ms across
+        # two runs on ONE Windows box (n=2, one machine; the gate is what will
+        # produce the actual distribution).
         #
         # No continue-on-error — test_no_gate_job_hides_failure forbids it and
         # it is not needed: the script exits 0 on every path by contract, and a

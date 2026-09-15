@@ -640,11 +640,27 @@ be true; the second is.
   and the outer guard are pinned by tests.
 * **It runs on Windows too.** Windows is the control, and "0 of 27 failed cells"
   (§2.1) is *absence of evidence*; a measured number is evidence of absence, and
-  it costs ~0.7 s. One local Windows reading exists — **384 ms then 306 ms to
-  `/json/version` against a 2750 ms budget** — but that is **n=1 on a single
-  developer machine** (a second, loaded run measured ~441/433 ms). It is a
-  plausible first explanation of why Windows never shows this family, **not a
-  property of Windows**. The gate is what will produce the distribution.
+  it costs well under a second per launch. Windows readings on the shipped
+  build: **340/322 ms and 379/333 ms to `/json/version` against a 2750 ms
+  budget** — but that is **n=2 on a single Windows machine**, not a property of
+  Windows. It is a plausible first explanation of why Windows never shows this
+  family; the gate is what will produce the distribution.
+* **`binary_prewarmed` mirrors `resolve_chrome`'s branching, not "is it
+  Linux".** `_read_version` execs the binary for every OS that is neither
+  Windows nor macOS, so the predicate is written as *not Windows and not
+  Darwin*. No gate cell other than Linux reaches that fall-through today; the
+  wording means a future POSIX cell would be reported correctly instead of
+  silently as `false`.
+* **The record is written incrementally.** `probe` yields per launch and
+  `main` appends into the list already inside the record, so a failure during
+  launch #2 still leaves launch #1's completed measurement — the cold one, and
+  the more interesting of the two — in what gets written.
+* **A squatter on the reserved port cannot score as a launch.** Readiness
+  requires the banner *and* an answer on the port the banner names; an answer on
+  the reserved port before any banner is recorded as
+  `json_answered_before_banner` and never counted. Otherwise the H2 race this
+  probe exists to size would enter the data as a *fast successful* launch and
+  drag the distribution the wrong way.
 
 On the `install-smoke` macOS cells (`stages: handshake`, partial by F-773) the
 probe is the only Chrome the job launches. That is deliberate and harmless: it

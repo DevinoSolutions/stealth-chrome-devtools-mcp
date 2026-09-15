@@ -75,10 +75,11 @@ right placement, because the product's own first spawn also happens after it, so
 this measures the conditions the product actually meets, and ``--freeze-updater``
 has already run so Chrome cannot be swapped mid-measurement (F-819). But that
 step calls the public ``resolve_chrome()``, and its per-OS version read differs:
-``resolve_chrome.py:128`` execs ``chrome --version`` on **Linux**, while Windows
-reads a sibling version directory (``:110-117``) and macOS reads ``Info.plist``
-(``:118-126``) — neither of which execs the binary. So the exec already happened
-on Linux and has not on Windows or macOS.
+``resolve_chrome.py:128`` execs ``chrome --version`` for every OS that is
+neither Windows (which reads a sibling version directory, ``:110-117``) nor
+macOS (which reads ``Info.plist``, ``:118-127``). So the exec already happened
+on **Linux** — the only OS that reaches that fall-through on a gate cell — and
+has not on Windows or macOS.
 
 :data:`binary_prewarmed` in the record carries that fact per OS, so the numbers
 are never compared blindly. **Where it is true, launch #1 is a FLOOR on the real
@@ -108,6 +109,10 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -159,12 +164,17 @@ NODRIVER_DEFAULT_ARGS = (
 def binary_prewarmed() -> bool:
     """Whether the gate's identity step already exec'd Chrome on this OS.
 
-    `resolve_chrome._read_version` execs `chrome --version` on Linux only;
-    Windows reads a sibling version directory and macOS reads `Info.plist`.
+    Mirrors `resolve_chrome._read_version`'s own branching rather than naming
+    Linux: Windows reads a sibling version directory and macOS reads
+    `Info.plist`, and everything ELSE falls through to `--version`. Today only
+    Linux reaches that fall-through on a gate cell, but writing it as "not
+    Windows and not Darwin" keeps this true for any other POSIX rather than
+    silently reporting `false` there.
+
     See the module docstring — where this is true, launch #1 is a FLOOR on the
-    cold cost rather than the cold cost.
+    cold cost rather than the cold cost itself.
     """
-    return platform.system().lower() == "linux"
+    return platform.system().lower() not in ("windows", "darwin")
 
 
 def _reserve_port() -> int:
@@ -196,6 +206,11 @@ class LaunchRecord:
     port_requested: int
     port_from_banner: int | None
     port_matches_request: bool | None
+    # Something answered `/json/version` on the port we reserved BEFORE any
+    # banner appeared — i.e. a squatter on the reserved port, which is the H2
+    # race itself. Never counted as readiness; carried so the reading is
+    # explicable rather than merely a slow launch.
+    json_answered_before_banner: bool
     pid: int | None
     exit_code_if_died: int | None
     deadline_ms: float
@@ -204,7 +219,14 @@ class LaunchRecord:
 
 
 def chrome_command(executable: str, profile_dir: Path, port: int) -> list[str]:
-    """The launch the PRODUCT makes, reproduced flag for flag.
+    """`nodriver.Config.__call__`'s argv for the gate's spawn shape, reproduced
+    flag for flag.
+
+    Deliberately NOT "everything the product passes": on top of this the product
+    appends `platform_utils.merge_browser_args(...)`, which adds a
+    `--user-agent=…` flag (F-806) even on a default spawn. That is a stealth
+    concern, not a startup-cost one, and reproducing it here would drag product
+    code into a probe whose value depends on being product-free.
 
     This mirrors `nodriver.Config.__call__` (`core/config.py:174-193`) for the
     gate's own spawn shape — `headless=True`, `sandbox=False`, host and port set
@@ -358,6 +380,7 @@ def _launch_failure(message: str, blank: dict[str, object]) -> LaunchRecord:
         ms_to_json_version=None,
         port_from_banner=None,
         port_matches_request=None,
+        json_answered_before_banner=False,
         pid=None,
         exit_code_if_died=None,
         output_excerpt="",
@@ -409,19 +432,26 @@ def probe_once(  # noqa: PLR0913  PERMANENT(each argument is a measurement param
     ms_to_json_version: float | None = None
     port_from_banner: int | None = None
     died: int | None = None
+    json_answered_before_banner = False
     try:
         while (time.monotonic() - started) < deadline_seconds:
             if port_from_banner is None:
                 port_from_banner = _port_from_output(_read_log(log_path))
                 if port_from_banner is not None:
                     ms_to_devtools_banner = (time.monotonic() - started) * 1000.0
-            # Ask the port Chrome SAYS it bound once it has said so, and the one
-            # we requested until then — so a lost-port race surfaces as a banner
-            # that disagrees, rather than as a silent never-ready.
-            asking = (
-                port_from_banner if port_from_banner is not None else port_requested
-            )
-            if asking and _json_version_answers(asking):
+            if port_from_banner is None:
+                # Nothing has announced yet. The reserved port is still asked —
+                # but an answer HERE is not our browser becoming ready, it is
+                # something already serving on the port we reserved, i.e. the
+                # H2 race itself. Recorded, never counted as success: treating
+                # it as readiness would let a squatter score as a clean launch.
+                if (
+                    port_requested
+                    and not json_answered_before_banner
+                    and _json_version_answers(port_requested)
+                ):
+                    json_answered_before_banner = True
+            elif _json_version_answers(port_from_banner):
                 ms_to_json_version = (time.monotonic() - started) * 1000.0
                 break
             if process.poll() is not None:
@@ -436,13 +466,19 @@ def probe_once(  # noqa: PLR0913  PERMANENT(each argument is a measurement param
         excerpt = _output_excerpt(log_path)
 
     return LaunchRecord(
-        listening=ms_to_json_version is not None,
+        # BOTH conditions, deliberately: the browser said it was listening AND
+        # answered on the port IT named. `ms_to_json_version` is only ever set
+        # on the banner's port above, so this is an invariant restated, not a
+        # second rule — a consumer can never read `listening: true` alongside a
+        # null `port_from_banner`.
+        listening=ms_to_json_version is not None and port_from_banner is not None,
         ms_to_devtools_banner=ms_to_devtools_banner,
         ms_to_json_version=ms_to_json_version,
         port_from_banner=port_from_banner,
         port_matches_request=(
             None if port_from_banner is None else port_from_banner == port_requested
         ),
+        json_answered_before_banner=json_answered_before_banner,
         pid=process.pid,
         exit_code_if_died=died,
         output_excerpt=excerpt,
@@ -455,14 +491,18 @@ def probe(
     executable: str,
     launches: int = LAUNCHES,
     deadline_seconds: float = DEADLINE_SECONDS,
-) -> list[LaunchRecord]:
-    """Run *launches* back-to-back cold launches, each on a fresh profile.
+) -> Iterator[LaunchRecord]:
+    """Yield one record per back-to-back cold launch, each on a fresh profile.
 
     A fresh profile per launch keeps the only difference between launch #1 and
     launch #2 the state of the MACHINE (page cache, warm loader), which is the
     comparison the finding needs — the profile is deliberately not the variable.
+
+    A GENERATOR rather than a list, so a completed launch is already in the
+    caller's record before the next one starts. Returning a list meant a crash
+    during launch #2 discarded launch #1's finished measurement — the more
+    interesting of the two, since launch #1 is the cold one.
     """
-    records: list[LaunchRecord] = []
     for index in range(1, launches + 1):
         # ignore_cleanup_errors: Windows cells run this too, and Chrome can
         # still hold a handle under the profile for a moment after
@@ -475,16 +515,13 @@ def probe(
             profile_dir = root / "profile"
             profile_dir.mkdir()
             port = _reserve_port()
-            records.append(
-                probe_once(
-                    chrome_command(executable, profile_dir, port),
-                    root / "launch.log",
-                    launch=index,
-                    port_requested=port,
-                    deadline_seconds=deadline_seconds,
-                )
+            yield probe_once(
+                chrome_command(executable, profile_dir, port),
+                root / "launch.log",
+                launch=index,
+                port_requested=port,
+                deadline_seconds=deadline_seconds,
             )
-    return records
 
 
 def main() -> int:
@@ -507,16 +544,18 @@ def main() -> int:
         # See binary_prewarmed(): where True, launch #1 is a FLOOR on the cold
         # cost, because the gate's identity step already exec'd the binary.
         "binary_prewarmed": binary_prewarmed(),
-        "launches": [],
     }
+    launches: list[dict[str, object]] = []
+    record["launches"] = launches
     try:
         chrome_path = _resolve_path()
         record["chrome_path"] = str(chrome_path)
-        launches = [
-            asdict(r) for r in probe(str(chrome_path), deadline_seconds=args.deadline)
-        ]
-        record["launches"] = launches
-        for row in launches:
+        # `launches` IS the list already in `record`, appended to as each launch
+        # finishes — so a failure during launch #2 still leaves launch #1's
+        # completed measurement in the written record.
+        for launch_record in probe(str(chrome_path), deadline_seconds=args.deadline):
+            row = asdict(launch_record)
+            launches.append(row)
             print(json.dumps(row, sort_keys=True))
     except Exception as exc:  # noqa: BLE001  PERMANENT(the probe must never fail a gate job; the failure IS the measurement)
         record.setdefault("chrome_path", None)

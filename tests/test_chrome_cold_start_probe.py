@@ -33,6 +33,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+# nodriver is a runtime dependency of this project, so the two pins that compare
+# the probe's argv against it import it outright rather than through
+# `importorskip` — a skip would hide exactly the drift they exist to catch.
+from nodriver.core import config as nodriver_config
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -51,8 +56,11 @@ import chrome_cold_start_probe as probe
 #             handler answers yet, so the probe must keep polling through it.
 #   silent  — start, never announce, never listen (hypothesis H3's shape).
 #   die     — exit immediately with a distinctive code.
+#   squat   — serve /json/version on the port given as argv[5] and NEVER print a
+#             banner: something else holding the port we reserved, which is the
+#             H2 race. Must NOT score as a successful launch.
 _FAKE_BROWSER = """
-import http.server, json, pathlib, sys, time
+import http.server, json, pathlib, socketserver, sys, time
 
 profile, delay, lead, mode = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
 sys.stderr.write("fake-browser start\\n")
@@ -76,6 +84,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
     def log_message(self, *a):
         pass
+
+if mode == "squat":
+    http.server.HTTPServer.allow_reuse_address = True
+    squatter = http.server.HTTPServer(("127.0.0.1", int(sys.argv[5])), Handler)
+    squatter.serve_forever()
+    raise SystemExit(0)
 
 server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
 port = server.server_address[1]
@@ -304,6 +318,47 @@ def test_an_escaping_failure_still_writes_a_record_and_exits_zero(
     assert "BadStatusLine" in record["error"]
 
 
+def test_a_finished_launch_survives_a_crash_during_the_next_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Launch #1 is the COLD one — the whole point of the measurement — and it
+    finishes minutes before launch #2 can fail. Collecting both and assigning
+    the pair at the end threw the interesting half away on exactly the runs
+    where it mattered most: the record is written per launch, as each finishes.
+    """
+    out = tmp_path / "chrome-cold-start.json"
+    first = probe.LaunchRecord(
+        launch=1,
+        listening=True,
+        ms_to_devtools_banner=412.0,
+        ms_to_json_version=430.0,
+        port_requested=45123,
+        port_from_banner=45123,
+        port_matches_request=True,
+        json_answered_before_banner=False,
+        pid=4321,
+        exit_code_if_died=None,
+        deadline_ms=60000.0,
+        output_excerpt="DevTools listening on ws://127.0.0.1:45123/",
+        error=None,
+    )
+
+    def _one_then_boom(
+        *_args: object, **_kwargs: object
+    ) -> Iterator[probe.LaunchRecord]:
+        yield first
+        raise http.client.BadStatusLine("NOT HTTP\r\n")
+
+    monkeypatch.setattr(probe, "_resolve_path", lambda: Path("/usr/bin/chrome"))
+    monkeypatch.setattr(probe, "probe", _one_then_boom)
+    monkeypatch.setattr(sys, "argv", ["probe", "--cell", "c", "--out", str(out)])
+    assert probe.main() == 0
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert [row["launch"] for row in record["launches"]] == [1]
+    assert record["launches"][0]["ms_to_devtools_banner"] == 412.0
+    assert "BadStatusLine" in record["error"]
+
+
 def test_a_port_the_browser_did_not_take_is_flagged(fake_browser: Path, tmp_path: Path):
     """The lost-port race (F-870 H2) is detectable only by comparing the port we
     asked for against the one Chrome says it bound. `--remote-debugging-port` is
@@ -319,6 +374,42 @@ def test_a_port_the_browser_did_not_take_is_flagged(fake_browser: Path, tmp_path
     assert record.port_from_banner == _bound_port(profile)
     assert record.port_from_banner != 65500
     assert record.port_matches_request is False
+
+
+def test_a_squatter_on_the_reserved_port_does_not_score_as_a_launch(
+    fake_browser: Path, tmp_path: Path
+):
+    """The H2 race, and the trap it sets.
+
+    `--remote-debugging-port` is a REQUEST. If something else is already serving
+    on the port we reserved, asking that port for `/json/version` gets a clean
+    200 that has nothing to do with our browser. Counting it would record the
+    squatter as a successful launch — and, worse, as a FAST one, which would
+    drag the very distribution this probe exists to measure.
+
+    So readiness requires the banner AND an answer on the port the banner names.
+    The squatter is recorded instead, via `json_answered_before_banner`, so the
+    reading is explicable rather than just a slow launch.
+    """
+    profile = _profile(tmp_path, "p8")
+    port = probe._reserve_port()
+    command = [
+        *_command(fake_browser, profile, delay=0, lead=0, mode="squat"),
+        str(port),
+    ]
+    record = probe.probe_once(
+        command,
+        _log(tmp_path, "p8"),
+        launch=1,
+        port_requested=port,
+        deadline_seconds=3.0,
+    )
+    assert record.json_answered_before_banner is True
+    assert record.listening is False
+    assert record.port_from_banner is None
+    assert record.ms_to_json_version is None
+    # The invariant a consumer relies on.
+    assert not (record.listening and record.port_from_banner is None)
 
 
 def test_the_launch_output_is_captured_rather_than_discarded(
@@ -361,10 +452,14 @@ def test_the_command_mirrors_nodrivers_own_launch(tmp_path: Path):
     Compared against a real `nodriver.Config`, not a copied list, so a nodriver
     bump that adds, drops or renames a flag fails HERE — rather than silently
     leaving the probe describing a browser the product no longer starts.
-    nodriver is a runtime dependency, so importing it in the unit lane is fine;
-    the probe itself still never imports it.
+    nodriver is a runtime dependency, so it is imported outright — `importorskip`
+    would let this pin quietly vanish in the one environment where it is cheapest
+    to notice. The probe itself still never imports it.
+
+    Compared as an ORDERED LIST, not a set: `Config.__call__` appends
+    `--disable-session-crashed-bubble` a second time, and a set comparison would
+    accept losing that duplicate, or any reordering, as equivalent.
     """
-    nodriver_config = pytest.importorskip("nodriver.core.config")
     profile = tmp_path / "profile"
     port = 45123
     theirs = nodriver_config.Config(
@@ -375,27 +470,35 @@ def test_the_command_mirrors_nodrivers_own_launch(tmp_path: Path):
         port=port,
     )()
     ours = probe.chrome_command("/usr/bin/google-chrome", profile, port)
-    assert set(ours[1:]) == set(theirs), (
-        f"only in the probe: {sorted(set(ours[1:]) - set(theirs))}; "
-        f"only in nodriver: {sorted(set(theirs) - set(ours[1:]))}"
-    )
+    assert ours[1:] == list(theirs), f"probe:    {ours[1:]}\nnodriver: {list(theirs)}"
 
 
 def test_the_default_args_are_nodrivers_verbatim():
-    """The copied constant, checked against its source of truth."""
-    nodriver_config = pytest.importorskip("nodriver.core.config")
+    """The copied constant, checked against its source of truth, in order."""
     theirs = nodriver_config.Config(user_data_dir="x")._default_browser_args
     assert list(probe.NODRIVER_DEFAULT_ARGS) == list(theirs)
 
 
-def test_prewarm_is_flagged_on_linux_only(monkeypatch: pytest.MonkeyPatch):
-    """`resolve_chrome._read_version` execs the binary on Linux only, so only
-    there is launch #1 measuring an already-paged-in Chrome. Comparing a Linux
-    number with a macOS one without this flag would compare two different
-    quantities."""
-    for system, expected in (("Linux", True), ("Windows", False), ("Darwin", False)):
+def test_prewarm_follows_resolve_chromes_own_branching(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """`resolve_chrome._read_version` execs the binary for every OS that is
+    neither Windows nor Darwin, so only there is launch #1 measuring an
+    already-paged-in Chrome. Comparing a Linux number with a macOS one without
+    this flag would compare two different quantities.
+
+    FreeBSD is in the table not because a gate cell runs it, but because the
+    predicate is written as "not Windows, not Darwin" precisely so a new POSIX
+    cell would be reported correctly instead of silently as `false`.
+    """
+    for system, expected in (
+        ("Linux", True),
+        ("FreeBSD", True),
+        ("Windows", False),
+        ("Darwin", False),
+    ):
         monkeypatch.setattr(probe.platform, "system", lambda s=system: s)
-        assert probe.binary_prewarmed() is expected
+        assert probe.binary_prewarmed() is expected, system
 
 
 def test_the_output_excerpt_keeps_the_head_where_the_banner_is(tmp_path: Path):
