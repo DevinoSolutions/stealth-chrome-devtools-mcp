@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
+import socket
 from pathlib import Path
 from types import GeneratorType, SimpleNamespace
 from typing import Any
@@ -761,3 +763,34 @@ def load_or_capture_golden(path: Any, obj: Any) -> Any:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(obj, indent=2, sort_keys=True), encoding="utf-8")
     return json.loads(p.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Chrome's process-singleton artefacts (F-871)
+# ---------------------------------------------------------------------------
+# ONE home for writing what Chrome writes into a profile directory, because a
+# test that hand-rolls a `SingletonLock` will hand-roll a WRONG one: Chrome's
+# lock is a SYMLINK whose target is the string `<hostname>-<pid>` -- it is a
+# claim about a pid, not a file that exists -- and `embedded/profile_lock.py`
+# reads it the way Chromium's `ParseProcessSingletonLock` does.
+
+
+def write_singleton(
+    profile_dir: Path, content: str, name: str = "SingletonLock"
+) -> Path:
+    """Write one singleton artefact as a symlink, or as a plain file where the
+    platform refuses one (creating a symlink is privileged on Windows).
+    ``profile_lock`` reads both forms, so a test means the same thing on either.
+    """
+    path = profile_dir / name
+    try:
+        path.symlink_to(content)
+    except (OSError, NotImplementedError):
+        path.write_text(content, encoding="utf-8")
+    return path
+
+
+def held_profile(profile_dir: Path) -> Path:
+    """Make *profile_dir* look like one a LIVE browser is holding, by naming a
+    pid that is certainly running: this test's own."""
+    return write_singleton(profile_dir, f"{socket.gethostname()}-{os.getpid()}")
