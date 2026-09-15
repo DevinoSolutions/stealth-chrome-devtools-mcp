@@ -30,7 +30,14 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # 1000-LOC budget. GRANDFATHERED at its actual post-ruff-format LOC per the
     # human gate ruling 2026-07-12 (cap == actual, no padding; the two-module
     # split and the partial move were both explicitly declined). No-grow applies.
-    "embedded/clone_storage.py": (1057, "plan_M4ph1"),
+    # F-871 RATCHETS DOWN 1057 -> 1055. "Is this Chrome profile held by a live
+    # process, and who holds it" left for the new profile_lock.py leaf, which
+    # reads Chrome's SingletonLock the way Chromium reads it; what stays here is
+    # the two-line adapter plus the walk diagnostics a named profile's caller
+    # needs (requested_user_data_dir / walked_to / walk_reason). The import of
+    # psutil went with the moved body, which is the rest of the payment.
+    # Cap == actual.
+    "embedded/clone_storage.py": (1055, "plan_M4ph1 + F-871"),
     # 1447 (DEBT(F-702)) + 2 (plan_M10a step 7a: switch_to_tab/close_tab's two
     # truly-silent `except Exception: return False` handlers now each add one
     # debug_logger.log_warning(...) line closing F-181 rows 1-2; same minimal-

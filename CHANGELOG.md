@@ -121,6 +121,39 @@ product's own mistaken belief about the library type; it is rebuilt from nodrive
 own constructors, which flipped all five of its cases from green to red before the
 fix.
 
+### Fixed — a named profile is no longer silently swapped for `<name>-2` (F-871)
+
+Whether a Chrome profile was busy used to be decided by asking whether
+`SingletonLock`, `SingletonSocket` or `SingletonCookie` exists in it. None of
+those names means what that assumed. Chrome's lock is a SYMLINK whose target is
+the string `<hostname>-<pid>` — a claim about a pid, not a path — so
+`Path.exists()`, which follows symlinks, reported the one artefact that names an
+owner as ABSENT; while `SingletonSocket` points into a per-launch `/tmp`
+directory that a killed browser never gets to clean up, so its target outlived
+the browser and reported "busy" forever. After F-860's reaper killed a Chrome
+that a failed spawn had leaked, the next `spawn_browser` on the same NAMED
+profile therefore read the leftovers as a running browser and walked the caller
+to `<name>-2` — a different identity (a fresh clone of the master snapshot the
+first time, and thereafter whatever an earlier walk left at that name) for a
+profile that exists
+precisely to keep its cookies and logins — with nothing in the answer saying so
+(measured on the 2.1.5 release gate: `ci-warmup`, `ci-warmup`, `ci-warmup-2`
+across three attempts that all passed `user_data_dir="ci-warmup"`). The question
+now has one home, `embedded/profile_lock.py`, which reads the lock the way
+Chromium's own `ParseProcessSingletonLock` does — a lock naming a dead pid is
+orphaned and holds nothing, exactly as Chrome concludes before unlinking it and
+starting — and the socket and cookie are not consulted at all, because Chrome
+writes them after the lock. A live browser's lock is also visible for the first
+time, so a held profile can no longer be handed to a second Chrome. When a walk
+does happen the answer now says so, and says it where a caller will actually
+read it: `spawn_diagnostics.profile_selection` gains `requested_user_data_dir`,
+`walked_to` and `walk_reason` (e.g. "Chrome's SingletonLock is held by live pid
+4242") whenever the caller did not get the profile they asked for, and that
+reason is prepended to the named-profile `warning` rather than left sitting
+beside it. On Windows, where Chrome writes no readable lock and the process scan
+is the only witness there is, a scan that cannot be read now resolves toward
+"held" instead of "free" — the same direction an unreadable pid already took.
+
 ## 2.1.5
 
 ### Fixed — the backend escapes the MCP client's Job Object (F-867)

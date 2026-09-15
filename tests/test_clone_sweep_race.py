@@ -22,6 +22,7 @@ import os
 
 import pytest
 
+from fakes import held_profile
 from stealth_chrome_devtools_mcp.embedded import clone_storage
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     _enforce_clone_storage_cap_in,
@@ -134,7 +135,10 @@ class TestSpawnFlowProtectsClone:
     @pytest.mark.asyncio
     async def test_resolve_profile_selection_protects_the_clone(self, tmp_session_root):
         # Force the clone branch by making the master profile look busy.
-        (tmp_session_root["master"] / "SingletonLock").write_text("lock")
+        # SOFT GOLDEN UPDATED for F-871: a `SingletonLock` holding the bytes
+        # "lock" is what Chromium calls an INVALID lockfile (it unlinks it and
+        # starts), so it never meant "busy". `held_profile` names a live pid.
+        held_profile(tmp_session_root["master"])
 
         result = await clone_storage.resolve_profile_selection(None)
 

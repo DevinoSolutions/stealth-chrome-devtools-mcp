@@ -5,9 +5,20 @@ than raising ``NameError`` while evaluating ``psutil.Error`` in its except claus
 server.py referenced ``psutil.Error`` at the handler but never imported ``psutil``
 (caught by ruff F821 during the 2.5-gates workstream). Any real failure in the
 ``try`` body therefore masked itself with a NameError and crashed the caller.
+
+SOFT PIN UPDATED for F-871. What must never change is that the failure is
+survived rather than raised. What the surviving ANSWER is was main's behaviour,
+not an invariant, and main's was not uniform: an unanswerable ``_pid_alive``
+counts a profile as held, while an unanswerable process scan counted it free.
+The direction is now uniform — an unanswerable question resolves toward HELD,
+because one extra walk is survivable and two browsers on one profile is not —
+and it is visible only where the process scan is the ONLY witness. On POSIX the
+``SingletonLock`` still answers (and an empty tmp_path holds no lock, so the
+answer is still False); on Windows Chrome writes no readable lock at all, so
+there is nothing to fall back to.
 """
 
-from stealth_chrome_devtools_mcp.embedded import clone_storage
+from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_lock
 
 
 def test_profile_pid_check_survives_os_error(tmp_path, monkeypatch):
@@ -18,6 +29,5 @@ def test_profile_pid_check_survives_os_error(tmp_path, monkeypatch):
         clone_storage.process_cleanup, "_get_browser_pids_for_profile", _raise
     )
 
-    # tmp_path carries no Chrome singleton markers, so the liveness heuristic must
-    # fall back to False without raising.
-    assert clone_storage._profile_has_running_browser(tmp_path) is False
+    held = clone_storage._profile_has_running_browser(tmp_path)
+    assert held is not profile_lock._LOCK_IS_A_WITNESS

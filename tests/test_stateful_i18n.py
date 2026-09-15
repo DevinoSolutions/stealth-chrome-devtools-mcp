@@ -164,7 +164,8 @@ class _Instances:
 
         This is a correctness barrier, not politeness. ``spawn_browser`` on a
         named profile that is still held resolves to a NUMBERED VARIANT
-        (``…-2``) freshly cloned from master rather than failing — which is a
+        (``…-2``) cloned from master — or, if an earlier walk already made that
+        name, whatever it left there — rather than failing, which is a
         reasonable product behaviour and a silent disaster for a restart test:
         the respawn would read an empty profile and the node would report that
         nothing persisted. Waiting on the product's own predicate is the only
