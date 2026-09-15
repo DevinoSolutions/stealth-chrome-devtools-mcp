@@ -28,12 +28,13 @@ from __future__ import annotations
 import os
 import socket
 from pathlib import Path
+from types import SimpleNamespace
 
 import psutil
 import pytest
 
-from fakes import held_profile, write_singleton
-from stealth_chrome_devtools_mcp.embedded import profile_lock
+from fakes import FakeBrowserManager, held_profile, write_singleton
+from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_lock
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     resolve_profile_selection,
 )
@@ -112,13 +113,39 @@ class TestProfileHold:
         write_singleton(tmp_path, "0123456789", name="SingletonCookie")
         assert profile_lock.profile_hold(tmp_path, no_pids) is None
 
-    def test_a_pid_scan_that_fails_does_not_raise(self, tmp_path):
+    def test_a_pid_scan_that_fails_resolves_toward_held_where_it_is_the_only_witness(
+        self, tmp_path
+    ):
+        """Never raises, and the direction is uniform with ``_pid_alive``: an
+        unanswerable question resolves toward HELD. On POSIX the lock is a
+        second witness and answers "free"; on Windows there is none, so the
+        profile is not SHOWN free."""
+
         def _raise(_user_data_dir):
             raise OSError("simulated PID-lookup failure")
 
-        assert profile_lock.profile_hold(tmp_path, _raise) is None
+        hold = profile_lock.profile_hold(tmp_path, _raise)
+        if profile_lock._LOCK_IS_A_WITNESS:
+            assert hold is None
+        else:
+            assert hold is not None
+            assert hold.pid is None
+            assert "could not be read" in hold.reason
+
+    def test_a_scan_that_rejects_both_str_and_path_counts_as_unasked(self, tmp_path):
+        """A TypeError is the str/Path probe, not an answer — a scan that takes
+        neither was never really asked, and must not read as "no browsers"."""
+
+        def _wrong_arity(_a, _b):
+            raise AssertionError("must never be reached")
+
+        assert profile_lock._browser_pids(tmp_path, _wrong_arity) is None
+
+    def test_a_scan_that_answers_nothing_is_not_the_same_as_unasked(self, tmp_path):
+        assert profile_lock._browser_pids(tmp_path, no_pids) == ()
 
     def test_a_missing_pid_scan_does_not_raise(self, tmp_path):
+        """An absent collaborator is a replaced seam, not a runtime failure."""
         assert profile_lock.profile_hold(tmp_path, None) is None
 
 
@@ -169,3 +196,80 @@ class TestNamedProfileSelection:
         assert result["requested_user_data_dir"] == str(occupied)
         assert result["walked_to"] == result["user_data_dir"]
         assert str(os.getpid()) in result["walk_reason"]
+
+
+# ---------------------------------------------------------------------------
+# What spawn_browser actually tells the caller
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnBrowserAnnouncesTheSubstitution:
+    """`walk_reason` on its own is a quiet field beside a loud one: the named
+    profile `warning` is what a model reads, so a substitution has to lead it."""
+
+    async def test_the_walk_reason_leads_the_warning(
+        self, call_tool, patched_server, monkeypatch
+    ):
+        fbm = FakeBrowserManager(
+            spawn_instance=SimpleNamespace(
+                instance_id="i1",
+                state="active",
+                headless=True,
+                viewport={"width": 800, "height": 600},
+            ),
+            spawn_diagnostics={},
+        )
+
+        async def fake_resolve(user_data_dir, **kwargs):
+            return {
+                "user_data_dir": "/sessions/github-2",
+                "profile_role": "explicit",
+                "clone_source": None,
+                "requested_user_data_dir": "/sessions/github",
+                "walked_to": "/sessions/github-2",
+                "walk_reason": "Chrome's SingletonLock is held by live pid 4242",
+            }
+
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        srv = patched_server(browser_manager=fbm)
+
+        result = await call_tool(
+            srv, "spawn_browser", headless=True, user_data_dir="github", sandbox=False
+        )
+
+        warning = result["spawn_diagnostics"]["profile_selection"]["warning"]
+        assert warning.startswith("NOT the profile you asked for")
+        assert "Chrome's SingletonLock is held by live pid 4242" in warning
+        assert "/sessions/github-2" in warning
+        # The standing named-profile advice is kept, not replaced.
+        assert "NOT auto-cleaned" in warning
+
+    async def test_no_walk_leaves_the_warning_alone(
+        self, call_tool, patched_server, monkeypatch
+    ):
+        fbm = FakeBrowserManager(
+            spawn_instance=SimpleNamespace(
+                instance_id="i1",
+                state="active",
+                headless=True,
+                viewport={"width": 800, "height": 600},
+            ),
+            spawn_diagnostics={},
+        )
+
+        async def fake_resolve(user_data_dir, **kwargs):
+            return {
+                "user_data_dir": "/sessions/github",
+                "profile_role": "explicit",
+                "clone_source": None,
+            }
+
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        srv = patched_server(browser_manager=fbm)
+
+        result = await call_tool(
+            srv, "spawn_browser", headless=True, user_data_dir="github", sandbox=False
+        )
+
+        warning = result["spawn_diagnostics"]["profile_selection"]["warning"]
+        assert warning.startswith("Named profile created")

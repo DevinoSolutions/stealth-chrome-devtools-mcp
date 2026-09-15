@@ -1,5 +1,10 @@
-"""THE one home for "is this Chrome profile held by a live process, and who
-holds it" (F-871).
+"""THE one home for INTERPRETING Chrome's process-singleton artefacts — "is this
+profile held by a live process, and who holds it" (F-871).
+
+Interpreting, not owning the names: `clone_storage._REGENERABLE_PROFILE_NAMES`
+also lists `SingletonLock`/`SingletonSocket`/`SingletonCookie` (and `lockfile`),
+for the different question of what a clone must not copy and what a trim may
+delete. That list is about bytes on disk; this module is about what they MEAN.
 
 Two witnesses, in order, and no third:
 
@@ -28,6 +33,17 @@ to ``<name>-2``: a different identity for a profile whose whole purpose is to
 keep one. The same ``exists()`` could never see the lock at all, because a
 dangling symlink is ``exists() == False``.
 
+**On Windows there is only ONE witness.** Chrome writes no ``Singleton*``
+artefact there at all — it takes a ``lockfile`` in the profile with
+``FILE_FLAG_DELETE_ON_CLOSE``, which the kernel removes even when the process is
+killed — so witness 2 is always vacuous and the process scan carries the answer
+alone (as it did before this change; F-860 §3.6 measured 0 stale ``lockfile``s
+across 80 idle profiles). Its mere PRESENCE is deliberately NOT taken as a third
+witness: a presence test is the exact reasoning this finding condemns, and here
+it is not even sound — a power loss or a hard reset leaves a ``lockfile`` behind
+forever with no pid in it to check. What the missing second witness DOES change
+is the direction an unreadable answer resolves in: see ``_browser_pids``.
+
 **Deliberately NOT here: clearing a stale lock.** Chromium unlinks an orphaned
 lock itself on the next launch, so deleting one from our side would be a second
 way to do something already done — and doing it from a failure handler would
@@ -45,6 +61,7 @@ read a lock is not a reason to fail a spawn.
 
 from __future__ import annotations
 
+import os
 import socket
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
@@ -59,6 +76,10 @@ if TYPE_CHECKING:
 
 LOCK_NAME = "SingletonLock"
 _DELIMITER = "-"
+
+# Whether Chrome leaves a readable owner in the profile — i.e. whether witness 2
+# exists on this platform at all (see the module docstring). False on Windows.
+_LOCK_IS_A_WITNESS = os.name != "nt"
 
 # The scan that answers "which live browsers run on this profile directory".
 # ``None`` is accepted so a caller whose collaborator has been replaced falls
@@ -84,27 +105,61 @@ def profile_hold(profile_dir: Path, live_pids: PidScan) -> Hold | None:
     if pids:
         pid = min(pids)
         return Hold(pid, f"a live browser process (pid {pid}) has this profile open")
+    if pids is None and not _LOCK_IS_A_WITNESS:
+        # The one witness this platform has did not answer. Every unanswerable
+        # question here resolves toward HELD (see `_pid_alive`) and for the same
+        # reason: one extra walk is survivable, two browsers on one profile is
+        # not. Unreachable on POSIX — the lock still answers there.
+        return Hold(
+            None,
+            "the process table could not be read and Chrome on this platform "
+            "leaves no lock to read instead, so this profile cannot be shown free",
+        )
     return _lock_hold(profile_dir / LOCK_NAME)
 
 
-def _browser_pids(profile_dir: Path, live_pids: PidScan) -> Collection[int]:
-    """The process table's answer, or nothing when it cannot be asked."""
+def _browser_pids(profile_dir: Path, live_pids: PidScan) -> Collection[int] | None:
+    """The process table's answer about *profile_dir*.
+
+    Three outcomes, and the caller needs all three: the pids found, ``()`` for
+    "asked, and nothing is running", and ``None`` for "could NOT be asked" —
+    which on Windows is the whole difference between free and unknowable,
+    because there is no second witness there.
+
+    A ``live_pids`` that is absent entirely is a replaced collaborator, not a
+    runtime failure, and stays ``()``.
+    """
     if not callable(live_pids):
         return ()
+    answered = False
+    rejected: TypeError | None = None
     for candidate in (str(profile_dir), profile_dir):
         try:
             found = live_pids(candidate)
-        except TypeError:
+        except TypeError as error:
+            # The scan may take only one of str/Path. Remembered, not dropped: a
+            # TypeError raised INSIDE a working scan would otherwise read as "no
+            # browsers", so exhausting both forms is warned about below.
+            rejected = error
             continue
         except (psutil.Error, OSError, AttributeError) as error:
             debug_logger.log_warning(
                 "profile_lock",
                 "pids",
-                f"PID check failed for profile {profile_dir}: {error}",
+                f"PID check failed for profile {profile_dir}: {error!r}",
             )
-            return ()
+            return None
+        answered = True
         if found:
             return found
+    if not answered:
+        debug_logger.log_warning(
+            "profile_lock",
+            "pids",
+            f"PID check rejected both a str and a Path for {profile_dir}, so it "
+            f"was never really asked: {rejected!r}",
+        )
+        return None
     return ()
 
 
@@ -158,7 +213,7 @@ def _lock_content(lock: Path) -> str:
     """
     try:
         if lock.is_symlink():
-            return str(lock.readlink())
+            return str(lock.readlink()).strip()
         if lock.is_file():
             return lock.read_text(encoding="utf-8", errors="replace").strip()
     except OSError as error:

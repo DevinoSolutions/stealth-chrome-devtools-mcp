@@ -24,10 +24,14 @@ orphaned and holds nothing, exactly as Chrome concludes before unlinking it and
 starting — and the socket and cookie are not consulted at all, because Chrome
 writes them after the lock. A live browser's lock is also visible for the first
 time, so a held profile can no longer be handed to a second Chrome. When a walk
-does happen the answer now says so: `spawn_diagnostics.profile_selection` gains
-`requested_user_data_dir`, `walked_to` and `walk_reason` (e.g. "Chrome's
-SingletonLock is held by live pid 4242"), present only when the caller did not
-get the profile they asked for.
+does happen the answer now says so, and says it where a caller will actually
+read it: `spawn_diagnostics.profile_selection` gains `requested_user_data_dir`,
+`walked_to` and `walk_reason` (e.g. "Chrome's SingletonLock is held by live pid
+4242") whenever the caller did not get the profile they asked for, and that
+reason is prepended to the named-profile `warning` rather than left sitting
+beside it. On Windows, where Chrome writes no readable lock and the process scan
+is the only witness there is, a scan that cannot be read now resolves toward
+"held" instead of "free" — the same direction an unreadable pid already took.
 
 ## 2.1.5
 

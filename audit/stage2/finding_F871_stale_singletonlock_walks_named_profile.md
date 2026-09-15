@@ -148,6 +148,16 @@ witnesses and no third:
 writes them AFTER the lock, so a live browser always has a lock, and consulting
 them is precisely the bug.
 
+**Windows has only witness 1**, since Chrome there writes no `Singleton*` at all
+(§3). Its `lockfile` is deliberately not promoted to a third witness — presence
+is the reasoning this finding condemns, and a power loss leaves one behind
+forever with no pid in it to check. What the missing witness does change is the
+DIRECTION of an unreadable answer: `_browser_pids` distinguishes "could not be
+asked" (`None`) from "asked, nothing running" (`()`), and where there is no
+second witness the former resolves toward HELD — uniformly with `_pid_alive`,
+which already counted an unreadable pid as alive. One extra walk is survivable;
+two browsers on one profile is not.
+
 `clone_storage` keeps the names its readers use — `_profile_hold` is a two-line
 adapter and `_profile_has_running_browser` is that answer as a bool — so no
 sweep, trim or CLI site changed.
@@ -192,7 +202,10 @@ process is inspected beyond the test's own pid).
 * The premise: a real `SingletonLock` symlink is `exists() == False`.
 * `profile_hold` across the whole decision table — live pid scan, live lock,
   stale lock, foreign-host lock, unparseable lock, residual socket+cookie with
-  no lock, a pid scan that raises, a pid scan that is absent.
+  no lock, a pid scan that raises (per-platform direction), a pid scan that
+  takes neither `str` nor `Path`, a pid scan that is absent.
+* The `warning` a caller actually reads
+  (`TestSpawnBrowserAnnouncesTheSubstitution`).
 * Selection level, the two product claims, both RED before the fix:
   `test_residual_socket_reuses_the_named_profile`
   (`assert 'occupied-2' == 'occupied'` — the CI shape) and
@@ -216,6 +229,12 @@ only passed because the old check asked `exists()`. Each now calls
 `::test_master_busy_clones`, and
 `tests/test_clone_sweep_race.py::TestSpawnFlowProtectsClone::test_resolve_profile_selection_protects_the_clone`.
 
+A fifth, `tests/test_profile_pid_check.py::test_profile_pid_check_survives_os_error`,
+pinned main's answer to a FAILING process scan (False, i.e. free). What that test
+exists to guard — the failure is survived, not raised — is untouched; the answer
+was main's behaviour and main's was not uniform (see §4, Windows). It is now
+expressed per-platform against `profile_lock._LOCK_IS_A_WITNESS`.
+
 ---
 
 ## 6. What remains
@@ -231,10 +250,15 @@ only passed because the old check asked `exists()`. Each now calls
   `<name>-2` a user's machine accumulated) are not migrated. They are ordinary
   named profiles; nothing reclaims them, and merging them back into `<name>` is
   not a thing this tool can do safely.
-* **The walk fields are not yet a `spawn_browser` WARNING.** They ride in
-  `spawn_diagnostics`, where the existing named-profile `warning` also lives.
-  Whether a substitution deserves louder treatment than a diagnostic field is a
-  product call, not a defect.
+* ~~**The walk fields are not yet a `spawn_browser` WARNING.**~~ **Done in
+  review.** A quiet `walk_reason` beside a loud `warning` is a field a model does
+  not read: `tool_sections/browser_management.py` now PREPENDS the substitution
+  to that same `warning` ("NOT the profile you asked for: … is in use (…), so
+  this spawn got … — a DIFFERENT profile, freshly cloned, with none of the
+  cookies or logins the requested one holds."), keeping the standing
+  named-profile advice after it. Same field set, no second diagnostics home;
+  pinned by `TestSpawnBrowserAnnouncesTheSubstitution` (walk → leads the warning;
+  no walk → the warning is byte-for-byte what it was).
 * **The residue is still on disk after a reap.** By the §4 argument that is
   correct — Chromium cleans it up — but it means `ls` of a reaped profile still
   shows `SingletonSocket`. Nothing reads it any more.

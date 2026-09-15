@@ -187,7 +187,22 @@ async def spawn_browser(
             if spawn_errors:
                 spawn_diagnostics["profile_selection"]["spawn_retries"] = spawn_errors
             if profile_selection.get("profile_role") == "explicit":
-                spawn_diagnostics["profile_selection"]["warning"] = (
+                # F-871: when the requested profile was held, the walk to
+                # <name>-N is an identity change. It LEADS the field a caller
+                # actually reads, rather than sitting quietly beside it in
+                # walk_reason — same field set, no second diagnostics home.
+                walked = profile_selection.get("walk_reason")
+                substitution = (
+                    f"NOT the profile you asked for: "
+                    f"{profile_selection.get('requested_user_data_dir')} is in use "
+                    f"({walked}), so this spawn got "
+                    f"{profile_selection.get('walked_to')} — a DIFFERENT profile, "
+                    f"freshly cloned, with none of the cookies or logins the "
+                    f"requested one holds. "
+                    if walked
+                    else ""
+                )
+                spawn_diagnostics["profile_selection"]["warning"] = substitution + (
                     "Named profile created — it is NOT auto-cleaned and persists on disk. "
                     "Only pass user_data_dir when the user explicitly asks for a persistent "
                     "profile; otherwise omit it so the session is auto-cloned and auto-deleted."
