@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — four cloner aspects returned nested transport nodes, not values (F-872)
+
+`extract_element_structure`, `extract_element_events`, `extract_element_assets` and
+`extract_related_files` handed back payloads whose nested lists held Chrome's BiDi
+`{'type': …, 'value': …}` serialization records instead of the values they describe.
+Measured against real headless Chrome: `structure["children"][0]` was
+`{'type': 'object', 'value': [['tag_name', {'type': 'string', 'value': 'span'}], …]}`
+rather than `{'tag_name': 'span', …}`, `class_list` was a list of `{'type': 'string'}`
+nodes, `assets["images"][0]` and `related_files["stylesheets"][0]` the same — and an
+empty JS object (`events["framework_handlers"]`) decayed into an empty **list**.
+
+nodriver's `Tab.evaluate` sends `serialization="deep"` on every call and returns the
+deep-serialized value verbatim, so a returned JS object arrives encoded at *every*
+depth and `return_by_value` cannot undo it. The engine's tolerance,
+`_convert_nodriver_result`, unwrapped the **top level only**: its `"array"` branch
+returned the raw list of nodes. Nothing raised — the answer looked right and was
+wrong below the first level, which is why the E2E tier (which string-searches the
+JSON, and the values ARE in there) stayed green, and why the unit fixture, which fed
+a plain dict a real tab can never produce, short-circuited the conversion entirely.
+
+The four aspect scripts now end in `JSON.stringify` and are read back with
+`json.loads` — the idiom `extract_element_animations` (F-846), the viewport read
+(F-844) and `window_sizing` already use, since a string is the one shape deep
+serialization leaves alone. The four per-aspect ladders collapse into one reader,
+`_js_answer`, shared with the animations aspect; `_convert_nodriver_result` is
+deleted. Schemas and field names are unchanged — only the depth at which the values
+are real. Also corrupted, and also fixed: the seven tools composed from these four
+(`*_to_file`, `clone_element_complete`, `clone_element_progressive` and its
+`expand_children` / `expand_events` slices). `cdp_element_cloner.py` 1012 → 973 LOC;
+its grandfathered cap ratchets down to match.
+
 ## 2.1.5
 
 ### Fixed — the backend escapes the MCP client's Job Object (F-867)

@@ -485,33 +485,31 @@ class CDPElementCloner:
         """
         return ToolError(f"Unexpected return type: {type(value)} (raw: {value!s:.400})")
 
-    def _convert_nodriver_result(self, data):
-        """Convert nodriver's array result format back to a dict."""
-        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
-            result = {}
-            for item in data:
-                if isinstance(item, list) and len(item) == 2:
-                    key = item[0]
-                    value_obj = item[1]
-                    if isinstance(value_obj, dict) and "type" in value_obj:
-                        if value_obj["type"] == "string":
-                            result[key] = value_obj.get("value", "")
-                        elif value_obj["type"] == "number":
-                            result[key] = value_obj.get("value", 0)
-                        elif value_obj["type"] == "null":
-                            result[key] = None
-                        elif value_obj["type"] == "array":
-                            result[key] = value_obj.get("value", [])
-                        elif value_obj["type"] == "object":
-                            result[key] = self._convert_nodriver_result(
-                                value_obj.get("value", [])
-                            )
-                        else:
-                            result[key] = value_obj.get("value")
-                    else:
-                        result[key] = value_obj
-            return result
-        return data
+    def _js_answer(self, raw: object) -> dict[str, Any]:
+        """THE one way a JS aspect's answer becomes plain Python (F-872).
+
+        ``nodriver``'s ``Tab.evaluate`` sends
+        ``SerializationOptions(serialization="deep", max_depth=10)`` on EVERY
+        call and hands back ``deep_serialized_value.value`` verbatim
+        (``nodriver/core/tab.py``; ``cdp/runtime.py``'s ``DeepSerializedValue``
+        keeps ``json["value"]`` as it arrived), so a returned OBJECT becomes BiDi
+        ``RemoteValue`` nodes — ``[[key, {type, value}], …]`` — at every depth,
+        and ``return_by_value`` cannot undo it. A string is the one shape the
+        transport leaves alone, so every aspect script ends in
+        ``JSON.stringify``; this is where it is read back.
+
+        Replaces the per-aspect tolerance that unwrapped the TOP level only and
+        left every nested array/object as raw transport nodes — corrupted rather
+        than crashed, which is why nothing ever raised.
+        """
+        if hasattr(raw, "exception_details"):
+            raise ToolError(f"JavaScript error: {raw.exception_details}")
+        if not isinstance(raw, str):
+            raise self._unexpected_type(raw)
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise self._unexpected_type(parsed)
+        return parsed
 
     async def extract_element_styles(
         self,
@@ -639,15 +637,7 @@ class CDPElementCloner:
             }
 
             js_code = self._load_js_file("extract_structure.js", selector, options)
-            structure_data = await tab.evaluate(js_code)
-
-            if hasattr(structure_data, "exception_details"):
-                raise ToolError(f"JavaScript error: {structure_data.exception_details}")
-            if isinstance(structure_data, dict):
-                return structure_data
-            if isinstance(structure_data, list):
-                return self._convert_nodriver_result(structure_data)
-            raise self._unexpected_type(structure_data)
+            return self._js_answer(await tab.evaluate(js_code))
         except ToolError:
             raise
         except Exception as e:
@@ -677,15 +667,7 @@ class CDPElementCloner:
             }
 
             js_code = self._load_js_file("extract_events.js", selector, options)
-            event_data = await tab.evaluate(js_code)
-
-            if hasattr(event_data, "exception_details"):
-                raise ToolError(f"JavaScript error: {event_data.exception_details}")
-            if isinstance(event_data, dict):
-                return event_data
-            if isinstance(event_data, list):
-                return self._convert_nodriver_result(event_data)
-            raise self._unexpected_type(event_data)
+            return self._js_answer(await tab.evaluate(js_code))
         except ToolError:
             raise
         except Exception as e:
@@ -722,12 +704,7 @@ class CDPElementCloner:
                 "max_keyframes": max_keyframes,
             }
             js_code = self._load_js_file("extract_animations.js", selector, options)
-            raw = await tab.evaluate(js_code)
-            if hasattr(raw, "exception_details"):
-                raise ToolError(f"JavaScript error: {raw.exception_details}")
-            if not isinstance(raw, str):
-                raise self._unexpected_type(raw)
-            facts = json.loads(raw)
+            facts = self._js_answer(await tab.evaluate(js_code))
             if "error" in facts:
                 # The collector reports its own miss inside the JSON. Q4 asked
                 # this aspect to keep PARITY with the other five; the five now
@@ -778,15 +755,7 @@ class CDPElementCloner:
                 "$FETCH_EXTERNAL", "true" if fetch_external else "false"
             )
 
-            asset_data = await tab.evaluate(js_code)
-            if hasattr(asset_data, "exception_details"):
-                raise ToolError(f"JavaScript error: {asset_data.exception_details}")
-            if isinstance(asset_data, dict):
-                pass
-            elif isinstance(asset_data, list):
-                asset_data = self._convert_nodriver_result(asset_data)
-            else:
-                raise self._unexpected_type(asset_data)
+            asset_data = self._js_answer(await tab.evaluate(js_code))
 
             if fetch_external and isinstance(asset_data, dict):
                 asset_data["external_assets"] = {}
@@ -845,15 +814,7 @@ class CDPElementCloner:
             )
             js_code = js_code.replace("$MAX_DEPTH", str(max_depth))
 
-            file_data = await tab.evaluate(js_code)
-            if hasattr(file_data, "exception_details"):
-                raise ToolError(f"JavaScript error: {file_data.exception_details}")
-            if isinstance(file_data, dict):
-                pass
-            elif isinstance(file_data, list):
-                file_data = self._convert_nodriver_result(file_data)
-            else:
-                raise self._unexpected_type(file_data)
+            file_data = self._js_answer(await tab.evaluate(js_code))
 
             if follow_imports and max_depth > 0 and isinstance(file_data, dict):
                 await self._fetch_and_analyze_files(file_data)

@@ -33,7 +33,7 @@ from types import SimpleNamespace
 import nodriver.cdp.dom as cdp_dom
 import pytest
 
-from fakes import FakeStorage, FakeTab, fake_element
+from fakes import FakeStorage, FakeTab, fake_element, js_aspect_answer
 from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
 from stealth_chrome_devtools_mcp.embedded import file_based_element_cloner as _fbc
 from stealth_chrome_devtools_mcp.embedded import progressive_element_cloner as _pec
@@ -245,7 +245,7 @@ class TestToFilePropagates:
         self, tmp_path, monkeypatch
     ):
         monkeypatch.setattr(_fbc.file_based_element_cloner, "output_dir", tmp_path)
-        tab = FakeTab(evaluate_result={"tag_name": "DIV"})
+        tab = FakeTab(evaluate_result=js_aspect_answer({"tag_name": "DIV"}))
         with pytest.raises(ToolError, match=r"^Selector is required$"):
             await _fbc.file_based_element_cloner.extract_element_structure_to_file(
                 tab, selector=None
@@ -257,13 +257,15 @@ class TestToFilePropagates:
     async def test_a_successful_save_is_unchanged(self, tmp_path, monkeypatch):
         monkeypatch.setattr(_fbc.file_based_element_cloner, "output_dir", tmp_path)
         tab = FakeTab(
-            evaluate_result={
-                "tag_name": "DIV",
-                "attributes": {"id": "demo"},
-                "data_attributes": {},
-                "children": [],
-                "dom_path": "html>body>div",
-            }
+            evaluate_result=js_aspect_answer(
+                {
+                    "tag_name": "DIV",
+                    "attributes": {"id": "demo"},
+                    "data_attributes": {},
+                    "children": [],
+                    "dom_path": "html>body>div",
+                }
+            )
         )
         result = await _fbc.file_based_element_cloner.extract_element_structure_to_file(
             tab, selector="#demo"
@@ -286,7 +288,7 @@ class TestKeptEmbeddedFailureRecords:
 
         monkeypatch.setattr(_cdc.cdp_element_cloner, "extract_element_events", boom)
         tab = FakeTab(
-            evaluate_result={"tag_name": "DIV"},
+            evaluate_result=js_aspect_answer({"tag_name": "DIV"}),
             cdp_responses=_cdp_responses(),
             select_result=fake_element(node_id=2),
         )

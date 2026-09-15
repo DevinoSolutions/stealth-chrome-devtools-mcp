@@ -1,6 +1,9 @@
+// Returns ONE JSON string (F-872): tab.evaluate always requests deep
+// serialization, so a returned OBJECT arrives as BiDi RemoteValue nodes at every
+// depth (images/icons/videos would be lists of {type, value} records).
 (function(selector, options) {
     const element = document.querySelector(selector);
-    if (!element) return {error: 'Element not found'};
+    if (!element) return JSON.stringify({error: 'Element not found'});
     
     const result = {
         images: [],
@@ -93,7 +96,7 @@
         });
     });
     
-    return result;
+    return JSON.stringify(result);
 })('$SELECTOR', {
     include_images: $INCLUDE_IMAGES,
     include_backgrounds: $INCLUDE_BACKGROUNDS, 
