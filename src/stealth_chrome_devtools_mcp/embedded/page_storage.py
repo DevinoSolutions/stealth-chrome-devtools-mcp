@@ -53,9 +53,12 @@ emails and URL query strings, not a bare bearer token. The defect this module
 closes never logged storage contents; the fix must not introduce a leak the
 defect did not have. So every message reports SHAPE and COUNT only — a type
 name, an index, a field count, a character count — never a key and never a
-value. The single exception is Chrome's own ``SecurityError`` text on
-:class:`StorageBlockedError`, which describes the property ACCESS and is
-produced before anything is read.
+value. The single page-supplied string repeated at all is the refusal text on
+:class:`StorageBlockedError` — kept because Chrome's own wording is the
+diagnostic, and **bounded** (:data:`BLOCKED_REASON_CHARS`) because it is
+page-CONTROLLED text, not Chrome's word: ``window.localStorage`` is an own
+accessor with ``configurable: true``, so a page can define a throwing getter
+over it and author that string itself.
 
 A leaf: it imports no other embedded module and takes the tab as an argument.
 """
@@ -89,17 +92,33 @@ READ_JS = (
 #: ``Object.entries`` yields ``[key, value]`` — two elements, always.
 _PAIR = 2
 
+#: Cap on the refusal text repeated into :class:`StorageBlockedError`. Measured on
+#: Chrome 152: ``window.localStorage`` is an OWN accessor with
+#: ``configurable: true``, so a page can ``Object.defineProperty`` a throwing
+#: getter over it and dictate this string verbatim — page-controlled, unbounded
+#: text on the path to the durable log and a Sentry breadcrumb. Chrome's own
+#: wording is 98 characters ("Failed to read the 'localStorage' property from
+#: 'Window': Storage is disabled inside 'data:' URLs."), so 200 keeps every real
+#: message whole while a hostile one is cut.
+BLOCKED_REASON_CHARS = 200
+
+#: Appended when the cap bit, so a reader can tell a cut message from a short one.
+_TRUNCATED = "…"
+
 
 class StorageBlockedError(Exception):
     """The PAGE refused the read — an expected answer, not a failure.
 
-    Raised only when Chrome itself threw while the page touched
-    ``window.localStorage`` / ``window.sessionStorage``: an opaque origin, a
-    ``data:`` URL, storage disabled by policy. Measured message from Chrome 152
-    on a ``data:`` URL::
+    Raised when the throw came from touching ``window.localStorage`` /
+    ``window.sessionStorage``: an opaque origin, a ``data:`` URL, storage
+    disabled by policy. Measured message from Chrome 152 on a ``data:`` URL::
 
         Failed to read the 'localStorage' property from 'Window':
         Storage is disabled inside 'data:' URLs.
+
+    The text is repeated into this error's message but capped at
+    :data:`BLOCKED_REASON_CHARS`: a page can install its own throwing getter, so
+    the wording is not necessarily Chrome's and its length is not its own to set.
     """
 
 
@@ -113,6 +132,18 @@ class StorageReadError(Exception):
     """
 
 
+def _bounded(reason: object) -> str:
+    """The page's refusal text, capped at :data:`BLOCKED_REASON_CHARS`.
+
+    Not a value, but not trustworthy either: see that constant for why a page can
+    author this string.
+    """
+    text = str(reason)
+    if len(text) <= BLOCKED_REASON_CHARS:
+        return text
+    return text[:BLOCKED_REASON_CHARS] + _TRUNCATED
+
+
 def _entries(record: object, store: str) -> dict[str, str]:
     """One store's ``{ok, entries}`` record as a plain ``{key: value}`` dict."""
     if not isinstance(record, dict):
@@ -120,10 +151,9 @@ def _entries(record: object, store: str) -> dict[str, str]:
             f"{store}: record is {type(record).__name__}, not an object"
         )
     if not record.get("ok"):
-        # Chrome's own SecurityError text, which describes the PROPERTY ACCESS
-        # and carries no stored value — the one page-supplied string this
-        # module repeats (see the no-values rule above).
-        raise StorageBlockedError(f"{store}: {record.get('reason')}")
+        # PAGE-CONTROLLED text, repeated because Chrome's own wording is the
+        # diagnostic — and BOUNDED for exactly that reason (BLOCKED_REASON_CHARS).
+        raise StorageBlockedError(f"{store}: {_bounded(record.get('reason'))}")
     rows = record.get("entries")
     if not isinstance(rows, list):
         raise StorageReadError(f"{store}: entries is {type(rows).__name__}, not a list")

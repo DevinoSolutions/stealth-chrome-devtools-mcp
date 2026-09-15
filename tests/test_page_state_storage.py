@@ -37,7 +37,7 @@ printed by that probe, not a hand-shaped ``["ls-key"]``. The pre-existing
 list of plain strings — which is precisely why this defect was green there
 through F-844's own live-driven fix.
 
-The three pins:
+The four pins:
 
 * :func:`test_storage_comes_back_from_the_shape_chrome_really_sends` drives the
   real shape through the reader and asserts the VALUES arrive. Under the old
@@ -54,6 +54,13 @@ The three pins:
   breadcrumb; the data being read is a page's session tokens. Every malformed
   answer in :data:`MALFORMED` embeds :data:`SECRET`, so a diagnostic built with
   ``{rows!r}`` fails these — a leak the defect itself never had.
+* :func:`test_a_page_authored_refusal_is_truncated_to_the_budget` covers the one
+  page-supplied string the module DOES repeat. ``window.localStorage`` is an own
+  accessor with ``configurable: true`` (measured, Chrome 152), so the refusal
+  text is not necessarily Chrome's and its length is not Chrome's to set;
+  ``BLOCKED_REASON_CHARS`` bounds it, and
+  :func:`test_chromes_own_refusal_survives_the_budget_whole` is the other half —
+  the cap may not cost a real diagnostic a character.
 """
 
 from __future__ import annotations
@@ -338,6 +345,50 @@ MALFORMED = [
         id="an-entry-with-three-fields",
     ),
 ]
+
+
+async def test_a_page_authored_refusal_is_truncated_to_the_budget():
+    """A blocked reason is page-CONTROLLED text, so its length is not the page's
+    to choose.
+
+    Measured on Chrome 152: ``window.localStorage`` is an own accessor with
+    ``configurable: true``, so a page can ``Object.defineProperty`` a throwing
+    getter over it and its message reaches ``StorageBlockedError`` verbatim —
+    from there to the INFO line in the durable backend log and to a Sentry
+    breadcrumb. Chrome's own wording is 98 characters; anything past
+    ``BLOCKED_REASON_CHARS`` is cut, and says so.
+    """
+    hostile = "A" * (page_storage.BLOCKED_REASON_CHARS * 50)
+    tab = FakeTab(
+        evaluate_map={"read('localStorage')": _local({"ok": False, "reason": hostile})}
+    )
+
+    with pytest.raises(page_storage.StorageBlockedError) as raised:
+        await page_storage.read(tab)
+
+    message = str(raised.value)
+    assert len(message) < len(hostile)
+    assert message.endswith("…"), (
+        "a cut message must be distinguishable from a short one"
+    )
+    assert message.count("A") == page_storage.BLOCKED_REASON_CHARS
+
+
+async def test_chromes_own_refusal_survives_the_budget_whole():
+    """The cap may not cost a real diagnostic a single character."""
+    real = (
+        "Failed to read the 'localStorage' property from 'Window': "
+        "Storage is disabled inside 'data:' URLs."
+    )
+    tab = FakeTab(
+        evaluate_map={"read('localStorage')": _local({"ok": False, "reason": real})}
+    )
+
+    with pytest.raises(page_storage.StorageBlockedError) as raised:
+        await page_storage.read(tab)
+
+    assert str(raised.value) == f"localStorage: {real}"
+    assert "…" not in str(raised.value)
 
 
 @pytest.mark.parametrize("answer", MALFORMED)

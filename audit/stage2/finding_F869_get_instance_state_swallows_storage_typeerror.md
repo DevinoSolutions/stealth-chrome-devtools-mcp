@@ -267,13 +267,28 @@ The defect being fixed never logged storage contents — it crashed before it co
 A fix that made the failure visible by quoting the data would have been strictly
 worse than the bug. So `page_storage` states the rule in its module docstring and
 every message reports **shape and count only**: a type name, an index, a field
-count, a character count. The single page-supplied string it repeats is Chrome's
-own `SecurityError` text on `StorageBlockedError`, which describes the property
-*access* and is produced before anything is read. Three parametrized pins embed a
+count, a character count. Three parametrized pins embed a
 JWT-shaped `SECRET` in every malformed answer and assert it reaches neither the
 raised message, nor `detail_error`, nor any **formatted** log record (formatted,
 not `getMessage()`, because the WARNING carries `exc_info` and the rendered
 traceback is what a log file and a breadcrumb actually hold).
+
+**The one page-supplied string that IS repeated, and its bound.**
+`StorageBlockedError` carries the refusal text, because Chrome's own wording is
+the diagnostic — *"Storage is disabled inside `data:` URLs"* is the answer an
+operator needs — and `browser_manager.py:1447` logs it at INFO. But it is not
+Chrome's word: measured on Chrome 152, `window.localStorage` is an **own accessor
+with `configurable: true`**, so a page can `Object.defineProperty` a throwing
+getter over it and author that string itself, at any length, straight into the
+durable log and a Sentry breadcrumb. It is therefore capped at
+`page_storage.BLOCKED_REASON_CHARS = 200` — Chrome's real message is 98
+characters, so every genuine diagnostic survives whole — with a trailing `…` so a
+reader can tell a cut message from a short one. Both halves are pinned:
+`test_a_page_authored_refusal_is_truncated_to_the_budget` (RED without the cap: a
+10 000-character reason came through whole) and
+`test_chromes_own_refusal_survives_the_budget_whole`. The comment at the raise
+site now says *page-controlled, bounded*, not "carries no stored value" — true but
+the wrong reassurance.
 
 ## 6. Tests
 
@@ -305,6 +320,10 @@ traceback is what a log file and a breadcrumb actually hold).
   same seven malformed answers, each embedding a JWT-shaped `SECRET`, asserted
   absent from the raised message, from `detail_error` and from every formatted
   log record.
+* `test_a_page_authored_refusal_is_truncated_to_the_budget` and
+  `test_chromes_own_refusal_survives_the_budget_whole` — §5(c): the refusal text
+  is bounded at `BLOCKED_REASON_CHARS` with a visible `…`, and the cap costs
+  Chrome's own 98-character message nothing.
 
 `DEEP_KEYS` in that module is the literal `repr` printed by the Chrome 152 probe,
 per the memory notes *mocked fakes can encode the bug* and *fixtures from the same
