@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from fakes import held_profile
+
 # These are module-level functions in server.py (bare imports via sys.path)
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     _copy_profile_delta,
@@ -288,11 +290,15 @@ class TestNextAvailableExplicitDir:
         dirs = tmp_session_root
         requested = dirs["sessions"] / "busy"
         requested.mkdir()
-        # Create -2 and -3 with SingletonLock (simulates running browser)
+        # SOFT GOLDEN UPDATED for F-871: these used to write the literal bytes
+        # "lock", which `profile_lock` now reads the way Chromium does -- an
+        # INVALID lockfile that Chrome unlinks and starts over, i.e. NOT a
+        # running browser. `held_profile` writes what a running browser writes,
+        # which is what the comment here always claimed.
         for i in (2, 3):
             d = dirs["sessions"] / f"busy-{i}"
             d.mkdir()
-            (d / "SingletonLock").write_text("lock")
+            held_profile(d)
         result = _next_available_explicit_dir(requested)
         assert result.name == "busy-4"
 
@@ -351,7 +357,7 @@ class TestResolveProfileSelection:
         dirs = tmp_session_root
         busy = dirs["sessions"] / "occupied"
         busy.mkdir()
-        (busy / "SingletonLock").write_text("lock")
+        held_profile(busy)  # SOFT GOLDEN UPDATED for F-871 -- see above
         result = await _resolve_profile_selection("occupied")
         resolved = Path(result["user_data_dir"])
         assert resolved.name == "occupied-2"
@@ -360,7 +366,7 @@ class TestResolveProfileSelection:
     async def test_master_busy_clones(self, tmp_session_root):
         """When master is busy and user_data_dir=None, should clone."""
         dirs = tmp_session_root
-        (dirs["master"] / "SingletonLock").write_text("lock")
+        held_profile(dirs["master"])  # SOFT GOLDEN UPDATED for F-871
         result = await _resolve_profile_selection(None)
         assert result["profile_role"] == "clone"
         assert result["clone_source"] is not None

@@ -27,8 +27,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import psutil
-
+from stealth_chrome_devtools_mcp.embedded import profile_lock
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -76,26 +75,15 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
-def _profile_has_running_browser(profile_dir: Path) -> bool:
-    try:
-        get_pids = getattr(process_cleanup, "_get_browser_pids_for_profile", None)
-        if callable(get_pids):
-            for candidate in (str(profile_dir), profile_dir):
-                try:
-                    if get_pids(candidate):
-                        return True
-                except TypeError:
-                    continue
-    except (psutil.Error, OSError, AttributeError) as e:
-        debug_logger.log_warning(
-            "server",
-            "_profile_has_running_browser",
-            f"PID check failed for profile {profile_dir}: {e}",
-        )
-    return any(
-        (profile_dir / marker).exists()
-        for marker in ("SingletonLock", "SingletonSocket", "SingletonCookie")
+def _profile_hold(profile_dir: Path) -> profile_lock.Hold | None:
+    """What holds *profile_dir*, per the one home for that question (F-871)."""
+    return profile_lock.profile_hold(
+        profile_dir, getattr(process_cleanup, "_get_browser_pids_for_profile", None)
     )
+
+
+def _profile_has_running_browser(profile_dir: Path) -> bool:
+    return _profile_hold(profile_dir) is not None
 
 
 # Regenerable Chrome profile subdirectories — caches and on-device model stores
@@ -948,10 +936,19 @@ async def resolve_profile_selection(
             )
         # If the requested path (inside clone_root) is already held by a running
         # browser, find the next free numbered variant rather than crashing.
-        if _is_relative_to(explicit, clone_root) and _profile_has_running_browser(
-            explicit
-        ):
-            explicit = _next_available_explicit_dir(explicit)
+        # For a NAMED profile that walk is an identity change — a different set
+        # of cookies and logins than the caller asked for — so the answer has to
+        # carry what was asked for and what held it (F-871).
+        walk: dict[str, Any] = {}
+        if _is_relative_to(explicit, clone_root):
+            hold = _profile_hold(explicit)
+            if hold is not None:
+                requested, explicit = explicit, _next_available_explicit_dir(explicit)
+                walk = {
+                    "requested_user_data_dir": str(requested),
+                    "walked_to": str(explicit),
+                    "walk_reason": hold.reason,
+                }
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
             # Refresh stale snapshot before copying so the clone carries the
             # latest logins (only runs when master is not in use).
@@ -967,6 +964,7 @@ async def resolve_profile_selection(
             "user_data_dir": str(explicit),
             "profile_role": "explicit",
             "clone_source": None,
+            **walk,
         }
 
     master.parent.mkdir(parents=True, exist_ok=True)
