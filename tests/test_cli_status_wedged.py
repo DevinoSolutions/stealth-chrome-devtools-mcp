@@ -21,7 +21,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from stealth_chrome_devtools_mcp import cli
-from stealth_chrome_devtools_mcp.embedded import desktop_launch, singleton
+from stealth_chrome_devtools_mcp.embedded import (
+    desktop_launch,
+    display_context,
+    singleton,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -578,3 +582,139 @@ class TestCliDoctorDisplayContexts:
 
         assert "backend  (none recorded)" in out
         assert "no live backend can display a window" not in out
+
+
+@contextmanager
+def _live_only_on(port: int):
+    """Both liveness primitives answering for ONE port and no other.
+
+    `_probe_backend_status` is left REAL on purpose — which recorded backend it
+    speaks about is exactly what F-868 is about, so stubbing it would stub the
+    defect out. Nothing here opens a socket: both probes are replaced, so the
+    port numbers are record data, never a connection.
+    """
+    with (
+        patch.object(singleton, "_server_is_healthy", lambda p: p == port),
+        patch.object(singleton, "_backend_http_ready", lambda p, **_kw: p == port),
+    ):
+        yield
+
+
+class TestCliStatusReportsTheBackendThisClientWouldUse:
+    """F-868: `status` must answer for the backend THIS shell would be served
+    by — the one `_find_running_server` adopts — not for whichever entry the
+    record happens to list first.
+
+    The record observed on 2026-09-14 (2.1.5, Windows 11) held three entries;
+    the first two named dead pids on ports nothing listened on, and the third
+    was the healthy backend serving 56 proxies in the operator's own session.
+    `status` reported "not running" and the first entry's dead pid.
+    """
+
+    def test_status_reports_the_own_context_live_backend_not_a_dead_sibling(
+        self, fake_server, recorded_backends, capsys, monkeypatch, tmp_path
+    ):
+        recorded_backends(
+            _v2(
+                win_session_2={"port": 7169, "pid": 89892, "version": "2.1.1"},
+                headless={"port": 19222, "pid": 67720, "version": "2.1.3"},
+                win_session_1={"port": 52554, "pid": 53836, "version": "2.1.5"},
+            )
+        )
+        monkeypatch.setattr(display_context, "display_context", lambda: "win-session-1")
+        with (
+            patch.object(cli, "_clone_storage", return_value=fake_server),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.logging_setup.resolve_log_dir",
+                return_value=tmp_path,
+            ),
+            _live_only_on(52554),
+        ):
+            cli._cmd_status(None)
+        out = capsys.readouterr().out
+
+        assert "running (responsive) on port 52554" in out
+        assert "not running" not in out
+        # The pid and the log path must describe the SAME backend the status
+        # line is about — two independent record reads is how they diverged.
+        assert "53836" in out
+        assert "backend-53836.log" in out
+        assert "89892" not in out
+
+    def test_status_reports_the_live_backend_for_a_client_that_adopts_anything(
+        self, fake_server, recorded_backends, capsys, monkeypatch, tmp_path
+    ):
+        """The other half of adoption's asymmetry: a HEADLESS/UNVERIFIED client
+        adopts any recorded backend, capable-first — so the dead window-capable
+        entry it tries first must not end the search."""
+        recorded_backends(
+            _v2(
+                win_session_2={"port": 7169, "pid": 89892, "version": "2.1.1"},
+                win_session_1={"port": 52554, "pid": 53836, "version": "2.1.5"},
+            )
+        )
+        monkeypatch.setattr(display_context, "display_context", lambda: "headless")
+        with (
+            patch.object(cli, "_clone_storage", return_value=fake_server),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.logging_setup.resolve_log_dir",
+                return_value=tmp_path,
+            ),
+            _live_only_on(52554),
+        ):
+            cli._cmd_status(None)
+        out = capsys.readouterr().out
+
+        assert "running (responsive) on port 52554" in out
+        assert "53836" in out
+
+    def test_status_names_the_records_it_is_not_speaking_about(
+        self, fake_server, recorded_backends, capsys, monkeypatch, tmp_path
+    ):
+        """One summary line over a three-entry record silently drops two of
+        them. It must say they exist and where to read them."""
+        recorded_backends(
+            _v2(
+                win_session_2={"port": 7169, "pid": 89892, "version": "2.1.1"},
+                headless={"port": 19222, "pid": 67720, "version": "2.1.3"},
+                win_session_1={"port": 52554, "pid": 53836, "version": "2.1.5"},
+            )
+        )
+        monkeypatch.setattr(display_context, "display_context", lambda: "win-session-1")
+        with (
+            patch.object(cli, "_clone_storage", return_value=fake_server),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.logging_setup.resolve_log_dir",
+                return_value=tmp_path,
+            ),
+            _live_only_on(52554),
+        ):
+            cli._cmd_status(None)
+        out = capsys.readouterr().out
+
+        assert "other records" in out
+        assert "win-session-2" in out
+        assert "headless" in out
+        assert "doctor" in out
+
+    def test_a_single_recorded_backend_gets_no_other_records_line(
+        self, fake_server, recorded_backends, capsys, monkeypatch, tmp_path
+    ):
+        """The note is evidence, not decoration: with nothing else recorded
+        there is nothing it could honestly say."""
+        recorded_backends(
+            _v2(win_session_1={"port": 52554, "pid": 53836, "version": "2.1.5"})
+        )
+        monkeypatch.setattr(display_context, "display_context", lambda: "win-session-1")
+        with (
+            patch.object(cli, "_clone_storage", return_value=fake_server),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.logging_setup.resolve_log_dir",
+                return_value=tmp_path,
+            ),
+            _live_only_on(52554),
+        ):
+            cli._cmd_status(None)
+        out = capsys.readouterr().out
+
+        assert "other records" not in out

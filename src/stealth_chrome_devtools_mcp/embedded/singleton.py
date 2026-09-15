@@ -158,27 +158,42 @@ def _clear_server_state() -> None:
 
 
 def _probe_backend_status() -> tuple[str, int | None]:
-    """Report the recorded backend's actual state for display (CLI status/
-    doctor), distinguishing what `_find_running_server`'s binary answer
-    collapses: not running, socket-dead, and wedged (the F-301 state a bare
-    socket check cannot see). Read-only: never evicts, never spawns. Doctor
-    runs this same ladder per-entry in `cli._probe_recorded_backend`.
+    """Report the state of the backend THIS process would be served by, for
+    display (CLI status/doctor) and for `stop`, distinguishing what
+    `_find_running_server`'s binary answer collapses: not running, socket-dead,
+    and wedged (the F-301 state a bare socket check cannot see). Read-only:
+    never evicts, never spawns. Doctor runs this same ladder per-entry in
+    `cli._probe_recorded_backend`.
 
-    Returns ("none", None) no recorded backend | ("down", port) socket closed |
+    Candidates come in ADOPTION order (F-868) — `adoption_candidates`, the one
+    home `_find_running_server` already walks — never "whichever entry the
+    record lists first", which under one-entry-per-display-context is routinely
+    a dead sibling's: the 2026-09-14 record listed a dead `win-session-2` ahead
+    of the healthy own-context backend, so `status` said "not running" beside a
+    backend serving 56 proxies and `stop` aimed at the dead one's record. The
+    first candidate that ANSWERS wins, else the most informative verdict —
+    wedged over down, because a wedged backend holds a port and will be evicted
+    while a down record names nothing running. Selection is not decided here.
+
+    Returns ("none", None) no adoptable record | ("down", port) socket closed |
     ("wedged", port) socket open, no real MCP initialize answer |
     ("responsive", port) socket open AND initialize answers 200.
     """
-    entry = backend_registry.first_backend(_read_server_state())
-    if entry is None:
-        return "none", None
-    port = entry.get("port")
-    if not isinstance(port, int):
-        return "none", None
-    if not _server_is_healthy(port):
-        return "down", port
-    if not _backend_http_ready(port):
-        return "wedged", port
-    return "responsive", port
+    best: tuple[str, int | None] = ("none", None)
+    own = display_context.display_context()
+    for entry in backend_registry.adoption_candidates(SERVER_STATE_FILE, own):
+        port = backend_registry.recorded_int(entry, "port")
+        if port is None:
+            continue
+        if not _server_is_healthy(port):
+            verdict = ("down", port)
+        elif not _backend_http_ready(port):
+            verdict = ("wedged", port)
+        else:
+            return "responsive", port
+        if best[0] == "none" or (best[0] == "down" and verdict[0] == "wedged"):
+            best = verdict
+    return best
 
 
 def _same_identity_backend_ready(port: int, patience: float | None = None) -> bool:

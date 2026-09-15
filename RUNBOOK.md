@@ -51,8 +51,20 @@ browser-session cap : 20.0 GB  [STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB]
 - **`backend`** is the real liveness state (`singleton._probe_backend_status`):
   `responsive` = answers a real MCP `initialize`; `wedged` = socket open but not
   answering (→ `restart`); `down` = recorded but nothing there; "not running" = no
-  recorded backend. The port shown is the **chosen** port, which may differ from
-  `19222` if that was taken (see "Port already in use" below).
+  recorded backend this shell could adopt. The port shown is the **chosen** port, which
+  may differ from `19222` if that was taken (see "Port already in use" below).
+- **Which backend is it about?** The one *this shell* would be served by — the same
+  adoption order discovery uses (F-868), not whichever entry `server.json` lists first.
+  `pid` and `log` name that same backend, so the four lines can never describe different
+  processes. `server.json` can hold one entry per display context, and dead ones are
+  never pruned, so an `other records:` line appears when there are others:
+
+  ```
+  other records: 2 (win-session-2, headless) — run `doctor` for each one's state
+  ```
+
+  `doctor`'s `contexts :` block probes every recorded backend on its own port; that is
+  the place to look when you want all of them rather than yours.
 - **`browser-session root`** and **`browser-session cap`** are about **disk** — the
   directory holding named browser-session profiles/clones and the cap that trims idle
   ones. They are named "browser-session" deliberately: this cap trims *named

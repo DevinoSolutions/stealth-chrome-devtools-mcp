@@ -132,3 +132,90 @@ class TestProbeBackendStatus:
         status, reported_port = singleton._probe_backend_status()
         assert status == "responsive"
         assert reported_port == responsive_stub
+
+
+def _v2(**backends) -> dict:
+    """A schema-v2 record from `context=entry` kwargs (`_` reads as `-`)."""
+    return {
+        "schema": 2,
+        "backends": {ctx.replace("_", "-"): entry for ctx, entry in backends.items()},
+    }
+
+
+class TestProbeWalksAdoptionOrder:
+    """F-868: the reporter must speak about the backend THIS process would be
+    served by — `backend_registry.adoption_candidates`' order, the same one
+    `_find_running_server` walks — not about whichever entry the record lists
+    first. Reading the first entry made `status` answer "not running" beside a
+    healthy own-context backend, and made `stop` aim at a dead sibling's record.
+
+    There is no second selection policy here: the order arrives from the one
+    home, and this function only says which of those candidates is up.
+    """
+
+    def test_a_dead_first_entry_does_not_hide_the_live_own_context_one(
+        self, isolated_state, monkeypatch, responsive_stub
+    ):
+        dead = _free_closed_port()
+        (isolated_state / "server.json").write_text(
+            json.dumps(
+                _v2(
+                    win_session_2={"port": dead, "version": "2.1.1", "pid": 89892},
+                    win_session_1={
+                        "port": responsive_stub,
+                        "version": "2.1.5",
+                        "pid": 53836,
+                    },
+                )
+            )
+        )
+        monkeypatch.setattr(
+            singleton.display_context, "display_context", lambda: "win-session-1"
+        )
+
+        assert singleton._probe_backend_status() == ("responsive", responsive_stub)
+
+    def test_a_dead_capable_entry_does_not_end_an_unproven_clients_search(
+        self, isolated_state, monkeypatch, responsive_stub
+    ):
+        """A HEADLESS/UNVERIFIED client adopts anything, window-capable first —
+        so the dead capable entry it tries first must not be its answer."""
+        dead = _free_closed_port()
+        (isolated_state / "server.json").write_text(
+            json.dumps(
+                _v2(
+                    win_session_2={"port": dead, "version": "2.1.1", "pid": 89892},
+                    headless={
+                        "port": responsive_stub,
+                        "version": "2.1.5",
+                        "pid": 67720,
+                    },
+                )
+            )
+        )
+        monkeypatch.setattr(
+            singleton.display_context, "display_context", lambda: "headless"
+        )
+
+        assert singleton._probe_backend_status() == ("responsive", responsive_stub)
+
+    def test_a_wedged_candidate_outranks_a_dead_one(
+        self, isolated_state, monkeypatch, wedged_stub
+    ):
+        """With nothing responsive the report still has to name the most
+        informative state: a wedged backend holds a port and will be evicted;
+        a down record names nothing running at all."""
+        dead = _free_closed_port()
+        (isolated_state / "server.json").write_text(
+            json.dumps(
+                _v2(
+                    win_session_2={"port": dead, "version": "2.1.1", "pid": 89892},
+                    headless={"port": wedged_stub, "version": "2.1.5", "pid": 67720},
+                )
+            )
+        )
+        monkeypatch.setattr(
+            singleton.display_context, "display_context", lambda: "unverified"
+        )
+
+        assert singleton._probe_backend_status() == ("wedged", wedged_stub)

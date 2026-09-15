@@ -113,19 +113,19 @@ def _gb_to_bytes(gb: float | None, fallback: int) -> int:
 # ── commands ────────────────────────────────────────────────────────────────
 
 
-def _format_backend_status() -> str:
-    """Human-readable backend status for status/doctor, driven by
-    `_probe_backend_status` (plan_M1 SS2.1-D) instead of `_find_running_
-    server`'s binary reuse-or-not answer. Closes F-301's "status prints
-    *running* through the whole outage" half: a wedged backend (socket open,
-    dispatch loop dead) now reports UNRESPONSIVE instead of a plain
-    "running" indistinguishable from a genuinely healthy one. Read-only -
-    this performs a single initialize+DELETE probe, self-cleaning, same as
-    every other consumer of `_backend_http_ready` (never evicts or spawns).
-    """
-    from stealth_chrome_devtools_mcp.embedded import singleton
+def _format_backend_status(status: str, port: int | None) -> str:
+    """Human-readable backend status for status/doctor, formatting what
+    `_probe_backend_status` (plan_M1 SS2.1-D) reported instead of
+    `_find_running_server`'s binary reuse-or-not answer. Closes F-301's "status
+    prints *running* through the whole outage" half: a wedged backend (socket
+    open, dispatch loop dead) now reports UNRESPONSIVE instead of a plain
+    "running" indistinguishable from a genuinely healthy one.
 
-    status, port = singleton._probe_backend_status()
+    The probe is the CALLER's (F-868): every line of the status block —
+    liveness, pid, log path, port occupant — must describe ONE backend, and the
+    only way to guarantee that is to select it once and pass it down. This
+    function is pure formatting and performs no I/O at all.
+    """
     # "down" (a stale record but nothing actually listening) and "none" (no
     # record at all) both read as "not running" to an operator - there is no
     # live process to reconnect to either way; plan_M1 SS2.1-D's three
@@ -141,18 +141,42 @@ def _format_backend_status() -> str:
     return f"running (responsive) on port {port}"
 
 
-def _recorded_backend_pid() -> int | None:
-    """The pid singleton last recorded for the backend (server.json), or None
-    if there is no record. Independent of liveness — status/doctor combine
+def _recorded_backend_pid(port: int | None) -> int | None:
+    """The pid singleton recorded for the backend on ``port``, or None when
+    that port names no entry. Independent of liveness — status/doctor combine
     this with `_format_backend_status()`'s liveness read separately (F-305).
 
-    The FIRST recorded backend: the record can now hold one per display context
-    (F-808), and naming them all belongs to `_doctor_backend_lines`, not to this
-    one-value line."""
+    The backend on THAT port, never the first recorded one (F-868). The record
+    holds one entry per display context (F-808), so "first" is routinely a
+    different backend from the one the status line just reported — that split
+    is what printed a dead sibling's pid under a live backend's status. Same
+    agree-on-one-port rule `singleton.stop_backend` and `restart_backend`
+    already apply; naming every entry belongs to `_doctor_backend_lines`."""
     from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
-    entry = backend_registry.first_backend(singleton._read_server_state())
+    entry = backend_registry.backend_on_port(singleton._read_server_state(), port)
     return backend_registry.recorded_int(entry, "pid")
+
+
+def _other_records_note(port: int | None) -> str:
+    """The display contexts recorded BESIDE the one reported, or "" when the
+    reported backend is the only entry there is (F-868).
+
+    The status block is one summary line over a record that can hold an entry
+    per display context, and a summary that silently drops the rest reads as
+    "this is all there is". It never re-decides which backend to report — it
+    only names what the reported one is not, and points at the verb that probes
+    them all."""
+    from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
+
+    others = [
+        str(entry.get("display_context"))
+        for entry in backend_registry.backends_in(singleton._read_server_state())
+        if backend_registry.recorded_int(entry, "port") != port
+    ]
+    if not others:
+        return ""
+    return f"{len(others)} ({', '.join(others)}) — run `doctor` for each one's state"
 
 
 def _backend_log_location(pid: int | None) -> str:
@@ -271,15 +295,17 @@ def _doctor_backend_lines() -> list[str]:
     return lines
 
 
-def _doctor_port_occupant_line() -> str:
+def _doctor_port_occupant_line(port: int | None) -> str:
     """F-509 visibility: is the target port free, ours, or a NON-stealth
     process squatting it (which would otherwise silently block a backend
-    from binding)? Uses only existing helpers — no new port logic."""
-    from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
+    from binding)? Uses only existing helpers — no new port logic.
 
-    entry = backend_registry.first_backend(singleton._read_server_state())
-    recorded = entry.get("port") if entry else None
-    port = recorded if isinstance(recorded, int) else singleton.DEFAULT_PORT
+    ``port`` is the one the status block is already about (F-868), so this line
+    cannot describe a different backend's port than the two lines above it; with
+    nothing reported it falls back to the default the next spawn would prefer."""
+    from stealth_chrome_devtools_mcp.embedded import singleton
+
+    port = port if port is not None else singleton.DEFAULT_PORT
     our_pid = singleton._backend_pid_on_port(port)
     if our_pid is not None:
         return f"port {port} held by our backend (pid {our_pid})"
@@ -293,10 +319,16 @@ def _cmd_status(_args) -> int:
     from stealth_chrome_devtools_mcp.embedded import singleton
 
     root = cs.default_session_root()
-    pid = _recorded_backend_pid()
-    print(f"backend     : {_format_backend_status()}")
+    # ONE selection for the whole block (F-868): probe first, then report that
+    # backend's pid, its log and the records this line is not about.
+    status, port = singleton._probe_backend_status()
+    pid = _recorded_backend_pid(port)
+    others = _other_records_note(port)
+    print(f"backend     : {_format_backend_status(status, port)}")
     print(f"pid         : {pid if pid is not None else '-'}")
     print(f"log         : {_backend_log_location(pid)}")
+    if others:
+        print(f"other records: {others}")
     print(f"version     : {singleton._server_version()}")
     print(f"browser-session root: {root}  (exists: {root.exists()})")
     print(
@@ -381,6 +413,8 @@ def _cmd_cleanup(args) -> int:
 def _cmd_doctor(_args) -> int:
     import platform
 
+    from stealth_chrome_devtools_mcp.embedded import singleton
+
     cs = _clone_storage()
 
     ok = True
@@ -388,11 +422,12 @@ def _cmd_doctor(_args) -> int:
     print(f"platform    : {platform.platform()}")
     root = cs.default_session_root()
     print(f"browser-session root: {root}  (exists: {root.exists()})")
-    pid = _recorded_backend_pid()
-    print(f"backend     : {_format_backend_status()}")
+    status, port = singleton._probe_backend_status()
+    pid = _recorded_backend_pid(port)
+    print(f"backend     : {_format_backend_status(status, port)}")
     print(f"pid         : {pid if pid is not None else '-'}")
     print(f"log         : {_backend_log_location(pid)}")
-    print(f"port        : {_doctor_port_occupant_line()}")
+    print(f"port        : {_doctor_port_occupant_line(port)}")
     print("contexts    :")
     for line in _doctor_backend_lines():
         print(f"  {line}")
@@ -499,9 +534,9 @@ def _cmd_kill_orphans(args) -> int:
     _server()
     from stealth_chrome_devtools_mcp.embedded import process_cleanup, singleton
 
-    status, _ = singleton._probe_backend_status()
+    status, port = singleton._probe_backend_status()
     if status in ("responsive", "wedged") and not args.force:
-        pid = _recorded_backend_pid()
+        pid = _recorded_backend_pid(port)
         print(
             f"a backend is running (pid {pid if pid is not None else '-'}); "
             "use restart to recover it, or pass --force."
