@@ -113,13 +113,15 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # helpers (they back the live extract_complete_element_cdp tool, not dead), so
     # the cap holds at 1013. GRANDFATHERED at actual ruff-clean LOC (cap == actual,
     # no padding) per the C1/C4 gate-ruling discipline.
-    # F-872 RATCHETS DOWN 1013 -> 973. All six JS aspect scripts now hand back ONE
-    # JSON string (the F-846 contract, generalised), so the four per-aspect
-    # dict/list/convert ladders collapse into the single ``_js_answer`` reader and
-    # the incomplete ``_convert_nodriver_result`` unwrapper is DELETED — it only
-    # ever unwrapped the top level, leaving every nested array/object as raw BiDi
-    # transport nodes. Cap == actual.
-    "embedded/cdp_element_cloner.py": (973, "plan_M5b + F-872"),
+    # F-872 RATCHETS DOWN 1013 -> 947. All five evaluated JS aspect scripts now
+    # hand back ONE JSON string (the F-846 contract, generalised), so the four
+    # per-aspect dict/list/convert ladders collapse and the incomplete
+    # ``_convert_nodriver_result`` unwrapper is DELETED — it only ever unwrapped
+    # the top level, leaving every nested array/object as raw BiDi transport
+    # nodes. Reading that answer (and decoding a thrown script's
+    # ``ExceptionDetails``) moved to the new ``js_aspect_answer.py`` leaf rather
+    # than growing this file past its cap. Cap == actual.
+    "embedded/cdp_element_cloner.py": (947, "plan_M5b + F-872"),
 }
 
 

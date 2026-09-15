@@ -457,6 +457,12 @@ class TestCanonicalEngine:
             f"{script} still returns a bare object — deep serialization corrupts "
             "every nested array/object in it (F-872)"
         )
+        # EVERY return, not just the success one: the not-found guard is a
+        # returned object too, and reverting only that would satisfy the two
+        # checks above while handing the caller a BiDi-encoded error record.
+        assert not re.search(r"return\s*\{[^}]*\berror\b", src), (
+            f"{script}'s not-found guard must stringify as well (F-872)"
+        )
 
     async def test_nested_containers_survive_the_transport(self):
         """F-872 REGRESSION PIN, payload measured from real headless Chrome.

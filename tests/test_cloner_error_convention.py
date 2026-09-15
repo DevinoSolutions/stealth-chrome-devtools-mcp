@@ -31,6 +31,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import nodriver.cdp.dom as cdp_dom
+import nodriver.cdp.runtime as cdp_runtime
 import pytest
 
 from fakes import FakeStorage, FakeTab, fake_element, js_aspect_answer
@@ -67,10 +68,45 @@ def _cdp_responses():
     }
 
 
-#: A value carrying ``exception_details`` — what ``Tab.evaluate`` hands back
-#: when the injected extraction script threw (nodriver returns the record in the
-#: value's place rather than raising).
-JS_THREW = SimpleNamespace(exception_details="ReferenceError: x is not defined")
+def js_threw(
+    description: str = (
+        "ReferenceError: nosuchthing is not defined\n"
+        "    at <anonymous>:1:14\n    at <anonymous>:1:38"
+    ),
+) -> cdp_runtime.ExceptionDetails:
+    """What ``Tab.evaluate`` REALLY hands back when the injected script threw.
+
+    Built from nodriver's own constructors, and field-for-field what real
+    headless Chrome produced for ``(function(){ return nosuchthing(); })()``
+    (measured 2026-09-15, F-872). Two things the previous hand-rolled
+    ``SimpleNamespace(exception_details=…)`` double got wrong, and both mattered:
+
+    * ``ExceptionDetails`` has **no** ``exception_details`` attribute — nodriver
+      returns the record ITSELF in the value's place (``core/tab.py``'s
+      ``if errors: return errors``), so the engine's ``hasattr`` probe could
+      never fire and every real JS error surfaced as
+      ``Unexpected return type: <class 'ExceptionDetails'>``;
+    * ``.text`` is the literal string ``"Uncaught"`` for EVERY throw —
+      ReferenceError, TypeError, an explicit ``throw new Error(…)`` and a
+      SyntaxError all measured identical. The diagnostic a caller needs is
+      ``.exception.description``.
+    """
+    return cdp_runtime.ExceptionDetails(
+        exception_id=1,
+        text="Uncaught",
+        line_number=0,
+        column_number=13,
+        script_id=cdp_runtime.ScriptId("3"),
+        exception=cdp_runtime.RemoteObject(
+            type_="object",
+            subtype="error",
+            class_name="ReferenceError",
+            description=description,
+        ),
+    )
+
+
+JS_THREW = js_threw()
 
 
 class TestEngineAspectsRaise:
@@ -106,7 +142,7 @@ class TestEngineAspectsRaise:
         ],
     )
     async def test_missing_selector_raises(self, method):
-        tab = FakeTab(evaluate_result={})
+        tab = FakeTab(evaluate_result=js_aspect_answer({}))
         with pytest.raises(ToolError, match=r"^Selector is required$"):
             await getattr(_cdc.cdp_element_cloner, method)(tab, selector=None)
 
@@ -124,6 +160,44 @@ class TestEngineAspectsRaise:
         tab = FakeTab(evaluate_result=JS_THREW)
         with pytest.raises(ToolError, match=r"JavaScript error: ReferenceError"):
             await getattr(_cdc.cdp_element_cloner, method)(tab, selector="#demo")
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "extract_element_structure",
+            "extract_element_events",
+            "extract_element_animations",
+            "extract_element_assets",
+            "extract_related_files",
+        ],
+    )
+    async def test_a_throw_names_the_error_not_the_word_uncaught(self, method):
+        """F-872: the message must carry Chrome's own error text.
+
+        ``ExceptionDetails.text`` is ``"Uncaught"`` for every throw there is
+        (measured), so a message built from it names nothing. And the whole
+        record must never be reported as an *unexpected return type* — that was
+        the observable symptom while the ``hasattr(raw, "exception_details")``
+        probe could not fire.
+        """
+        tab = FakeTab(evaluate_result=js_threw("TypeError: x.y is not a function"))
+        with pytest.raises(ToolError) as exc:
+            await getattr(_cdc.cdp_element_cloner, method)(tab, selector="#demo")
+        message = str(exc.value)
+        assert "TypeError: x.y is not a function" in message
+        assert "Unexpected return type" not in message
+        assert message != "JavaScript error: Uncaught"
+
+    async def test_a_throws_message_is_bounded(self):
+        """A thrown ``Error`` carries whatever the page put in it, plus a stack.
+        The text is Chrome's, but its LENGTH is the page's, so it is clamped the
+        way F-869 clamps its own — a diagnostic, never a transcript."""
+        tab = FakeTab(evaluate_result=js_threw("Error: " + "x" * 5000))
+        with pytest.raises(ToolError) as exc:
+            await _cdc.cdp_element_cloner.extract_element_structure(
+                tab, selector="#demo"
+            )
+        assert len(str(exc.value)) < 400
 
     @pytest.mark.parametrize(
         "method",
@@ -217,7 +291,9 @@ class TestProgressiveRaises:
         string "Element not found or extraction failed", which named neither the
         element nor the failure. Delegating to the engine's own raise is what
         makes the answer actionable."""
-        tab = FakeTab(evaluate_result={}, cdp_responses=_cdp_responses())
+        tab = FakeTab(
+            evaluate_result=js_aspect_answer({}), cdp_responses=_cdp_responses()
+        )
 
         async def boom(*args, **kwargs):
             raise ToolError("the tab went away mid-clone")

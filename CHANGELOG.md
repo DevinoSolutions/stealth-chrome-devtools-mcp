@@ -25,13 +25,36 @@ a plain dict a real tab can never produce, short-circuited the conversion entire
 The four aspect scripts now end in `JSON.stringify` and are read back with
 `json.loads` — the idiom `extract_element_animations` (F-846), the viewport read
 (F-844) and `window_sizing` already use, since a string is the one shape deep
-serialization leaves alone. The four per-aspect ladders collapse into one reader,
-`_js_answer`, shared with the animations aspect; `_convert_nodriver_result` is
-deleted. Schemas and field names are unchanged — only the depth at which the values
-are real. Also corrupted, and also fixed: the seven tools composed from these four
-(`*_to_file`, `clone_element_complete`, `clone_element_progressive` and its
-`expand_children` / `expand_events` slices). `cdp_element_cloner.py` 1012 → 973 LOC;
-its grandfathered cap ratchets down to match.
+serialization leaves alone. The four per-aspect ladders collapse into one reader in
+the new `embedded/js_aspect_answer.py` leaf, shared with the animations aspect;
+`_convert_nodriver_result` is deleted. Schemas and field names are unchanged — only
+the depth at which the values are real. Also corrupted, and also fixed: the nine
+tools composed from these four (three `*_to_file`, `clone_element_complete`,
+`extract_complete_element_to_file`, `clone_element_to_file`,
+`clone_element_progressive` and its `expand_children` / `expand_events` slices) —
+13 of 94 in all. `cdp_element_cloner.py` 1012 → 947 LOC; its grandfathered cap
+ratchets down to match.
+
+### Fixed — a JS error inside an extraction script was reported as a wrong type (F-872)
+
+Found while fixing the above, on the same line of code. Every aspect began with
+`if hasattr(raw, "exception_details")`, a branch that cannot fire against nodriver
+0.47: `Tab.evaluate` returns the `ExceptionDetails` record *itself* in the value's
+place, and that class has no `exception_details` attribute. So a genuine JS error in
+an extraction script reached the caller as
+`Unexpected return type: <class 'ExceptionDetails'>` rather than as the error.
+
+The decode moves into the new leaf, and the message is built from
+`.exception.description`, not `.text` — measured against real Chrome, `.text` is the
+literal string `"Uncaught"` for *every* throw there is (ReferenceError, TypeError, an
+explicit `throw new Error(…)`, a SyntaxError), so a message built from it names
+nothing. A caller now sees
+`JavaScript error: ReferenceError: nosuchthing is not defined … (line 0, column 13)`,
+clamped to 200 characters of Chrome's text — the text is Chrome's, but its length is
+the page's. The only test covering this was a hand-built double asserting the
+product's own mistaken belief about the library type; it is rebuilt from nodriver's
+own constructors, which flipped all five of its cases from green to red before the
+fix.
 
 ## 2.1.5
 

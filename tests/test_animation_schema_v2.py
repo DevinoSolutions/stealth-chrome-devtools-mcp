@@ -21,7 +21,12 @@ from pathlib import Path
 
 import pytest
 
-from fakes import ANIMATION_JS_MARKER, FakeTab, animation_evaluate_map
+from fakes import (
+    ANIMATION_JS_MARKER,
+    FakeTab,
+    animation_evaluate_map,
+    js_aspect_answer,
+)
 from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -1452,7 +1457,10 @@ class TestAdaptersReadTheV2Shape:
 
         monkeypatch.setattr(_fbc.file_based_element_cloner, "output_dir", tmp_path)
         tab = FakeTab(
-            evaluate_result={},
+            # A real tab answers EVERY aspect script with one JSON string
+            # (F-872); a bare {} made the four non-animation aspects come
+            # back as error blocks inside the composed clone.
+            evaluate_result=js_aspect_answer({}),
             evaluate_map=animation_evaluate_map(FIXTURE_PAGE),
         )
         result = await _fbc.file_based_element_cloner.clone_element_complete_to_file(
@@ -1474,7 +1482,10 @@ class TestAdaptersReadTheV2Shape:
 
         monkeypatch.setattr(_fbc.file_based_element_cloner, "output_dir", tmp_path)
         tab = FakeTab(
-            evaluate_result={},
+            # A real tab answers EVERY aspect script with one JSON string
+            # (F-872); a bare {} made the four non-animation aspects come
+            # back as error blocks inside the composed clone.
+            evaluate_result=js_aspect_answer({}),
             evaluate_map=animation_evaluate_map(FIXTURE_PAGE),
         )
         result = await _fbc.file_based_element_cloner.extract_complete_element_to_file(

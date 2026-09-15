@@ -30,6 +30,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     animation_analysis,
     animation_facts,
     aspect_options,
+    js_aspect_answer,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
@@ -474,43 +475,6 @@ class CDPElementCloner:
 
         return js_code
 
-    @staticmethod
-    def _unexpected_type(value: object) -> ToolError:
-        """THE one way an aspect reports a payload shape it cannot read (F-858).
-
-        The offending value rides in the message because a raise has no second
-        field to carry it — it used to sit in a ``raw_data`` key beside the
-        error, and dropping it would leave "unexpected type" undebuggable. Same
-        400-char clamp the animations aspect already applied, now uniform.
-        """
-        return ToolError(f"Unexpected return type: {type(value)} (raw: {value!s:.400})")
-
-    def _js_answer(self, raw: object) -> dict[str, Any]:
-        """THE one way a JS aspect's answer becomes plain Python (F-872).
-
-        ``nodriver``'s ``Tab.evaluate`` sends
-        ``SerializationOptions(serialization="deep", max_depth=10)`` on EVERY
-        call and hands back ``deep_serialized_value.value`` verbatim
-        (``nodriver/core/tab.py``; ``cdp/runtime.py``'s ``DeepSerializedValue``
-        keeps ``json["value"]`` as it arrived), so a returned OBJECT becomes BiDi
-        ``RemoteValue`` nodes — ``[[key, {type, value}], …]`` — at every depth,
-        and ``return_by_value`` cannot undo it. A string is the one shape the
-        transport leaves alone, so every aspect script ends in
-        ``JSON.stringify``; this is where it is read back.
-
-        Replaces the per-aspect tolerance that unwrapped the TOP level only and
-        left every nested array/object as raw transport nodes — corrupted rather
-        than crashed, which is why nothing ever raised.
-        """
-        if hasattr(raw, "exception_details"):
-            raise ToolError(f"JavaScript error: {raw.exception_details}")
-        if not isinstance(raw, str):
-            raise self._unexpected_type(raw)
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            raise self._unexpected_type(parsed)
-        return parsed
-
     async def extract_element_styles(
         self,
         tab,
@@ -637,7 +601,7 @@ class CDPElementCloner:
             }
 
             js_code = self._load_js_file("extract_structure.js", selector, options)
-            return self._js_answer(await tab.evaluate(js_code))
+            return js_aspect_answer.parsed(await tab.evaluate(js_code))
         except ToolError:
             raise
         except Exception as e:
@@ -667,7 +631,7 @@ class CDPElementCloner:
             }
 
             js_code = self._load_js_file("extract_events.js", selector, options)
-            return self._js_answer(await tab.evaluate(js_code))
+            return js_aspect_answer.parsed(await tab.evaluate(js_code))
         except ToolError:
             raise
         except Exception as e:
@@ -704,11 +668,21 @@ class CDPElementCloner:
                 "max_keyframes": max_keyframes,
             }
             js_code = self._load_js_file("extract_animations.js", selector, options)
-            facts = self._js_answer(await tab.evaluate(js_code))
+            facts = js_aspect_answer.parsed(await tab.evaluate(js_code))
             if "error" in facts:
-                # The collector reports its own miss inside the JSON. Q4 asked
-                # this aspect to keep PARITY with the other five; the five now
-                # raise, so parity is a raise carrying the collector's words.
+                # The collector reports its own miss inside the JSON, and this
+                # aspect RAISES it rather than handing the record back.
+                #
+                # It is the only one of the five that does. The other four JS
+                # scripts still answer an unresolved selector with
+                # ``{"error": "Element not found"}`` and their aspects still
+                # RETURN it — a tool return in the shape convention 2 bans,
+                # outside any named KEEP. F-872 deliberately did not change it:
+                # that is an error-convention decision (F-858's unfinished
+                # business), not a transport one, and folding it into a
+                # transport fix would hide a behaviour change. Named as a
+                # follow-up in
+                # audit/stage2/finding_F872_cloner_nested_bidi_nodes.md §6.
                 raise ToolError(str(facts["error"]))
             return animation_analysis.analyze(facts, options)
         except ToolError:
@@ -755,7 +729,7 @@ class CDPElementCloner:
                 "$FETCH_EXTERNAL", "true" if fetch_external else "false"
             )
 
-            asset_data = self._js_answer(await tab.evaluate(js_code))
+            asset_data = js_aspect_answer.parsed(await tab.evaluate(js_code))
 
             if fetch_external and isinstance(asset_data, dict):
                 asset_data["external_assets"] = {}
@@ -814,7 +788,7 @@ class CDPElementCloner:
             )
             js_code = js_code.replace("$MAX_DEPTH", str(max_depth))
 
-            file_data = self._js_answer(await tab.evaluate(js_code))
+            file_data = js_aspect_answer.parsed(await tab.evaluate(js_code))
 
             if follow_imports and max_depth > 0 and isinstance(file_data, dict):
                 await self._fetch_and_analyze_files(file_data)
