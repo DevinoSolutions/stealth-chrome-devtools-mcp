@@ -63,9 +63,18 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # Args:/Returns: blocks that only restated their own signatures
     # (_resolve_idle_timeout_seconds, touch_instance, spawn_browser,
     # get_instance) — the plan_F856 payment mechanism. Cap == actual.
+    # F-869 RATCHETS DOWN 1529 -> 1528. Reading a page's localStorage/
+    # sessionStorage moved to the new page_storage.py leaf (the deep-
+    # serialization trap and the one-shot JSON.stringify read that closes it are
+    # a paragraph of justification that belongs WITH the JS, not in the middle
+    # of get_page_state). What this file keeps is the policy: which failure is
+    # the page refusing (INFO, empty storage) and which is a defect here
+    # (WARNING + traceback, propagate to get_instance_state's partial record).
+    # The row had zero headroom, so the extraction was the only way in; a
+    # one-line ratchet is small but it is the honest actual. Cap == actual.
     "embedded/browser_manager.py": (
-        1529,
-        "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860",
+        1528,
+        "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its

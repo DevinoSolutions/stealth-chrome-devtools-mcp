@@ -16,6 +16,7 @@ from nodriver import Browser, Tab
 
 from stealth_chrome_devtools_mcp.embedded import (
     desktop_launch,
+    page_storage,
     spawn_contention,
     spawn_exhaustion,
     spawn_leak,
@@ -1432,32 +1433,20 @@ class BrowserManager:
             # a ``{"cookies": [...]}`` envelope (F-844). PageState wants dicts.
             cookies = await tab.send(uc.cdp.network.get_cookies()) or []
 
-            local_storage = {}
-            session_storage = {}
-
+            local_storage: dict[str, str] = {}
+            session_storage: dict[str, str] = {}
             try:
-                local_storage_keys = await tab.evaluate("Object.keys(localStorage)")
-                for key in local_storage_keys:
-                    value = await tab.evaluate(f"localStorage.getItem('{key}')")
-                    local_storage[key] = value
-
-                session_storage_keys = await tab.evaluate("Object.keys(sessionStorage)")
-                for key in session_storage_keys:
-                    value = await tab.evaluate(f"sessionStorage.getItem('{key}')")
-                    session_storage[key] = value
-            except (RuntimeError, ConnectionError) as e:
-                debug_logger.log_warning(
-                    "browser_manager",
-                    "get_page_state",
-                    f"Storage access failed (connection issue) for {instance_id}: {e}",
-                )
-            except Exception as e:
-                # Pages may block storage access (cross-origin, opaque origins,
-                # security policies)
+                local_storage, session_storage = await page_storage.read(tab)
+            except page_storage.StorageBlockedError as blocked:
+                # The ONLY condition this message was ever meant for: the PAGE
+                # itself refused (opaque origin, ``data:`` URL, storage disabled
+                # by policy), so empty dicts are the truth here. Anything else —
+                # F-869's TypeError among them — now reaches the handler below
+                # and becomes get_instance_state's honest partial record.
                 debug_logger.log_info(
                     "browser_manager",
                     "get_page_state",
-                    f"Storage access unavailable for {instance_id}: {e}",
+                    f"Storage access unavailable for {instance_id}: {blocked}",
                 )
 
             # ``JSON.stringify``, not a bare object literal: nodriver always
@@ -1482,6 +1471,16 @@ class BrowserManager:
             )
 
         except Exception as e:
+            # F-869: ONE place a collection failure is recorded, at WARNING with
+            # its traceback. It used to be INFO'd as "storage unavailable" and
+            # dropped. This reaches the caller (get_instance_state's partial
+            # record) and a post-mortem; NOT Sentry — see the finding's §8.
+            debug_logger.log_warning(
+                "browser_manager",
+                "get_page_state",
+                f"Page state collection failed for {instance_id}: {e}",
+                error=e,
+            )
             raise Exception(f"Failed to get page state: {e!s}")  # noqa: B904  plan_M4ph1
 
     async def cleanup_inactive(self, timeout_seconds: int | None = None) -> int:
