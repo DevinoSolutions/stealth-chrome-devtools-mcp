@@ -132,9 +132,13 @@ class TestDomHandlerSilentExcepts:
         element = MagicMock()
         element.focus = AsyncMock()
         element.apply = AsyncMock(side_effect=RuntimeError("clear-fail"))
-        element.send_keys = AsyncMock()
         tab = MagicMock()
         tab.select = AsyncMock(return_value=element)
+        # F-873: the keyboard clear is now the ONE CDP select-all+Delete
+        # (text_entry.clear_via_keyboard), shared with paste_text, instead of
+        # two WebDriver private-use codepoints down element.send_keys that CDP
+        # never understood. The fallback therefore goes through the tab.
+        tab.send = AsyncMock()
 
         result = await DOMHandler.type_text(tab, "#input", "", delay_ms=0)
 

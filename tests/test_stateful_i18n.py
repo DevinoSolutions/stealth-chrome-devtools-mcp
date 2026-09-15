@@ -76,7 +76,8 @@ Scope honesty, stated once so no node has to imply it:
   and is NOT tested here. MQ-162 covers the DOM composition sequence the tool
   can synthesize, and says so; a synthetic ``CompositionEvent`` is never
   evidence about a real IME.
-* ``type_text``'s missing ``keydown``/``keyup`` half is already pinned by
+* ``type_text``'s key lifecycle (``keydown``/``keypress``/``keyup``, all
+  trusted since F-873) is already pinned by
   ``tests/test_e2e_interaction_fidelity.py::test_keyboard_fidelity_and_enter_submit``.
   MQ-162 cites that pin instead of re-measuring it.
 
@@ -963,7 +964,8 @@ async def test_the_real_input_tools_emit_no_composition_at_all(
     product speaks IME. It also fixes the shape of what they DO emit, so the
     two tools cannot silently swap behaviours.
 
-    The missing ``keydown``/``keyup`` half of ``type_text`` is already pinned by
+    The key lifecycle ``type_text`` emits (``keydown``/``keypress``/``keyup``,
+    all trusted since F-873) is already pinned by
     ``tests/test_e2e_interaction_fidelity.py::test_keyboard_fidelity_and_enter_submit``
     and is not re-measured here.
     """

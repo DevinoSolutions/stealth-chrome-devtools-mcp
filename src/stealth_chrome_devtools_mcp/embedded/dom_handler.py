@@ -8,6 +8,7 @@ from typing import Any
 
 from nodriver import Tab, cdp
 
+from stealth_chrome_devtools_mcp.embedded import text_entry
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     resolve_by_text,
@@ -402,6 +403,15 @@ class DOMHandler:
         """
         Type text with human-like delays and optional newline parsing.
 
+        Every key press and the "did the page take it" check belong to
+        ``text_entry``; what lives here is the ORDER (F-873). A line's
+        characters are verified BEFORE that line's Enter, never after: an Enter
+        that submits may navigate the page away, and a read against the
+        detached element would report a failure the page had in fact accepted.
+        An empty line is skipped entirely, which is what keeps the common
+        ``"query\\n"`` \u2014 type, submit, done \u2014 from reading back across its own
+        navigation.
+
         Args:
             tab (Tab): The browser tab object.
             selector (str): CSS selector for the input element.
@@ -413,7 +423,12 @@ class DOMHandler:
                 (for chat apps).
 
         Returns:
-            bool: True if typing succeeded, False otherwise.
+            bool: True \u2014 the characters were typed AND the page took them.
+
+        Raises:
+            ToolError: the selector resolved to nothing, the element could not
+                be read back, or every key event was delivered and the
+                element's text did not move.
         """
         try:
             element = await resolve_element(tab, selector)
@@ -428,58 +443,20 @@ class DOMHandler:
                     await element.apply("(elem) => { elem.value = ''; }")
                 except Exception as e:
                     debug_logger.log_debug("dom_handler", "type_text", str(e))
-                    await element.send_keys("\ue009" + "a")  # Ctrl+A fallback
-                    await element.send_keys("\ue017")
+                    await text_entry.clear_via_keyboard(tab)
                 await asyncio.sleep(0.1)
 
-            if parse_newlines:
-                lines = text.split("\n")
-                for i, line in enumerate(lines):
-                    for char in line:
-                        await element.send_keys(char)
-                        await asyncio.sleep(delay_ms / 1000)
-
-                    if i < len(lines) - 1:
-                        if shift_enter:
-                            await element.apply("""(elem) => {
-                                const start = elem.selectionStart;
-                                const end = elem.selectionEnd;
-                                const value = elem.value;
-                                elem.value = value.substring(0, start)
-                                    + '\\n' + value.substring(end);
-                                elem.selectionStart = elem.selectionEnd = start + 1;
-
-                                elem.dispatchEvent(new KeyboardEvent('keydown', {
-                                    key: 'Enter',
-                                    code: 'Enter',
-                                    shiftKey: true,
-                                    bubbles: true
-                                }));
-                                elem.dispatchEvent(
-                                    new Event('input', { bubbles: true }));
-                            }""")
-                        else:
-                            await element.apply("""(elem) => {
-                                const start = elem.selectionStart;
-                                const end = elem.selectionEnd;
-                                const value = elem.value;
-                                elem.value = value.substring(0, start)
-                                    + '\\n' + value.substring(end);
-                                elem.selectionStart = elem.selectionEnd = start + 1;
-
-                                elem.dispatchEvent(new KeyboardEvent('keydown', {
-                                    key: 'Enter',
-                                    code: 'Enter',
-                                    bubbles: true
-                                }));
-                                elem.dispatchEvent(
-                                    new Event('input', { bubbles: true }));
-                            }""")
-                        await asyncio.sleep(delay_ms / 1000)
-            else:
-                for char in text:
-                    await element.send_keys(char)
-                    await asyncio.sleep(delay_ms / 1000)
+            delay = delay_ms / 1000
+            lines = text.split("\n") if parse_newlines else [text]
+            for index, line in enumerate(lines):
+                if line:
+                    before = await text_entry.entered_text(element, selector)
+                    await text_entry.type_characters(tab, element, line, delay)
+                    after = await text_entry.entered_text(element, selector)
+                    text_entry.verify_received(selector, line, before, after)
+                if index < len(lines) - 1:
+                    await text_entry.press_enter(tab, shift=shift_enter)
+                    await asyncio.sleep(delay)
 
             return True
 
@@ -518,40 +495,7 @@ class DOMHandler:
                     await element.apply("(elem) => { elem.value = ''; }")
                 except Exception as e:
                     debug_logger.log_debug("dom_handler", "paste_text", str(e))
-                    await tab.send(
-                        cdp.input_.dispatch_key_event(  # Ctrl+A fallback
-                            "rawKeyDown",
-                            modifiers=2,  # Ctrl
-                            key="a",
-                            code="KeyA",
-                            windows_virtual_key_code=65,
-                        )
-                    )
-                    await tab.send(
-                        cdp.input_.dispatch_key_event(
-                            "keyUp",
-                            modifiers=2,  # Ctrl
-                            key="a",
-                            code="KeyA",
-                            windows_virtual_key_code=65,
-                        )
-                    )
-                    await tab.send(
-                        cdp.input_.dispatch_key_event(
-                            "rawKeyDown",
-                            key="Delete",
-                            code="Delete",
-                            windows_virtual_key_code=46,
-                        )
-                    )
-                    await tab.send(
-                        cdp.input_.dispatch_key_event(
-                            "keyUp",
-                            key="Delete",
-                            code="Delete",
-                            windows_virtual_key_code=46,
-                        )
-                    )
+                    await text_entry.clear_via_keyboard(tab)
                 await asyncio.sleep(0.1)
 
             await tab.send(cdp.input_.insert_text(text))

@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — `type_text` reported success for text it never entered, and for an Enter that could not submit (F-873)
+
+Measured on 2.1.6 over real stdio transport, headed Chrome 152: `type_text` returned
+`{"result": true}` when the characters never reached the page (Amazon's and Gmail's
+search boxes, `.value` still `""` afterwards, three runs each), and `parse_newlines`'s
+trailing newline never submitted the form it was typed into. Two defects, one shape —
+the tool reported the success of its own dispatch, not the success of the interaction.
+The Enter was a `KeyboardEvent` constructed *inside the page* by `element.apply`; an
+event a script constructs is `isTrusted: false` and carries no `charCode`, and a
+form's implicit submission is performed by Blink on the **keypress** of a trusted
+Enter. Measured against a one-input form with a submit listener: the synthetic
+keydown submits 0 times, a trusted `rawKeyDown` (which fires no keypress) submits 0
+times, and only a `keyDown` carrying `text="\r"` submits — while adding a separate
+`char` event on top fires a second keypress and submits **twice**. And nothing
+between "dispatch the events" and `return True` ever asked the page whether the
+characters had landed: measured on the same Chrome, `readonly`, `range`, `date` and
+`color` controls each accept every key event and leave their value exactly where it
+was, and the tool answered `True` for all four. Key presses and the "did the page
+take it" check now live in `embedded/text_entry.py`: every key goes out as one
+`Input.dispatchKeyEvent` `keyDown` carrying `text` plus a `keyUp` (so `keydown`,
+`keypress` and `input` all fire, all trusted — the shipped path sent a lone `char`
+event per character, so a page whose autocomplete or shortcuts are bound to `keydown`
+saw a value appear with no key pressed), and after each line's characters the
+element's own text is read back and compared against the baseline taken just before
+them. A control that took every event and moved nothing now raises `ToolError` naming
+the selector and the counts — never the typed text, since a failed call reaches the
+log, the debug ring and Sentry at once and the field may be a password box. The
+verification asks "did anything change" rather than "does it contain exactly what I
+typed", deliberately: an input mask, an autocomplete that rewrites and a `number`
+field that normalises all DID receive the input, and a stricter test would have
+turned each into a new false alarm. `type_text`'s clear fallback also stopped being a
+no-op — it sent WebDriver's private-use codepoints (``, ``) through
+`send_keys`, which CDP has never understood, so it inserted two junk characters and
+cleared nothing; it and `paste_text` now share the one CDP select-all + Delete.
+
 ## 2.1.6
 
 ### Fixed — `get_instance_state` reported empty storage as if it were the truth (F-869)

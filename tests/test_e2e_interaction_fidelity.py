@@ -24,12 +24,19 @@ FIDELITY VERDICTS pinned below (evidence in each test's docstring):
     pointerdown/mousedown/mouseup/click chain, HIT-TESTED (an overlay wins), and
     AUTO scroll-into-view (dom_handler.py:235). ``element.click()`` (synthetic,
     untrusted) is only a fallback on error (dom_handler.py:242).
-  * ``type_text`` -> CHAR-event input, NOT the full key lifecycle. Per char
-    ``element.send_keys`` (dom_handler.py:400) -> nodriver
-    ``cdp.input_.dispatch_key_event("char")`` (core/element.py) => keypress+input
-    fire but keydown/keyup do NOT; so native Enter implicit-submit (which needs a
-    trusted keydown) never triggers (the parse_newlines path dispatches a SYNTHETIC
-    KeyboardEvent, dom_handler.py:354-396, isTrusted false).
+  * ``type_text`` -> REAL trusted keyboard input, full lifecycle (F-873). Per
+    char ``text_entry.type_characters`` -> CDP ``Input.dispatchKeyEvent``
+    keyDown(text=char) + keyUp => keydown, keypress and input all fire, all
+    trusted. ``parse_newlines``' Enter is the same pair with ``text="\\r"``,
+    which is what makes Blink synthesise the keypress a form's implicit
+    submission is performed on. Both halves of this row USED to be findings
+    pinned in this file (a lone ``char`` event per char; a page-constructed
+    ``KeyboardEvent`` for Enter, isTrusted false, 0 submits), and F-873 flipped
+    them deliberately -- see
+    ``audit/stage2/finding_F873_type_text_reports_success_without_typing.md``.
+  * ``type_text`` also VERIFIES now: a control that takes every key event and
+    keeps its value (readonly / range / date / color) raises ``ToolError``
+    instead of answering True.
 
 Determinism (plan §2.6): ONE spawn per test closed in ``finally`` (nodriver binds
 websockets to the function-scoped loop, so a shared browser is a cross-loop
@@ -58,6 +65,7 @@ from e2e_helpers import (
     wait_for_js,
     warmup_once,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 pytestmark = integration_pytestmark()
 
@@ -197,21 +205,26 @@ async def test_click_respects_occlusion_and_offscreen(fixture_app_server):
 
 @pytest.mark.characterization
 async def test_keyboard_fidelity_and_enter_submit(fixture_app_server):
-    """PINS: type_text emits CHAR events (keypress+input), NOT keydown/keyup, and
-    its Enter is synthetic (no native implicit form submit).
+    """PINS: type_text emits the FULL trusted key lifecycle, and its Enter
+    performs native implicit form submission (F-873 — this test's two FINDINGS,
+    deliberately flipped by the fix that closed them).
 
     #key-probe logs ``key:<down|up|press>:<key>:<trust>`` and ``input:key-probe:
-    <value>``. type_text drives ``element.send_keys`` per char (dom_handler.py:400)
-    -> nodriver ``cdp.input_.dispatch_key_event("char")``, which COMMITS the
-    character: keypress + input fire (trusted) but keydown/keyup do NOT. So the
-    typed value lands, yet the keydown/keyup half of the lifecycle is absent -- a
-    partial-fidelity FINDING (tool-limitation).
+    <value>``. type_text now drives ``text_entry.type_characters`` per char ->
+    ``Input.dispatchKeyEvent`` keyDown(text=char)+keyUp, so keydown, keypress
+    and input all fire and all are trusted. It USED to send a lone ``char``
+    event per character (nodriver's ``Element.send_keys``), which commits the
+    character but fires no keydown/keyup at all — so a page whose autocomplete
+    or shortcut handling is bound to keydown saw a value appear with no key
+    pressed.
 
-    Enter: #enter-form has a single field and NO submit button, so only a TRUSTED
-    Enter keydown triggers native implicit submission. type_text's parse_newlines
-    path dispatches a SYNTHETIC ``KeyboardEvent('keydown',{key:'Enter'})`` via
-    element.apply (dom_handler.py:381-396, isTrusted false), so ``submit:enter-form``
-    NEVER fires -- pinned as a tool-gap (no trusted-Enter / key-press tool exists).
+    Enter: #enter-form has a single field and NO submit button, so only a
+    TRUSTED Enter **keypress** triggers native implicit submission. That
+    keypress is synthesised by Blink from a ``keyDown`` carrying ``text="\\r"``
+    — measured: a page-constructed ``KeyboardEvent`` submits 0 times, a trusted
+    ``rawKeyDown`` submits 0 times, ``keyDown(text="\\r")`` submits once, and
+    adding a separate ``char`` submits TWICE. ``parse_newlines`` sends exactly
+    the one pair, so ``submit:enter-form`` fires exactly once.
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
@@ -230,29 +243,23 @@ async def test_keyboard_fidelity_and_enter_submit(fixture_app_server):
 
         # input events fired and carried the growing value (real text input).
         assert any(a.startswith("input:key-probe:") for a in actions), actions
-        # Whatever key phase fires is TRUSTED (CDP char is a trusted event).
+        # Every key phase that fires is TRUSTED.
         assert not any(
             a.startswith("key:") and a.endswith(":untrusted") for a in actions
         ), actions
-        # FINDING: no keydown / keyup -- send_keys uses dispatch_key_event("char"),
-        # which fires keypress+input only, not the keydown/keyup lifecycle.
-        assert not any(a.startswith("key:down:") for a in actions), actions
-        assert not any(a.startswith("key:up:") for a in actions), actions
+        # F-873: the keydown/keyup half of the lifecycle is present now.
+        assert any(a.startswith("key:down:") for a in actions), actions
+        assert any(a.startswith("key:up:") for a in actions), actions
 
-        # Enter via parse_newlines: types the text, but the synthetic Enter does
-        # NOT trigger native implicit submission of the button-less form.
+        # Enter via parse_newlines: types the text AND triggers native implicit
+        # submission of the button-less form.
         assert await type_text(
             instance_id=iid,
             selector="#enter-input",
             text="hello\n",
             parse_newlines=True,
         )
-        assert "hello" in await eval_js(
-            iid, "document.getElementById('enter-input').value"
-        )
-        # Positive control: the value landed (type_text ran) -- so the absent
-        # submit is a real gap, not a missed dispatch.
-        assert "submit:enter-form" not in await read_actions(iid)
+        assert await _wait_action(iid, "submit:enter-form")
     finally:
         await close(instance_id=iid)
 
@@ -302,10 +309,10 @@ async def test_form_semantics(fixture_app_server):
         assert await click(instance_id=iid, selector="#disabled-btn") is True
         assert "click:disabled-btn" not in await read_actions(iid)
 
-        # Readonly: typed text is rejected; the injected string never lands.
-        assert await type_text(
-            instance_id=iid, selector="#readonly-input", text="INJECT"
-        )
+        # Readonly: typed text is rejected, and F-873 means the TOOL says so
+        # instead of answering True. The injected string never lands either way.
+        with pytest.raises(ToolError):
+            await type_text(instance_id=iid, selector="#readonly-input", text="INJECT")
         readonly_val = await eval_js(
             iid, "document.getElementById('readonly-input').value"
         )
@@ -338,15 +345,17 @@ async def test_rich_input_types(fixture_app_server):
     resulting live .value and change log. execute_script is used as the escape-hatch
     oracle to confirm each element+listener works even where the tool cannot reach.
 
-      * range  (FINDING/tool-gap): type_text cannot move a slider (char events are
-        ignored by range) -- value stays 50, no ``input:range-input``; execute_script
-        setting the value + dispatching input DOES log, proving the gap is the tool.
+      * range  (tool-gap, now REPORTED): type_text cannot move a slider -- the
+        key events are delivered and the value stays 50. Since F-873 the tool
+        RAISES instead of answering True; execute_script setting the value +
+        dispatching input DOES log, proving the gap is the control, not the page.
       * number (spec-correct): type_text lands digits -> value "42",
-        ``input:number-input`` logs.
-      * date   (FINDING/tool-gap): type_text cannot fill the segmented date field
-        via char events -> value stays "" ; execute_script sets it.
-      * color  (FINDING/tool-gap): type_text cannot drive the color control ->
-        value stays "#000000" ; execute_script sets it.
+        ``input:number-input`` logs. The positive control for the three raises.
+      * date   (tool-gap, now REPORTED): type_text cannot fill the segmented
+        date field -> value stays "" and the tool raises; execute_script sets it.
+      * color  (tool-gap, now REPORTED): type_text cannot drive the color
+        control -> value stays "#000000" and the tool raises; execute_script
+        sets it.
     select_option IS exercised here and pinned as a FINDING (see the value+index
     asserts below): a second evaluate-path call on the same document silently
     no-ops yet returns True -- a ``const select`` re-declaration collision
@@ -365,8 +374,9 @@ async def test_rich_input_types(fixture_app_server):
         await navigate_and_settle(iid, f"{base}/interactions.html")
         await _query_at_least(iid, "#range-input", 1)
 
-        # range: type_text is a no-op on a slider (char events ignored).
-        assert await type_text(instance_id=iid, selector="#range-input", text="80")
+        # range: a slider takes the key events and moves nothing -> raises.
+        with pytest.raises(ToolError):
+            await type_text(instance_id=iid, selector="#range-input", text="80")
         assert await eval_js(iid, "document.getElementById('range-input').value") == (
             "50"
         )
@@ -387,10 +397,9 @@ async def test_rich_input_types(fixture_app_server):
         )
         assert any(a.startswith("input:number-input:") for a in await read_actions(iid))
 
-        # date: type_text cannot fill the segmented field via char events.
-        assert await type_text(
-            instance_id=iid, selector="#date-input", text="2025-06-15"
-        )
+        # date: the segmented field cannot be filled by typing -> raises.
+        with pytest.raises(ToolError):
+            await type_text(instance_id=iid, selector="#date-input", text="2025-06-15")
         assert (
             await eval_js(iid, "document.getElementById('date-input').value")
             != "2025-06-15"
@@ -404,8 +413,9 @@ async def test_rich_input_types(fixture_app_server):
         )
         assert await _wait_action(iid, "input:date-input:2025-06-15")
 
-        # color: type_text cannot drive the color control (stays default black).
-        assert await type_text(instance_id=iid, selector="#color-input", text="#123456")
+        # color: the color control cannot be typed into (stays default black).
+        with pytest.raises(ToolError):
+            await type_text(instance_id=iid, selector="#color-input", text="#123456")
         assert await eval_js(iid, "document.getElementById('color-input').value") == (
             "#000000"
         )
