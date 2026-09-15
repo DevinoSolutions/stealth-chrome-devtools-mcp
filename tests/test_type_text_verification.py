@@ -29,6 +29,7 @@ from __future__ import annotations
 import pytest
 
 from fakes import FakeTab, FakeTextField
+from stealth_chrome_devtools_mcp.embedded import text_entry
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -231,6 +232,31 @@ async def test_clear_first_then_typing_is_verified_against_the_cleared_state():
         await DOMHandler.type_text(tab, SELECTOR, "new", delay_ms=0)
 
     assert field.value == ""
+
+
+async def test_the_clear_fallback_is_a_real_keyboard_clear():
+    """``clear_first``'s fallback presses Ctrl+A then Delete over CDP.
+
+    It used to send WebDriver's private-use codepoints (U+E009 for Ctrl, U+E017
+    for Delete) through ``send_keys``, which dispatches them as literal ``char``
+    text — CDP has never spoken that protocol. Measured against an
+    ``<input value="preset-value">``: the old fallback left
+    ``"\\ue009a\\ue017preset-value"``; ``clear_via_keyboard`` leaves ``""``.
+    One home, shared with ``paste_text``.
+    """
+    field = FakeTextField(value="preset")
+    tab = FakeTab(select_result=field)
+
+    await text_entry.clear_via_keyboard(tab)
+
+    downs = _key_frames(tab, type_="keyDown")
+    # Modifier bits: Alt=1, Ctrl=2, Meta=4, Shift=8.
+    assert [(p.get("key"), p.get("modifiers")) for p in downs] == [
+        ("a", 2),
+        ("Delete", 0),
+    ], downs
+    assert downs[0]["code"] == "KeyA"
+    assert downs[1]["code"] == "Delete"
 
 
 async def test_empty_text_is_not_a_failure():

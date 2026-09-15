@@ -69,6 +69,17 @@ A literal `"\n"` **character** (i.e. `parse_newlines=False`) is dropped by Chrom
 
 i18n round trip into an `<input>`, `"héllo 日本語 👍🏽 ß"`: byte-exact under `char`-only, under the full lifecycle (with `windowsVirtualKeyCode` 0 for every non-ASCII character) and under `Input.insertText`. Into a `contenteditable` div, both dispatches insert and `.value` is `undefined`, which is why the read-back reads `textContent` there.
 
+### 2bb. The clear fallback was a no-op that made things worse
+
+`type_text`'s `clear_first` fallback (taken when the programmatic `elem.value = ''` throws) sent WebDriver's private-use codepoints through `send_keys`. Measured against an `<input value="preset-value">`, focused:
+
+| clear | value afterwards |
+|---|---|
+| old fallback — `send_keys("a")` then `send_keys("")` | `"apreset-value"` |
+| `text_entry.clear_via_keyboard` (Ctrl+A, Delete over CDP) | `""`, and a subsequent `type_characters(…, "new")` gives `"new"` |
+
+CDP has never spoken the WebDriver protocol, so those codepoints were dispatched as literal `char` text: the fallback prepended three junk characters and cleared nothing. `paste_text` already had a correct CDP version of the same thing inline; both call the one function now.
+
 ### 2c. What defect B's site-specific trigger is NOT
 
 The Amazon/Gmail runs above are the same *class* as the table in §2b — every event delivered, nothing moved — but their particular trigger did **not** reproduce here. Ruled out by measurement, all on Chrome 152:
@@ -122,10 +133,10 @@ A failed tool call reaches the durable log, the debug ring and Sentry at once (F
 
 ## 5. Verification
 
-* `tests/test_type_text_verification.py` — 11 hermetic pins (9 RED before the fix, 2 positive controls green throughout): the Enter is a real `Input.dispatchKeyEvent`; its `keyDown` carries `text="\r"` + `code` + vk 13; it is dispatched exactly twice (`keyDown`, `keyUp`) and never a third time; `shift_enter` carries modifier 8; each character gets a `keyDown`+`keyUp` pair; a refusing control raises with the selector and the count; the message never carries the typed text; an unreadable read-back raises; a control that accepts still returns `True`; `clear_first`'s baseline is the state AFTER the clear; empty text is not a failure.
+* `tests/test_type_text_verification.py` — 12 hermetic pins (9 RED before the fix, the rest positive controls and the clear pin): the Enter is a real `Input.dispatchKeyEvent`; its `keyDown` carries `text="\r"` + `code` + vk 13; it is dispatched exactly twice (`keyDown`, `keyUp`) and never a third time; `shift_enter` carries modifier 8; each character gets a `keyDown`+`keyUp` pair; a refusing control raises with the selector and the count; the message never carries the typed text; an unreadable read-back raises; a control that accepts still returns `True`; `clear_first`'s baseline is the state AFTER the clear; the clear fallback is Ctrl+A then Delete; empty text is not a failure.
 * `tests/test_e2e_type_text_verification.py` — 9 real-Chrome pins (6 RED before the fix), own `tmp_empty_root` session root: `#enter-form` (one field, no submit button) is submitted by `parse_newlines`; keydown AND keyup fire, all trusted; `readonly`/`range`/`date`/`color` each raise; `number`, the key probe and an i18n string still succeed with the value to prove it.
 * `tests/fakes.py` gains `FakeTextField`, a page-backed element double whose `send_keys` is nodriver 0.47's `Element.send_keys` reproduced verbatim — the char-only dispatch IS the thing under test, so a stub that merely appended the text would have made the pins pass against the very dispatch they exist to reject. `FakeTab` routes a key event carrying `text` to the focused field per EVENT, so a double dispatch shows up there exactly as it double-submits in Chrome.
-* Unit lane at the fix: **2495 passed, 1 skipped** (2484 before this work + the 11 new hermetic pins). The type_text-adjacent integration files (`test_e2e_interaction_fidelity.py`, `test_e2e_interaction.py`, `test_e2e_hard_dom.py`, `test_e2e_type_text_verification.py`): **31 passed**.
+* Unit lane at the fix: **2496 passed, 1 skipped** (2484 before this work + the 12 new hermetic pins). The type_text-adjacent integration files (`test_e2e_interaction_fidelity.py`, `test_e2e_interaction.py`, `test_e2e_hard_dom.py`, `test_e2e_type_text_verification.py`): **31 passed**.
 * §1 measurement 1 re-run against the fix, product code path (`DOMHandler.type_text`), real headless Chrome, same `data:` form page:
 
 ```
