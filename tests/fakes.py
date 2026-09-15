@@ -27,6 +27,7 @@ identically.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
@@ -582,6 +583,7 @@ class FakeBrowser:
         pid: int | None = None,
         tabs: list[Any] | None = None,
         opened_tab: Any = None,
+        update_targets_stalls: bool = False,
     ) -> None:
         if alive is None:
             self._process = None
@@ -595,6 +597,7 @@ class FakeBrowser:
         self.connection = FakeTab(url="ws://fake.test/devtools/browser")
         self.get_calls: list[tuple[str, bool]] = []
         self._opened_tab = opened_tab
+        self._update_targets_stalls = update_targets_stalls
 
     async def get(self, url: str, new_tab: bool = False) -> FakeTab:
         """nodriver's ``Browser.get``.
@@ -617,8 +620,17 @@ class FakeBrowser:
     async def update_targets(self) -> None:
         """nodriver's target refresh. The real one rewrites every known
         ``target``'s metadata in place from a fresh ``Target.getTargets``, which
-        is precisely why a metadata-listing loop has nothing left to await."""
+        is precisely why a metadata-listing loop has nothing left to await.
+
+        Seed ``update_targets_stalls=True`` for a WEDGED browser: the refresh is
+        a real CDP round trip, so a browser whose devtools websocket has stopped
+        answering never completes it. That is the one case a listing over N
+        instances must survive (F-874), and a fake that returned promptly could
+        not express it.
+        """
         self.update_targets_calls += 1
+        if self._update_targets_stalls:
+            await asyncio.Event().wait()
 
 
 class FakeBrowserManager:
@@ -653,6 +665,13 @@ class FakeBrowserManager:
         return list(self._instances)
 
     async def get_tab(self, instance_id: str) -> Any:
+        return self._tabs.get(instance_id)
+
+    async def get_active_tab(self, instance_id: str) -> Any:
+        """The real manager's ``get_active_tab`` is ``get_tab`` under another
+        name (``browser_manager.py``: "the instance's stored active tab"), so the
+        double delegates rather than growing a second seedable store that could
+        disagree with ``tabs=``."""
         return self._tabs.get(instance_id)
 
     async def get_browser(self, instance_id: str) -> Any:
