@@ -544,19 +544,57 @@ a recurring 30-minute re-diagnosis into a read.
 
 ---
 
-## 7. The one CI experiment that settles it
+## 7. The experiment — now running on every gate run
 
-**Measure Chrome's cold time-to-DevTools on the gate's own images, product-free —
-and measure the FIRST launch specifically, because §3.4 says that is the only
-one that matters.**
+**Status: IMPLEMENTED in this PR.** What follows is what it does and how to read
+it, not a proposal.
 
-Add a step to the Linux and macOS gate cells that never fails the job, placed
-**immediately before the first step that launches Chrome** (so it *is* the
-machine's first Chrome launch, and it measures what the product would have
-paid). Launch **twice**, back to back, and report both — the first/second delta
-is the whole question, and it separates "Chrome cold start" from "the machine
-was busy" (§3.4): a page-in cause makes only launch #1 slow, a contention cause
-makes both slow.
+**It measures Chrome's cold time-to-DevTools on the gate's own images,
+product-free, and it measures the FIRST launch specifically, because §3.4 says
+that is the only one that matters.**
+
+| piece | where |
+|---|---|
+| the probe | `tools/chrome_cold_start_probe.py` — stdlib only, imports no part of the package (pinned by a test that asserts so in a subprocess) |
+| its hermetic test | `tests/test_chrome_cold_start_probe.py` — a real **fake-browser subprocess** that writes `DevToolsActivePort` after a configurable delay and serves `/json/version` on loopback; no real Chrome in the unit lane |
+| the gate step | `Chrome cold-start probe (F-870)` in `.github/workflows/release-gate.yml`, on `integration`, `transport`, `offline-stealth` and `install-smoke` |
+| the evidence | artifact kind `chrome-cold-start` (`tools/release_evidence.py` `ARTIFACT_KINDS`), landing at `release-evidence/<sha>/<job>/artifacts/chrome-cold-start.json` |
+
+It launches Chrome **twice**, back to back, on a fresh profile each time, and
+reports per launch: `ms_to_active_port`, `ms_to_json_version`, `port_from_file`,
+`port_matches_request`, `pid`, `exit_code_if_died`, `listening` and a
+`stderr_tail`. The first/second delta is the whole question (§3.4): a page-in
+cause makes only launch #1 slow, a contention cause makes both slow.
+
+Four design choices worth recording, because each one was a fork:
+
+* **Placed after `Resolve image Chrome Stable identity`, not before it.** Before
+  would give a colder binary, but the *product's* first spawn also happens after
+  that step, so measuring there measures the conditions the product actually
+  meets — and `--freeze-updater` has already run, so Chrome cannot be swapped
+  under the measurement (F-819).
+* **It calls `resolve_chrome._resolve_path()`, not the public
+  `resolve_chrome()`.** The public function additionally shells out to the binary
+  for `--version`, and **that subprocess pages the binary in** — it would warm
+  the exact thing being timed. Identity stays single-homed in
+  `chrome-identity.json`; this record cites the path only.
+* **Output goes to a temporary FILE, not a pipe and not `DEVNULL`.** A pipe's
+  kernel buffer can fill and block the child forever, and the probe would then be
+  measuring its own deadlock; `subprocess.DEVNULL` is banned repo-wide (TID251)
+  for exactly the habit this finding is about. Capturing the stream is also
+  §6.1(d) in miniature: `DevTools listening on ws://` now lands in evidence.
+* **It runs on Windows too.** Windows is the control, and "0 of 27 failed cells"
+  (§2.1) is *absence of evidence*; a measured number is evidence of absence. It
+  costs ~0.7 s. A local Windows reading already exists: **384 ms then 306 ms to
+  `/json/version`, against nodriver's 2750 ms budget — 7× headroom**, which is
+  the first direct explanation of why Windows never shows this family.
+
+On the `install-smoke` macOS cells (`stages: handshake`, partial by F-773) the
+probe is the only Chrome the job launches. That is deliberate and harmless: it
+measures the image, makes no navigation claim, and leaves the F-773 gap warning
+exactly as true as it was.
+
+**How to read the result:**
 
 ```
 google-chrome --headless=new --no-sandbox --disable-gpu \

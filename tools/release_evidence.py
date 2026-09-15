@@ -102,6 +102,11 @@ ARTIFACT_KINDS = frozenset(
     {
         "runner-identity",
         "chrome-identity",
+        # F-870: how long THIS runner's Chrome took to open its DevTools
+        # endpoint, measured twice, product-free. It rides as an artifact
+        # because the record's own keys are a closed set (RECORD_KEYS) and
+        # this is evidence ABOUT the machine, not a claim about the release.
+        "chrome-cold-start",
         "coverage",
         "junit",
         "build-manifest",

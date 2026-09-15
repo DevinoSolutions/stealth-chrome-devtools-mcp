@@ -308,6 +308,40 @@ jobs:
         run: |
           echo "::warning title=F-773::macOS runs 'integration and not transport'."
           echo "::warning title=F-773::Chrome under the DETACHED backend cannot complete any network navigation on this runner (a connection to a CLOSED port hangs 35s while about:blank returns in 1.1s). Cause unknown; see audit/stage2/finding_F773_macos_detached_navigation.md. This gate therefore makes NO macOS navigation claim."
+      - name: Chrome cold-start probe (F-870)
+        # THE one description of this step; the other three cells point here.
+        #
+        # Measures how long THIS runner's Chrome takes to open its DevTools
+        # endpoint — twice, back to back, product-free. F-870 established that
+        # the POSIX gate's intermittent "Failed to connect to browser" is
+        # nodriver spending its hardcoded 2.75 s connect window in full against
+        # a Chrome that is alive and simply not listening yet, but it could not
+        # measure what that launch actually costs: our own F-860 reaper kills
+        # the browser 2.8 s in, and nodriver pipes Chrome's stderr and never
+        # reads it, so "DevTools listening on ws://" appears in ZERO of ~100
+        # sampled job logs. This step is that missing measurement. The launch
+        # #1 vs #2 delta is what separates a cold page-in cost from machine
+        # contention (finding §3.4/§7).
+        #
+        # Placed AFTER "Resolve image Chrome Stable identity" so --freeze-updater
+        # has already run and Chrome cannot be swapped under the measurement,
+        # and BEFORE the first step that launches Chrome through the product, so
+        # launch #1 is this job's first Chrome and sits exactly where the
+        # product's own first spawn would.
+        #
+        # Runs on EVERY cell INCLUDING Windows. Windows is F-870's control, and
+        # "0 of 27 failed Windows cells" is absence of evidence; a measured
+        # number is evidence of absence. Cost is ~0.7 s on a warm machine
+        # (measured locally: 384 ms then 306 ms to /json/version).
+        #
+        # No continue-on-error — test_no_gate_job_hides_failure forbids it and
+        # it is not needed: the script exits 0 on every path by contract, and a
+        # launch that never listens inside the deadline is itself the answer.
+        shell: bash
+        run: >-
+          uv run python tools/chrome_cold_start_probe.py
+          --cell "${{ matrix.runner_os }}-${{ matrix.runner_arch }}"
+          --out "chrome-cold-start.json"
       - name: Run integration + Chrome-identity tests
         # Headless cases must not depend on DISPLAY; Linux sets it only for the
         # headed cases that need Xvfb, and Windows/macOS never inherit :99.
@@ -420,6 +454,7 @@ jobs:
           --chrome-identity "chrome-identity.json"
           --chrome-launched
           --junit "junit.xml"
+          --artifact "chrome-cold-start=chrome-cold-start.json"
           --artifact "chrome-identity=chrome-identity.json"
           --artifact "junit=junit.xml"
           --artifact "runner-identity=runner-identity.json"
@@ -499,6 +534,15 @@ jobs:
           sudo apt-get install -y -qq xvfb
           Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
           sleep 3
+      - name: Chrome cold-start probe (F-870)
+        # See the `integration` job's copy of this step for the full rationale.
+        # Same placement rule: after the frozen identity resolve, before the
+        # first product Chrome launch, exits 0 on every path.
+        shell: bash
+        run: >-
+          uv run python tools/chrome_cold_start_probe.py
+          --cell "${{ matrix.runner_os }}-${{ matrix.runner_arch }}"
+          --out "chrome-cold-start.json"
       - name: Run real-stdio transport journey
         # Session root at step level for the same runner-context reason as the
         # integration job above.
@@ -560,6 +604,7 @@ jobs:
           --chrome-identity "chrome-identity.json"
           --chrome-launched
           --junit "junit.xml"
+          --artifact "chrome-cold-start=chrome-cold-start.json"
           --artifact "chrome-identity=chrome-identity.json"
           --artifact "junit=junit.xml"
           --artifact "runner-identity=runner-identity.json"
@@ -678,6 +723,15 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq xvfb
           Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+      - name: Chrome cold-start probe (F-870)
+        # See the `integration` job's copy of this step for the full rationale.
+        # Same placement rule: after the frozen identity resolve, before the
+        # first product Chrome launch, exits 0 on every path.
+        shell: bash
+        run: >-
+          uv run python tools/chrome_cold_start_probe.py
+          --cell "${{ matrix.runner_os }}-${{ matrix.runner_arch }}"
+          --out "chrome-cold-start.json"
       - name: Run offline stealth lane
         # W4's stealth tests are now in this history, so the lane is no longer
         # empty and pytest's exit 5 (zero collected) is NO LONGER treated as a
@@ -708,6 +762,7 @@ jobs:
           --chrome-identity "chrome-identity.json"
           --chrome-launched
           --junit "junit.xml"
+          --artifact "chrome-cold-start=chrome-cold-start.json"
           --artifact "chrome-identity=chrome-identity.json"
           --artifact "junit=junit.xml"
           --artifact "runner-identity=runner-identity.json"
@@ -982,6 +1037,21 @@ jobs:
         if: matrix.cell.stages == 'handshake'
         run: |
           echo "::warning title=F-773::install-smoke (${{ matrix.kind }} macOS/ARM64) is a PARTIAL cell: it proves the artifact installs, the launcher resolves out of the fresh environment, and the server completes initialize + tools/list + list_instances. It performs NO navigation, so it makes NO macOS navigation claim. See audit/stage2/finding_F773_macos_detached_navigation.md."
+      - name: Chrome cold-start probe (F-870)
+        # See the `integration` job's copy of this step for the full rationale.
+        # Same placement rule: after the frozen identity resolve, before the
+        # first product Chrome launch, exits 0 on every path.
+        #
+        # Note for the macOS cells, which are `stages: handshake` partial cells
+        # (F-773) and launch NO Chrome of their own: here the probe is the only
+        # Chrome in the job. That is deliberate and harmless — it measures the
+        # image, which is what F-870 needs, and it makes no navigation claim, so
+        # the F-773 gap warning above stays exactly as true as it was.
+        shell: bash
+        run: >-
+          uv run python tools/chrome_cold_start_probe.py
+          --cell "${{ matrix.kind }}-${{ matrix.cell.runner_os }}-${{ matrix.cell.runner_arch }}"
+          --out "chrome-cold-start.json"
       - name: Install the exact artifact and run W1's journey
         # Step-level env for the same reason as the integration job: the
         # `runner` context is NOT available in job-level env (actionlint).
@@ -1026,6 +1096,7 @@ jobs:
           --runner-identity "runner-identity.json"
           --chrome-identity "chrome-identity.json"
           ${{ matrix.cell.stages == 'full' && '--chrome-launched' || '' }}
+          --artifact "chrome-cold-start=chrome-cold-start.json"
           --artifact "chrome-identity=chrome-identity.json"
           --artifact "install-smoke=install-smoke-${{ matrix.kind }}.json"
           --artifact "runner-identity=runner-identity.json"

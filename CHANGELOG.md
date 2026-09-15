@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### CI only — every gate run now measures Chrome's cold start (F-870)
+
+No product change. `tools/chrome_cold_start_probe.py` runs on the `integration`,
+`transport`, `offline-stealth` and `install-smoke` cells (Windows included, as
+the control) and records how long that runner's Chrome takes to open its
+DevTools endpoint over two back-to-back launches — the one number
+`audit/stage2/finding_F870_posix_ci_nodriver_connect_failures.md` could not get
+from any failure log, because nodriver abandons a launched Chrome after a
+hardcoded 2.75 s and discards its stderr.
+
 ## 2.1.5
 
 ### Fixed — the backend escapes the MCP client's Job Object (F-867)
