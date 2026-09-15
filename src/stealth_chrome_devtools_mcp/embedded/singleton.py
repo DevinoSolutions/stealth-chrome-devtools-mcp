@@ -157,27 +157,34 @@ def _clear_server_state() -> None:
     backend_registry.clear_record(SERVER_STATE_FILE, PORT_FILE)
 
 
+def _probe_port(port: int) -> str:
+    """THE liveness ladder for ONE port — socket, then a real MCP `initialize`:
+    "down" | "wedged" | "responsive" (F-301's third state, which a bare socket
+    check cannot see). Read-only. THE one home for those four lines (F-868),
+    with three readers: the candidate walk below, `restart_backend`'s report of
+    the port it spawned on, and doctor's `cli._probe_recorded_backend`, which
+    adds only the one word this cannot reach ("no port recorded") and was a
+    verbatim copy of this ladder until now.
+    """
+    if not _server_is_healthy(port):
+        return "down"
+    return "responsive" if _backend_http_ready(port) else "wedged"
+
+
 def _probe_backend_status() -> tuple[str, int | None]:
     """Report the state of the backend THIS process would be served by, for
-    display (CLI status/doctor) and for `stop`, distinguishing what
-    `_find_running_server`'s binary answer collapses: not running, socket-dead,
-    and wedged (the F-301 state a bare socket check cannot see). Read-only:
-    never evicts, never spawns. Doctor runs this same ladder per-entry in
-    `cli._probe_recorded_backend`.
+    display (CLI status/doctor) and for `stop`: `_probe_port`'s verdict and the
+    port it was reached on, or ("none", None) when no adoptable entry names a
+    port. What this adds over that ladder is WHICH port to ask about.
 
     Candidates come in ADOPTION order (F-868) — `adoption_candidates`, the one
     home `_find_running_server` already walks — never "whichever entry the
     record lists first", which under one-entry-per-display-context is routinely
-    a dead sibling's: the 2026-09-14 record listed a dead `win-session-2` ahead
-    of the healthy own-context backend, so `status` said "not running" beside a
-    backend serving 56 proxies and `stop` aimed at the dead one's record. The
+    a dead sibling's: that is how `status` came to report "not running" beside
+    a backend serving 56 proxies, and `stop` to aim at the dead record. The
     first candidate that ANSWERS wins, else the most informative verdict —
-    wedged over down, because a wedged backend holds a port and will be evicted
-    while a down record names nothing running. Selection is not decided here.
-
-    Returns ("none", None) no adoptable record | ("down", port) socket closed |
-    ("wedged", port) socket open, no real MCP initialize answer |
-    ("responsive", port) socket open AND initialize answers 200.
+    wedged over down: a wedged backend holds a port and will be evicted, a down
+    record names nothing running. The ORDER itself is not decided here.
     """
     best: tuple[str, int | None] = ("none", None)
     own = display_context.display_context()
@@ -185,14 +192,11 @@ def _probe_backend_status() -> tuple[str, int | None]:
         port = backend_registry.recorded_int(entry, "port")
         if port is None:
             continue
-        if not _server_is_healthy(port):
-            verdict = ("down", port)
-        elif not _backend_http_ready(port):
-            verdict = ("wedged", port)
-        else:
-            return "responsive", port
-        if best[0] == "none" or (best[0] == "down" and verdict[0] == "wedged"):
-            best = verdict
+        verdict = _probe_port(port)
+        if verdict == "responsive":
+            return verdict, port
+        if best[0] == "none" or (best[0] == "down" and verdict == "wedged"):
+            best = (verdict, port)
     return best
 
 
@@ -213,14 +217,11 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     ``patience=0.0`` (discovery) probes once and never sleeps; ``None`` means
     ``REUSE_PATIENCE_SECONDS``, read at call time so tests can shrink it.
 
-    F-856: the window is spent in FAIRLY SCHEDULED seconds, not wall seconds.
-    A probe timeout is evidence about the backend only while this process is
-    itself being scheduled, and on a machine at 100% CPU it is not — the
-    2026-09-02 incident condemned a backend that had answered its six previous
-    confirmations. ``scheduling_lag.FairWindow`` measures that lateness from
-    the loop's own naps and discounts the budget by it, bounded at
-    ``MAX_STRETCH``. On an idle machine the measurement is 1.0 and this is
-    exactly the wall-clock deadline it replaced.
+    F-856: the window is spent in FAIRLY SCHEDULED seconds, not wall seconds —
+    a probe timeout is evidence about the backend only while this process is
+    itself being scheduled. The measurement, its bound and the 2026-09-02
+    incident behind it are ``scheduling_lag.FairWindow``'s, THE one home for
+    that question; on an idle machine it is the wall-clock deadline it replaced.
     """
     # The entry recorded ON THIS PORT, not merely the first: under F-808's
     # per-context record another desktop's backend says nothing about `port`.
@@ -651,12 +652,17 @@ def restart_backend() -> tuple[str, int | None]:
     instead of a repeat 120s outage — the fallback port stays recorded (SSA1.5);
     `stop` clears `server.json`, the reset path to `DEFAULT_PORT`. Lock
     contention reports "busy" so the operator retries instead of racing. The
-    post-restart state is reported via `_probe_backend_status()` (binding
-    ruling: ONE liveness vocabulary) — a restart that comes back wedged or down
-    must be visible, not assumed "responsive".
+    post-restart state is `_probe_port`'s verdict for THE PORT WE SPAWNED ON
+    (binding ruling: ONE liveness vocabulary) — a restart that comes back
+    wedged or down must be visible, not assumed "responsive".
 
-    Returns ``(status, pid)``: `_probe_backend_status`'s status or "busy";
-    ``pid`` is the freshly recorded pid once the lock is acquired, else None.
+    That port, never `_probe_backend_status()`'s (F-868): the adoption walk
+    answers "is there a backend for ME", so on a multi-context record a
+    RESPONSIVE sibling reported "responsive" for a restart whose own backend
+    came up wedged. Both halves now read the one selected port.
+
+    Returns ``(status, pid)``: `_probe_port`'s verdict or "busy"; ``pid`` is the
+    freshly recorded pid once the lock is acquired, else None.
     """
     # A PREFERENCE only: selection re-derives our own context's port itself.
     own = display_context.display_context()
@@ -670,10 +676,9 @@ def restart_backend() -> tuple[str, int | None]:
         _start_server_process(port)
         _wait_for_server(port)
 
-    status, _ = _probe_backend_status()
-    # The port WE spawned on, not first_backend's - same agree-on-one-port rule.
+    # Both halves read the port WE spawned on - the agree-on-one-port rule.
     fresh = backend_registry.backend_on_port(_read_server_state(), port)
-    return (status, backend_registry.recorded_int(fresh, "pid"))
+    return (_probe_port(port), backend_registry.recorded_int(fresh, "pid"))
 
 
 def _port_is_foreign_held(port: int) -> bool:

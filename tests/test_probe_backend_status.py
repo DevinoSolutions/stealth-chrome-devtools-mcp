@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from fakes import pretend_display_context, v2_record
 from stealth_chrome_devtools_mcp.embedded import singleton
 
 
@@ -134,14 +135,6 @@ class TestProbeBackendStatus:
         assert reported_port == responsive_stub
 
 
-def _v2(**backends) -> dict:
-    """A schema-v2 record from `context=entry` kwargs (`_` reads as `-`)."""
-    return {
-        "schema": 2,
-        "backends": {ctx.replace("_", "-"): entry for ctx, entry in backends.items()},
-    }
-
-
 class TestProbeWalksAdoptionOrder:
     """F-868: the reporter must speak about the backend THIS process would be
     served by — `backend_registry.adoption_candidates`' order, the same one
@@ -159,7 +152,7 @@ class TestProbeWalksAdoptionOrder:
         dead = _free_closed_port()
         (isolated_state / "server.json").write_text(
             json.dumps(
-                _v2(
+                v2_record(
                     win_session_2={"port": dead, "version": "2.1.1", "pid": 89892},
                     win_session_1={
                         "port": responsive_stub,
@@ -169,9 +162,7 @@ class TestProbeWalksAdoptionOrder:
                 )
             )
         )
-        monkeypatch.setattr(
-            singleton.display_context, "display_context", lambda: "win-session-1"
-        )
+        pretend_display_context(monkeypatch, "win-session-1")
 
         assert singleton._probe_backend_status() == ("responsive", responsive_stub)
 
@@ -183,7 +174,7 @@ class TestProbeWalksAdoptionOrder:
         dead = _free_closed_port()
         (isolated_state / "server.json").write_text(
             json.dumps(
-                _v2(
+                v2_record(
                     win_session_2={"port": dead, "version": "2.1.1", "pid": 89892},
                     headless={
                         "port": responsive_stub,
@@ -193,9 +184,7 @@ class TestProbeWalksAdoptionOrder:
                 )
             )
         )
-        monkeypatch.setattr(
-            singleton.display_context, "display_context", lambda: "headless"
-        )
+        pretend_display_context(monkeypatch, "headless")
 
         assert singleton._probe_backend_status() == ("responsive", responsive_stub)
 
@@ -208,14 +197,12 @@ class TestProbeWalksAdoptionOrder:
         dead = _free_closed_port()
         (isolated_state / "server.json").write_text(
             json.dumps(
-                _v2(
+                v2_record(
                     win_session_2={"port": dead, "version": "2.1.1", "pid": 89892},
                     headless={"port": wedged_stub, "version": "2.1.5", "pid": 67720},
                 )
             )
         )
-        monkeypatch.setattr(
-            singleton.display_context, "display_context", lambda: "unverified"
-        )
+        pretend_display_context(monkeypatch, "unverified")
 
         assert singleton._probe_backend_status() == ("wedged", wedged_stub)

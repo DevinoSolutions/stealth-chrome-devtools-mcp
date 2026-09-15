@@ -166,17 +166,31 @@ def _other_records_note(port: int | None) -> str:
     per display context, and a summary that silently drops the rest reads as
     "this is all there is". It never re-decides which backend to report — it
     only names what the reported one is not, and points at the verb that probes
-    them all."""
+    them all.
+
+    "Other" is decided on DISPLAY CONTEXT, not on the port: `backends_in`
+    stamps a context on every entry (the v2 key, or `UNVERIFIED` for a v1
+    record), so the comparison is always against a real value, whereas a
+    hand-edited entry whose `port` is a string reads as `None` and would have
+    matched a `None` reported port — silently hiding itself in exactly the
+    "nothing is running" case where the operator most needs to see it. With
+    nothing reported at all, every recorded entry is correctly an "other"."""
     from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
+    state = singleton._read_server_state()
+    reported = backend_registry.backend_on_port(state, port)
+    mine = reported.get("display_context") if reported else None
     others = [
         str(entry.get("display_context"))
-        for entry in backend_registry.backends_in(singleton._read_server_state())
-        if backend_registry.recorded_int(entry, "port") != port
+        for entry in backend_registry.backends_in(state)
+        if entry.get("display_context") != mine
     ]
     if not others:
         return ""
-    return f"{len(others)} ({', '.join(others)}) — run `doctor` for each one's state"
+    return (
+        f"{len(others)} backends recorded ({', '.join(others)}) — "
+        "run `doctor` for each one's state"
+    )
 
 
 def _backend_log_location(pid: int | None) -> str:
@@ -191,27 +205,22 @@ def _backend_log_location(pid: int | None) -> str:
 
 def _probe_recorded_backend(port: int | None) -> str:
     """One recorded backend's liveness on a port the caller already holds, in
-    `_probe_backend_status`'s exact vocabulary: down / wedged / responsive —
-    plus "no port recorded" for an entry naming nothing usable as a port, a
-    state that function cannot reach (it reports such a record as no backend
-    at all, and so has no word for it).
+    the ONE liveness vocabulary (plan_M8 SS2.1-B): down / wedged / responsive,
+    plus "no port recorded" for an entry naming nothing usable as a port.
 
-    Same two primitives in the same order producing the same three words as
-    `singleton._probe_backend_status` (ONE liveness vocabulary, plan_M8
-    SS2.1-B) — all that differs is where the port comes from. That function
-    reads the FIRST recorded backend, which cannot answer for a record holding
-    one per display context (F-808), and singleton.py sits at its LOC budget,
-    so the per-port form lives here rather than beside it. It reaches the
-    primitives THROUGH the module (`singleton._server_is_healthy`), never by
-    importing their names, so a test that patches singleton still reaches them.
+    That fourth word is the whole of what this adds. The ladder itself is
+    `singleton._probe_port` and is CALLED, not copied (F-868) — it used to be
+    the same four lines in both files, justified by a note that
+    `_probe_backend_status` "reads the FIRST recorded backend" and so could not
+    answer per-entry. It no longer does, and duplicating a liveness ladder was
+    a second way to answer one question regardless. Reached THROUGH the module,
+    never by importing the name, so a test that patches singleton still wins.
     """
     from stealth_chrome_devtools_mcp.embedded import singleton
 
     if port is None:
         return "no port recorded"
-    if not singleton._server_is_healthy(port):
-        return "down"
-    return "responsive" if singleton._backend_http_ready(port) else "wedged"
+    return singleton._probe_port(port)
 
 
 def _doctor_backend_lines() -> list[str]:
@@ -224,7 +233,9 @@ def _doctor_backend_lines() -> list[str]:
     is refused when the backend serving it can neither display a window nor hand
     the launch to a logged-on desktop (F-810), and that refusal points the
     operator at this command, so it must be able to name every context — the
-    summary line, which reports the first recorded backend only, cannot.
+    summary line above, which reports the ONE backend this shell would be served
+    by (`_probe_backend_status`'s adoption walk, F-868), cannot: every entry a
+    proven-capable client will not adopt is missing from it by design.
     Ordering is `backend_registry.window_capable_first`'s, so doctor presents
     the same preference discovery applies rather than re-deriving one.
 
@@ -328,7 +339,7 @@ def _cmd_status(_args) -> int:
     print(f"pid         : {pid if pid is not None else '-'}")
     print(f"log         : {_backend_log_location(pid)}")
     if others:
-        print(f"other records: {others}")
+        print(f"others      : {others}")
     print(f"version     : {singleton._server_version()}")
     print(f"browser-session root: {root}  (exists: {root.exists()})")
     print(

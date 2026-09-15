@@ -123,6 +123,15 @@ lifetime. **Deliberately NOT changed here — see §6.**
 
 ## 4. The fix
 
+**The liveness ladder now has one home.** `singleton._probe_port(port)` — socket, then a
+real MCP `initialize`, returning `down` / `wedged` / `responsive` — was four lines
+duplicated in `cli._probe_recorded_backend`, justified there by a note saying
+`_probe_backend_status` "reads the FIRST recorded backend" and so could not answer
+per-entry. That justification dies with this fix, and a duplicated liveness ladder was a
+second way to answer one question regardless. It now has three callers: the candidate
+walk, `restart_backend`, and the CLI form, which keeps only the one word the ladder
+cannot reach ("no port recorded").
+
 **One home, no second way.** `_probe_backend_status` now walks
 `backend_registry.adoption_candidates(SERVER_STATE_FILE, display_context.display_context())`
 — the same list, from the same function, in the same order that `_find_running_server`
@@ -144,6 +153,16 @@ disagree with each other:
 - `_doctor_port_occupant_line(port)` takes that same port (falling back to
   `DEFAULT_PORT` when nothing is reported, exactly as before), deleting the third.
 
+**`restart`'s report is pinned to the port it spawned on.** `restart_backend` took its
+`status` from `_probe_backend_status()` while its `pid` came from `backend_on_port(…,
+port)`, so on a multi-context record a responsive SIBLING could report "responsive" beside
+the pid of a backend that had just come up wedged — the two halves of one return
+describing two processes, and a direct contradiction of the docstring's promise that "a
+restart that comes back wedged or down must be visible". Both halves now read the one
+selected port via `_probe_port(port)`, so they agree by construction. The adoption walk
+answers "is there a backend for me", which is the right question for `status` and the
+wrong one here.
+
 **`status` now says what it is not speaking about.** `_other_records_note(port)` adds one
 line when — and only when — the record holds entries besides the reported one:
 
@@ -151,16 +170,20 @@ line when — and only when — the record holds entries besides the reported on
 backend     : running (responsive) on port 52554
 pid         : 53836
 log         : C:\Users\amind\.stealth-mcp\logs\backend-53836.log
-other records: 2 (win-session-2, headless) — run `doctor` for each one's state
+others      : 2 backends recorded (win-session-2, headless) — run `doctor` for each one's state
 version     : 2.1.5
 ```
 
 It never re-decides which backend to report; it names what the reported one is not and
 points at the verb that probes them all. A single-entry record prints no such line.
+"Other" is decided on DISPLAY CONTEXT, not on port: `backends_in` stamps a context on
+every entry, so the comparison is always against a real value, whereas a hand-edited entry
+whose `port` is a string reads as `None` and would have matched a `None` reported port —
+hiding itself in precisely the "nothing is running" case that needs it most.
 
-No new `STEALTH_MCP_*` knob, no new env read, no `typing.Any`, no LOC-budget change
-(`singleton.py` 979 → 994 of its 1000 default; `cli.py` 645 → 680; neither is
-grandfathered).
+No new `STEALTH_MCP_*` knob, no new env read, no `typing.Any`, no LOC-budget change:
+`cli.py` 645 → 691, and `singleton.py` 979 → **999 of its 1000 default** — see §6, this
+is now the binding constraint on the file.
 
 ## 5. Verification
 
@@ -176,8 +199,27 @@ grandfathered).
   `wedged_stub` fixtures): a dead first entry does not hide the live own-context one; a
   dead window-capable entry does not end an unproven client's search; a wedged candidate
   outranks a dead one.
-- RED first: all 7 failed before the product change, the CLI ones with output identical
-  to the observation (§1). GREEN after.
+- `tests/test_singleton_stop_restart.py::TestRestartReportsTheSpawnedPort` (1 test): a
+  responsive SIBLING must not answer for a restart whose own fresh backend came up
+  wedged. RED against the pre-fix reporter with `('responsive', 4242) == ('wedged', 4242)`
+  — the sibling speaking for the wrong process — and it asserts BOTH halves, so it cannot
+  pass by the sibling merely being invisible: `_probe_backend_status()` is separately
+  shown to say `("responsive", sibling_port)` at the same moment.
+- `tests/test_singleton_stop_restart.py::TestStopIsPerDisplayContext` (1 test): a record
+  holding only a FOREIGN proven context, own context a different proven desktop →
+  `stop_backend()` is `("not running", None)`, `_terminate_backend` is never called, and
+  the foreign entry is still recorded afterward. **Not RED-first, and deliberately so** —
+  it is green on this branch by construction, because the adoption walk IS the fix. It is
+  pinned because it is a BEHAVIOUR CHANGE riding on a bug fix (§6), and an unpinned
+  behaviour change is the kind a later "simplification" reverts without noticing.
+- RED first: **6 of the 7 status tests failed before the product change** (plus the
+  restart pin above, 7 of 8 overall), the CLI ones with output identical to the
+  observation (§1). The seventh,
+  `test_a_single_recorded_backend_gets_no_other_records_line`, is green on BOTH sides by
+  construction and is not claimed as a RED: with a single-entry record `first_backend` and
+  the adoption walk select the same entry, and the assertion is a negative one about a
+  line that did not exist before. It earns its place as the boundary of the new note, not
+  as evidence of the defect. GREEN after.
 - Regression scope run: `test_cli.py`, `test_cli_status_wedged.py`,
   `test_probe_backend_status.py`, `test_backend_registry.py`,
   `test_singleton_stop_restart.py`, `test_singleton_display_routing.py`,
@@ -209,21 +251,34 @@ grandfathered).
   consequence of the same rule — an operator's `stop` should not reach across into
   another desktop's backend — but it is a behaviour change, not merely a bug fix, and it
   is stated here rather than left to be discovered.
-- **`restart`'s post-restart REPORT is still not pinned to the port it spawned on.**
-  `restart_backend` (`singleton.py:658-661`) takes its `status` from
-  `_probe_backend_status()` and its `pid` from `backend_on_port(state, port)` for the port
-  it actually spawned, so on a multi-context record the two halves can describe different
-  backends — a pre-existing split (`first_backend` could diverge exactly the same way),
-  narrowed but not closed by this fix, since our own fresh entry now sorts first for a
-  proven context. Closing it means reporting the SPAWNED port's own liveness, which is a
-  change to `restart`'s contract, not a report fix; left for its own change.
+- **`restart`'s post-restart report: CLOSED here** (it was scoped out of the first draft
+  and put back on review). `_probe_port` made it a one-line change rather than a contract
+  change — see §4 and the `TestRestartReportsTheSpawnedPort` pin in §5.
+- **`stop`'s narrowing is a behaviour change, and is now pinned** rather than only
+  described: `TestStopIsPerDisplayContext` (§5). On a record whose only entries are
+  foreign PROVEN contexts, `stop` reports `not running` and leaves them alone, where it
+  previously reported one, terminated nothing, and then forgot the record — quietly making
+  a possibly-live sibling undiscoverable. That pin is green on both sides of the fix by
+  construction; it exists to stop the change being reverted by accident, not as evidence.
 - **The probe now costs up to one connect attempt per adoptable candidate** instead of
   exactly one. Refused loopback connects are immediate; the only slow case is a candidate
   whose socket is open but silent (one `LIVENESS_PROBE_TIMEOUT`, 2 s), and the walk stops
   at the first responsive one. Not measured on a pathological record — `status` is an
   interactive verb with no deadline.
-- **`singleton.py` is now at 994 of its 1000-LOC default.** Not a violation, but the next
-  change to that file will have to pay its way; the module is a standing candidate for
-  another extraction (`_probe_backend_status` and the per-entry form in
-  `cli._probe_recorded_backend` are the same ladder read twice, and a `backend_liveness`
-  leaf would hold both).
+- **`singleton.py` is at 999 of its 1000-LOC default — one line of headroom. This is the
+  most fragile thing in this change and it needs a decision, not a note.** The gate passes
+  and nothing here is over budget, but the next contributor to that file has nowhere to
+  put a line. Two of the +20 were paid for honestly (the F-856 paragraph in
+  `_same_identity_backend_ready` was retelling what `scheduling_lag.FairWindow` is THE one
+  home for, and now points at it instead); the rest is the F-868 reasoning, which belongs
+  with the code it justifies.
+
+  The right next change is an extraction, and it should be its own PR rather than more
+  prose-trimming, which is just padding a cap from the other side. The shape is already
+  proven in this tree: `backend_watchdog.py` takes **both probes as arguments** so it never
+  imports `singleton` and the dead-vs-busy policy stays single-homed. A `backend_liveness`
+  leaf holding `_probe_port` plus the adoption walk, with `_server_is_healthy` /
+  `_backend_http_ready` handed in, would move ~35 lines out and leave thin wrappers on
+  `singleton` so every existing `monkeypatch.setattr(singleton, …)` in the suite keeps
+  working. I did NOT do it here: it lands mid-review-cycle, touches patch surfaces across
+  a dozen test modules, and would bury a four-line truthfulness fix under a refactor.

@@ -19,8 +19,19 @@ it. The CLI status block now also selects once and passes the answer down: the p
 log lines read the entry on the port just reported (`backend_on_port`) instead of making
 their own `first_backend` read, and `doctor`'s port-occupant line takes the same port —
 two independent record selections deleted rather than a third added. `status` gained one
-line naming the display contexts it is NOT speaking about when the record holds more than
-one, so a summary over a multi-context record no longer reads as "this is all there is".
+`others      :` line naming the display contexts it is NOT speaking about when the record
+holds more than one, so a summary over a multi-context record no longer reads as "this is
+all there is".
+
+Two things the same selection bug was hiding are fixed with it. The socket→`initialize`
+ladder is now `singleton._probe_port`, one home with three callers, instead of four lines
+copied into `cli._probe_recorded_backend` under a comment justifying the copy with a claim
+about `_probe_backend_status` that this release makes false. And `restart` now reports
+that ladder's verdict for **the port it spawned on**: it took its `status` from the
+record-wide walk while its `pid` came from the spawned port, so a responsive sibling could
+report "responsive" beside the pid of a backend that had just come up wedged — both halves
+of one return describing two processes.
+
 Stale records are still pruned by nobody; see `audit/stage2/finding_F868_cli_status_reports_a_dead_record.md` §6.
 
 ## 2.1.5

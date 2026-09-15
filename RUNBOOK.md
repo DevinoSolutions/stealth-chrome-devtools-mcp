@@ -57,10 +57,10 @@ browser-session cap : 20.0 GB  [STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB]
   adoption order discovery uses (F-868), not whichever entry `server.json` lists first.
   `pid` and `log` name that same backend, so the four lines can never describe different
   processes. `server.json` can hold one entry per display context, and dead ones are
-  never pruned, so an `other records:` line appears when there are others:
+  never pruned, so an `others` line appears when there are others:
 
   ```
-  other records: 2 (win-session-2, headless) — run `doctor` for each one's state
+  others      : 2 backends recorded (win-session-2, headless) — run `doctor` for each one's state
   ```
 
   `doctor`'s `contexts :` block probes every recorded backend on its own port; that is
