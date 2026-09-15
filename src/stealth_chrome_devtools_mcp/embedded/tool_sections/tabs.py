@@ -94,10 +94,11 @@ async def get_active_tab(instance_id: str) -> dict[str, Any]:
     # nodriver's `Tab.wait()`, a 0.5 s floor that refreshes nothing, and it
     # raised TypeError outright on a rediscovered target, which is a raw
     # Connection with no __await__ (F-771). One Target.getTargets answers from
-    # Chrome instead of hoping a targetInfoChanged event already landed.
-    browser = await rt._with_cdp_timeout(
-        rt.browser_manager.get_browser(instance_id), instance_id=instance_id
-    )
+    # Chrome instead of hoping a targetInfoChanged event already landed, and the
+    # CDP bound sits on THAT call only — `get_browser` is a lock-guarded dict
+    # read that never speaks CDP. (The wrap on the `get_active_tab` lookup above
+    # predates this finding and is left exactly as it was.)
+    browser = await rt.browser_manager.get_browser(instance_id)
     return await rt._with_cdp_timeout(
         tab_identity.refreshed(browser, tab), instance_id=instance_id
     )

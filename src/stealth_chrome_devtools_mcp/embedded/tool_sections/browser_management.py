@@ -33,7 +33,7 @@ is ``get_instance_state``'s ``# F-164 non-CDP`` marker comment, which
 """
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from stealth_chrome_devtools_mcp.embedded import tab_identity
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
@@ -50,6 +50,13 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     _require_tab,
 )
 from stealth_chrome_devtools_mcp.settings import get_settings
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # Quoted at the one use site rather than `from __future__ import
+    # annotations`: that import would stringify EVERY annotation in this module,
+    # including the eight tool signatures FastMCP builds `tool_surface.json`'s
+    # HARD golden from.
+    from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance
 
 SECTION = "browser-management"
 
@@ -220,30 +227,43 @@ async def spawn_browser(
         raise ToolError(f"Failed to spawn browser: {e!s}")
 
 
-async def _live_instance_record(inst: Any) -> dict[str, Any]:
+async def _live_instance_record(inst: "BrowserInstance") -> dict[str, Any]:
     """One active instance as it IS: the LIVE url and title of its active tab.
 
-    Bounded per entry and degraded per entry (F-874). One browser whose devtools
-    websocket has stopped answering must cost its OWN row and nothing else — it
-    may not hang the listing, and it may not fall back to a cached value under a
-    name that claims to be current, which is the defect this whole record exists
-    to close.
+    The bound is ONE CDP budget per entry, and it sits on the one call that
+    reaches Chrome: ``tab_identity.refreshed``'s ``Target.getTargets`` round
+    trip. The two manager lookups in front of it are lock-guarded dict reads
+    (``get_active_tab`` is ``get_tab`` under another name; both resolve through
+    ``get_instance``), so wrapping them would have claimed a CDP bound over
+    something that never speaks CDP and would have charged the entry three
+    budgets for one round trip.
+
+    Degraded per entry (F-874). One browser whose devtools websocket has stopped
+    answering must cost its OWN row and nothing else — it may not hang the
+    listing, and it may not fall back to a cached value under a name that claims
+    to be current, which is the defect this whole record exists to close.
     """
     try:
-        tab = await rt._with_cdp_timeout(
-            rt.browser_manager.get_active_tab(inst.instance_id),
-            instance_id=inst.instance_id,
-        )
+        tab = await rt.browser_manager.get_active_tab(inst.instance_id)
         if tab is None:
             raise ToolError(f"Instance {inst.instance_id} has no active tab.")
-        browser = await rt._with_cdp_timeout(
-            rt.browser_manager.get_browser(inst.instance_id),
-            instance_id=inst.instance_id,
-        )
+        browser = await rt.browser_manager.get_browser(inst.instance_id)
         view = await rt._with_cdp_timeout(
             tab_identity.refreshed(browser, tab), instance_id=inst.instance_id
         )
     except Exception as exc:
+        # The caller sees this in `detail_error`; the durable log is what makes a
+        # real bug INSIDE tab_identity visible rather than a quiet partial row.
+        # Shape only in the message — a url can carry a session token in its
+        # query string and this line reaches the log and a Sentry breadcrumb —
+        # while `error=` forwards the traceback as `exc_info` (F-869).
+        rt.debug_logger.log_warning(
+            "browser_management",
+            "list_instances",
+            f"Live tab read failed for instance {inst.instance_id} "
+            f"({type(exc).__name__}); this entry is reported partial.",
+            error=exc,
+        )
         return {
             "instance_id": inst.instance_id,
             "state": inst.state,
@@ -278,8 +298,9 @@ async def list_instances() -> list[dict[str, Any]]:
     """
     memory_instances = await rt.browser_manager.list_instances()
     storage_instances = rt.in_memory_storage.list_instances()
-    # Concurrently: the per-entry bound is the CDP budget, so N wedged instances
-    # served serially would make the caller wait N budgets for one answer.
+    # Concurrently: each entry is bounded by ONE CDP budget, for its own
+    # Target.getTargets round trip, so N wedged instances served serially would
+    # make the caller wait N budgets for one answer.
     result = list(
         await asyncio.gather(*(_live_instance_record(i) for i in memory_instances))
     )
