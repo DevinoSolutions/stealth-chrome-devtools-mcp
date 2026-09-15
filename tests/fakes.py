@@ -147,6 +147,26 @@ def pretend_display_context(monkeypatch: Any, token: str) -> None:
     monkeypatch.setattr(display_context, "display_context", lambda: token)
 
 
+def v2_record(**backends: dict) -> dict:
+    """A schema-v2 ``server.json`` record from ``context=entry`` kwargs, where
+    ``_`` in a kwarg name reads as ``-`` (``win_session_1`` → ``win-session-1``,
+    the token `display_context()` actually produces).
+
+    Here rather than in a test module because both
+    `test_cli_status_wedged.py` and `test_probe_backend_status.py` build the
+    same record shape (F-868), and a record builder that disagreed with itself
+    between two files is exactly the drift this module exists to prevent. It
+    writes the schema literally, deliberately: `backend_registry.record_backend`
+    is the code under test in several of those cases, so a fixture that went
+    through it could not express a record that function would never write — a
+    hand-edited one, or a pre-supersede pair.
+    """
+    return {
+        "schema": 2,
+        "backends": {ctx.replace("_", "-"): entry for ctx, entry in backends.items()},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Fake DOM tab — covers BOTH cloner seams (JS-eval + CDP)
 # ---------------------------------------------------------------------------
@@ -341,8 +361,22 @@ class FakeTab:
 
 
 # ---------------------------------------------------------------------------
-# animations-aspect transport fidelity (F-846)
+# JS-aspect transport fidelity (F-846 animations, F-872 the other four)
 # ---------------------------------------------------------------------------
+
+
+def js_aspect_answer(payload: Any) -> str:
+    """What a REAL tab hands back for a cloner JS aspect script (F-872).
+
+    ``nodriver``'s ``Tab.evaluate`` always requests deep serialization, so an
+    object literal comes back as BiDi ``RemoteValue`` nodes
+    (``[[key, {type, value}], …]``) at EVERY depth — a plain dict is a shape the
+    transport cannot produce. All six aspect scripts therefore end in
+    ``JSON.stringify``; the ONE home for encoding that in a test is here, so no
+    fixture can quietly re-encode the bug the fix removed.
+    """
+    return json.dumps(payload)
+
 
 # The marker present in ``embedded/js/extract_animations.js`` — the substring an
 # ``evaluate_map`` keys on to answer THAT script and no other.

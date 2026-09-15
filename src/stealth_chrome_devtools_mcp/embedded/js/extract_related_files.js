@@ -1,3 +1,6 @@
+// Returns ONE JSON string (F-872): tab.evaluate always requests deep
+// serialization, so a returned OBJECT arrives as BiDi RemoteValue nodes at every
+// depth (stylesheets/scripts would be lists of {type, value} records).
 (function() {
     const result = {
         stylesheets: [],
@@ -87,5 +90,5 @@
         });
     }
     
-    return result;
+    return JSON.stringify(result);
 })();
