@@ -8,7 +8,7 @@
  *   include_listeners: boolean - Whether to detect event listeners via attributes.
  * 
  * Returns:
- *   object - {
+ *   string - ONE JSON string (F-872; tab.evaluate deep-serializes any object) of {
  *     inline_handlers: Array<{event: string, handler: string}>,
  *     event_listeners: Array<{event: string, type: string, detected: boolean}>,
  *     framework_handlers: Object,
@@ -19,7 +19,7 @@
     const selector = "$SELECTOR$";
     const options = $OPTIONS$;
     const element = document.querySelector(selector);
-    if (!element) return {error: 'Element not found'};
+    if (!element) return JSON.stringify({error: 'Element not found'});
 
     const result = {
         inline_handlers: [],
@@ -104,5 +104,5 @@
         });
     }
 
-    return result;
+    return JSON.stringify(result);
 })();

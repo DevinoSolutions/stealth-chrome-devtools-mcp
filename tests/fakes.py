@@ -359,8 +359,22 @@ class FakeTab:
 
 
 # ---------------------------------------------------------------------------
-# animations-aspect transport fidelity (F-846)
+# JS-aspect transport fidelity (F-846 animations, F-872 the other four)
 # ---------------------------------------------------------------------------
+
+
+def js_aspect_answer(payload: Any) -> str:
+    """What a REAL tab hands back for a cloner JS aspect script (F-872).
+
+    ``nodriver``'s ``Tab.evaluate`` always requests deep serialization, so an
+    object literal comes back as BiDi ``RemoteValue`` nodes
+    (``[[key, {type, value}], …]``) at EVERY depth — a plain dict is a shape the
+    transport cannot produce. All six aspect scripts therefore end in
+    ``JSON.stringify``; the ONE home for encoding that in a test is here, so no
+    fixture can quietly re-encode the bug the fix removed.
+    """
+    return json.dumps(payload)
+
 
 # The marker present in ``embedded/js/extract_animations.js`` — the substring an
 # ``evaluate_map`` keys on to answer THAT script and no other.
