@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.6
 
 ### Fixed — `get_instance_state` reported empty storage as if it were the truth (F-869)
 
