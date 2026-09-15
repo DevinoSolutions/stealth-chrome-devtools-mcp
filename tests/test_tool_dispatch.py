@@ -18,6 +18,7 @@ import json
 import pytest
 
 from fakes import (
+    FakeBrowser,
     FakeBrowserManager,
     FakeStorage,
     FakeTab,
@@ -55,8 +56,15 @@ async def test_smoke_list_instances_via_seam(call_tool, patched_server):
     """A seeded FakeBrowserManager drives the real ``list_instances`` body
     through ``call_tool`` and yields the expected merged-list shape — proving the
     ``.fn`` unwrap + module-global patch seam end-to-end with zero Chrome."""
+    # An active entry is the LIVE tab (F-874): the instance's own cached pair is
+    # seeded to a DIFFERENT, older page, so a body that read the cache instead of
+    # the tab fails here rather than passing on a coincidence.
+    live = FakeTab(url="https://example.test", target_id="T-live")
+    live.target.title = "Example"
     fbm = FakeBrowserManager(
-        instances=[fake_instance("i1", "active", "https://example.test", "Example")]
+        instances=[fake_instance("i1", "active", "https://stale.test", "Stale")],
+        tabs={"i1": live},
+        browsers={"i1": FakeBrowser(tabs=[live])},
     )
     srv = patched_server(browser_manager=fbm, in_memory_storage=FakeStorage())
 
@@ -69,6 +77,7 @@ async def test_smoke_list_instances_via_seam(call_tool, patched_server):
             "current_url": "https://example.test",
             "title": "Example",
             "source": "active",
+            "partial": False,
         }
     ]
 

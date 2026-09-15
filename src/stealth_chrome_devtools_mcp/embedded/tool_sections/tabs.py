@@ -16,6 +16,7 @@ signatures are byte-identical — FastMCP surfaces them and
 
 from typing import Any
 
+from stealth_chrome_devtools_mcp.embedded import tab_identity
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     ToolError,
@@ -88,13 +89,19 @@ async def get_active_tab(instance_id: str) -> dict[str, Any]:
     )
     if not tab:
         raise ToolError("No active tab found")
-    await rt._with_cdp_timeout(tab, instance_id=instance_id)
-    return {
-        "tab_id": str(tab.target.target_id),
-        "url": getattr(tab, "url", "") or "",
-        "title": getattr(tab.target, "title", "") or "Untitled",
-        "type": getattr(tab.target, "type_", "page"),
-    }
+    # The record is `tab_identity`'s, shared with list_tabs and list_instances
+    # (F-874). The `await tab` that used to stand here is gone with it: it was
+    # nodriver's `Tab.wait()`, a 0.5 s floor that refreshes nothing, and it
+    # raised TypeError outright on a rediscovered target, which is a raw
+    # Connection with no __await__ (F-771). One Target.getTargets answers from
+    # Chrome instead of hoping a targetInfoChanged event already landed, and the
+    # CDP bound sits on THAT call only — `get_browser` is a lock-guarded dict
+    # read that never speaks CDP. (The wrap on the `get_active_tab` lookup above
+    # predates this finding and is left exactly as it was.)
+    browser = await rt.browser_manager.get_browser(instance_id)
+    return await rt._with_cdp_timeout(
+        tab_identity.refreshed(browser, tab), instance_id=instance_id
+    )
 
 
 async def new_tab(instance_id: str, url: str = "about:blank") -> dict[str, Any]:
