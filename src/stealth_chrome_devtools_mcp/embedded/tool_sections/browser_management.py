@@ -35,6 +35,7 @@ is ``get_instance_state``'s ``# F-164 non-CDP`` marker comment, which
 import asyncio
 from typing import Any
 
+from stealth_chrome_devtools_mcp.embedded import tab_identity
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.models import (
     BrowserOptions,
@@ -219,26 +220,69 @@ async def spawn_browser(
         raise ToolError(f"Failed to spawn browser: {e!s}")
 
 
+async def _live_instance_record(inst: Any) -> dict[str, Any]:
+    """One active instance as it IS: the LIVE url and title of its active tab.
+
+    Bounded per entry and degraded per entry (F-874). One browser whose devtools
+    websocket has stopped answering must cost its OWN row and nothing else — it
+    may not hang the listing, and it may not fall back to a cached value under a
+    name that claims to be current, which is the defect this whole record exists
+    to close.
+    """
+    try:
+        tab = await rt._with_cdp_timeout(
+            rt.browser_manager.get_active_tab(inst.instance_id),
+            instance_id=inst.instance_id,
+        )
+        if tab is None:
+            raise ToolError(f"Instance {inst.instance_id} has no active tab.")
+        browser = await rt._with_cdp_timeout(
+            rt.browser_manager.get_browser(inst.instance_id),
+            instance_id=inst.instance_id,
+        )
+        view = await rt._with_cdp_timeout(
+            tab_identity.refreshed(browser, tab), instance_id=inst.instance_id
+        )
+    except Exception as exc:
+        return {
+            "instance_id": inst.instance_id,
+            "state": inst.state,
+            "source": "active",
+            "partial": True,
+            "detail_error": f"Could not read the active tab: {type(exc).__name__}: {exc}",
+            "last_navigated_url": inst.last_navigated_url,
+            "last_navigated_title": inst.last_navigated_title,
+        }
+    return {
+        "instance_id": inst.instance_id,
+        "state": inst.state,
+        "current_url": view["url"],
+        "title": view["title"],
+        "source": "active",
+        "partial": False,
+    }
+
+
 async def list_instances() -> list[dict[str, Any]]:
     """
     List all active browser instances.
 
     Returns:
-        List[Dict[str, Any]]: List of browser instances with their current state.
+        List[Dict[str, Any]]: One record per instance. An ``active`` record
+        carries the LIVE ``current_url``/``title`` of the instance's active tab
+        (the same answer ``get_active_tab`` gives) and ``partial: False``; if
+        that read failed it carries ``partial: True``, ``detail_error`` and the
+        last navigation's values as ``last_navigated_url``/
+        ``last_navigated_title`` instead. A ``stored`` record has no live browser
+        to read at all, so it only ever carries the ``last_navigated_*`` pair.
     """
     memory_instances = await rt.browser_manager.list_instances()
     storage_instances = rt.in_memory_storage.list_instances()
-    result = []
-    for inst in memory_instances:
-        result.append(
-            {
-                "instance_id": inst.instance_id,
-                "state": inst.state,
-                "current_url": inst.current_url,
-                "title": inst.title,
-                "source": "active",
-            }
-        )
+    # Concurrently: the per-entry bound is the CDP budget, so N wedged instances
+    # served serially would make the caller wait N budgets for one answer.
+    result = list(
+        await asyncio.gather(*(_live_instance_record(i) for i in memory_instances))
+    )
     memory_ids = {inst.instance_id for inst in memory_instances}
     for instance_id, inst_data in storage_instances.get("instances", {}).items():
         if instance_id not in memory_ids:
@@ -246,8 +290,8 @@ async def list_instances() -> list[dict[str, Any]]:
                 {
                     "instance_id": inst_data["instance_id"],
                     "state": inst_data["state"] + " (stored)",
-                    "current_url": inst_data["current_url"],
-                    "title": inst_data["title"],
+                    "last_navigated_url": inst_data.get("last_navigated_url"),
+                    "last_navigated_title": inst_data.get("last_navigated_title"),
                     "source": "stored",
                 }
             )
@@ -314,8 +358,8 @@ async def get_instance_state(instance_id: str) -> dict[str, Any] | None:
                 return {
                     "instance_id": instance.instance_id,
                     "state": instance.state,
-                    "current_url": instance.current_url,
-                    "title": instance.title,
+                    "last_navigated_url": instance.last_navigated_url,
+                    "last_navigated_title": instance.last_navigated_title,
                     "source": "active",
                     "partial": True,
                     "detail_error": f"Timed out after {timeout_seconds:g}s while collecting full page state.",
@@ -332,8 +376,8 @@ async def get_instance_state(instance_id: str) -> dict[str, Any] | None:
                 return {
                     "instance_id": instance.instance_id,
                     "state": instance.state,
-                    "current_url": instance.current_url,
-                    "title": instance.title,
+                    "last_navigated_url": instance.last_navigated_url,
+                    "last_navigated_title": instance.last_navigated_title,
                     "source": "active",
                     "partial": True,
                     "detail_error": f"Failed to collect full page state: {type(exc).__name__}: {exc}",

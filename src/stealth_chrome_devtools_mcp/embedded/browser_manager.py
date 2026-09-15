@@ -20,6 +20,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     spawn_contention,
     spawn_exhaustion,
     spawn_leak,
+    tab_identity,
     tool_errors,
     window_sizing,
 )
@@ -732,7 +733,9 @@ class BrowserManager:
                 }
 
             instance.state = BrowserState.READY
-            instance.current_url = getattr(tab, "url", "") or instance.current_url
+            instance.last_navigated_url = (
+                getattr(tab, "url", "") or instance.last_navigated_url
+            )
             instance.update_activity()
             in_memory_storage.store_instance(
                 instance_id, instance.model_dump(mode="json")
@@ -1303,17 +1306,11 @@ class BrowserManager:
         # No per-tab `await` (F-771): update_targets() just refreshed every field
         # below; a rediscovered target is a raw Connection with no __await__ (its
         # __getattr__ still answers .url); and Tab.wait() costs 0.5s per tab.
+        # The record itself is `tab_identity`'s, shared with get_active_tab and
+        # list_instances so the three cannot disagree (F-874).
         await browser.update_targets()
 
-        return [
-            {
-                "tab_id": str(tab.target.target_id),
-                "url": getattr(tab, "url", "") or "",
-                "title": getattr(tab.target, "title", "") or "Untitled",
-                "type": getattr(tab.target, "type_", "page"),
-            }
-            for tab in browser.tabs
-        ]
+        return [tab_identity.record(tab) for tab in browser.tabs]
 
     async def switch_to_tab(self, instance_id: str, tab_id: str) -> bool:
         """Bring tab *tab_id* to front and make it the stored active tab.
@@ -1396,21 +1393,24 @@ class BrowserManager:
     async def update_instance_state(
         self, instance_id: str, url: str | None = None, title: str | None = None
     ):
-        """
-        Update instance state after navigation or action.
+        """Record what a navigation reported, as the instance's ``last_navigated``
+        pair. THE one writer of that cache besides the spawn.
 
-        Args:
-            instance_id (str): The ID of the browser instance.
-            url (str, optional): The current URL to update.
-            title (str, optional): The title to update.
+        ``is not None``, not truthiness (F-874): an empty title is what the page
+        HAS — Amazon sets its title after load, a bare ``data:text/html``
+        document never sets one — and ``if title:`` silently kept the PREVIOUS
+        page's instead, which is how a measured instance on a ``data:`` URL still
+        reported "Wikipedia, the free encyclopedia". ``None`` alone means this
+        caller had nothing to say, which is why it is the default of both
+        parameters.
         """
         async with self._lock:
             if instance_id in self._instances:
                 instance = self._instances[instance_id]["instance"]
-                if url:
-                    instance.current_url = url
-                if title:
-                    instance.title = title
+                if url is not None:
+                    instance.last_navigated_url = url
+                if title is not None:
+                    instance.last_navigated_title = title
         await self.touch_instance(instance_id)
 
     async def get_page_state(self, instance_id: str) -> PageState | None:

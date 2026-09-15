@@ -705,15 +705,21 @@ class FakeBrowserManager:
 def fake_instance(
     instance_id: str = "i1",
     state: str = "active",
-    current_url: str = "https://fake.test/page",
-    title: str = "Fake Page",
+    last_navigated_url: str = "https://fake.test/page",
+    last_navigated_title: str = "Fake Page",
 ) -> SimpleNamespace:
-    """A minimal instance object with the attributes ``list_instances`` reads."""
+    """A minimal instance object with the attributes ``list_instances`` reads.
+
+    The pair is named as ``BrowserInstance`` names it (F-874): it is what the
+    last navigation reported, NOT what the instance is showing. Where a test
+    wants the live answer it seeds a tab through ``tabs=``/``browsers=``, which
+    is the only thing that can carry one.
+    """
     return SimpleNamespace(
         instance_id=instance_id,
         state=state,
-        current_url=current_url,
-        title=title,
+        last_navigated_url=last_navigated_url,
+        last_navigated_title=last_navigated_title,
     )
 
 

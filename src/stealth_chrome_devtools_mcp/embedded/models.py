@@ -18,12 +18,27 @@ class BrowserState(StrEnum):
 
 
 class BrowserInstance(BaseModel):
-    """Represents a browser instance."""
+    """Represents a browser instance.
+
+    ``last_navigated_url`` / ``last_navigated_title`` are a CACHE, and the names
+    say so (F-874). Nothing writes them but the spawn and
+    ``BrowserManager.update_instance_state`` (i.e. the ``navigate`` tool), so a
+    page that moved on its own, a ``switch_tab`` and a title the page set after
+    load all leave them behind. They were called ``current_url``/``title``, which
+    is how ``list_instances`` came to report a login page for an instance sitting
+    on a feed. Where a tool needs what the instance is showing NOW it reads the
+    active tab through ``tab_identity``; these two are what the last navigation
+    reported, no more.
+    """
 
     instance_id: str = Field(description="Unique identifier for the browser instance")
     state: BrowserState = Field(default=BrowserState.STARTING)
-    current_url: str | None = Field(default=None, description="Current page URL")
-    title: str | None = Field(default=None, description="Current page title")
+    last_navigated_url: str | None = Field(
+        default=None, description="URL the last navigation (or the spawn) reported"
+    )
+    last_navigated_title: str | None = Field(
+        default=None, description="Title the last navigation (or the spawn) reported"
+    )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_activity: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     headless: bool = Field(default=False)

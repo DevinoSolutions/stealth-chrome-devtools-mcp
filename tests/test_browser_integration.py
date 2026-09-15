@@ -937,3 +937,82 @@ class TestHeadedSpawnIsSeenOrRefused:
                 **_sandbox_kwargs(),
             )
         assert "cannot display a window" in str(err.value)
+
+
+# ---------------------------------------------------------------------------
+# F-874 — list_instances describes the instance as it IS, against real Chrome
+# ---------------------------------------------------------------------------
+
+
+class TestListInstancesLiveState:
+    """The three ways a real page moves out from under the cached pair.
+
+    The hermetic half of this finding is
+    ``tests/test_list_instances_live_state.py``; what only Chrome can prove is
+    that ``Target.getTargets`` actually reports each of these — a fake can be
+    made to say anything. Every page here is a ``data:`` URL, so the test needs
+    no network and no fixture server, and the profile root is a temp dir
+    (``tmp_empty_root``) so nothing touches the developer's real session root.
+    """
+
+    ALPHA = "data:text/html,<title>Alpha</title><h1>A</h1>"
+    GAMMA = "data:text/html,<title>Gamma</title><h1>G</h1>"
+
+    @staticmethod
+    def _entry(listing, iid):
+        [entry] = [e for e in listing if e["instance_id"] == iid]
+        return entry
+
+    @pytest.mark.asyncio
+    async def test_live_title_url_and_tab_switch(self, tmp_empty_root):
+        spawn = _get_fn("spawn_browser")
+        close = _get_fn("close_instance")
+        navigate = _get_fn("navigate")
+        list_instances = _get_fn("list_instances")
+        get_active_tab = _get_fn("get_active_tab")
+        execute_script = _get_fn("execute_script")
+        new_tab = _get_fn("new_tab")
+        switch_tab = _get_fn("switch_tab")
+
+        result = await spawn(headless=True, **_sandbox_kwargs())
+        iid = result["instance_id"]
+        try:
+            # The navigate tool's own answer is the baseline the cache holds.
+            nav = await navigate(instance_id=iid, url=self.ALPHA)
+            assert nav["title"] == "Alpha"
+
+            # (1) A title the PAGE sets after load — the measured Amazon case,
+            #     where navigate answered title "" and the cache froze it.
+            await execute_script(instance_id=iid, script="document.title = 'Beta-late'")
+            await asyncio.sleep(0.3)
+            entry = self._entry(await list_instances(), iid)
+            assert entry["partial"] is False
+            assert entry["title"] == "Beta-late"
+            active = await get_active_tab(instance_id=iid)
+            assert (entry["current_url"], entry["title"]) == (
+                active["url"],
+                active["title"],
+            )
+
+            # (2) A url change no navigation tool made — the measured YouTube
+            #     case, reached here without leaving the page so the test needs
+            #     no second document. (`location.hash` is a no-op on a data:
+            #     URL; pushState is what actually moves it — measured.)
+            await execute_script(
+                instance_id=iid,
+                script="history.pushState({}, '', '#deep'); return location.href",
+            )
+            await asyncio.sleep(0.3)
+            entry = self._entry(await list_instances(), iid)
+            assert entry["current_url"].endswith("#deep")
+
+            # (3) switch_tab — the measured LinkedIn case.
+            opened = await new_tab(instance_id=iid, url=self.GAMMA)
+            assert await switch_tab(instance_id=iid, tab_id=opened["tab_id"]) is True
+            await asyncio.sleep(0.3)
+            entry = self._entry(await list_instances(), iid)
+            assert entry["title"] == "Gamma"
+            assert entry["current_url"] == self.GAMMA
+        finally:
+            with contextlib.suppress(Exception):
+                await close(instance_id=iid)
