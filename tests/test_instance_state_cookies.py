@@ -71,14 +71,29 @@ PAGE_JS = {
     "window.location.href": PAGE_URL,
     "document.title": "fixture-index-page",
     "document.readyState": "complete",
-    "Object.keys(localStorage)": ["ls-key"],
-    "localStorage.getItem": "ls-value",
-    "Object.keys(sessionStorage)": ["ss-key"],
-    "sessionStorage.getItem": "ss-value",
+    # F-869 (2026-09-14) UPDATES THIS FIXTURE, deliberately. It used to answer
+    # ``Object.keys(localStorage)`` with ``["ls-key"]`` — a list of plain
+    # strings — and ``localStorage.getItem`` with a value, modelling the per-key
+    # loop the product then ran. That answer was WRONG about nodriver in exactly
+    # the way this module's own docstring warns about two paragraphs up: deep
+    # serialization makes ``Object.keys`` come back as
+    # ``[{'type': 'string', 'value': 'ls-key'}, …]`` (measured, Chrome 152), so
+    # the live product raised ``TypeError: unhashable type: 'dict'`` here while
+    # this fixture stayed green. Storage is now ONE ``JSON.stringify`` read —
+    # the same trick F-844 applied to the viewport — so the fixture answers it
+    # the same way: a JSON *string*. Both expressions now begin with
+    # ``JSON.stringify`` and FakeTab returns the FIRST substring that matches, so
+    # each is keyed on a token unique to it — ``read('localStorage')`` here and
+    # ``innerWidth`` below — rather than on dict order.
+    # See tests/test_page_state_storage.py, which is F-869's home.
+    "read('localStorage')": (
+        '{"local":{"ok":true,"entries":[["ls-key","ls-value"]]},'
+        '"session":{"ok":true,"entries":[["ss-key","ss-value"]]}}'
+    ),
     # A JSON *string*, because that is what the product now asks the page for
     # and what nodriver hands back for one. A dict here would model an
     # `evaluate` that returns plain objects — which it does not (see below).
-    "JSON.stringify": '{"width":1280,"height":720,"devicePixelRatio":1}',
+    "innerWidth": '{"width":1280,"height":720,"devicePixelRatio":1}',
 }
 
 
@@ -178,7 +193,7 @@ async def test_page_state_accepts_a_fractional_device_pixel_ratio(manager_and_ta
     ``int``: nobody wants ``"width": 1280.0``.
     """
     manager, tab = manager_and_tab
-    tab._evaluate_map["JSON.stringify"] = (
+    tab._evaluate_map["innerWidth"] = (
         '{"width":1280,"height":720,"devicePixelRatio":1.25}'
     )
 
