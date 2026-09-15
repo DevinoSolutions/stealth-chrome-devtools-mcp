@@ -95,11 +95,22 @@ names instead of claiming `current_url`: `list_instances`' `stored` tier (the
 instance is not in memory at all) and `get_instance_state`'s two `partial` records.
 And the write guard is `is not None`.
 
-**Cost and degradation.** Each active entry is bounded by `rt._with_cdp_timeout`
-and degrades on its own — `partial: True` + `detail_error` + the
+**Cost and degradation.** Each active entry is bounded by exactly ONE CDP budget,
+and the wrap sits on the one call that reaches Chrome — `tab_identity.refreshed`'s
+`Target.getTargets`. The two manager lookups in front of it (`get_active_tab`,
+`get_browser`) are lock-guarded dict reads and are deliberately unwrapped: a
+`_with_cdp_timeout` there would claim a CDP bound over something that never speaks
+CDP and charge the entry three budgets for one round trip. Entries are gathered
+concurrently, so N wedged browsers cost ONE budget for the listing, not N.
+
+An entry degrades on its own — `partial: True` + `detail_error` + the
 `last_navigated_*` pair, deliberately with **no `current_url` key at all**, because
-a cached value under that name is the defect. Entries are gathered concurrently, so
-N wedged browsers cost ONE CDP budget for the listing, not N.
+a cached value under that name is the defect. The degradation is also written to
+the durable log (`rt.debug_logger.log_warning(..., error=exc)`) so a real bug
+inside `tab_identity` is visible rather than a quiet partial row: the message is
+shape-only — instance id and exception TYPE, never a url, which can carry a session
+token in its query string and would reach the log and a Sentry breadcrumb — while
+`error=` forwards the traceback as `exc_info` (F-869's addition).
 
 The three record shapes are stated in `list_instances`' own docstring, which is
 what the regenerated golden carries.
