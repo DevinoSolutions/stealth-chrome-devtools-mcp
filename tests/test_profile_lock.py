@@ -241,6 +241,15 @@ class TestSpawnBrowserAnnouncesTheSubstitution:
         assert warning.startswith("NOT the profile you asked for")
         assert "Chrome's SingletonLock is held by live pid 4242" in warning
         assert "/sessions/github-2" in warning
+        # `_next_available_explicit_dir` returns the first non-busy <name>-N,
+        # and `resolve_profile_selection` skips the copy when that directory
+        # already exists (`ci-warmup-2` pre-existed in the CI evidence). So the
+        # warning may NOT promise a fresh clone -- only that it is a different
+        # profile, whichever of the two ways it came to be.
+        assert "either a fresh clone of the master snapshot or one an earlier" in (
+            warning
+        )
+        assert "freshly cloned" not in warning
         # The standing named-profile advice is kept, not replaced.
         assert "NOT auto-cleaned" in warning
 

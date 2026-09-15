@@ -197,8 +197,9 @@ async def spawn_browser(
                     f"{profile_selection.get('requested_user_data_dir')} is in use "
                     f"({walked}), so this spawn got "
                     f"{profile_selection.get('walked_to')} — a DIFFERENT profile, "
-                    f"freshly cloned, with none of the cookies or logins the "
-                    f"requested one holds. "
+                    f"either a fresh clone of the master snapshot or one an "
+                    f"earlier walk left behind, with none of the cookies or "
+                    f"logins the requested one holds. "
                     if walked
                     else ""
                 )

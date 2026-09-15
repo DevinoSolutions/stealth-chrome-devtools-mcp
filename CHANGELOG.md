@@ -14,7 +14,9 @@ directory that a killed browser never gets to clean up, so its target outlived
 the browser and reported "busy" forever. After F-860's reaper killed a Chrome
 that a failed spawn had leaked, the next `spawn_browser` on the same NAMED
 profile therefore read the leftovers as a running browser and walked the caller
-to `<name>-2` — a different, freshly cloned identity for a profile that exists
+to `<name>-2` — a different identity (a fresh clone of the master snapshot the
+first time, and thereafter whatever an earlier walk left at that name) for a
+profile that exists
 precisely to keep its cookies and logins — with nothing in the answer saying so
 (measured on the 2.1.5 release gate: `ci-warmup`, `ci-warmup`, `ci-warmup-2`
 across three attempts that all passed `user_data_dir="ci-warmup"`). The question

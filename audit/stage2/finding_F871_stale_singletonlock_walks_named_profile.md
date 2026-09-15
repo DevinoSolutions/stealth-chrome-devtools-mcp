@@ -3,7 +3,7 @@
 **Status:** fixed on `fix/F871-stale-singletonlock-profile-walk` (RED pinned, GREEN, hermetic)
 **Opened by:** the F-870 write-up, from the release gate of 2.1.5
 **Source at:** `main` = `267bac8`
-**Severity:** MEDIUM-HIGH. A named profile exists to keep one identity — cookies, logins, consent. The walk to `<name>-2` hands the caller a DIFFERENT identity, freshly cloned from the master snapshot, and nothing in `spawn_browser`'s answer says a substitution happened. The mirror-image half is worse in kind though rarer: a profile a live browser holds could not be seen at all, so a second Chrome could be pointed at it.
+**Severity:** MEDIUM-HIGH. A named profile exists to keep one identity — cookies, logins, consent. The walk to `<name>-2` hands the caller a DIFFERENT identity — a fresh clone of the master snapshot the first time, and thereafter whatever an earlier walk left at that name, since `_next_available_explicit_dir` returns the first non-busy `<name>-N` and `resolve_profile_selection` skips the copy when it already exists (`ci-warmup-2` pre-existed in the evidence below) — and nothing in `spawn_browser`'s answer says a substitution happened. The mirror-image half is worse in kind though rarer: a profile a live browser holds could not be seen at all, so a second Chrome could be pointed at it.
 **Evidence:** GitHub Actions run `34911829422`, job `104200794999` (`release-gate / integration (Linux/X64)`, the only red cell of that run).
 
 ---
@@ -254,9 +254,11 @@ expressed per-platform against `profile_lock._LOCK_IS_A_WITNESS`.
   review.** A quiet `walk_reason` beside a loud `warning` is a field a model does
   not read: `tool_sections/browser_management.py` now PREPENDS the substitution
   to that same `warning` ("NOT the profile you asked for: … is in use (…), so
-  this spawn got … — a DIFFERENT profile, freshly cloned, with none of the
-  cookies or logins the requested one holds."), keeping the standing
-  named-profile advice after it. Same field set, no second diagnostics home;
+  this spawn got … — a DIFFERENT profile, either a fresh clone of the master
+  snapshot or one an earlier walk left behind, with none of the cookies or
+  logins the requested one holds."), keeping the standing named-profile advice
+  after it. The disjunction is not hedging: only the FIRST walk to a given name
+  clones, and `ci-warmup-2` already existed in the CI evidence. Same field set, no second diagnostics home;
   pinned by `TestSpawnBrowserAnnouncesTheSubstitution` (walk → leads the warning;
   no walk → the warning is byte-for-byte what it was).
 * **The residue is still on disk after a reap.** By the §4 argument that is
