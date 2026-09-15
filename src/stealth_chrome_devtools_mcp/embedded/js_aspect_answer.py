@@ -43,13 +43,20 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 #: (the same bound F-869 puts on a storage error).
 MAX_ERROR_CHARS = 200
 
+#: Appended when the clamp actually cut something, so a reader can tell a
+#: truncated message from one that simply ended there — a silent cut reads as
+#: Chrome's complete words and is not (F-869's marker, same style).
+TRUNCATION_MARKER = "…"
+
 
 def js_error(details: uc.cdp.runtime.ExceptionDetails) -> ToolError:
     """The ``ToolError`` for a script that threw, named by Chrome's own text."""
     exception = getattr(details, "exception", None)
-    described = getattr(exception, "description", None) or details.text
+    described = str(getattr(exception, "description", None) or details.text)
+    if len(described) > MAX_ERROR_CHARS:
+        described = described[:MAX_ERROR_CHARS] + TRUNCATION_MARKER
     return ToolError(
-        f"JavaScript error: {described!s:.{MAX_ERROR_CHARS}} "
+        f"JavaScript error: {described} "
         f"(line {details.line_number}, column {details.column_number})"
     )
 

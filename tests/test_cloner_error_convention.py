@@ -37,6 +37,7 @@ import pytest
 from fakes import FakeStorage, FakeTab, fake_element, js_aspect_answer
 from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
 from stealth_chrome_devtools_mcp.embedded import file_based_element_cloner as _fbc
+from stealth_chrome_devtools_mcp.embedded import js_aspect_answer as _jsa
 from stealth_chrome_devtools_mcp.embedded import progressive_element_cloner as _pec
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -188,16 +189,33 @@ class TestEngineAspectsRaise:
         assert "Unexpected return type" not in message
         assert message != "JavaScript error: Uncaught"
 
-    async def test_a_throws_message_is_bounded(self):
+    async def test_a_throws_message_is_bounded_and_says_it_was_cut(self):
         """A thrown ``Error`` carries whatever the page put in it, plus a stack.
         The text is Chrome's, but its LENGTH is the page's, so it is clamped the
-        way F-869 clamps its own — a diagnostic, never a transcript."""
+        way F-869 clamps its own — a diagnostic, never a transcript.
+
+        And the cut is VISIBLE. A silent truncation reads as Chrome's complete
+        words: a caller cannot tell ``…is not a functi`` from an error that
+        really ended there, which is how a clamp turns a diagnostic into a
+        misleading one."""
         tab = FakeTab(evaluate_result=js_threw("Error: " + "x" * 5000))
         with pytest.raises(ToolError) as exc:
             await _cdc.cdp_element_cloner.extract_element_structure(
                 tab, selector="#demo"
             )
-        assert len(str(exc.value)) < 400
+        message = str(exc.value)
+        assert len(message) < 400
+        assert _jsa.TRUNCATION_MARKER in message
+
+    async def test_a_short_throws_message_carries_no_truncation_marker(self):
+        """The other half of the pin: a marker on every message would say
+        "cut" about text that is whole, which is the same lie inverted."""
+        tab = FakeTab(evaluate_result=js_threw("TypeError: x.y is not a function"))
+        with pytest.raises(ToolError) as exc:
+            await _cdc.cdp_element_cloner.extract_element_structure(
+                tab, selector="#demo"
+            )
+        assert _jsa.TRUNCATION_MARKER not in str(exc.value)
 
     @pytest.mark.parametrize(
         "method",
