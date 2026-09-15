@@ -145,6 +145,26 @@ def pretend_display_context(monkeypatch: Any, token: str) -> None:
     monkeypatch.setattr(display_context, "display_context", lambda: token)
 
 
+def v2_record(**backends: dict) -> dict:
+    """A schema-v2 ``server.json`` record from ``context=entry`` kwargs, where
+    ``_`` in a kwarg name reads as ``-`` (``win_session_1`` → ``win-session-1``,
+    the token `display_context()` actually produces).
+
+    Here rather than in a test module because both
+    `test_cli_status_wedged.py` and `test_probe_backend_status.py` build the
+    same record shape (F-868), and a record builder that disagreed with itself
+    between two files is exactly the drift this module exists to prevent. It
+    writes the schema literally, deliberately: `backend_registry.record_backend`
+    is the code under test in several of those cases, so a fixture that went
+    through it could not express a record that function would never write — a
+    hand-edited one, or a pre-supersede pair.
+    """
+    return {
+        "schema": 2,
+        "backends": {ctx.replace("_", "-"): entry for ctx, entry in backends.items()},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Fake DOM tab — covers BOTH cloner seams (JS-eval + CDP)
 # ---------------------------------------------------------------------------

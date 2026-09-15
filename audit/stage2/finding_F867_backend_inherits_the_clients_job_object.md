@@ -310,7 +310,28 @@ tests were never exercised on POSIX locally, and a Windows-green local run said 
 about them. This is the same shape as the earlier gap on this branch, and the standing
 lesson holds — all-POSIX-red with Windows-green is platform divergence, not flake.
 
-### 6.4 What CI measured, and what is still a prediction
+### 6.4 What CI and production measured, and what is still a prediction
+
+**Which rung serves under the real Claude Code client: read, and it is `breakaway`.**
+2.1.5 went live on this machine at 23:05 local on 2026-09-14, when Claude Code
+reconnected its MCP servers and 56 proxies (one per session) started within 100 s of
+each other against the freshly upgraded tool venv. The lock winner, proxy 5732, wrote:
+
+```
+2026-09-14 23:05:48,339 INFO 5732 [-] stealth.proxy: backend spawned via the breakaway rung (pid 53836)
+```
+
+and an independent `IsProcessInJob` read, taken 12 minutes later from an unrelated
+process, agreed: backend 53836 is in **no** job, while proxy 5732 and both trampoline
+ancestors above it (45444, 11980) are **in** one. So §6.5's open question about Claude
+Code's own node client is answered by measurement: it DOES put the proxy in a Job
+Object, and that job PERMITS breakaway — rung 1 serves in production, and the
+scheduler rung, which is what the SDK's job forces in the pin and on CI, is never
+needed under Claude Code. `~/.stealth-mcp/backend-launch/` was empty and
+`schtasks /Query` listed zero `stealth-mcp-backend-*` tasks afterwards, as rung 1
+leaves nothing behind. The same herd produced one probe strike (`probe failed 1/3`)
+on 27 of the 56 proxies at 23:06:49–50, the moment a 4.0 s `spawn_browser` held the
+backend; no proxy reached 2/3, nothing was condemned, and the backend stayed up.
 
 **Which rung serves on CI: read, and it is `scheduler`.** PR #100's first gate run
 (`34842210967`, head `07f11a9`, 2026-09-14 12:13 UTC) ran the escape pin on all three
@@ -355,9 +376,12 @@ unmeasured.
   runners have a logged-on console session and the scheduler rung serves there. The
   follow-up is therefore NOT needed, and the exposure is limited to real
   non-console-session hosts.
-* **Claude Code's own node client** was never captured using a job or naming its tree
-  flags. The Python SDK case is the proven one; §3's local mass-disconnect observation
-  remains consistent-with, not proven.
+* **Claude Code's own node client** — now measured (§6.4, 2026-09-14 23:05 local): it
+  DOES wrap the proxy in a Job Object, and that job permits `CREATE_BREAKAWAY_FROM_JOB`,
+  so rung 1 serves there. What its tree flags are on session end (kill-on-close or not)
+  is still not captured; it no longer matters for the backend, which is outside the job
+  either way, but §3's local mass-disconnect observation stays consistent-with, not
+  proven.
 * **A backend that dies for any other reason** — an upgrade's source-change eviction, a
   deliberate `restart` — still KILLS the browsers it owned on the way back up rather
   than re-adopting them. Unchanged from 2.1.4, and unrelated to the job.

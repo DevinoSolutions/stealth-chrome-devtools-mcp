@@ -25,6 +25,38 @@ propagates and `get_instance_state` answers with `partial: true` and a
 `detail_error`, as its docstring always promised, with a WARNING and a traceback in
 the backend log.
 
+### Fixed — `status` reported a dead sibling's record as "the backend" (F-868)
+
+On a machine whose `server.json` recorded three display contexts — two dead
+(`win-session-2` on 7169, `headless` on 19222) and one healthy backend serving 56
+proxies (`win-session-1` on 52554) — `stealth-chrome-devtools status`, run from that
+same session-1 shell, printed `backend : not running` and `pid : 89892`, the pid of a
+process that had been gone for hours. `singleton._probe_backend_status` selected the
+record with `backend_registry.first_backend`, which under schema v2 is dict insertion
+order and carries no preference of its own, while discovery had been walking
+`adoption_candidates` — the one home for "which backend would THIS client use" — all
+along. The probe now walks that same list and reports the first candidate that answers
+(wedged over down when none does), which fixes `status`, `doctor`'s summary lines,
+`stop` and `kill-orphans`'s live-backend guard at once, since all four already consumed
+it. The CLI status block now also selects once and passes the answer down: the pid and
+log lines read the entry on the port just reported (`backend_on_port`) instead of making
+their own `first_backend` read, and `doctor`'s port-occupant line takes the same port —
+two independent record selections deleted rather than a third added. `status` gained one
+`others      :` line naming the display contexts it is NOT speaking about when the record
+holds more than one, so a summary over a multi-context record no longer reads as "this is
+all there is".
+
+Two things the same selection bug was hiding are fixed with it. The socket→`initialize`
+ladder is now `singleton._probe_port`, one home with three callers, instead of four lines
+copied into `cli._probe_recorded_backend` under a comment justifying the copy with a claim
+about `_probe_backend_status` that this release makes false. And `restart` now reports
+that ladder's verdict for **the port it spawned on**: it took its `status` from the
+record-wide walk while its `pid` came from the spawned port, so a responsive sibling could
+report "responsive" beside the pid of a backend that had just come up wedged — both halves
+of one return describing two processes.
+
+Stale records are still pruned by nobody; see `audit/stage2/finding_F868_cli_status_reports_a_dead_record.md` §6.
+
 ## 2.1.5
 
 ### Fixed — the backend escapes the MCP client's Job Object (F-867)
