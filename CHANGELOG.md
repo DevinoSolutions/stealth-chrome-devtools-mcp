@@ -33,9 +33,10 @@ verification asks "did anything change" rather than "does it contain exactly wha
 typed", deliberately: an input mask, an autocomplete that rewrites and a `number`
 field that normalises all DID receive the input, and a stricter test would have
 turned each into a new false alarm. `type_text`'s clear fallback also stopped being a
-no-op — it sent WebDriver's private-use codepoints (``, ``) through
-`send_keys`, which CDP has never understood, so it inserted two junk characters and
-cleared nothing; it and `paste_text` now share the one CDP select-all + Delete.
+no-op — it sent WebDriver's private-use codepoints (U+E009 for Ctrl, U+E017 for
+Delete) through `send_keys`, which CDP has never understood, so it inserted two junk
+characters and cleared nothing; it and `paste_text` now share the one CDP select-all
++ Delete.
 
 ## 2.1.6
 

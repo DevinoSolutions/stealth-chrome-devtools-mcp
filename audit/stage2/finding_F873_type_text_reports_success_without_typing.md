@@ -102,7 +102,7 @@ New leaf `embedded/text_entry.py` — **THE one home for pressing a key in a pag
 * `press_key` — the ONE way a key reaches the page. Exactly two events: a `keyDown` carrying `text` (so Chrome synthesises the keypress) and a `keyUp` that does not. Never a third, because §2a measured a third as a second submit.
 * `press_enter(tab, shift=…)` — Enter as `text="\r"`, `key`/`code` `"Enter"`, `windowsVirtualKeyCode` 13, Shift as modifier bit 8.
 * `type_characters` — per character, full lifecycle, re-focusing the element before each one as the shipped path did.
-* `clear_via_keyboard` — the ONE select-all + Delete. `type_text`'s fallback used to send WebDriver's private-use codepoints (`""`, `""`) through `send_keys`, which dispatches them as literal `char` text: CDP has never spoken that protocol, so the fallback inserted two junk characters and cleared nothing. `paste_text` already had a correct CDP version inline; both now call the one function, and the inline copy is deleted.
+* `clear_via_keyboard` — the ONE select-all + Delete. `type_text`'s fallback used to send WebDriver's private-use codepoints (U+E009 for Ctrl, U+E017 for Delete) through `send_keys`, which dispatches them as literal `char` text: CDP has never spoken that protocol, so the fallback inserted two junk characters and cleared nothing. `paste_text` already had a correct CDP version inline; both now call the one function, and the inline copy is deleted.
 * `READ_JS` + `entered_text` — the ONE read-back, answering with a JSON **string** because `Element.apply` returns `result[0].value` and a script that threw lands there as `None`. A non-`str` answer is "could not be read" and raises; it is never mistaken for an empty field. `contentEditable` is read from `textContent`, which is the only thing such an element has.
 * `verify_received` — raises unless the element's text moved.
 
@@ -125,7 +125,19 @@ A failed tool call reaches the durable log, the debug ring and Sentry at once (F
 * `tests/test_type_text_verification.py` — 11 hermetic pins (9 RED before the fix, 2 positive controls green throughout): the Enter is a real `Input.dispatchKeyEvent`; its `keyDown` carries `text="\r"` + `code` + vk 13; it is dispatched exactly twice (`keyDown`, `keyUp`) and never a third time; `shift_enter` carries modifier 8; each character gets a `keyDown`+`keyUp` pair; a refusing control raises with the selector and the count; the message never carries the typed text; an unreadable read-back raises; a control that accepts still returns `True`; `clear_first`'s baseline is the state AFTER the clear; empty text is not a failure.
 * `tests/test_e2e_type_text_verification.py` — 9 real-Chrome pins (6 RED before the fix), own `tmp_empty_root` session root: `#enter-form` (one field, no submit button) is submitted by `parse_newlines`; keydown AND keyup fire, all trusted; `readonly`/`range`/`date`/`color` each raise; `number`, the key probe and an i18n string still succeed with the value to prove it.
 * `tests/fakes.py` gains `FakeTextField`, a page-backed element double whose `send_keys` is nodriver 0.47's `Element.send_keys` reproduced verbatim — the char-only dispatch IS the thing under test, so a stub that merely appended the text would have made the pins pass against the very dispatch they exist to reject. `FakeTab` routes a key event carrying `text` to the focused field per EVENT, so a double dispatch shows up there exactly as it double-submits in Chrome.
-* Unit lane at the fix: **2503 passed, 1 skipped** (2494 + the 11 new, less the pin folded in). Integration lane: see §5a.
+* Unit lane at the fix: **2495 passed, 1 skipped** (2484 before this work + the 11 new hermetic pins). The type_text-adjacent integration files (`test_e2e_interaction_fidelity.py`, `test_e2e_interaction.py`, `test_e2e_hard_dom.py`, `test_e2e_type_text_verification.py`): **31 passed**.
+* §1 measurement 1 re-run against the fix, product code path (`DOMHandler.type_text`), real headless Chrome, same `data:` form page:
+
+```
+measurement_1_form: {"returned": true, "value": "abc", "submitted": "submitted:abc"}
+refusal_is_reported: RAISED ToolError: Failed to type text: typed 9 character(s)
+  into '#ro' but the element's text did not change (still 0 character(s)) — the
+  page did not accept the input. The control may be read-only or disabled, a
+  non-text input type (range/date/color cannot be typed into), or governed by a
+  script that cancels key events.
+```
+
+  The form submits; a refusal names the selector and the counts and carries none of the typed text.
 
 ### 5a. Characterization pins deliberately flipped (SOFT goldens)
 
@@ -144,4 +156,5 @@ A failed tool call reaches the durable log, the debug ring and Sentry at once (F
 * **`paste_text` is not verified.** It inserts via `Input.insertText` and returns `True` on the same unchecked basis. It shares `clear_via_keyboard` now but not the read-back. Deliberately out of scope for one PR; the mechanism (`entered_text` + `verify_received`) is already a leaf that takes an element, so joining it is a small follow-up, not a redesign.
 * **`click_element` is not verified either** and has the same shape: `tests/test_e2e_interaction_fidelity.py::test_form_semantics` still pins `click_element` on a `disabled` control returning `True` with no click dispatched. That pin is left alone — it is a different question (did the browser act on a coordinate) with a different check.
 * **The `"did anything change"` boundary** (§4a) means a control that accepts only part of what was typed still answers `True`. Named here rather than silently narrowed.
+* **Typing at a page rather than into a field now raises.** A caller using `type_text` to fire a page-level keyboard shortcut (`"/"` to focus a search box, `"j"`/`"k"` navigation) aimed at a container that holds no text will get a `ToolError` where it used to get `True`. That is the correct answer for a tool whose one job is entering text — the message names the selector and says nothing landed — but it IS a behaviour change for that use, and a `press_key` tool is the right home for it if it is wanted. `text_entry.press_key` is already the leaf such a tool would call.
 * **`shift_enter` still cannot stop a form submitting**, because Blink does not consult the modifier (§2a). The parameter does what it can do and what it is for: make the page's `shiftKey` branch reachable.
