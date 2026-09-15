@@ -6,13 +6,15 @@
  * @const element {Element|null} - The DOM element found by selector.
  * @const result {object} - Object containing extracted element data.
  * @const rect {DOMRect} - Bounding rectangle of the element.
- * @returns {object} - Extracted structure and metadata, or error if not found.
+ * @returns {string} - ONE JSON string (F-872): tab.evaluate always requests deep
+ *   serialization, so a returned OBJECT arrives as BiDi RemoteValue nodes at
+ *   every depth. A string is the one shape the transport leaves alone.
  */
 (function() {
     const selector = "$SELECTOR$";
     const options = $OPTIONS$;
     const element = document.querySelector(selector);
-    if (!element) return { error: 'Element not found' };
+    if (!element) return JSON.stringify({ error: 'Element not found' });
 
     const result = {
         tag_name: element.tagName.toLowerCase(),
@@ -67,5 +69,5 @@
         scroll_left: element.scrollLeft
     };
 
-    return result;
+    return JSON.stringify(result);
 })();

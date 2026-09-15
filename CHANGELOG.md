@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Fixed — `status` reported a dead sibling's record as "the backend" (F-868)
+
+On a machine whose `server.json` recorded three display contexts — two dead
+(`win-session-2` on 7169, `headless` on 19222) and one healthy backend serving 56
+proxies (`win-session-1` on 52554) — `stealth-chrome-devtools status`, run from that
+same session-1 shell, printed `backend : not running` and `pid : 89892`, the pid of a
+process that had been gone for hours. `singleton._probe_backend_status` selected the
+record with `backend_registry.first_backend`, which under schema v2 is dict insertion
+order and carries no preference of its own, while discovery had been walking
+`adoption_candidates` — the one home for "which backend would THIS client use" — all
+along. The probe now walks that same list and reports the first candidate that answers
+(wedged over down when none does), which fixes `status`, `doctor`'s summary lines,
+`stop` and `kill-orphans`'s live-backend guard at once, since all four already consumed
+it. The CLI status block now also selects once and passes the answer down: the pid and
+log lines read the entry on the port just reported (`backend_on_port`) instead of making
+their own `first_backend` read, and `doctor`'s port-occupant line takes the same port —
+two independent record selections deleted rather than a third added. `status` gained one
+`others      :` line naming the display contexts it is NOT speaking about when the record
+holds more than one, so a summary over a multi-context record no longer reads as "this is
+all there is".
+
+Two things the same selection bug was hiding are fixed with it. The socket→`initialize`
+ladder is now `singleton._probe_port`, one home with three callers, instead of four lines
+copied into `cli._probe_recorded_backend` under a comment justifying the copy with a claim
+about `_probe_backend_status` that this release makes false. And `restart` now reports
+that ladder's verdict for **the port it spawned on**: it took its `status` from the
+record-wide walk while its `pid` came from the spawned port, so a responsive sibling could
+report "responsive" beside the pid of a backend that had just come up wedged — both halves
+of one return describing two processes.
+
+Stale records are still pruned by nobody; see `audit/stage2/finding_F868_cli_status_reports_a_dead_record.md` §6.
+
 ### CI only — every gate run now measures Chrome's cold start (F-870)
 
 No product change. `tools/chrome_cold_start_probe.py` runs on the `integration`,
@@ -11,6 +43,60 @@ DevTools endpoint over two back-to-back launches — the one number
 `audit/stage2/finding_F870_posix_ci_nodriver_connect_failures.md` could not get
 from any failure log, because nodriver abandons a launched Chrome after a
 hardcoded 2.75 s and discards its stderr.
+
+### Fixed — four cloner aspects returned nested transport nodes, not values (F-872)
+
+`extract_element_structure`, `extract_element_events`, `extract_element_assets` and
+`extract_related_files` handed back payloads whose nested lists held Chrome's BiDi
+`{'type': …, 'value': …}` serialization records instead of the values they describe.
+Measured against real headless Chrome: `structure["children"][0]` was
+`{'type': 'object', 'value': [['tag_name', {'type': 'string', 'value': 'span'}], …]}`
+rather than `{'tag_name': 'span', …}`, `class_list` was a list of `{'type': 'string'}`
+nodes, `assets["images"][0]` and `related_files["stylesheets"][0]` the same — and an
+empty JS object (`events["framework_handlers"]`) decayed into an empty **list**.
+
+nodriver's `Tab.evaluate` sends `serialization="deep"` on every call and returns the
+deep-serialized value verbatim, so a returned JS object arrives encoded at *every*
+depth and `return_by_value` cannot undo it. The engine's tolerance,
+`_convert_nodriver_result`, unwrapped the **top level only**: its `"array"` branch
+returned the raw list of nodes. Nothing raised — the answer looked right and was
+wrong below the first level, which is why the E2E tier (which string-searches the
+JSON, and the values ARE in there) stayed green, and why the unit fixture, which fed
+a plain dict a real tab can never produce, short-circuited the conversion entirely.
+
+The four aspect scripts now end in `JSON.stringify` and are read back with
+`json.loads` — the idiom `extract_element_animations` (F-846), the viewport read
+(F-844) and `window_sizing` already use, since a string is the one shape deep
+serialization leaves alone. The four per-aspect ladders collapse into one reader in
+the new `embedded/js_aspect_answer.py` leaf, shared with the animations aspect;
+`_convert_nodriver_result` is deleted. Schemas and field names are unchanged — only
+the depth at which the values are real. Also corrupted, and also fixed: the nine
+tools composed from these four (three `*_to_file`, `clone_element_complete`,
+`extract_complete_element_to_file`, `clone_element_to_file`,
+`clone_element_progressive` and its `expand_children` / `expand_events` slices) —
+13 of 94 in all. `cdp_element_cloner.py` 1012 → 947 LOC; its grandfathered cap
+ratchets down to match.
+
+### Fixed — a JS error inside an extraction script was reported as a wrong type (F-872)
+
+Found while fixing the above, on the same line of code. Every aspect began with
+`if hasattr(raw, "exception_details")`, a branch that cannot fire against nodriver
+0.47: `Tab.evaluate` returns the `ExceptionDetails` record *itself* in the value's
+place, and that class has no `exception_details` attribute. So a genuine JS error in
+an extraction script reached the caller as
+`Unexpected return type: <class 'ExceptionDetails'>` rather than as the error.
+
+The decode moves into the new leaf, and the message is built from
+`.exception.description`, not `.text` — measured against real Chrome, `.text` is the
+literal string `"Uncaught"` for *every* throw there is (ReferenceError, TypeError, an
+explicit `throw new Error(…)`, a SyntaxError), so a message built from it names
+nothing. A caller now sees
+`JavaScript error: ReferenceError: nosuchthing is not defined … (line 0, column 13)`,
+clamped to 200 characters of Chrome's text — the text is Chrome's, but its length is
+the page's. The only test covering this was a hand-built double asserting the
+product's own mistaken belief about the library type; it is rebuilt from nodriver's
+own constructors, which flipped all five of its cases from green to red before the
+fix.
 
 ## 2.1.5
 

@@ -25,6 +25,7 @@ from pathlib import Path
 import psutil
 
 from stealth_chrome_devtools_mcp.embedded import (
+    backend_liveness,
     backend_registry,
     backend_watchdog,
     display_context,
@@ -157,28 +158,32 @@ def _clear_server_state() -> None:
     backend_registry.clear_record(SERVER_STATE_FILE, PORT_FILE)
 
 
-def _probe_backend_status() -> tuple[str, int | None]:
-    """Report the recorded backend's actual state for display (CLI status/
-    doctor), distinguishing what `_find_running_server`'s binary answer
-    collapses: not running, socket-dead, and wedged (the F-301 state a bare
-    socket check cannot see). Read-only: never evicts, never spawns. Doctor
-    runs this same ladder per-entry in `cli._probe_recorded_backend`.
+def _probe_port(port: int) -> str:
+    """OUR binding of `backend_liveness.probe_port` — the ladder, with THIS
+    module's two probes handed in. The reasoning lives with the leaf.
 
-    Returns ("none", None) no recorded backend | ("down", port) socket closed |
-    ("wedged", port) socket open, no real MCP initialize answer |
-    ("responsive", port) socket open AND initialize answers 200.
+    A wrapper on purpose, not a hop to delete: both probe names are resolved
+    HERE at call time, so `monkeypatch.setattr(singleton, "_server_is_healthy",
+    …)` still reaches the ladder. A caller importing the leaf's names directly
+    would bind them at import time and stop seeing such a patch.
     """
-    entry = backend_registry.first_backend(_read_server_state())
-    if entry is None:
-        return "none", None
-    port = entry.get("port")
-    if not isinstance(port, int):
-        return "none", None
-    if not _server_is_healthy(port):
-        return "down", port
-    if not _backend_http_ready(port):
-        return "wedged", port
-    return "responsive", port
+    return backend_liveness.probe_port(
+        port, is_healthy=_server_is_healthy, http_ready=_backend_http_ready
+    )
+
+
+def _probe_backend_status() -> tuple[str, int | None]:
+    """OUR binding of `backend_liveness.probe_recorded`: this module's record
+    path, this process's display context, and `_probe_port` above as the
+    per-port probe (so a test that patches THAT still drives the walk).
+
+    `stop_backend` and the CLI's status/doctor/kill-orphans verbs all call it
+    through this name; the adoption-order policy is the leaf's, and the order
+    itself is `backend_registry`'s.
+    """
+    return backend_liveness.probe_recorded(
+        SERVER_STATE_FILE, display_context.display_context(), probe=_probe_port
+    )
 
 
 def _same_identity_backend_ready(port: int, patience: float | None = None) -> bool:
@@ -198,14 +203,11 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     ``patience=0.0`` (discovery) probes once and never sleeps; ``None`` means
     ``REUSE_PATIENCE_SECONDS``, read at call time so tests can shrink it.
 
-    F-856: the window is spent in FAIRLY SCHEDULED seconds, not wall seconds.
-    A probe timeout is evidence about the backend only while this process is
-    itself being scheduled, and on a machine at 100% CPU it is not — the
-    2026-09-02 incident condemned a backend that had answered its six previous
-    confirmations. ``scheduling_lag.FairWindow`` measures that lateness from
-    the loop's own naps and discounts the budget by it, bounded at
-    ``MAX_STRETCH``. On an idle machine the measurement is 1.0 and this is
-    exactly the wall-clock deadline it replaced.
+    F-856: the window is spent in FAIRLY SCHEDULED seconds, not wall seconds —
+    a probe timeout is evidence about the backend only while this process is
+    itself being scheduled. The measurement, its bound and the 2026-09-02
+    incident behind it are ``scheduling_lag.FairWindow``'s, THE one home for
+    that question; on an idle machine it is the wall-clock deadline it replaced.
     """
     # The entry recorded ON THIS PORT, not merely the first: under F-808's
     # per-context record another desktop's backend says nothing about `port`.
@@ -636,12 +638,17 @@ def restart_backend() -> tuple[str, int | None]:
     instead of a repeat 120s outage — the fallback port stays recorded (SSA1.5);
     `stop` clears `server.json`, the reset path to `DEFAULT_PORT`. Lock
     contention reports "busy" so the operator retries instead of racing. The
-    post-restart state is reported via `_probe_backend_status()` (binding
-    ruling: ONE liveness vocabulary) — a restart that comes back wedged or down
-    must be visible, not assumed "responsive".
+    post-restart state is `_probe_port`'s verdict for THE PORT WE SPAWNED ON
+    (binding ruling: ONE liveness vocabulary) — a restart that comes back
+    wedged or down must be visible, not assumed "responsive".
 
-    Returns ``(status, pid)``: `_probe_backend_status`'s status or "busy";
-    ``pid`` is the freshly recorded pid once the lock is acquired, else None.
+    That port, never `_probe_backend_status()`'s (F-868): the adoption walk
+    answers "is there a backend for ME", so on a multi-context record a
+    RESPONSIVE sibling reported "responsive" for a restart whose own backend
+    came up wedged. Both halves now read the one selected port.
+
+    Returns ``(status, pid)``: `_probe_port`'s verdict or "busy"; ``pid`` is the
+    freshly recorded pid once the lock is acquired, else None.
     """
     # A PREFERENCE only: selection re-derives our own context's port itself.
     own = display_context.display_context()
@@ -655,10 +662,9 @@ def restart_backend() -> tuple[str, int | None]:
         _start_server_process(port)
         _wait_for_server(port)
 
-    status, _ = _probe_backend_status()
-    # The port WE spawned on, not first_backend's - same agree-on-one-port rule.
+    # Both halves read the port WE spawned on - the agree-on-one-port rule.
     fresh = backend_registry.backend_on_port(_read_server_state(), port)
-    return (status, backend_registry.recorded_int(fresh, "pid"))
+    return (_probe_port(port), backend_registry.recorded_int(fresh, "pid"))
 
 
 def _port_is_foreign_held(port: int) -> bool:

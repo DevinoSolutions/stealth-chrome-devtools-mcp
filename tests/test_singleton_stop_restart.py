@@ -31,6 +31,7 @@ from unittest.mock import MagicMock
 import psutil
 import pytest
 
+from fakes import pretend_display_context
 from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
 
@@ -384,6 +385,9 @@ class TestStopBackend:
         assert pid is None
 
     def test_lock_contended_reports_busy(self, isolated_state, monkeypatch):
+        # A STOP test: stop_backend still reads _probe_backend_status (which
+        # record to act on), unlike restart, which since F-868 reports
+        # _probe_port for the port it spawned on.
         monkeypatch.setattr(
             singleton, "_probe_backend_status", lambda: ("responsive", 19222)
         )
@@ -436,10 +440,14 @@ class TestRestartBackend:
     the outage is survived, same as cold start - see
     TestRestartPortSelection below for that behavior's own pinning tests.
 
-    The final state reported is _probe_backend_status()'s, read AFTER the
-    lock releases (M1's one liveness vocabulary - binding ruling: no new
-    health check anywhere) - a restart that comes back wedged/down must be
-    visible, not assumed "responsive". Pinned by the third test below.
+    The final state reported is _probe_port(port)'s for THE PORT WE SPAWNED ON,
+    read AFTER the lock releases (M1's one liveness vocabulary - binding
+    ruling: no new health check anywhere) - a restart that comes back
+    wedged/down must be visible, not assumed "responsive". Pinned by the third
+    test below. It was _probe_backend_status() until F-868: that walks the
+    ADOPTION order, so on a multi-context record a responsive sibling answered
+    for a restart whose own backend came up wedged - pinned by the last test in
+    TestRestartReportsTheSpawnedPort.
     """
 
     def test_terminate_then_spawn_ordering_under_the_lock(
@@ -475,9 +483,7 @@ class TestRestartBackend:
         monkeypatch.setattr(
             singleton, "_wait_for_server", lambda port: calls.append("wait")
         )
-        monkeypatch.setattr(
-            singleton, "_probe_backend_status", lambda: ("responsive", 19222)
-        )
+        monkeypatch.setattr(singleton, "_probe_port", lambda port: "responsive")
 
         result = singleton.restart_backend()
 
@@ -531,9 +537,7 @@ class TestRestartBackend:
         monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
         # The backend comes back wedged - restart_backend must report that,
         # not the "responsive" the ordering test above pinned.
-        monkeypatch.setattr(
-            singleton, "_probe_backend_status", lambda: ("wedged", 19222)
-        )
+        monkeypatch.setattr(singleton, "_probe_port", lambda port: "wedged")
 
         result = singleton.restart_backend()
 
@@ -573,9 +577,7 @@ class TestRestartPortSelection:
         )
         monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
         monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
-        monkeypatch.setattr(
-            singleton, "_probe_backend_status", lambda: ("responsive", recorded_port)
-        )
+        monkeypatch.setattr(singleton, "_probe_port", lambda port: "responsive")
 
         spawned_on = {}
 
@@ -616,9 +618,7 @@ class TestRestartPortSelection:
             # touched by this test.
             monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
             monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
-            monkeypatch.setattr(
-                singleton, "_probe_backend_status", lambda: ("responsive", 0)
-            )
+            monkeypatch.setattr(singleton, "_probe_port", lambda port: "responsive")
 
             spawned_on = {}
 
@@ -660,9 +660,7 @@ class TestRestartPortSelection:
         )
         monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
         monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
-        monkeypatch.setattr(
-            singleton, "_probe_backend_status", lambda: ("responsive", recorded_port)
-        )
+        monkeypatch.setattr(singleton, "_probe_port", lambda port: "responsive")
 
         def _fake_spawn(port):
             singleton._write_server_state(
@@ -730,9 +728,7 @@ class TestRestartIsPerDisplayContext:
             singleton, "_terminate_backend", lambda port: terminated.append(port)
         )
         monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
-        monkeypatch.setattr(
-            singleton, "_probe_backend_status", lambda: ("responsive", our_port)
-        )
+        monkeypatch.setattr(singleton, "_probe_port", lambda port: "responsive")
 
         spawned: list[int] = []
 
@@ -801,9 +797,7 @@ class TestRestartIsPerDisplayContext:
             singleton, "_terminate_backend", lambda port: terminated.append(port)
         )
         monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
-        monkeypatch.setattr(
-            singleton, "_probe_backend_status", lambda: ("responsive", diverted_port)
-        )
+        monkeypatch.setattr(singleton, "_probe_port", lambda port: "responsive")
 
         spawned: list[int] = []
 
@@ -824,3 +818,106 @@ class TestRestartIsPerDisplayContext:
             for e in backend_registry.read_backends(record)
         }
         assert surviving["headless"] == sibling_port
+
+
+class TestStopIsPerDisplayContext:
+    """F-868's consequence for `stop`, stated as a contract rather than left to
+    be discovered.
+
+    `stop` acts on whatever `_probe_backend_status` reports, and that now walks
+    `adoption_candidates`, which for a PROVEN-capable client excludes every
+    FOREIGN proven context. So an operator's `stop` no longer reaches across
+    into another desktop's backend — it says "not running", because for this
+    shell there is nothing it may act on, and it leaves the sibling's record
+    alone. Previously `first_backend` handed it that entry: it terminated
+    nothing (the port is not ours to hold) and then FORGOT the record, quietly
+    making a possibly-live sibling undiscoverable.
+
+    This is green on the branch by construction — the adoption walk is the fix,
+    not something added for this test. It is pinned because it is a BEHAVIOUR
+    CHANGE riding on a bug fix, and an unpinned one is the kind a later
+    "simplification" reverts without noticing.
+    """
+
+    def test_stop_will_not_act_on_a_foreign_proven_context(
+        self, isolated_state, monkeypatch
+    ):
+        backend_registry.record_backend(
+            singleton.SERVER_STATE_FILE,
+            port=6000,
+            version="1.2.1",
+            pid=2222,
+            source_fingerprint="fp",
+            display_context="win-session-OTHER",
+        )
+        pretend_display_context(monkeypatch, "win-session-OURS")
+        terminated: list[int] = []
+        monkeypatch.setattr(
+            singleton, "_terminate_backend", lambda port: terminated.append(port)
+        )
+
+        # "none" short-circuits before the lock, so nothing is probed either:
+        # a foreign desktop's backend is not even asked whether it is alive.
+        assert singleton.stop_backend() == ("not running", None)
+        assert terminated == []
+        assert [
+            (e["display_context"], e["port"])
+            for e in backend_registry.read_backends(singleton.SERVER_STATE_FILE)
+        ] == [("win-session-OTHER", 6000)]
+
+
+class TestRestartReportsTheSpawnedPort:
+    """F-868: restart's status must be about the backend restart just brought
+    up, never about a sibling that happens to answer.
+
+    `_probe_backend_status` asks "is there a backend for me" — the adoption
+    walk — which is the right question for `status` and the wrong one here: a
+    RESPONSIVE sibling would report "responsive" for a restart whose own
+    backend came up wedged, i.e. a promise about a different process than the
+    `pid` beside it. `restart_backend` now reports `_probe_port(port)` for the
+    port it selected, so both halves of its return describe one backend.
+    """
+
+    def test_a_responsive_sibling_does_not_answer_for_a_wedged_fresh_backend(
+        self, isolated_state, monkeypatch
+    ):
+        sibling_port = _free_closed_port()
+        our_port = _free_closed_port()
+        backend_registry.record_backend(
+            singleton.SERVER_STATE_FILE,
+            port=sibling_port,
+            version="1.2.1",
+            pid=1111,
+            source_fingerprint="fp",
+            display_context="win-session-1",
+        )
+        # HEADLESS adopts anything, window-capable first — so the sibling is
+        # the adoption walk's answer, which is the whole point of the case.
+        pretend_display_context(monkeypatch, "headless")
+        monkeypatch.setattr(
+            singleton, "_exclusive_lock", lambda: _tracking_lock([], True)
+        )
+        monkeypatch.setattr(singleton, "_select_backend_port", lambda port: our_port)
+        monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: None)
+
+        def _fake_spawn(port):
+            singleton._write_server_state(
+                port=port, version="1.2.1", pid=4242, source_fingerprint=""
+            )
+
+        monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)
+        # The real `_probe_port` runs; only its two primitives are stated. The
+        # sibling answers, ours holds its socket open and says nothing.
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: True)
+        monkeypatch.setattr(
+            singleton, "_backend_http_ready", lambda port, **_kw: port == sibling_port
+        )
+
+        result = singleton.restart_backend()
+
+        assert result == ("wedged", 4242)
+        # Both halves of the contrast, so this cannot pass by the sibling
+        # simply being invisible: the adoption walk DOES say responsive here,
+        # and restart deliberately does not use it.
+        assert singleton._probe_backend_status() == ("responsive", sibling_port)

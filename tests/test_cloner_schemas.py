@@ -19,6 +19,7 @@ golden never embeds a real time/path — that would be a flake/portability bug.
 """
 
 import inspect
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +32,7 @@ from fakes import (
     animation_evaluate_map,
     as_jsonable,
     fake_element,
+    js_aspect_answer,
     load_or_capture_golden,
     normalize_golden,
 )
@@ -40,6 +42,44 @@ from stealth_chrome_devtools_mcp.embedded import progressive_element_cloner as _
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 GOLDENS_DIR = Path(__file__).resolve().parent / "goldens"
+_JS_DIR = Path(_cdc.__file__).resolve().parent / "js"
+
+# The scripts the ENGINE evaluates, read out of the engine's own source rather
+# than listed here: a sixth or seventh aspect joins the F-872 pin below the day
+# its filename appears in ``cdp_element_cloner.py``, with no edit to this file.
+# ``extract_styles.js`` / ``comprehensive_element_extractor.js`` are packaged but
+# never evaluated by the engine (styles is the CDP path), so they are absent by
+# construction, not by exception.
+EVALUATED_JS = sorted(
+    set(
+        re.findall(
+            r'"(extract_\w+\.js)"',
+            Path(_cdc.__file__).read_text(encoding="utf-8"),
+        )
+    )
+)
+
+
+def _bidi_nodes(obj: object, path: str = "$") -> list[str]:
+    """Every path in ``obj`` still holding a BiDi ``RemoteValue`` node (F-872).
+
+    A ``{"type": …, "value": …}`` dict is what ``Tab.evaluate``'s deep
+    serialization emits for a JS value; finding one in an aspect's RESULT means
+    the transport's encoding leaked into the payload a caller reads.
+    """
+    if isinstance(obj, dict):
+        if "type" in obj and set(obj) <= {
+            "type",
+            "value",
+            "objectId",
+            "weakLocalObjectReference",
+        }:
+            return [path]
+        return [p for k, v in obj.items() for p in _bidi_nodes(v, f"{path}.{k}")]
+    if isinstance(obj, list):
+        return [p for i, v in enumerate(obj) for p in _bidi_nodes(v, f"{path}[{i}]")]
+    return []
+
 
 # --- Canned tab responses (test data; the FakeTab MECHANISM lives in fakes.py) --
 
@@ -281,13 +321,15 @@ class TestFileBasedCloner:
     async def test_structure_to_file_summary_shape(self, tmp_path, monkeypatch):
         monkeypatch.setattr(_fbc.file_based_element_cloner, "output_dir", tmp_path)
         tab = FakeTab(
-            evaluate_result={
-                "tag_name": "DIV",
-                "attributes": {"id": "demo"},
-                "data_attributes": {},
-                "children": [],
-                "dom_path": "html>body>div",
-            }
+            evaluate_result=js_aspect_answer(
+                {
+                    "tag_name": "DIV",
+                    "attributes": {"id": "demo"},
+                    "data_attributes": {},
+                    "children": [],
+                    "dom_path": "html>body>div",
+                }
+            )
         )
         result = await _fbc.file_based_element_cloner.extract_element_structure_to_file(
             tab, selector="#demo"
@@ -318,7 +360,7 @@ class TestFileBasedCloner:
         genuinely empty element. The engine raises now, so the failure reaches
         the caller and no file claims to be a clone that does not exist."""
         monkeypatch.setattr(_fbc.file_based_element_cloner, "output_dir", tmp_path)
-        tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
+        tab = FakeTab(evaluate_result=js_aspect_answer(CANNED_JS_ELEMENT))
         with pytest.raises(ToolError, match=r"^Selector is required$"):
             await _fbc.file_based_element_cloner.extract_element_structure_to_file(
                 tab, selector=None
@@ -366,38 +408,90 @@ class TestCanonicalEngine:
             "extract_element_structure",
             "extract_element_events",
             "extract_element_assets",
+            "extract_related_files",
         ],
     )
-    async def test_js_aspect_passes_dict_through(self, method):
-        # Structure/events/assets stay on JS-eval (§2.1 + 2026-07-18 structure
-        # ruling) — zero capability loss vs the retired ElementCloner.
+    async def test_js_aspect_parses_the_one_json_string(self, method):
+        # Structure/events/assets/related_files stay on JS-eval (§2.1 +
+        # 2026-07-18 structure ruling) — zero capability loss vs the retired
+        # ElementCloner.
         #
-        # ``extract_element_animations`` deliberately LEFT this list in F-846:
-        # it no longer passes a dict through, because a dict is exactly what the
-        # transport corrupts. It now asks the page for one JSON string and
-        # derives schema v2 from it — pinned in test_animation_schema_v2.py.
-        tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
+        # SOFT-GOLDEN/FIXTURE UPDATE (F-872, deliberate): this used to feed
+        # ``evaluate_result=dict(...)`` and assert the dict passed through. A
+        # real ``Tab.evaluate`` NEVER hands back a dict — it always requests deep
+        # serialization, so an object literal arrives as BiDi ``RemoteValue``
+        # nodes. The old fixture was the shape the bug needed to stay invisible
+        # (measured: ``children``/``class_list``/``images``/``stylesheets`` came
+        # back as ``{'type': 'object', 'value': [[…]]}`` from real Chrome).
+        # ``extract_element_animations`` reached this contract first in F-846;
+        # all six aspects share it now.
+        tab = FakeTab(evaluate_result=js_aspect_answer(CANNED_JS_ELEMENT))
         result = await getattr(_cdc.cdp_element_cloner, method)(tab, selector="#demo")
         assert result == CANNED_JS_ELEMENT
         assert tab.evaluate_calls  # JS-eval path exercised
         assert not tab.send_calls  # and NOT the CDP path
 
     async def test_structure_requires_selector(self):
-        tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
+        tab = FakeTab(evaluate_result=js_aspect_answer(CANNED_JS_ELEMENT))
         with pytest.raises(ToolError, match=r"^Selector is required$"):
             await _cdc.cdp_element_cloner.extract_element_structure(tab, selector=None)
 
-    async def test_structure_converts_nodriver_array_result(self):
-        # nodriver's [[key, {type,value}], ...] array format → dict via the
-        # engine's _convert_nodriver_result (verbatim move from ElementCloner).
-        tab = FakeTab(
-            evaluate_result=[["tag_name", {"type": "string", "value": "DIV"}]]
+    @pytest.mark.parametrize("script", EVALUATED_JS)
+    def test_every_aspect_script_returns_one_json_string(self, script):
+        """F-872 ROOT-CAUSE PIN: no aspect script may return a bare object.
+
+        ``nodriver``'s ``Tab.evaluate`` sends
+        ``SerializationOptions(serialization="deep", max_depth=10)`` on every
+        call and hands back ``deep_serialized_value.value`` verbatim
+        (``nodriver/core/tab.py``; ``cdp/runtime.py`` keeps ``json["value"]``
+        as-is), so a returned OBJECT arrives as BiDi ``RemoteValue`` nodes at
+        every depth and ``return_by_value`` cannot undo it. A string is the one
+        shape the transport leaves alone. Pinning the SCRIPTS rather than one
+        conversion helper is what keeps a seventh aspect from reintroducing the
+        defect the day it is added."""
+        src = (_JS_DIR / script).read_text(encoding="utf-8")
+        assert "return JSON.stringify(" in src, (
+            f"{script} must hand back ONE JSON string (F-872)"
         )
+        assert not re.search(r"\breturn result;", src), (
+            f"{script} still returns a bare object — deep serialization corrupts "
+            "every nested array/object in it (F-872)"
+        )
+        # EVERY return, not just the success one: the not-found guard is a
+        # returned object too, and reverting only that would satisfy the two
+        # checks above while handing the caller a BiDi-encoded error record.
+        assert not re.search(r"return\s*\{[^}]*\berror\b", src), (
+            f"{script}'s not-found guard must stringify as well (F-872)"
+        )
+
+    async def test_nested_containers_survive_the_transport(self):
+        """F-872 REGRESSION PIN, payload measured from real headless Chrome.
+
+        Before the fix the engine's ``_convert_nodriver_result`` unwrapped the
+        TOP level only: ``children`` stayed a list of
+        ``{'type': 'object', 'value': [['tag_name', {...}], …]}`` nodes,
+        ``class_list`` a list of ``{'type': 'string', …}`` nodes, and an empty
+        JS object (``framework_handlers``) decayed into an empty LIST. Nothing
+        raised, so every caller read corrupted values as real ones."""
+        payload = {
+            "tag_name": "div",
+            "class_list": ["box", "outer"],
+            "children": [
+                {"tag_name": "span", "id": None, "class_name": "child a"},
+                {"tag_name": "span", "id": None, "class_name": "child b"},
+            ],
+            "dimensions": {"width": 732, "height": 70},
+            "framework_handlers": {},
+        }
+        tab = FakeTab(evaluate_result=js_aspect_answer(payload))
         result = await _cdc.cdp_element_cloner.extract_element_structure(
-            tab, selector="#demo"
+            tab, selector="#target"
         )
-        assert result == {"tag_name": "DIV"}
-        _assert_golden("extract_element_structure_list_convert", result, volatile=())
+        assert result == payload
+        assert result["children"][0]["tag_name"] == "span"
+        assert result["class_list"] == ["box", "outer"]
+        assert result["framework_handlers"] == {}  # an object, not a list
+        assert _bidi_nodes(result) == []
 
     async def test_transport_split_styles_cdp_others_js(self):
         """Pins the §2.1 transport decision deterministically (no timing): styles
@@ -410,7 +504,7 @@ class TestCanonicalEngine:
         )
         assert styles_tab.send_calls and not styles_tab.evaluate_calls
 
-        js_tab = FakeTab(evaluate_result=dict(CANNED_JS_ELEMENT))
+        js_tab = FakeTab(evaluate_result=js_aspect_answer(CANNED_JS_ELEMENT))
         await _cdc.cdp_element_cloner.extract_element_structure(
             js_tab, selector="#demo"
         )
@@ -432,10 +526,11 @@ class TestCanonicalEngine:
 
     async def test_complete_composes_all_six_aspects(self):
         tab = FakeTab(
-            evaluate_result=dict(CANNED_JS_ELEMENT),
-            # The animations script alone answers with a JSON STRING (F-846), so
-            # the composed clone carries a real schema-v2 block rather than the
-            # generic canned element every other JS aspect gets.
+            evaluate_result=js_aspect_answer(CANNED_JS_ELEMENT),
+            # The animations script answers with its OWN JSON string, so the
+            # composed clone carries a real schema-v2 block rather than the
+            # generic canned element every other JS aspect gets. (Every aspect
+            # answers with a string since F-872; only the CONTENT differs.)
             evaluate_map=animation_evaluate_map(CANNED_ANIMATION_FACTS),
             cdp_responses=_cdp_responses(),
             select_result=fake_element(node_id=2),
