@@ -217,6 +217,10 @@ class FakeTab:
         self._evaluate_map = evaluate_map or {}
         self._cdp_responses = cdp_responses or {}
         self._select_result = select_result
+        if isinstance(select_result, FakeTextField):
+            # A real ``Element`` carries the tab it was resolved on; the F-873
+            # typing path sends key events through it.
+            select_result.bind(self)
         self.closed = False
         # Set by :meth:`FakeBrowser.get` for a tab it opened, so ``close()`` can
         # drop it from that browser's listing the way a real close does.
@@ -343,6 +347,15 @@ class FakeTab:
             except StopIteration:
                 pass
             cdp_obj.close()  # never leave the generator un-iterated
+        if name == "dispatch_key_event" and frame:
+            # Chrome's own routing: a key event carrying ``text`` is inserted at
+            # the caret of the FOCUSED element (F-873). Modelled per EVENT, not
+            # per character, so a path that dispatches both a ``keyDown`` with
+            # ``text`` and a separate ``char`` double-inserts here exactly as it
+            # double-fires ``keypress`` in a real Chrome (measured, 152).
+            field = self._select_result
+            if isinstance(field, FakeTextField) and field.focused:
+                field.receive(frame["params"])
         if name == "evaluate" and name not in self._cdp_responses and frame:
             # ``Runtime.evaluate`` reaches the SAME canned answers as
             # ``evaluate()`` — see ``_answer_for_js``. An explicit
@@ -499,6 +512,95 @@ def fake_element(node_id: int = 1, **attrs: Any) -> SimpleNamespace:
     ``NodeId(n) == n``, so assertions comparing against a plain int still hold.
     """
     return SimpleNamespace(node_id=cdp_dom.NodeId(node_id), **attrs)
+
+
+class FakeTextField:
+    """A nodriver ``Element`` double for a text control, PAGE-BACKED (F-873).
+
+    Models the one thing the typing path depends on and nothing else: a CDP key
+    event carrying ``text`` inserts that text at the caret — **only if the
+    control accepts typed characters**. ``accepts=False`` is the whole of
+    F-873's "reported success, typed nothing" class: a ``readonly`` input, a
+    ``range``/``date``/``color`` control, or a page whose script cancels the
+    key. In every one of them Chrome DELIVERS the events and the value never
+    moves (measured on Chrome 152 — see the finding's §2 matrix), which is why
+    a double that simply appended whatever it was sent could not express the
+    defect at all.
+
+    ``"\\r"``/``"\\n"`` are deliberately NOT inserted into a single-line
+    control: a literal newline character is dropped by Chrome (measured), so
+    the ONLY thing that can produce a newline or a submit is a real Enter key
+    press, which is what the Enter pins assert against ``FakeTab.cdp_frames``.
+
+    The read-back answer is COMPUTED from this object's own state, never
+    supplied by the test, so no fixture here can quietly encode the bug.
+    """
+
+    def __init__(
+        self,
+        value: str = "",
+        accepts: bool = True,
+        content_editable: bool = False,
+        multiline: bool = False,
+    ) -> None:
+        self.value = value
+        self.accepts = accepts
+        self.content_editable = content_editable
+        self.multiline = multiline
+        self.focused = False
+        self.apply_calls: list[str] = []
+        self._tab: Any = None
+
+    def bind(self, tab: Any) -> None:
+        """The tab this element belongs to — ``Element._tab`` in nodriver."""
+        self._tab = tab
+
+    async def focus(self) -> None:
+        self.focused = True
+
+    async def send_keys(self, text: str) -> None:
+        """``Element.send_keys``, verbatim from nodriver 0.47 (element.py:708).
+
+        It is reproduced here rather than stubbed because it is the thing under
+        test: a focus call, then ONE ``Input.dispatchKeyEvent`` of type
+        ``"char"`` per character — no ``keyDown``, no ``keyUp``. A stub that
+        merely appended the text would have made the F-873 pins pass against
+        the very dispatch they exist to reject.
+        """
+        from nodriver import cdp as _cdp
+
+        await self.apply("(elem) => elem.focus()")
+        for char in list(text):
+            await self._tab.send(_cdp.input_.dispatch_key_event("char", text=char))
+
+    async def apply(self, js_function: str, *args: Any, **kwargs: Any) -> Any:
+        """``Element.apply`` — ``Runtime.callFunctionOn(returnByValue=True)``.
+
+        Answers the three functions the typing path sends: the focus call, the
+        programmatic clear, and the read-back (whose answer is a JSON STRING,
+        which is what ``return_by_value`` really hands back).
+        """
+        self.apply_calls.append(js_function)
+        if "focus()" in js_function:
+            self.focused = True
+            return None
+        if "elem.value = ''" in js_function:
+            self.value = ""
+            return None
+        if "JSON.stringify" in js_function:
+            return json.dumps({"editable": self.content_editable, "text": self.value})
+        return None
+
+    def receive(self, params: dict[str, Any]) -> None:
+        """Insert one key event's ``text``, the way the renderer would."""
+        text = params.get("text")
+        if not text or params.get("type") == "keyUp":
+            return
+        if not self.accepts:
+            return
+        if text in ("\r", "\n") and not (self.multiline or self.content_editable):
+            return
+        self.value += "\n" if text == "\r" else text
 
 
 class FakeDiscoveredTarget:
