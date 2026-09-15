@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — `get_instance_state` reported empty storage as if it were the truth (F-869)
+
+On any page that actually has localStorage or sessionStorage entries,
+`get_instance_state` (and the `browser://{id}/state` and `browser://{id}/console`
+resources) returned `"local_storage": {}`, `"session_storage": {}` and
+`"partial": false`. Measured on 2.1.5 against `https://www.google.com/`: 28
+cookies came back, both stores came back empty, and the record declared itself
+complete. `nodriver`'s `Tab.evaluate` always sends deep `SerializationOptions` and
+hands back `deep_serialized_value.value` raw, so `Object.keys(localStorage)`
+arrives as `[{'type': 'string', 'value': 'alpha'}, …]` — measured against Chrome
+152 — and the per-key loop raised `TypeError: unhashable type: 'dict'` when it used
+one of those nodes as a dict key. An `except Exception` then logged it at INFO as
+"Storage access unavailable", the sentence meant for opaque origins, and let the
+empty record through; INFO is not error-reported, so the failure reached neither
+the caller nor error reporting. The read now lives in `embedded/page_storage.py`
+and asks the page for one `JSON.stringify` of both stores — the same idiom F-844
+applied to the viewport eleven lines below — which also retires the
+`localStorage.getItem('{key}')` string interpolation and 2N+2 CDP round trips. Only
+a page that genuinely refuses the read still reports empty storage; anything else
+propagates and `get_instance_state` answers with `partial: true` and a
+`detail_error`, as its docstring always promised, with a WARNING and a traceback in
+the backend log.
+
 ## 2.1.5
 
 ### Fixed — the backend escapes the MCP client's Job Object (F-867)

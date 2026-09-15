@@ -221,6 +221,7 @@ class DebugLogger:
         method: str,
         message: str,
         context: dict[str, Any] | None = None,
+        error: Exception | None = None,
     ):
         """
         Log a warning.
@@ -230,9 +231,17 @@ class DebugLogger:
             method (str): Name of the method where the warning occurred.
             message (str): Warning message.
             context (Optional[Dict[str, Any]]): Additional context for the warning.
+            error (Optional[Exception]): F-869 — the exception this warning is
+                about, when there is one. It is attached as ``exc_info`` so the
+                durable log line carries the TRACEBACK, which is the difference
+                between "something went wrong" and a locatable defect. Optional
+                because most warnings are conditions, not caught exceptions; the
+                in-memory ring shape is unchanged either way.
         """
         with self._lock:
-            _backend_logger.warning("%s.%s: %s", component, method, message)
+            _backend_logger.warning(
+                "%s.%s: %s", component, method, message, exc_info=error
+            )
 
             warning_entry = {
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
