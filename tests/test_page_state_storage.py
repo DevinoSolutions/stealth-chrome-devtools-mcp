@@ -37,7 +37,7 @@ printed by that probe, not a hand-shaped ``["ls-key"]``. The pre-existing
 list of plain strings — which is precisely why this defect was green there
 through F-844's own live-driven fix.
 
-The two pins:
+The three pins:
 
 * :func:`test_storage_comes_back_from_the_shape_chrome_really_sends` drives the
   real shape through the reader and asserts the VALUES arrive. Under the old
@@ -47,6 +47,13 @@ The two pins:
   (``partial: True`` + ``detail_error`` carrying the exception text) and is
   logged at WARNING **with a traceback**, instead of INFO + ``{}`` +
   ``partial: false``.
+* :func:`test_a_malformed_answer_never_quotes_the_storage_it_was_reading` and
+  :func:`test_the_storage_value_reaches_neither_the_log_nor_detail_error` pin the
+  thing the FIX could have broken. Making a failure visible means putting a
+  message in the durable log, in the client's ``detail_error`` and in a Sentry
+  breadcrumb; the data being read is a page's session tokens. Every malformed
+  answer in :data:`MALFORMED` embeds :data:`SECRET`, so a diagnostic built with
+  ``{rows!r}`` fails these — a leak the defect itself never had.
 """
 
 from __future__ import annotations
@@ -114,6 +121,13 @@ def _page_js(storage_answer: str) -> dict[str, str]:
     expression. Both the OLD per-key expressions and the NEW one-shot read are
     answered, so this fixture is honest against either implementation — the pin
     fails on the product's behaviour, never on the harness not knowing the JS.
+
+    Every key is UNIQUE to one expression. ``FakeTab._answer_for_js`` returns the
+    first substring that matches, so keying two entries on ``JSON.stringify`` —
+    which both the storage read and the viewport read begin with — would make
+    dict order decide which JSON the storage read receives. ``innerWidth``
+    appears only in the viewport expression and ``read('localStorage')`` only in
+    the storage one.
     """
     return {
         "window.location.href": PAGE_URL,
@@ -124,10 +138,9 @@ def _page_js(storage_answer: str) -> dict[str, str]:
         "localStorage.getItem": "1",
         "Object.keys(sessionStorage)": DEEP_KEYS,
         "sessionStorage.getItem": "9",
-        # NEW path (checked BEFORE the viewport read, which also starts with
-        # "JSON.stringify" — dict order is insertion order, so this entry wins).
+        # NEW path.
         "read('localStorage')": storage_answer,
-        "JSON.stringify": VIEWPORT_JS,
+        "innerWidth": VIEWPORT_JS,
     }
 
 
@@ -279,29 +292,111 @@ async def test_a_blocked_page_is_logged_at_info_and_carries_no_traceback(caplog)
     assert all(r.exc_info is None for r in blocked)
 
 
-@pytest.mark.parametrize(
-    "answer",
-    [
-        pytest.param(object(), id="a-husk-instead-of-a-string"),
-        pytest.param('{"local": null, "session": null}', id="a-record-that-is-not-one"),
-        pytest.param(
-            '{"local":{"ok":true,"entries":[["only-a-key"]]},'
-            '"session":{"ok":true,"entries":[]}}',
-            id="an-entry-that-is-not-a-pair",
-        ),
-        pytest.param(
-            '{"local":{"ok":true,"entries":"nope"},"session":{"ok":true,"entries":[]}}',
-            id="entries-that-are-not-a-list",
-        ),
-    ],
-)
+# ---------------------------------------------------------------------------
+# (c) the malformed-answer paths, and the leak the fix must not introduce
+# ---------------------------------------------------------------------------
+
+#: A JWT-shaped value of the kind that really lives in a page's localStorage.
+#: Every malformed answer below EMBEDS it, so a message built with ``{value!r}``
+#: anywhere on these paths puts it in the durable backend log, in
+#: ``get_instance_state``'s ``detail_error`` (i.e. in the MCP client's hands) and
+#: in a Sentry breadcrumb — ``_scrub_event`` strips emails and URL query strings,
+#: not a bare bearer token.
+SECRET = "eyJhbGciOiJIUzI1NiJ9.a-real-session-token.c2lnbmF0dXJl"
+
+
+class _Husk:
+    """Stands in for the ``ExceptionDetails`` husk ``tab.evaluate`` returns
+    instead of raising — whose ``repr`` carries the JS error's own text."""
+
+    def __repr__(self) -> str:
+        return f"ExceptionDetails(description='storing {SECRET} failed')"
+
+
+#: A well-formed, empty sessionStorage record, so each case below is malformed in
+#: exactly ONE way.
+_EMPTY: dict[str, object] = {"ok": True, "entries": []}
+
+
+def _local(broken: object) -> str:
+    return json.dumps({"local": broken, "session": _EMPTY})
+
+
+MALFORMED = [
+    pytest.param(_Husk(), id="a-husk-instead-of-a-string"),
+    pytest.param(f"not json at all: {SECRET}", id="a-string-that-is-not-json"),
+    pytest.param(json.dumps(SECRET), id="json-that-is-not-an-object"),
+    pytest.param(_local(["localStorage", SECRET]), id="a-record-that-is-not-an-object"),
+    pytest.param(
+        _local({"ok": True, "entries": SECRET}), id="entries-that-are-not-a-list"
+    ),
+    pytest.param(
+        _local({"ok": True, "entries": [SECRET]}), id="an-entry-that-is-not-a-pair"
+    ),
+    pytest.param(
+        _local({"ok": True, "entries": [["k", SECRET, "extra"]]}),
+        id="an-entry-with-three-fields",
+    ),
+]
+
+
+@pytest.mark.parametrize("answer", MALFORMED)
 async def test_an_answer_that_is_not_the_promised_json_is_an_error(answer):
     """Not-the-JSON-we-asked-for is a read failure, never "no storage".
 
     ``tab.evaluate`` answers a JS throw with an ``ExceptionDetails`` husk rather
-    than raising, so "it returned something" is not evidence that it worked.
+    than raising, so "it returned something" is not evidence that it worked. A
+    non-JSON string and a JSON scalar are covered here too: they used to escape
+    as `JSONDecodeError` / `AttributeError`, which propagate correctly but make a
+    module that promises two outcomes have four.
     """
     tab = FakeTab(evaluate_map={"read('localStorage')": answer})
 
     with pytest.raises(page_storage.StorageReadError):
         await page_storage.read(tab)
+
+
+@pytest.mark.parametrize("answer", MALFORMED)
+async def test_a_malformed_answer_never_quotes_the_storage_it_was_reading(answer):
+    """The fix must not introduce a leak the defect never had.
+
+    The old per-key loop crashed before it could log anything about the page's
+    data. A diagnostic built with ``{rows!r}`` / ``{row!r}`` would be strictly
+    worse than the bug: `page_storage`'s messages therefore report SHAPE and
+    COUNT only — a type name, an index, a field count, a character count.
+    """
+    assert SECRET in repr(answer), (
+        "the fixture must carry the secret, or this pin asserts nothing"
+    )
+    tab = FakeTab(evaluate_map={"read('localStorage')": answer})
+
+    with pytest.raises(page_storage.StorageReadError) as raised:
+        await page_storage.read(tab)
+
+    assert SECRET not in str(raised.value)
+    assert SECRET not in repr(raised.value.args)
+
+
+@pytest.mark.parametrize("answer", MALFORMED)
+async def test_the_storage_value_reaches_neither_the_log_nor_detail_error(
+    answer, call_tool, patched_server, caplog
+):
+    """The same rule at the two places the message actually travels to.
+
+    `detail_error` goes to the MCP client; the WARNING record goes to the durable
+    backend log and rides out as a Sentry breadcrumb attached to a later event.
+    """
+    manager, tab = _manager(STORAGE_OK)
+    tab._evaluate_map["read('localStorage')"] = answer
+    srv = patched_server(browser_manager=manager)
+
+    with caplog.at_level(logging.DEBUG, logger="stealth.backend"):
+        state = await call_tool(srv, "get_instance_state", instance_id=INSTANCE_ID)
+
+    assert state["partial"] is True
+    assert SECRET not in state["detail_error"]
+    # ``format`` rather than ``getMessage``: the WARNING carries exc_info, and the
+    # rendered traceback is what a log file and a breadcrumb actually hold.
+    rendered = logging.Formatter()
+    for record in caplog.records:
+        assert SECRET not in rendered.format(record)

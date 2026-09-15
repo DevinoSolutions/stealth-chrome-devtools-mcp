@@ -224,6 +224,12 @@ argument is a paragraph that belongs with the JS rather than in the middle of
   `exc_info`** and re-raises, and `get_instance_state` turns it into its
   `partial: True` + `detail_error` record.
 
+`StorageReadError` covers *every* other way the answer can be wrong, including the
+two that would otherwise escape as their own types: a non-JSON string
+(`JSONDecodeError`) and JSON that is not an object (`AttributeError` on
+`payload.get`). Both propagated correctly, but a module that says "there is no
+third outcome" and then has four is a claim its code does not keep.
+
 That is one degradation shape, the one that already existed, reached by raising —
 which is what convention 2 and the function's own docstring already said. No
 `{"success": False}` dict, no new field, no widened `except`, and the `except
@@ -237,6 +243,37 @@ unchanged, so `get_debug_view`'s tool contract is byte-stable.
 The `except (RuntimeError, ConnectionError)` branch is **deleted**, not kept. It
 swallowed a dying connection into the same untrue `{}` + `partial: false`; a
 connection that is failing mid-collection is a degraded record by any reading.
+
+**(c) The leak this fix must not introduce.** Caught in review of the first
+commit, and worth its own section because it is a property of *fixes of this
+shape*, not of this bug.
+
+Making a silent failure visible means writing a message, and the first draft of
+`page_storage` wrote `f"{store}: unexpected entries {rows!r}"` and
+`f"{store}: unexpected entry {row!r}"`. `rows` **is the page's localStorage** —
+where a logged-in app keeps its session token. That message travels three ways at
+once:
+
+* into the durable backend log (`~/.stealth-mcp/logs/`, retained by
+  `logging_setup.prune_old_logs`),
+* into `get_instance_state`'s `detail_error`, i.e. into the MCP client's hands,
+* into a **Sentry breadcrumb** — `LoggingIntegration(event_level=logging.ERROR)`
+  (`observability.py:599`) turns WARNING records into breadcrumbs that ride out
+  attached to any later event, and `observability._scrub_event` strips emails and
+  URL query strings, not a bare bearer token. Per the memory note *external users
+  on PyPI*, that is other people's machines.
+
+The defect being fixed never logged storage contents — it crashed before it could.
+A fix that made the failure visible by quoting the data would have been strictly
+worse than the bug. So `page_storage` states the rule in its module docstring and
+every message reports **shape and count only**: a type name, an index, a field
+count, a character count. The single page-supplied string it repeats is Chrome's
+own `SecurityError` text on `StorageBlockedError`, which describes the property
+*access* and is produced before anything is read. Three parametrized pins embed a
+JWT-shaped `SECRET` in every malformed answer and assert it reaches neither the
+raised message, nor `detail_error`, nor any **formatted** log record (formatted,
+not `getMessage()`, because the WARNING carries `exc_info` and the rendered
+traceback is what a log file and a breadcrumb actually hold).
 
 ## 6. Tests
 
@@ -260,8 +297,14 @@ connection that is failing mid-collection is a degraded record by any reading.
   `state["partial"]`.
 * `test_a_blocked_page_is_logged_at_info_and_carries_no_traceback` — the two
   conditions must not collapse into one level.
-* `test_an_answer_that_is_not_the_promised_json_is_an_error` — a husk is a read
-  failure, never "no storage".
+* `test_an_answer_that_is_not_the_promised_json_is_an_error` — a husk, a non-JSON
+  string, a JSON scalar, a record that is not an object and three malformed entry
+  shapes are all read failures, never "no storage".
+* `test_a_malformed_answer_never_quotes_the_storage_it_was_reading` and
+  `test_the_storage_value_reaches_neither_the_log_nor_detail_error` — §5(c): the
+  same seven malformed answers, each embedding a JWT-shaped `SECRET`, asserted
+  absent from the raised message, from `detail_error` and from every formatted
+  log record.
 
 `DEEP_KEYS` in that module is the literal `repr` printed by the Chrome 152 probe,
 per the memory notes *mocked fakes can encode the bug* and *fixtures from the same
@@ -276,11 +319,18 @@ exactly the failure mode that module's docstring warns about. It now answers the
 one-shot read with a JSON string; its assertions (`{"ls-key": "ls-value"}`) are
 unchanged.
 
+Both fixtures key the viewport answer on **`innerWidth`**, not `JSON.stringify`.
+`FakeTab._answer_for_js` returns the first substring that matches, and the storage
+read and the viewport read now both *begin* with `JSON.stringify`, so a shared key
+would have made dict insertion order decide which JSON the storage read received —
+a fixture that is correct by accident. Each expression is keyed on a token unique
+to it.
+
 ## 7. Files changed
 
 | File | Δ |
 |---|---|
-| `embedded/page_storage.py` | **new**, 133 LOC (leaf) |
+| `embedded/page_storage.py` | **new**, 172 LOC (leaf) |
 | `embedded/browser_manager.py` | +21 / −22 → **1528 LOC** |
 | `embedded/debug_logger.py` | +10 / −1 (`log_warning(error=…)`) |
 | `tools/check_file_budgets.py` | grandfather row **1529 → 1528** (ratchet DOWN, cap == actual) |
@@ -308,6 +358,12 @@ unchanged.
   for the value by value and is safe. A sweep of the remaining bare
   `tab.evaluate` callers that expect a non-primitive is the durable fix and is
   larger than this finding.
+* **There is deliberately NO named home for the `JSON.stringify` idiom here.**
+  Three sites now use it (the viewport, and this module's two stores), and a
+  fourth family — the cloner's nested BiDi nodes — is being measured under
+  **F-872**, which owns the decision about whether these collapse into one home
+  and where it lives. Extracting a shared helper in this branch would pre-empt
+  that with a home chosen from three examples instead of four.
 * **`console_logs: []` was not investigated.** The live record also carried an
   empty `console_logs`, which `PageState` defaults to and nothing in
   `get_page_state` ever populates. It may be a second untruthful field; it is a

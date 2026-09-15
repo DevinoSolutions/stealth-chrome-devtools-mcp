@@ -1473,8 +1473,8 @@ class BrowserManager:
         except Exception as e:
             # F-869: ONE place a collection failure is recorded, at WARNING with
             # its traceback. It used to be INFO'd as "storage unavailable" and
-            # dropped, so a defect in this package was invisible to the caller
-            # and to error reporting alike.
+            # dropped. This reaches the caller (get_instance_state's partial
+            # record) and a post-mortem; NOT Sentry — see the finding's §8.
             debug_logger.log_warning(
                 "browser_manager",
                 "get_page_state",

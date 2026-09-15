@@ -43,6 +43,20 @@ and ``get_instance_state`` turns it into its ``partial: True`` +
 ``detail_error`` record (the named sub-field degradation, DESIGN §9). There is
 no third outcome and no ``{"success": False}`` dict.
 
+**No message here ever carries a stored VALUE.** A page's localStorage is where
+its session tokens and JWTs live, and a :class:`StorageReadError` travels three
+ways at once: into the durable backend log, into ``get_instance_state``'s
+``detail_error`` (i.e. to the MCP client), and into a Sentry breadcrumb —
+``LoggingIntegration(event_level=ERROR)`` reduces WARNINGs to breadcrumbs that
+ride out attached to some later event, and ``observability._scrub_event`` strips
+emails and URL query strings, not a bare bearer token. The defect this module
+closes never logged storage contents; the fix must not introduce a leak the
+defect did not have. So every message reports SHAPE and COUNT only — a type
+name, an index, a field count, a character count — never a key and never a
+value. The single exception is Chrome's own ``SecurityError`` text on
+:class:`StorageBlockedError`, which describes the property ACCESS and is
+produced before anything is read.
+
 A leaf: it imports no other embedded module and takes the tab as an argument.
 """
 
@@ -102,18 +116,29 @@ class StorageReadError(Exception):
 def _entries(record: object, store: str) -> dict[str, str]:
     """One store's ``{ok, entries}`` record as a plain ``{key: value}`` dict."""
     if not isinstance(record, dict):
-        raise StorageReadError(f"{store}: unexpected record {record!r}")
+        raise StorageReadError(
+            f"{store}: record is {type(record).__name__}, not an object"
+        )
     if not record.get("ok"):
+        # Chrome's own SecurityError text, which describes the PROPERTY ACCESS
+        # and carries no stored value — the one page-supplied string this
+        # module repeats (see the no-values rule above).
         raise StorageBlockedError(f"{store}: {record.get('reason')}")
     rows = record.get("entries")
     if not isinstance(rows, list):
-        raise StorageReadError(f"{store}: unexpected entries {rows!r}")
+        raise StorageReadError(f"{store}: entries is {type(rows).__name__}, not a list")
     entries: dict[str, str] = {}
-    for row in rows:
+    for index, row in enumerate(rows):
         # Every row is checked rather than unpacked: a malformed answer must be
         # a named StorageReadError, not a ValueError out of tuple unpacking.
-        if not isinstance(row, list) or len(row) != _PAIR:
-            raise StorageReadError(f"{store}: unexpected entry {row!r}")
+        if not isinstance(row, list):
+            raise StorageReadError(
+                f"{store}: entry {index} is {type(row).__name__}, not a pair"
+            )
+        if len(row) != _PAIR:
+            raise StorageReadError(
+                f"{store}: entry {index} has {len(row)} fields, not {_PAIR}"
+            )
         entries[str(row[0])] = str(row[1])
     return entries
 
@@ -122,12 +147,26 @@ async def read(tab: Tab) -> tuple[dict[str, str], dict[str, str]]:
     """``(local_storage, session_storage)`` for the page ``tab`` is showing.
 
     Raises :class:`StorageBlockedError` when the page itself refused the read, and
-    :class:`StorageReadError` when the answer was not the promised JSON.
+    :class:`StorageReadError` for every other way the answer can be wrong —
+    including a non-JSON string and JSON that is not the object this module
+    asked for, which would otherwise escape as a ``JSONDecodeError`` / an
+    ``AttributeError`` and make the module's two outcomes into four.
     """
     answer = await tab.evaluate(READ_JS)
     if not isinstance(answer, str):
-        raise StorageReadError(f"evaluate answered {type(answer).__name__}: {answer!r}")
-    payload = json.loads(answer)
+        raise StorageReadError(
+            f"evaluate answered {type(answer).__name__}, not the JSON string asked for"
+        )
+    try:
+        payload = json.loads(answer)
+    except ValueError as bad_json:
+        raise StorageReadError(
+            f"evaluate answered {len(answer)} characters that are not JSON"
+        ) from bad_json
+    if not isinstance(payload, dict):
+        raise StorageReadError(
+            f"evaluate answered JSON {type(payload).__name__}, not an object"
+        )
     return _entries(payload.get("local"), "localStorage"), _entries(
         payload.get("session"), "sessionStorage"
     )

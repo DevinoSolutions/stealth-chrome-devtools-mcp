@@ -81,9 +81,10 @@ PAGE_JS = {
     # the live product raised ``TypeError: unhashable type: 'dict'`` here while
     # this fixture stayed green. Storage is now ONE ``JSON.stringify`` read —
     # the same trick F-844 applied to the viewport — so the fixture answers it
-    # the same way: a JSON *string*. Keyed by ``read('localStorage')`` and
-    # placed BEFORE the viewport entry because both expressions start with
-    # ``JSON.stringify`` and FakeTab takes the first matching substring.
+    # the same way: a JSON *string*. Both expressions now begin with
+    # ``JSON.stringify`` and FakeTab returns the FIRST substring that matches, so
+    # each is keyed on a token unique to it — ``read('localStorage')`` here and
+    # ``innerWidth`` below — rather than on dict order.
     # See tests/test_page_state_storage.py, which is F-869's home.
     "read('localStorage')": (
         '{"local":{"ok":true,"entries":[["ls-key","ls-value"]]},'
@@ -92,7 +93,7 @@ PAGE_JS = {
     # A JSON *string*, because that is what the product now asks the page for
     # and what nodriver hands back for one. A dict here would model an
     # `evaluate` that returns plain objects — which it does not (see below).
-    "JSON.stringify": '{"width":1280,"height":720,"devicePixelRatio":1}',
+    "innerWidth": '{"width":1280,"height":720,"devicePixelRatio":1}',
 }
 
 
@@ -192,7 +193,7 @@ async def test_page_state_accepts_a_fractional_device_pixel_ratio(manager_and_ta
     ``int``: nobody wants ``"width": 1280.0``.
     """
     manager, tab = manager_and_tab
-    tab._evaluate_map["JSON.stringify"] = (
+    tab._evaluate_map["innerWidth"] = (
         '{"width":1280,"height":720,"devicePixelRatio":1.25}'
     )
 
