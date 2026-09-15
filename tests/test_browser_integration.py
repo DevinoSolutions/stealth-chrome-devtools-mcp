@@ -14,6 +14,7 @@ import importlib.util
 import os
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -963,6 +964,17 @@ class TestListInstancesLiveState:
         [entry] = [e for e in listing if e["instance_id"] == iid]
         return entry
 
+    @staticmethod
+    def _same_url(reported, expected):
+        """Compare urls through ``unquote``.
+
+        Chrome is free to percent-encode a ``data:`` URL's payload in the target
+        record it hands back (``<`` / ``>`` / spaces), so a byte comparison
+        against the literal passed to ``navigate`` would pin an encoding choice
+        rather than the identity this test is about.
+        """
+        return urllib.parse.unquote(reported) == urllib.parse.unquote(expected)
+
     @pytest.mark.asyncio
     async def test_live_title_url_and_tab_switch(self, tmp_empty_root):
         spawn = _get_fn("spawn_browser")
@@ -1012,7 +1024,10 @@ class TestListInstancesLiveState:
             await asyncio.sleep(0.3)
             entry = self._entry(await list_instances(), iid)
             assert entry["title"] == "Gamma"
-            assert entry["current_url"] == self.GAMMA
+            assert self._same_url(entry["current_url"], self.GAMMA), (
+                entry["current_url"],
+                self.GAMMA,
+            )
         finally:
             with contextlib.suppress(Exception):
                 await close(instance_id=iid)

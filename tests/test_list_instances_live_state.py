@@ -26,6 +26,7 @@ real-browser half of this finding is
 """
 
 import asyncio
+import logging
 
 import pytest
 
@@ -219,6 +220,38 @@ async def test_missing_tab_degrades_rather_than_raising(patched_server):
     assert entry["partial"] is True
     assert entry["last_navigated_url"] == "https://gone.test/"
     assert "current_url" not in entry
+
+
+async def test_a_degraded_entry_reaches_the_durable_log(patched_server, caplog):
+    """A partial row is an ANSWER to the caller; it must not also be the only
+    record of a bug inside ``tab_identity``.
+
+    Shape only in the message — a url can carry a session token in its query
+    string and this line reaches the backend log and a Sentry breadcrumb — with
+    the traceback riding along as ``exc_info`` (F-869's ``error=``).
+    """
+    srv = _seeded(
+        patched_server,
+        instances=[
+            fake_instance("i1", "active", "https://secret.test/?token=abc", "Gone")
+        ],
+        tabs={},
+        browsers={},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="stealth.backend"):
+        [entry] = await call_tool(srv, "list_instances")
+
+    assert entry["partial"] is True
+    [record] = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "i1" in r.getMessage()
+    ]
+    assert "ToolError" in record.getMessage()
+    assert record.exc_info is not None, "the traceback must ride along as exc_info"
+    # The cached url is in the RECORD the caller gets; it is not in the log line.
+    assert "token=abc" not in record.getMessage()
 
 
 # ---------------------------------------------------------------------------
