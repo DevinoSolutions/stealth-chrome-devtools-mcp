@@ -64,9 +64,13 @@ keydown submits 0 times, a trusted `rawKeyDown` (which fires no keypress) submit
 times, and only a `keyDown` carrying `text="\r"` submits — while adding a separate
 `char` event on top fires a second keypress and submits **twice**. And nothing
 between "dispatch the events" and `return True` ever asked the page whether the
-characters had landed: measured on the same Chrome, `readonly`, `range`, `date` and
-`color` controls each accept every key event and leave their value exactly where it
-was, and the tool answered `True` for all four. Key presses and the "did the page
+characters had landed: measured on the same Chrome, `readonly`, `range` and `color`
+controls each accept every key event and leave their value exactly where it was, and
+the tool answered `True` for all three. (`<input type="date">` did the same on this
+machine's Chrome 152, but that one is build- and locale-dependent — CI's headless
+Chrome accepted the digits on Windows, macOS and Linux alike — so it is pinned as the
+invariant rather than as a refusal: never a success over a value that did not move.)
+Key presses and the "did the page
 take it" check now live in `embedded/text_entry.py`: every key goes out as one
 `Input.dispatchKeyEvent` `keyDown` carrying `text` plus a `keyUp` (so `keydown`,
 `keypress` and `input` all fire, all trusted — the shipped path sent a lone `char`

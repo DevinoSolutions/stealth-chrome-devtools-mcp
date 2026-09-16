@@ -371,8 +371,12 @@ async def test_rich_input_types(fixture_app_server):
         dispatching input DOES log, proving the gap is the control, not the page.
       * number (spec-correct): type_text lands digits -> value "42",
         ``input:number-input`` logs. The positive control for the three raises.
-      * date   (tool-gap, now REPORTED): type_text cannot fill the segmented
-        date field -> value stays "" and the tool raises; execute_script sets it.
+      * date   (ENVIRONMENT-DEPENDENT): whether Chrome's segmented date control
+        takes typed digits varies by build/locale -- local headless Chrome 152
+        refuses, all three release-gate cells accepted in run 35039244942. So
+        this pins only the invariant F-873 established: the tool either raises
+        with the value unmoved, or returns with the value moved -- never
+        "returned true while unchanged". execute_script sets it either way.
       * color  (tool-gap, now REPORTED): type_text cannot drive the color
         control -> value stays "#000000" and the tool raises; execute_script
         sets it.
@@ -417,13 +421,19 @@ async def test_rich_input_types(fixture_app_server):
         )
         assert any(a.startswith("input:number-input:") for a in await read_actions(iid))
 
-        # date: the segmented field cannot be filled by typing -> raises.
-        with pytest.raises(ToolError):
+        # date: build/locale decides whether the segments take digits, so pin
+        # the F-873 invariant instead of either answer.
+        date_before = await eval_js(iid, "document.getElementById('date-input').value")
+        date_raised = None
+        try:
             await type_text(instance_id=iid, selector="#date-input", text="2025-06-15")
-        assert (
-            await eval_js(iid, "document.getElementById('date-input').value")
-            != "2025-06-15"
-        )
+        except ToolError as exc:
+            date_raised = exc
+        date_after = await eval_js(iid, "document.getElementById('date-input').value")
+        if date_raised is not None:
+            assert date_after == date_before, (date_before, date_after)
+        else:
+            assert date_after != date_before, (date_before, date_after)
         await execute(
             instance_id=iid,
             script=(
