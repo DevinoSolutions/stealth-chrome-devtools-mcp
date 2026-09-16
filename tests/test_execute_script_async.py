@@ -31,7 +31,14 @@ Hermetic: a ``FakeTab`` and real ``nodriver`` CDP records, no browser.
 
 import pytest
 
-from fakes import FakeBrowserManager, FakeTab, call_tool, js_result, js_threw
+from fakes import (
+    FakeBrowserManager,
+    FakeTab,
+    call_tool,
+    js_promise,
+    js_result,
+    js_threw,
+)
 from stealth_chrome_devtools_mcp.embedded import server
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -238,11 +245,23 @@ def test_the_complaint_table_is_the_whole_trigger(message, expected):
 
 
 @pytest.mark.asyncio
+async def test_a_resolved_promise_answers_with_its_value_not_an_empty_object():
+    """``js_promise`` answers the way Chrome does: the settlement only when
+    ``awaitPromise`` was asked for, and the empty by-value serialization of the
+    Promise OBJECT when it was not (``fakes.JsPromise``). So this node fails on
+    2.1.8 with the reported ``{}`` rather than on a canned value."""
+    tab = FakeTab(evaluate_result=js_promise({"ok": 1}))
+
+    assert await DOMHandler.execute_script(tab, "Promise.resolve({ok: 1})") == {"ok": 1}
+
+
+@pytest.mark.asyncio
 async def test_a_rejection_raises_instead_of_answering_with_an_empty_object():
-    """``awaitPromise`` reports a rejection as ``exceptionDetails``, which is the
-    shape F-795's reader already refuses — so the fix to (2) is what turns a
-    silent ``{"success": true, "result": {}}`` into a raise."""
-    tab = FakeTab(evaluate_result=js_threw("Error: boom-reason"))
+    """The worst of the three shapes: 2.1.8 answered a REJECTION with
+    ``{"success": true, "result": {}}``. ``awaitPromise`` reports it as
+    ``exceptionDetails`` — the shape F-795's reader already refuses — so the one
+    flag is what turns a silent success into a raise."""
+    tab = FakeTab(evaluate_result=js_promise(rejects="Error: boom-reason"))
 
     with pytest.raises(ToolError) as raised:
         await DOMHandler.execute_script(tab, "Promise.reject(new Error('boom-reason'))")
@@ -259,7 +278,7 @@ async def test_a_rejection_reason_is_clamped_because_the_page_authored_it():
         JS_ERROR_TRUNCATION,
     )
 
-    tab = FakeTab(evaluate_result=js_threw("Error: " + "x" * 5000))
+    tab = FakeTab(evaluate_result=js_promise(rejects="Error: " + "x" * 5000))
 
     with pytest.raises(ToolError) as raised:
         await DOMHandler.execute_script(tab, "Promise.reject(new Error('x'))")
@@ -286,6 +305,8 @@ async def test_a_short_reason_is_not_marked_as_truncated():
 
 @pytest.mark.asyncio
 async def test_the_tool_answers_with_the_awaited_value(patched_server):
+    # No "=>" in the script's own text, or the map would answer the FIRST
+    # attempt and the node would be green without a retry ever happening.
     tab = FakeTab(
         evaluate_result=TOP_LEVEL_AWAIT,
         evaluate_map={WRAPPED: js_result({"fetched": "hello"})},
@@ -296,7 +317,7 @@ async def test_the_tool_answers_with_the_awaited_value(patched_server):
         server,
         "execute_script",
         instance_id="i1",
-        script="const t = await fetch('/x').then(r => r.text()); return {fetched: t};",
+        script="const t = await fetch('/x').then(readText); return {fetched: t};",
     )
 
     assert result == {"success": True, "result": {"fetched": "hello"}, "error": None}
@@ -306,7 +327,7 @@ async def test_the_tool_answers_with_the_awaited_value(patched_server):
 async def test_the_tool_raises_for_a_rejection_rather_than_reporting_success(
     patched_server,
 ):
-    tab = FakeTab(evaluate_result=js_threw("Error: es-rejected"))
+    tab = FakeTab(evaluate_result=js_promise(rejects="Error: es-rejected"))
     patched_server(browser_manager=FakeBrowserManager(tabs={"i1": tab}))
 
     with pytest.raises(ToolError) as raised:

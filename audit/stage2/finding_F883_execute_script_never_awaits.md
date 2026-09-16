@@ -201,7 +201,37 @@ claim nothing enforces drifts.
 
 ## 4. Verification
 
-### Hermetic — `tests/test_execute_script_async.py` (21 nodes)
+### RED, measured — the pins run against 2.1.8's own source
+
+Both new files were run against `6ca0ae9`'s `src/stealth_chrome_devtools_mcp/embedded/`
+(the release-2.1.8 tree, `script_evaluation.py` removed) with the *new* tests in
+place. Hermetic: **17 failed, 5 passed in 3.01 s**. Real Chrome: **6 failed, 1
+passed in 54.14 s**. The four headline nodes and their exact 2.1.8 messages:
+
+| node | 2.1.8 |
+|---|---|
+| `test_top_level_await_runs_instead_of_being_a_syntax_error` | `ToolError: Script raised an exception: SyntaxError: await is only valid in async functions and the top level bodies of modules` |
+| `test_a_returned_promise_answers_with_the_value_it_resolves_to` | `AssertionError: assert {} == {'k': 'es-fetched-value', 'n': 9}` |
+| `test_a_rejected_promise_raises_carrying_its_reason` | `Failed: DID NOT RAISE ToolError` |
+| `test_a_promise_that_never_settles_is_killed_at_timeout_ms` | `Failed: DID NOT RAISE ToolError` — 2.1.8 answered `{}` *instantly* |
+
+The five hermetic and one real-Chrome nodes that were **already green on 2.1.8**
+are the regression guards, and their staying green is the point: the CSP /
+user-gesture flags and the absent `serializationOptions` (F-832), a top-level
+declaration still evaluated unwrapped, an unrelated failure still evaluated
+exactly once, an illegal `return` still named as a `return` (F-812), a short
+reason not marked truncated, and a synchronous throw still carrying its own text.
+
+`tests/fakes.py` gained `JsPromise` / `js_promise` for this, and it is the
+mechanism the RED depends on: the double answers a script whose value is a
+Promise **two different ways depending on the `awaitPromise` it reads off the
+frame** — the settlement when it was asked for, and `RemoteObject(type=object,
+subtype=promise, value={})` when it was not, which is what Chrome sends
+(measured). A double that answered the settlement either way would have been
+green for the defect, which is exactly how the first draft of two of these nodes
+passed against 2.1.8 before the model existed.
+
+### Hermetic — `tests/test_execute_script_async.py` (22 nodes)
 
 Pins the MECHANISM, because a `FakeTab` cannot resolve a Promise — only Chrome
 can: `awaitPromise` rides on both sends; `userGesture` /
