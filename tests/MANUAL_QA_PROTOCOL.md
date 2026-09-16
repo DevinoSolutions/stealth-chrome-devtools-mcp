@@ -376,8 +376,10 @@ not content modification.
 **Evidence**: planned — planned-pytest:
 `tests/test_manual_qa_parity.py::test_type_readonly_field_refused`.
 **Current support (non-acceptance)**: pytest:
-`tests/test_e2e_interaction_fidelity.py::test_form_semantics` characterizes the
-current readonly behavior but contains no exact routed finding ID.
+`tests/test_e2e_interaction_fidelity.py::test_form_semantics` and
+`tests/test_e2e_type_text_verification.py::test_a_control_that_refuses_the_text_raises`
+pin the refusal: since F-873 `type_text` raises `ToolError` naming the selector
+rather than answering `True` over a field it never changed.
 `[KNOWN-BUG: E8-3]` Current behavior is not accepted; the success assertion is
 planned.
 
@@ -1920,8 +1922,8 @@ step exists so the DOM-level half is proved rather than assumed.
 is the honesty control. `type_text` emits `beforeinput`/`input` per character and
 `paste_text` emits one `beforeinput`/`input` for the whole string; **neither
 emits any composition event at all**. Without it, the node above could be
-misread as "the product speaks IME". `type_text`'s separate missing
-`keydown`/`keyup` half is already pinned by
+misread as "the product speaks IME". The key lifecycle `type_text` emits
+(`keydown`/`keypress`/`keyup`, all trusted since F-873) is already pinned by
 `tests/test_e2e_interaction_fidelity.py::test_keyboard_fidelity_and_enter_submit`
 and is not re-measured here.
 
