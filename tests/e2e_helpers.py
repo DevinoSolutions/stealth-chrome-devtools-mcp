@@ -166,6 +166,28 @@ async def navigate_and_settle(iid: str, url: str, timeout: float = 10.0):
     return result
 
 
+# ── The fixture server's own ledger: the oracle that does NOT go through the
+# browser. Off-thread so a blocking request never stalls the loop driving Chrome.
+# ONE implementation, because "what did the browser actually ask the server for"
+# is one question however many E2E modules ask it. ──
+FIXTURE_HTTP_TIMEOUT = 10
+
+
+async def fixture_get(url: str):
+    """Plain HTTP straight from this process to the fixture origin."""
+    import requests
+
+    return await asyncio.to_thread(requests.get, url, timeout=FIXTURE_HTTP_TIMEOUT)
+
+
+async def reset_fixture_ledger(origin: str) -> None:
+    await fixture_get(f"{origin}/e2e/reset")
+
+
+async def fixture_ledger(origin: str) -> dict:
+    return (await fixture_get(f"{origin}/e2e/ledger")).json()
+
+
 # ── Small readers shared across E2E modules. ──
 async def eval_js(iid: str, expression: str) -> Any:
     """Evaluate a non-blocking JS expression via ``execute_script``; return result.

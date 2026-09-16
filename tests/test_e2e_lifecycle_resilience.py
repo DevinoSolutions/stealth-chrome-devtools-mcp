@@ -76,6 +76,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -172,7 +173,29 @@ LIFECYCLE_INCIDENTS: dict[str, tuple[str, ...]] = {
 }
 
 # NOT an incident: F-820 exists precisely so a missed probe is not a verdict.
+# ``backend_watchdog.watch_liveness`` writes one of these per missed tick as
+# ``probe failed %d/%d on port %d``, so the FULL run is readable from the text —
+# which is what lets S1 assert the implication below rather than a count.
 STRIKE_MARKER = "probe failed"
+# The OTHER non-incident, and the one that makes a full strike run legible:
+# ``watch_liveness`` logs this (INFO) at the single point where the confirmation
+# phase was entered AND answered "alive" — i.e. exactly when F-820 did its job.
+# It is the positive half of the only branch that can also emit
+# ``confirmed unusable`` (``condemned:watchdog`` above), so "a full strike run,
+# neither line" is not a state the product has: a run that reaches N/N proves
+# which way the verdict went. Same tuple-of-substrings shape as an incident, for
+# the same reason — one short phrase is a false positive waiting to happen.
+CONFIRMED_BUSY_PARTS = ("backend on port", "was busy, not dead")
+# The product's own format string for a strike, restated so the reader below is
+# derived from it rather than from a hand-typed shape; the vocabulary pin
+# asserts it is still in ``backend_watchdog`` AND that the reader reads what it
+# renders, so a reworded line cannot leave S1 silently matching nothing.
+STRIKE_FORMAT = "probe failed %d/%d on port %d"
+_STRIKE_RUN_RE = re.compile(r"probe failed (\d+)/(\d+) on port (\d+)")
+# ``on port %d`` is the ONE way every watchdog line names its subject, which is
+# what lets a verdict be matched to the strike run it concluded rather than to
+# "some verdict, somewhere in the fleet".
+_PORT_RE = re.compile(r"on port (\d+)")
 
 
 async def test_lifecycle_incident_patterns_match_the_product_strings() -> None:
@@ -218,6 +241,24 @@ async def test_lifecycle_incident_patterns_match_the_product_strings() -> None:
                 f"check"
             )
     assert STRIKE_MARKER in watchdog
+    # The three non-incident facts S1's implication oracle is built on, pinned
+    # for the same reason the incidents are: reword any of them and the oracle
+    # goes RED rather than quietly vacuous.
+    for part in CONFIRMED_BUSY_PARTS:
+        assert part in watchdog, (
+            f"{part!r}, part of the 'busy, not dead' verdict S1's implication "
+            f"oracle requires, is gone from backend_watchdog"
+        )
+    assert STRIKE_FORMAT in watchdog, (
+        f"{STRIKE_FORMAT!r}, the format string S1 parses strike runs out of, is "
+        f"gone from backend_watchdog — re-derive the reader from the new one"
+    )
+    rendered = STRIKE_FORMAT % (3, 3, 19222)
+    assert _strike_run(rendered) == (3, 3, 19222), (
+        f"the strike-run reader no longer reads the product's own line: "
+        f"{rendered!r} -> {_strike_run(rendered)}"
+    )
+    assert _port_in(rendered) == 19222
 
 
 # ── The idle window, computed from the product's own constants ───────────────
@@ -250,6 +291,13 @@ IDLE_WINDOW_SECONDS = _idle_window_seconds()
 # still have room for its own assertions (~10s measured). A full-module run
 # reaches the node with 194-218s remaining; anything above this is a partial
 # selection, which the node turns into a legible skip rather than a timeout.
+#
+# It is a budget, not a derivation, and it depends on exactly three things —
+# change any of them and re-measure this number: (1) the ``timeout`` in this
+# module's ``pytestmark`` (300s, the per-test ceiling both gate cells run at),
+# (2) :data:`IDLE_WINDOW_SECONDS`, which is what the node must out-wait, and
+# (3) the wall time the nodes BEFORE it spend, since the witness's idleness is
+# overlapped with their work rather than added to it.
 IDLE_SLEEP_BUDGET_SECONDS = 250.0
 
 
@@ -398,11 +446,88 @@ def _strikes(lines: list[tuple[str, str]]) -> int:
     return sum(1 for _, line in lines if STRIKE_MARKER in line)
 
 
+def _strike_run(line: str) -> tuple[int, int, int] | None:
+    """``(consecutive, limit, port)`` for a strike line, else ``None``.
+
+    Derived from :data:`STRIKE_FORMAT`, which the vocabulary pin ties to the
+    product's own source AND to this reader, so a reworded line cannot leave
+    this matching nothing.
+    """
+    m = _STRIKE_RUN_RE.search(line)
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def _port_in(line: str) -> int | None:
+    """The port a watchdog line is ABOUT — every one of them says ``on port N``."""
+    m = _PORT_RE.search(line)
+    return int(m[1]) if m else None
+
+
+def assert_strikes_concluded_correctly(
+    lines: list[tuple[str, str]], what: str
+) -> tuple[int, int]:
+    """The F-820 IMPLICATION, and the honest shape of this oracle: **whenever a
+    FULL strike run is reached on a port, the confirmation phase must have run
+    and must have answered "busy, not dead" for that port** — never nothing, and
+    never ``confirmed unusable``.
+
+    Returns ``(strike lines, longest run reached)``.
+
+    An implication rather than a count, because the count is not stable: across
+    seven runs of this module S1 logged 0, 0, 0, 0, 0, 6 and 0 strikes, so any
+    threshold or floor over it would be a coin flip. The implication is exactly
+    as strong as the product's own branch — ``watch_liveness`` reaches
+    ``consecutive == failures_before_teardown`` and then logs precisely one of
+    the two verdicts — so it is VACUOUS on a run where the load did not bite and
+    a real F-820 oracle on one where it did, with no flake either way.
+
+    The verdict is matched on the SAME port: two proxies share a backend here,
+    and a confirmation for one port is not evidence about the other's.
+    """
+    longest = 0
+    full_runs: set[int] = set()
+    for _, line in lines:
+        run = _strike_run(line)
+        if run is None:
+            continue
+        consecutive, limit, port = run
+        longest = max(longest, consecutive)
+        if consecutive >= limit:
+            full_runs.add(port)
+
+    confirmed_busy = {
+        port
+        for _, line in lines
+        if all(part in line for part in CONFIRMED_BUSY_PARTS)
+        and (port := _port_in(line)) is not None
+    }
+    unresolved = full_runs - confirmed_busy
+    assert not unresolved, (
+        f"{what}: a full strike run was reached on port(s) {sorted(unresolved)} "
+        f"and no {CONFIRMED_BUSY_PARTS[1]!r} verdict followed for them. Either "
+        f"the confirmation phase did not run, or it condemned a backend that was "
+        f"still answering every call this node made — which is F-820 itself.\n"
+        + "\n".join(
+            f"  {name}: {line}"
+            for name, line in lines
+            if STRIKE_MARKER in line or CONFIRMED_BUSY_PARTS[1] in line
+        )
+    )
+    return _strikes(lines), longest
+
+
 def assert_no_lifecycle_incident(
     space: dict, offsets: dict[Path, int], what: str
-) -> int:
-    """The fourth invariant. Returns the strike count, which is a measurement,
-    not a verdict (F-820: strikes alone never condemn)."""
+) -> tuple[int, int]:
+    """The fourth invariant, plus the one thing a strike DOES have to imply.
+
+    Returns ``(strike lines, longest run reached)`` — both measurements, never
+    verdicts (F-820: strikes alone never condemn). The verdict half is
+    :func:`assert_strikes_concluded_correctly`, applied here rather than in one
+    node because "a full strike run must have concluded 'busy, not dead'" is
+    true of EVERY node, not only the one that applies load: S0, which applies
+    none, has logged 2 strikes.
+    """
     lines = _lines_since(space, offsets)
     incidents = _incidents(lines)
     assert not incidents, (
@@ -411,7 +536,7 @@ def assert_no_lifecycle_incident(
         + "\n".join(f"  [{kind}] {name}: {line}" for kind, name, line in incidents)
         + f"\n--- proxy warnings ---\n{workspace_proxy_warnings(space)[-3000:]}"
     )
-    return _strikes(lines)
+    return assert_strikes_concluded_correctly(lines, what)
 
 
 # ── Browser-liveness oracle ──────────────────────────────────────────────────
@@ -736,7 +861,7 @@ async def test_s0_baseline_soak_three_proxies_sixty_seconds(
     # not have failed).
     assert calls["issued"] >= SOAK_PROXIES * 60, calls
     assert_backend_unchanged(space, backend_pid, "S0 soak")
-    strikes = assert_no_lifecycle_incident(space, offsets, "S0 soak")
+    strikes, _ = assert_no_lifecycle_incident(space, offsets, "S0 soak")
     print(f"\nS0: {elapsed:.1f}s, {calls['issued']} tool calls, {strikes} strikes")
 
 
@@ -817,15 +942,26 @@ async def test_s1_cpu_saturation_does_not_condemn_a_live_backend(
     load at all, logged **2 strikes** in one of the reviewer's runs, so strikes
     are not a clean function of the stress on this box.
 
-    The node therefore proves the whole path survives saturation — probes may
-    miss, strikes may accumulate, calls keep being answered and nothing is
-    condemned. It does NOT prove F-820's confirmation phase is correct: a strike
-    COUNT cannot say whether three ever landed consecutively on one proxy, and
-    the hermetic ``test_watchdog_busy_vs_dead`` and
-    ``test_singleton_starvation_patience`` own that claim. The count is printed
-    on every run precisely so a cell where the load bites harder stays visible:
-    a 2-core CI runner at the same 2x oversubscription, with Chrome beside it,
-    is the likelier place. Deliberately not tuned upward to force strikes — the
+    WHAT IT ASSERTS ABOUT THOSE STRIKES, and the exact shape of the disclaimer.
+    No count and no floor — 0,0,0,0,0,6,0 across seven runs cannot carry a
+    threshold. What is asserted is the IMPLICATION
+    (:func:`assert_strikes_concluded_correctly`, applied by every node's
+    incident check): if a FULL run is ever reached on a port, the confirmation
+    phase must have run for THAT port and must have answered ``was busy, not
+    dead`` — never silence, never ``confirmed unusable``. So:
+
+    * on a run whose longest run is BELOW the limit, this node is silent about
+      the confirmation phase, because the product never entered it;
+    * on a run that reaches the limit, this node IS an F-820 oracle end to end,
+      over the real transport, with the real gate.
+
+    The longest run is printed on every run so which of those two happened is
+    readable from the output, and so a cell where the load bites harder stays
+    visible: a 2-core CI runner at the same 2x oversubscription, with Chrome
+    beside it, is the likelier place. The hermetic
+    ``test_watchdog_busy_vs_dead`` and ``test_singleton_starvation_patience``
+    remain the nodes that reach the confirmation phase DELIBERATELY rather than
+    when the box happens to be slow. Not tuned upward to force strikes — the
     window is capped at 25s by house rule, the developer machine runs other
     agents, and a node that must starve a shared machine to mean anything is a
     node that will flake.
@@ -880,11 +1016,14 @@ async def test_s1_cpu_saturation_does_not_condemn_a_live_backend(
         assert_browser_processes_alive(
             space, [i for _, i in pairs], "S1 cpu saturation"
         )
-        strikes = assert_no_lifecycle_incident(space, offsets, "S1 cpu saturation")
+        strikes, longest_run = assert_no_lifecycle_incident(
+            space, offsets, "S1 cpu saturation"
+        )
 
     print(
         f"\nS1: {elapsed:.1f}s, {load} busy loops on {os.cpu_count()} cpus, "
-        f"{answered['n']} calls answered, {strikes} watchdog strikes"
+        f"{answered['n']} calls answered, {strikes} watchdog strikes, "
+        f"longest consecutive run {longest_run}"
     )
 
 
@@ -1016,7 +1155,7 @@ async def _s2_kill_and_assert(  # noqa: PLR0913  PERMANENT(one call site, named 
     for instance_id in (instance_b, instance_a):
         await _cdp_round_trip(wire_b, instance_id)
 
-    strikes = assert_no_lifecycle_incident(space, offsets, "S2 sibling death")
+    strikes, _ = assert_no_lifecycle_incident(space, offsets, "S2 sibling death")
     return time.monotonic() - started, strikes
 
 
@@ -1094,7 +1233,7 @@ async def test_s3_session_churn_keeps_the_backend_serving_old_and_new_sessions(
             space, [idle_witness["instance_id"]], "S3 idle witness after churn"
         )
         assert_backend_unchanged(space, backend_pid, "S3 session churn")
-        strikes = assert_no_lifecycle_incident(space, offsets, "S3 session churn")
+        strikes, _ = assert_no_lifecycle_incident(space, offsets, "S3 session churn")
 
     print(
         f"\nS3: {elapsed:.1f}s, {ok} probe sessions + {PROBE_CHURN_PROXIES} proxy "
@@ -1165,7 +1304,7 @@ async def test_s4_a_session_idle_past_every_reaper_still_answers(
         await _cdp_round_trip(wire, instance_id)
         assert_backend_unchanged(space, backend_pid, "S4 idle")
         assert_browser_processes_alive(space, [instance_id], "S4 idle")
-        strikes = assert_no_lifecycle_incident(space, offsets, "S4 idle")
+        strikes, _ = assert_no_lifecycle_incident(space, offsets, "S4 idle")
     finally:
         # The witness's browser is closed here rather than in its fixture: the
         # fixture must never CALL the wire (that resets the clock), and this is

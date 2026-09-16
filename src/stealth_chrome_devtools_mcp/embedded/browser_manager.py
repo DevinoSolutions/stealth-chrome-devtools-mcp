@@ -1156,10 +1156,8 @@ class BrowserManager:
                 tab = await self.get_navigation_tab(instance_id)
             else:
                 cause = type(last_error).__name__ if last_error else "unknown"
-                tab = await self._replace_main_tab(
-                    instance_id,
-                    reason=f"recovering after navigation failure: {cause}",
-                )
+                reason = f"recovering after navigation failure: {cause}"
+                tab = await self._replace_main_tab(instance_id, reason=reason)
 
             if not tab:
                 raise tool_errors.InstanceNotFoundError(
@@ -1185,18 +1183,14 @@ class BrowserManager:
                     timeout=timeout_seconds,
                 )
 
-                elapsed = time.monotonic() - start_time
-                remaining = timeout_seconds - elapsed
+                remaining = timeout_seconds - (time.monotonic() - start_time)
                 if remaining <= 0:
                     raise TimeoutError("Navigation result budget exhausted")  # noqa: TRY301  plan_M4ph1
 
-                final_url = await asyncio.wait_for(
-                    tab.evaluate("window.location.href"),
-                    timeout=remaining,
-                )
-                title = await asyncio.wait_for(
-                    tab.evaluate("document.title"),
-                    timeout=remaining,
+                # ONE round trip for both (F-882): two straddled a `meta refresh`
+                # and answered with one document's url and another's title.
+                final_url, title = await asyncio.wait_for(
+                    navigation_milestone.landing(tab), timeout=remaining
                 )
 
                 await self.update_instance_state(instance_id, final_url, title)
@@ -1211,11 +1205,13 @@ class BrowserManager:
                 return {"url": final_url, "title": title, "success": True}
             except Exception as error:
                 last_error = error
+                # The reason comes from BOTH witnesses (F-882): a TimeoutError's
+                # own message is empty, so the line used to end at the colon.
                 debug_logger.log_warning(
                     "browser_manager",
                     "navigate",
-                    f"Navigation attempt {attempt + 1} failed for "
-                    f"{instance_id}: {error}",
+                    f"Navigation attempt {attempt + 1} failed for {instance_id}: "
+                    f"{type(error).__name__}: {error} [{progress.describe()}]",
                     {"url": url, "attempt": attempt + 1},
                 )
                 # A timeout after Chrome ACCEPTED the navigation is the page's own
@@ -1226,7 +1222,8 @@ class BrowserManager:
                 if attempt == 1 or not retry:
                     if isinstance(error, asyncio.TimeoutError):
                         raise tool_errors.ToolError(
-                            f"Navigation to {url} timed out after {timeout}ms"
+                            f"Navigation to {url} timed out after {timeout}ms "
+                            f"({progress.describe()})"
                         ) from error
                     raise
         return None

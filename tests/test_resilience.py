@@ -538,6 +538,20 @@ async def _assert_hang_times_out(instance, base: str, wait_until: str) -> None:
     The message is asserted byte-for-byte, not matched loosely: it is the M6
     pin, and a looser assertion would let a reworded (or differently caused)
     failure keep the node green.
+
+    **SOFT golden, updated deliberately with F-882** - in the same PR that
+    changed the shape, per CONTRIBUTING's golden discipline. The message gained
+    a parenthesised REASON, and the reason is the point rather than decoration:
+    a bare ``TimeoutError`` stringifies to nothing at all, so the durable
+    warning line this one mirrors used to end at its colon. What the reason
+    carries is F-881/F-882's line - whether Chrome ever ACCEPTED the
+    navigation. This route never sends a byte, so ``Page.navigate`` never
+    answers, the tab may be stale, and the one-shot recovery on a fresh tab is
+    the right response; a navigation Chrome accepted and the page then failed to
+    finish reads ``accepted, committed, ...`` instead and is never retried.
+    That is why the expected text below is a CONSTANT and not a pattern: for a
+    hang BEFORE headers the reason is always this one, and a node that accepted
+    any reason would stop pinning WHICH of the two failures happened.
     """
     navigate = get_fn("navigate")
     token = _token(f"hang-{wait_until}")
@@ -572,9 +586,10 @@ async def _assert_hang_times_out(instance, base: str, wait_until: str) -> None:
         "deadline — the deadline is not what ended it"
     )
     assert elapsed < OUTER_BOUND
-    assert str(value) == f"Navigation to {url} timed out after {NAV_TIMEOUT_MS}ms", (
-        f"M6-pinned navigation-timeout message changed: {str(value)!r}"
-    )
+    unaccepted = "Chrome never answered Page.navigate"
+    assert str(value) == (
+        f"Navigation to {url} timed out after {NAV_TIMEOUT_MS}ms ({unaccepted})"
+    ), f"M6-pinned navigation-timeout message changed: {str(value)!r}"
 
 
 async def test_load_wait_against_a_hang_times_out_with_the_pinned_message(
