@@ -268,6 +268,17 @@ class FakeTab:
     for ``net::ERR_ABORTED`` (a download) nothing commits and no event ever
     fires, which is measured and is why the tool must answer rather than wait.
 
+    **The hold.** ``supersede_held`` keeps the replacement BACK until the test
+    calls :meth:`deliver_supersession`. It exists for the nodes that pin "the
+    wait ended at OUR document" while a replacement is on its way: scheduled on
+    the loop, the replacement advances the fake's page whenever the host gives
+    the product a turn, and how many turns fall between a milestone landing and
+    the tool's landing read is a property of the asyncio implementation
+    (whether ``wait_for`` wraps its awaitable in a Task) and of scheduling —
+    such a node was green on one interpreter and red on three CI lanes. Held,
+    the page cannot move until the test says so, and a rule that needed the
+    replacement to finish simply times out, which is the RED those nodes want.
+
     **The replay.** ``send(Page.setLifecycleEventsEnabled(true))`` delivers the
     CURRENT document's whole lifecycle again, under the name ``commit`` where a
     live navigation says ``init`` (measured, Chrome 152). It is modelled on
@@ -297,6 +308,7 @@ class FakeTab:
         iframe_loader: bool = False,
         navigate_error: str | None = None,
         replay_loader: str = "L-replay",
+        supersede_held: bool = False,
     ) -> None:
         self.url = url
         # ``fake_target`` (defined below) — a Tab's ``.target`` is a real
@@ -331,6 +343,8 @@ class FakeTab:
         self._iframe_loader = iframe_loader
         self._navigate_error = navigate_error
         self._replay_loader = replay_loader
+        self._supersede_held = supersede_held
+        self._held: list[tuple[str, str, str]] = []
         self.navigations = 0
         # The milestones the CURRENT document has reached. A tab that exists is
         # showing a loaded document until it is navigated. Tracked for ONE
@@ -413,18 +427,40 @@ class FakeTab:
             ]
         return events
 
-    def _document_milestones(self, loader_id: str) -> list[tuple[str, str, str]]:
-        """Our document's events, then anything that replaced it (F-882)."""
+    def _document_milestones(
+        self, loader_id: str
+    ) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+        """Our document's events, and what replaced it (F-882) — two lists,
+        because a test may hold the second back (``supersede_held``)."""
         order = ["init", "DOMContentLoaded", "load"]
         ours = order[: order.index(self._last_milestone) + 1]
         if self._supersede_after is None or self._supersede_after not in ours:
-            return [(MAIN_FRAME, loader_id, name) for name in ours]
+            return [(MAIN_FRAME, loader_id, name) for name in ours], []
         # Our document stops where the replacement takes over; Chrome sends no
         # further milestone for a document that no longer exists.
         cut = ours.index(self._supersede_after) + 1
-        return [
-            (MAIN_FRAME, loader_id, name) for name in ours[:cut]
-        ] + self._supersession_milestones(loader_id)
+        return (
+            [(MAIN_FRAME, loader_id, name) for name in ours[:cut]],
+            self._supersession_milestones(loader_id),
+        )
+
+    def _hold_or(self, later: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
+        """*later* for delivery now, or nothing when the test asked to hold it."""
+        if self._supersede_held:
+            self._held.extend(later)
+            return []
+        return later
+
+    def deliver_supersession(self) -> None:
+        """Deliver what ``supersede_held`` kept back — all of it, synchronously.
+
+        No ``call_soon``: the test's next line already sees the moved page, so
+        "the replacement was real and would have been next" is one assertion
+        and not a drain loop tuned to a host.
+        """
+        held, self._held = self._held, []
+        for event in held:
+            self._reach([event])
 
     def _navigate(self, url: str) -> tuple[Any, Any, Any]:
         """``Page.navigate``'s answer, and the new document's lifecycle."""
@@ -438,7 +474,7 @@ class FakeTab:
             self.navigations += 1
             loader_id = f"L{self.navigations}"
             if self._supersede_after == ABORTED_SUPERSESSION:
-                self._schedule(self._supersession_milestones(loader_id))
+                self._schedule(self._hold_or(self._supersession_milestones(loader_id)))
             return (
                 cdp_page.FrameId(MAIN_FRAME),
                 cdp_network.LoaderId(loader_id),
@@ -454,7 +490,9 @@ class FakeTab:
         if self._stale_load_for is not None:
             milestones.append((MAIN_FRAME, self._stale_load_for, "load"))
         if self._lifecycle != "never":
-            milestones.extend(self._document_milestones(loader_id))
+            own_events, later = self._document_milestones(loader_id)
+            milestones.extend(own_events)
+            milestones.extend(self._hold_or(later))
         self._schedule(milestones)
         return (
             cdp_page.FrameId(MAIN_FRAME),

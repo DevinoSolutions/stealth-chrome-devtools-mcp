@@ -255,6 +255,25 @@ count; `24 passed` on the fix.) The four guard nodes — subframe loader, the
 enable-time replay, "our own `load` first", `networkidle` keys to the first
 commit — are green on BOTH sides by design: they pin what must not change.
 
+**Gate follow-up (PR #121, run 35138478980).** The last two of those guard
+nodes were green locally (CPython 3.13) and red on every CI lane (3.11 / 3.12
+/ 3.13 across the three platforms): the fake scheduled the replacement on the
+loop with `call_soon`, and how many loop turns fall between our milestone
+landing and the tool's landing read is the host's — `asyncio.wait_for` wraps
+its awaitable in a Task on the older interpreters, which is one extra turn,
+and the page had moved to `LANDING` by the time `landing()` read it.
+Reproduced deterministically with the `68ce29f` files on CPython 3.11 (3/3
+runs, exactly those two nodes). The fix is `FakeTab(supersede_held=True)`: the
+replacement is HELD until the test calls `deliver_supersession()`, so the page
+cannot move before the read regardless of scheduling, and a rule that keyed to
+the replacement now has nothing to key to and times out — mutation-checked
+(`networkidle → load` reds the `networkidle` node; "reached only once a
+replacement is in the chain" reds both). `24 passed` on 3.11 and 3.13, 3/3
+each, random order. The `tests/test_resilience.py` pin on the timeout message
+is a SOFT golden and was updated in the same PR — see its docstring for the
+justification: the suffix is the accepted/unaccepted line F-881 added, and a
+pinned message with no reason was the empty-colon defect in another form.
+
 ### Real Chrome (`tests/test_e2e_navigation_truthfulness.py`, `@pytest.mark.integration`)
 
 Eight nodes, one per shape, all driving the real tools against the local

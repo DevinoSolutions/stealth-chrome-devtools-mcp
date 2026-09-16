@@ -536,10 +536,17 @@ async def test_a_document_that_loads_before_its_replacement_answers_at_its_own(
     """The Amazon / ``meta refresh`` shape, and the deliberate residual (§6):
     when OUR document reaches ``load`` first, that is what the tab was showing at
     that instant and it is what we answer. Waiting past it would be a quiescence
-    wait, which ``navigate`` does not promise and cannot bound."""
+    wait, which ``navigate`` does not promise and cannot bound.
+
+    The replacement is HELD, not raced: how many loop turns fall between our
+    ``load`` landing and the tool's landing read is the host's (``wait_for``
+    wraps its awaitable in a Task on some interpreters — green on 3.13, red on
+    the three CI lanes). Held, the page cannot move before the read, and a rule
+    that waited for the replacement times out instead of passing by luck."""
     tab = FakeTab(
         lifecycle="after",
         supersede_after="load",
+        supersede_held=True,
         supersede_url=LANDING,
         title_at_load="Alpha",
         title_after_supersede="Landing",
@@ -550,6 +557,9 @@ async def test_a_document_that_loads_before_its_replacement_answers_at_its_own(
 
     assert result["title"] == "Alpha"
     assert result["url"] == URL
+    # ... and the replacement WAS real: released, it is where the page goes.
+    tab.deliver_supersession()
+    assert tab.url == LANDING
 
 
 async def test_networkidle_still_keys_to_the_first_commit(monkeypatch, manager):
@@ -559,20 +569,23 @@ async def test_networkidle_still_keys_to_the_first_commit(monkeypatch, manager):
     for the REPLACEMENT's commit would have folded it, and the fake moves
     ``tab.url`` to `LANDING` at exactly that event, so it would answer `LANDING`.
 
-    The mocked sleep does NOT yield, deliberately: F-787's two seconds are not
-    really being taken here, so the fake's page must not advance across them
-    either. What this node pins is the instant the WAIT ended; what the page did
-    during a sleep it never took is not a fact about the rule."""
+    The replacement is HELD until after the read (see ``supersede_held``): what
+    this node pins is the instant the WAIT ended, and a replacement racing the
+    landing read across the mocked sleep's yield was the host's schedule, not the
+    rule's — green on 3.13, red on the three CI lanes. A rule that keyed to the
+    replacement's commit now has nothing to key to and times out."""
     slept: list[float] = []
     real_sleep = asyncio.sleep
 
     async def observed_sleep(delay, *args, **kwargs):
         slept.append(delay)
+        await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", observed_sleep)
     tab = FakeTab(
         lifecycle="after",
         supersede_after="init",
+        supersede_held=True,
         supersede_url=LANDING,
         title_at_load="Alpha",
         title_after_supersede="Landing",
@@ -586,8 +599,7 @@ async def test_networkidle_still_keys_to_the_first_commit(monkeypatch, manager):
     assert result["success"] is True
     assert result["url"] == URL  # ours, not the document that replaced it
     assert 2.0 in slept
-    # ... and the replacement WAS queued, so the assertion above is a choice the
+    # ... and the replacement WAS real, so the assertion above is a choice the
     # code made rather than a shape that never arose.
-    for _ in range(4):
-        await real_sleep(0)
+    tab.deliver_supersession()
     assert tab.url == LANDING
