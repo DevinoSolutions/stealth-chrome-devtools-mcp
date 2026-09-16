@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+### Fixed — nothing ever forgot a dead backend record (F-880)
+
+`~/.stealth-mcp/server.json` had a writer for every backend that arrived and none for
+any that left. On the maintainer's machine it held three entries: a live backend
+(`win-session-1`, 2.1.6) beside two whose ports had no listener and whose recorded pids
+had not existed for days (`win-session-2` at 2.1.1, `headless` at 2.1.3). The only rule
+that ever removed anything was `record_backend`'s supersede-by-port, which by
+construction only touches the port being claimed — a dead sibling on another port stayed
+for good. F-868 had already stopped such an entry being *reported* as the backend;
+what was left was a record that only grows, a cold-start probe against ports nobody
+listens on, and a `doctor` listing naming backends that do not exist.
+
+`backend_liveness` gains the ONE deadness rule (`survey` / `dead_entries` /
+`forget_dead`), and it takes **two witnesses**: the port must probe `down` AND the
+recorded pid must not be a running backend of ours. Neither alone will do. A backend is
+recorded at Popen time, *before* it binds, so a sibling is `down` for the whole of its
+cold start while its process is alive — the socket alone would race every cold start on
+the machine. And "the pid is gone" says nothing about whether the port is free (F-868
+§6's stated objection), which requiring `down` answers directly: the port has just been
+observed to hold no listener at all. A **wedged** backend is therefore never dead — it
+holds its port, `restart` is its verb, and its record is how the eviction path finds a
+pid to kill — and an entry whose `port` is not an int is reported, never forgotten.
+
+The write is `backend_registry.forget_entries`, which re-reads the record and drops only
+entries still matching on display context **and** port **and** pid, so a context
+re-recorded while the probe was running survives. It never unlinks the file: forgetting
+the last entry leaves a readable empty record, exactly as `forget_backend` does.
+
+Two operator-facing changes. `cleanup` prints a `backend records:` line — how many are
+recorded and how many are dead — and `--apply` forgets them; it is the disk-hygiene verb
+and a record naming nothing is residue. `doctor` marks each dead line `(dead record)`,
+names them in one summary line and points at `cleanup --apply`; it stays read-only.
+Both read the SAME survey pass, so a wedged sibling costs one probe per run rather than
+one per question.
+
+Display context is deliberately not consulted: a `down` entry belonging to another
+desktop is forgotten like any other. Adoption's asymmetry (F-808) exists to stop a
+client *reusing* a foreign desktop's live backend; it has nothing to say about one whose
+process is gone.
+
+`cli._probe_recorded_backend` is deleted — its whole content was the ladder plus the
+word `no port recorded`, and that word is `backend_liveness.NO_PORT` now.
+
+## 2.1.7
+
 ### Fixed — `list_instances` reported the last navigation, not the instance (F-874)
 
 Measured on 2.1.6 over real stdio with ten headed browsers (Chrome 152, Windows
