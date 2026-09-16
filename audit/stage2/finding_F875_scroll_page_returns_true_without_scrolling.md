@@ -1,6 +1,6 @@
 # F-875 — `scroll_page` returns `True` for a scroll that has not happened
 
-**Status:** OPEN (product defect; live on 2.1.6 and on `main` at `bb78878`). Measured, NOT fixed — see §5 for why it is not folded into F-874's PR.
+**Status:** FIXED on `fix/F875-scroll-page-verified` (branched from `main` at `b0ae010`). Was OPEN: live on 2.1.6 and on `main` at `bb78878`. See §7 for what changed and what it measures now; §5 records why it was not folded into F-874's PR.
 **Opened by:** live use of the 2.1.6 backend (2026-09-15): `scroll_page(direction="bottom")` on `stackoverflow.com/questions` returned `true` and `window.scrollY` read `0` immediately after
 **Source at:** `origin/main` = `bb78878`
 **Severity:** MEDIUM. Nothing raises. The tool's own docstring says the return is "True if scrolled successfully", and it is `True` in two cases where nothing was scrolled at all and one where the scroll is still in flight. A caller that reads elements after it reads the wrong viewport.
@@ -107,7 +107,7 @@ and those are exactly the pages whose height is still growing when the nap ends.
 
 ---
 
-## 4. Proposed remedy (not implemented)
+## 4. Proposed remedy (implemented — see §7)
 
 The honest answer is not a `bool`. Sketch, for the PR that takes this:
 
@@ -139,10 +139,138 @@ it in would put two unrelated schema changes behind one review.
 * **Not measured:** a page whose real scroller is a nested element (`body`
   `overflow:hidden`, a scrolling `div`). `document.body.scrollHeight` would be
   wrong there, but that is a separate hypothesis and this report is not evidence
-  for it.
+  for it. **Still true after the fix, and now VISIBLE rather than silent** — see
+  §7's "what this does not fix".
 * **Not measured:** `direction` values other than `bottom`. The `return True` is
   unconditional for all of them, so the truthfulness defect is shared; the
-  magnitude is not.
+  magnitude is not. *(The fix is per-direction by construction: the record
+  reports the axis the requested direction moves, and `up`/`top`/`left`/`right`
+  are pinned hermetically.)*
 * The Cloudflare interstitial is not itself a product defect — `navigate` returned
   truthfully about the document Chrome had committed. It is the reason a caller
   reaches a settled-looking page that is one viewport tall.
+
+---
+
+## 7. What changed
+
+Branch `fix/F875-scroll-page-verified`. The nap became a **settle** and the bool
+became a **record**, exactly as §4 sketched.
+
+### 7.1 The new leaf — `embedded/scroll_position.py`
+
+THE one home for "where is this page scrolled, and has it stopped". It owns:
+
+* **`READ_JS` / `read`** — the scroll offsets AND the extent in ONE
+  `JSON.stringify` round trip. `JSON.stringify` for F-869's and F-872's reason:
+  `Tab.evaluate` always sends `serialization="deep"` and returns the value raw,
+  so an object literal arrives as BiDi `RemoteValue` nodes while a string
+  arrives intact. The extent is measured off `document.scrollingElement` — the
+  element CSSOM View says `window.scrollTo`/`scrollBy` actually move, which §1a
+  measured as `html` on every sampled page. Offsets are `Math.round`ed, because
+  sub-pixel positions are real (zoom, HiDPI, the tail of a smooth animation) and
+  a settle comparing floats would never see two reads agree.
+* **`settle`** — polls `read` until two consecutive answers agree, bounded by
+  `SETTLE_BUDGET_SECONDS = 10.0`. The bound is argued from both sides: it is
+  roughly 3× the worst smooth scroll §1b measured (which arrived between the
+  0.5 s and 3 s samples), and it is a THIRD of `CDP_OPERATION_TIMEOUT` (30 s),
+  so a scroll that outlasts it is **reported** as `settled: false` rather than
+  raised as a CDP timeout — which is the whole point of the finding.
+  `START_GRACE_SECONDS = 0.3` is the one subtlety: a smooth scroll begins on the
+  next animation frame, so for the first frames "has not started" and "will
+  never move" are the same reading, and settling on it would have replaced one
+  lie with another. A reading equal to the ORIGIN may not settle before the
+  grace; the caller passes `start_grace=0` when the page is already at the
+  requested edge, because then nothing will move and there is nothing to wait
+  for. That is what keeps a one-viewport page on the two-read fast path.
+* **`_DIRECTIONS` / `script` / `Position.at_edge`** — ONE table for what a
+  direction means (its axis, the edge it heads for, and the JS that goes there),
+  not a script table beside an edge table. It also retires a latent bug the old
+  ladder had: `-{amount}` turned a negative `amount` into JS's decrement
+  operator (`--500`), a syntax error; the template interpolates a pre-negated
+  value now.
+
+A leaf: `tool_errors` only, tab as an argument, `_now`/`_sleep` as its single
+timing seam (the `scheduling_lag` pattern). It never decides whether a scroll
+*succeeded* — only where the page is and whether it has stopped.
+
+### 7.2 The record
+
+`DOMHandler.scroll_page` (and the `scroll_page` tool) return:
+
+| field | means |
+|---|---|
+| `scrolled` | the position CHANGED between before and after |
+| `at_edge` | the page is as far as `direction` goes (true for `max_scroll_y == 0`) |
+| `settled` | the position stopped changing inside the budget |
+| `settle_seconds` | what the settle actually cost |
+| `direction` / `amount` / `smooth` | what the caller ASKED for (`amount` is ignored by `top`/`bottom`, and is echoed as the request, not as a distance travelled) |
+| `scroll_x_before` / `scroll_y_before` | where the page was |
+| `scroll_x_after` / `scroll_y_after` | where it ended up |
+| `max_scroll_x` / `max_scroll_y` | how far it could go |
+
+Both axes are reported because `direction="right"` moves X, and a Y-only record
+would call a working horizontal scroll a no-op. The record deliberately does
+**not** use §4's bare `max_scroll`: next to `max_scroll_x` that name would read
+as ambiguous, so the pair is symmetric.
+
+`max_scroll_y == 0` is an answer, never a raise — §4/§5's explicit requirement.
+`ToolError` is still raised only for operational failure: an invalid direction
+(rejected before any round trip, so `tests/test_error_typing.py`'s pin is
+unchanged) and an evaluate that did not answer with the JSON the read asks for
+(reporting `scroll_y: 0` for a read that did not happen would be this same class
+of untruth). Messages report shape and count only — a type name, a character
+count, a field count.
+
+### 7.3 Measured with the fix
+
+Real Chrome 152, headless, Windows 11, an 8000 px `data:` page in a 977 px
+viewport (`max_scroll_y` 7023), through the product path
+`spawn_browser → navigate → scroll_page`:
+
+```
+smooth bottom      wall 1.594 s   settle 1.592 s   y 7023/7023   scrolled settled at_edge
+smooth top         wall 1.584 s   settle 1.581 s   y    0/7023   scrolled settled at_edge
+instant bottom     wall 0.126 s   settle 0.124 s   y 7023/7023   scrolled settled at_edge
+one viewport tall  wall 0.119 s   settle 0.117 s   y    0/0      scrolled=False at_edge settled
+```
+
+So the smooth case takes the ~1.6 s it actually needs instead of answering at
+0.5 s and 70 % of the way, and the instant fast path costs 0.126 s against the
+0.109 s §1a measured for the old fixed nap — two extra round trips (the before
+and after reads) for an answer that is true.
+
+### 7.4 Tests and goldens
+
+* `tests/test_scroll_page_verification.py` — 11 hermetic pins, driven through
+  `fakes.ScrollingTab`, a new double that models the document's own scroll
+  geometry: clamped `scrollTo`/`scrollBy`, a **JSON-string** read answer, and a
+  smooth animation advanced one step per POSITION READ, so the mid-flight case
+  is deterministic without a clock. Nothing in the double is copied from the
+  defect.
+* `tests/test_e2e_scroll_page_verification.py` — 2 real-Chrome pins on `data:`
+  pages under `tmp_empty_root`, cross-checking the record against the page's own
+  `window.scrollY` and against Chrome's own `document.scrollingElement` extent.
+* `tests/goldens/tool_surface.json` (HARD) — one tool, deliberate: `scroll_page`'s
+  `output_schema` moves from FastMCP's `_WrappedResult` `{result: boolean}` to
+  the `{type: object, additionalProperties: true}` every other dict-returning
+  tool already serves, and the description carries the record. Input schema
+  untouched; no other tool moved. §4 named this regeneration as the cost.
+* Two characterization pins moved, each with a comment saying why:
+  `test_e2e_interaction.py` asserted the bare truthiness of the return (a record
+  is truthy whatever it says) and now reads the fields;
+  `test_e2e_dynamic_sites.py` asserted `is True` in front of an
+  IntersectionObserver check that a non-scroll would have turned into a false
+  pass, and now asserts `scrolled is True`.
+
+### 7.5 What this does NOT fix
+
+§6's first bullet stands: a page whose real scroller is a nested element (`body`
+`overflow: hidden` + a scrolling `div`) is still not scrolled by
+`window.scrollBy`/`scrollTo`, and `document.scrollingElement`'s extent is not
+that div's. What has changed is that the tool no longer LIES about it — such a
+page now answers `scrolled: false`, `max_scroll_y: 0`, `at_edge: true` instead
+of `true`, so the caller can see it and reach for `execute_script`. Making
+`scroll_page` find and drive a nested scroller is a separate change with its own
+evidence requirement (which element is "the" scroller when several overflow?)
+and is the named follow-up from this finding.
