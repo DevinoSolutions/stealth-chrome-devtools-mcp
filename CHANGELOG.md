@@ -92,7 +92,80 @@ the page has.
 
 `scroll_page` returning `true` for a scroll that has not happened was measured
 in the same session and is a different defect with a different remedy; it is
-open as `audit/stage2/finding_F875_scroll_page_returns_true_without_scrolling.md`.
+fixed separately, below.
+
+### Fixed — `scroll_page` returned `true` for a scroll that had not happened (F-875)
+
+`DOMHandler.scroll_page` ended in one `tab.evaluate`, a fixed
+`asyncio.sleep(0.5 if smooth else 0.1)` and an unconditional `return True`,
+documented as "True if scrolled successfully". `True` reported that the evaluate
+had not thrown. Measured against real Chrome 152 on 2.1.6, three different
+states wore that one word: the scroll arrived; the scroll was **still in
+flight** (4910 of 7039 px on an 8016 px document when the nap ended, 1747 of
+1815 on a real stackoverflow page); and there was **nothing to scroll at all** —
+a Cloudflare interstitial exactly one viewport tall, `scrollY` `0` before and
+after, `true` returned. A caller that read elements after it read the wrong
+viewport, and the shortfall grew with the page, which is exactly the
+lazy-loading case `direction="bottom"` exists for.
+
+The nap is a **settle** now and the bool is a **record**. `scroll_page` reads
+the page's scroll offsets and extent before the scroll, then scrolls and waits
+for the page itself to say the scroll finished — bounded, not slept through —
+and answers
+with `scrolled` (the scroll OFFSET changed), `at_edge` (the page is as far as
+`direction` goes), `settled` (the offset stopped moving inside the budget),
+`settle_seconds`, the requested `direction`/`amount`/`smooth`, and
+`scroll_x_before`/`scroll_y_before`/`scroll_x_after`/`scroll_y_after`/
+`max_scroll_x`/`max_scroll_y`. Both axes, because `direction="right"` moves X
+and a Y-only record would call a working horizontal scroll a no-op.
+
+Offsets and extent are never compared together — a lazy-loading page grows its
+document while standing perfectly still, so comparing whole readings would call
+that growth a scroll (with identical `scroll_y_before`/`scroll_y_after` in the
+same record) and would stop a still-loading page from ever settling. The extent
+reported is the final read's.
+
+A page with nothing to scroll is **reported**, never raised — `max_scroll_y: 0`,
+`scrolled: false`, `at_edge: true` — because a one-viewport document is a
+legitimate page. `ToolError` is still raised only for operational failure, and
+only once (the leaf's own message is no longer re-wrapped): an invalid
+direction, a **negative `amount`** (both rejected before any round trip —
+`amount` is a distance and `direction` is the only thing that carries a sign, so
+the old `down, -500` that silently scrolled up and the old `up, -500` that died
+as a JS syntax error are now one clear refusal), and an evaluate that did not
+answer with the JSON the read asks for.
+
+**What ends the wait is `scrollend`, not the reads.** Stopping when two
+consecutive reads agree on the offset is a guess about timing, and it is wrong:
+a plain document smooth scroll runs on Chrome's compositor thread while
+`window.scrollY` is read on the main thread, so a blocked main thread makes the
+reads go stale while the scroll keeps going. Measured on Chrome 152, the run of
+agreeing mid-flight reads lasts exactly as long as the renderer's long task
+(120 ms → 121 ms, 250 → 250, 400 → 400) — unbounded, so no read count and no
+fixed quiet window can see through it. The scroll now arms a one-shot
+`scrollend` listener in the same round trip that performs it, and the position
+read reports that latch: `scrollend` latches, so jank can only delay when the
+end is observed, never fake it. A scroll that moves nothing fires no `scrollend`
+at all, so the same round trip also answers "will this move anything",
+synchronously — which is what keeps an instant scroll and a one-viewport page on
+the 0.12 s fast path.
+
+The read and the settle live in the new leaf `embedded/scroll_position.py`,
+which also holds the one table for what a direction means (its axis, its edge
+and its JS). The read is one `JSON.stringify` round trip off
+`document.scrollingElement` — the element CSSOM View says `scrollTo` moves, and
+now the same element `bottom` targets, so the destination and the reported
+`max_scroll_y` cannot disagree. Measured with the fix on an 8000 px `data:` page
+in a 977 px viewport: a smooth scroll to the bottom answers after 1.59 s at
+7023/7023 instead of at 0.5 s and 70 % of the way, an instant scroll answers in
+0.126 s (against the old nap's 0.109 s), and the one-viewport page answers in
+0.119 s with `scrolled: false`.
+
+This is a tool **schema change** — `scroll_page`'s `output_schema` in
+`tests/goldens/tool_surface.json` moves from FastMCP's `_WrappedResult`
+`{result: boolean}` to the `{type: object}` every other dict-returning tool
+already serves. A caller that treated the old `true` as proof must read
+`scrolled` / `at_edge` / `settled` instead.
 
 <<<<<<< HEAD
 ### Fixed — the headed desktop hand-off could send a `/TR` schtasks truncates (F-879)

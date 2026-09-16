@@ -318,7 +318,13 @@ timeout ≥5s → element appears (200ms reveal vs 5s timeout → no flake).
 `tests/test_e2e_interaction.py::test_scroll_page_exact_delta`.
 **Current support (non-acceptance)**: pytest:
 `tests/test_e2e_interaction.py::test_text_input_scroll_and_wait` scrolls to the
-bottom and checks only `scrollY > 0`, not the requested 500px operation.
+bottom and checks the record's `scroll_y_after` against the page's own
+`window.scrollY`, not the requested 500px delta. F-875 additionally pins the
+tool's truthfulness against real Chrome —
+`tests/test_e2e_scroll_page_verification.py` proves a smooth scroll is reported
+where it LANDED and that a one-viewport page answers `max_scroll_y: 0` /
+`scrolled: false` — but neither asserts an exact 500px delta, so MQ-33 stays
+planned.
 
 ### MQ-34: Upload single file
 **Manual**: call `upload_file` on `#single-file`; verify the file is attached.

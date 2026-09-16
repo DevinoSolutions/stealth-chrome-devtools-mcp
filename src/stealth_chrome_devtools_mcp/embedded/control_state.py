@@ -71,6 +71,24 @@ on an input that has no ``multiple`` attribute (the raw call answers ``None``, n
 error) and Chrome keeps the **first** file only. :data:`READ_FILES_JS` is the
 read, and :func:`verify_attached` is the verdict.
 
+**The ORDER the handler keeps, and why each step of it is load-bearing.**
+``dom_handler.select_option`` / ``upload_file`` keep only the sequence of calls
+into this module, and the sequence is the fix:
+
+* ``select_option`` reads the options (:func:`read_select`) BEFORE anything is
+  written, so a criterion that names no option raises having changed nothing —
+  the shipped ``value`` arm assigned ``select.value`` first and so CLEARED the
+  page's standing selection on its way to answering ``True``. It reads the
+  control back AFTER the events (:func:`apply_selection` does both in one
+  script), which are synchronous, so a page that resets the control inside its
+  own ``change`` handler has already done so. Criterion precedence is unchanged:
+  text, value, index.
+* ``upload_file`` runs its two pre-flight guards (every path must exist;
+  :func:`require_file_input`) BEFORE any CDP call, then reads the ``FileList``
+  (:func:`read_files`) once, AFTER ``send_file`` — the only moment at which it
+  can answer, because Chrome's decision to keep one file of two is made by the
+  write.
+
 **No message here ever carries an option's text or value, and none carries a file
 path or name.** A ``<select>`` is frequently a list of account numbers and an
 absolute path names the operating user; a raised ``ToolError`` reaches the
@@ -397,6 +415,33 @@ def select_record(
         "multiple": bool(after.get("multiple")),
         "changed": before.get("selected_indexes") != after.get("selected_indexes"),
     }
+
+
+def require_file_input(element: Element, selector: str) -> None:
+    """Raise unless *element* is an ``<input type="file">``.
+
+    The file-input twin of :func:`verify_matched`'s ``is_select`` gate, and for
+    the same reason it sits BEFORE the write: ``DOM.setFileInputFiles`` against
+    anything else is a CDP error at best, and the caller pointed the selector at
+    a control this tool cannot answer for. Read from what nodriver already
+    holds (``tag_name``/``attrs``) — no round trip — and tolerant of a double
+    that carries neither, which is why an EMPTY tag or type passes: absence of
+    metadata is not evidence of the wrong control.
+    """
+    tag_name = (getattr(element, "tag_name", "") or "").lower()
+    input_type = ""
+    if hasattr(element, "attrs") and element.attrs:
+        input_type = (element.attrs.get("type") or "").lower()
+    if tag_name and tag_name != "input":
+        raise ToolError(
+            f"Selector '{selector}' resolved to <{tag_name}>, not a file input. "
+            'Point the selector at an <input type="file"> element.'
+        )
+    if input_type and input_type != "file":
+        raise ToolError(
+            f"Selector '{selector}' is an <input type=\"{input_type}\">, "
+            'not type="file".'
+        )
 
 
 async def read_files(element: Element, selector: str) -> dict[str, object]:

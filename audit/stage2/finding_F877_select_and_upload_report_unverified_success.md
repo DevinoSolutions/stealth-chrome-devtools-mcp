@@ -372,6 +372,16 @@ redundant field is a second way to ask the same question.
   in each. **Its headroom is 25 lines** — flagged here because the next change to that
   file should expect to pay for itself, and the file is not grandfathered, so there is
   no cap to ratchet.
+  *Paid, one merge later:* when F-875/F-876/F-877/F-873 met on one branch the file
+  reached **1007** and the pre-commit gate refused it. The "why the order is
+  load-bearing" argument for both tools moved into `control_state.py`'s module
+  docstring, next to the code that makes the order matter, and the handler's two
+  docstrings became one-line pointers; and the is-it-a-file-input guard moved into
+  the leaf as `control_state.require_file_input` (the twin of `verify_matched`'s
+  `is_select` gate, the same question about the other control). `upload_file` keeps
+  ONE pre-flight guard in its own body, every-path-must-exist. `dom_handler.py`
+  1007 → **987**, `control_state.py` 439 → **484**; no behaviour, message or
+  golden moved.
 * The full unit lane and the full integration lane are the coordinator's pre-push gate
   and are deliberately **not** claimed here.
 

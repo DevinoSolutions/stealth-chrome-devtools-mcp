@@ -8,7 +8,12 @@ from typing import Any
 
 from nodriver import Tab, cdp
 
-from stealth_chrome_devtools_mcp.embedded import click_target, control_state, text_entry
+from stealth_chrome_devtools_mcp.embedded import (
+    click_target,
+    control_state,
+    scroll_position,
+    text_entry,
+)
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     resolve_by_text,
@@ -360,9 +365,8 @@ class DOMHandler:
         the renderer's main thread, so it never freezes the page (unlike
         fetch/base64/DataTransfer hacks run through execute_script).
 
-        What the input HOLDS afterwards belongs to ``control_state``; what lives
-        here is the ORDER (F-877) — the ``FileList`` is read once, AFTER
-        ``send_file``, the only moment at which it can answer.
+        What the input IS and HOLDS belongs to ``control_state``; what lives
+        here is the ORDER (F-877), and why it is load-bearing is stated there.
 
         Args:
             tab (Tab): The browser tab object.
@@ -401,22 +405,7 @@ class DOMHandler:
             element = await resolve_element(tab, selector, timeout=timeout / 1000)
             if not element:
                 raise ToolError(f"File input not found: {selector}")
-
-            tag_name = (getattr(element, "tag_name", "") or "").lower()
-            input_type = ""
-            if hasattr(element, "attrs") and element.attrs:
-                input_type = (element.attrs.get("type") or "").lower()
-            if tag_name and tag_name != "input":
-                raise ToolError(
-                    f"Selector '{selector}' resolved to <{tag_name}>, "
-                    "not a file input. "
-                    'Point the selector at an <input type="file"> element.'
-                )
-            if input_type and input_type != "file":
-                raise ToolError(
-                    f"Selector '{selector}' is an <input type=\"{input_type}\">, "
-                    'not type="file".'
-                )
+            control_state.require_file_input(element, selector)
 
             await element.send_file(*resolved)
 
@@ -574,14 +563,10 @@ class DOMHandler:
         Select an option from a dropdown, and report what the control now holds.
 
         Which option a criterion names, and whether the control took it, belong
-        to ``control_state``; what lives here is the ORDER (F-877), and the
-        order is load-bearing twice. The options are read BEFORE anything is
-        written, so a criterion that names no option raises having changed
-        nothing — the shipped ``value`` arm assigned ``select.value`` first and
-        so CLEARED the page's standing selection on its way to answering
-        ``True``. The control is read back AFTER the events, which are
-        synchronous, so a page that resets it in its own ``change`` handler has
-        already done so. Criterion precedence is unchanged: text, value, index.
+        to ``control_state``; what lives here is the ORDER (F-877) — read
+        before any write, read back after the events — and why each half of it
+        is load-bearing is stated there. Criterion precedence: text, value,
+        index.
 
         Args:
             tab (Tab): The browser tab object.
@@ -921,55 +906,82 @@ class DOMHandler:
     @staticmethod
     async def scroll_page(
         tab: Tab, direction: str = "down", amount: int = 500, smooth: bool = True
-    ) -> bool:
+    ) -> dict[str, object]:
         """
-        Scroll the page in specified direction.
+        Scroll the page and report where it actually ended up (F-875).
+
+        The answer used to be an unconditional ``True``, which reported that the
+        evaluate did not throw while promising that the page scrolled — three
+        different states wearing one word. It is a record now: the position
+        before and after, the page's extent, and what was asked for, so
+        "arrived", "still moving when the budget ran out" and "there was nothing
+        to scroll" are all sayable. Reading the position and waiting for it to
+        stop is ``scroll_position``'s; this method owns the script, the budget
+        and the record.
 
         Args:
             tab (Tab): The browser tab object.
-            direction (str): Direction to scroll ('down', 'up', 'right',
-                'left', 'top', 'bottom').
-            amount (int): Amount to scroll in pixels.
+            direction (str): 'down', 'up', 'right', 'left', 'top' or 'bottom'.
+            amount (int): Pixels to scroll (ignored for 'top' and 'bottom'); a
+                distance, never negative.
             smooth (bool): Use smooth scrolling.
 
         Returns:
-            bool: True if scroll succeeded, False otherwise.
+            Dict[str, object]: ``scrolled`` (the scroll OFFSET changed, never
+            the extent), ``at_edge``, ``settled`` (the offset stopped moving
+            within the budget), ``settle_seconds``, the requested
+            ``direction``/``amount``/``smooth``, and the six offsets — see the
+            tool's own docstring.
+
+        Raises:
+            ToolError: an invalid direction or a negative amount (both decided
+            before any round trip), or an operational failure of the evaluate
+            itself. A page with nothing to scroll is NOT one of these: a
+            one-viewport document is a legitimate page, and it is reported.
         """
         try:
-            behavior = "'smooth'" if smooth else "'instant'"
+            # Built first: an invalid direction or a negative amount must cost
+            # no round trip at all, not even the before-read.
+            scroll_js = scroll_position.script(direction, amount, smooth)
+            before = (await scroll_position.read(tab)).position
+            # ONE round trip: arms the end-of-scroll latch AND scrolls.
+            scrolled = await scroll_position.start(tab, scroll_js)
+            # The page's own answer to "will anything move", not a guess from
+            # the offsets: a scroll that moves nothing never fires `scrollend`,
+            # so waiting for one would burn the whole budget. This is what keeps
+            # a one-viewport page and an instant scroll on the fast path.
+            settled = await scroll_position.settle(
+                tab,
+                before,
+                awaiting_end=scrolled.moves and scrolled.supported,
+                start_grace=None if scrolled.moves else 0.0,
+            )
+            after = settled.position
+            return {
+                # OFFSETS only. A lazy-loading page grows its extent while
+                # standing perfectly still, and comparing whole ``Position``
+                # values would report that growth as "it scrolled" with
+                # identical before/after offsets in the same record.
+                "scrolled": after.offset != before.offset,
+                "at_edge": after.at_edge(direction),
+                "settled": settled.settled,
+                "settle_seconds": round(settled.seconds, 3),
+                "direction": direction,
+                "amount": amount,
+                "smooth": smooth,
+                "scroll_x_before": before.x,
+                "scroll_y_before": before.y,
+                "scroll_x_after": after.x,
+                "scroll_y_after": after.y,
+                "max_scroll_x": after.max_x,
+                "max_scroll_y": after.max_y,
+            }
 
-            if direction == "down":
-                script = (
-                    f"window.scrollBy({{top: {amount}, left: 0, behavior: {behavior}}})"
-                )
-            elif direction == "up":
-                script = (
-                    f"window.scrollBy({{top: -{amount}, "
-                    f"left: 0, behavior: {behavior}}})"
-                )
-            elif direction == "right":
-                script = (
-                    f"window.scrollBy({{top: 0, left: {amount}, behavior: {behavior}}})"
-                )
-            elif direction == "left":
-                script = (
-                    f"window.scrollBy({{top: 0, left: -{amount}, "
-                    f"behavior: {behavior}}})"
-                )
-            elif direction == "top":
-                script = f"window.scrollTo({{top: 0, left: 0, behavior: {behavior}}})"
-            elif direction == "bottom":
-                script = (
-                    "window.scrollTo({top: document.body.scrollHeight, "
-                    f"left: 0, behavior: {behavior}}})"
-                )
-            else:
-                raise ValueError(f"Invalid scroll direction: {direction}")
-
-            await tab.evaluate(script)
-            await asyncio.sleep(0.5 if smooth else 0.1)
-
-            return True
-
+        except ToolError:
+            # ``scroll_position.script``/``read`` already speak the error
+            # convention and already name what went wrong. Re-wrapping them
+            # doubled the message ("Failed to scroll page: Invalid scroll
+            # direction: …") and dropped the cause.
+            raise
         except Exception as e:
-            raise ToolError(f"Failed to scroll page: {e!s}")
+            raise ToolError(f"Failed to scroll page: {e!s}") from e
