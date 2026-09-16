@@ -288,6 +288,43 @@ async def test_a_plain_document_is_still_named_as_the_document():
     assert record["scroll_y_after"] == MAX_SCROLL_Y
 
 
+async def test_the_committed_matrix_is_the_findings_twelve_fixtures():
+    """``F878_MATRIX`` is what makes §3 reproducible — so it needs a witness.
+
+    The matrix constants carry no assertions of their own (only four of the
+    twelve do), which is the point: they exist so a future reader can re-measure
+    the finding from the repo. That leaves nothing to notice a fixture dropped
+    from the dict or a constant renamed out of it, and the reproducibility claim
+    would quietly become false. Pinned HERE rather than beside the constants
+    because this file has no ``integration`` mark: the e2e module is deselected
+    by the pre-push lane (``-m "not integration"``), so a pin living there would
+    not run on the one gate that always runs.
+    """
+    from test_e2e_scroll_page_verification import F878_MATRIX
+
+    assert set(F878_MATRIX) == {
+        "a_control",
+        "b_app_shell",
+        "c_two_panes",
+        "d_nested_in_scrolling_doc",
+        "e_snap_document",
+        "e2_snap_nested",
+        "f_quirks",
+        "g_shell_with_grid",
+        "h_shell_under_scrim",
+        "i_three_columns",
+        "j_h_strip",
+        "k_stray_overflow",
+    }
+    # Each is a distinct page: a copy-pasted constant would still count twelve.
+    assert len(set(F878_MATRIX.values())) == 12
+    # And f is the ONE quirks-mode fixture, so it must carry no doctype.
+    assert "DOCTYPE" not in F878_MATRIX["f_quirks"]
+    assert all(
+        "DOCTYPE" in page for key, page in F878_MATRIX.items() if key != "f_quirks"
+    )
+
+
 async def test_a_scrolling_document_wins_over_a_nested_scroller():
     """Rule 1 is a PRECEDENCE: fixture d's 400 px box must not win (F-878 §4).
 

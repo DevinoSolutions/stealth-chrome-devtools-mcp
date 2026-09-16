@@ -498,6 +498,15 @@ class Position(NamedTuple):
           mid-scroll makes *before* the div's offset and this one the
           document's, and the difference between two different elements'
           offsets is not a distance anything travelled (F-878).
+
+        ``is_document`` is a COARSE identity and that second condition is
+        therefore not exhaustive: a re-render that puts a DIFFERENT div at the
+        same index path leaves both readings ``is_document=False``, and this
+        compares two elements again. Documented rather than coded around — it is
+        strictly less likely than the case it does catch (which needs only the
+        path to stop resolving, not to resolve to something else), and the
+        record still names the element the FINAL read found, so the answer is
+        visible even when this flag is not.
         """
         return self.is_document == before.is_document and self.offset != before.offset
 
