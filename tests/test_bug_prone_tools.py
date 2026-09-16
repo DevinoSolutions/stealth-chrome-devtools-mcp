@@ -129,8 +129,10 @@ class TestFallbackProfileSelection:
     """``test_profile_resolution.py`` pins ``_resolve_profile_selection`` but not
     the fallback's retry guard — pin it here (no overlap)."""
 
-    async def test_non_clone_selection_never_retries(self):
-        # profile_role != "clone" short-circuits to None before any dir I/O (pure).
+    async def test_a_named_or_unknown_role_never_retries(self):
+        # "explicit" and an absent role both short-circuit to None before any dir
+        # I/O (pure). "master" DOES retry since F-834 stage 1 — that half is
+        # pinned in tests/test_concurrent_spawn_collision.py, not duplicated here.
         assert (
             await clone_storage._fallback_profile_selection(
                 {"profile_role": "explicit"}, 0

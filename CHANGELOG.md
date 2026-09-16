@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Fixed — F-834 stage 1: a concurrent unnamed `spawn_browser` that lost the master profile failed outright
+
+Three concurrent `spawn_browser` calls with no `user_data_dir` all select the
+MASTER profile, because that branch of `clone_storage.resolve_profile_selection`
+asks `_profile_has_running_browser` — a LIVENESS check, never a reservation, and
+every concurrent spawn is pre-launch when it asks. Chrome's own process
+singleton then lets exactly one of them open the directory. The other two got no
+retry: `_fallback_profile_selection` answered `None` for every role that was not
+`clone`, so `spawn_browser`'s three-attempt loop re-raised on the first failure
+and the caller saw `Failed to connect to browser` plus nodriver's misleading
+"running as root / pass `no_sandbox=True`" advice — the same advice F-834's own
+contention hint exists to disclaim. The retry budget was always there; the loser
+had nowhere to spend it.
+
+A `master`-role loser now falls back exactly as a `clone`-role one does, onto a
+clone directory — which IS reserved, via `_protect_clone_dir`, and is unique per
+ATTEMPT since F-834 stage 2. No reservation was added on master itself: that
+would need a matching release on the close path, and a leaked one would silently
+force every later spawn to clone forever. A NAMED (`explicit`) profile is
+deliberately not widened either, because handing back a clone is an identity
+change and `resolve_profile_selection` already owns that walk with a warning
+(F-871). The attempt count is unchanged.
+
+Measured hermetically through the real tool body, with Chrome's process
+singleton modelled at the one place it acts: three concurrent unnamed spawns go
+from **1 of 3** live on **1** profile directory to **3 of 3** live on **3**
+distinct directories, the two retrying instances each reporting their swallowed
+first failure in `spawn_diagnostics.profile_selection.spawn_retries`. That three
+concurrent selections all still answer `master` is unchanged and is now pinned
+as characterization — it is the liveness check behaving as designed.
+
+`clone_storage.py` is still 1055 lines, its grandfathered cap: the two
+`snapshot.exists()` arms of the fallback collapsed into one call site, which
+paid for the comment that explains the widening.
+
 ### Fixed — F-885: proxy/backend-death tests touched the developer's live `~/.stealth-mcp` record
 
 `tests/test_proxy_backend_death.py::TestProxyExitsOnBackendDeath` ran an

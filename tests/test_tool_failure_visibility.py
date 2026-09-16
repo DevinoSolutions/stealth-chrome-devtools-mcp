@@ -71,13 +71,16 @@ def empty_ring():
 def failing_spawn(monkeypatch, patched_server):
     """The reported outage, hermetically: every ``spawn_browser`` attempt fails.
 
-    ``profile_role`` is ``master`` so no clone dir is created, released, or
+    ``profile_role`` is ``explicit`` so no clone dir is created, released, or
     fallen back to — ``_fallback_profile_selection`` returns ``None`` for a
-    non-clone role, which is what makes the first failure final.
+    NAMED profile, which is what makes the first failure final. It was
+    ``master`` until F-834 stage 1: a master-role loser now retries onto a
+    clone, which would drive this fixture through three attempts and a real
+    profile copy on the way.
     """
 
     async def fake_resolve(user_data_dir, **kwargs):
-        return {"user_data_dir": "/fake/dir", "profile_role": "master"}
+        return {"user_data_dir": "/fake/dir", "profile_role": "explicit"}
 
     async def doomed_spawn(options):
         raise RuntimeError(SPAWN_FAILURE)

@@ -34,9 +34,12 @@ because this test process is the only process guaranteed to be alive).
 import asyncio
 import os
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from fakes import FakeBrowserManager
 from stealth_chrome_devtools_mcp.embedded import (
     clone_storage,
     spawn_contention,
@@ -313,3 +316,129 @@ def test_in_flight_counters_return_to_zero_after_a_burst(doomed_manager):
     assert doomed_manager._spawn_peak_in_flight == 0, (
         "a stale peak would tell the next solo failure it was contended"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: the master race — the loser must land somewhere, not nowhere
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_unnamed_selections_all_still_pick_master(tmp_session_root):
+    """Characterization, NOT the defect: the master branch is a LIVENESS check.
+
+    ``_dir_unavailable``'s own docstring says ``_profile_has_running_browser`` is
+    a liveness check and never a reservation, and every concurrent spawn is
+    pre-launch when it asks — so three-of-three ``master`` is the reading the
+    code is designed to give. Reserving master is deliberately NOT the fix
+    (F-834 "Not fixed here"): the reservation would need a matching release on
+    the close path, and a leaked one would silently force every later spawn to
+    clone. What has to change is what happens to the two callers that then lose
+    Chrome's own profile singleton.
+    """
+    selections = await asyncio.gather(
+        *(clone_storage.resolve_profile_selection(None) for _ in range(3))
+    )
+    assert [s["profile_role"] for s in selections] == ["master"] * 3
+    assert {s["user_data_dir"] for s in selections} == {
+        str(clone_storage.master_profile_dir())
+    }
+
+
+async def test_a_master_role_loser_retries_onto_a_reserved_clone(tmp_session_root):
+    """THE stage-1 defect: the fallback answered ``None`` for every non-clone
+    role, so the loser of the master race got no second attempt at all — the
+    caller saw ``Failed to connect to browser`` plus nodriver's root/no_sandbox
+    advice, which F-834's own hint already disclaims."""
+    fallback = await clone_storage._fallback_profile_selection(
+        {
+            "user_data_dir": str(clone_storage.master_profile_dir()),
+            "profile_role": "master",
+        },
+        0,
+    )
+
+    assert fallback is not None, "a master-role loser got no retry at all (F-834)"
+    assert fallback["profile_role"] == "clone"
+    clone = Path(fallback["user_data_dir"])
+    assert clone != clone_storage.master_profile_dir()
+    assert clone_storage._is_relative_to(clone, clone_storage.clone_root_dir())
+    assert clone_storage._clone_dir_is_protected(clone), (
+        "the retry clone must be RESERVED — being reserved is the whole reason a "
+        "clone is a safe place for a master loser to land"
+    )
+
+
+async def test_two_master_losers_land_in_distinct_dirs(tmp_session_root):
+    """Both losers of one master race retry at once; layer 1's per-attempt token
+    has to hold for this new entry point too."""
+    previous = {"profile_role": "master"}
+    first = await clone_storage._fallback_profile_selection(previous, 0)
+    second = await clone_storage._fallback_profile_selection(previous, 0)
+
+    assert first["user_data_dir"] != second["user_data_dir"]
+
+
+async def test_a_named_profile_is_never_walked_to_a_clone_by_the_fallback(
+    tmp_session_root,
+):
+    """``explicit`` stays un-widened. The caller asked for THAT profile's cookies
+    and logins; handing back a clone is an identity change, and the one place
+    that walk may happen is ``resolve_profile_selection``, where it is reported
+    (F-871). A role the resolver never issues gets no retry either."""
+    for role in ({"profile_role": "explicit"}, {}, {"profile_role": "nonsense"}):
+        assert await clone_storage._fallback_profile_selection(role, 0) is None
+        assert await clone_storage._fallback_profile_selection(role, 2) is None
+
+
+class _MasterRefusingManager(FakeBrowserManager):
+    """Chrome's profile singleton, modelled: a launch against the MASTER
+    directory fails, every other directory works.
+
+    That is the stage-1 race as the losing caller experiences it — a second
+    Chrome against a user-data-dir another Chrome already holds hands its
+    command line to the incumbent and exits, which nodriver reports as
+    ``Failed to connect to browser``.
+    """
+
+    def __init__(self, master, spawn_instance):
+        super().__init__(spawn_instance=spawn_instance, spawn_diagnostics={})
+        self._master = str(master)
+        self.dirs: list[str] = []
+
+    async def spawn_browser(self, options):
+        self.dirs.append(options.user_data_dir)
+        if options.user_data_dir == self._master:
+            raise RuntimeError(INNER_FAILURE)
+        return await super().spawn_browser(options)
+
+
+async def test_a_spawn_that_loses_master_succeeds_on_its_second_attempt(
+    tmp_session_root, call_tool, patched_server
+):
+    """End to end through the tool body: the loser gets a SECOND attempt, on a
+    distinct reserved clone, and the spawn succeeds instead of raising."""
+    master = clone_storage.master_profile_dir()
+    manager = _MasterRefusingManager(
+        master,
+        SimpleNamespace(
+            instance_id="i1",
+            state="active",
+            headless=True,
+            viewport={"width": 1920, "height": 1080},
+        ),
+    )
+    srv = patched_server(browser_manager=manager)
+
+    result = await call_tool(srv, "spawn_browser", headless=True, sandbox=False)
+
+    assert result["state"] == "active"
+    assert len(manager.dirs) == 2, f"attempted dirs: {manager.dirs}"
+    assert manager.dirs[0] == str(master)
+    clone = Path(manager.dirs[1])
+    assert clone != master
+    assert clone_storage._is_relative_to(clone, clone_storage.clone_root_dir())
+    assert clone_storage._clone_dir_is_protected(clone)
+    selection = result["spawn_diagnostics"]["profile_selection"]
+    assert selection["profile_role"] == "clone"
+    assert selection["user_data_dir"] == str(clone)
+    assert selection["spawn_retries"], "the swallowed first failure must be reported"

@@ -2,9 +2,10 @@
 
 **Severity: HIGH** (agent-fleet workloads — the primary local usage pattern)
 **Found:** 2026-08-30, live stress test of v2.0.7 (3 Opus agents spawning concurrently + 8-proxy herd)
-**Status:** FIXED — see "Fix shipped" below (branch `fix/F834-per-attempt-clone-dirs`).
-The F-835/F-836/F-837 sections embedded further down remain OPEN and are not
-covered by that fix.
+**Status:** FIXED, both stages — stage 2 in "Fix shipped" below (branch
+`fix/F834-per-attempt-clone-dirs`), stage 1 in "Stage 1 shipped" (branch
+`fix/F834-stage1-master-fallback`). The F-835/F-836/F-837 sections embedded
+further down remain OPEN and are not covered by either fix.
 
 ## Symptom (as a client sees it)
 
@@ -212,14 +213,89 @@ per-burst `_spawn_peak_in_flight`; the hint reads the **peak**, because one
 race's losers fail in sequence and by the last of them the live count is 1
 again — the last loser is exactly the caller most likely to be reading.
 
-### Not fixed here (deliberate)
+### Not fixed here (deliberate) — CLOSED by "Stage 1 shipped" below
 
 Stage 1 of the two-stage race — N concurrent spawns all finding the **master**
-profile free and all opening it — is unchanged. Reserving master would need a
-matching release on the close path in `server.py` (at its LOC cap), and a leaked
-master reservation would silently force every later spawn to clone. Layer 1
-makes the *losers* of that race land in distinct directories, which is what
+profile free and all opening it — was left unchanged. Reserving master would
+need a matching release on the close path in `server.py` (at its LOC cap), and a
+leaked master reservation would silently force every later spawn to clone. Layer
+1 makes the *losers* of that race land in distinct directories, which is what
 turns the incident from a mutual kill into an ordinary retry.
+
+**That last sentence was true of stage 2 only.** A stage-1 loser did not land in
+a distinct directory; it landed nowhere. See below.
+
+## Stage 1 shipped — a master loser retries onto a clone
+
+**Status: FIXED** (branch `fix/F834-stage1-master-fallback`).
+
+### What was still broken
+
+`_fallback_profile_selection` returned `None` for every `profile_role` that was
+not `clone`, so `tool_sections/browser_management.py::spawn_browser`'s
+`for spawn_attempt in range(3)` re-raised on the FIRST failure whenever the
+attempt had selected `master`. Three concurrent unnamed spawns therefore
+produced one winner and two hard failures, each reading `Failed to connect to
+browser` plus nodriver's root/`no_sandbox` advice — the very advice layer 3's
+`contention_hint` exists to disclaim. The attempt count was never the problem:
+the retry budget was there, the loser just had nowhere to spend it.
+
+Measured 2026-09-16 against the product's own functions (reproduced by the
+macOS/ARM64 gate cell, run 35146195943): three concurrent
+`clone_storage.resolve_profile_selection(None)` against a free master return
+`['master', 'master', 'master']`. That reading is **correct by design** and is
+now pinned as characterization — the master branch asks
+`_profile_has_running_browser`, which `_dir_unavailable`'s own docstring calls
+"a LIVENESS check, NOT a reservation — every concurrent spawn is pre-launch when
+it asks".
+
+### The fix
+
+One widened guard in the ONE fallback home: a `master`-role previous selection
+falls back exactly as a `clone`-role one does, onto a clone directory — which IS
+reserved, via `_protect_clone_dir`. No master reservation was added (the release
+problem above stands), the attempt count is untouched, and `explicit` is
+deliberately NOT widened: walking a caller's NAMED profile to a clone is an
+identity change, and the one place that walk may happen is
+`resolve_profile_selection`, where F-871 reports it.
+
+The two `snapshot.exists()` arms collapsed into one call site as part of the
+same edit, which is what paid for the new comment: `clone_storage.py` sits at
+its grandfathered 1055-LOC cap with zero headroom, and the file is still 1055
+lines — a ratchet was neither needed nor taken.
+
+### Measurement (hermetic, no Chrome)
+
+Three CONCURRENT unnamed `spawn_browser` calls through the real tool body
+against a temp session root, with Chrome's process singleton modelled at the one
+place it acts (first launch to reach a user-data-dir wins it; every later launch
+against that same directory fails as a second Chrome does):
+
+| | before | after |
+|---|---|---|
+| live instances | 1 / 3 | 3 / 3 |
+| distinct profile dirs | 1 | 3 |
+| launch attempts | 3 | 5 |
+
+After: `i1` on `master`, `i2` and `i3` on
+`…-<pid>-1-retry` / `…-<pid>-2-retry`, each with `spawn_retries` carrying its
+swallowed first failure. Before: one instance and two
+`ToolError: Failed to spawn browser: Failed to connect to browser -- Possibly
+because you are running as root? …`.
+
+Pins: `tests/test_concurrent_spawn_collision.py` (stage-1 section).
+
+### Residual (NOT fixed here)
+
+On the LAST attempt of a losing spawn the tool body still computes a fallback it
+can never use — `range(3)` is exhausted, the `else:` raises — so a fully failed
+spawn copies one extra profile and leaves that clone dir `_protect_clone_dir`-ed
+for the life of the process (nothing releases it: the release paths are the
+per-attempt failure handler, which already ran, and `close_instance`, which never
+will). This predates stage 1 and applies to the `clone` role exactly as much;
+fixing it means not asking for a fallback on the final attempt, which changes
+which error the caller sees (the last one, rather than the joined set), so it is
+left for its own change.
 
 ## Related
 
