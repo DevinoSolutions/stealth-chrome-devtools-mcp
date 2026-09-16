@@ -28,7 +28,7 @@ import asyncio
 
 import pytest
 from nodriver import cdp
-from nodriver.core.connection import Transaction
+from nodriver.core.connection import EventTransaction, Transaction
 
 from stealth_chrome_devtools_mcp.embedded import cdp_transport
 
@@ -108,6 +108,60 @@ async def test_a_cancelled_caller_leaves_the_reply_deliverable():
     )
     _listener_delivers(mapper, {"id": tx.id, "result": _REPLY})
     assert tx.done() and not tx.cancelled()
+
+
+async def test_awaiting_an_already_done_transaction_returns_its_value():
+    """``shield`` on a DONE future returns the inner future itself, and the
+    inner future here is a ``Transaction`` whose ``__await__`` is this very
+    patch — so shielding unconditionally recursed until ``RecursionError``.
+
+    Latent on nodriver 0.47 rather than live: ``send()`` has no yield point
+    between ``self.mapper[the_id] = tx`` and ``await tx`` (``create_task`` does
+    not suspend), so the listener cannot resolve a Transaction before it is
+    awaited. It is pinned anyway, because the module claims in its docstring
+    that a done future costs nothing, and an untested claim about a library's
+    internals is how a nodriver release turns hang-protection into a crash on
+    every CDP command.
+    """
+    cdp_transport.install()
+    tx = _transaction()
+    tx.set_result("already-here")
+    assert tx.done()
+    assert await tx == "already-here"
+
+
+async def test_awaiting_an_event_transaction_returns_its_event():
+    """``EventTransaction`` is constructed COMPLETE (its ``__init__`` ends in
+    ``set_result``), so it is the done-future case that a library change would
+    reach first. It is dead code in nodriver 0.47 — constructed nowhere, the
+    class statement is its only occurrence — which is exactly why the cost of
+    getting it wrong is invisible until it is not."""
+    cdp_transport.install()
+    event = cdp.page.DomContentEventFired(timestamp=1.0)
+    ev = EventTransaction(event)
+    assert ev.done(), "nodriver constructs this one complete"
+    assert type(ev).__await__ is Transaction.__await__, "it inherits the patch"
+    assert await ev is event
+
+
+async def test_a_delivered_reply_can_be_awaited_again():
+    """The same shape reached from the product's own path: once the listener
+    has delivered, the Transaction is done, and awaiting it a second time must
+    answer rather than recurse."""
+    cdp_transport.install()
+    mapper: dict[int, Transaction] = {}
+
+    async def answer_soon():
+        await asyncio.sleep(0.05)
+        (tx,) = mapper.values()
+        _listener_delivers(mapper, {"id": tx.id, "result": _REPLY})
+
+    answering = asyncio.ensure_future(answer_soon())  # noqa: RUF006 - FALSE-POSITIVE(the task is awaited two lines down)
+    tx = _transaction()
+    mapper[tx.id] = tx
+    first = await tx
+    await answering
+    assert await tx == first
 
 
 async def test_the_caller_stops_at_the_send_it_was_cancelled_on():

@@ -51,12 +51,27 @@ home; this one is narrower, cheaper and not a fight. ``Connection``'s metaclass
 (``CantTouchThis``) raises ``SettingClassVarNotAllowedException`` for any
 class-level assignment, so wrapping ``send`` means bypassing a guard the library
 states in words, and it costs a task per command. ``Transaction`` is a plain
-``asyncio.Future`` subclass with no such guard, ``shield`` on an already-done
-future returns it untouched (so nodriver's ``EventTransaction``, which is
-constructed complete, pays nothing), and a dunder is looked up on the type — so
-one assignment covers every send there is: ours, and nodriver's own from
-``Tab.evaluate``, ``Element.apply``, ``Browser.update_targets`` and
+``asyncio.Future`` subclass with no such guard, and a dunder is looked up on the
+type — so one assignment covers every send there is: ours, and nodriver's own
+from ``Tab.evaluate``, ``Element.apply``, ``Browser.update_targets`` and
 ``Tab.close``, none of which pass through any seam of ours.
+
+**A DONE reply must not be shielded, and that is not a detail.** ``shield``
+shortcuts a completed future by returning *the inner future itself*
+(``if inner.done(): return inner``), and here the inner future is the
+``Transaction`` whose ``__await__`` is this patch — so shielding it
+unconditionally recursed until ``RecursionError``. Measured, on the first
+version of this module, for an already-resolved ``Transaction``, for a
+re-awaited delivered reply, and for ``EventTransaction``, which nodriver
+constructs COMPLETE. Latent rather than live on 0.47 — ``EventTransaction`` is
+never constructed anywhere in the package, and ``send()`` has no yield point
+between ``self.mapper[the_id] = tx`` and ``await tx``, so a Transaction is
+always pending at the only await there is — but a library release that
+constructs or re-awaits one would have turned hang protection into a crash on
+every CDP command. The guard is one line: a done reply cannot be cancelled,
+there is nothing left to protect, and it takes nodriver's own ``__await__``
+unchanged. Three nodes in ``tests/test_cdp_transport.py`` hold it, because an
+untested claim about a library's internals is exactly what this was.
 
 What this deliberately does NOT do:
 
@@ -72,13 +87,16 @@ What this deliberately does NOT do:
 * It adds no deadline. ``tool_runtime._clamp_timeout`` + ``_with_cdp_timeout``
   remain the one bound, and that wrapper cancels the operation again.
 
-What it costs, named rather than hidden: an abandoned reply keeps one ``mapper``
-entry and one pending future alive until Chrome answers — or for the life of the
-connection, for a command that is never answered (a Promise that never settles).
-That is the residue 2.1.8 already left behind, minus the dead listener. The
-answer itself is discarded, and ``asyncio.shield`` retrieves the abandoned
-outcome itself when the outer future was cancelled, so nothing reaches the loop
-as "exception was never retrieved".
+What it costs, named rather than hidden: an abandoned reply keeps FOUR things
+alive until Chrome answers — the ``mapper`` entry, the pending ``Transaction``,
+the shield's own outer future, and the done-callback ``shield`` left on the
+inner one — or keeps them for the life of the connection, for a command that is
+never answered (a Promise that never settles). No TASK is leaked: shielding a
+future creates no task, which is the other reason this layer is cheaper than
+wrapping ``send``. That is the residue 2.1.8 already left behind, minus the dead
+listener. The answer itself is discarded, and ``asyncio.shield`` retrieves the
+abandoned outcome itself when the outer future was cancelled, so nothing reaches
+the loop as "exception was never retrieved".
 
 ``install()`` is the seam, called once from ``tool_runtime``'s module body — the
 one module loaded once where ``embedded/server.py`` is executed three times
@@ -101,6 +119,13 @@ _MARKER = "__stealth_cdp_transport__"
 def _protect(original: Callable) -> Callable:
     def __await__(self: Transaction) -> Generator:  # noqa: N807 - PERMANENT(the name IS the dunder we are replacing)
         """Await this CDP reply without being able to cancel it (F-883 B1)."""
+        if self.done():
+            # ``shield`` SHORTCUTS a done future by returning the inner future
+            # itself — which is ``self``, whose ``__await__`` is this function.
+            # Shielding here would recurse until ``RecursionError``. A done
+            # reply cannot be cancelled anyway: there is nothing left to
+            # protect, so it takes nodriver's own ``__await__`` unchanged.
+            return original(self)
         return asyncio.shield(self).__await__()
 
     setattr(__await__, _MARKER, original)

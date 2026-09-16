@@ -51,22 +51,27 @@ now an assertion of recovery, so three of the four recover today:
   ``False`` for a browser that is provably gone (F-789). Everything else — no
   orphan, removable profile, working fresh spawn — does hold.
 * **MQ-128** (navigation deadlines) times out exactly as specified, on the
-  product's own deadline, with the M6-pinned message. But a timed-out
-  navigation leaves the instance's CDP connection permanently wedged (F-788),
-  so the "then prove a normal navigation succeeds" half cannot be claimed.
+  product's own deadline, with the M6-pinned message. Its recovery half —
+  "then prove a normal navigation succeeds" — could not be claimed while a
+  timed-out navigation left the instance's CDP connection permanently wedged
+  (F-788). **F-788 is fixed** (``embedded/cdp_transport.py``: a cancelled await
+  no longer cancels nodriver's ``Transaction``, so the connection's listener
+  survives Chrome's late answer), the pin that carried it is now an assertion
+  of recovery, and the step is satisfied and bound.
 
-Both are pinned as characterizations and routed, never fixed: `src/` edits are
-a plan_RELEASE non-goal (§1.2), and a characterization can never satisfy an MQ
-(§0.2). MQ-126 and MQ-128 are therefore `planned` in the parity manifest and
-are NOT bound to any ``--mq`` id.
+MQ-126 stays pinned as a characterization and routed, never fixed here: `src/`
+edits are a plan_RELEASE non-goal (§1.2), and a characterization can never
+satisfy an MQ (§0.2). It is `planned` in the parity manifest and bound to no
+``--mq`` id. MQ-128 was in that position until F-788 closed, and moved out of it
+in the same change.
 
-MQ binding. Four faults, eight nodes; only the two whose contract holds are
-bound:
+MQ binding. Four faults, eight nodes; the three whose contract holds are bound:
 
 ===========  ================================================================
 MQ           node
 ===========  ================================================================
 ``MQ-127``   ``test_tab_closed_under_a_running_tool_has_one_terminal_outcome``
+``MQ-128``   ``test_a_navigation_timeout_leaves_the_instance_usable``
 ``MQ-129``   ``test_route_abort_mid_navigation_is_bounded_and_recoverable``
 ===========  ================================================================
 
@@ -76,15 +81,17 @@ The ids are bound to runtime evidence by the ``--mq`` flags on the
 what W8 resolves against; this table exists so the two cannot silently
 disagree.
 
-The other six nodes are current support, not acceptance:
+The other five nodes are current support, not acceptance:
 ``test_slow_success_control_completes_when_released`` and the two
-``..._times_out_with_the_pinned_message`` nodes are real assertions that MQ-128
-will rest on once F-788 closes;
-``test_crash_recovery_after_the_owned_chrome_is_killed`` (F-789),
-``test_a_navigation_timeout_wedges_the_instance_connection`` (F-788) and
+``..._times_out_with_the_pinned_message`` nodes are the rest of MQ-128 — its
+timeout half and its sensitivity control — carried by the bound node above;
+``test_crash_recovery_after_the_owned_chrome_is_killed`` (F-789) and
 ``test_networkidle_returns_before_the_transfer_completes`` (F-787) are
 characterization pins. Each pin asserts in the direction that makes a FIX go
-red, so closing any of these findings forces a deliberate test update.
+red, so closing either finding forces a deliberate test update — which is
+exactly what happened to F-788's pin: it went red carrying its own message, "a
+normal navigation succeeded after a timeout", and was inverted into the bound
+MQ-128 node above in the change that fixed it.
 """
 
 from __future__ import annotations
