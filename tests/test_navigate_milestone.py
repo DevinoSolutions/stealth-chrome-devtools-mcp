@@ -27,7 +27,9 @@ import pytest
 from nodriver import cdp
 
 from fakes import FakeTab
+from stealth_chrome_devtools_mcp.embedded import navigation_milestone
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 URL = "https://fake.test/target"
@@ -268,4 +270,312 @@ async def test_networkidle_still_sleeps_f787s_fixed_window_after_commit(
 
     assert result["success"] is True
     assert result["title"] == ""  # F-787: answered before load
+    assert 2.0 in slept
+
+
+# ---------------------------------------------------------------------------
+# F-882 — the document our loader committed can be REPLACED before it loads
+# ---------------------------------------------------------------------------
+# Measured live on 2.1.8 (Chrome 152): three of ten ordinary sites answered
+# ``Navigation ... timed out after 30000ms`` while the browser sat on a fully
+# loaded page — a signed-out Gmail, YouTube, and Reddit's ``js_challenge``. Each
+# had replaced the document Chrome committed for OUR loaderId with a new one
+# under a NEW loaderId, so the ``load`` we were keyed on never fired. The fake
+# below reproduces that stream (``FakeTab``'s supersession model) plus the two
+# things that must NOT be mistaken for it: a subframe's loader, and the
+# lifecycle replay ``Page.setLifecycleEventsEnabled`` sends for the page being
+# LEFT.
+
+LANDING = "https://fake.test/landing"
+
+
+async def test_a_document_replaced_before_its_load_answers_at_the_replacements(
+    monkeypatch, manager
+):
+    """THE F-882 pin: the head-script ``location.replace`` / js-challenge shape —
+    our document commits and is destroyed before ``load``. The answer must be the
+    document the tab is actually showing. RED at 6ca0ae9: ``ToolError: Navigation
+    to https://fake.test/target timed out after 500ms``."""
+    tab = FakeTab(
+        lifecycle="after",
+        supersede_after="init",
+        supersede_url=LANDING,
+        title_at_load="Alpha",
+        title_after_supersede="Landing",
+    )
+    replacements = _with_tab(monkeypatch, tab)
+
+    result = await manager.navigate(instance_id="iid-1", url=URL, timeout=500)
+
+    assert result == {"url": LANDING, "title": "Landing", "success": True}
+    # One navigation, no stale-tab recovery: Chrome accepted ours and the page
+    # moved itself, which a fresh tab would not have fixed.
+    assert _navigate_frames(tab) == [URL]
+    assert replacements == []
+
+
+async def test_the_whole_chain_is_followed_not_just_the_first_replacement(
+    monkeypatch, manager
+):
+    """A challenge that bounces twice is the same shape twice. Only the LAST
+    document's milestone may end the wait. RED at 6ca0ae9: timed out."""
+    tab = FakeTab(
+        lifecycle="after",
+        supersede_after="init",
+        supersede_count=3,
+        supersede_url=LANDING,
+        title_at_load="Alpha",
+        title_after_supersede="Landing",
+    )
+    _with_tab(monkeypatch, tab)
+
+    result = await manager.navigate(instance_id="iid-1", url=URL, timeout=800)
+
+    assert result["title"] == "Landing"
+    assert result["url"] == LANDING
+
+
+async def test_domcontentloaded_is_followed_across_a_replacement_too(
+    monkeypatch, manager
+):
+    """The milestone the caller named, on the document that exists. RED at
+    6ca0ae9: timed out."""
+    tab = FakeTab(
+        lifecycle="after",
+        supersede_after="init",
+        supersede_last_milestone="DOMContentLoaded",
+        supersede_url=LANDING,
+        title_at_dcl="Landing",
+    )
+    _with_tab(monkeypatch, tab)
+
+    result = await manager.navigate(
+        instance_id="iid-1", url=URL, wait_until="domcontentloaded", timeout=500
+    )
+
+    assert result == {"url": LANDING, "title": "Landing", "success": True}
+
+
+async def test_a_page_that_keeps_replacing_itself_still_times_out_and_says_so(
+    monkeypatch, manager
+):
+    """Following the chain is not waiting forever: a document that never reaches
+    the milestone is still the caller's budget, and the message now carries WHY
+    — ``accepted, committed, superseded by 1 later document(s)`` — where it used
+    to end at an empty ``TimeoutError`` (F-882 §4)."""
+    tab = FakeTab(
+        lifecycle="after",
+        supersede_after="init",
+        supersede_last_milestone="DOMContentLoaded",
+    )
+    _with_tab(monkeypatch, tab)
+
+    with pytest.raises(ToolError, match=r"superseded by 1 later document\(s\)"):
+        await manager.navigate(instance_id="iid-1", url=URL, timeout=200)
+
+
+async def test_the_failed_attempt_warning_carries_the_reason_not_an_empty_colon(
+    monkeypatch, manager
+):
+    """The shipped line was ``Navigation attempt 1 failed for <id>: `` — a
+    ``TimeoutError`` stringifies to nothing, so the durable log said only that
+    something had failed. RED at 6ca0ae9: the message ends at the colon."""
+    lines: list[str] = []
+    monkeypatch.setattr(
+        debug_logger,
+        "log_warning",
+        lambda component, method, message, context=None, error=None: lines.append(
+            message
+        ),
+    )
+    tab = FakeTab(
+        lifecycle="after",
+        supersede_after="init",
+        supersede_last_milestone="DOMContentLoaded",
+    )
+    _with_tab(monkeypatch, tab)
+
+    with pytest.raises(ToolError):
+        await manager.navigate(instance_id="iid-1", url=URL, timeout=200)
+
+    assert lines, "the failed attempt was not logged at all"
+    assert "TimeoutError" in lines[0]
+    assert "accepted, committed, superseded by 1 later document(s)" in lines[0]
+
+
+async def test_a_download_is_named_after_the_grace_never_after_the_whole_budget(
+    monkeypatch, manager
+):
+    """A download (``Content-Disposition: attachment``) answers ``Page.navigate``
+    with ``net::ERR_ABORTED`` in ~9-13 ms, commits nothing, fires nothing and
+    leaves the tab where it was (measured, Chrome 152). RED at 6ca0ae9: the wait
+    sat for the WHOLE budget and then reported a timeout about a navigation that
+    was over before it started. It is not retried either — a second attempt
+    would trigger the download twice."""
+    tab = FakeTab(navigate_error="net::ERR_ABORTED", url=LANDING)
+    replacements = _with_tab(monkeypatch, tab)
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(ToolError, match=r"aborted by Chrome \(net::ERR_ABORTED\)"):
+        await manager.navigate(instance_id="iid-1", url=URL, timeout=8000)
+    spent = asyncio.get_running_loop().time() - started
+
+    assert spent < navigation_milestone.ABORTED_GRACE_SECONDS + 0.5, (
+        f"the abort was waited on for {spent:.2f}s"
+    )
+    assert _navigate_frames(tab) == [URL]
+    assert replacements == []
+    assert tab.url == LANDING  # the tab did not move, and the message says so
+
+
+async def test_an_abort_whose_page_took_our_place_is_followed_not_called_a_download(
+    monkeypatch, manager
+):
+    """The OTHER meaning of ``net::ERR_ABORTED`` (measured, 6/6 runs): the
+    displayed page navigated itself away while our navigation was still pending,
+    so ours is cancelled and the page's own document commits 11.6-14.1 ms later
+    — or, in two of six runs, BEFORE the abort response arrived. Both orders are
+    followed; reporting either as a download would be a lie about a tab that
+    moved. RED at 6ca0ae9: timed out after the whole budget."""
+    tab = FakeTab(
+        lifecycle="after",
+        navigate_error="net::ERR_ABORTED",
+        supersede_after="aborted",
+        supersede_url=LANDING,
+        title_at_load="Alpha",
+        title_after_supersede="Landing",
+    )
+    _with_tab(monkeypatch, tab)
+
+    result = await manager.navigate(instance_id="iid-1", url=URL, timeout=4000)
+
+    assert result == {"url": LANDING, "title": "Landing", "success": True}
+
+
+class _LateAbortTab(FakeTab):
+    """A ``Page.navigate`` whose abort takes a while to arrive — the real shape.
+    The abort IS the page navigating away, which happens a second or more into a
+    pending navigation (measured: the response landed at 1006 ms)."""
+
+    async def send(self, cdp_obj, *args, **kwargs):
+        if getattr(getattr(cdp_obj, "gi_code", None), "co_name", None) == "navigate":
+            await asyncio.sleep(navigation_milestone.ABORTED_GRACE_SECONDS + 0.2)
+        return await super().send(cdp_obj, *args, **kwargs)
+
+
+async def test_the_abort_grace_starts_at_the_response_not_at_the_call(
+    monkeypatch, manager
+):
+    """Caught by the real-Chrome node before it could ship: a grace anchored at
+    the start of the attempt is ALREADY SPENT when the abort arrives — the tool
+    reported every pre-empted navigation as a download, ~1 s into its own
+    budget, while the tab was on the page that pre-empted it."""
+    tab = _LateAbortTab(
+        lifecycle="after",
+        navigate_error="net::ERR_ABORTED",
+        supersede_after="aborted",
+        supersede_url=LANDING,
+        title_at_load="Alpha",
+        title_after_supersede="Landing",
+    )
+    _with_tab(monkeypatch, tab)
+
+    result = await manager.navigate(instance_id="iid-1", url=URL, timeout=8000)
+
+    assert result == {"url": LANDING, "title": "Landing", "success": True}
+
+
+async def test_the_abort_grace_cannot_outlive_the_callers_own_budget(
+    monkeypatch, manager
+):
+    """The grace is clipped to what is left of ``timeout``, so a caller who
+    asked for 200 ms still gets the NAMED answer rather than a bare
+    cancellation from the enclosing ``wait_for``."""
+    tab = FakeTab(navigate_error="net::ERR_ABORTED", url=LANDING)
+    _with_tab(monkeypatch, tab)
+
+    with pytest.raises(ToolError, match=r"aborted by Chrome"):
+        await manager.navigate(instance_id="iid-1", url=URL, timeout=200)
+
+
+async def test_a_subframes_loader_is_never_this_navigations(monkeypatch, manager):
+    """Measured: a same-origin iframe that replaces itself produces two loaders
+    under the SUBFRAME's frameId while the main frame commits once. Those
+    documents load; ours must still be the one waited for, so a main frame that
+    never reaches ``load`` still times out."""
+    tab = FakeTab(
+        lifecycle="after",
+        supersede_after="DOMContentLoaded",
+        supersede_last_milestone="DOMContentLoaded",
+        iframe_loader=True,
+    )
+    _with_tab(monkeypatch, tab)
+
+    with pytest.raises(ToolError, match="timed out"):
+        await manager.navigate(instance_id="iid-1", url=URL, timeout=200)
+
+
+async def test_the_enable_time_replay_is_never_read_as_this_navigation(
+    monkeypatch, manager
+):
+    """``Page.setLifecycleEventsEnabled(true)`` re-sends the CURRENT document's
+    whole lifecycle — ``commit``/``DOMContentLoaded``/``load`` — under the loader
+    of the page being LEFT, and the tool sends it immediately before
+    ``Page.navigate``. A wait that took any ``load`` on its frame would answer
+    with the previous page, instantly and always."""
+    tab = FakeTab(lifecycle="never", replay_loader="L-previous", title_at_load="Alpha")
+    _with_tab(monkeypatch, tab)
+
+    with pytest.raises(ToolError, match="timed out"):
+        await manager.navigate(instance_id="iid-1", url=URL, timeout=200)
+
+
+async def test_a_document_that_loads_before_its_replacement_answers_at_its_own(
+    monkeypatch, manager
+):
+    """The Amazon / ``meta refresh`` shape, and the deliberate residual (§6):
+    when OUR document reaches ``load`` first, that is what the tab was showing at
+    that instant and it is what we answer. Waiting past it would be a quiescence
+    wait, which ``navigate`` does not promise and cannot bound."""
+    tab = FakeTab(
+        lifecycle="after",
+        supersede_after="load",
+        supersede_url=LANDING,
+        title_at_load="Alpha",
+        title_after_supersede="Landing",
+    )
+    _with_tab(monkeypatch, tab)
+
+    result = await manager.navigate(instance_id="iid-1", url=URL, timeout=500)
+
+    assert result["title"] == "Alpha"
+    assert result["url"] == URL
+
+
+async def test_networkidle_still_keys_to_the_first_commit(monkeypatch, manager):
+    """F-787's fixed sleep is keyed to the commit, and the commit is ours: the
+    chain cannot reach past a milestone that is already satisfied when our own
+    document lands. Stated here so the choice is a pin and not an accident."""
+    slept: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def observed_sleep(delay, *args, **kwargs):
+        slept.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", observed_sleep)
+    tab = FakeTab(
+        lifecycle="after",
+        supersede_after="init",
+        supersede_url=LANDING,
+        title_at_load="Alpha",
+        title_after_supersede="Landing",
+    )
+    _with_tab(monkeypatch, tab)
+
+    result = await manager.navigate(
+        instance_id="iid-1", url=URL, wait_until="networkidle", timeout=5000
+    )
+
+    assert result["success"] is True
     assert 2.0 in slept

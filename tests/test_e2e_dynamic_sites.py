@@ -65,9 +65,11 @@ import requests
 import fixture_routes as fr
 from e2e_helpers import (
     eval_js,
+    fixture_ledger,
     get_fn,
     integration_pytestmark,
     navigate_and_settle,
+    reset_fixture_ledger,
     sandbox_kwargs,
     wait_for_js,
     warmup_once,
@@ -113,11 +115,11 @@ async def _http_get(url: str):
 
 
 async def _reset_ledger(origin: str) -> None:
-    await _http_get(f"{origin}/e2e/reset")
+    await reset_fixture_ledger(origin)  # ONE ledger reader (e2e_helpers), F-882
 
 
 async def _ledger(origin: str) -> dict:
-    return (await _http_get(f"{origin}/e2e/ledger")).json()
+    return await fixture_ledger(origin)
 
 
 def _unwrap(payload: Any) -> Any:

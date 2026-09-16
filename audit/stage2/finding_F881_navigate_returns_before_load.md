@@ -302,6 +302,13 @@ Nothing raised, nothing logged.
   the existing timeout `ToolError`. Before, it answered `success: true` with the
   *previous* page's url and title. Honest, but slow; a dedicated answer for
   downloads and superseding redirects is its own finding.
+  **→ That finding is [F-882](./finding_F882_navigate_superseded_loader.md), and
+  it makes this bullet obsolete.** A fleet test measured the superseding-redirect
+  half on three of ten ordinary sites (Gmail, YouTube, Reddit), each costing the
+  full 30 s: keying on one `loaderId` was too narrow, and the wait now follows
+  the FRAME's loader chain. `net::ERR_ABORTED` is answered within a measured
+  grace instead of the budget — it turned out to have two meanings, only one of
+  which is a download.
 * **What such a timeout costs now, and what it no longer costs.** Before review
   round 1 every attempt-1 `TimeoutError` was retried on a REPLACED tab
   (`_replace_main_tab`, `close_existing=True`): 2× the budget, the previous page
