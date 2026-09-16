@@ -44,6 +44,36 @@
         min-height: 30px;
         border: 1px dashed rgb(150, 150, 150);
       }
+
+      /* F-876 click-verification targets. Each is a shape MEASURED (Chrome 152)
+         to take a real coordinate click and deliver it to something other than
+         the target -- or to nobody -- while click_element answered True. None of
+         them is clicked by any other test, so they add no actions to the log. */
+      #pe-none-btn {
+        pointer-events: none;
+      }
+      #zero-size-btn {
+        width: 0;
+        height: 0;
+        overflow: hidden;
+        padding: 0;
+        border: 0;
+        margin: 0;
+      }
+      #display-none-btn {
+        display: none;
+      }
+      #vis-hidden-btn {
+        visibility: hidden;
+      }
+      /* A real 33.5x21 box at a NEGATIVE point: scroll_into_view does not bring
+         it back, the coordinate click goes to (-483, -489) and
+         document.elementFromPoint answers null there. */
+      #offviewport-btn {
+        position: absolute;
+        left: -500px;
+        top: -500px;
+      }
     </style>
   </head>
   <body>
@@ -143,6 +173,50 @@
     <!-- Offscreen target below a tall spacer: proves click auto-scrolls. -->
     <div id="scroll-spacer"></div>
     <button id="offscreen-btn">Offscreen</button>
+
+    <!-- F-876: targets a real coordinate click reaches but the TARGET does not
+         receive (pointer-events:none / zero-size / visibility:hidden all send
+         the click to <body>; display:none has no box at all, so
+         Element.mouse_click raises and the tool falls back to the synthetic,
+         untrusted el.click()). Plus the two non-input paste targets: a plain
+         <div>, which takes nothing, and a contenteditable one, which does. -->
+    <button id="pe-none-btn">PE none</button>
+    <button id="zero-size-btn">Z</button>
+    <button id="display-none-btn">Display none</button>
+    <button id="vis-hidden-btn">Visibility hidden</button>
+    <button id="offviewport-btn">Off viewport</button>
+    <!-- Disabled by an ANCESTOR: elem.disabled is false here, :disabled matches,
+         the button hit-tests to itself and receives nothing. -->
+    <fieldset disabled>
+      <button id="fieldset-disabled-btn">In disabled fieldset</button>
+    </fieldset>
+    <div id="plain-div">PLAIN-DIV-TEXT</div>
+    <div id="editable-div" contenteditable="true"></div>
+
+    <!-- F-877: the <select> shapes select_option answered True for without
+         selecting anything, and the file inputs upload_file reported a count
+         for without reading input.files. None is touched by any other test. -->
+    <select id="sel-disabled" disabled>
+      <option value="one">Alpha</option>
+      <option value="two">Beta</option>
+    </select>
+    <select id="sel-empty"></select>
+    <select id="sel-multi" multiple size="3">
+      <option value="one">Alpha</option>
+      <option value="two">Beta</option>
+      <option value="three">Gamma</option>
+    </select>
+    <!-- A disabled <option> (unreachable by typeahead, reachable by value) and
+         an option whose label= differs from its inner text, which is the
+         collision Chrome's typeahead resolved to the WRONG option. -->
+    <select id="sel-labels">
+      <option value="d1">Delta</option>
+      <option value="d2" disabled>Delta Two</option>
+      <option value="l1" label="LabelThree">TextThree</option>
+    </select>
+    <input type="file" id="file-single" />
+    <input type="file" id="file-multi" multiple />
+    <input type="file" id="file-disabled" disabled />
 
     <!-- Anchor destination, far down the page. -->
     <div id="anchor-target">ANCHOR-TARGET-TEXT</div>

@@ -236,10 +236,11 @@ async def test_contenteditable_and_multiselect(fixture_app_server):
       * paste_text uses CDP ``Input.insertText`` (dom_handler.py:476), which
         inserts into the editable's CONTENT (unlike setting .value), so pasted
         text lands.
-      * select_option sets ``select.value = <one value>`` (dom_handler.py:519) —
-        which selects exactly ONE option even on a ``<select multiple>`` (there is
-        no multi-value path) — then dispatches change, so the log records the
-        single value only.
+      * select_option resolves ONE criterion to ONE option index (F-877's
+        ``control_state``) — so even on a ``<select multiple>`` exactly one
+        option ends up selected, because the tool's signature has no multi-value
+        path — then dispatches input + change, so the log records the single
+        value only.
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")

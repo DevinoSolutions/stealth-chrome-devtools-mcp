@@ -35,6 +35,7 @@ jobs:
   publish:
     name: Publish the gated artifacts
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: gate
     environment: pypi
     permissions:

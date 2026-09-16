@@ -27,8 +27,12 @@ and both answers came from the same place: nothing here asked Chrome anything.
 take it". It compares the element's own text against the baseline read just
 before the characters went out, and a control that took every event and moved
 nothing is a FAILURE that raises. Measured on the same Chrome, every key event
-delivered and the value unchanged: ``readonly``, ``range``, ``date``,
-``color``. The tool used to report all four as success.
+delivered and the value unchanged: ``readonly``, ``range``, ``color``. The tool
+used to report all three as success. ``date`` is deliberately NOT in that list
+or in the hint :func:`verify_received` raises: the local Chrome 152 build
+refused digits into a ``<input type="date">``, but PR #110's gate measured all
+three CI cells ACCEPTING them, so it is a build-dependent shape and naming it as
+a known refusal would be a claim the evidence does not support.
 
 The test is "did anything change", deliberately, and not "does it now contain
 exactly what I typed": an input mask, an autocomplete that rewrites, a
@@ -180,6 +184,18 @@ async def type_characters(tab: Tab, element: Element, text: str, delay: float) -
             await asyncio.sleep(delay)
 
 
+#: The programmatic clear — THE one spelling of it (F-876). ``type_text`` and
+#: ``paste_text`` each wrote this string out inline, which is two ways to say one
+#: thing in the one path this work unified; the fallback WHEN it throws stays with
+#: the caller, because that is policy and this is the sentence.
+#:
+#: It is deliberately narrow. On a non-input element ``elem.value = ''`` does not
+#: throw — it silently creates an expando property named ``value`` (measured on a
+#: ``<div>``, Chrome 152) — so this clears a field and reports nothing about
+#: whether there was a field to clear. That question is :func:`entered_text`'s.
+CLEAR_JS = "(elem) => { elem.value = ''; }"
+
+
 async def clear_via_keyboard(tab: Tab) -> None:
     """Select-all + Delete, for when a programmatic ``elem.value = ''`` fails.
 
@@ -233,18 +249,28 @@ async def entered_text(element: Element, selector: str) -> str:
     return record["text"]
 
 
-def verify_received(selector: str, typed: str, before: str, after: str) -> None:
+def verify_received(selector: str, entered: str, before: str, after: str) -> None:
     """Raise unless the page took the characters.
 
     The failure this exists for is the one that used to answer ``True``: every
-    key event delivered, the element's text exactly as it was.
+    event delivered, the element's text exactly as it was.
+
+    Both text tools ask this one question (F-876). The wording says "entered"
+    rather than "typed" because ``paste_text`` reaches the same refusing
+    controls through a single ``Input.insertText`` rather than a key event per
+    character, and a message naming keys would be a message about the wrong
+    mechanism half the time. The hint stays HEDGED ("may be") and names only
+    ``readonly``, ``range`` and ``color``: they are the shapes measured to refuse
+    on every build, while ``date`` refused on the local Chrome 152 and was
+    measured ACCEPTING digits on all three of PR #110's CI cells.
     """
     if after != before:
         return
     raise ToolError(
-        f"typed {len(typed)} character(s) into '{selector}' but the element's "
-        f"text did not change (still {len(after)} character(s)) — the page did "
-        "not accept the input. The control may be read-only or disabled, a "
-        "non-text input type (range/date/color cannot be typed into), or "
-        "governed by a script that cancels key events."
+        f"entered {len(entered)} character(s) into '{selector}' but the "
+        f"element's text did not change (still {len(after)} character(s)) — "
+        "the page did not accept the input. The control may be read-only or "
+        "disabled, a non-text input type (range and color take neither typed "
+        "characters nor an insert), or governed by a script that cancels the "
+        "input."
     )

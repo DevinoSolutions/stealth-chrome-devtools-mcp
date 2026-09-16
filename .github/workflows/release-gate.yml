@@ -52,6 +52,7 @@ jobs:
   quality:
     name: quality
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -116,6 +117,7 @@ jobs:
   unit-tests:
     name: unit-tests (${{ matrix.runner_os }}/${{ matrix.runner_arch }} py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -188,6 +190,7 @@ jobs:
   coverage:
     name: coverage (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -263,6 +266,7 @@ jobs:
   integration:
     name: integration (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -498,6 +502,7 @@ jobs:
   transport:
     name: transport (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -635,6 +640,7 @@ jobs:
   known-gaps:
     name: known-gaps
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -688,6 +694,7 @@ jobs:
   offline-stealth:
     name: offline-stealth (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -786,6 +793,7 @@ jobs:
   build-dist:
     name: build-dist
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.manifest.outputs.version }}
     steps:
@@ -859,6 +867,7 @@ jobs:
     name: package-verify
     needs: build-dist
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -988,6 +997,7 @@ jobs:
     name: install-smoke (${{ matrix.kind }} ${{ matrix.cell.runner_os }}/${{ matrix.cell.runner_arch }}${{ matrix.cell.stages == 'handshake' && ' NO-NAVIGATION partial' || '' }})
     needs: build-dist
     runs-on: ${{ matrix.cell.os }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -1140,6 +1150,7 @@ jobs:
       - package-verify
       - install-smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -1192,6 +1203,7 @@ jobs:
       - install-smoke
       - release-evidence
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Require every edge to have succeeded
         shell: bash

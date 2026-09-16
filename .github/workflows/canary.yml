@@ -76,6 +76,7 @@ jobs:
   live-observation:
     name: live-observation (informational, non-gating)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Structural guarantee #1: even if a step below were changed to propagate a
     # non-zero exit, a failed job here cannot fail the workflow run.
     continue-on-error: true
@@ -134,6 +135,7 @@ jobs:
   canary-known-gaps:
     name: canary-known-gaps
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
