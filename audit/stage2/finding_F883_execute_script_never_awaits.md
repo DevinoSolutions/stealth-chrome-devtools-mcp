@@ -159,39 +159,71 @@ with no `try`/`except`. The `InvalidStateError` propagates out of `_listener`
 and **ends the listener task**. From then on the connection dispatches no
 responses and no events; every later call on that tab times out.
 
-Measured (Chrome 152, nodriver 0.47, the branch's own `esDelayed`), both shapes:
+**This was not a new defect. It was F-788 and F-794, reached through a new
+door.** Both were opened by plan_RELEASE (W10, W13), both HIGH, both OPEN, both
+characterization-pinned as "the instance is wedged after a timeout /
+cancellation", and both describe this exact listener death. `awaitPromise` did
+not create the crash; it made `execute_script` a third way to reach it.
 
-| shape | before the shield | after |
+**Where the protection belongs: around the SEND, not around the operation.**
+The first attempt (`529cec0`, reverted) shielded
+`tool_runtime._with_cdp_timeout`, which protects the send by DETACHING the whole
+tool body. The listener lived, but a cancelled operation ran on in the
+background — a cancelled `navigate` navigated anyway — and
+`tests/test_wire_semantics.py` caught it over real frames. Two scopes were being
+confused, and separating them is the fix:
+
+* the await on ONE reply must survive the caller, because Chrome will answer and
+  something has to receive it;
+* the rest of a multi-step body must STOP when the caller gives up.
+
+`embedded/cdp_transport.py` wraps `Transaction.__await__` in `asyncio.shield`:
+the cancellation lands on a throwaway outer future, the registered Transaction
+stays pending exactly as the listener expects to find it, and the
+`CancelledError` still arrives AT that await, so the body stops where it always
+did. `Connection.send` was the other candidate and was rejected on two counts —
+`Connection`'s metaclass (`CantTouchThis`) raises
+`SettingClassVarNotAllowedException` for any class-level assignment, so wrapping
+it means bypassing a guard the library states in words, and it costs a task per
+command. A dunder is looked up on the TYPE, so ONE assignment covers every send
+there is: ours, and nodriver's own from `Tab.evaluate`, `Element.apply`,
+`Browser.update_targets` and `Tab.close`, none of which pass through a seam of
+ours. Nothing in nodriver ever cancels a Transaction deliberately (checked: the
+only `cancel()` calls are `_listener_task` on disconnect and two helper tasks in
+`Tab.wait`), so no library path loses anything.
+
+Measured (Chrome 152, nodriver 0.47), all three shapes:
+
+| shape | at 2.1.8 | with the fix |
 |---|---|---|
-| A. `execute_script("return esDelayed(9000,'late')", timeout_ms=1500)`, then `6*7` on the same instance | `Connection.mapper` held `[9]` after the timeout; after the late answer `_listener_task.done() == True` with `InvalidStateError('invalid state')`; follow-up `CDP operation timed out after 10s` | listener `ALIVE`, follow-up `{'success': True, 'result': 42}` |
-| B. `navigate(url=<9 s-header route>)`, times out, then `6*7` | `mapper` held `[8]`; listener `DEAD (InvalidStateError)`; follow-up timed out | **still dead** — see below |
+| A. `execute_script("return esDelayed(9000,'late')", timeout_ms=1500)`, then `6*7` | `mapper` held `[9]`; after the late answer `_listener_task.done()` with `InvalidStateError('invalid state')`; follow-up `CDP operation timed out after 10s` | `mapper` drains to `[]`, listener `ALIVE`, follow-up `{'success': True, 'result': 42}` |
+| B. `navigate(url=<9 s-header route>, timeout=2000)`, then `6*7` — **F-788 / F-882's shape** | listener `DEAD (InvalidStateError)`; follow-up timed out | follow-up `{'success': True, 'result': 42}`; `tests/test_resilience.py`'s own pin went red with "a normal navigation succeeded after a timeout — F-788 is fixed" |
+| C. cancel a confirmed in-flight `navigate` over the wire, then reuse the instance — **F-794's shape** | next navigate burned the full CDP budget and returned "the browser may have crashed" | the same instance navigates AND answers an `execute_script` round trip (`tests/test_wire_semantics.py`, 15/15) |
 
-At 2.1.8 shape A is unreachable for `execute_script` only because without
-`awaitPromise` the call never times out; **shape B is live on 2.1.8** and on
-every release that has `navigate`'s inner `wait_for`.
+Shape B matters twice: it is F-788, and it is the mechanism the F-882 report
+describes (a navigation that times out while the page *does* load). It is fixed
+here **without touching `browser_manager.navigate` or `navigation_milestone`** —
+the F-882 agent's files — because the fix sits BELOW every deadline in the tree,
+including that file's own inner `asyncio.wait_for` at `browser_manager.py:1181`,
+which is a different scope from `_with_cdp_timeout`. That is also why shape B was
+measured directly rather than inferred from shape A.
 
-**Shape B is F-882's shape, and it is a release-blocking product defect.**
-`navigate` is bounded twice: the tool body's `_with_cdp_timeout` (now shielded)
-AND `browser_manager.navigate`'s own bare
-`asyncio.wait_for(navigation_milestone.navigate(...), timeout=timeout_seconds)`
-at `browser_manager.py:1181` (plus the two `tab.evaluate` reads at `:1193` /
-`:1197` under the remaining budget). The inner `wait_for` cancels the
-`Page.navigate` transaction; when Chrome commits late — the F-882 report is
-exactly a navigation that times out while the page *does* load — the listener
-dies and the instance is dead from then on. That is a strong mechanical candidate
-for the user's "browsers randomly closing" / "sessions randomly disconnect"
-reports: the browser is fine, the tab's CDP listener is gone, and every tool
-answers with the generic timeout. `browser_manager.navigate` and
-`navigation_milestone` are owned by the F-882 agent and are deliberately NOT
-touched here; the measurement and the census below are handed over instead.
+**What the fix does not do, and cannot.** A timed-out `navigate` has already
+handed `Page.navigate` to Chrome, and cancelling our await does not un-send it:
+measured, the page DID land on the slow route when its headers finally arrived
+(`document.title == 'Late'`). What stops is the rest of the body — the retry, the
+post-navigation reads, the state update. "The navigation was cancelled" was never
+true of the browser; it is true of our waiting for it.
 
-**Census of the other bare `asyncio.wait_for` sites over a CDP send** (each is
-the same cancellation-while-registered shape; none is changed in this PR):
-`browser_manager.py:1181/1193/1197` (navigate), `:875/:894/:904/:929/:950`
-(close paths — the connection is being torn down, benign), `cdp_function_executor.py:846`,
-`tool_errors.py:213` (`_require_landing_ok`'s settled-URL read),
-`tool_sections/browser_management.py:372` (`get_instance_state`, deliberately not
-the wrapper), `tool_sections/debugging.py:71/:109`.
+**The bare `asyncio.wait_for` census is no longer a list of exposures.** Every
+one of these cancels an operation, and none of them can now cancel a Transaction:
+`browser_manager.py:1181/1193/1197` (navigate), `:875/:894/:904` (close paths),
+`cdp_function_executor.py:846`, `tool_errors.py:213`,
+`tool_sections/browser_management.py:372`, `tool_sections/element_interaction.py:323`,
+`platform_utils.py:508` (whose docstring still says "expiry cancels the pending
+send" — true of the send, no longer fatal to the connection). They are listed so
+the next reader can see the blast radius the one-line fix covers, not so someone
+goes and shields them again.
 
 ---
 
@@ -243,21 +275,19 @@ second deadline is a second answer to "how long may a script run". A Promise tha
 never settles blocks the send exactly as `while(true)` blocks the renderer, and
 both are killed by the same wrapper.
 
-**The bound is SHIELDED, at its one home (B1).** `_with_cdp_timeout` now runs the
-work as a detached task and awaits `asyncio.shield(task)` under the same
-`wait_for`: on expiry the shield is cancelled, the task is not, nodriver's
-`Transaction` is never cancelled, Chrome's late answer lands on a healthy future,
-the listener lives, and the value is discarded. A done-callback
-(`_discard_outcome`) retrieves the abandoned outcome so asyncio never logs "Task
-exception was never retrieved" about a call already reported as timed out. The
-deadline is byte-identical; the reviewer's proposed location
-(`script_evaluation.evaluate`) was rejected by the coordinator as a second way —
-every tool bounded by the wrapper had the same exposure — and the two
-alternatives the reviewer rejected (popping our `mapper` entry, which turns the
-later `pop` into a `KeyError` that kills the listener the same way; a hand-built
-Transaction double in the hot path) were not re-litigated. What the shield COSTS
-is named in its docstring: a timed-out multi-step operation now runs to
-completion in the background instead of stopping part-way.
+**The AWAIT is shielded, at its one home (B1).** `embedded/cdp_transport.py`
+wraps nodriver's `Transaction.__await__` in `asyncio.shield`, installed once from
+`tool_runtime`'s module body (the one module loaded once where
+`embedded/server.py` is executed three times under runpy) and idempotent anyway,
+on `session_hygiene.install()`'s precedent. `_with_cdp_timeout` is unchanged from
+2.1.8 and still CANCELS the operation it bounds. The deadline is byte-identical.
+Three placements were rejected and each for its own reason: `script_evaluation`
+(the reviewer's first suggestion) fixes one tool out of ninety-four;
+`_with_cdp_timeout` (shipped as `529cec0`, reverted) breaks the cancellation
+contract; popping our `mapper` entry turns the listener's later `pop` into a
+`KeyError` that kills it one line earlier. What the shield COSTS is named in its
+docstring: an abandoned reply keeps one `mapper` entry and one pending future
+until Chrome answers — the residue 2.1.8 already had, minus the dead listener.
 
 **The retry is keyed on the RECORD, not the message (review nit 1).** A page
 controls `exception.description`, so `throw new Error("Illegal return statement")`
@@ -312,26 +342,37 @@ subtype=promise, value={})` when it was not, which is what Chrome sends
 green for the defect, which is exactly how the first draft of two of these nodes
 passed against 2.1.8 before the model existed.
 
-### B1 pins — RED without the shield, GREEN with it (same tree, shield lines removed)
+### B1 — the mechanism, and the two findings it closes
+
+`tests/test_cdp_transport.py` (8 nodes, hermetic, ~1.6 s) pins the mechanism out
+of nodriver's OWN classes: a real `Transaction` around a real CDP generator,
+answered by the two lines `Connection._listener` runs (`mapper.pop(id)`, then
+`tx(**message)`), copied unguarded on purpose — what is proved is that they
+cannot raise, not that someone caught it when they did. Its last node is the
+sensitivity control: it restores nodriver's own `__await__` for the length of the
+node and requires `InvalidStateError`, so a green file means the patch did it
+rather than that the defect was never reachable. A hand-written double would have
+had to encode the bug to prove it, and this repo has been bitten by exactly that.
+
+Three pins, in three lanes, each of which was RED before this change:
 
 ```
 tests/test_e2e_execute_script_async.py::test_a_promise_that_settles_after_the_timeout_leaves_the_instance_usable
-    RED:   ToolError: CDP operation timed out after 10s   (the follow-up 6*7 — dead tab)
-tests/test_cdp_timeout.py::TestWithCdpTimeoutMechanism::test_timeout_does_not_cancel_the_inner_coroutine
-    RED:   AssertionError: the shield, not the work, is what the timeout cancels
-tests/test_cdp_timeout.py::TestWithCdpTimeoutMechanism::test_a_late_set_result_lands_on_a_healthy_future
-    RED:   AssertionError: the Transaction must never be cancelled
-                                                            -> 3 passed in 15.28 s
+    real Chrome   — polls window.esSettled THROUGH the tool (every poll is a call
+                    that times out if the listener died), settle 2.5 s vs timeout_ms 800
+tests/test_resilience.py::test_a_navigation_timeout_leaves_the_instance_usable
+    real Chrome   — WAS test_a_navigation_timeout_wedges_the_instance_connection
+                    (characterization, F-788); inverted here, asserts the full
+                    recovery invariant: driveable, closes clean, fresh spawn works
+tests/test_wire_semantics.py::test_cancelling_a_confirmed_in_flight_request_ends_it_with_code_zero
+    real wire     — F-794's half inverted: the cancelled instance must navigate
+                    again AND answer a script round trip. F-791 (code 0) untouched
 ```
 
-The second hermetic node is nodriver's exact mechanism with a bare `Future` in
-the Transaction's place: after the timeout, `set_result` on it must be a normal
-completion — under the old wrapper it was the `InvalidStateError` that killed the
-listener. `test_timeout_cancels_inner_coroutine`, the pin that stood in that
-file asserting the OLD behaviour, is inverted deliberately in the same PR. The
-E2E node polls `window.esSettled` through the tool itself — every poll is a call
-that would time out if the listener were dead — rather than sleeping, and its
-settle time (2.5 s) is comfortably past its `timeout_ms` (800).
+`test_timeout_cancels_the_whole_operation` in `tests/test_cdp_timeout.py` is the
+counter-pin that keeps the layers apart: it asserts `_with_cdp_timeout` still
+cancels the body. It was briefly inverted by `529cec0` and is restored here, with
+the reason written into its docstring.
 
 ### Hermetic — `tests/test_execute_script_async.py` (28 nodes)
 
@@ -450,20 +491,19 @@ round trips, a global on the page, and a race, in place of one `await`.
    CDP's `Runtime.evaluate` `timeout` would kill the work in the page and is
    deliberately not used: see §3's "no new deadline".
 
-4b. **The shield changes what a timed-out MULTI-STEP operation does.** Before,
-   `wait_for` cancelled it part-way (and, if a send was in flight, killed the
-   listener); now it runs to completion detached. A `type_text` that times out
-   keeps typing in the background; a `scroll_page` keeps settling. Named as the
-   price of not killing the tab — the alternative was a dead instance — and it
-   is bounded by the operation's own remaining work, never by a new deadline.
+4b. **A timed-out or cancelled operation still STOPS.** `529cec0` made it run on
+   in the background, which is the one thing a cancellation may not do; it was
+   reverted and the pin that asserts cancellation
+   (`test_timeout_cancels_the_whole_operation`) is back. What cannot be recalled
+   is a command Chrome already has: a timed-out `navigate` may still land its
+   page (measured — §2f's shape C note). That is a property of CDP, not of a
+   layer choice, and it is stated in MQ-128 rather than papered over.
 
-4c. **`navigate`'s inner `wait_for` is NOT shielded — release-blocking, handed
-   over (§2f).** `browser_manager.py:1181` cancels the `Page.navigate` transaction
-   itself, below the shielded wrapper, so a navigation that times out while
-   Chrome commits late STILL kills the tab (measured, this PR's own probe, after
-   the shield). It is F-882's shape; the file is the F-882 agent's; the census of
-   every other bare `asyncio.wait_for` over a CDP send is in §2f for the
-   follow-up finding.
+4c. **`navigate`'s inner `wait_for` needed no change** — which is the point of
+   the layer. `browser_manager.py:1181` still cancels its operation, and that is
+   correct; it can no longer cancel a Transaction. Measured directly (§2f shape
+   B), not inferred. `browser_manager.py` and `navigation_milestone.py` are
+   untouched by this PR, so the F-882 agent's work does not conflict with it.
 
 4d. **The retry trigger can still be spoofed by a page that overwrites `.stack`.**
    `const e = new SyntaxError('Illegal return statement'); e.stack = 'SyntaxError:

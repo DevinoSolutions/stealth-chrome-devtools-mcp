@@ -88,21 +88,36 @@ One behaviour is deliberately slower: a Promise that never settles used to answe
 `_with_cdp_timeout`, the one home for that clamp — no second deadline inside the
 eval seam), reported as a timeout. The tab is usable immediately afterwards.
 
-**And `_with_cdp_timeout` is now SHIELDED, which fixes a latent crash the review
-made reachable.** A bare `asyncio.wait_for` cancels the work on expiry, which
-cancels nodriver's `Transaction` while it is still registered in
-`Connection.mapper`; when Chrome answers LATE, the listener task `set_result`s a
-cancelled future, dies of the `InvalidStateError`, and every later call on that
-tab times out with the generic "the browser may have crashed". Measured on Chrome
-152 for a Promise that settles after `timeout_ms` — and for a `navigate` that
-times out while Chrome commits late, which is F-882's shape and is still live
-below the wrapper in `browser_manager.navigate`'s own `wait_for` (handed to that
-finding; see the F-883 finding §2f). The wrapper now awaits `asyncio.shield` over
-a detached task: the deadline is unchanged, the late answer lands on a healthy
-future and is discarded, and the instance stays usable — pinned hermetically
-(nodriver's mechanism with a bare Future) and on real Chrome. What it costs: a
-timed-out multi-step operation runs to completion in the background instead of
-stopping part-way.
+**And every CDP reply is now shielded from its caller's cancellation, which
+closes TWO open HIGH findings — F-788 and F-794 — as well as the crash the
+review made reachable.** Cancelling an await — ours on a timeout, or the
+client's `notifications/cancelled` — cancelled nodriver's `Transaction` while it
+was still registered in `Connection.mapper`; when Chrome answered LATE, the
+connection's listener task `set_result`-ed a cancelled future, died of the
+`InvalidStateError`, and every later call on that tab timed out with the generic
+"the browser may have crashed" — about a browser that was fine. That is
+**F-788** (a navigation timeout wedges the instance, HIGH, open since W10) and
+**F-794** (a cancelled call wedges the instance, HIGH, open since W13), and
+F-883's `awaitPromise` simply made `execute_script` a third way to reach it.
+
+The fix is one line at the transport layer: the new
+`embedded/cdp_transport.py` wraps `Transaction.__await__` in `asyncio.shield`,
+so the cancellation lands on a throwaway future and the registered one stays
+pending for the listener to resolve. It is installed once from `tool_runtime`
+and covers every CDP send in the tree — ours and nodriver's own — including the
+deadlines inside `browser_manager.navigate`, which is untouched. `_with_cdp_timeout`
+still CANCELS the operation it bounds: a cancelled request must stop the rest of
+the body, and an earlier attempt that shielded there instead made a cancelled
+`navigate` navigate anyway (caught by the wire lane, reverted).
+
+Measured on Chrome 152: a Promise settling after `timeout_ms`, a `navigate` that
+times out while Chrome commits late (F-882's reported shape), and a client
+cancellation of a confirmed in-flight request — all three now leave the instance
+usable. Both characterization pins that recorded the wedge are inverted in this
+change (`tests/test_resilience.py`, `tests/test_wire_semantics.py`), MQ-128 is
+promoted to satisfied and MQ-141 now waits on F-791 alone. What is NOT recalled:
+a timed-out `navigate` has already handed `Page.navigate` to Chrome, so the page
+may still land — the instance survives, the navigation is not undone.
 
 The F-812 retry is keyed on the raw `exceptionDetails` now, not on the message:
 class `SyntaxError` AND no stack frame in the description (measured: a compile
