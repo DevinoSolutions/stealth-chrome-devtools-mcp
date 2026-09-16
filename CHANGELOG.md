@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — F-883: `execute_script` never awaited, so a Promise was `{}` and `await` was a SyntaxError
+
+Measured through the shipped MCP on 2.1.8 (Chrome 152, nodriver 0.47):
+`return fetch(u).then(r => r.text())` answered `{"success": true, "result": {}}`,
+`return Promise.reject(new Error('boom'))` answered the **same** `{}` — a failure
+reported as a success — and `const v = await …` died with `SyntaxError: await is
+only valid in async functions`. The tool's own docstring forbade every blocking
+wait and told callers to use `await fetch(url)`, which is the one thing it refused
+to run.
+
+The one `Runtime.evaluate` was sent without `awaitPromise`, so Chrome answered
+with the Promise **object** and `returnByValue` serialized it by its own
+enumerable properties — a `Promise` has none, hence `{}`, indistinguishable from
+a script that genuinely returned an empty object. And F-812's retry wrapper was an
+ordinary arrow function, so a top-level `await` was never even a case it
+recognised.
+
+Three changes, at a new leaf `embedded/script_evaluation.py` — THE one home for
+"run a caller's JS in the page and read its answer" (`dom_handler.py` was at 997
+of its 1000-LOC budget; it is 853 now, and `DOMHandler.execute_script` is a
+one-line delegation): `await_promise=True` on THE one send, so a returned Promise
+answers with the value it resolves to and a rejection becomes the
+`exceptionDetails` F-795's reader already refuses; an **async** wrapper on both
+wrap paths (the retry's and the `args` path's), so `await` is legal on both call
+shapes; and a retry keyed on **two** compile complaints — Chrome's illegal-`return`
+and its top-level-`await` — each paired with the phrase the error message uses to
+name it, so a caller whose `await` was the trigger is not told about a `return`
+they did not write. A script that fails for any other reason still keeps its error
+and is still evaluated exactly once, and a top-level `var`/`function` still lands
+on the page unwrapped, because the source is always evaluated as written first.
+
+A rejection reason is page-authored and unbounded, so `tool_errors._require_js_value`
+— THE one place a thrown script becomes the error convention — now clamps the
+detail to 200 characters with a visible `…`, the same bound
+`js_aspect_answer.MAX_ERROR_CHARS` and `page_storage.BLOCKED_REASON_CHARS` carry.
+
+The same defect through the other door: `inject_and_execute_script` and
+`call_javascript_function` / `execute_function_sequence` already sent
+`await_promise=True`, but the **wrappers** their caller's code runs inside were
+synchronous, so an async page function's Promise landed in `result` as `{}` with
+`success: true`. Both wrappers are `async` now and their inner calls awaited, in
+their own home — no second evaluate path.
+
+One behaviour is deliberately slower: a Promise that never settles used to answer
+`{}` instantly and is now killed at `timeout_ms` (`_clamp_timeout` +
+`_with_cdp_timeout`, the one home for that clamp — no second deadline inside the
+eval seam), reported as a timeout. The tab is usable immediately afterwards.
+Everything else is byte-identical: a plain sync return, a nested object/array
+(including falsy leaves), `0`/`""`/`false`/`null`/`undefined`, `Infinity`, `args`,
+a synchronous throw, a non-serialisable value and a cycle all answer exactly as
+they did on 2.1.8 — measured, `audit/stage2/finding_F883_execute_script_never_awaits.md` §2d.
+
 ## 2.1.8
 
 ### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)
