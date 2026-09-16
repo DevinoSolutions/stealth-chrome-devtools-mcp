@@ -1407,6 +1407,7 @@ async def mixed_fleet(launcher, tmp_path_factory):
         f"stepped_aside={report['stepped_aside']}  "
         f"timeline={report['backend_pid_timeline']}  "
         f"backends_alive={report['backends_alive']}  "
+        f"recorded_at_end={report['recorded_at_end']}  "
         f"served_at_end={report['served_at_end']}  "
         f"browsers_alive={report['browsers_alive']}  "
         f"fingerprints={ {k: v[:12] for k, v in report['fingerprints'].items()} }"

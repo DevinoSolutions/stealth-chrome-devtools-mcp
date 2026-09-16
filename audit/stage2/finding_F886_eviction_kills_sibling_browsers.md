@@ -70,6 +70,28 @@ recovery is therefore unreachable on this path, and the client's later calls
 answered `{"code": 32600, "message": "Session terminated"}` (5 of 6 runs; 1 of 6
 kept answering over a backend that no longer had its browser).
 
+**A second route into the same kill, and why a caller cannot opt out.** The
+mixed-install fleet is not the only way to arrive at `_clear_stale_backend` with
+someone else's live backend on the port. `singleton._select_backend_port`
+PREFERS the port recorded for our display context over the `--singleton-port`
+the caller asked for — `target = preferred if recorded is None else recorded` —
+so ANY process whose source fingerprint differs from the recorded one resolves
+to the live backend's port, whatever port it named on its command line. The
+team lead reproduced this from a different direction while I was working:
+`tests/test_singleton_fast_handshake.py::TestEntrypointExitsOnDisconnect`
+spawns the real stdio entrypoint without redirecting `HOME`, resolves to the
+developer's live backend on 52554 (several sessions attached) and evicts it on
+fingerprint mismatch — a test worktree's fingerprint being, by construction,
+not the installed one. Same `_clear_stale_backend` → `_terminate_backend` call,
+same consequence for everybody's browsers, reached by a plain test run rather
+than a mixed install. The invariant the operator actually needs is therefore
+not "mixed installs must converge" but **"a process that did not start this
+backend must not be able to terminate it while another session is live on
+it"**, and that is what the chosen rule states. Under it that test's spawn now
+steps aside onto a fresh port (the live backend has browsers, so it is
+protected) instead of killing it — and a test that cannot reach the real record
+at all is still the right fix for the test, which is F-885's.
+
 **The schema's part in it.** `server.json` v2 held ONE entry per display
 context. Two clients on one desktop competed for that one slot, so even without
 a kill, recording either one erased the other — and an erased proxy can no
@@ -179,7 +201,10 @@ Let only a strictly-newer client evict. Rejected:
 **Behaviour that changes.**
 
 * A cold start that finds a stranger's serving backend on its preferred port now
-  spawns beside it instead of terminating it. One extra backend process (~70 MB)
+  spawns beside it instead of terminating it — whichever route brought it there:
+  a mixed install, an editable checkout, a test worktree that reached the real
+  record (the second witness in §1), or a `restart`/cold start from a process
+  whose `--singleton-port` was overridden by the recorded-port preference. One extra backend process (~70 MB)
   per extra source identity on a machine, for as long as its session's browsers
   live. Logged at INFO, once, naming the port and the browser count.
 * `server.json` is written as schema v3. v2 and v1 still READ, with v2's key
