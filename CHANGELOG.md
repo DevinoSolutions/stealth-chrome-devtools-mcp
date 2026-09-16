@@ -16,12 +16,18 @@ that would have been red first. No `src/` change.
   covers all three profile roles (`master`, `clone`, `explicit`). Two members move
   their page WITHOUT the `navigate` tool (a click that retitles, and a `switch_tab`),
   which is what makes the `list_instances` block red against F-874 rather than
-  decorative. Asserts six live titles with `partial: false`; that every disposable
-  auto-clone directory is gone after close while every named profile survives (both
-  halves of `spawn_browser`'s documented promise); that the fleet left no directory
-  nobody asked for; and that the backend logged no warning beyond the one named,
-  lane-structural clone-seed fallback. Measured `spawn 3.6s, navigate 1.3s,
-  actions 1.7s, total 6.7s`.
+  decorative. Asserts six live titles with `partial: false`; that of the six profile
+  directories the product said it used, exactly the named ones survive the close
+  (both halves of `spawn_browser`'s documented promise — every disposable auto-clone
+  reclaimed, driven through `cleanup_deferred_profiles` rather than waited for; every
+  claim scoped to what this fleet was given, because the temp root is shared across
+  worktrees); and that the backend logged nothing at WARNING while the fleet was
+  DRIVEN beyond the one named, lane-structural clone-seed fallback. A six-way
+  concurrent close on Windows may add exactly two named teardown warnings (a Chrome
+  kill over `CLOSE_KILL_TIMEOUT`, a profile a dying Chrome still holds open — both
+  measured), tolerated only because the node has already proved their consequence
+  repaired. The spawn `gather` collects exceptions so a partial spawn failure closes
+  whatever did start. Measured `spawn 5.2s, navigate 1.3s, actions 2.3s, total 9.0s`.
 - **`tests/test_e2e_load_milestone.py` (new)** — F-881 made red by construction: a
   page that commits at once and holds its `load` on a slow `<img>` for 1.8 s, whose
   title and `readyState` flip only at `load`. Plus the `domcontentloaded` control that

@@ -53,6 +53,30 @@ os.environ.setdefault(
 # path rather than a fresh temp dir per session so the master profile is cloned
 # once on this machine instead of once per run. Nothing here is the operator's
 # root, which is the whole point.
+#
+# What a FIXED path costs, stated so no test assumes otherwise: this root is
+# SHARED — across git worktrees, across concurrent pytest processes, and with
+# any other agent on this machine running this suite. Three consequences:
+#
+# * a NAMED profile collision is handled by the product (a held ``fleet-type``
+#   walks to ``fleet-type-2``), so a test must read the directory it got from
+#   ``spawn_diagnostics["profile_selection"]["user_data_dir"]`` and never
+#   assume the name it asked for;
+# * ``master`` has NO reservation — ``resolve_profile_selection`` protects a
+#   clone directory (``_protect_clone_dir``) but not master — so two processes,
+#   or two concurrent unnamed spawns in one process, can both read it as free;
+# * therefore **a disk assertion must be scoped to directories the test itself
+#   was given.** A bare "what appeared in this root since we started" diff is
+#   not a fact about the test that makes it; a sibling process creating one
+#   directory mid-run would fail it. No path was found by which one process
+#   deletes another's LIVE profile — the cap sweeps skip protected and in-use
+#   directories — so the residual is noisy assertions, not lost work.
+#
+# The ``-test-`` infix in the directory name is LOAD-BEARING: the doc lane
+# (``tests/test_doc_examples.py``) asserts that the substring
+# ``stealth-mcp-browser-sessions`` never appears in CLI output, and this name
+# avoids it only because of that infix. Renaming this without renaming that
+# pin turns the doc lane red.
 os.environ.setdefault(
     "STEALTH_MCP_BROWSER_SESSION_ROOT",
     str(Path(tempfile.gettempdir()) / "stealth-mcp-test-browser-sessions"),

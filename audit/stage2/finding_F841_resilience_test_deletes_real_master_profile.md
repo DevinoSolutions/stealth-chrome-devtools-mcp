@@ -43,11 +43,22 @@ always a claim about the disposable clone the spawn created.
 ## Structural fix (LANDED — `test/e2e-coverage-F873-F881`)
 
 The whole e2e tier used to spawn against the operator's real
-`STEALTH_MCP_BROWSER_SESSION_ROOT`. It no longer can: `tests/conftest.py`
-redirects that variable at **module import time** — before collection, before
-any fixture — to a fixed directory under the system temp dir, alongside the
-`STEALTH_MCP_CLONE_OUTPUT_DIR` line that already used the idiom. `setdefault`,
-so the release gate's `runner.temp` value still wins.
+`STEALTH_MCP_BROWSER_SESSION_ROOT`. It no longer does — unless the operator's
+own environment names it: `tests/conftest.py` redirects that variable at
+**module import time** (before collection, before any fixture) to a fixed
+directory under the system temp dir, alongside the
+`STEALTH_MCP_CLONE_OUTPUT_DIR` line that already used the idiom, using
+`setdefault` so the release gate's `runner.temp` value still wins. The cost of
+`setdefault` is exactly that: a shell that exports
+`STEALTH_MCP_BROWSER_SESSION_ROOT=C:\stealth-mcp-browser-sessions` gets the old
+behaviour back, deliberately, because overriding an explicit environment would
+also override the gate's.
+
+A second residual comes from the path being FIXED: the root is shared across
+worktrees and concurrent runs. Named collisions walk correctly and nothing
+deletes another process's live profile, but `master` carries no reservation and
+a disk assertion must be scoped to what the test itself was given. The argument
+is written out beside the `setdefault` line.
 
 Two things were learned building it, and they are why the fix is not the
 fixture this section originally proposed:
