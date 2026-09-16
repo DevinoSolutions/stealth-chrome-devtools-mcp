@@ -108,16 +108,29 @@ SCROLL_AMOUNT = 800
 #: gone before the first poll.
 RECLAIM_BUDGET_SECONDS = 15.0
 
-#: The only two backend warnings the CLOSE phase may emit, matched on component,
-#: operation AND sentence. Both are Windows contention under a six-way
-#: concurrent teardown, both have a reaper behind them, and both are tolerated
+#: The only backend warnings the CLOSE phase may emit, matched on component,
+#: operation AND sentence. All are Windows contention under a six-way
+#: concurrent teardown, all have a reaper behind them, and all are tolerated
 #: only because a later assertion in this node proves the repair happened — see
-#: the gate at the end of the test for the argument. Their neighbours from the
-#: same operations (``Blocking teardown failed``, ``browser.stop() coroutine
-#: failed``, ``Proxy forwarder close failed``) are deliberately NOT here.
+#: the gate at the end of the test for the argument. The first and third are
+#: the two ends of ONE slow kill: `close_instance` giving up waiting on its
+#: worker thread after `settings.close_kill_timeout`, and that worker's
+#: `_kill_process_by_pid` finding the pid still present two seconds after
+#: `process.kill()` (measured: the pid was gone moments later). What earns
+#: both is the tracked-pid witness in the reclaim poll — the product untracks
+#: an instance only once it has seen the pid go — so a kill that genuinely
+#: wedged still fails the node there, before this tuple is consulted. The
+#: `kill_process` prefix ends at the variable and, at WARNING under that
+#: operation, matches that one sentence: its neighbours begin ``PID ``,
+#: ``Could not verify process `` and ``Failed to terminate process ``, and the
+#: successful kills are logged at INFO. Neighbours from the other two
+#: operations (``Blocking teardown failed``, ``browser.stop() coroutine
+#: failed``, ``Proxy forwarder close failed``) are deliberately NOT here: they
+#: are exceptions, not timeouts, and nothing reaps after them.
 TEARDOWN_WARNINGS_WITH_A_REAPER = (
     "browser_manager.close_instance: Chrome kill for ",
     "process_cleanup.cleanup_profile: Failed to remove temp profile for ",
+    "process_cleanup.kill_process: Process ",
 )
 
 
@@ -562,8 +575,8 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     # phases are held to genuinely different standards. While the fleet is being
     # DRIVEN nothing on the backend's durable channel is acceptable at all, bar
     # one named property of the lane. While six Chromes are torn down AT ONCE on
-    # Windows, two named warnings are — and the assertions above are what earn
-    # them.
+    # Windows, the named warnings in `TEARDOWN_WARNINGS_WITH_A_REAPER` are — and
+    # the assertions above are what earn them.
     #
     # The channel is the BACKEND's own (`stealth.*`), not the process's:
     # nodriver's websocket teardown puts `asyncio` ERROR records ("Task
@@ -609,12 +622,15 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     )
 
     # The teardown phase. Closing six browsers at once is where Windows contends
-    # with itself, and the product says so in both places it can: a Chrome whose
-    # blocking kill outruns `BrowserManager.CLOSE_KILL_TIMEOUT` is handed to
-    # `process_cleanup`, and a profile directory a dying Chrome still holds open
-    # is left tracked for `cleanup_deferred_profiles` (measured on this run:
-    # `[WinError 5] Access is denied` on a `Trusted Icons` png, and one kill over
-    # the 5.0 s budget). Both are tolerated ONLY because the assertions above
+    # with itself, and the product says so everywhere it can: a Chrome whose
+    # blocking kill outruns `settings.close_kill_timeout` is handed to
+    # `process_cleanup` (and that worker may itself report the pid still present
+    # two seconds after `process.kill()` — the same slow kill, seen from its
+    # other end), and a profile directory a dying Chrome still holds open is left
+    # tracked for `cleanup_deferred_profiles` (measured across runs: `[WinError
+    # 5] Access is denied` on a `Trusted Icons` png, one kill over the 5.0 s
+    # budget, one `did not die after force kill` whose pid was gone moments
+    # later). All are tolerated ONLY because the assertions above have
     # already proved each one's consequence was repaired: every disposable clone
     # directory was gone inside the reclaim budget — which this node DROVE
     # rather than waited for — and every one of the six instances had left the

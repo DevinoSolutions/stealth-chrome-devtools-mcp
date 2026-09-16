@@ -23,9 +23,10 @@ that would have been red first. No `src/` change.
   claim scoped to what this fleet was given, because the temp root is shared across
   worktrees); and that the backend logged nothing at WARNING while the fleet was
   DRIVEN beyond the one named, lane-structural clone-seed fallback. A six-way
-  concurrent close on Windows may add exactly two named teardown warnings (a Chrome
-  kill over `settings.close_kill_timeout`, a profile a dying Chrome still holds open —
-  both measured), tolerated only because the node has already proved their
+  concurrent close on Windows may add exactly three named teardown warnings (a Chrome
+  kill over `settings.close_kill_timeout` and its worker's `did not die after force
+  kill` — two ends of one slow kill — plus a profile a dying Chrome still holds open;
+  all measured), tolerated only because the node has already proved their
   consequence repaired: the same poll that reclaims the clone directories also waits
   for all six instances to leave the product's tracked-pid record, which is the
   product itself vouching that every Chrome is dead — `close_instance` answers True
