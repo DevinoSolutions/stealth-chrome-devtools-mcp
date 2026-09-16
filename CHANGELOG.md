@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — concurrent selector resolution on one tab crashed with `-32000` (F-884)
+
+Three concurrent `wait_for_element` calls against ONE tab raised
+`ProtocolException: DOM agent hasn't been enabled [code: -32000]`. Deterministic, not
+flaky: at three concurrent resolutions 5 of 15 failed on every round, at five 15 of 25,
+and through the real tools a mixed batch of fifteen CSS/XPath/wait calls lost **14**.
+
+Three links. `DOM.getDocument` does not merely read the document — it resets this CDP
+session's node-id bindings (measured on Chrome 152: a session's own re-fetch kills the
+ids it just handed out, while a *second* connection to the same target leaves them
+alone, so the table is per session, which is per `Tab`). Every resolution is
+`getDocument` followed by a query using the id it returned, so two overlapping ones
+always lose. nodriver then answers that `ProtocolException` by sending `DOM.disable()`
+*before* re-raising, and that send fails with `"DOM agent hasn't been enabled"` once a
+sibling already disabled the agent — **replacing** the stale-node text. And
+`element_resolution`'s bounded retry, which would have absorbed the first link on its
+own, classifies on that text and so never ran.
+
+The fix is not a wider marker list — the wording is Chrome's and not a closed set (the
+XPath path raises `"DOM agent is not enabled"` from the same cause). It is to stop
+generating the race: `element_resolution` now gives each tab one `asyncio.Lock`, held
+across each resolution ATTEMPT, so `getDocument` and the query that uses its node id are
+atomic per tab. Scope is the tab object because the state it guards is; the key is
+`id(tab)` with a `weakref.finalize`, because nodriver's `Connection` defines `__eq__`
+without `__hash__` and a `Tab` is therefore unhashable.
+
+A fourth site had to move for the fix to hold: `Element.update()` is a `DOM.getDocument`
+too, and `dom_handler.query_elements` called it once per returned element — one listing
+of twenty elements reset the table twenty times while a sibling was mid-query. Both
+`update()` call sites now go through `element_resolution.refresh_element`, the one home,
+under the same lock. A lock inside `element_resolution` alone was measured and still
+lost 1 of 15.
+
+Serialising is **faster** in the common case, because each race it removes used to cost a
+backoff plus a full re-resolve: three concurrent resolutions of a present selector went
+from 0.122 s to 0.005 s, and failures from 5/15 to 0/15. The named cost is the absent
+selector: nodriver bundles the wait into the same call as the query, so concurrent
+waiters serialise (three at a 3 s timeout: 4.59 s with 5/9 failing, to 9.41 s with none).
+Owning the wait loop would remove that and is deliberately left out — it changes polling
+semantics and F-884 is a crash. Full argument, matrices and residuals in
+`audit/stage2/finding_F884_concurrent_dom_queries.md`.
+
 ## 2.1.8
 
 ### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)

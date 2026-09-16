@@ -8,6 +8,9 @@ success straight through, and propagate any other error unchanged. These are
 hermetic (a fake Tab) so they run in the fast unit lane, not the browser lane.
 """
 
+import asyncio
+import gc
+
 import pytest
 from nodriver import cdp
 from nodriver.core.connection import ProtocolException
@@ -16,6 +19,7 @@ from stealth_chrome_devtools_mcp.embedded import element_resolution
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     _MAX_RESOLVES,
     query_selector_all,
+    refresh_element,
     resolve_by_text,
     resolve_element,
     resolve_elements,
@@ -264,3 +268,179 @@ async def test_query_selector_all_recovers_from_stale_node():
     tab = _FakeTab(send=[_Doc(), _stale(), _Doc(), nodes])
     assert await query_selector_all(tab, ".x") == nodes
     assert tab.send_calls == 4
+
+
+# ---------------------------------------------------------------------------
+# F-884: two resolutions on ONE tab are never in flight at the same time
+# ---------------------------------------------------------------------------
+
+_RESOLVED = object()
+
+
+class _RacingTab:
+    """A tab that answers an OVERLAPPING resolution the way Chrome 152 does.
+
+    Faithful to the measured chain, not to a convenient stand-in. Every
+    resolution is ``DOM.getDocument`` followed by a query using the node id it
+    returned, and ``getDocument`` resets this CDP session's node-id bindings --
+    so a second resolution entering while a first is mid-flight kills the
+    first's id and its query raises "Could not find node with given id".
+    nodriver answers THAT by sending ``DOM.disable()`` before re-raising, which
+    itself fails once a sibling has already disabled the agent, and the
+    resulting "DOM agent hasn't been enabled" REPLACES the stale-node text --
+    which is why the error modelled here is the masked one and not the
+    recoverable one ``_STALE_NODE_MARKERS`` would catch.
+
+    It also records the high-water mark, so the pin can assert the property
+    that actually matters (mutual exclusion) rather than merely the absence of
+    a raise on one scheduling.
+    """
+
+    def __init__(self):
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.select_calls = 0
+
+    async def select(self, selector, timeout=None):
+        self.select_calls += 1
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            # Two yields: a resolution is two awaited CDP round trips, and a
+            # single yield would give a sibling nowhere to interleave.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            if self.in_flight > 1:
+                raise ProtocolException(
+                    {"message": "DOM agent hasn't been enabled", "code": -32000}
+                )
+            return _RESOLVED
+        finally:
+            self.in_flight -= 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_resolutions_on_one_tab_are_serialised():
+    """Three concurrent resolutions on one tab: none races, all succeed.
+
+    Before F-884 this raised ``-32000 "DOM agent hasn't been enabled"`` -- and
+    that text is deliberately NOT in ``_STALE_NODE_MARKERS``, so the recovery
+    loop could not absorb it. The fix removes the race rather than widening the
+    marker list, which is what ``max_in_flight`` pins: retrying three colliding
+    resolutions until they happened to miss each other would also make the
+    raise go away, and would not be this fix.
+    """
+    tab = _RacingTab()
+
+    results = await asyncio.gather(*(resolve_element(tab, "#btn") for _ in range(3)))
+
+    assert results == [_RESOLVED] * 3
+    assert tab.max_in_flight == 1, "two resolutions overlapped on one tab"
+    assert tab.select_calls == 3, "no attempt needed a retry"
+
+
+@pytest.mark.asyncio
+async def test_the_lock_is_per_tab_so_two_tabs_still_resolve_concurrently():
+    """The cure must not serialise the whole browser.
+
+    The node-id table Chrome resets is per CDP session and a session is per
+    tab, so two tabs share no state and must share no lock. One global lock
+    would pass the pin above and quietly cost every multi-tab caller.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _BlockingTab:
+        async def select(self, selector, timeout=None):
+            started.set()
+            await release.wait()
+            return _RESOLVED
+
+    slow, quick = _BlockingTab(), _FakeTab(select=[_RESOLVED])
+
+    slow_call = asyncio.create_task(resolve_element(slow, "#slow"))
+    await started.wait()
+
+    # The other tab must answer while the first still holds its own lock.
+    assert await resolve_element(quick, "#quick") is _RESOLVED
+
+    release.set()
+    assert await slow_call is _RESOLVED
+
+
+@pytest.mark.asyncio
+async def test_one_tab_gets_exactly_one_lock_and_loses_it_when_collected():
+    """Same tab, same lock -- and no entry outlives the tab that needed it.
+
+    The table is keyed by ``id(tab)`` because nodriver's ``Connection`` defines
+    ``__eq__`` without ``__hash__``, which makes a ``Tab`` unhashable. That key
+    is only safe because the finalizer drops the entry, so a recycled id can
+    never inherit a dead tab's lock.
+    """
+    tab = _FakeTab()
+    first = element_resolution._document_lock(tab)
+    assert element_resolution._document_lock(tab) is first
+
+    key = id(tab)
+    assert key in element_resolution._DOCUMENT_LOCKS
+    del tab, first
+    gc.collect()
+    assert key not in element_resolution._DOCUMENT_LOCKS
+
+
+@pytest.mark.asyncio
+async def test_the_settle_sleep_between_attempts_does_not_hold_the_lock():
+    """A churning tab must still let a sibling in between two of its own tries.
+
+    The lock is taken per ATTEMPT, not around the retry loop; holding it across
+    the backoff would let one unlucky resolution block the tab for the whole
+    bounded recovery.
+    """
+    held_during_sleep = None
+
+    async def _observe(_seconds):
+        nonlocal held_during_sleep
+        held_during_sleep = element_resolution._document_lock(tab).locked()
+
+    tab = _FakeTab(select=[_stale(), _RESOLVED])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(element_resolution.asyncio, "sleep", _observe)
+        assert await resolve_element(tab, "#btn") is _RESOLVED
+
+    assert held_during_sleep is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_element_takes_the_same_lock_as_a_resolution():
+    """``Element.update()`` is a ``DOM.getDocument`` and must not run unlocked.
+
+    This is the site that made the first version of the fix insufficient: a
+    lock inside the resolution helpers alone still lost 1 of 15 real-Chrome
+    mixed resolutions, because ``dom_handler.query_elements`` reached
+    ``elem.update()`` once per returned element. Nothing about the LOCK is
+    visible from the resolution side, so the pin observes it from inside
+    ``update`` itself.
+    """
+    locked_during_update = None
+
+    class _Element:
+        async def update(self):
+            nonlocal locked_during_update
+            locked_during_update = element_resolution._document_lock(tab).locked()
+
+    tab = _FakeTab()
+    await refresh_element(tab, _Element())
+
+    assert locked_during_update is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_element_tolerates_a_node_that_cannot_be_updated():
+    """A rediscovered target yields a node with no ``update`` (F-771).
+
+    The two call sites carried a ``hasattr`` guard each; folding it in here is
+    what lets them be one line, so the tolerance has to live in this one home.
+    """
+    tab = _FakeTab()
+    await refresh_element(tab, None)
+    await refresh_element(tab, object())

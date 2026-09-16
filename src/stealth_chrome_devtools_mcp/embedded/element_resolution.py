@@ -35,6 +35,53 @@ Paths that resolve no selector ask it too rather than re-listing the signals:
 ``Tab.get`` (which awaits the tab) and consults this function to decide whether
 its own single stale-tab retry applies (F-824).
 
+One document at a time: why resolving is serialised per tab (F-884)
+-------------------------------------------------------------------
+Retrying is the right handling for a race the page LOST. It is the wrong
+handling for a race this module STARTS, and every resolution below starts one:
+``DOM.getDocument`` does not merely read the document, it **resets this CDP
+session's node-id bindings**. Measured on Chrome 152 -- a session's own
+re-fetch kills the ids it just handed out, while a *second* connection to the
+same target leaves them untouched, so the binding table is per CDP session,
+which is per nodriver ``Connection``/``Tab`` object. Two overlapping
+resolutions on one tab therefore always lose: A fetches the document, B fetches
+it and resets the table, A's query uses an id that no longer exists.
+
+That much the retry above could absorb. What it cannot absorb is nodriver's
+handling of the resulting error. ``Tab.query_selector`` / ``query_selector_all``
+answer a ``ProtocolException`` by sending ``DOM.disable()`` *before* re-raising,
+and that send is itself a round trip that fails -- with ``-32000 "DOM agent
+hasn't been enabled"`` -- once a sibling has already disabled the agent. The
+failure REPLACES the stale-node error, so ``recoverable_race`` never sees the
+marker it classifies on and the caller gets a bare -32000 instead of a retry.
+Measured at three concurrent ``wait_for_element`` calls on one tab: every round
+raised it, and at five concurrent, three of five did.
+
+So the fix is not a wider marker list -- it is to stop generating the race.
+``_document_lock`` gives each tab one ``asyncio.Lock``, held across each
+resolution ATTEMPT (never across the settle sleep between attempts), so
+``DOM.getDocument`` and the query that uses its node id are atomic per tab.
+The lock's scope is the tab OBJECT because the state it guards is, and it is
+taken by every function here, so no selector-resolving path can opt out.
+
+What that costs, and what it does not:
+
+* a resolution that WAITS blocks siblings on the same tab for as long as it
+  waits, because nodriver's ``select``/``find``/``select_all`` bundle the wait
+  into the same call as the query. On a selector that is present this is
+  invisible and in fact faster than the racing version it replaces (the races
+  it removes each cost a settle sleep); on one that is absent, concurrent
+  waiters serialise. That is the deliberate trade: a late answer over a
+  -32000;
+* it does NOT make a node id safe to hold across calls. ``query_selector_all``
+  hands back raw ids and its caller owns them once the lock is released -- the
+  cloner engine holds one across five further CDP calls, and a sibling
+  resolution between any two of them still invalidates it. That exposure is
+  named in ``audit/stage2/finding_F884_concurrent_dom_queries.md`` §6 and is
+  not this lock's job;
+* it is not re-entrant, and nothing here needs it to be: no function in this
+  module calls another, so a resolution never nests inside a held lock.
+
 CSS or XPath: the detection contract (F-831)
 --------------------------------------------
 Every selector-taking tool advertises "CSS selector or XPath", so choosing
@@ -63,6 +110,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import weakref
 from typing import TYPE_CHECKING, TypeVar
 
 from nodriver import cdp
@@ -106,6 +154,30 @@ _CDP_EVENT_PACKAGE = "nodriver.cdp"
 # genuinely unresolvable and the stale-node error is surfaced to the caller.
 _MAX_RESOLVES = 3
 _SETTLE_SECONDS = 0.05
+
+
+# --- One document at a time, per tab (F-884) ---------------------------------
+# Keyed by ``id(tab)`` and not by the tab itself because nodriver's
+# ``Connection`` defines ``__eq__`` and no ``__hash__``, which makes every
+# ``Tab`` unhashable -- it cannot key a dict, weak or otherwise. The finalizer
+# is what makes the id safe: the entry is dropped when the tab is collected, so
+# a recycled id can never be handed a dead tab's lock.
+_DOCUMENT_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _document_lock(tab: Tab) -> asyncio.Lock:
+    """THE one lock serialising ``DOM.getDocument`` + its query on ``tab``.
+
+    See the module docstring for why the scope is the tab object: the node-id
+    bindings this guards are per CDP session, and a session is per ``Tab``.
+    """
+    key = id(tab)
+    lock = _DOCUMENT_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _DOCUMENT_LOCKS[key] = lock
+        weakref.finalize(tab, _DOCUMENT_LOCKS.pop, key, None)
+    return lock
 
 
 # --- The XPath detection contract -------------------------------------------
@@ -181,16 +253,23 @@ def recoverable_race(exc: BaseException) -> str | None:
     return None
 
 
-async def _resolve_with_recovery(what: str, resolve: Callable[[], Awaitable[_T]]) -> _T:
-    """Run ``resolve``, re-running it on either known nodriver resolve race.
+async def _resolve_with_recovery(
+    tab: Tab, what: str, resolve: Callable[[], Awaitable[_T]]
+) -> _T:
+    """Run ``resolve`` under ``tab``'s document lock, re-running it on either race.
 
     ``resolve`` must build a *fresh* awaitable on each call so the retry lands on
     a freshly fetched document nodeId.
+
+    The lock is taken per ATTEMPT rather than around the whole loop, so the
+    settle sleep below never holds it — a tab whose document is churning must
+    still let a sibling in between two of its own tries (F-884).
     """
     attempt = 0
     while True:
         try:
-            return await resolve()
+            async with _document_lock(tab):
+                return await resolve()
         except (ProtocolException, KeyError) as exc:
             race = recoverable_race(exc)
             if race is None:
@@ -256,6 +335,33 @@ async def _xpath_node_ids(tab: Tab, expression: str) -> list[NodeId]:
             await tab.send(cdp.dom.discard_search_results(search_id))
 
 
+async def refresh_element(tab: Tab, element: Element | None) -> None:
+    """``Element.update()`` under ``tab``'s document lock (F-884).
+
+    ``update`` reads as "re-read this element" and is nothing of the kind: it
+    sends ``DOM.getDocument`` and re-resolves the node against the answer, so
+    it resets the very per-session node-id table every resolution above depends
+    on. Called outside the lock it invalidates a concurrent resolution's node
+    id exactly as a second resolution would — and ``query_elements`` called it
+    once per returned element, so ONE listing of twenty elements reset the
+    table twenty times while a sibling was mid-query. That is why this is the
+    one home for it and why no caller may reach ``element.update()`` directly.
+
+    Deliberately NOT inside ``_resolve_with_recovery``: a stale node here means
+    the element the caller already holds is gone from the document, which is an
+    answer about that element, not a race worth re-running — and a retry loop
+    around a per-element call would triple the cost of every listing.
+
+    Tolerates an ``element`` that has no ``update`` (a rediscovered target
+    yields a raw ``Connection``-backed node, F-771) and a ``None``, so the two
+    call sites are one line each rather than one line and a guard.
+    """
+    if element is None or not hasattr(element, "update"):
+        return
+    async with _document_lock(tab):
+        await element.update()
+
+
 async def resolve_element(
     tab: Tab,
     selector: str,
@@ -274,14 +380,14 @@ async def resolve_element(
             matches = await _xpath_matches(tab, expression, timeout)
             return matches[0] if matches else None
 
-        return await _resolve_with_recovery(f"xpath {expression!r}", _do_xpath)
+        return await _resolve_with_recovery(tab, f"xpath {expression!r}", _do_xpath)
 
     async def _do() -> Element | None:
         if timeout is None:
             return await tab.select(selector)
         return await tab.select(selector, timeout=timeout)
 
-    return await _resolve_with_recovery(f"select {selector!r}", _do)
+    return await _resolve_with_recovery(tab, f"select {selector!r}", _do)
 
 
 async def resolve_by_text(
@@ -297,7 +403,7 @@ async def resolve_by_text(
             return await tab.find(text, best_match=best_match)
         return await tab.find(text, best_match=best_match, timeout=timeout)
 
-    return await _resolve_with_recovery(f"find {text!r}", _do)
+    return await _resolve_with_recovery(tab, f"find {text!r}", _do)
 
 
 async def resolve_elements(tab: Tab, selector: str) -> list[Element]:
@@ -319,12 +425,12 @@ async def resolve_elements(tab: Tab, selector: str) -> list[Element]:
         async def _do_xpath() -> list[Element]:
             return await _xpath_matches(tab, expression)
 
-        return await _resolve_with_recovery(f"xpath {expression!r}", _do_xpath)
+        return await _resolve_with_recovery(tab, f"xpath {expression!r}", _do_xpath)
 
     async def _do() -> list[Element]:
         return await tab.select_all(selector)
 
-    return await _resolve_with_recovery(f"select_all {selector!r}", _do)
+    return await _resolve_with_recovery(tab, f"select_all {selector!r}", _do)
 
 
 async def query_selector_all(tab: Tab, selector: str) -> list[NodeId]:
@@ -341,10 +447,10 @@ async def query_selector_all(tab: Tab, selector: str) -> list[NodeId]:
         async def _do_xpath() -> list[NodeId]:
             return await _xpath_node_ids(tab, expression)
 
-        return await _resolve_with_recovery(f"xpath {expression!r}", _do_xpath)
+        return await _resolve_with_recovery(tab, f"xpath {expression!r}", _do_xpath)
 
     async def _do() -> list[NodeId]:
         doc = await tab.send(cdp.dom.get_document())
         return await tab.send(cdp.dom.query_selector_all(doc.node_id, selector))
 
-    return await _resolve_with_recovery(f"query_selector_all {selector!r}", _do)
+    return await _resolve_with_recovery(tab, f"query_selector_all {selector!r}", _do)

@@ -16,6 +16,7 @@ from stealth_chrome_devtools_mcp.embedded import (
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
+    refresh_element,
     resolve_by_text,
     resolve_element,
     resolve_elements,
@@ -169,8 +170,10 @@ class DOMHandler:
             results = []
             for idx, elem in enumerate(elements):
                 try:
-                    if hasattr(elem, "update"):
-                        await elem.update()
+                    # NEVER ``elem.update()`` — that is a DOM.getDocument and
+                    # it resets this session's node ids under any concurrent
+                    # resolution (F-884). One home, one lock.
+                    await refresh_element(tab, elem)
 
                     tag_name = elem.tag_name if hasattr(elem, "tag_name") else "unknown"
                     text_content = elem.text_all if hasattr(elem, "text_all") else ""
@@ -637,8 +640,7 @@ class DOMHandler:
             if not element:
                 raise ToolError(f"Element not found: {selector}")
 
-            if hasattr(element, "update"):
-                await element.update()
+            await refresh_element(tab, element)
 
             return {
                 "tag_name": element.tag_name
