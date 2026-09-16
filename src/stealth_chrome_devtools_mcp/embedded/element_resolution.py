@@ -84,6 +84,13 @@ waiter never holds the tab hostage; a caller's ``timeout`` means what it says.
 The defaults and the interval are nodriver's own, so a caller that passed no
 timeout waits exactly as long as it did before. ``timeout=0`` is one query.
 
+One default, both languages. nodriver waits 10 s in ``select``/``find``/
+``select_all`` and 2.5 s in ``xpath``, for no stated reason; this module
+advertises ONE contract for CSS and XPath (see the detection contract below)
+and now spends ONE budget for both. The cost is named rather than hidden: a
+genuinely absent XPath takes 10 s to answer "not found" where it used to take
+2.5 s. A caller that wants less passes ``timeout``.
+
 What that still costs, and what it does not:
 
 * the lock is held for one CDP round trip pair at a time, so concurrent
@@ -126,6 +133,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 import weakref
 from typing import TYPE_CHECKING, TypeVar
 
@@ -170,6 +178,14 @@ _CDP_EVENT_PACKAGE = "nodriver.cdp"
 # genuinely unresolvable and the stale-node error is surfaced to the caller.
 _MAX_RESOLVES = 3
 _SETTLE_SECONDS = 0.05
+
+# The wait this module owns (F-884). Both numbers are nodriver's own, so a
+# caller that passed no timeout waits exactly as long as it did when nodriver
+# did the polling: ``Tab.select``/``find``/``select_all`` default to 10 s and
+# sleep 0.5 s between tries. They are NOT env knobs -- a caller that wants a
+# different bound passes ``timeout``.
+_DEFAULT_WAIT_SECONDS = 10.0
+_POLL_SECONDS = 0.5
 
 
 # --- One document at a time, per tab (F-884) ---------------------------------
@@ -275,11 +291,12 @@ async def _resolve_with_recovery(
     """Run ``resolve`` under ``tab``'s document lock, re-running it on either race.
 
     ``resolve`` must build a *fresh* awaitable on each call so the retry lands on
-    a freshly fetched document nodeId.
+    a freshly fetched document nodeId, and must be a SINGLE-SHOT query — the
+    waiting is :func:`_wait_for`'s and happens outside the lock (F-884).
 
     The lock is taken per ATTEMPT rather than around the whole loop, so the
     settle sleep below never holds it — a tab whose document is churning must
-    still let a sibling in between two of its own tries (F-884).
+    still let a sibling in between two of its own tries.
     """
     attempt = 0
     while True:
@@ -312,21 +329,57 @@ async def _resolve_with_recovery(
             await asyncio.sleep(_SETTLE_SECONDS * attempt)
 
 
-async def _xpath_matches(
+async def _wait_for(
     tab: Tab,
-    expression: str,
-    timeout: float | None = None,  # noqa: ASYNC109  plan_M4ph1
-) -> list[Element]:
-    """One ``tab.xpath`` round trip, with nodriver's ``None`` placeholders dropped.
+    what: str,
+    query: Callable[[], Awaitable[_T]],
+    timeout: float | None,  # noqa: ASYNC109  plan_M4ph1
+) -> _T:
+    """Poll ``query`` until it finds something, or the caller's deadline passes.
+
+    THE one home for "wait for this selector to appear" (F-884). ``query`` is a
+    SINGLE-SHOT locked resolution; the sleep between tries happens with the lock
+    RELEASED, which is the whole point — nodriver's ``select``/``find``/
+    ``select_all`` bundle their own poll loop into the same call as the query,
+    and holding the lock across that froze every other DOM operation on the tab
+    for nodriver's default 10 s no matter what the caller asked for. Measured on
+    real Chrome before this loop existed: a ``wait_for_element`` given a ONE
+    second timeout held the lock 10.5 s, a sibling ``query_elements`` went from
+    0.25 s to 10.56 s, and a waiter for an element a concurrent click would
+    have created answered ``False`` because it starved that click.
+
+    ``timeout`` is in seconds, ``None`` means nodriver's default (so a caller
+    that passed nothing waits exactly as long as it always did) and ``0`` means
+    exactly one query. A falsy answer (``None``, ``[]``) is "not yet"; the last
+    one is returned when the deadline passes, so a genuine zero-match still
+    surfaces as the empty answer callers already expect rather than a raise.
+    """
+    budget = _DEFAULT_WAIT_SECONDS if timeout is None else timeout
+    deadline = _now() + budget
+    while True:
+        found = await _resolve_with_recovery(tab, what, query)
+        if found:
+            return found
+        if _now() >= deadline:
+            return found
+        await _sleep(_POLL_SECONDS)
+
+
+async def _xpath_matches(tab: Tab, expression: str) -> list[Element]:
+    """ONE ``DOM.performSearch`` XPath query — no waiting, no ``dom.disable``.
+
+    ``Tab.xpath`` is not used: it wraps ``find_all`` in its own poll loop (the
+    thing :func:`_wait_for` now owns) and brackets the whole thing in
+    ``dom.enable()``/``dom.disable()``, so under the lock it would still burn a
+    caller's budget in one indivisible call. The pair below is what
+    ``Tab.xpath`` is built on anyway, and :func:`_xpath_node_ids` has always
+    used it directly.
 
     ``Tab.xpath`` is typed ``List[Optional[Element]]``; no caller of this module
-    should have to defend against a ``None`` inside a match list.
+    should have to defend against a ``None`` inside a match list, so the
+    placeholders nodriver leaves for nodes it could not build are dropped here.
     """
-    matches = (
-        await tab.xpath(expression)
-        if timeout is None
-        else await tab.xpath(expression, timeout=timeout)
-    )
+    matches = await tab.find_elements_by_text(expression)
     return [match for match in matches if match is not None]
 
 
@@ -383,27 +436,29 @@ async def resolve_element(
     selector: str,
     timeout: float | None = None,  # noqa: ASYNC109  plan_M4ph1
 ) -> Element | None:
-    """``tab.select(selector, timeout=...)`` with stale-document recovery.
+    """The first element matching ``selector``, waiting for it to appear.
 
     An XPath ``selector`` (see :func:`xpath_expression`) resolves through
-    ``tab.xpath`` instead and yields its first match. ``timeout`` is in seconds
-    (nodriver's unit) for both; ``None`` uses nodriver's default.
+    ``DOM.performSearch`` instead and yields its first match. ``timeout`` is in
+    seconds for both; ``None`` keeps nodriver's 10 s default and ``0`` is a
+    single query. Each try is one LOCKED single-shot query and the waiting
+    happens between them with the lock released (F-884) — never
+    ``tab.select``, whose bundled poll loop would hold the tab for its whole
+    default no matter what the caller asked for.
     """
     expression = xpath_expression(selector)
     if expression is not None:
 
         async def _do_xpath() -> Element | None:
-            matches = await _xpath_matches(tab, expression, timeout)
+            matches = await _xpath_matches(tab, expression)
             return matches[0] if matches else None
 
-        return await _resolve_with_recovery(tab, f"xpath {expression!r}", _do_xpath)
+        return await _wait_for(tab, f"xpath {expression!r}", _do_xpath, timeout)
 
     async def _do() -> Element | None:
-        if timeout is None:
-            return await tab.select(selector)
-        return await tab.select(selector, timeout=timeout)
+        return await tab.query_selector(selector)
 
-    return await _resolve_with_recovery(tab, f"select {selector!r}", _do)
+    return await _wait_for(tab, f"select {selector!r}", _do, timeout)
 
 
 async def resolve_by_text(
@@ -412,28 +467,33 @@ async def resolve_by_text(
     best_match: bool = True,
     timeout: float | None = None,  # noqa: ASYNC109  plan_M4ph1
 ) -> Element | None:
-    """``tab.find(text, ...)`` with stale-document recovery."""
+    """The element containing ``text``, waiting for it to appear.
+
+    ``tab.find_element_by_text`` is the single-shot form of ``tab.find``; the
+    wait is :func:`_wait_for`'s, outside the lock (F-884).
+    """
 
     async def _do() -> Element | None:
-        if timeout is None:
-            return await tab.find(text, best_match=best_match)
-        return await tab.find(text, best_match=best_match, timeout=timeout)
+        return await tab.find_element_by_text(text, best_match)
 
-    return await _resolve_with_recovery(tab, f"find {text!r}", _do)
+    return await _wait_for(tab, f"find {text!r}", _do, timeout)
 
 
 async def resolve_elements(tab: Tab, selector: str) -> list[Element]:
-    """``tab.select_all(selector)`` with stale-document recovery.
+    """Every element matching ``selector``, waiting for the first to appear.
 
     The multi-``Element`` counterpart to :func:`resolve_element`: returns the
     full match list of live ``Element`` objects (with ``.attrs``/``.text_all``/
     ``.get_position()``), or an empty list on a genuine zero-match. A -32000
     stale-node race re-resolves against a fresh document; a persistent one
-    surfaces after ``_MAX_RESOLVES`` exactly like the single-element path. This
-    is also the path that hits nodriver's handler-cleanup ``KeyError``, since
-    ``select_all`` awaits the tab between attempts.
+    surfaces after ``_MAX_RESOLVES`` exactly like the single-element path.
 
-    An XPath ``selector`` resolves through ``tab.xpath`` under the same recovery.
+    ``tab.query_selector_all`` is the single-shot form of ``tab.select_all``,
+    so the wait is :func:`_wait_for`'s and happens outside the lock (F-884).
+    That also retires the second race this module used to recover from on this
+    path: ``select_all`` reached nodriver's handler-cleanup ``KeyError`` only
+    because it awaited the tab between its own tries, and it no longer does.
+    An XPath ``selector`` resolves through ``DOM.performSearch``.
     """
     expression = xpath_expression(selector)
     if expression is not None:
@@ -441,12 +501,14 @@ async def resolve_elements(tab: Tab, selector: str) -> list[Element]:
         async def _do_xpath() -> list[Element]:
             return await _xpath_matches(tab, expression)
 
-        return await _resolve_with_recovery(tab, f"xpath {expression!r}", _do_xpath)
+        return await _wait_for(tab, f"xpath {expression!r}", _do_xpath, None)
 
     async def _do() -> list[Element]:
-        return await tab.select_all(selector)
+        # nodriver answers a missing content_document with a bare ``return``,
+        # so ``None`` is possible where the annotation says list.
+        return await tab.query_selector_all(selector) or []
 
-    return await _resolve_with_recovery(tab, f"select_all {selector!r}", _do)
+    return await _wait_for(tab, f"select_all {selector!r}", _do, None)
 
 
 async def query_selector_all(tab: Tab, selector: str) -> list[NodeId]:
@@ -470,3 +532,16 @@ async def query_selector_all(tab: Tab, selector: str) -> list[NodeId]:
         return await tab.send(cdp.dom.query_selector_all(doc.node_id, selector))
 
     return await _resolve_with_recovery(tab, f"query_selector_all {selector!r}", _do)
+
+
+# --- The one timing seam (the ``scroll_position``/``scheduling_lag`` pattern) --
+# Module functions, not imports at the call site, so a test can replace them
+# without a running clock and without patching ``asyncio`` itself.
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+async def _sleep(seconds: float) -> None:
+    await asyncio.sleep(seconds)

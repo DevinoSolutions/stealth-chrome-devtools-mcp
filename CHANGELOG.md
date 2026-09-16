@@ -162,14 +162,25 @@ of twenty elements reset the table twenty times while a sibling was mid-query. B
 under the same lock. A lock inside `element_resolution` alone was measured and still
 lost 1 of 15.
 
-Serialising is **faster** in the common case, because each race it removes used to cost a
-backoff plus a full re-resolve: three concurrent resolutions of a present selector went
-from 0.122 s to 0.005 s, and failures from 5/15 to 0/15. The named cost is the absent
-selector: nodriver bundles the wait into the same call as the query, so concurrent
-waiters serialise (three at a 3 s timeout: 4.59 s with 5/9 failing, to 9.41 s with none).
-Owning the wait loop would remove that and is deliberately left out — it changes polling
-semantics and F-884 is a crash. Full argument, matrices and residuals in
-`audit/stage2/finding_F884_concurrent_dom_queries.md`.
+**The waiting moved out of the lock**, and that half matters as much as the lock. nodriver
+bundles a poll loop into `select`/`find`/`select_all`/`xpath`, so holding the lock across
+one froze every other DOM call on that tab for its 10 s default no matter what the caller
+asked — measured: a `wait_for_element` given a **one second** timeout held the tab 10.5 s,
+a sibling `query_elements` went 0.25 s → 10.56 s, four concurrent absent resolutions blew
+the tool's own 30 s budget, and a waiter answered `False` about an element a concurrent
+click *would have created*, because it starved that click. So `element_resolution` now
+owns the wait: one locked single-shot query, then a poll with the lock released, bounded
+by the caller's own deadline. `wait_for_element` passes `timeout=0` inward because its own
+loop is the wait — it used to nest nodriver's 10 s default inside a 1 s budget.
+
+The result beats the pre-fix baseline on every axis measured: three concurrent resolutions
+of a present selector 0.122 s → 0.005 s with failures 5/15 → 0/15; the starved waiter
+`False @ 10.71 s` → `True @ 1.02 s`; the sibling query 0.25 s → 0.01 s; four concurrent
+absent resolutions from 2 answers + 2 crashes to 4 answers at ~10.2 s each. Two costs are
+named rather than hidden: one locked round-trip pair at a time still delays a sibling by a
+slow query's own duration, and a genuinely absent **XPath** now waits 10 s rather than
+nodriver's 2.5 s, because CSS and XPath were given one budget. Full argument, matrices and
+residuals in `audit/stage2/finding_F884_concurrent_dom_queries.md`.
 
 ## 2.1.8
 

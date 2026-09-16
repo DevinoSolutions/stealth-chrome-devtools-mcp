@@ -10,6 +10,7 @@ hermetic (a fake Tab) so they run in the fast unit lane, not the browser lane.
 
 import asyncio
 import gc
+import inspect
 
 import pytest
 from nodriver import cdp
@@ -32,6 +33,12 @@ def _instant_backoff(monkeypatch):
     # The recovery backoff is real; zero it so the unit lane stays fast while the
     # real asyncio.sleep(0) code path still runs.
     monkeypatch.setattr(element_resolution, "_SETTLE_SECONDS", 0.0)
+    # Same for F-884's wait: zero the default budget so a pin whose fake answers
+    # a falsy value (a genuine zero-match) makes exactly ONE query, as it did
+    # when nodriver owned the polling. A pin that wants the loop asks for a
+    # budget explicitly.
+    monkeypatch.setattr(element_resolution, "_DEFAULT_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(element_resolution, "_POLL_SECONDS", 0.0)
 
 
 def _stale():
@@ -84,17 +91,26 @@ class _FakeTab:
         self.find_calls = 0
         self.send_calls = 0
 
-    async def select(self, selector, timeout=None):
+    # The SINGLE-SHOT nodriver surfaces. Since F-884 this module never calls
+    # ``select``/``select_all``/``find``/``xpath``: those bundle a poll loop
+    # into the query, and holding the document lock across one froze the tab
+    # for nodriver's whole default. A fake that still offered them would let a
+    # regression back in silently, so it offers only what production may call.
+    async def query_selector(self, selector):
         self.select_calls += 1
         return _pop(self._select)
 
-    async def select_all(self, selector):
+    async def query_selector_all(self, selector):
         self.select_all_calls += 1
         return _pop(self._select_all)
 
-    async def find(self, text, best_match=True, timeout=None):
+    async def find_element_by_text(self, text, best_match=True):
         self.find_calls += 1
         return _pop(self._find)
+
+    async def find_elements_by_text(self, expression):
+        self.select_all_calls += 1
+        return _pop(self._select_all)
 
     async def send(self, _cmd):
         self.send_calls += 1
@@ -138,18 +154,35 @@ async def test_resolve_element_is_bounded_when_stale_persists():
 
 
 @pytest.mark.asyncio
-async def test_resolve_element_forwards_timeout():
-    captured = {}
+async def test_the_timeout_is_spent_here_and_never_handed_to_nodriver():
+    """``timeout`` used to be forwarded into ``tab.select``; now it bounds OUR loop.
+
+    That is the F-884 fix, not an incidental change: nodriver spends a timeout
+    by polling INSIDE one call, and this module holds the tab's document lock
+    for the duration of that call. The budget has to be spent where the lock is
+    not held, so the single-shot query nodriver is left with takes no timeout at
+    all — and a fake that accepted one would hide a regression to the old shape.
+    """
     tab = _FakeTab(select=[object()])
+    signature = inspect.signature(tab.query_selector)
+    assert "timeout" not in signature.parameters
 
-    async def _select(selector, timeout=None):
-        captured["timeout"] = timeout
-        tab.select_calls += 1
-        return _pop(tab._select)
+    elapsed = []
 
-    tab.select = _select
-    await resolve_element(tab, "#btn", timeout=2.5)
-    assert captured["timeout"] == 2.5
+    async def _observe(seconds):
+        elapsed.append(seconds)
+
+    clock = iter([0.0, 0.0, 9.0])
+    misses = _FakeTab(select=[None, None])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(element_resolution, "_now", lambda: next(clock))
+        patch.setattr(element_resolution, "_sleep", _observe)
+        patch.setattr(element_resolution, "_POLL_SECONDS", 0.5)
+        assert await resolve_element(misses, "#btn", timeout=2.5) is None
+
+    # One sleep, at the module's own interval, then the 9.0 read passes 2.5.
+    assert elapsed == [0.5]
+    assert misses.select_calls == 2
 
 
 @pytest.mark.asyncio
@@ -301,7 +334,7 @@ class _RacingTab:
         self.max_in_flight = 0
         self.select_calls = 0
 
-    async def select(self, selector, timeout=None):
+    async def query_selector(self, selector):
         self.select_calls += 1
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
@@ -351,7 +384,7 @@ async def test_the_lock_is_per_tab_so_two_tabs_still_resolve_concurrently():
     release = asyncio.Event()
 
     class _BlockingTab:
-        async def select(self, selector, timeout=None):
+        async def query_selector(self, selector):
             started.set()
             await release.wait()
             return _RESOLVED
@@ -432,6 +465,68 @@ async def test_refresh_element_takes_the_same_lock_as_a_resolution():
     await refresh_element(tab, _Element())
 
     assert locked_during_update is True
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_resolution_does_not_hold_the_lock_between_tries():
+    """The B1 blocker: a waiter must not freeze every other DOM call on the tab.
+
+    The first cut of F-884 held the lock across ``tab.select``, whose poll loop
+    is inside the same call, so a ``wait_for_element`` given a ONE second
+    timeout held the tab for nodriver's 10 s default and a sibling
+    ``query_elements`` went from 0.25 s to 10.56 s. The lock must be free while
+    this module sleeps between tries.
+    """
+    observed = []
+
+    async def _observe(_seconds):
+        observed.append(element_resolution._document_lock(tab).locked())
+
+    # Three misses then a hit, so the loop sleeps three times.
+    tab = _FakeTab(select=[None, None, None, _RESOLVED])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(element_resolution, "_sleep", _observe)
+        patch.setattr(element_resolution, "_DEFAULT_WAIT_SECONDS", 30.0)
+        assert await resolve_element(tab, "#late") is _RESOLVED
+
+    assert observed == [False, False, False], observed
+    assert tab.select_calls == 4
+
+
+@pytest.mark.asyncio
+async def test_the_wait_is_bounded_by_the_callers_timeout_not_nodrivers():
+    """``timeout`` means what it says, and ``timeout=0`` is exactly one query.
+
+    ``wait_for_element`` owns its own poll loop and now passes ``timeout=0``;
+    before F-884 it passed nothing, so each of its turns carried nodriver's
+    10 s default *inside* the caller's budget.
+    """
+    single = _FakeTab(select=[None])
+    assert await resolve_element(single, "#nope", timeout=0) is None
+    assert single.select_calls == 1, "timeout=0 must not poll"
+
+    clock = iter([0.0, 0.0, 1.0, 2.0, 99.0])
+    waiting = _FakeTab(select=[None, None, None, None])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(element_resolution, "_now", lambda: next(clock))
+        assert await resolve_element(waiting, "#nope", timeout=1.5) is None
+    # Deadline is 1.5: the reads 1.0 keeps going, 2.0 stops.
+    assert waiting.select_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_resolve_element_never_calls_nodrivers_bundled_wait():
+    """A fake that offers only single-shot surfaces is the pin (F-884).
+
+    ``Tab.select``/``find``/``select_all``/``xpath`` each wrap a poll loop
+    around the query; calling one under the document lock is the regression
+    this whole change exists to prevent, so production must not reach them and
+    an ``AttributeError`` here is the proof.
+    """
+    tab = _FakeTab(select=[_RESOLVED])
+    assert not hasattr(tab, "select")
+    assert not hasattr(tab, "xpath")
+    assert await resolve_element(tab, "#btn") is _RESOLVED
 
 
 @pytest.mark.asyncio

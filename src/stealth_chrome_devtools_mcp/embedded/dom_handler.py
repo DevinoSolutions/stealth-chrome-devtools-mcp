@@ -170,9 +170,7 @@ class DOMHandler:
             results = []
             for idx, elem in enumerate(elements):
                 try:
-                    # NEVER ``elem.update()`` — that is a DOM.getDocument and
-                    # it resets this session's node ids under any concurrent
-                    # resolution (F-884). One home, one lock.
+                    # NEVER ``elem.update()``: it is a DOM.getDocument (F-884).
                     await refresh_element(tab, elem)
 
                     tag_name = elem.tag_name if hasattr(elem, "tag_name") else "unknown"
@@ -702,7 +700,8 @@ class DOMHandler:
 
         while time.time() - start_time < timeout_seconds:
             try:
-                element = await resolve_element(tab, selector)
+                # timeout=0: THIS loop is the wait (F-884, see that module).
+                element = await resolve_element(tab, selector, timeout=0)
 
                 if element:
                     if visible:

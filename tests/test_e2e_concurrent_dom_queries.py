@@ -25,10 +25,12 @@ synthetic one.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
 from e2e_helpers import (
+    eval_js,
     get_fn,
     integration_pytestmark,
     navigate_and_settle,
@@ -115,6 +117,86 @@ async def test_concurrent_query_elements_on_one_tab_all_succeed(
         counts = {len(r) for r in results}
         assert len(counts) == 1, f"concurrent queries disagreed on the DOM: {counts}"
         assert counts.pop() > 0
+    finally:
+        await close(instance_id=iid)
+
+
+async def test_a_waiter_does_not_starve_the_call_that_would_satisfy_it(
+    fixture_app_server, tmp_empty_root
+):
+    """The B1 regression: the cure must not be worse than the crash.
+
+    The first cut of F-884 held the per-tab lock across nodriver's bundled
+    wait, so a ``wait_for_element`` blocked the concurrent click that CREATES
+    the element it was waiting for — measured ``True @ 1.08 s`` before the fix,
+    ``False @ 10.71 s`` after it. A wrong answer, not a slow one, which is why
+    this asserts the RESULT and not a duration.
+
+    ``#late-target`` does not exist until ``#make-late`` is clicked, so the only
+    way this passes is if the two calls genuinely interleave.
+    """
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    wait_for_element = get_fn("wait_for_element")
+    click_element = get_fn("click_element")
+    close = get_fn("close_instance")
+
+    iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+    try:
+        await navigate_and_settle(iid, f"{base}/interactions.html")
+        await eval_js(
+            iid,
+            "document.getElementById('make-late') || (function(){"
+            "var b=document.createElement('button');b.id='make-late';"
+            "b.onclick=function(){setTimeout(function(){"
+            "var d=document.createElement('div');d.id='late-target';"
+            "document.body.appendChild(d);},200);};"
+            "document.body.appendChild(b);return 1;})()",
+        )
+
+        found, _clicked = await asyncio.gather(
+            wait_for_element(instance_id=iid, selector="#late-target", timeout=6000),
+            click_element(instance_id=iid, selector="#make-late"),
+        )
+
+        assert found is True, "the waiter starved the click that creates its element"
+    finally:
+        await close(instance_id=iid)
+
+
+async def test_a_waiter_does_not_delay_a_sibling_query_on_the_same_tab(
+    fixture_app_server, tmp_empty_root
+):
+    """The other half of B1: a waiter must not hold the tab hostage.
+
+    Measured before the wait moved out of the lock: a sibling ``query_elements``
+    that answered in 0.25 s took 10.56 s, because the waiter held the document
+    lock for nodriver's 10 s default regardless of its own 1 s budget. The
+    bound here is deliberately loose (3 s) — it is guarding against a ten-second
+    freeze, and a tight one would be a flake on a loaded runner.
+    """
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    wait_for_element = get_fn("wait_for_element")
+    query_elements = get_fn("query_elements")
+    close = get_fn("close_instance")
+
+    iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+    try:
+        await navigate_and_settle(iid, f"{base}/interactions.html")
+
+        async def _sibling():
+            started = time.monotonic()
+            found = await query_elements(instance_id=iid, selector="body")
+            return found, time.monotonic() - started
+
+        _waited, (found, elapsed) = await asyncio.gather(
+            wait_for_element(instance_id=iid, selector="#never-there", timeout=1000),
+            _sibling(),
+        )
+
+        assert found, "the sibling query answered nothing"
+        assert elapsed < 3.0, f"a 1 s waiter held the tab for {elapsed:.2f} s"
     finally:
         await close(instance_id=iid)
 

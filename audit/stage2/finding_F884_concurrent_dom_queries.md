@@ -119,28 +119,68 @@ selector:
 24x faster at N=3. Serialising is cheaper than racing because each race the
 lock removes used to cost a `_SETTLE_SECONDS` backoff plus a full re-resolve.
 
-### 2c. Latency — the cost, on an ABSENT selector
+### 2c. The first cut held the lock across the WAIT — what that cost
 
-Per-call timeout 3 s, three concurrent:
+The lock originally wrapped `tab.select`/`select_all`/`find`/`xpath`, each of
+which polls *inside* the same call. Reviewer's measurements through the real
+handlers on real Chrome, and the same three after moving the wait out:
 
-| | before | after |
+**Starvation.** `wait_for_element("#late", 6000)` concurrent with a click that
+creates `#late` 200 ms later:
+
+| | waiter | the click |
 |---|---|---|
-| failures | 5/9 | 0/9 |
-| mean round wall | 4.59 s | 9.41 s |
+| base `6ca0ae9` | **True** @ 1.08 s | 0.33 s |
+| lock across the wait | **False** @ 10.71 s | 10.72 s |
+| wait outside the lock | **True** @ 1.02 s | 0.52 s |
 
-This is the one real cost and it is named rather than hidden: nodriver's
-`select`/`find`/`select_all` bundle the *wait* into the same call as the query,
-so a waiter holds the lock while it waits and concurrent waiters on an absent
-selector serialise (3 x 3 s). A 4-call mixed present/absent round measured
-6.37 s. The trade is deliberate — a late answer beats a `-32000`.
+The middle row is a *wrong answer*, not a slow one: the click could not resolve
+`#b` until the waiter released, so the element could not be created until the
+waiter had given up.
 
-### 2d. Under DOM churn
+**Sibling latency.** `wait_for_element("#never", 1000)` concurrent with
+`query_elements("p")`:
+
+| | waiter | sibling |
+|---|---|---|
+| base | False @ 11.42 s | **0.25 s** |
+| lock across the wait | False @ 11.06 s | **10.56 s** |
+| wait outside the lock | False @ **1.02 s** | **0.01 s** |
+
+The last row beats the base on both counts. The sibling is 25x faster than
+base, and the waiter finally honours the 1 s it was given — base overshot its
+own request by 10x, because `wait_for_element`'s outer loop wrapped nodriver's
+10 s default.
+
+**The tool's own budget.** Four concurrent absent-selector `query_elements`,
+each under `CDP_OPERATION_TIMEOUT` (30 s):
+
+| | outcome |
+|---|---|
+| base | 2 x ok (10.2 s, 20.7 s), 2 x `ProtocolException` (the F-884 crash) |
+| lock across the wait | 2 x ok (10.1 s, 20.6 s), 2 x **`TimeoutError` @ 30 s** |
+| wait outside the lock | 4 x ok @ **10.20–10.21 s** |
+
+They now run concurrently rather than serialising, so the N-th caller no longer
+pays N x the wait and nothing reaches the tool's budget.
+
+### 2d. What the wait still costs
+
+Each try is one locked round-trip pair, so a genuinely slow single query on a
+huge document still delays a sibling by its own duration. And the defaults were
+unified: nodriver waits 10 s in `select`/`find`/`select_all` but 2.5 s in
+`xpath`, for no stated reason, so a genuinely absent **XPath** now takes 10 s to
+answer "not found" where it took 2.5 s. That is deliberate — this module
+advertises one contract for CSS and XPath — and a caller that wants less passes
+`timeout`.
+
+### 2e. Under DOM churn
 
 A page mutating its body every 7 ms, three concurrent resolutions of a present
 selector: 0/15 failed, mean round wall 0.018 s. The pre-existing
 `documentUpdated` recovery still does its job; the lock did not replace it.
 
-### 2e. Through the real tools, real Chrome
+### 2f. Through the real tools, real Chrome
 
 `tests/test_e2e_concurrent_dom_queries.py`, five concurrent calls per test:
 
@@ -199,15 +239,39 @@ is sent by nodriver, not by us, so "we keep it enabled" only changes which call
 gets the failure. Not measured beyond that, because the mechanism rules it out
 before cost does.
 
-### Rejected: own the wait loop so waiting happens outside the lock
+### Adopted on review: own the wait loop so waiting happens outside the lock
 
-This would remove 2c's cost: call nodriver's single-shot
-`query_selector`/`query_selector_all` under the lock and poll in this module,
-so only the round trip is serialised. It is the better end state and it is
-deliberately not in this change — it replaces nodriver's polling semantics
-(`Tab.select` does `await self` between polls, whose own 0.5 s floor is F-881's
-subject), which is a behaviour change needing its own measurement, and F-884 is
-a crash. Named in §6.
+This was first written up as *rejected* — "the better end state, but a polling
+behaviour change, and F-884 is a crash". The review measured what deferring it
+cost (§2c) and that reasoning does not survive the numbers: holding the lock
+across nodriver's bundled wait turned a crash into a **wrong answer** and into
+a tool-level `TimeoutError`, both for exactly the pipelining clients the fix
+exists to serve. It is in this change.
+
+`_wait_for` is the one home. Under the lock: nodriver's single-shot
+`query_selector` / `query_selector_all` / `find_element_by_text`, and
+`find_elements_by_text` for XPath (`DOM.performSearch` takes an XPath — it is
+what `Tab.xpath` is built on). Between tries, with the lock released:
+`_POLL_SECONDS`, bounded by the caller's own deadline. Both numbers are
+nodriver's own (10 s budget, 0.5 s interval), so a caller that passed no
+timeout waits exactly as long as it always did.
+
+Two details the review called out and one it did not:
+
+* `tab.select(selector, timeout=0)` would have been the smaller diff and is
+  wrong: `Tab.select` still does `await self` per turn, i.e. F-881's 0.5 s
+  `Tab.wait` floor, **inside** the lock. `query_selector` avoids it entirely.
+* `Tab.xpath` brackets its poll loop in `dom.enable()`/`dom.disable()`, so even
+  at `timeout=0` it is an indivisible multi-round-trip call. Dropping to
+  `find_elements_by_text` removes that bracket too.
+* `wait_for_element` already owned a 0.5 s poll loop and passed **no** timeout
+  inward, so every one of its turns carried nodriver's 10 s default inside the
+  caller's budget — which is why a 1 s request measured 11.42 s on base. It now
+  passes `timeout=0`: one query per turn, its own loop is the wait.
+
+The recovery loop is unchanged and still wraps each single-shot try, so link
+(b)'s `DOM.disable()`-before-re-raise still only fires for a genuine error and
+`recoverable_race` still classifies it.
 
 ### Rejected: a lock inside `element_resolution` only
 
@@ -272,10 +336,31 @@ No tool signature, return shape or error message changed. No new
   of the fix insufficient.
 * `test_refresh_element_tolerates_a_node_that_cannot_be_updated` — the
   `hasattr` tolerance both call sites used to carry, now in the one home.
+* `test_a_waiting_resolution_does_not_hold_the_lock_between_tries` — reads
+  `lock.locked()` from inside the sleep, three tries in a row.
+* `test_the_wait_is_bounded_by_the_callers_timeout_not_nodrivers` and
+  `test_the_timeout_is_spent_here_and_never_handed_to_nodriver` — the budget is
+  spent in this module's loop, and the single-shot query takes no `timeout` at
+  all.
+* `test_resolve_element_never_calls_nodrivers_bundled_wait` — the fakes offer
+  **only** the single-shot surfaces (`query_selector`,`query_selector_all`,
+  `find_element_by_text`, `find_elements_by_text`), in
+  `tests/test_element_resolution.py`, `tests/test_xpath_dispatch.py`,
+  `tests/test_dom_handler.py` and the shared `tests/fakes.py`. A regression to
+  `tab.select` is an `AttributeError`, not a silent slowdown — which matters
+  because the B1 defect was invisible to every pin that existed.
 
 **Integration** (`tests/test_e2e_concurrent_dom_queries.py`, `integration`
-marker, real Chrome): the three cases in §2e. All three verified RED on
-unfixed source at 3/5, 3/5 and 14/15.
+marker, real Chrome), five tests:
+
+* the three concurrency cases in §2f — verified RED on unfixed source at 3/5,
+  3/5 and 14/15;
+* `test_a_waiter_does_not_starve_the_call_that_would_satisfy_it` and
+  `test_a_waiter_does_not_delay_a_sibling_query_on_the_same_tab` — the two B1
+  regressions, verified RED against `345a0db` (the lock-across-the-wait commit)
+  with its exact symptoms: `False` for an element the concurrent click created,
+  and `a 1 s waiter held the tab for 10.45 s`. The first asserts the RESULT,
+  not a duration, because the failure it guards is a wrong answer.
 
 ---
 
@@ -299,9 +384,21 @@ unfixed source at 3/5, 3/5 and 14/15.
    deadlock. It needs its own finding, its own measurement and probably a
    re-entrant scope.
 
-3. **Concurrent waiters on an absent selector serialise** (§2c: 4.59 s → 9.41 s
-   for three at a 3 s timeout). The cure is §3's rejected "own the wait loop",
-   which is a behaviour change and belongs in its own change.
+3. **Waiters no longer serialise — this residual is gone.** It was written as
+   "concurrent waiters on an absent selector serialise, 4.59 s → 9.41 s for
+   three at a 3 s timeout", and the review was right to dispute the framing:
+   the cost was never confined to waiters among themselves. A waiter froze
+   *every* DOM operation on that tab, including the one that would have
+   satisfied it, for nodriver's 10 s default regardless of its own budget
+   (§2c). Owning the wait loop removed both halves: four concurrent absent
+   resolutions now answer at 10.20–10.21 s each rather than at 10/20/30 s, and
+   a sibling query during a 1 s wait went from 10.56 s to 0.01 s — faster than
+   the pre-fix base.
+
+   What replaces it is smaller and named in §2d: one locked round-trip pair at
+   a time, so a genuinely slow single query still delays a sibling by its own
+   duration; and a genuinely absent **XPath** now waits 10 s rather than
+   nodriver's 2.5 s, because the two languages were given one budget.
 
 4. **The two wordings are Chrome's.** `"DOM agent hasn't been enabled"` and
    `"DOM agent is not enabled"` both appear, from `DOM.disable` and
