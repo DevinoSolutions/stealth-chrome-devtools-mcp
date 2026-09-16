@@ -185,6 +185,10 @@ async def test_a_click_that_reaches_its_target_says_so(
     "selector,expected",
     [
         ("#disabled-btn", "disabled"),
+        # Disabled by an ANCESTOR: elem.disabled is FALSE here, so the IDL read
+        # this pin was written against answered reason=null for a click the
+        # button never acted on. :disabled is what decides it.
+        ("#fieldset-disabled-btn", "disabled"),
         ("#pe-none-btn", "pointer-events-none"),
         ("#zero-size-btn", "zero-size"),
         ("#vis-hidden-btn", "not-visible"),

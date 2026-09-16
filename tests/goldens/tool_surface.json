@@ -3411,7 +3411,7 @@
     "tags": []
   },
   "type_text": {
-    "description": "   Type text into an input field.\n\n   Args:\n       instance_id (str): Browser instance ID.\n       selector (str): CSS selector or XPath.\n       text (str): Text to type.\n       clear_first (bool): Clear field before typing.\n       delay_ms (int): Delay between keystrokes in milliseconds.\n       parse_newlines (bool): If True, parse \nas Enter key presses.\n       shift_enter (bool): If True, use Shift+Enter instead of Enter (for chat apps).\n\n   Returns:\n       bool: True if typed successfully.\n   ",
+    "description": "   Type text into an input field.\n\n   Args:\n       instance_id (str): Browser instance ID.\n       selector (str): CSS selector or XPath.\n       text (str): Text to type.\n       clear_first (bool): Clear field before typing.\n       delay_ms (int): Delay between keystrokes in milliseconds.\n       parse_newlines (bool): If True, parse \nas Enter key presses.\n       shift_enter (bool): If True, use Shift+Enter instead of Enter (for chat apps).\n\n   Returns:\n       bool: True — the characters were typed AND the field's own read-back\n           showed them land. Raises if the element's text did not move (a\n           readonly/range/color control, a non-editable element, or a script\n           that cancels the input).\n   ",
     "enabled": true,
     "input_schema": {
       "properties": {

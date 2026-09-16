@@ -275,6 +275,7 @@
         "display-none-btn",
         "vis-hidden-btn",
         "offviewport-btn",
+        "fieldset-disabled-btn",
       ].forEach(
         function (id) {
           on(id, "click", function (e) {

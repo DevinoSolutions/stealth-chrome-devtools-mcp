@@ -188,7 +188,10 @@ async def type_text(
         shift_enter (bool): If True, use Shift+Enter instead of Enter (for chat apps).
 
     Returns:
-        bool: True if typed successfully.
+        bool: True — the characters were typed AND the field's own read-back
+            showed them land. Raises if the element's text did not move (a
+            readonly/range/color control, a non-editable element, or a script
+            that cancels the input).
     """
     if isinstance(delay_ms, str):
         delay_ms = int(delay_ms)

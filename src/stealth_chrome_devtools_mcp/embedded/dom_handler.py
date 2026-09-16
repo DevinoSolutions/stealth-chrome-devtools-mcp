@@ -457,7 +457,7 @@ class DOMHandler:
 
             if clear_first:
                 try:
-                    await element.apply("(elem) => { elem.value = ''; }")
+                    await element.apply(text_entry.CLEAR_JS)
                 except Exception as e:
                     debug_logger.log_debug("dom_handler", "type_text", str(e))
                     await text_entry.clear_via_keyboard(tab)
@@ -521,7 +521,7 @@ class DOMHandler:
 
             if clear_first:
                 try:
-                    await element.apply("(elem) => { elem.value = ''; }")
+                    await element.apply(text_entry.CLEAR_JS)
                 except Exception as e:
                     debug_logger.log_debug("dom_handler", "paste_text", str(e))
                     await text_entry.clear_via_keyboard(tab)

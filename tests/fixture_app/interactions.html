@@ -185,6 +185,11 @@
     <button id="display-none-btn">Display none</button>
     <button id="vis-hidden-btn">Visibility hidden</button>
     <button id="offviewport-btn">Off viewport</button>
+    <!-- Disabled by an ANCESTOR: elem.disabled is false here, :disabled matches,
+         the button hit-tests to itself and receives nothing. -->
+    <fieldset disabled>
+      <button id="fieldset-disabled-btn">In disabled fieldset</button>
+    </fieldset>
     <div id="plain-div">PLAIN-DIV-TEXT</div>
     <div id="editable-div" contenteditable="true"></div>
 

@@ -33,18 +33,22 @@ wrapped over four line boxes — where ``getBoundingClientRect()``'s centre is
 never used.
 
 **Why the target's own flags are read too.** ``elementFromPoint`` is not enough
-on its own for exactly one shape: a ``disabled`` control hit-tests to ITSELF and
-still receives nothing. So ``disabled``, computed ``pointer-events`` and computed
+on its own for exactly one shape: a disabled control hit-tests to ITSELF and
+still receives nothing. So ``:disabled``, computed ``pointer-events`` and computed
 ``visibility`` come back in the same read, and :func:`reason` decides between them
-in one place.
+in one place — the hit-test first, because a ``pointer-events: none`` element
+whose child re-enables them DOES get the click (measured), and only then the
+target's own flags.
 
 **No text content, ever.** The only thing this module says about any element is
 its tag, its id and its classes. An overlay is frequently a consent banner or a
 modal dialog, and its words are the page's — echoing them into an MCP payload is
-the same discipline failure F-869 names for a page's localStorage. The class list
-is bounded by :data:`MAX_CLASSES` for the same reason: a page can carry two
-hundred utility classes on one element and a record that copied them all would be
-a payload, not a diagnostic.
+the same discipline failure F-869 names for a page's localStorage. Those are
+bounded twice for the same reason: :data:`MAX_CLASSES` caps how MANY classes are
+named — a page can carry two hundred utility classes on one element — and
+:data:`MAX_TOKEN_CHARS` caps how long any one of them, or the id, may be, because
+a count is not a bound when one hashed build-tool class outweighs eight ordinary
+ones.
 
 A leaf: ``tool_errors`` only, and the element arrives as an argument. It has NO
 error policy — the one thing it raises is "the page did not answer with the
@@ -76,6 +80,13 @@ SYNTHETIC = "synthetic"
 #: How many of an element's classes the shape descriptor carries.
 MAX_CLASSES = 8
 
+#: How many characters of any ONE token (an id, a single class name) it carries.
+#: The count bound above is not enough on its own: a build tool can emit a single
+#: hashed class name hundreds of characters long, and an id is unbounded by spec.
+#: Same discipline as ``page_storage``'s character bounds — a diagnostic names a
+#: shape, it does not carry the page's strings at whatever length the page chose.
+MAX_TOKEN_CHARS = 64
+
 #: The closed set of reasons the resolved target could not have taken the click.
 #: ``None`` — the hit element IS the target or sits inside it — is the seventh
 #: member and is not listed here because it is the absence of a reason.
@@ -89,8 +100,17 @@ DISABLED = "disabled"
 
 #: The ONE read. Answers with a JSON **string** for the same reason
 #: ``text_entry.READ_JS`` does. ``getClientRects()[0]`` is the box nodriver
-#: clicks; ``getBoundingClientRect()`` is the fallback for an element that has no
-#: client rects at all, where it is all zeros and ``rendered`` is already false.
+#: clicks. An element with NO client rects has no box at all: the rect comes back
+#: zeroed, ``rendered`` is false and there is no point to name — deliberately not
+#: ``getBoundingClientRect()``, which answers an all-zero rect there and would
+#: invent a click point at the viewport origin.
+#:
+#: ``disabled`` is ``matches(':disabled')`` and NOT the ``elem.disabled`` IDL
+#: attribute. Measured, Chrome 152: a ``<button>`` inside a ``<fieldset disabled>``
+#: reports ``elem.disabled === false`` while ``:disabled`` matches, it hit-tests to
+#: ITSELF, and the page receives nothing — so the IDL read produced exactly the
+#: false "the click reached it" this module exists to retire. ``:disabled`` also
+#: covers ``<option disabled>`` and every other inherited-disabled form.
 AIM_JS = """(elem) => {
     const rects = elem.getClientRects();
     const box = rects.length ? rects[0] : null;
@@ -121,7 +141,7 @@ AIM_JS = """(elem) => {
         target: shape(elem),
         hit: hit,
         hit_is_target: hitIsTarget,
-        disabled: !!elem.disabled,
+        disabled: elem.matches(':disabled'),
         pointer_events: String(style.pointerEvents),
         visibility: String(style.visibility)
     });
@@ -171,15 +191,26 @@ def _number(raw: object) -> float:
     return float(raw) if isinstance(raw, (int, float)) else 0.0
 
 
+def _token(raw: object) -> str:
+    """One id or class name, bounded to :data:`MAX_TOKEN_CHARS` characters."""
+    return str(raw or "")[:MAX_TOKEN_CHARS]
+
+
 def _shape(raw: object) -> dict[str, object] | None:
-    """One element as tag + id + (bounded) classes. Never its text."""
+    """One element as tag + id + (bounded) classes. Never its text.
+
+    Bounded twice over: :data:`MAX_CLASSES` caps how MANY classes are named and
+    :data:`MAX_TOKEN_CHARS` caps how long any one of them (or the id) may be. The
+    count alone is not a bound — one hashed class name from a build tool can be
+    longer than eight ordinary ones together.
+    """
     if not isinstance(raw, dict):
         return None
     classes = raw.get("classes")
-    named = [str(c) for c in classes] if isinstance(classes, list) else []
+    named = [_token(c) for c in classes] if isinstance(classes, list) else []
     return {
-        "tag": str(raw.get("tag") or ""),
-        "id": str(raw.get("id") or ""),
+        "tag": _token(raw.get("tag")),
+        "id": _token(raw.get("id")),
         "classes": named[:MAX_CLASSES],
     }
 
@@ -189,11 +220,19 @@ def reason(  # noqa: PLR0911  PERMANENT(one return per measured shape, in measur
 ) -> str | None:
     """Which measured shape kept the click from reaching the resolved target.
 
-    Order is what the measurement requires, not taste.
-    ``pointer-events: none`` is decided before ``covered`` because both are true
-    for that shape and only one of them is the cause; ``disabled`` is decided
-    last because it is the one shape where the hit-test names the target and the
-    click is still inert.
+    The shape of the decision is what the measurement requires, not taste. The
+    hit-test splits it in two: when the click point is over the target or
+    something INSIDE it the click reached the target, and the only remaining
+    question is whether the target could act on it (``disabled``). Only when it
+    did NOT reach the target is there a cause to name, and there the order runs
+    from the most specific to the most general — ``visibility``, then
+    ``pointer-events``, then the general "something else was there".
+
+    That split is not cosmetic. Measured, Chrome 152: a ``pointer-events: none``
+    span whose child re-enables pointer events hit-tests to the CHILD and DOES
+    receive the click (it bubbles — the page logged both). Deciding
+    ``pointer-events`` before the hit would have reported
+    ``pointer-events-none`` for a click that worked.
     """
     if not facts.get("rendered"):
         return NOT_RENDERED
@@ -208,12 +247,15 @@ def reason(  # noqa: PLR0911  PERMANENT(one return per measured shape, in measur
         _number(rect.get("width")) and _number(rect.get("height"))
     ):
         return ZERO_SIZE
-    if facts.get("visibility") != "visible":
-        return NOT_VISIBLE
-    if facts.get("pointer_events") == "none":
-        return POINTER_EVENTS_NONE
     if not facts.get("hit_is_target"):
+        if facts.get("visibility") != "visible":
+            return NOT_VISIBLE
+        if facts.get("pointer_events") == "none":
+            return POINTER_EVENTS_NONE
         return COVERED
+    # The click reached the target. The one thing that can still make it inert is
+    # the target being disabled — including by an ancestor ``<fieldset disabled>``,
+    # which is why ``AIM_JS`` asks ``:disabled`` and not ``elem.disabled``.
     if facts.get("disabled"):
         return DISABLED
     return None

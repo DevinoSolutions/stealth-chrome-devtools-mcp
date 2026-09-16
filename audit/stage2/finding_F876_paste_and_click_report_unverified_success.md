@@ -3,7 +3,7 @@
 **Status:** FIXED in this PR (product defect; live on 2.1.6 and on `main` at `b0ae010`)
 **Opened by:** `audit/stage2/finding_F873_type_text_reports_success_without_typing.md` §6, which named both tools as sharing `type_text`'s shape and left them out of that PR on purpose
 **Source at:** `fix/F873-type-text-silent-failure` = `258e1df` (= `main` `b0ae010` + the F-873 fix)
-**Severity:** HIGH for `paste_text` (same class as F-873: the tool answers `True` for text the page did not take, five of seven measured controls), MEDIUM for `click_element` (the click is really dispatched, but the tool cannot say WHERE it landed — five of eight measured shapes deliver the click to something other than the target, or to nothing at all, and every one of them answers `True`).
+**Severity:** HIGH for `paste_text` (same class as F-873: the tool answers `True` for text the page did not take, five of seven measured controls), MEDIUM for `click_element` (the click is really dispatched, but the tool cannot say WHERE it landed — six of nine measured shapes deliver the click to something other than the target, or to nothing at all, and every one of them answers `True`).
 
 ---
 
@@ -21,9 +21,10 @@ Everything below is a measurement, not a reading of the code. All of it:
   probe did not start.
 * Against a local `file://` page written by the probe itself (no network).
 
-Three probes: the tool-answer matrices (§2a, §2b), the per-path/per-trust
-breakdown (§2c), and the click-point equivalence check the fix's design rests on
-(§2d).
+Five probes: the tool-answer matrices (§2a, §2b), the per-path/per-trust
+breakdown (§2c), the click-point equivalence check the fix's design rests on
+(§2d), and the two the review added — the disabling ancestor (§2e) and the
+re-enabling descendant (§2f).
 
 ---
 
@@ -158,10 +159,42 @@ happened. Measured on four shapes:
 
 `getClientRects()[0]` is byte-equal to nodriver's centre in every shape including
 the wrapped inline, where the bounding box is 28.5 px off. So the aim probe reads
-`getClientRects()[0]`, falling back to `getBoundingClientRect()` only when the
-element has no client rects at all (which is the `display:none` row, where the
-bounding box is all zeros and the record says "no box" rather than inventing a
-point at the origin).
+`getClientRects()[0]` and **nothing else**: an element with no client rects has
+no box at all, and `AIM_JS` answers `rendered: false` with a zeroed rect and a
+`null` point rather than falling back to `getBoundingClientRect()`, which returns
+an all-zero rect there and would invent a click point at the viewport origin.
+
+### 2e. `elem.disabled` does not see a disabling ANCESTOR
+
+Measured on the same Chrome, a `<button>` inside a `<fieldset disabled>` against
+a plain `<button disabled>` and an enabled control:
+
+| target | `elem.disabled` | `matches(':disabled')` | `elementFromPoint` | page received |
+|---|---|---|---|---|
+| `<fieldset disabled><button>` | **`false`** | **`true`** | itself | **nothing** |
+| `<button disabled>` | `true` | `true` | itself | **nothing** |
+| `<button>` (control) | `false` | `false` | itself | `click:enabled:trusted` |
+
+The IDL attribute reflects only the element's OWN `disabled` content attribute.
+So the fieldset row hit-tests to itself *and* reports `disabled: false`, which is
+`hit_is_target: true, reason: null` — a record claiming the click reached a
+control that never acted on it, i.e. exactly the false claim this finding
+retires, reintroduced one level up. The aim therefore asks `matches(':disabled')`,
+which is also what covers `<option disabled>` and every other inherited form.
+
+### 2f. `pointer-events: none` does not mean the click was lost
+
+Same run. A `pointer-events: none` span containing a child that re-enables them:
+
+| target | computed `pointer-events` | `elementFromPoint` | `contains(hit)` | page received |
+|---|---|---|---|---|
+| `#pe-off` (child `#pe-on` re-enables) | `none` | **`SPAN#pe-on`** | **`true`** | `click:pe-on:trusted`, `click:pe-off:trusted` |
+
+The click reaches the child and **bubbles to the target**, so both listeners fire.
+A `reason` order that consulted `pointer-events` before the hit-test would report
+`pointer-events-none` for a click that worked. The hit-test therefore splits the
+decision: when the hit is the target or inside it, the only remaining question is
+whether the target could act (§2e); only when it is NOT is there a cause to name.
 
 ---
 
@@ -237,22 +270,27 @@ aimed, and what was under that point"**:
   answer is "could not be read" and says so rather than being mistaken for an
   empty answer). It reports the target's first client rect, the click point
   computed from it (§2d), `document.elementFromPoint` at exactly that point, and
-  four flags that §2c proved are needed to read the hit: `disabled`,
-  computed `pointer-events`, computed `visibility`, and whether the hit element is
-  the target or inside it.
-* `Shape` — the tag/id/class descriptor, and the ONLY thing said about any
+  four flags that §2c/§2e proved are needed to read the hit:
+  `matches(':disabled')` — **not** `elem.disabled`, §2e — plus computed
+  `pointer-events`, computed `visibility`, and whether the hit element is the
+  target or inside it.
+* `_shape(...)` — the tag/id/class descriptor, and the ONLY thing said about any
   element. **No text content, ever**, on either the target or the hit: an overlay
   is frequently a modal or a consent banner and its text is the page's, not the
-  tool's to echo into an MCP payload. The class list is bounded by `MAX_CLASSES`.
-* `reason(...)` — the closed code set, decided in one place from the facts above,
-  in the order measurement requires: `not-rendered` → `off-viewport` →
-  `zero-size` → `not-visible` → `pointer-events-none` → `covered` → `disabled` →
-  `None`. `pointer-events-none` is checked before `covered` because both are true
-  for that shape (§2c) and only one of them is the cause; `off-viewport` is
-  checked before `zero-size` because `elementFromPoint` answering `null` is a
-  different fact from a degenerate box, and only one of the two can be read from
-  the hit; `disabled` is last because it is the one shape where the hit-test names
-  the target and the click is still inert.
+  tool's to echo into an MCP payload. Bounded twice: `MAX_CLASSES` caps how MANY
+  classes are named and `MAX_TOKEN_CHARS` caps how long any one of them — or the
+  id — may be, because a count is not a bound when one hashed class name from a
+  build tool can outweigh eight ordinary ones.
+* `reason(...)` — the closed code set, decided in one place from the facts above.
+  The hit-test splits it: `not-rendered` → `off-viewport` → `zero-size`, then
+  **if the hit is NOT the target or inside it** `not-visible` →
+  `pointer-events-none` → `covered`, and **if it is** `disabled` → `None`.
+  `off-viewport` is checked before `zero-size` because `elementFromPoint`
+  answering `null` is a different fact from a degenerate box, and only one of the
+  two can be read from the hit. The split itself is §2f's measurement, not taste:
+  a `pointer-events: none` element whose child re-enables them DOES receive the
+  click, so a flag consulted before the hit-test would name a cause for a click
+  that worked.
 * `record(...)` — composes the returned dict. `COORDINATE` / `SYNTHETIC` are the
   two dispatch kinds and they are this module's constants.
 
@@ -327,7 +365,9 @@ an element with no box has no click point to name.
 |---|---|---|---|
 | `tests/goldens/tool_surface.json` (`click_element`) | `output_schema` `{"result": {"type": "boolean"}}`, description ending `bool: True if clicked successfully.` | the record's object schema, description ending with the record's fields | the HARD wire-surface golden, regenerated **deliberately** with this justification per `CONTRIBUTING.md`: the tool's return type and its docstring both changed on purpose, and this is the same PR |
 | `tests/goldens/tool_surface.json` (`paste_text`) | description ending `bool: True if pasted successfully.` | `bool: True — the text was pasted AND the page took it.` | the old line was the claim this finding shows to be false; the schema is unchanged |
-| `test_e2e_interaction_fidelity.py::test_form_semantics` (disabled arm) | `assert await click(...) is True` with a docstring bullet calling the silence a FINDING | asserts the record's `reason == "disabled"` | the pin's own comment ("the tool cannot tell you the control was inert (FINDING: no disabled-state guard)") named this fix. Kept to **one assert + its docstring bullet**, because `fix/F873-type-text-silent-failure` also edits this file |
+| `tests/goldens/tool_surface.json` (`type_text`) | description ending `bool: True if typed successfully.` | `bool: True — … AND the field's own read-back showed them land.` | F-873 corrected `DOMHandler.type_text`'s docstring and left the WRAPPER's Returns line alone, so the served surface still carried the claim F-873 disproved. Folded in here rather than left as a follow-up, because this PR is regenerating that golden anyway and a third stale line in the same file is not worth a second regeneration |
+| `test_e2e_interaction_fidelity.py::test_form_semantics` (disabled arm) | `assert await click(...) is True` with a docstring bullet calling the silence a FINDING | asserts the record's `reason == "disabled"` | the pin's own comment ("the tool cannot tell you the control was inert (FINDING: no disabled-state guard)") named this fix |
+| `test_e2e_interaction_fidelity.py` — the 7 bare `assert await click(...)` sites inside the TWO tests this PR already edits | truthy-only, i.e. vacuous for a dict return | `reason == "covered"` + the hit's id (occlusion), `hit_is_target is True` (five plain controls), `dispatch == "coordinate"` (offscreen) | a non-empty dict is always truthy, and these were near-vacuous before too since the tool raises on failure. Scoped to the two tests already touched; the other ~17 sites across four files are §6's named follow-up, partly because `fix/F873-type-text-silent-failure` edits this file concurrently |
 | `test_e2e_dynamic_sites.py` (6 asserts) | `assert await click(...) is True` | `assert (await click(...))["dispatch"] == "coordinate"` | the faithful translation of the old claim ("a click was really dispatched") and deliberately **not** the stronger `reason is None`, which would be a new claim on six real pages this PR did not measure |
 | `test_xpath_dispatch.py::test_the_issue_15_repro_selector_clicks` | `assert await DOMHandler.click_element(...) is True` | asserts the returned record's `selector` | a return-shape change; the test's claim (one grammar, both tools) is untouched. Its `_FakeElement` gains an `apply` answering the minimum well-formed aim — that double exists to pin which resolution surface a selector reaches, and modelling geometry is `FakeClickTarget`'s job |
 | `test_silent_excepts_log.py::test_click_element_mouse_click_fallback_logs_at_debug` | `assert result is True` | asserts `dispatch == "synthetic"` | same return-shape change; the DEBUG line it exists to pin is byte-unchanged, and the new assert additionally proves the fallback is *labelled* |
@@ -342,27 +382,34 @@ an element with no box has no click point to name.
   error — `DID NOT RAISE ToolError` for the paste rows, `isinstance(True, dict)`
   / `'bool' object is not subscriptable` for the click rows, `At index 1 diff:
   'mouse_click' != 'aim'` for the ordering pin (no aim is read at all), and an
-  `ImportError` for the leaf that does not exist yet. At the fix: **23 passed**
-  (the extra node is the `off-viewport` reason, added once probe 4 measured it).
+  `ImportError` for the leaf that does not exist yet. At the fix: **26 passed**
+  (three nodes added after the RED commit, each once its own probe measured the
+  shape: `off-viewport`, the disabling ancestor, the re-enabling descendant, plus
+  the token-length bound).
 * `tests/test_e2e_paste_click_verification.py` at the RED commit: **13 failed, 4
-  passed** of 17 nodes, same reasons. At the fix: **17 passed** in 48.6 s (the
-  `date` paste row was dropped and the `off-viewport` click row added — see the
-  `†` note in §2a).
+  passed** of 17 nodes, same reasons. At the fix: **18 passed** (the `date` paste
+  row was dropped — see the `†` note in §2a — and the `off-viewport` and
+  `<fieldset disabled>` click rows added).
+* The `<fieldset disabled>` pin was confirmed load-bearing by reverting the one
+  token in `AIM_JS` to `!!elem.disabled`, clearing `__pycache__` and re-running
+  the parametrized node: **1 failed, 5 passed** — only the fieldset row, exactly
+  the shape §2e measured. Restored immediately.
 * Narrow confirmation lane, `STEALTH_MCP_NO_ERROR_REPORTING=1 PYTHONUTF8=1`,
   `test_paste_click_verification` + `test_type_text_verification` +
   `test_dom_handler` + `test_tool_dispatch` + `test_mcp_protocol_surface` +
   `test_error_typing` + `test_silent_excepts_log` + `test_tool_sections_contract`
   + `test_doc_claims` + `test_xpath_dispatch` + `test_release_contract`:
-  **191 passed**.
+  **194 passed**.
 * The five integration nodes whose asserts this PR flipped, run individually:
   `test_e2e_interaction_fidelity::test_form_semantics` and
-  `::test_click_respects_occlusion_and_offscreen` — **2 passed**;
+  `::test_click_respects_occlusion_and_offscreen` — **2 passed** (re-run after
+  the tightened asserts, together with the E2E file: **20 passed**);
   `test_e2e_dynamic_sites::test_spa_history_route_swap_and_requery`,
   `::test_virtualized_and_finite_infinite_lists`,
   `::test_custom_elements_slots_and_popup_lifecycle` — **3 passed**.
 * LOC (`tools/check_file_budgets.py`'s own rule — every line, blanks and comments
-  included): `dom_handler.py` 904 → **940**, `text_entry.py` 250 → **261**,
-  `click_target.py` **251**. All three under the 1000-LOC default; no
+  included): `dom_handler.py` 904 → **940**, `text_entry.py` 250 → **276**,
+  `click_target.py` **293**. All three under the 1000-LOC default; no
   `GRANDFATHER` row is involved and none moved.
 * The full unit lane and the full integration lane are the coordinator's
   pre-push gate and are deliberately **not** claimed here.
@@ -393,18 +440,40 @@ an element with no box has no click point to name.
   be a second way to decide what the browser already decides, and it would break
   the legitimate case of clicking a control that a script enables between the
   probe and the click. The record names it; the click still goes out.
-* **`paste_text` inherits both of F-873's named costs verbatim** — a control that
-  legitimately normalises the pasted text back to the identical string now raises,
-  and a control that accepts only part of what was pasted still answers `True`
-  (F-873 §4a and §6). They are the price of "did anything change", and the
-  narrower alternative is the one that finding rejects.
-* **`type_text`'s tool-wrapper docstring still says `bool: True if typed
-  successfully.`** F-873 corrected `DOMHandler.type_text`'s docstring and left the
-  `tool_sections/element_interaction.py` wrapper's Returns line alone, so the
-  served surface still makes the claim F-873 disproved. This PR corrects
-  `paste_text`'s and `click_element`'s because it is changing those two tools; the
-  third is a one-line truthfulness fix to the same golden and is deliberately left
-  as a named follow-up rather than widened into this diff.
+* **`paste_text` inherits F-873's two named costs, one of them only in part.** A
+  control that accepts only some of what was pasted still answers `True` (F-873
+  §4a), unchanged. The other — a value that is legitimately IDENTICAL afterwards
+  reads as a refusal — applies here **only under `clear_first=False`**: the
+  default empties the field first, so the baseline is `""` and re-pasting the
+  text the field already held still registers as a change. Pasting into a
+  pre-filled field with `clear_first=False` the exact string it already contains
+  is the one shape that raises wrongly.
+* **`Element.mouse_click` can return having sent nothing, and the record would
+  still say `coordinate`.** nodriver's implementation catches `AttributeError`
+  from `get_position()` and returns; `get_position` itself returns `None` on an
+  `IndexError` from `getContentQuads`, and `mouse_click` then logs a warning and
+  returns. Neither path raises, so `click_element`'s fallback is not taken and
+  `dispatch` reads `"coordinate"` for a click that was never dispatched. It is
+  narrow — the `display:none` shape this PR measured raises a plain `Exception`
+  and does reach the fallback (§2c) — but it is the one residual over-claim in
+  the record, and the remedy would be patching nodriver, which this PR does not
+  do.
+* **Inside an iframe the two geometries diverge.** `getClientRects()` is
+  iframe-relative while `DOM.getContentQuads` is main-frame relative, so the aim
+  point and nodriver's click point would not agree. Unreachable today —
+  `element_resolution` does not pierce iframes — and named here so it is not
+  discovered the day it becomes reachable.
+* **About thirty `assert await click(...)` sites in the E2E suite are vacuous for
+  a dict return** (any non-empty dict is truthy), and were near-vacuous before it
+  since the tool raises on failure. This PR tightened the ones inside the two
+  files it already edits — seven in `test_e2e_interaction_fidelity.py` (the two
+  tests it touched) and six in `test_e2e_dynamic_sites.py` — to assert
+  `dispatch`, `hit_is_target` or `reason`. The remaining ~17, in
+  `test_e2e_data_tools.py`, `test_e2e_hard_dom.py`, `test_e2e_interaction.py` and
+  the rest of `test_e2e_interaction_fidelity.py`, are a test-hygiene follow-up
+  deliberately left out: rewriting them all would widen this diff across files
+  this PR has no other reason to touch, and `fix/F873-type-text-silent-failure`
+  edits one of them concurrently.
 * **`select_option` and `upload_file` are the two remaining interaction tools that
   answer `True` without asking the page anything.** `select_option`'s `text` arm
   in particular still calls `send_keys` on a `<select>` and returns unconditionally

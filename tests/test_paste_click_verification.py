@@ -234,6 +234,14 @@ async def test_click_point_is_the_centre_of_the_first_client_rect():
         ({"hit": ("div", "overlay", ())}, "covered"),
         ({"rect": (-500.0, -500.0, 33.5, 21.0)}, "off-viewport"),
     ],
+    ids=[
+        "disabled",
+        "pointer-events-none",
+        "zero-size",
+        "not-visible",
+        "covered",
+        "off-viewport",
+    ],
 )
 async def test_click_record_names_why_the_target_could_not_have_taken_it(
     kwargs, expected
@@ -290,6 +298,33 @@ async def test_the_record_carries_no_text_content():
     assert "SECRET-BUTTON-LABEL" not in json.dumps(result)
 
 
+async def test_a_disabling_ancestor_is_reported_as_disabled():
+    """A ``<button>`` inside a ``<fieldset disabled>`` reports
+    ``elem.disabled === false``, matches ``:disabled``, hit-tests to ITSELF and
+    receives nothing (measured, Chrome 152). Reading the IDL attribute therefore
+    answered ``hit_is_target: true, reason: null`` for a click the target never
+    acted on — the exact false claim this work retires."""
+    tab, _ = _click_tab(disabled=True)  # what ``:disabled`` matches, not the IDL
+
+    result = await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert result["hit_is_target"] is True
+    assert result["reason"] == "disabled"
+
+
+async def test_a_descendant_that_re_enables_pointer_events_is_not_a_reason():
+    """Measured, Chrome 152: a ``pointer-events: none`` span whose child
+    re-enables them hit-tests to the CHILD and DOES receive the click (it
+    bubbles — the page logged both). Deciding ``pointer-events`` before the
+    hit-test would report a cause for a click that worked."""
+    tab, _ = _click_tab(pointer_events="none", hit=None)
+
+    result = await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert result["hit_is_target"] is True
+    assert result["reason"] is None
+
+
 async def test_a_long_class_list_is_bounded():
     """A page can put two hundred utility classes on one element; a record that
     copied them all would be a payload, not a diagnostic."""
@@ -301,6 +336,20 @@ async def test_a_long_class_list_is_bounded():
     result = await DOMHandler.click_element(tab, CLICK_SELECTOR)
 
     assert len(result["target"]["classes"]) == click_target.MAX_CLASSES
+
+
+async def test_a_single_long_token_is_bounded_too():
+    """The COUNT bound is not a bound: one hashed class name from a build tool
+    can be longer than eight ordinary ones together, and an id is unbounded by
+    spec. Same character discipline as ``page_storage``."""
+    from stealth_chrome_devtools_mcp.embedded import click_target
+
+    tab, _ = _click_tab(element_id="i" * 500, classes=("c" * 500,))
+
+    result = await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert len(result["target"]["id"]) == click_target.MAX_TOKEN_CHARS
+    assert len(result["target"]["classes"][0]) == click_target.MAX_TOKEN_CHARS
 
 
 async def test_an_aim_that_cannot_be_read_raises():

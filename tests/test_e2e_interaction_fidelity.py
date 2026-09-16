@@ -180,15 +180,21 @@ async def test_click_respects_occlusion_and_offscreen(fixture_app_server):
         await navigate_and_settle(iid, f"{base}/interactions.html")
         await _query_at_least(iid, "#covered-btn", 1)
 
-        # Occlusion: the overlay (topmost at the coordinate) receives the click.
-        assert await click(instance_id=iid, selector="#covered-btn")
+        # Occlusion: the overlay (topmost at the coordinate) receives the click,
+        # and since F-876 the record NAMES it -- a bare `assert await click(...)`
+        # is vacuous for a dict return, and was near-vacuous before it.
+        covered = await click(instance_id=iid, selector="#covered-btn")
+        assert covered["reason"] == "covered"
+        assert covered["hit"]["id"] == "overlay-trap"
         assert await _wait_action(iid, "click:overlay-trap")
         actions = await read_actions(iid)
         assert "click:overlay-trap" in actions
         assert "click:covered-btn" not in actions  # occlusion honored
 
         # pointer-events:none overlay -> the real click passes through.
-        assert await click(instance_id=iid, selector="#pen-covered-btn")
+        assert (await click(instance_id=iid, selector="#pen-covered-btn"))[
+            "hit_is_target"
+        ] is True
         assert await _wait_action(iid, "click:pen-covered-btn")
         actions = await read_actions(iid)
         assert "click:pen-covered-btn" in actions
@@ -196,7 +202,9 @@ async def test_click_respects_occlusion_and_offscreen(fixture_app_server):
 
         # Offscreen: no manual scroll; the tool scrolls it into view and clicks.
         assert await eval_js(iid, "window.scrollY") == 0
-        assert await click(instance_id=iid, selector="#offscreen-btn")
+        assert (await click(instance_id=iid, selector="#offscreen-btn"))[
+            "dispatch"
+        ] == "coordinate"
         assert await _wait_action(iid, "click:offscreen-btn")
         assert await eval_js(iid, "window.scrollY") > 0  # auto-scrolled
     finally:
@@ -302,7 +310,9 @@ async def test_form_semantics(fixture_app_server):
         await _query_at_least(iid, "#disabled-btn", 1)
 
         # Positive control first: the label click forwards to the checkbox.
-        assert await click(instance_id=iid, selector="#label-for-check")
+        assert (await click(instance_id=iid, selector="#label-for-check"))[
+            "hit_is_target"
+        ] is True
         assert await _wait_action(iid, "change:labeled-check:on")
 
         # Disabled: the browser dispatches nothing on a disabled control, and
@@ -323,7 +333,9 @@ async def test_form_semantics(fixture_app_server):
         assert "INJECT" not in readonly_val
 
         # Constraint validation: empty required field blocks submit + fires invalid.
-        assert await click(instance_id=iid, selector="#validated-submit")
+        assert (await click(instance_id=iid, selector="#validated-submit"))[
+            "hit_is_target"
+        ] is True
         assert await _wait_action(iid, "invalid:required-input")
         assert "submit:validated-form" not in await read_actions(iid)
 
@@ -331,11 +343,15 @@ async def test_form_semantics(fixture_app_server):
         assert await type_text(
             instance_id=iid, selector="#required-input", text="filled"
         )
-        assert await click(instance_id=iid, selector="#validated-submit")
+        assert (await click(instance_id=iid, selector="#validated-submit"))[
+            "hit_is_target"
+        ] is True
         assert await _wait_action(iid, "submit:validated-form")
 
         # Reset fires reset and clears the field.
-        assert await click(instance_id=iid, selector="#reset-btn")
+        assert (await click(instance_id=iid, selector="#reset-btn"))[
+            "hit_is_target"
+        ] is True
         assert await _wait_action(iid, "reset:validated-form")
     finally:
         await close(instance_id=iid)
