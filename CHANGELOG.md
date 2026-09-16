@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+### Fixed — nothing ever forgot a dead backend record (F-880)
+
+`~/.stealth-mcp/server.json` had a writer for every backend that arrived and none for
+any that left. On the maintainer's machine it held three entries: a live backend
+(`win-session-1`, 2.1.6) beside two whose ports had no listener and whose recorded pids
+had not existed for days (`win-session-2` at 2.1.1, `headless` at 2.1.3). The only rule
+that ever removed anything was `record_backend`'s supersede-by-port, which by
+construction only touches the port being claimed — a dead sibling on another port stayed
+for good. F-868 had already stopped such an entry being *reported* as the backend;
+what was left was a record that only grows, a cold-start probe against ports nobody
+listens on, and a `doctor` listing naming backends that do not exist.
+
+`backend_liveness` gains the ONE deadness rule (`survey` / `dead_entries` /
+`forget_dead`), and it takes **two witnesses**: the port must probe `down` AND the
+recorded pid must not be a running backend of ours. Neither alone will do. A backend is
+recorded at Popen time, *before* it binds, so a sibling is `down` for the whole of its
+cold start while its process is alive — the socket alone would race every cold start on
+the machine. And "the pid is gone" says nothing about whether the port is free (F-868
+§6's stated objection), which requiring `down` answers directly: the port has just been
+observed to hold no listener at all. A **wedged** backend is therefore never dead — it
+holds its port, `restart` is its verb, and its record is how the eviction path finds a
+pid to kill — and an entry whose `port` is not an int is reported, never forgotten.
+
+The write is `backend_registry.forget_entries`, which re-reads the record and drops only
+entries still matching on display context **and** port **and** pid, so a context
+re-recorded while the probe was running survives. It never unlinks the file: forgetting
+the last entry leaves a readable empty record, exactly as `forget_backend` does.
+
+Two operator-facing changes. `cleanup` prints a `backend records:` line — how many are
+recorded and how many are dead — and `--apply` forgets them; it is the disk-hygiene verb
+and a record naming nothing is residue. `doctor` marks each dead line `(dead record)`,
+names them in one summary line and points at `cleanup --apply`; it stays read-only.
+Both read the SAME survey pass, so a wedged sibling costs one probe per run rather than
+one per question.
+
+Display context is deliberately not consulted: a `down` entry belonging to another
+desktop is forgotten like any other. Adoption's asymmetry (F-808) exists to stop a
+client *reusing* a foreign desktop's live backend; it has nothing to say about one whose
+process is gone.
+
+`cli._probe_recorded_backend` is deleted — its whole content was the ladder plus the
+word `no port recorded`, and that word is `backend_liveness.NO_PORT` now.
+
+## 2.1.7
+
 ### Fixed — `list_instances` reported the last navigation, not the instance (F-874)
 
 Measured on 2.1.6 over real stdio with ten headed browsers (Chrome 152, Windows
@@ -49,48 +94,47 @@ the page has.
 in the same session and is a different defect with a different remedy; it is
 open as `audit/stage2/finding_F875_scroll_page_returns_true_without_scrolling.md`.
 
-### Fixed — nothing ever forgot a dead backend record (F-880)
+### Fixed — `type_text` reported success for text it never entered, and for an Enter that could not submit (F-873)
 
-`~/.stealth-mcp/server.json` had a writer for every backend that arrived and none for
-any that left. On the maintainer's machine it held three entries: a live backend
-(`win-session-1`, 2.1.6) beside two whose ports had no listener and whose recorded pids
-had not existed for days (`win-session-2` at 2.1.1, `headless` at 2.1.3). The only rule
-that ever removed anything was `record_backend`'s supersede-by-port, which by
-construction only touches the port being claimed — a dead sibling on another port stayed
-for good. F-868 had already stopped such an entry being *reported* as the backend;
-what was left was a record that only grows, a cold-start probe against ports nobody
-listens on, and a `doctor` listing naming backends that do not exist.
-
-`backend_liveness` gains the ONE deadness rule (`survey` / `dead_entries` /
-`forget_dead`), and it takes **two witnesses**: the port must probe `down` AND the
-recorded pid must not be a running backend of ours. Neither alone will do. A backend is
-recorded at Popen time, *before* it binds, so a sibling is `down` for the whole of its
-cold start while its process is alive — the socket alone would race every cold start on
-the machine. And "the pid is gone" says nothing about whether the port is free (F-868
-§6's stated objection), which requiring `down` answers directly: the port has just been
-observed to hold no listener at all. A **wedged** backend is therefore never dead — it
-holds its port, `restart` is its verb, and its record is how the eviction path finds a
-pid to kill — and an entry whose `port` is not an int is reported, never forgotten.
-
-The write is `backend_registry.forget_entries`, which re-reads the record and drops only
-entries still matching on display context **and** port **and** pid, so a context
-re-recorded while the probe was running survives. It never unlinks the file: forgetting
-the last entry leaves a readable empty record, exactly as `forget_backend` does.
-
-Two operator-facing changes. `cleanup` prints a `backend records:` line — how many are
-recorded and how many are dead — and `--apply` forgets them; it is the disk-hygiene verb
-and a record naming nothing is residue. `doctor` marks each dead line `(dead record)`,
-names them in one summary line and points at `cleanup --apply`; it stays read-only.
-Both read the SAME survey pass, so a wedged sibling costs one probe per run rather than
-one per question.
-
-Display context is deliberately not consulted: a `down` entry belonging to another
-desktop is forgotten like any other. Adoption's asymmetry (F-808) exists to stop a
-client *reusing* a foreign desktop's live backend; it has nothing to say about one whose
-process is gone.
-
-`cli._probe_recorded_backend` is deleted — its whole content was the ladder plus the
-word `no port recorded`, and that word is `backend_liveness.NO_PORT` now.
+Measured on 2.1.6 over real stdio transport, headed Chrome 152: `type_text` returned
+`{"result": true}` when the characters never reached the page (Amazon's and Gmail's
+search boxes, `.value` still `""` afterwards, three runs each), and `parse_newlines`'s
+trailing newline never submitted the form it was typed into. Two defects, one shape —
+the tool reported the success of its own dispatch, not the success of the interaction.
+The Enter was a `KeyboardEvent` constructed *inside the page* by `element.apply`; an
+event a script constructs is `isTrusted: false` and carries no `charCode`, and a
+form's implicit submission is performed by Blink on the **keypress** of a trusted
+Enter. Measured against a one-input form with a submit listener: the synthetic
+keydown submits 0 times, a trusted `rawKeyDown` (which fires no keypress) submits 0
+times, and only a `keyDown` carrying `text="\r"` submits — while adding a separate
+`char` event on top fires a second keypress and submits **twice**. And nothing
+between "dispatch the events" and `return True` ever asked the page whether the
+characters had landed: measured on the same Chrome, `readonly`, `range` and `color`
+controls each accept every key event and leave their value exactly where it was, and
+the tool answered `True` for all three. (`<input type="date">` did the same on this
+machine's Chrome 152, but that one is build- and locale-dependent — CI's headless
+Chrome accepted the digits on Windows, macOS and Linux alike — so it is pinned as the
+invariant rather than as a refusal: never a success over a value that did not move.)
+Key presses and the "did the page
+take it" check now live in `embedded/text_entry.py`: every key goes out as one
+`Input.dispatchKeyEvent` `keyDown` carrying `text` plus a `keyUp` (so `keydown`,
+`keypress` and `input` all fire, all trusted — the shipped path sent a lone `char`
+event per character, so a page whose autocomplete or shortcuts are bound to `keydown`
+saw a value appear with no key pressed), and after each line's characters the
+element's own text is read back and compared against the baseline taken just before
+them. A control that took every event and moved nothing now raises `ToolError` naming
+the selector and the counts — never the typed text, since the raised error reaches the
+debug ring and, as the exception itself, the caller and Sentry, and the field may be a
+password box. The verification asks "did anything change" rather than "does it contain
+exactly what I typed", deliberately: an input mask, an autocomplete that rewrites and a
+`number` field that normalises all DID receive the input, and a stricter test would have
+turned each into a new false alarm; the cost of the looser rule, named in the finding,
+is that a control whose value is legitimately identical afterwards now raises.
+`type_text`'s clear fallback also stopped being a no-op — it sent WebDriver's
+private-use codepoints (U+E009 for Ctrl, U+E017 for Delete) through `send_keys`, which
+CDP has never understood, so all three characters landed verbatim and nothing was
+cleared, corrupting the field it was asked to empty; it and `paste_text` now share the
+one CDP select-all + Delete.
 
 ## 2.1.6
 
