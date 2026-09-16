@@ -959,11 +959,10 @@ class DOMHandler:
             )
             after = settled.position
             return {
-                # OFFSETS only. A lazy-loading page grows its extent while
-                # standing perfectly still, and comparing whole ``Position``
-                # values would report that growth as "it scrolled" with
-                # identical before/after offsets in the same record.
-                "scrolled": after.offset != before.offset,
+                # OFFSETS only, and only when both readings are about the same
+                # element — ``Position.moved_from`` is the one home for that
+                # comparison and its docstring is the why.
+                "scrolled": after.moved_from(before),
                 "at_edge": after.at_edge(direction),
                 "settled": settled.settled,
                 "settle_seconds": round(settled.seconds, 3),

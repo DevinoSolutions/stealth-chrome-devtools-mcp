@@ -437,6 +437,9 @@ class ScrollingTab(FakeTab):
         nested_id: str | None = None,
         nested_classes: tuple[str, ...] = ("shell",),
         nested_path: tuple[int, ...] = (1, 0),
+        document_height: int | None = None,
+        document_width: int | None = None,
+        stale_path: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -458,6 +461,23 @@ class ScrollingTab(FakeTab):
         self.nested_id = nested_id
         self.nested_classes = nested_classes
         self.nested_path = nested_path
+        #: The DOCUMENT's own content box, when it is NOT the scroller. Default
+        #: ``None`` means exactly one viewport — nothing to scroll, the app
+        #: shell above. Setting it makes the page BOTH-scrollable (fixture d: a
+        #: 400 px ``overflow:auto`` box inside an 8000 px document), which is
+        #: the only shape that can tell rule 1 (the ``scrollingElement``
+        #: precedence) from rule 2. The document then has its OWN offsets and
+        #: its own smooth flight, because it is a different scroll container.
+        self.document_height = document_height
+        self.document_width = document_width
+        self.doc_scroll_y = 0
+        self.doc_scroll_x = 0
+        #: The chosen element is no longer in the document when the READ gets
+        #: there — a page that re-rendered mid-scroll. ``_RESOLVE_JS`` falls
+        #: back to the document scroller, so every later round trip addresses
+        #: the DOCUMENT however the path is spelled, which is what makes the
+        #: record name what it read rather than what it picked.
+        self.stale_path = stale_path
         #: A page whose content keeps arriving never stops moving — the
         #: budget-exhaustion case. One pixel per read is enough to model it.
         self.never_settles = never_settles
@@ -467,6 +487,7 @@ class ScrollingTab(FakeTab):
         #: that tells an offset comparison from a whole-``Position`` one.
         self.growing_content = growing_content
         self._flight: tuple[int, int] | None = None
+        self._doc_flight: tuple[int, int] | None = None
         #: Every position read, in order — so a test can count round trips.
         self.position_reads: list[str] = []
         #: Every scroller pick, in order — so a test can pin that it is ONE per
@@ -482,25 +503,76 @@ class ScrollingTab(FakeTab):
     def max_scroll_x(self) -> int:
         return max(0, self.doc_width - self.viewport_width)
 
-    def _clamped(self, x: int, y: int) -> tuple[int, int]:
+    @property
+    def document_is_the_scroller(self) -> bool:
+        """Is there no nested scroller at all? Then everything is the document."""
+        return self.nested_id is None
+
+    @property
+    def doc_content_height(self) -> int:
+        if self.document_is_the_scroller:
+            return self.doc_height
         return (
-            max(0, min(int(x), self.max_scroll_x)),
-            max(0, min(int(y), self.max_scroll_y)),
+            self.viewport_height
+            if self.document_height is None
+            else (self.document_height)
         )
 
-    def _target_of(self, expression: str) -> tuple[int, int] | None:
-        """The (x, y) a scroll script asks for, or ``None`` if it is not one."""
+    @property
+    def doc_content_width(self) -> int:
+        if self.document_is_the_scroller:
+            return self.doc_width
+        return (
+            self.viewport_width
+            if self.document_width is None
+            else (self.document_width)
+        )
+
+    @property
+    def doc_max_scroll_y(self) -> int:
+        return max(0, self.doc_content_height - self.viewport_height)
+
+    @property
+    def doc_max_scroll_x(self) -> int:
+        return max(0, self.doc_content_width - self.viewport_width)
+
+    def _target_of(
+        self, expression: str, *, x: int, y: int, max_x: int, max_y: int, content: int
+    ) -> tuple[int, int] | None:
+        """The (x, y) a scroll script asks OF ONE CONTAINER, or ``None``.
+
+        *content* is that container's ``scrollHeight`` — what a ``scrollTo``
+        naming ``…scrollHeight`` heads for. Every bound is passed in, because
+        since F-878 a page can have two containers and a ``window`` script must
+        clamp against the DOCUMENT's extent even when a nested div is taller.
+        """
         by = self._BY.search(expression)
         if by is not None:
-            return self._clamped(
-                self.scroll_x + int(by.group(2)), self.scroll_y + int(by.group(1))
-            )
-        to = self._TO.search(expression)
-        if to is None:
-            return None
-        top = to.group(1).strip()
-        y = self.doc_height if "scrollHeight" in top else int(top)
-        return self._clamped(int(to.group(2)), y)
+            target_x, target_y = x + int(by.group(2)), y + int(by.group(1))
+        else:
+            to = self._TO.search(expression)
+            if to is None:
+                return None
+            top = to.group(1).strip()
+            target_x = int(to.group(2))
+            target_y = content if "scrollHeight" in top else int(top)
+        return (
+            max(0, min(int(target_x), max_x)),
+            max(0, min(int(target_y), max_y)),
+        )
+
+    def _step(
+        self, flight: tuple[int, int] | None, x: int, y: int
+    ) -> tuple[int, int, tuple[int, int] | None]:
+        """One animation frame of *flight* from (*x*, *y*) — the new (x, y, flight)."""
+        if flight is None:
+            return (x, y, None)
+        target_x, target_y = flight
+        step_x = -(-abs(target_x - x) // self.smooth_steps)
+        step_y = -(-abs(target_y - y) // self.smooth_steps)
+        x += min(step_x, abs(target_x - x)) * (1 if target_x >= x else -1)
+        y += min(step_y, abs(target_y - y)) * (1 if target_y >= y else -1)
+        return (x, y, None if (x, y) == flight else flight)
 
     def _advance(self) -> None:
         """One animation frame's worth of movement, charged per read."""
@@ -510,19 +582,12 @@ class ScrollingTab(FakeTab):
             self.scroll_y = min(self.scroll_y + 1, self.max_scroll_y)
             self.doc_height += 1  # the content that keeps arriving
             return
-        if self._flight is None:
-            return
-        target_x, target_y = self._flight
-        step_x = -(-abs(target_x - self.scroll_x) // self.smooth_steps)
-        step_y = -(-abs(target_y - self.scroll_y) // self.smooth_steps)
-        self.scroll_x += min(step_x, abs(target_x - self.scroll_x)) * (
-            1 if target_x >= self.scroll_x else -1
+        self.scroll_x, self.scroll_y, self._flight = self._step(
+            self._flight, self.scroll_x, self.scroll_y
         )
-        self.scroll_y += min(step_y, abs(target_y - self.scroll_y)) * (
-            1 if target_y >= self.scroll_y else -1
+        self.doc_scroll_x, self.doc_scroll_y, self._doc_flight = self._step(
+            self._doc_flight, self.doc_scroll_x, self.doc_scroll_y
         )
-        if (self.scroll_x, self.scroll_y) == self._flight:
-            self._flight = None
 
     def _drives_nested(self, expression: str) -> bool:
         """Does this script address the NESTED scroller rather than the window?
@@ -531,35 +596,46 @@ class ScrollingTab(FakeTab):
         ``_el(null)``/no call at all is the document. On a page that has no
         nested scroller the answer is always ``False`` and the geometry is the
         document's, so every pre-F-878 test reads exactly as it did.
+
+        ``stale_path`` is the one case where the SCRIPT says nested and the
+        answer is ``False``: ``_RESOLVE_JS`` falls back to the document scroller
+        when the path resolves to nothing, and this models that fallback rather
+        than the spelling.
         """
-        if self.nested_id is None:
+        if self.nested_id is None or self.stale_path:
             return False
         found = self._EL.search(expression)
         return found is not None and found.group(1) != "null"
 
-    def _scroller_answer(self) -> str:
+    def _scroller_answer(self, expression: str) -> str:
         """The page's answer to the scroller pick — Chrome's rule, not the product's.
 
-        Measured (F-878 §3): with ``html,body{overflow:hidden}`` the document
-        scroller cannot move on either axis, so the pick falls through to the
-        one full-viewport ``div{overflow:auto}``; with a plain document it stops
-        at rule 1 and never walks at all.
+        Rule 1 first, because that is the order Chrome's own geometry imposes:
+        if the DOCUMENT can move on the asked-for axis it is the scroller, and
+        that is true of a plain page (F-878 fixture a) and of a page that has a
+        nested scroller as well (fixture d). Only when the document cannot move
+        — ``html,body{overflow:hidden}``, measured as ``max_y 0`` — does the
+        pick fall through to the one nested ``div{overflow:auto}``.
         """
-        if self.nested_id is None:
+        axis = "x" if "'x'" in expression else "y"
+        doc_extent = self.doc_max_scroll_x if axis == "x" else self.doc_max_scroll_y
+        if doc_extent > 0 or self.document_is_the_scroller:
             return json.dumps({"path": None, "document": True})
         return json.dumps({"path": list(self.nested_path), "document": False})
 
     def _read_answer(self, expression: str) -> str:
-        """The geometry of whichever element the read addressed."""
-        nested = self._drives_nested(expression)
-        if self.nested_id is not None and not nested:
-            # The app shell's DOCUMENT: exactly one viewport, nothing to scroll.
+        """The geometry and identity of whichever element the read addressed."""
+        if not self._drives_nested(expression):
             return json.dumps(
                 {
-                    "x": 0,
-                    "y": 0,
-                    "max_x": 0,
-                    "max_y": 0,
+                    "x": self.doc_scroll_x
+                    if not self.document_is_the_scroller
+                    else self.scroll_x,
+                    "y": self.doc_scroll_y
+                    if not self.document_is_the_scroller
+                    else self.scroll_y,
+                    "max_x": self.doc_max_scroll_x,
+                    "max_y": self.doc_max_scroll_y,
                     "tag": "html",
                     "id": "",
                     "classes": [],
@@ -572,10 +648,10 @@ class ScrollingTab(FakeTab):
                 "y": self.scroll_y,
                 "max_x": self.max_scroll_x,
                 "max_y": self.max_scroll_y,
-                "tag": "div" if nested else "html",
-                "id": self.nested_id if nested else "",
-                "classes": list(self.nested_classes) if nested else [],
-                "document": not nested,
+                "tag": "div",
+                "id": self.nested_id,
+                "classes": list(self.nested_classes),
+                "document": False,
             }
         )
 
@@ -584,22 +660,55 @@ class ScrollingTab(FakeTab):
         if expression.startswith(self.POSITION_JS_MARKER):
             if self.SCROLLER_JS_MARKER in expression:
                 self.scroller_picks.append(expression)
-                return self._scroller_answer()
+                return self._scroller_answer(expression)
             self.position_reads.append(expression)
             self._advance()
             return self._read_answer(expression)
-        target = self._target_of(expression)
+        if self._drives_nested(expression) or self.document_is_the_scroller:
+            return self._apply_scroll(expression, nested=True)
+        return self._apply_scroll(expression, nested=False)
+
+    def _apply_scroll(self, expression: str, *, nested: bool) -> Any:
+        """Move ONE container the way the script asks, clamped to ITS extent."""
+        if nested:
+            target = self._target_of(
+                expression,
+                x=self.scroll_x,
+                y=self.scroll_y,
+                max_x=self.max_scroll_x,
+                max_y=self.max_scroll_y,
+                content=self.doc_height,
+            )
+        else:
+            target = self._target_of(
+                expression,
+                x=self.doc_scroll_x,
+                y=self.doc_scroll_y,
+                max_x=self.doc_max_scroll_x,
+                max_y=self.doc_max_scroll_y,
+                content=self.doc_content_height,
+            )
         if target is None:
             return self._answer_for_js(expression)
-        if self.nested_id is not None and not self._drives_nested(expression):
-            # A window scroll on an app shell moves nothing — the document is
-            # one viewport tall. This is the defect, modelled as geometry.
-            return None
+        here = (
+            (self.scroll_x, self.scroll_y)
+            if nested
+            else (
+                self.doc_scroll_x,
+                self.doc_scroll_y,
+            )
+        )
         if "'smooth'" in expression:
-            self._flight = None if target == (self.scroll_x, self.scroll_y) else target
+            flight = None if target == here else target
         else:
-            self.scroll_x, self.scroll_y = target
-            self._flight = None
+            flight = None
+            here = target
+        if nested:
+            self.scroll_x, self.scroll_y = here
+            self._flight = flight
+        else:
+            self.doc_scroll_x, self.doc_scroll_y = here
+            self._doc_flight = flight
         return None
 
 

@@ -484,6 +484,23 @@ class Position(NamedTuple):
         """Where the page is scrolled — the ONLY part that means "moved"."""
         return (self.x, self.y)
 
+    def moved_from(self, before: Position) -> bool:
+        """Did the page actually MOVE between *before* and this reading?
+
+        THE one home for that comparison, so no caller can reach for the halves
+        itself. Two conditions, and both are about a lie the record could
+        otherwise tell:
+
+        * the offsets differ — never the extent, because a lazy-loading page
+          grows its content while standing perfectly still (see the class
+          docstring);
+        * the two readings are about the SAME element. A path that went stale
+          mid-scroll makes *before* the div's offset and this one the
+          document's, and the difference between two different elements'
+          offsets is not a distance anything travelled (F-878).
+        """
+        return self.is_document == before.is_document and self.offset != before.offset
+
     @property
     def descriptor(self) -> dict[str, object]:
         """The element that was read, as the record carries it — SHAPE ONLY.

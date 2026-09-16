@@ -288,14 +288,73 @@ async def test_a_plain_document_is_still_named_as_the_document():
     assert record["scroll_y_after"] == MAX_SCROLL_Y
 
 
-async def test_a_document_scroller_is_still_driven_through_window():
-    """Rule 1 is a precedence, and the script it produces is F-875's, unchanged.
+async def test_a_scrolling_document_wins_over_a_nested_scroller():
+    """Rule 1 is a PRECEDENCE: fixture d's 400 px box must not win (F-878 §4).
 
-    The measured reason (finding §4): if the document can move, the document IS
-    the page — fixture d put a 400 px scrollable box inside a 6023 px scrolling
-    document, and any "largest scrollable" rule without this in front of it has
-    to be talked out of choosing the box. Keeping ``window`` in the generated JS
-    is the mechanical form of "the control fixture is unchanged".
+    What this pin holds is the WIRING — that when the page answers "the
+    document", the tool drives the document, reports the document's offsets and
+    leaves the nested container exactly where it was. It cannot hold the RULE
+    itself: ``ScrollingTab`` is not a JS engine, so it applies Chrome's rule to
+    its own geometry rather than executing ``SCROLLER_JS``. Swapping rules 1 and
+    2 in the product is caught by
+    ``test_e2e_scroll_page_verification.py::test_a_scrolling_document_is_the_page_even_with_a_nested_scroller``,
+    where real Chrome runs the real script.
+
+    (The double gives both containers the same viewport height; fixture d's box
+    is really 400 px tall. Nothing here depends on that number — only on both
+    containers being able to move.)
+    """
+    tab = ScrollingTab(
+        doc_height=5000,  # the nested box's content
+        viewport_height=SHELL_VIEWPORT,
+        nested_id="box",
+        nested_classes=("box",),
+        document_height=8000,  # ...inside a document that scrolls too
+    )
+    assert tab.doc_max_scroll_y > 0 and tab.max_scroll_y > 0, "both must be scrollable"
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=False)
+
+    assert record["scroller_is_document"] is True, record
+    assert record["scroller"] == {"tag": "html", "id": "", "classes": []}
+    assert record["scrolled"] is True
+    assert record["scroll_y_after"] == record["max_scroll_y"] == tab.doc_max_scroll_y
+    # The box never moved: driving it would have been the defect rule 1 prevents.
+    assert tab.scroll_y == 0, tab.scroll_y
+
+
+async def test_a_stale_path_reports_the_element_it_actually_read():
+    """The record names what the READ found, never what the PICK hoped for.
+
+    ``_RESOLVE_JS`` falls back to the document scroller when the chosen
+    element is no longer in the document — a page that re-rendered mid-scroll.
+    Both shapes that produces are here: the identity is the document's, and
+    ``scroller_is_document`` agrees with it. A record that kept naming
+    ``div#shell`` while reading ``html`` would be F-875's defect in a new place.
+    """
+    tab = _app_shell(stale_path=True)
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=False)
+
+    assert record["scroller_is_document"] is True, record
+    assert record["scroller"] == {"tag": "html", "id": "", "classes": []}
+    # The pick still asked for the shell — this is a fallback, not a re-pick.
+    assert tab.scroller_picks, tab.evaluate_calls
+    assert any("_el([1, 0])" in e for e in tab.evaluate_calls), tab.evaluate_calls
+    # And the record is honest about the document it fell back to: it cannot move.
+    assert record["max_scroll_y"] == 0
+    assert record["scrolled"] is False
+
+
+async def test_a_document_scroller_is_still_driven_through_window():
+    """Rule 1 is a precedence, and the SCROLL script it produces is F-875's.
+
+    **Green before the fix as well as after, deliberately** — it does not pin
+    the new behaviour, it pins that the old behaviour survived it. The measured
+    reason (finding §4): if the document can move, the document IS the page, and
+    keeping ``window`` in the generated scroll JS is the mechanical form of "the
+    control fixture is unchanged". (The scroll scripts only — ``READ_JS`` did
+    move, to the element's ``scrollLeft``/``scrollTop`` plus the resolver.)
     """
     tab = ScrollingTab(doc_height=DOC_HEIGHT, viewport_height=VIEWPORT_HEIGHT)
 
@@ -351,9 +410,11 @@ async def test_a_nested_scroller_is_asked_for_on_the_direction_s_own_axis():
 async def test_an_invalid_request_still_costs_no_round_trip_with_the_pick_in_front():
     """The pick is now the FIRST round trip, so it must validate before making it.
 
-    F-875's two refusals (an unknown direction, a negative amount) are both
-    decided from the request alone; putting a round trip in front of them would
-    have quietly retired both pins.
+    **Green before the fix as well as after, deliberately** — it does not pin
+    the new behaviour, it pins that F-875's two refusals (an unknown direction,
+    a negative amount) survived it. Both are decided from the request alone, and
+    putting a round trip in front of them would have quietly retired both pins
+    while leaving them passing against the OLD first call.
     """
     tab = _app_shell()
 
