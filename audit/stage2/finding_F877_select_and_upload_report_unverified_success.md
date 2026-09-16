@@ -192,12 +192,18 @@ deep-serializes an object at every depth — F-872's rule, F-869's mechanism).
 
 ### 4a. `select_option`: resolve the option in one place, then read what the control holds
 
-`SELECT_JS` is one `Element.apply` that, in a single synchronous block:
+Two `Element.apply` calls, each one `JSON.stringify` round trip, in this order:
 
-1. refuses anything that is not a `<select>` (rows 13 and 14 become a raise, not a
-   write into someone else's control);
-2. resolves the caller's criterion to a **target index** — the ONE matching rule,
-   spelled out rather than delegated to a browser feature:
+1. `READ_SELECT_JS` answers the `<select>`'s tag, its `multiple` flag, its standing
+   selection and its options — `index`, `value`, `text`, `label` and `disabled` for
+   each, bounded at `MAX_OPTIONS` (2000). A tag that is not `select` answers
+   `is_select: false` and the tool raises, so rows 13 and 14 become a refusal rather
+   than a write into someone else's control. `option.text` is Chrome's COLLAPSED text
+   and `option.label` falls back to it, so the caller's string is compared against
+   what a browser RENDERS;
+2. `control_state.resolve_option` — a pure Python function, which is the point: the
+   ONE matching rule, spelled out where it can be read and unit-tested rather than
+   delegated to a browser feature:
    * `index=` — the integer, if it is in range;
    * `value=` — the first `<option>` whose `value` is exactly that string;
    * `text=` — exact match on `option.text`, then exact match on `option.label`,
@@ -207,23 +213,27 @@ deep-serializes an object at every depth — F-872's rule, F-869's mechanism).
      dropped them would break a caller who relies on `text="Bet"`. What is gone is
      the buffer, the wraparound, the `label`/text collision and the ability to
      type into a different element entirely;
-3. if nothing resolved, returns `matched: false` **having changed nothing** (row 4's
-   destroyed selection cannot happen: no assignment is reached);
-4. otherwise sets `selectedIndex` and, **only if the index moved**, dispatches
+3. if nothing resolved, `verify_matched` raises **having written nothing** — row 4's
+   destroyed selection cannot happen, because no assignment is reached;
+4. otherwise `apply_js(index, value)` sets `selectedIndex` and, **only if the index
+   moved**, dispatches
    `input` and then `change`, both bubbling — the pair, and the order, Chrome's
    own typeahead produced in §2b (`input:true` then `change:true`). The shipped
    `value`/`index` arms fired `change` alone, no `input` at all, and fired it
    even when nothing had changed (§2a rows 10 and 13 both announce a `change`
    for a control that did not move); Chrome fires nothing when a selection lands
    where it already was (measured, §2b's `"Spaced Out"` row);
-5. reads the control back **after** those events have run (they are synchronous, so
-   a page handler that resets the select has already run) and returns
-   `{matched, target_index, before, after, tag, multiple, option_count, …}` as a
-   JSON string.
+5. and reads the control back **after** those events have run (they are synchronous,
+   so a page handler that resets the select has already run) in the same answer.
 
-`control_state.verify_selected` is the verdict and the only thing that raises: no
-match, or a match whose `selectedIndex` is not where it was aimed. `select_option`
-returns a record:
+That second script is also the one place the two-call split is paid for: the options
+can be replaced between the read and the write — a dependent dropdown repopulating —
+and an index resolved against the old list addresses a different option in the new
+one, so the write re-checks the option's `value` against the index it was given and
+refuses as `stale` rather than selecting the wrong thing.
+
+`control_state.verify_selected` is the second verdict: a stale write, or a
+`selectedIndex` that is not where it was aimed. `select_option` returns a record:
 
 ```json
 {
@@ -246,7 +256,7 @@ moved", which a bare `True` never could.
 
 ### 4b. `upload_file`: read `input.files`
 
-`FILES_JS` is one `Element.apply` returning `{count, names, total_bytes}` read from
+`READ_FILES_JS` is one `Element.apply` returning `{count, names, total_bytes}` read from
 `input.files` **after** `send_file`. `control_state.verify_attached` raises when the
 input holds a different number of files than were requested — which is row 2, and
 which also covers "the input holds nothing" as its zero case. The record:
@@ -297,13 +307,47 @@ redundant field is a second way to ask the same question.
 | test | was | now | why |
 |---|---|---|---|
 | `tests/goldens/tool_surface.json` (`select_option`, `upload_file`) | see §4c | see §4c | the HARD wire-surface golden, regenerated deliberately per `CONTRIBUTING.md`: both tools' return type and docstring changed on purpose, in this PR |
-| `tests/test_dom_handler.py::test_select_option_*` | `assert result is True` | asserts the record | return-shape change; the claim each test makes (which arm ran, which JS was sent) is untouched |
-| `tests/test_e2e_interaction_fidelity.py` (`select_option` arms) | `is True` | the record's `selected_index` | the faithful translation of the old claim, plus the one the old one could not make |
-| `tests/fixture_app/interactions.html` + `app.js` | — | the F-877 block: a `disabled` select, an empty select, a `multiple` select, a select with a `disabled` option, and four file inputs (plain, `multiple`, `disabled`, and an `<input>` with no `type`) | every one is a shape §2a/§2c measured. No existing test touches any of them |
+| `test_xpath_dispatch.py::test_select_option_acts_on_the_resolved_element_not_a_second_lookup` | `assert … is True`, one `apply` | the record's `selected_index`, and `querySelector` absent from BOTH scripts | a return-shape change plus a second script; the test's claim (the tool acts on the already-resolved element, never a second lookup) is untouched. Its hand-rolled `_Select` double is replaced by `fakes.FakeSelect` — modelling option semantics a second time is what that class exists to prevent |
+| `test_e2e_interaction_fidelity.py::test_rich_input_types` (2 asserts + the docstring's FINDING paragraph) | `assert await select(...)`, `… is True` | `["selected_index"] == 1` / `== 2` | the faithful translation of the old claim plus the one it could not make. The FINDING paragraph it carried (a `const select` re-declaration collision) was closed by F-831 and is now unrepresentable, so the paragraph says that rather than standing as an open defect |
+| `test_e2e_interaction.py::test_upload_screenshot_and_content`, `test_browser_integration.py::TestFileUpload` (4 asserts) | `res["count"]` | `res["attached"]` | same claim, but `count` was the request echoed and `attached` is read from `input.files`; the key names which question it answers |
+| `test_e2e_hard_dom.py::test_contenteditable_and_multiselect` (docstring) | `select_option sets select.value = <one value> (dom_handler.py:519)` | the same claim through `control_state` | the mechanism moved; the pinned behaviour (exactly one option ends up selected, even on a `<select multiple>`) did not, and its asserts are byte-unchanged |
+| `tests/fixture_app/interactions.html` + `app.js` | — | the F-877 block: a `disabled` select, an empty select, a `multiple` select, a select carrying a `disabled` option and a `label=`/text collision, and three file inputs (plain, `multiple`, `disabled`) | every one is a shape §2a/§2b/§2c measured. No existing test touches any of them. The selects log `input` AND `change` with `isTrusted`, so "fired the pair" is assertable from the action log alone |
+| `tests/fakes.py` | — | gains `FakeSelect` and `FakeFileInput` | both compute their answer from their own state, never from a test, and both model a MEASURED rule rather than the code: an option's `value`/`text`/`label` can all differ, assigning `selectedIndex` fires nothing by itself and Chrome fires nothing at all when the selection lands where it already was, and `DOM.setFileInputFiles` keeps only the first file on a non-`multiple` input |
 
 ### 5b. Numbers
 
-Recorded at the fix commit — see the PR body.
+* `tests/test_select_upload_verification.py` at the RED commit (`552b375`):
+  **31 failed, 4 passed** of 35 nodes. Every failure is the defect, not a harness
+  error — `DID NOT RAISE ToolError` for the eleven silent rows, `TypeError: 'bool'
+  object is not subscriptable` for the record rows, `assert ['Beta'] == []` for the
+  keystroke that must no longer be sent, and `assert [] == ['input', 'change']` for
+  the event pair. At the fix: **35 passed**.
+* `tests/test_e2e_select_upload_verification.py` at the fix: **20 passed in 52.8 s**
+  against a real Chrome 152.0.7977.83, first run, no flake. It was not run at the RED
+  commit: its `select_option` rows assert a record shape the shipped tool cannot
+  produce, so every one would have failed on the same `TypeError` the hermetic half
+  already records.
+* Narrow confirmation lane, `STEALTH_MCP_NO_ERROR_REPORTING=1 PYTHONUTF8=1`:
+  `test_select_upload_verification` + `test_dom_handler` + `test_tool_dispatch` +
+  `test_mcp_protocol_surface` + `test_error_typing` + `test_silent_excepts_log` +
+  `test_tool_sections_contract` + `test_doc_claims` + `test_release_contract` +
+  `test_xpath_dispatch` + `test_tool_errors` + `test_observability`:
+  **278 passed**.
+* The integration nodes whose asserts this PR flipped, run individually:
+  `test_e2e_interaction::test_interaction_controls_and_log`,
+  `::test_upload_screenshot_and_content` and `test_browser_integration::TestFileUpload`
+  — **6 passed**; `test_e2e_interaction_fidelity::test_rich_input_types` — **1
+  passed**; `test_e2e_hard_dom::test_contenteditable_and_multiselect` — **1 passed**.
+* LOC (`tools/check_file_budgets.py`'s own rule — every line, blanks and comments
+  included): `dom_handler.py` 940 → **967**, `control_state.py` **385**,
+  `tool_sections/element_interaction.py` 519 → **532**, `tests/fakes.py` 1097 →
+  **1307**. All under the 1000-LOC default; no `GRANDFATHER` row is involved and none
+  moved. `dom_handler.py` grows by 27 despite losing both bodies' logic, and the 27
+  are docstring: the two methods keep only the ORDER and say why the order is
+  load-bearing in each. Its headroom is now 33 lines, and the next change to it should
+  expect to pay for itself.
+* The full unit lane and the full integration lane are the coordinator's pre-push gate
+  and are deliberately **not** claimed here.
 
 ---
 

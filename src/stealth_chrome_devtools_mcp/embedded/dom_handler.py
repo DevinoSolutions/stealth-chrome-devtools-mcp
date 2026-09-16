@@ -8,7 +8,7 @@ from typing import Any
 
 from nodriver import Tab, cdp
 
-from stealth_chrome_devtools_mcp.embedded import click_target, text_entry
+from stealth_chrome_devtools_mcp.embedded import click_target, control_state, text_entry
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     resolve_by_text,
@@ -360,14 +360,24 @@ class DOMHandler:
         the renderer's main thread, so it never freezes the page (unlike
         fetch/base64/DataTransfer hacks run through execute_script).
 
+        What the input HOLDS afterwards belongs to ``control_state``; what lives
+        here is the ORDER (F-877) — the ``FileList`` is read once, AFTER
+        ``send_file``, the only moment at which it can answer.
+
         Args:
             tab (Tab): The browser tab object.
-            selector (str): CSS selector or XPath for the <input type="file"> element.
+            selector (str): CSS selector or XPath for the <input type="file">.
             file_paths (List[str]): Absolute paths of the file(s) to attach.
             timeout (int): Element lookup timeout in milliseconds.
 
         Returns:
-            Dict[str, Any]: {"uploaded": [...], "count": int}.
+            Dict[str, Any]: what the input holds — see
+                ``control_state.upload_record``.
+
+        Raises:
+            ToolError: a path does not exist, the selector resolved to something
+                that is not a file input, or the input holds a different number
+                of files than were sent.
         """
         try:
             if not file_paths:
@@ -402,7 +412,10 @@ class DOMHandler:
 
             await element.send_file(*resolved)
 
-            return {"uploaded": resolved, "count": len(resolved)}
+            facts = await control_state.read_files(element, selector)
+            control_state.verify_attached(selector, len(resolved), facts)
+
+            return control_state.upload_record(selector, len(resolved), facts)
 
         except Exception as e:
             raise ToolError(f"Failed to upload file: {e!s}")
@@ -548,19 +561,35 @@ class DOMHandler:
         value: str | None = None,
         text: str | None = None,
         index: int | None = None,
-    ) -> bool:
+    ) -> dict[str, Any]:
         """
-        Select option from dropdown using nodriver's native methods.
+        Select an option from a dropdown, and report what the control now holds.
+
+        Which option a criterion names, and whether the control took it, belong
+        to ``control_state``; what lives here is the ORDER (F-877), and the
+        order is load-bearing twice. The options are read BEFORE anything is
+        written, so a criterion that names no option raises having changed
+        nothing — the shipped ``value`` arm assigned ``select.value`` first and
+        so CLEARED the page's standing selection on its way to answering
+        ``True``. The control is read back AFTER the events, which are
+        synchronous, so a page that resets it in its own ``change`` handler has
+        already done so. Criterion precedence is unchanged: text, value, index.
 
         Args:
             tab (Tab): The browser tab object.
             selector (str): CSS selector for the select element.
             value (Optional[str]): Option value to select.
-            text (Optional[str]): Option text to select.
+            text (Optional[str]): Option text (or label) to select.
             index (Optional[int]): Option index to select.
 
         Returns:
-            bool: True if option selected, False otherwise.
+            Dict[str, Any]: what the control holds — see
+                ``control_state.select_record``.
+
+        Raises:
+            ToolError: the selector resolved to nothing or to a non-``<select>``,
+                no option matches the criterion, the options changed underneath,
+                or the control did not keep the selection.
         """
         try:
             select_element = await resolve_element(tab, selector)
@@ -568,34 +597,32 @@ class DOMHandler:
                 raise ToolError(f"Select element not found: {selector}")
 
             if text is not None:
-                await select_element.send_keys(text)
-                return True
+                by = control_state.BY_TEXT
+            elif value is not None:
+                by = control_state.BY_VALUE
+            elif index is not None:
+                by = control_state.BY_INDEX
+            else:
+                raise ToolError(
+                    "No selection criteria provided (value, text, or index)"
+                )
 
-            # The value/index arms act on the element already resolved above,
-            # never on a second `document.querySelector(selector)` lookup: that
-            # was a second resolution of the same selector, in a language that
-            # cannot express the XPath element_resolution now accepts (F-831) —
-            # it would have silently matched nothing and still returned True.
-            if value is not None:
-                safe_value = json.dumps(value)
-                await select_element.apply(f"""(select) => {{
-                    select.value = {safe_value};
-                    select.dispatchEvent(new Event('change', {{bubbles: true}}));
-                }}""")
-                return True
+            before = await control_state.read_select(select_element, selector)
+            options = control_state.options_of(before)
+            target = control_state.resolve_option(
+                options, by=by, value=value, text=text, index=index
+            )
+            control_state.verify_matched(selector, by, before, target)
 
-            if index is not None:
-                safe_index = int(index)
-                await select_element.apply(f"""(select) => {{
-                    if ({safe_index} >= 0
-                        && {safe_index} < select.options.length) {{
-                        select.selectedIndex = {safe_index};
-                        select.dispatchEvent(new Event('change', {{bubbles: true}}));
-                    }}
-                }}""")
-                return True
+            after = await control_state.apply_selection(
+                select_element,
+                selector,
+                target,
+                control_state.value_at(options, target),
+            )
+            control_state.verify_selected(selector, target, after)
 
-            raise ToolError("No selection criteria provided (value, text, or index)")
+            return control_state.select_record(selector, by, before, after)
 
         except Exception as e:
             raise ToolError(f"Failed to select option: {e!s}")

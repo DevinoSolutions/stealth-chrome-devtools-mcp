@@ -19,6 +19,7 @@ import json
 import pytest
 from nodriver.core.connection import ProtocolException
 
+from fakes import FakeSelect
 from stealth_chrome_devtools_mcp.embedded import element_resolution
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
@@ -403,13 +404,16 @@ async def test_select_option_acts_on_the_resolved_element_not_a_second_lookup(kw
     # shared path -- so its value/index arms must act on the element already
     # resolved, not re-run `document.querySelector(selector)`, which cannot
     # express an XPath and would silently no-op while still returning True.
-    applied = []
+    # F-877: the tool now reads the options and then writes the selection, so it
+    # sends TWO scripts rather than one, and answers a record rather than a bare
+    # bool. The claim here is unchanged — neither script may re-look-up the
+    # selector — so the asserts move to the record and to both scripts. The
+    # element is ``FakeSelect``, the one home for a <select> double: modelling
+    # option semantics a second time here is what that class exists to prevent.
+    element = FakeSelect(options=(("a", "A"), ("b", "B")))
 
-    class _Select(_FakeElement):
-        async def apply(self, js):
-            applied.append(js)
-
-    tab = _FakeTab(xpath=[[_Select(tag="select")]])
-    assert await DOMHandler.select_option(tab, "//select", **kwargs) is True
-    assert len(applied) == 1
-    assert "querySelector" not in applied[0]
+    tab = _FakeTab(xpath=[[element]])
+    record = await DOMHandler.select_option(tab, "//select", **kwargs)
+    assert record["selected_index"] == 1
+    assert len(element.apply_calls) == 2
+    assert all("querySelector" not in js for js in element.apply_calls)

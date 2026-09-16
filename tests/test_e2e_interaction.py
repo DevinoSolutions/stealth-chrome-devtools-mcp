@@ -250,7 +250,9 @@ async def test_upload_screenshot_and_content(fixture_app_server, tmp_path):
         single = await upload(
             instance_id=iid, selector="#single-file", file_paths=str(f1)
         )
-        assert single["count"] == 1
+        # F-877: the count is read from the input's own FileList now, and the
+        # key says which question it answers. The claim is unchanged.
+        assert single["attached"] == 1
         assert (
             await eval_js(iid, "document.getElementById('single-file').files[0].name")
             == "alpha.txt"
@@ -259,7 +261,7 @@ async def test_upload_screenshot_and_content(fixture_app_server, tmp_path):
         multi = await upload(
             instance_id=iid, selector="#multi-file", file_paths=[str(f1), str(f2)]
         )
-        assert multi["count"] == 2
+        assert multi["attached"] == 2
         assert (
             await eval_js(iid, "document.getElementById('multi-file').files.length")
             == 2
