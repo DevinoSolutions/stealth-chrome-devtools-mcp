@@ -445,7 +445,9 @@ class TestFileUpload:
             res = await upload(instance_id=iid, selector="#single", file_paths=str(f))
             elapsed = time.monotonic() - t0
 
-            assert res["count"] == 1
+            # F-877: "attached" is read back from input.files; "count" was the
+            # request echoed. Same claim, now measured.
+            assert res["attached"] == 1
             # Proves it does not block the renderer (the sync-XHR bug froze ~30s).
             assert elapsed < 5.0, f"upload should be near-instant, took {elapsed:.1f}s"
 
@@ -477,7 +479,7 @@ class TestFileUpload:
             res = await upload(
                 instance_id=iid, selector="#multi", file_paths=[str(a), str(b)]
             )
-            assert res["count"] == 2
+            assert res["attached"] == 2
             count = await execute(
                 instance_id=iid,
                 script="document.getElementById('multi').files.length",

@@ -266,6 +266,31 @@
         window.logAction("click", "offscreen-btn");
       });
 
+      // F-876: each of these logs its own click with isTrusted, so "the target
+      // never received it" and "it received a SYNTHETIC one" are distinguishable
+      // from the action log alone.
+      [
+        "pe-none-btn",
+        "zero-size-btn",
+        "display-none-btn",
+        "vis-hidden-btn",
+        "offviewport-btn",
+        "fieldset-disabled-btn",
+      ].forEach(
+        function (id) {
+          on(id, "click", function (e) {
+            window.logAction(
+              "click",
+              id,
+              e.isTrusted ? "trusted" : "untrusted"
+            );
+          });
+        }
+      );
+      on("editable-div", "input", function () {
+        window.logAction("input", "editable-div");
+      });
+
       // Disabled button must never log a click; the label toggles its checkbox.
       on("disabled-btn", "click", function () {
         window.logAction("click", "disabled-btn");
@@ -333,6 +358,29 @@
       // Select exercising select_option's value / index / text paths.
       on("select-fidelity", "change", function (e) {
         window.logAction("change", "select-fidelity", e.target.value);
+      });
+
+      // F-877: the selects and file inputs whose state the tool never read.
+      // input AND change are both logged, with isTrusted: a real selection
+      // fires input then change (measured, Chrome 152 typeahead), while the
+      // shipped value/index arms fired change alone.
+      ["sel-disabled", "sel-empty", "sel-multi", "sel-labels"].forEach(
+        function (id) {
+          ["input", "change"].forEach(function (type) {
+            on(id, type, function (e) {
+              window.logAction(
+                type,
+                id,
+                e.target.value + ":" + (e.isTrusted ? "trusted" : "untrusted")
+              );
+            });
+          });
+        }
+      );
+      ["file-single", "file-multi", "file-disabled"].forEach(function (id) {
+        on(id, "change", function (e) {
+          window.logAction("change", id, String(e.target.files.length));
+        });
       });
 
       // Value-typed inputs: each logs its live value on input.

@@ -409,6 +409,51 @@ def forget_backend(path: Path, display_context: str) -> None:
     _write(path, entries)
 
 
+def forget_entries(path: Path, entries: list[BackendEntry]) -> list[str]:
+    """Drop the NAMED entries, keeping every other; return the display contexts
+    actually forgotten, in recorded order (F-880).
+
+    :func:`forget_backend`'s sibling — "drop these entries" beside "drop this
+    context" — and the one write behind
+    ``backend_liveness.forget_dead``. Whether an entry deserves forgetting is
+    NOT decided here: this module owns the file, never liveness, and a probe
+    passed in through this door would make it the second place in the tree that
+    knows what ``down`` means.
+
+    **Re-reads before writing, and matches on all three of display context,
+    port and pid.** The caller's list came from PROBING, which takes time (a
+    wedged sibling costs a whole liveness timeout), and another process may have
+    recorded a backend in that window. Writing back the survivors the caller
+    saw would drop it — the classic lost update. Re-reading and removing only
+    entries that still match exactly means a context RE-RECORDED since the
+    probe (new port, new pid) is kept: it is not the entry that was condemned.
+    Every production writer of this record runs under singleton's cold-start
+    lock, so this is belt-and-braces rather than the only defence, and it is
+    cheap enough to keep either way.
+
+    Nothing matched is nothing written, so the common case costs zero writes and
+    cannot bump the file's mtime. Forgetting the LAST entry leaves a readable
+    empty record exactly as :func:`forget_backend` does; unlinking the file
+    stays :func:`clear_record`'s job, and ``PORT_FILE`` is never touched here.
+    """
+    condemned = {
+        (str(e["display_context"]), e.get("port"), e.get("pid")) for e in entries
+    }
+    if not condemned:
+        return []
+    survivors: dict[str, BackendEntry] = {}
+    forgotten: list[str] = []
+    for recorded in read_backends(path):
+        context = str(recorded["display_context"])
+        if (context, recorded.get("port"), recorded.get("pid")) in condemned:
+            forgotten.append(context)
+            continue
+        survivors[context] = recorded
+    if forgotten:
+        _write(path, survivors)
+    return forgotten
+
+
 def _commit(tmp: Path, path: Path) -> None:
     """Move ``tmp`` onto ``path``, retrying briefly on a Windows sharing refusal.
 

@@ -194,12 +194,18 @@ async def test_spa_history_route_swap_and_requery(instance, fixture_origin_pair)
         assert await eval_js(
             instance, "document.getElementById('route-root').dataset.gen"
         ) == str(generation)
-        assert await click(instance_id=instance, selector="#route-action") is True
+        assert (await click(instance_id=instance, selector="#route-action"))[
+            "dispatch"
+        ] == "coordinate"
 
     await requery_and_act("home", 1)
-    assert await click(instance_id=instance, selector="#nav-push") is True
+    assert (await click(instance_id=instance, selector="#nav-push"))[
+        "dispatch"
+    ] == "coordinate"
     await requery_and_act("alpha", 2)
-    assert await click(instance_id=instance, selector="#nav-replace") is True
+    assert (await click(instance_id=instance, selector="#nav-replace"))[
+        "dispatch"
+    ] == "coordinate"
     await requery_and_act("beta", 3)
 
     assert await back(instance_id=instance) is True
@@ -341,7 +347,9 @@ async def test_virtualized_and_finite_infinite_lists(instance, fixture_origin_pa
     assert await row_texts() == [f"virtual-row-{i}" for i in range(20)]
     assert await _json_state(instance, "window.__virtual.stamps()") == expected_stamps
 
-    assert await click(instance_id=instance, selector="#virtual-advance") is True
+    assert (await click(instance_id=instance, selector="#virtual-advance"))[
+        "dispatch"
+    ] == "coordinate"
     assert await wait_for_js(instance, "window.__virtual.start", 20) == 20
 
     assert await row_texts() == [f"virtual-row-{i}" for i in range(20, 40)]
@@ -350,7 +358,9 @@ async def test_virtualized_and_finite_infinite_lists(instance, fixture_origin_pa
     assert await eval_js(instance, "window.__virtual.total") == fr.VIRTUAL_TOTAL_ROWS
 
     # Finite "infinite" list.
-    assert await click(instance_id=instance, selector="#feed-load") is True
+    assert (await click(instance_id=instance, selector="#feed-load"))[
+        "dispatch"
+    ] == "coordinate"
     assert await wait_for_js(instance, "window.__feed.done", True, timeout=20.0) is True
 
     feed = await _json_state(instance, "window.__feed")
@@ -681,7 +691,9 @@ async def test_custom_elements_slots_and_popup_lifecycle(instance, fixture_origi
     assert isinstance(before, list) and before, before
     origin_tab = (await get_active_tab(instance_id=instance))["tab_id"]
 
-    assert await click(instance_id=instance, selector="#popup-link") is True
+    assert (await click(instance_id=instance, selector="#popup-link"))[
+        "dispatch"
+    ] == "coordinate"
 
     deadline = time.monotonic() + 15.0
     popup = None
