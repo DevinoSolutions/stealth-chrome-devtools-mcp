@@ -217,10 +217,6 @@ class FakeTab:
         self._evaluate_map = evaluate_map or {}
         self._cdp_responses = cdp_responses or {}
         self._select_result = select_result
-        if isinstance(select_result, FakeTextField):
-            # A real ``Element`` carries the tab it was resolved on; the F-873
-            # typing path sends key events through it.
-            select_result.bind(self)
         self.closed = False
         # Set by :meth:`FakeBrowser.get` for a tab it opened, so ``close()`` can
         # drop it from that browser's listing the way a real close does.
@@ -532,6 +528,15 @@ class FakeTextField:
     the ONLY thing that can produce a newline or a submit is a real Enter key
     press, which is what the Enter pins assert against ``FakeTab.cdp_frames``.
 
+    ``content_editable=True`` is the OTHER control shape the typing path has to
+    hold: such an element has no ``.value`` at all (measured — it is
+    ``undefined``), it carries its text in ``textContent``, and it takes an
+    Enter as a newline where a single-line ``<input>`` drops it. The double
+    reports itself as ``editable`` in the read-back so the surrounding contract
+    is pinnable here; whether the JS picks the right property is the page's to
+    evaluate and its witness is a real Chrome
+    (``tests/test_e2e_hard_dom.py::test_contenteditable_and_multiselect``).
+
     The read-back answer is COMPUTED from this object's own state, never
     supplied by the test, so no fixture here can quietly encode the bug.
     """
@@ -549,29 +554,9 @@ class FakeTextField:
         self.multiline = multiline
         self.focused = False
         self.apply_calls: list[str] = []
-        self._tab: Any = None
-
-    def bind(self, tab: Any) -> None:
-        """The tab this element belongs to — ``Element._tab`` in nodriver."""
-        self._tab = tab
 
     async def focus(self) -> None:
         self.focused = True
-
-    async def send_keys(self, text: str) -> None:
-        """``Element.send_keys``, verbatim from nodriver 0.47 (element.py:708).
-
-        It is reproduced here rather than stubbed because it is the thing under
-        test: a focus call, then ONE ``Input.dispatchKeyEvent`` of type
-        ``"char"`` per character — no ``keyDown``, no ``keyUp``. A stub that
-        merely appended the text would have made the F-873 pins pass against
-        the very dispatch they exist to reject.
-        """
-        from nodriver import cdp as _cdp
-
-        await self.apply("(elem) => elem.focus()")
-        for char in list(text):
-            await self._tab.send(_cdp.input_.dispatch_key_event("char", text=char))
 
     async def apply(self, js_function: str, *args: Any, **kwargs: Any) -> Any:
         """``Element.apply`` — ``Runtime.callFunctionOn(returnByValue=True)``.

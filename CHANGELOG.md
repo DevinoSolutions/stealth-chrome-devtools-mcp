@@ -27,16 +27,18 @@ event per character, so a page whose autocomplete or shortcuts are bound to `key
 saw a value appear with no key pressed), and after each line's characters the
 element's own text is read back and compared against the baseline taken just before
 them. A control that took every event and moved nothing now raises `ToolError` naming
-the selector and the counts — never the typed text, since a failed call reaches the
-log, the debug ring and Sentry at once and the field may be a password box. The
-verification asks "did anything change" rather than "does it contain exactly what I
-typed", deliberately: an input mask, an autocomplete that rewrites and a `number`
-field that normalises all DID receive the input, and a stricter test would have
-turned each into a new false alarm. `type_text`'s clear fallback also stopped being a
-no-op — it sent WebDriver's private-use codepoints (U+E009 for Ctrl, U+E017 for
-Delete) through `send_keys`, which CDP has never understood, so it inserted two junk
-characters and cleared nothing; it and `paste_text` now share the one CDP select-all
-+ Delete.
+the selector and the counts — never the typed text, since the raised error reaches the
+debug ring and, as the exception itself, the caller and Sentry, and the field may be a
+password box. The verification asks "did anything change" rather than "does it contain
+exactly what I typed", deliberately: an input mask, an autocomplete that rewrites and a
+`number` field that normalises all DID receive the input, and a stricter test would have
+turned each into a new false alarm; the cost of the looser rule, named in the finding,
+is that a control whose value is legitimately identical afterwards now raises.
+`type_text`'s clear fallback also stopped being a no-op — it sent WebDriver's
+private-use codepoints (U+E009 for Ctrl, U+E017 for Delete) through `send_keys`, which
+CDP has never understood, so all three characters landed verbatim and nothing was
+cleared, corrupting the field it was asked to empty; it and `paste_text` now share the
+one CDP select-all + Delete.
 
 ## 2.1.6
 

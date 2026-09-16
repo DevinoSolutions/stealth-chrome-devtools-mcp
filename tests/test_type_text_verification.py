@@ -26,6 +26,8 @@ The pins here are hermetic (``FakeTab`` + ``FakeTextField`` from
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from fakes import FakeTab, FakeTextField
@@ -232,6 +234,42 @@ async def test_clear_first_then_typing_is_verified_against_the_cleared_state():
         await DOMHandler.type_text(tab, SELECTOR, "new", delay_ms=0)
 
     assert field.value == ""
+
+
+async def test_a_contenteditable_is_verified_from_its_text_content():
+    """A ``contentEditable`` element carries its text in ``textContent``.
+
+    Measured: both dispatches insert into such a div and its ``.value`` is
+    ``undefined``, which is why ``READ_JS`` branches on ``isContentEditable``.
+    What THIS pin holds is the surrounding contract — an editable answers the
+    read-back as ``editable``, takes the Enter as a newline rather than dropping
+    it the way a single-line ``<input>`` does, and is verified line by line to a
+    ``True``. The branch inside the JS is the page's to evaluate, so the witness
+    for it is a real Chrome:
+    ``tests/test_e2e_hard_dom.py::test_contenteditable_and_multiselect``.
+    """
+    tab, field = _field_tab(content_editable=True)
+
+    assert await DOMHandler.type_text(
+        tab, SELECTOR, "one\ntwo", delay_ms=0, parse_newlines=True
+    )
+
+    # An editable takes the Enter as a newline rather than dropping it the way
+    # a single-line <input> does, so both lines are verified and both land.
+    assert field.value == "one\ntwo"
+    answer = json.loads(await field.apply(text_entry.READ_JS))
+    assert answer == {"editable": True, "text": "one\ntwo"}
+
+
+async def test_a_contenteditable_that_refuses_still_raises():
+    """The guard on the branch above: reading ``textContent`` must not become a
+    way for a refusing editable to pass."""
+    tab, _ = _field_tab(content_editable=True, accepts=False)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.type_text(tab, SELECTOR, "hello", delay_ms=0)
+
+    assert SELECTOR in str(caught.value)
 
 
 async def test_the_clear_fallback_is_a_real_keyboard_clear():

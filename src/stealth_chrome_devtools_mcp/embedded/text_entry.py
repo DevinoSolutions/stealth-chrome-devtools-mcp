@@ -36,11 +36,15 @@ exactly what I typed": an input mask, an autocomplete that rewrites, a
 receive the input, and a stricter test would have turned each of them into a
 new false alarm, which is the same defect wearing the opposite sign.
 
-**No message here ever carries the text.** A failed tool call reaches the
-durable log, the debug ring and Sentry at once, and the field that refused may
-be a password box — so every message reports shape and count only (the
-selector, how many characters were typed, how many the element holds). Same
-discipline as F-869's storage reader, for the same reason.
+**No message here ever carries the text.** The field that refused may be a
+password box, and a raised ``ToolError`` travels further than the caller: the
+``section_tool`` wrapper hands every escaping exception to
+``debug_logger.log_tool_failure`` (the in-memory ring — that entry point
+deliberately withholds the durable line, F-782/F-835, precisely because a
+failure message echoes the caller's own arguments), and the exception itself
+goes on to the client and to Sentry. So every message here reports shape and
+count only (the selector, how many characters were typed, how many the element
+holds). Same discipline as F-869's storage reader, for the same reason.
 
 A leaf: ``nodriver`` and ``tool_errors`` only. The tab and the element both
 arrive as arguments.
@@ -50,10 +54,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import TYPE_CHECKING
 
-from nodriver import Tab, cdp
+from nodriver import cdp
 
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
+if TYPE_CHECKING:
+    from nodriver import Element, Tab
 
 #: The Enter key, as Chrome's own keyboard produces it. ``text="\r"`` is what
 #: makes Blink synthesise the keypress that performs implicit submission.
@@ -98,7 +106,7 @@ def _virtual_key_code(char: str) -> int:
     return 0
 
 
-async def press_key(  # noqa: PLR0913  PERMANENT(a key event's own shape)
+async def press_key(  # noqa: PLR0913  PERMANENT(function interface)
     tab: Tab,
     *,
     key: str,
@@ -156,7 +164,7 @@ async def press_enter(tab: Tab, *, shift: bool = False) -> None:
     )
 
 
-async def type_characters(tab: Tab, element: object, text: str, delay: float) -> None:
+async def type_characters(tab: Tab, element: Element, text: str, delay: float) -> None:
     """Type *text* one character at a time, full key lifecycle per character.
 
     The element is re-focused before each character, as the shipped path was:
@@ -176,10 +184,12 @@ async def clear_via_keyboard(tab: Tab) -> None:
     """Select-all + Delete, for when a programmatic ``elem.value = ''`` fails.
 
     The ONE keyboard clear. ``type_text`` used to send WebDriver's private-use
-    codepoints here (``"\\ue009"`` for Ctrl, ``"\\ue017"`` for Delete) through
-    ``send_keys``, which dispatches them as literal ``char`` text — CDP has
-    never spoken that protocol, so the fallback inserted two junk characters
-    and cleared nothing.
+    codepoints here — ``send_keys("\\ue009" + "a")`` then ``send_keys("\\ue017")``
+    (U+E009 for Ctrl, U+E017 for Delete) — which dispatches each codepoint as
+    literal ``char`` text, and CDP has never spoken that protocol. Measured
+    against an ``<input value="preset-value">``: all THREE characters landed
+    verbatim (``"\\ue009a\\ue017preset-value"``) and nothing was cleared, so the
+    fallback did not merely fail, it corrupted the field it was asked to empty.
     """
     await press_key(
         tab,
@@ -194,7 +204,7 @@ async def clear_via_keyboard(tab: Tab) -> None:
     )
 
 
-async def entered_text(element: object, selector: str) -> str:
+async def entered_text(element: Element, selector: str) -> str:
     """What *element* currently holds, read through the one :data:`READ_JS`.
 
     Raises ``ToolError`` when the answer is not the promised JSON string:
