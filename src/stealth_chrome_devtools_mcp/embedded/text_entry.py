@@ -244,10 +244,13 @@ def verify_received(selector: str, entered: str, before: str, after: str) -> Non
     event delivered, the element's text exactly as it was.
 
     Both text tools ask this one question (F-876). The wording says "entered"
-    rather than "typed" because ``paste_text`` reaches the same five refusing
+    rather than "typed" because ``paste_text`` reaches the same refusing
     controls through a single ``Input.insertText`` rather than a key event per
     character, and a message naming keys would be a message about the wrong
-    mechanism half the time.
+    mechanism half the time. The hint stays HEDGED ("may be") and names only
+    ``readonly``, ``range`` and ``color``: they are the shapes measured to refuse
+    on every build, while ``date`` refused on the local Chrome 152 and was
+    measured ACCEPTING digits on all three of PR #110's CI cells.
     """
     if after != before:
         return
