@@ -14,6 +14,8 @@ that CSS is untouched, and that ``query_elements``' returned shape is unchanged.
 Hermetic (fake Tab/Element), so the fast unit lane -- no real Chrome.
 """
 
+import json
+
 import pytest
 from nodriver.core.connection import ProtocolException
 
@@ -74,6 +76,25 @@ class _FakeElement:
 
     async def click(self):
         return None
+
+    async def apply(self, js_function, *args, **kwargs):
+        """F-876's aim read. This double exists to pin WHICH resolution surface
+        a selector reaches, so the aim answers the minimum well-formed record
+        rather than modelling geometry — ``tests/fakes.py``'s
+        ``FakeClickTarget`` is the double that does that."""
+        return json.dumps(
+            {
+                "rendered": True,
+                "rect": {"left": 0, "top": 0, "width": 10, "height": 10},
+                "point": {"x": 5, "y": 5},
+                "target": {"tag": self.tag_name, "id": "", "classes": []},
+                "hit": {"tag": self.tag_name, "id": "", "classes": []},
+                "hit_is_target": True,
+                "disabled": False,
+                "pointer_events": "auto",
+                "visibility": "visible",
+            }
+        )
 
 
 class _FakeTab:
@@ -368,7 +389,10 @@ async def test_the_issue_15_repro_selector_clicks():
     click_tab = _FakeTab(xpath=[[_FakeElement()]])
 
     assert len(await DOMHandler.query_elements(query_tab, selector, visible_only=False))
-    assert await DOMHandler.click_element(click_tab, selector) is True
+    # F-876: click_element answers a record instead of a bare bool. The claim
+    # here is unchanged — one grammar, both tools — so the assert moves to the
+    # record's own selector rather than to a truthiness the shape change retired.
+    assert (await DOMHandler.click_element(click_tab, selector))["selector"] == selector
     assert query_tab.xpath_calls == click_tab.xpath_calls == [selector]
 
 
