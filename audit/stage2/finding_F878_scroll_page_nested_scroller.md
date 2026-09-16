@@ -179,9 +179,14 @@ page: that is what the window scrolls, what the user's wheel scrolls at rest,
 and what `document.scrollingElement` is defined to name. Fixture d is the proof:
 a 400 px scrollable box sits inside a 6023 px scrolling document, and any
 "largest scrollable" rule without rule 1 in front of it would have to be talked
-out of choosing the box. Rule 1 also means **the control path is byte-identical
-to F-875's** — `window.scrollTo` on the document, the same script, the same
-reads — so the fix cannot regress the four fixtures that already worked.
+out of choosing the box. Rule 1 also means **the SCROLL SCRIPT for a document
+scroller is byte-identical to F-875's** — `window.scrollTo` / `window.scrollBy`,
+the same six templates, for all twelve direction/`smooth` combinations — so the
+fix cannot regress the four fixtures that already worked. The claim is scoped to
+the scroll scripts on purpose: `READ_JS` **did** change, from
+`window.scrollX`/`scrollY` to the chosen element's `scrollLeft`/`scrollTop`
+(equal by definition for the document scroller, and measured equal in both
+compatibility modes), plus the resolver and the identity fields.
 
 **Rule 2 beats B (the centre walk) on three measured grounds:** B looks
 *inward* (g), B is blind to what is painted over the centre (h), and B's answer
@@ -308,12 +313,30 @@ k  stray overflow scroller div#shell is_document=false   y 7023/7023  scrolled s
   `overflow: hidden`; `div#shell` `max_y 7023`) and whose pick is answered by
   Chrome's own rule, not by the product's. The RED pin fails on the DEFECT:
   before the fix it reports `scrolled: false, max_scroll_y: 0` on a page whose
-  shell can move 7023 px.
+  shell can move 7023 px. The double models **two independent scroll
+  containers**, so it can express fixture d (a page where the document AND a
+  nested div can both move) and a **stale path** (`stale_path=True`: the
+  resolver falls back to the document however the script is spelled).
+* **What a hermetic pin here cannot hold.** `ScrollingTab` is not a JS engine:
+  it applies Chrome's rule to its own geometry rather than executing
+  `SCROLLER_JS`. So the hermetic fixture-d pin holds the tool's **wiring** —
+  when the page answers "the document", the tool drives the document, reports
+  the document's offsets and leaves the nested container alone — and the RULE
+  itself is held only by real Chrome. Swapping rules 1 and 2 in the product
+  leaves every hermetic pin green and fails
+  `test_e2e…::test_a_scrolling_document_is_the_page_even_with_a_nested_scroller`.
+  That is stated in both files' docstrings so nobody reads the hermetic pin as
+  more than it is.
 * `tests/test_e2e_scroll_page_verification.py` — the F-875 pins stay, plus real
-  Chrome on the app shell (b), the outer-vs-inner shell (g) and the horizontal
-  strip (j), each cross-checked against the page's own `scrollTop` / `scrollLeft`
-  and against `document.scrollingElement` still reading zero. `tmp_empty_root`,
-  `data:` URLs, browsers closed in `finally`.
+  Chrome on fixture d (the `scrollingElement` precedence, the load-bearing pin
+  for rule 1), the app shell (b), the outer-vs-inner shell (g) and the
+  horizontal strip (j), each cross-checked against the page's own `scrollTop` /
+  `scrollLeft` and against what the *other* container did. **All twelve matrix
+  fixtures are declared there as `data:` constants** (`F878_MATRIX`), in the
+  finding's own lettering, so §3 is reproducible from the repo and not only
+  from this prose — the four that carry assertions are the four a candidate
+  heuristic gets wrong. `tmp_empty_root`, `data:` URLs, browsers closed in
+  `finally`.
 * `tests/goldens/tool_surface.json` (HARD) — **one tool, deliberate**:
   `scroll_page`'s description gains the two record fields. The input schema and
   the output schema are untouched (`{type: object, additionalProperties: true}`
@@ -332,16 +355,29 @@ k  stray overflow scroller div#shell is_document=false   y 7023/7023  scrolled s
   the record. There is no measurement that settles it, and inventing a
   `STEALTH_MCP_*` knob for it would be a second way to do what naming the chosen
   element already does.
-* **A page with `body{overflow:hidden}` and only a tiny scroller wins by
-  default.** With no coverage floor, if the document cannot move and the page's
-  only `overflow:auto` element is a 100 × 100 legend on a fullscreen canvas, the
-  rule picks the legend. Measured? No — reasoned from the rule, and left in
+* **With no coverage floor, a tiny scroller wins by default whenever the
+  document cannot move on the asked-for axis.** If the page's only
+  `overflow:auto` element is a 100 × 100 legend on a fullscreen canvas, the rule
+  picks the legend. Measured? No — reasoned from the rule, and left in
   deliberately: "there is exactly one scroller on this page" is a better guess
   than "nothing scrolls", and the record names it either way.
+* **Because the rule is per-axis, this reaches ORDINARY pages too.** A normal
+  article scrolls vertically, so `direction="bottom"` takes rule 1 and nothing
+  changes — but its document almost never scrolls HORIZONTALLY, so
+  `direction="right"` now falls to rule 2 and drives whatever horizontal
+  scroller the page has: a wide `<pre>`, a code block, a carousel, a table
+  wrapper. Before F-878 that call did nothing at all. This is a deliberate
+  behaviour change and the better answer of the two, but it IS a change, and it
+  is the one place the fix alters a page the finding never called broken. The
+  record names the element, which is the whole mitigation. Not measured on a
+  real article — reasoned from the rule and from fixture j.
 * **A path that goes stale mid-scroll falls back to the document**, and the
-  record then reports the document (§5.1). Not measured against a real SPA
-  re-render: the fallback is reasoned, and the two shapes it can produce are
-  pinned hermetically only.
+  record then reports the document (§5.1). The fallback is reasoned rather than
+  measured against a real SPA re-render; what IS pinned (hermetically, through
+  `ScrollingTab(stale_path=True)`) is the record's two shapes — the identity is
+  the document's, and `scroller_is_document` agrees with it. `scrolled` is also
+  `False` across such a fallback by construction: `Position.moved_from` refuses
+  to call the difference between two DIFFERENT elements' offsets a scroll.
 * **Not measured: `iframe` content.** The pick walks `document.querySelectorAll`
   in the top document only. A page whose content is inside a same-origin iframe
   will report the top document's scroller. `scroll_page` has never crossed a
