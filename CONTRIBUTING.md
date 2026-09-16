@@ -224,8 +224,18 @@ run for that port and answered `was busy, not dead`** — never silence, never
 `confirmed unusable`. That is exactly as strong as `watch_liveness`'s own branch,
 which logs precisely one of those two at `consecutive == failures_before_teardown`,
 so it is vacuous on a run where the load did not bite and a real end-to-end F-820
-oracle on one where it did, with no flake either way. The longest consecutive run is
-printed so which case a run hit is readable from the output. Below the limit the CPU
+oracle on one where it did. Two details are what keep it from flaking, and each
+without the other is wrong in a different direction: the key is **(log file, port)**,
+never the port — every proxy here shares one backend, so a port-only key lets a
+sibling's verdict close another proxy's open run — and a full run that is the **last
+watchdog line its proxy wrote is PENDING**, because `watch_liveness` then awaits a
+confirmation that may legitimately take `REUSE_PATIENCE_SECONDS` (60 s, 10 s per
+attempt) while logging nothing, and demanding its verdict would fail a correct
+product. The longest consecutive run is printed so which case a run hit is readable
+from the output. **The oracle has not yet fired on any real run** — seven runs, the
+limit never reached — so its pass and fail paths are exercised hermetically instead,
+on synthetic log lines, by
+`test_the_strike_implication_is_per_proxy_and_waits_for_a_pending_verdict`. Below the limit the CPU
 node is deliberately silent about the confirmation phase, because the product never
 entered it — `test_watchdog_busy_vs_dead` and `test_singleton_starvation_patience`
 remain the nodes that enter it deliberately rather than when the box happens to be

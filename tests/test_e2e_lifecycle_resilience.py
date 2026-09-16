@@ -463,13 +463,30 @@ def _port_in(line: str) -> int | None:
     return int(m[1]) if m else None
 
 
+def _watchdog_event(name: str, line: str) -> tuple[str, int, tuple[int, int]] | None:
+    """``(file, port, (consecutive, limit))`` for a strike line, ``(file, port,
+    ())`` for a busy verdict, ``None`` for anything else.
+
+    The FILE is part of the identity and not decoration: every proxy in this
+    module talks to the one backend on ``space["port"]``, so the port alone
+    cannot tell two proxies apart, and ``proxy-<pid>.log`` is the only thing
+    that can.
+    """
+    port = _port_in(line)
+    if port is None:
+        return None
+    if all(part in line for part in CONFIRMED_BUSY_PARTS):
+        return (name, port, ())
+    run = _strike_run(line)
+    return (name, port, (run[0], run[1])) if run is not None else None
+
+
 def assert_strikes_concluded_correctly(
     lines: list[tuple[str, str]], what: str
 ) -> tuple[int, int]:
-    """The F-820 IMPLICATION, and the honest shape of this oracle: **whenever a
-    FULL strike run is reached on a port, the confirmation phase must have run
-    and must have answered "busy, not dead" for that port** — never nothing, and
-    never ``confirmed unusable``.
+    """The F-820 IMPLICATION: **whenever one proxy reaches a FULL strike run,
+    that proxy's confirmation phase must have answered "busy, not dead"** — once
+    the run is DECIDED, and never by a sibling's verdict.
 
     Returns ``(strike lines, longest run reached)``.
 
@@ -478,39 +495,72 @@ def assert_strikes_concluded_correctly(
     threshold or floor over it would be a coin flip. The implication is exactly
     as strong as the product's own branch — ``watch_liveness`` reaches
     ``consecutive == failures_before_teardown`` and then logs precisely one of
-    the two verdicts — so it is VACUOUS on a run where the load did not bite and
-    a real F-820 oracle on one where it did, with no flake either way.
+    two verdicts — so it is VACUOUS on a run where the load did not bite and a
+    real F-820 oracle on one where it did.
 
-    The verdict is matched on the SAME port: two proxies share a backend here,
-    and a confirmation for one port is not evidence about the other's.
+    TWO things make it an assertion about the right thing, and without each the
+    oracle is wrong in a DIFFERENT direction:
+
+    1. The key is ``(log file, port)``, never the port alone. The port is shared
+       by construction here, so a port-keyed check lets proxy B's verdict close
+       proxy A's open run — a real silence, passed. The file name is what
+       identifies the proxy.
+    2. A full run that is the LAST watchdog line its proxy wrote is PENDING, not
+       silent. ``watch_liveness`` reaches the limit and then *awaits*
+       ``confirm_probe`` — ``_same_identity_backend_ready`` with
+       ``REUSE_PATIENCE_SECONDS`` (60 s) of patience and a 10 s per-attempt
+       probe — logging nothing until it decides. A proxy that struck out in the
+       last seconds of a window is still inside that when the logs are read, and
+       demanding its verdict would fail a product doing exactly what F-820 asks.
+       Any LATER watchdog line from the same proxy proves its loop moved on, so
+       the verdict was due and its absence is the real defect.
+
+    The other half of the implication — never ``confirmed unusable`` — is not
+    checked here at all: it is one of :data:`LIFECYCLE_INCIDENTS`, so
+    :func:`assert_no_lifecycle_incident` has already failed on it, with a better
+    message, before this function runs. That is also why a condemnation cannot
+    reach this scan as a "later watchdog line".
     """
     longest = 0
-    full_runs: set[int] = set()
-    for _, line in lines:
-        run = _strike_run(line)
-        if run is None:
+    open_runs: dict[tuple[str, int], tuple[int, str]] = {}  # key -> (index, line)
+    last_event: dict[str, int] = {}  # file -> index of its last watchdog line
+    for index, (name, line) in enumerate(lines):
+        event = _watchdog_event(name, line)
+        if event is None:
             continue
-        consecutive, limit, port = run
+        _, port, run = event
+        last_event[name] = index
+        if not run:  # the busy verdict: this proxy's run on this port is closed
+            open_runs.pop((name, port), None)
+            continue
+        consecutive, limit = run
         longest = max(longest, consecutive)
         if consecutive >= limit:
-            full_runs.add(port)
+            open_runs[(name, port)] = (index, line)
+        # A PARTIAL run deliberately does not close an open one. The counter is
+        # only reset to 0 by a healthy tick or by a successful confirmation, and
+        # the latter logs the verdict — so a `1/3` following a `3/3` with no
+        # verdict between them IS the silence this function exists to catch.
 
-    confirmed_busy = {
-        port
-        for _, line in lines
-        if all(part in line for part in CONFIRMED_BUSY_PARTS)
-        and (port := _port_in(line)) is not None
+    silent = {
+        key: line
+        for key, (index, line) in open_runs.items()
+        if last_event[key[0]] > index
     }
-    unresolved = full_runs - confirmed_busy
-    assert not unresolved, (
-        f"{what}: a full strike run was reached on port(s) {sorted(unresolved)} "
-        f"and no {CONFIRMED_BUSY_PARTS[1]!r} verdict followed for them. Either "
-        f"the confirmation phase did not run, or it condemned a backend that was "
-        f"still answering every call this node made — which is F-820 itself.\n"
+    assert not silent, (
+        f"{what}: {len(silent)} full strike run(s) were reached, the proxy that "
+        f"reached each kept logging afterwards, and no "
+        f"{CONFIRMED_BUSY_PARTS[1]!r} verdict was ever written for them:\n"
+        + "\n".join(
+            f"  {name} (port {port}): {line}" for (name, port), line in silent.items()
+        )
+        + "\nThe confirmation phase is what F-820 exists for; a decided run "
+        "that never reports it means the watchdog did not confirm.\n"
+        "All watchdog lines in the window:\n"
         + "\n".join(
             f"  {name}: {line}"
             for name, line in lines
-            if STRIKE_MARKER in line or CONFIRMED_BUSY_PARTS[1] in line
+            if _watchdog_event(name, line) is not None
         )
     )
     return _strikes(lines), longest
@@ -537,6 +587,79 @@ def assert_no_lifecycle_incident(
         + f"\n--- proxy warnings ---\n{workspace_proxy_warnings(space)[-3000:]}"
     )
     return assert_strikes_concluded_correctly(lines, what)
+
+
+def _log_line(pid: int, text: str) -> tuple[str, str]:
+    """One synthetic ``(file, line)`` pair in the shape ``_lines_since`` yields:
+    the file is ``proxy-<pid>.log``, which is how a proxy is identified."""
+    return (f"proxy-{pid}.log", f"2026-09-16 18:10:58,550 WARNING {pid} [-] {text}")
+
+
+STRUCK_OUT = STRIKE_FORMAT % (3, 3, 4087)
+PARTIAL_STRIKE = STRIKE_FORMAT % (1, 3, 4087)
+BUSY_VERDICT = "backend on port 4087 was busy, not dead"
+
+
+async def test_the_strike_implication_is_per_proxy_and_waits_for_a_pending_verdict():
+    """:func:`assert_strikes_concluded_correctly` on synthetic lines — the two
+    ways an implication oracle can be wrong, made RED-provable without Chrome.
+
+    It exists because the live oracle has never fired: across seven runs of this
+    module the longest strike run never reached the limit, so neither its pass
+    nor its fail path was ever exercised by a real fleet. A check whose first
+    real firing is also its first execution is a coin flip; these five cases are
+    how it is exercised instead.
+
+    The first case is the reviewer's, verbatim, and it FAILED the port-keyed
+    version of this function: every proxy here talks to the one backend on
+    ``space["port"]``, so proxy B's verdict closed proxy A's open run and a real
+    silence passed. The third is its mirror — ``watch_liveness`` awaits a
+    confirmation that may legitimately take up to ``REUSE_PATIENCE_SECONDS``
+    without logging, so a run still in flight at scan time must not be a
+    failure. Both are the same fix: key on ``(file, port)`` and treat "no later
+    watchdog line from this proxy" as pending.
+
+    ``async def`` only because the module pins one event loop; the body awaits
+    nothing.
+    """
+    # 1. Two proxies, ONE verdict — proxy 111 never concluded and kept logging.
+    with pytest.raises(AssertionError, match=r"proxy-111\.log"):
+        assert_strikes_concluded_correctly(
+            [
+                _log_line(111, STRUCK_OUT),
+                _log_line(222, STRUCK_OUT),
+                _log_line(222, BUSY_VERDICT),
+                _log_line(111, PARTIAL_STRIKE),
+            ],
+            "sibling verdict",
+        )
+
+    # 2. The same proxy concludes its own run: the implication holds.
+    assert assert_strikes_concluded_correctly(
+        [_log_line(111, STRUCK_OUT), _log_line(111, BUSY_VERDICT)],
+        "self verdict",
+    ) == (1, 3)
+
+    # 3. PENDING: the full run is the last watchdog line this proxy wrote, so
+    #    its confirmation is still running. Not a defect, must not fail.
+    assert assert_strikes_concluded_correctly(
+        [_log_line(222, BUSY_VERDICT), _log_line(111, STRUCK_OUT)],
+        "verdict in flight",
+    ) == (1, 3)
+
+    # 4. DECIDED AND SILENT: the same proxy kept logging after striking out and
+    #    never reported a verdict. This is the defect the oracle is for.
+    with pytest.raises(AssertionError, match="full strike run"):
+        assert_strikes_concluded_correctly(
+            [_log_line(111, STRUCK_OUT), _log_line(111, PARTIAL_STRIKE)],
+            "decided and silent",
+        )
+
+    # 5. Below the limit: vacuous, and the longest run is still measured.
+    assert assert_strikes_concluded_correctly(
+        [_log_line(111, PARTIAL_STRIKE), _log_line(111, STRIKE_FORMAT % (2, 3, 4087))],
+        "no full run",
+    ) == (2, 2)
 
 
 # ── Browser-liveness oracle ──────────────────────────────────────────────────
@@ -861,8 +984,14 @@ async def test_s0_baseline_soak_three_proxies_sixty_seconds(
     # not have failed).
     assert calls["issued"] >= SOAK_PROXIES * 60, calls
     assert_backend_unchanged(space, backend_pid, "S0 soak")
-    strikes, _ = assert_no_lifecycle_incident(space, offsets, "S0 soak")
-    print(f"\nS0: {elapsed:.1f}s, {calls['issued']} tool calls, {strikes} strikes")
+    strikes, longest_run = assert_no_lifecycle_incident(space, offsets, "S0 soak")
+    # The longest run is printed here too, not only in S1: S0 applies no load
+    # and has still logged 2 strikes, and only the run length says whether that
+    # was two proxies striking once or one proxy getting halfway to a verdict.
+    print(
+        f"\nS0: {elapsed:.1f}s, {calls['issued']} tool calls, {strikes} strikes, "
+        f"longest consecutive run {longest_run}"
+    )
 
 
 # ── S1 — CPU saturation ──────────────────────────────────────────────────────
@@ -952,9 +1081,15 @@ async def test_s1_cpu_saturation_does_not_condemn_a_live_backend(
 
     * on a run whose longest run is BELOW the limit, this node is silent about
       the confirmation phase, because the product never entered it;
-    * on a run that reaches the limit, this node IS an F-820 oracle end to end,
-      over the real transport, with the real gate.
+    * on a run where a proxy reaches the limit AND keeps logging afterwards,
+      this node is an F-820 oracle end to end FOR THAT PROXY, over the real
+      transport with the real gate — and stays silent about a sibling whose own
+      run is still in flight, which is a property of the two proxies S1 runs,
+      not of the check.
 
+    It has NOT been exercised on any run yet: across seven runs the longest run
+    never reached the limit, so neither path has fired against a real fleet. The
+    hermetic node above is what exercises both, which is why it exists at all.
     The longest run is printed on every run so which of those two happened is
     readable from the output, and so a cell where the load bites harder stays
     visible: a 2-core CI runner at the same 2x oversubscription, with Chrome
