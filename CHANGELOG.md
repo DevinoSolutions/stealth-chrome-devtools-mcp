@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.8
 
 ### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)
 
