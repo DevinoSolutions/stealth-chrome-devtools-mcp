@@ -191,12 +191,11 @@ def _identity_matches(entry: backend_registry.BackendEntry | None) -> bool:
     """True iff ``entry`` records OUR version AND a source digest that does not
     CONTRADICT ours — the identity half of the reuse gate, with no probe.
 
-    Extracted (F-886) because a second reader appeared: the eviction guard has
-    to know whether the backend it is about to terminate is a STRANGER's, and
-    re-spelling "version equal, fingerprint not mismatched" there would be a
-    second answer to the question :func:`_same_identity_backend_ready` opens
-    with. The two now share this one, so #14's version rule and F-829's
-    three-state digest rule cannot drift apart.
+    Extracted (F-886) because a second reader appeared — the eviction guard,
+    which must know whether the backend it is about to terminate is a
+    STRANGER's. Re-spelling it there would be a second answer to the question
+    :func:`_same_identity_backend_ready` opens with, and #14's version rule and
+    F-829's three-state digest rule could then drift apart.
     """
     return (entry or {}).get("version") == _server_version() and (
         not backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
@@ -285,13 +284,10 @@ def _is_our_backend(pid) -> bool:
 
 # ── Eviction: the four bindings of `backend_eviction` ────────────────────────
 # The rule ("a backend still serving live browsers is never evicted", F-886) and
-# the act (terminate, and the port-release wait) both live in that leaf, which
-# is where the measurement and the argument are. What stays here is the wiring
-# that knows which record, which state dir and which probes are OURS — and it
-# stays as four WRAPPERS on purpose, not as four re-exported names: the suite
-# patches `_terminate_backend` / `_backend_pid_on_port` / `_clear_stale_backend`
-# on THIS module, and a wrapper resolves its collaborators at CALL time, so such
-# a patch still steers everything downstream of it.
+# the act both live in that leaf, with the measurement and the argument. What
+# stays here is the wiring that knows which record, which state dir and which
+# probes are OURS — as four WRAPPERS, never re-exported names: the suite patches
+# these on THIS module, and a wrapper resolves its collaborators at CALL time.
 def _backend_pid_on_port(port: int) -> int | None:
     """The pid of OUR backend listening on ``port``, or None."""
     return backend_eviction.pid_on_port(port, is_ours=_is_our_backend)
