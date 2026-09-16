@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.7
 
 ### Fixed — `list_instances` reported the last navigation, not the instance (F-874)
 
