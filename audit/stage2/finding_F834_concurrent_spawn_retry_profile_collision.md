@@ -4,7 +4,8 @@
 **Found:** 2026-08-30, live stress test of v2.0.7 (3 Opus agents spawning concurrently + 8-proxy herd)
 **Status:** FIXED — see "Fix shipped" below (branch `fix/F834-per-attempt-clone-dirs`).
 The F-835/F-836/F-837 sections embedded further down remain OPEN and are not
-covered by that fix.
+covered by that fix. **Stage 1 (concurrent spawns all selecting the free master)
+is also still OPEN, and was measured on 2026-09-16 — see that section below.**
 
 ## Symptom (as a client sees it)
 
@@ -220,6 +221,56 @@ matching release on the close path in `server.py` (at its LOC cap), and a leaked
 master reservation would silently force every later spawn to clone. Layer 1
 makes the *losers* of that race land in distinct directories, which is what
 turns the incident from a mutual kill into an ordinary retry.
+
+## Stage 1 measured, and the consolation above does not reach its losers (2026-09-16)
+
+**Status: OPEN. A product change, not a test one — the E2E branch works around
+it and points here.**
+
+The CI gate for PR #123 (run 35146195943) failed on **macOS/ARM64 only**,
+1 of 216 integration nodes, with the product's own Layer-3 paragraph attached:
+
+```
+tests/test_e2e_fleet.py::test_a_fleet_of_six_browsers_answers_truthfully_about_every_page
+ToolError: Failed to spawn browser: Failed to connect to browser
+Spawn diagnostics: 6 spawn_browser calls were in flight in this backend when this one failed.
+```
+
+The node spawned three UNNAMED members concurrently. Windows and Linux passed
+the same commit; a two-core runner opens the window the other cells close.
+
+Two measurements were taken afterwards, both with the product's own functions
+against an isolated session root:
+
+1. **Stage 1 is not a narrow race — at the selection layer it is a certainty.**
+   Three concurrent `resolve_profile_selection(None)` calls against a free
+   master, with no Chrome running at all, return the SAME directory: `roles
+   ['master', 'master', 'master']`, `distinct 1 of 3`. The master branch asks
+   `_profile_has_running_browser(master)`, which is precisely what
+   `_dir_unavailable`'s docstring — written by THIS fix — calls "a LIVENESS
+   check, NOT a reservation … every concurrent spawn is pre-launch when it
+   asks". The clone path got `_protect_clone_dir` for that reason; master did
+   not. Whether the losers survive is then decided by how much of Chrome's
+   startup happens between two resolutions, which is why it reproduces on a
+   slow cell and not a fast one.
+2. **A stage-1 loser gets no retry at all**, so "an ordinary retry" above is
+   true of stage 2 only. `_fallback_profile_selection` returns `None` for every
+   role that is not `clone`, on both attempts — measured `role=master
+   attempt=0 -> None`, `attempt=1 -> None`, against `role=clone -> clone` for
+   both. The tool body's `for spawn_attempt in range(3)` then re-raises on the
+   first failure. So the loser of the master race does not land "in a distinct
+   directory"; it does not land anywhere.
+
+Either half would close the gate failure: a master reservation (the fix this
+section declined, with its release problem still real), or letting a failed
+master-role selection fall back to a clone, which needs no release and is
+strictly a widening of an existing path.
+
+Until then the promise is what it always was — **one master-eligible spawn at a
+time** — and `tests/test_e2e_fleet.py` now respects it: its first unnamed member
+spawns alone and takes master, and the other five (two unnamed clones, three
+named) spawn in one `gather`. The workaround is commented at that call and
+names this section.
 
 ## Related
 

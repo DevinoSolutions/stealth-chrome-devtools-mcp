@@ -46,12 +46,19 @@ Every defect in the 2.1.7/2.1.8 set was found by driving the shipped release aga
 real sites with several browsers at once, after CI was green. This adds the coverage
 that would have been red first. No `src/` change.
 
-- **`tests/test_e2e_fleet.py` (new)** — six headless browsers spawned, navigated and
-  driven in three `asyncio.gather` calls, over a mix of page shapes (plain, a page
-  whose `load` is held open, an app shell whose document cannot scroll, a form), with
-  every answer checked against the page's own state in JavaScript. Half the fleet is
-  UNNAMED, which is the advertised path and the manual run's own shape — one run
-  covers all three profile roles (`master`, `clone`, `explicit`). Two members move
+- **`tests/test_e2e_fleet.py` (new)** — six headless browsers: one lead, then five
+  spawned at once, then six navigations and six tool calls in one `asyncio.gather`
+  each, over a mix of page shapes (plain, a page whose `load` is held open, an app
+  shell whose document cannot scroll, a form), with every answer checked against the
+  page's own state in JavaScript. Half the fleet is UNNAMED, which is the advertised
+  path and the manual run's own shape — one run covers all three profile roles
+  (`master`, `clone`, `explicit`). The lead spawns alone because nothing reserves the
+  master profile: measured, three concurrent `resolve_profile_selection(None)` calls
+  against a free master all return the SAME directory, and a master-role spawn that
+  then fails to connect gets no fallback (`_fallback_profile_selection` answers `None`
+  for every non-clone role), which is how the macOS/ARM64 gate cell failed this node.
+  That residual is recorded in the F-834 finding as still open; the test works around
+  it rather than asserting a concurrency the product documents it does not offer. Two members move
   their page WITHOUT the `navigate` tool (a click that retitles, and a `switch_tab`),
   which is what makes the `list_instances` block red against F-874 rather than
   decorative. Asserts six live titles with `partial: false`; that of the six profile

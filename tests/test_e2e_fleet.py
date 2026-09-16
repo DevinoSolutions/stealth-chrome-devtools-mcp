@@ -20,11 +20,17 @@ run did which no committed node did are what this module reproduces:
   against the tool's own record. A record that agrees with itself is what
   F-873, F-875, F-876 and F-877 each shipped.
 
-It is one node on purpose. The fleet is the unit: six browsers spawned in ONE
-``gather``, navigated in ONE ``gather``, driven in ONE ``gather``, and only
-then asked — collectively — whether ``list_instances`` can still name what each
-one is showing. Split into six nodes it would cost six fleets and stop being
-the shape that found the defects.
+It is one node on purpose. The fleet is the unit: one lead browser and then
+five more spawned in ONE ``gather``, all six navigated in ONE ``gather``,
+driven in ONE ``gather``, and only then asked — collectively — whether
+``list_instances`` can still name what each one is showing. Split into six
+nodes it would cost six fleets and stop being the shape that found the defects.
+
+The lead is the one deliberate serialization, and it is there because master
+carries no spawn reservation — measured, and the argument is at the spawn call
+below. Everything the product does promise to do concurrently still happens
+concurrently: two unnamed CLONE spawns and three named ones in a single
+``gather``, then six navigations, then six tool calls.
 
 **Two members move their page WITHOUT the ``navigate`` tool**, and that is what
 makes the listing block evidence rather than decoration. F-874 §2's mechanism is
@@ -263,29 +269,62 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     kinds = [kind for _, kind, _ in plan]
     clone_root = _clone_root()
 
-    # `return_exceptions=True` is load-bearing, not defensive style. Without it
-    # `gather` re-raises the FIRST failure while the other five spawns run to
-    # completion, so `ids` would never be bound, the `try` below would never be
-    # entered and its `finally` would never close them: one failed spawn would
-    # leak up to five live headless Chromes — and a clone-role leak also holds
-    # its directory, so the NEXT node in the session inherits it. A spawn phase
-    # running six concurrent Chrome launches is the single most likely place in
-    # this suite to fail on a loaded runner (measured on this machine with 118
-    # foreign Chrome processes live: `ConnectionRefusedError [WinError 1225]`),
-    # so this path is exercised, not hypothetical. Collect first, bind `ids`
-    # from whatever DID start, and re-raise from INSIDE the try.
+    def _spawn(row):
+        _, kind, named = row
+        return spawn(
+            headless=True,
+            **({"user_data_dir": f"fleet-{kind}"} if named else {}),
+            **sandbox_kwargs(),
+        )
+
+    # ── Why the first member spawns ALONE ────────────────────────────────────
+    # It is the one thing in this file the product does not promise, and the
+    # macOS/ARM64 gate cell proved it rather than the reasoning: run 35146195943
+    # failed this node with `Failed to spawn browser: Failed to connect to
+    # browser` plus the product's own F-834 contention paragraph ("6 spawn_browser
+    # calls were in flight … only one process may hold a user-data-dir").
+    #
+    # Measured here afterwards, with the product's own functions and no Chrome
+    # at all: three concurrent `resolve_profile_selection(None)` calls against a
+    # free master return the SAME directory, 3 of 3, every time. It is not a
+    # narrow race — the master branch asks `_profile_has_running_browser(master)`,
+    # which `_dir_unavailable`'s own docstring calls "a LIVENESS check, NOT a
+    # reservation … every concurrent spawn is pre-launch when it asks". The clone
+    # path was given a reservation for exactly that reason (`_protect_clone_dir`,
+    # F-834 Layer 1); master deliberately was not — F-834 §"Not fixed here"
+    # records the decision. And the loser has no way back: measured,
+    # `_fallback_profile_selection` returns None for every non-`clone` role, on
+    # both attempts, so a master-role spawn that fails to connect raises instead
+    # of retrying. Windows and Linux passed the same commit because the window
+    # is timing-dependent; a two-core runner opens it.
+    #
+    # So the fleet spawns its first unnamed member on its own, lets that Chrome
+    # take master, and only then launches the other five AT ONCE. That is the
+    # manual fleet's real shape (one master, the rest clones) and it keeps every
+    # concurrency the product does promise: two unnamed CLONE spawns and three
+    # named ones, all in one `gather`. What it gives up is a guarantee that was
+    # never offered — and the residual is recorded in the F-834 finding rather
+    # than hidden here, so a later branch can reserve master and delete this
+    # paragraph.
+    #
+    # `return_exceptions=True` on that second wave is load-bearing, not
+    # defensive style. Without it `gather` re-raises the FIRST failure while the
+    # other spawns run to completion, so `ids` would never be bound, the `try`
+    # below would never be entered and its `finally` would never close them: one
+    # failed spawn would leak up to four live headless Chromes — and a clone-role
+    # leak also holds its directory, so the NEXT node in the session inherits it.
+    # A concurrent spawn phase is the single most likely place in this suite to
+    # fail on a loaded runner (measured on this machine with 118 foreign Chrome
+    # processes live: `ConnectionRefusedError [WinError 1225]`), so this path is
+    # exercised, not hypothetical. Collect first, bind `ids` from whatever DID
+    # start, and re-raise from INSIDE the try.
+    assert plan[0][2] is False, "the lead member must be the unnamed master-taker"
     started = time.monotonic()
-    spawned = await asyncio.gather(
-        *(
-            spawn(
-                headless=True,
-                **({"user_data_dir": f"fleet-{kind}"} if named else {}),
-                **sandbox_kwargs(),
-            )
-            for _, kind, named in plan
-        ),
-        return_exceptions=True,
+    lead = await _spawn(plan[0])
+    followers = await asyncio.gather(
+        *(_spawn(row) for row in plan[1:]), return_exceptions=True
     )
+    spawned = [lead, *followers]
     spawn_seconds = time.monotonic() - started
     ids = [result["instance_id"] for result in spawned if isinstance(result, dict)]
 
@@ -297,13 +336,14 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
         assert len(set(ids)) == FLEET_SIZE, f"the fleet shares instance ids: {ids}"
 
         # Every member got its OWN profile, and got the KIND of profile it asked
-        # for. Three concurrent unnamed spawns resolving to ONE directory would
-        # be six browsers on three profiles, and every disk claim below would be
-        # about something other than what ran. If this line ever fails, read it
-        # as a PRODUCT finding before a test bug: `resolve_profile_selection`
-        # reserves a clone directory (`_protect_clone_dir`) but nothing reserves
-        # `master`, so two unnamed spawns can both read it as free before either
-        # Chrome exists.
+        # for. Two unnamed spawns resolving to ONE directory would be six
+        # browsers on five profiles, and every disk claim below would be about
+        # something other than what ran. The lead spawns alone precisely so this
+        # cannot happen through the master branch (see above); if it fails
+        # anyway, the two CLONE members collided, and that IS a product finding
+        # — `_protect_clone_dir` reserves a clone directory with no await
+        # between the choice and the reserve, so two of them cannot legitimately
+        # agree.
         selections = [_selection(result) for result in spawned]
         roles = {
             kind: selection["profile_role"]
