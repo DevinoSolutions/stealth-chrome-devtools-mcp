@@ -414,6 +414,25 @@ fast path is unchanged (0.124 s instant, 0.119 s one-viewport, against F-875's
 0.126 s), because a scroll that moves nothing and an instant scroll both answer
 from the latch or the no-op flag rather than waiting.
 
+### 8.3a `settle_seconds` may honestly be `0.0`
+
+Gate run **35055359548** (Windows/X64; macOS and Linux green) failed the same
+e2e pin on its LAST line only — `assert record["settle_seconds"] > 0` saw
+`0.0` — with the defect-holding assertions above it (`scroll_y_after` equals
+the page's own `Math.round(window.scrollY)`, equals `max_scroll_y`, `settled`)
+all green. That is the latch WORKING: the first settle read already carried
+`ended`, so the settle returned on that read, and `settle_seconds` is the cost
+of one round trip. Two environment facts make that read as zero. Headless Chrome
+on Windows can complete a `behavior: smooth` scroll inside a single frame (no
+compositor animation to spend time on), and the CI Windows cells run Python
+3.11/3.12, where `time.monotonic()` is `GetTickCount64` at ~15.6 ms resolution
+(3.13 uses `QueryPerformanceCounter`, 100 ns — which is why the local
+measurements in §8.3 never showed it). Nothing in the record lies: the path is
+`elapsed = _now() - started` on every read and `Settled(..., True, elapsed)` on
+the read that sees the latch — there is no branch that leaves the field unset.
+"A smooth scroll takes measurable time" was the pin's premise, not an invariant;
+the pin now asserts `>= 0` and keeps the invariants that hold on every platform.
+
 ### 8.4 The pin, and that it is load-bearing
 
 `tests/test_scroll_page_verification.py::test_a_mid_flight_stall_is_not_a_finished_scroll`
