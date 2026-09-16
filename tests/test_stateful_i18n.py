@@ -76,7 +76,8 @@ Scope honesty, stated once so no node has to imply it:
   and is NOT tested here. MQ-162 covers the DOM composition sequence the tool
   can synthesize, and says so; a synthetic ``CompositionEvent`` is never
   evidence about a real IME.
-* ``type_text``'s missing ``keydown``/``keyup`` half is already pinned by
+* ``type_text``'s key lifecycle (``keydown``/``keypress``/``keyup``, all
+  trusted since F-873) is already pinned by
   ``tests/test_e2e_interaction_fidelity.py::test_keyboard_fidelity_and_enter_submit``.
   MQ-162 cites that pin instead of re-measuring it.
 
@@ -961,9 +962,13 @@ async def test_the_real_input_tools_emit_no_composition_at_all(
     field, and NEITHER produces a composition. This is what makes the node
     above a statement about ``execute_script`` rather than a claim that the
     product speaks IME. It also fixes the shape of what they DO emit, so the
-    two tools cannot silently swap behaviours.
+    two tools cannot silently swap behaviours: ``type_text`` drives a real key
+    per character (keydown, beforeinput, input, keyup) while ``paste_text``
+    emits ONE ``beforeinput``/``input`` for the whole string, and neither ever
+    produces a composition.
 
-    The missing ``keydown``/``keyup`` half of ``type_text`` is already pinned by
+    The key lifecycle ``type_text`` emits (``keydown``/``keypress``/``keyup``,
+    all trusted since F-873) is already pinned by
     ``tests/test_e2e_interaction_fidelity.py::test_keyboard_fidelity_and_enter_submit``
     and is not re-measured here.
     """
@@ -976,7 +981,21 @@ async def test_the_real_input_tools_emit_no_composition_at_all(
         instance_id=instance_id, selector="#composer", text="ab", delay_ms=0
     )
     typed = json.loads(await eval_js(instance_id, "window.w16CompEvents()"))
-    assert typed == ["beforeinput:a", "input:a", "beforeinput:b", "input:b"]
+    # F-873: the key lifecycle is present now — one keydown/keyup pair around
+    # each character's beforeinput/input. The page logs `<type>:<data>` and a
+    # key event has no `data`, hence the bare "keydown:"/"keyup:". Before the
+    # fix a character arrived as a lone CDP `char` event, so the text appeared
+    # with no key pressed at all and this list began at "beforeinput:a".
+    assert typed == [
+        "keydown:",
+        "beforeinput:a",
+        "input:a",
+        "keyup:",
+        "keydown:",
+        "beforeinput:b",
+        "input:b",
+        "keyup:",
+    ]
 
     await eval_js(instance_id, "window.w16CompReset()")
     assert await get_fn("paste_text")(
