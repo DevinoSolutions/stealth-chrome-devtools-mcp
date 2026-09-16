@@ -104,12 +104,22 @@ redirects `Path.home()`/`singleton.STATE_DIR` before doing so.
   `test_e2e_transport.py`, `test_e2e_transport_cookies.py`, `test_doc_examples.py`
   — all route through `release_gate_harness.gate_workspace` /
   `run_release_gate_journey` / `_isolated_env`, which already redirect HOME.
-- `test_singleton_version_aware.py`, `test_singleton_stop_restart.py`,
+- `test_singleton_stop_restart.py`,
   `test_singleton_port_fallback.py`, `test_backend_spawn_no_redirector.py`,
   `test_find_running_server_app_probe.py`, `test_fingerprint_unreadable.py`,
   `test_probe_backend_status.py`, `test_proxy_sentry_reporting.py`,
   `test_singleton_backend_logging.py` — all use the `isolated_state` idiom
   (in-process only, no subprocess spawn in the affected tests).
+- **CORRECTED (F-885b):** `test_singleton_version_aware.py` was wrongly
+  cleared by this row. Most of the file is `isolated_state`, in-process only —
+  but `TestStaleBackendEvictionEndToEnd::
+  test_clear_stale_backend_terminates_real_backend` spawns a REAL
+  `--transport http` backend subprocess with `env = dict(os.environ)` plus
+  only `STEALTH_MCP_BROWSER_SESSION_ROOT` set — byte-for-byte the same
+  unisolated-subprocess shape as §3/§4's `test_proxy_backend_death.py` fix,
+  missed because the file-level `isolated_state` fixture (which this
+  particular test does not even use) made the whole file look covered. See
+  F-885b for the fix and the measured before/after.
 - `test_singleton_cold_start_patience.py` — same idiom (not modified, per
   explicit instruction not to touch this file).
 - `test_sigbreak_immunity.py` — has its own local `_isolated_env` (HOME +
@@ -129,12 +139,21 @@ redirects `Path.home()`/`singleton.STATE_DIR` before doing so.
   `singleton.stop_backend` / `singleton.restart_backend` /
   `singleton._probe_backend_status` / the orphan reaper directly; none reaches
   real I/O.
-- `test_tool_registry.py`, `test_packaging.py`, `test_release_evidence.py`,
+- `test_packaging.py`, `test_release_evidence.py`,
   `test_chrome_cold_start_probe.py`, `test_doc_claims.py`,
   `test_resolve_chrome_freeze.py`, `test_display_context.py` — subprocess/mock
-  usage unrelated to the backend registry (`--list-sections` exits before
-  serving, `uv build`, spawning a throwaway `pytest` module, `tasklist`,
-  static introspection, or a pure stand-in double).
+  usage unrelated to the backend registry (`uv build`, spawning a throwaway
+  `pytest` module, `tasklist`, static introspection, or a pure stand-in
+  double).
+- **CORRECTED (F-885b):** `test_tool_registry.py` was wrongly cleared by this
+  row on the theory that `--list-sections` "exits before serving." It does —
+  but `embedded/server.py`'s `__main__` calls
+  `bootstrap_backend_process_logging()` as its FIRST statement, six lines
+  before the `--list-sections` branch is even reached, so the process still
+  writes a `backend process starting` line and a `-fault.log` and still runs
+  `prune_old_logs` against the real `~/.stealth-mcp/logs/` before exiting.
+  `test_list_sections_printed_total_matches_registry` ran with NO `env=`
+  override at all. See F-885b for the fix and the measured before/after.
 
 **Fixed in this change (same shape as the original finding):**
 - `tests/test_proxy_backend_death.py::TestProxyExitsOnBackendDeath::
@@ -185,3 +204,34 @@ redirects `Path.home()`/`singleton.STATE_DIR` before doing so.
   files (this finding did not invent the duplication, and consolidating it
   into a shared `conftest.py` fixture was out of scope for a targeted
   hygiene fix — noted as a candidate follow-up, not acted on here).
+
+## 6. F-885b — an independent reviewer found the class is worse than "log pollution" (2026-09-16)
+
+An independent review of this finding's §4 sweep found the two rows corrected
+above, and pointed out that the consequence is not just extra files landing in
+the wrong directory. Every `configure_logging()` call — reached by ANY
+unisolated backend or proxy process this shape spawns, not only the two fixed
+here — ends by calling `logging_setup.prune_old_logs()` against the resolved
+log dir (`logging_setup.py:262`). Unisolated, that resolves to the real
+`~/.stealth-mcp/logs/`, and `prune_old_logs` **unlinks** every `*.log*` file
+there beyond the newest 50 or older than 7 days (`keep_days=7, keep_files=50`).
+
+So an unisolated test subprocess does not just add noise: it applies the
+product's own retention policy to the developer's real backend/proxy logs —
+the post-mortem evidence for whatever the developer's live sessions were
+doing — and deletes the oldest of it, silently, as a side effect of a test
+run. Measured directly: running the two UNPATCHED tests fixed in F-885b
+against the real `~/.stealth-mcp/logs/` (294 files beforehand) left the
+directory at 295 files, not 294+4 — `prune_old_logs` had already reaped older
+real entries to make room for the four new ones the unpatched subprocesses
+wrote. Running the FIXED tests left the directory's file set byte-identical
+(same 294 names, `server.json` sha256 unchanged) — confirmed by name-only diff
+before/after, since concurrent legitimate backend/proxy activity from other
+sessions on the same machine during this measurement window changed some
+`mtime`s without changing the file set.
+
+This raises the bar on the sweep in §4: "does it touch the real record" is not
+the only question a future audit of this shape needs to ask — "does it run
+ANY unisolated `configure_logging()` call at all" is the one that also
+matters, because that alone costs the developer real log retention even when
+the record itself is never touched.

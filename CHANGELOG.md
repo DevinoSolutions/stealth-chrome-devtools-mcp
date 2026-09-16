@@ -40,6 +40,95 @@ All three were fixed with the same `_isolated_env`-based redirect.
 Full before/after measurement, the eviction trace, and the rest of the sweep
 are in `audit/stage2/finding_F885_proxy_death_test_touches_real_state.md`.
 
+### Fixed — `navigate` timed out on a loaded page whose document replaced itself (F-882)
+
+A ten-site fleet test on 2.1.8 (Chrome 152, Windows 11) raised
+`Navigation … timed out after 30000ms` for three of ten ordinary destinations —
+a signed-out `mail.google.com`, `youtube.com` and `reddit.com` — while the
+browser was sitting on a fully loaded page. Each of those sites replaces its
+first document with a second one (a head-script `location.replace`, a JS
+challenge that sets a cookie and re-navigates) BEFORE the first reaches `load`.
+The replacement commits under a NEW `loaderId`, fires its own `load`, and
+F-881's wait — keyed on the single `loaderId` `Page.navigate` answered with —
+had nothing left to wait for and spent the caller's whole budget. Measured on
+Chrome 152: the superseding document's commit landed 20.3-22.5 ms after ours
+across all four shapes.
+
+`navigation_milestone` follows the FRAME's loader CHAIN now: events are filtered
+to the frame `Page.navigate` returned (a same-origin iframe's two loaders carry
+the subframe's `frameId` and are ignored), a commit for that frame under a later
+loader extends the chain, and the milestone is satisfied when the LATEST document
+has reached it. A commit is `Page.lifecycleEvent` name `init` and never `commit`
+— because `Page.setLifecycleEventsEnabled(true)` REPLAYS the current document's
+whole lifecycle under that name (measured), and the tool sends it immediately
+before navigating, so the replay always describes the page being left.
+
+`net::ERR_ABORTED` is answered instead of waited on. It has two measured
+meanings: a download (`Content-Disposition: attachment`) commits nothing ever and
+leaves the tab where it was, and a page navigating itself away while our
+navigation is still pending cancels ours and commits its own 11.6-14.1 ms later
+(or, in two of six runs, just before the abort response arrived). So an abort
+waits `ABORTED_GRACE_SECONDS` (1 s, ~70x the worst measured gap, clipped to half
+the remaining budget) for the document that took our place, and only a grace that
+passes with nothing in it raises — naming the download rather than reporting a
+30 s timeout about a navigation that was over in 13 ms.
+
+Two smaller truths came out of the same work. The post-navigation read was two
+`tab.evaluate` round trips, and on a `meta refresh` page the refresh fired
+between them: the tool answered with the FIRST document's `url` and the SECOND
+document's `title`, a record no document ever had. It is one `JSON.stringify`
+round trip now (`navigation_milestone.landing`). And the one durable record of a
+failed navigation was `Navigation attempt 1 failed for <id>: ` — a `TimeoutError`
+stringifies to nothing — so the line now carries the exception type plus
+`Progress.describe()`: whether Chrome accepted the navigation, whether our
+document committed, and how many later documents superseded it. The raised
+`ToolError` carries the same clause.
+
+Deliberately unchanged: a document that reaches `load` BEFORE its replacement
+commits is still answered about at its own `load` (the `meta refresh` and
+self-reload shapes, and Amazon's `title: ""`), because that answer is true at the
+instant it is made and waiting past it would be a quiescence wait `navigate` does
+not promise. `networkidle` keys to the FIRST commit and F-787 stays open.
+
+New real-Chrome coverage: `tests/test_e2e_navigation_truthfulness.py`
+(`integration`, 8 nodes) drives all seven shapes plus the same-origin-iframe case
+against local fixture routes, with the page's own sentinel and the fixture
+server's request ledger as oracles independent of the tool under test.
+
+### Fixed — F-885b: two more tests wrongly cleared by F-885's sweep, plus the retention consequence
+
+An independent reviewer of F-885 found two sites its §4 sweep had wrongly
+cleared, both the same unisolated-subprocess shape: `tests/test_tool_registry.py::
+TestCountTripwire::test_list_sections_printed_total_matches_registry` spawned
+`python -m stealth_chrome_devtools_mcp --transport http --list-sections` with
+no `env=` override at all, on the theory that `--list-sections` "exits before
+serving" — it does, but `embedded/server.py`'s `__main__` calls
+`bootstrap_backend_process_logging()` as its first statement, six lines before
+that branch, so the process still writes a "backend process starting" line
+and a `-fault.log` into the real `~/.stealth-mcp/logs/`. And
+`tests/test_singleton_version_aware.py::TestStaleBackendEvictionEndToEnd::
+test_clear_stale_backend_terminates_real_backend` spawned a real
+`--transport http` backend with `env = dict(os.environ)` plus only
+`STEALTH_MCP_BROWSER_SESSION_ROOT` — byte-for-byte the pattern F-885 replaced
+elsewhere, missed here because the file's `isolated_state` fixture (which this
+one test does not use) made the whole file look covered. Both fixed with the
+same `release_gate_harness._isolated_env`-based redirect.
+
+The reviewer also identified that the class is worse than log pollution:
+every `configure_logging()` call ends by calling `prune_old_logs()`, which
+unlinks every `*.log*` file in the resolved log dir beyond the newest 50 or
+older than 7 days — so an unisolated test subprocess applies the product's own
+retention policy to the developer's real backend/proxy logs and deletes the
+oldest of it. Measured directly: running the two unpatched tests against the
+real `~/.stealth-mcp/logs/` (294 files beforehand) left it at 295, not 298 —
+`prune_old_logs` had already reaped older real entries to make room for the
+four new files the unpatched subprocesses wrote. Running the fixed tests left
+the directory's file set byte-identical.
+
+A repo-wide re-sweep of `tests/` for the same shape (any spawn of product code
+with an env that does not redirect HOME/USERPROFILE or `STEALTH_MCP_LOG_DIR`)
+found no further instances. See §6 of the finding doc for the full writeup.
+
 ### Fixed — F-883: `execute_script` never awaited, so a Promise was `{}` and `await` was a SyntaxError
 
 Measured through the shipped MCP on 2.1.8 (Chrome 152, nodriver 0.47):
