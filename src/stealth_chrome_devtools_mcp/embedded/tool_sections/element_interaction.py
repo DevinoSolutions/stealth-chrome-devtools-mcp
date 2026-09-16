@@ -155,7 +155,13 @@ async def upload_file(
         timeout (int): Element lookup timeout in ms (default 10000, max 60000).
 
     Returns:
-        Dict[str, Any]: {"uploaded": [absolute paths], "count": int}.
+        Dict[str, Any]: {"selector", "requested", "attached", "multiple",
+            "total_bytes"} — "attached" and "total_bytes" are read from the
+            input's own FileList after the attach, never from the request. No
+            path or file name is echoed back. Raises if the input ends up
+            holding a different number of files than were sent, which is what an
+            input without `multiple` does with more than one path: Chrome keeps
+            the first and reports no error.
     """
     timeout = rt._clamp_timeout(timeout, default=10_000)
     paths = [file_paths] if isinstance(file_paths, str) else list(file_paths)
@@ -235,19 +241,29 @@ async def select_option(
     value: str | None = None,
     text: str | None = None,
     index: Any | None = None,
-) -> bool:
+) -> dict[str, Any]:
     """
-    Select an option from a dropdown.
+    Select an option from a dropdown, and report what the control now holds.
 
     Args:
         instance_id (str): Browser instance ID.
         selector (str): CSS selector for the select element.
-        value (Optional[str]): Option value attribute.
-        text (Optional[str]): Option text content.
+        value (Optional[str]): Option value attribute (exact match).
+        text (Optional[str]): Option text or label. Matched exactly first, then
+            as a case-insensitive prefix; a disabled option is never matched.
         index (Optional[Any]): Option index (0-based). Can be string or int.
 
     Returns:
-        bool: True if selected successfully.
+        Dict[str, Any]: {"selector", "by", "selected_index", "selected_count",
+            "option_count", "multiple", "changed"}. "by" is which criterion was
+            used ("text", "value" or "index" — in that precedence). "changed" is
+            false when the control was already on that option, which is a
+            success. No option text or value is echoed back. Raises if the
+            element is not a <select>, if no option matches, or if the page did
+            not keep the selection.
+            The "input" and "change" events this fires are UNTRUSTED
+            (isTrusted: false), and are dispatched only when the selection
+            actually moved. A page that gates on event.isTrusted will not react.
     """
     tab = await _require_tab(rt.browser_manager, instance_id)
 

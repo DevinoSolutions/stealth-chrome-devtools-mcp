@@ -360,6 +360,29 @@
         window.logAction("change", "select-fidelity", e.target.value);
       });
 
+      // F-877: the selects and file inputs whose state the tool never read.
+      // input AND change are both logged, with isTrusted: a real selection
+      // fires input then change (measured, Chrome 152 typeahead), while the
+      // shipped value/index arms fired change alone.
+      ["sel-disabled", "sel-empty", "sel-multi", "sel-labels"].forEach(
+        function (id) {
+          ["input", "change"].forEach(function (type) {
+            on(id, type, function (e) {
+              window.logAction(
+                type,
+                id,
+                e.target.value + ":" + (e.isTrusted ? "trusted" : "untrusted")
+              );
+            });
+          });
+        }
+      );
+      ["file-single", "file-multi", "file-disabled"].forEach(function (id) {
+        on(id, "change", function (e) {
+          window.logAction("change", id, String(e.target.files.length));
+        });
+      });
+
       // Value-typed inputs: each logs its live value on input.
       ["range-input", "number-input", "date-input", "color-input"].forEach(
         function (id) {

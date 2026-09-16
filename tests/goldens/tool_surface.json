@@ -2944,7 +2944,7 @@
     "tags": []
   },
   "select_option": {
-    "description": "Select an option from a dropdown.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the select element.\n    value (Optional[str]): Option value attribute.\n    text (Optional[str]): Option text content.\n    index (Optional[Any]): Option index (0-based). Can be string or int.\n\nReturns:\n    bool: True if selected successfully.",
+    "description": "Select an option from a dropdown, and report what the control now holds.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the select element.\n    value (Optional[str]): Option value attribute (exact match).\n    text (Optional[str]): Option text or label. Matched exactly first, then\n        as a case-insensitive prefix; a disabled option is never matched.\n    index (Optional[Any]): Option index (0-based). Can be string or int.\n\nReturns:\n    Dict[str, Any]: {\"selector\", \"by\", \"selected_index\", \"selected_count\",\n        \"option_count\", \"multiple\", \"changed\"}. \"by\" is which criterion was\n        used (\"text\", \"value\" or \"index\" — in that precedence). \"changed\" is\n        false when the control was already on that option, which is a\n        success. No option text or value is echoed back. Raises if the\n        element is not a <select>, if no option matches, or if the page did\n        not keep the selection.\n        The \"input\" and \"change\" events this fires are UNTRUSTED\n        (isTrusted: false), and are dispatched only when the selection\n        actually moved. A page that gates on event.isTrusted will not react.",
     "enabled": true,
     "input_schema": {
       "properties": {
@@ -2998,18 +2998,8 @@
       "type": "object"
     },
     "output_schema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "_WrappedResult",
-      "type": "object",
-      "x-fastmcp-wrap-result": true
+      "additionalProperties": true,
+      "type": "object"
     },
     "tags": []
   },
@@ -3472,7 +3462,7 @@
     "tags": []
   },
   "upload_file": {
-    "description": "Upload local file(s) to a file input. USE THIS for file uploads.\n\nSets the files directly on the <input type=\"file\"> via CDP — reliable and\nnon-blocking. Do NOT try to upload by fetching blobs / building base64 /\nDataTransfer inside execute_script: that hits mixed-content/CORS limits and\ncan freeze the page. This tool is the supported path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath for the <input type=\"file\"> element.\n    file_paths (Union[str, List[str]]): Absolute path, or list of paths, to attach.\n        For multiple files the input must have the `multiple` attribute.\n    timeout (int): Element lookup timeout in ms (default 10000, max 60000).\n\nReturns:\n    Dict[str, Any]: {\"uploaded\": [absolute paths], \"count\": int}.",
+    "description": "Upload local file(s) to a file input. USE THIS for file uploads.\n\nSets the files directly on the <input type=\"file\"> via CDP — reliable and\nnon-blocking. Do NOT try to upload by fetching blobs / building base64 /\nDataTransfer inside execute_script: that hits mixed-content/CORS limits and\ncan freeze the page. This tool is the supported path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath for the <input type=\"file\"> element.\n    file_paths (Union[str, List[str]]): Absolute path, or list of paths, to attach.\n        For multiple files the input must have the `multiple` attribute.\n    timeout (int): Element lookup timeout in ms (default 10000, max 60000).\n\nReturns:\n    Dict[str, Any]: {\"selector\", \"requested\", \"attached\", \"multiple\",\n        \"total_bytes\"} — \"attached\" and \"total_bytes\" are read from the\n        input's own FileList after the attach, never from the request. No\n        path or file name is echoed back. Raises if the input ends up\n        holding a different number of files than were sent, which is what an\n        input without `multiple` does with more than one path: Chrome keeps\n        the first and reports no error.",
     "enabled": true,
     "input_schema": {
       "properties": {

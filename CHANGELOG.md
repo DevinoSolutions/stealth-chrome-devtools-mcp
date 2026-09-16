@@ -181,6 +181,80 @@ no longer names `date` — the local build refused digits into a date field but 
 gate measured all three CI cells accepting them, so it is build-dependent and is not
 claimed.
 
+### Fixed — `select_option` selected nothing and said it had; `upload_file` counted the request, not the files (F-877)
+
+Measured on Chrome 152.0.7977.83 through the product code path, on a throwaway
+profile. The two tools F-876 named and left unmeasured, and the same sentence a third
+and fourth time: the tool reported the success of its own dispatch, not of the
+interaction.
+
+`select_option` answered `True` for **eleven** cases that did not select what was
+asked, and three of them were worse than a silent no-op. A `value=` that names no
+option does not merely fail — `select.value = …` sets `selectedIndex` to `-1`, so it
+**cleared the selection the page already had**, fired a `change` announcing it, and
+reported success. A selector pointing at an `<input type="text">` had its `value`
+**written**, because nothing checked that the element was a `<select>` at all. And the
+`text=` arm was `send_keys`, so its real consumer was Chrome's `<select>` typeahead —
+a live buffer with a ~1 s timeout shared with the previous call, searching from the
+option after the current one, resolving a `label=`/text collision onto the wrong
+option — which on a `<select disabled>`, a control that cannot take focus, sent the
+characters wherever focus already was: measured, a request for the disabled select
+moved a **different** select on the page, with a trusted `input`+`change` pair, and
+the tool answered `True`. An out-of-range `index=`, a `text=` matching nothing and an
+empty `<select>` each changed nothing and answered `True` too.
+
+**`select_option` now returns a record instead of a bool** — `{"selector", "by",
+"selected_index", "selected_count", "option_count", "multiple", "changed"}`. It reads
+the options first, resolves the criterion to an index in one stated rule (exact
+`option.text`, then exact `option.label`, then a case-insensitive prefix over either,
+skipping `disabled` options — the prefix tier is kept because the typeahead had it and
+callers may rely on it), refuses before writing anything when nothing matches, then
+sets `selectedIndex` and dispatches `input` **and** `change` (the pair, and the order,
+Chrome's own typeahead produces; the shipped arms fired `change` alone, and fired it
+even when nothing moved). The control is read back after those handlers have run, so a
+page that resets the select inside its own `change` handler is caught. Nothing types,
+so a request can only ever move the control it named. `changed: false` is a success —
+"it was already on that option" and "it refused" are different facts a bool could not
+tell apart.
+
+`upload_file` was honest in ten of eleven measured cases — every "resolved to the wrong
+thing" case already raised — but its answer was composed from the caller's own argument
+list before the CDP call and regardless of it. Two paths into an input with no
+`multiple` attribute: `DOM.setFileInputFiles` **succeeds** (the raw call reports no
+error) and Chrome keeps only the first file, while the tool reported `count: 2`.
+**It now returns** `{"selector", "requested", "attached", "multiple", "total_bytes"}`,
+read from the input's own `FileList`, and raises when the input holds a different
+number of files than were sent. The old `uploaded` field is gone: it echoed **absolute
+local paths**, which name the operating user, into a value that travels to the client.
+
+No message either tool raises carries an option's text or value, a file path or a file
+name — a `<select>` is frequently a list of account numbers, and a raised `ToolError`
+reaches the caller, the debug ring and Sentry at once. A new leaf
+`embedded/control_state.py` owns both reads, the matching rule and both verdicts.
+
+**What this costs, plainly.** The `text=` arm's events are now **untrusted**
+(`isTrusted: false`) where real keystrokes produced trusted ones — there is no trusted
+alternative that is not the typeahead being removed, and the `value=`/`index=` arms
+were already untrusted, so a page gating on `event.isTrusted` was already unreachable
+through two of three arms and is now unreachable through all three. A caller relying on
+the typeahead's **wraparound** — asking for a prefix that matches the option already
+selected in order to advance to the *next* match — now gets the current option and
+`changed: false` instead of a move; that behaviour was never documented and is not
+kept. And an `index=` inside a `<select>` with more than 2000 options cannot be
+resolved, because the option read is bounded; that case gets its own message naming the
+cap, never "no option matches".
+
+Also fixed in passing, the same leak class one guard earlier: `upload_file`'s
+"File not found" now reports the path's position, the count, its length and its suffix
+instead of the absolute path, which named the operating user in an error that reaches
+the client, the debug ring and Sentry.
+
+Deliberately unchanged, and named in the finding: a `multiple` `<select>` still cannot
+be driven past one selection (the signature takes one criterion — the record now says
+so); a `disabled` `<option>` stays reachable by `value=`/`index=` and unreachable by
+`text=`, which is what Chrome does; and `upload_file` still attaches to a `disabled`
+input and still ignores `accept=`, because CDP does.
+
 ## 2.1.6
 
 ### Fixed — `get_instance_state` reported empty storage as if it were the truth (F-869)

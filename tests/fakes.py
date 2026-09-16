@@ -31,6 +31,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import socket
 from pathlib import Path
 from types import GeneratorType, SimpleNamespace
@@ -748,6 +749,257 @@ class FakeClickTarget:
                 return self._aim_answer
             return self._aim()
         return None
+
+
+class FakeSelect:
+    """A nodriver ``Element`` double for a ``<select>``, PAGE-BACKED (F-877).
+
+    ``FakeTextField``'s and ``FakeClickTarget``'s sibling, one control over. It
+    models the DOM semantics the selection path depends on and nothing else:
+
+    * an ``<option>`` has a ``value``, a ``text`` and a ``label`` and they can
+      all differ (measured, Chrome 152: ``<option label="LabelOne">TextOne``
+      answers ``.text == "TextOne"``, ``.label == "LabelOne"``);
+    * ``.text`` is the **collapsed** text, not ``textContent`` (measured: an
+      option written over three lines as ``\\n  Spaced   Out\\n`` answers
+      ``.text == "Spaced Out"``), so this double takes the collapsed form
+      directly and a test that wants the raw one is asking the wrong layer —
+      the witness for the collapsing itself is a real Chrome
+      (``tests/test_e2e_select_upload_verification.py``);
+    * assigning ``selectedIndex`` fires **nothing** on its own. The ``input``
+      and ``change`` pair, in that order and bubbling, is what Chrome's own
+      typeahead produced for a real selection (measured), so this double
+      records exactly what the code under test dispatched and a pin can assert
+      the pair rather than trusting it;
+    * the selection is a **SET**, and the spec's ``selectedIndex`` SETTER
+      selects exactly the option it names and deselects every other. That is
+      why the state here is a tuple and not a single int: a ``<select
+      multiple>`` holding ``[0, 2]`` still answers ``selectedIndex == 0`` after
+      index 0 is assigned, so a double that modelled the selection as one
+      number could not express the write that silently drops option 2 while
+      that number does not budge.
+
+    The answer to both reads is COMPUTED from this object's own state, never
+    supplied by a test, so no fixture here can quietly encode the bug.
+
+    ``read_cap`` is the product's ``MAX_OPTIONS`` truncation, stated by the test
+    rather than imported: the read answers at most that many options while
+    ``option_count`` stays the control's true length, exactly as the real script
+    does. ``None`` by default, so no pin that does not ask for it moves.
+
+    ``on_selected`` is the page: a callable invoked right after the events are
+    dispatched, with this double as its argument. It exists so a pin can model
+    the page that resets the control inside its own ``change`` handler — which
+    a read-back taken *before* the events could not see.
+    """
+
+    #: One ``<option>`` as ``(value, text)``, ``(value, text, label)`` or
+    #: ``(value, text, label, disabled)``. ``label`` defaults to ``text``,
+    #: which is what ``HTMLOptionElement.label`` does when the attribute is
+    #: absent (measured).
+    DEFAULT_OPTIONS = (("one", "Alpha"), ("two", "Beta"), ("three", "Gamma"))
+
+    def __init__(  # noqa: PLR0913  PERMANENT(one field per modelled DOM fact)
+        self,
+        options: tuple[tuple[str, ...], ...] = DEFAULT_OPTIONS,
+        selected_index: int = 0,
+        multiple: bool = False,
+        tag: str = "select",
+        on_selected: Any = None,
+        answer: Any = _UNSET,
+        selected: tuple[int, ...] | None = None,
+        read_cap: int | None = None,
+    ) -> None:
+        self.tag = tag
+        self.multiple = multiple
+        self.read_cap = read_cap
+        self.options = [self._option(i, raw) for i, raw in enumerate(options)]
+        #: ``selectedOptions``' indices, ascending. ``selected=`` states the set
+        #: directly — the only way to express a real multi-selection — while
+        #: ``selected_index=`` is the one-option shorthand every other pin uses.
+        self.selected: list[int] = (
+            sorted(selected)
+            if selected is not None
+            else ([] if selected_index < 0 else [selected_index])
+        )
+        self.on_selected = on_selected
+        self._answer = answer
+        self.events: list[str] = []
+        self.apply_calls: list[str] = []
+        self.keys_sent: list[str] = []
+
+    async def send_keys(self, text: str) -> None:
+        """nodriver's ``Element.send_keys`` — what the shipped ``text=`` arm
+        called, and the reason a request for a ``<select disabled>`` moved a
+        DIFFERENT select. It records and does nothing else: the double's job
+        here is to make "nothing ever typed" assertable, not to re-implement
+        Chrome's typeahead."""
+        self.keys_sent.append(text)
+
+    @staticmethod
+    def _option(index: int, raw: tuple[str, ...]) -> dict[str, Any]:
+        value, text = raw[0], raw[1]
+        label = raw[2] if len(raw) > 2 else text
+        disabled = bool(raw[3]) if len(raw) > 3 else False
+        return {
+            "index": index,
+            "value": value,
+            "text": text,
+            "label": label,
+            "disabled": disabled,
+        }
+
+    @property
+    def selected_indexes(self) -> list[int]:
+        """``selectedOptions``' indices."""
+        return list(self.selected)
+
+    @property
+    def selected_index(self) -> int:
+        """``HTMLSelectElement.selectedIndex`` — the FIRST selected option, or
+        ``-1`` when none is, which is the state ``select.value = "nope"`` leaves
+        behind (measured)."""
+        return self.selected[0] if self.selected else -1
+
+    @selected_index.setter
+    def selected_index(self, index: int) -> None:
+        """The spec's setter: selects exactly that option, deselects every other.
+
+        On a multiple select holding ``[0, 2]``, assigning ``0`` leaves the
+        GETTER answering ``0`` while the set shrinks to ``[0]`` — which is why
+        "did anything move" can only be asked of the set.
+        """
+        self.selected = [] if index < 0 else [index]
+
+    def _state(self) -> dict[str, Any]:
+        return {
+            "selected_index": self.selected_index,
+            "selected_count": len(self.selected_indexes),
+            "selected_indexes": list(self.selected_indexes),
+            "option_count": len(self.options),
+            "multiple": self.multiple,
+        }
+
+    def _read(self) -> str:
+        if self.tag != "select":
+            return json.dumps(
+                {
+                    "tag": self.tag,
+                    "is_select": False,
+                    "multiple": False,
+                    "option_count": 0,
+                    "selected_index": -1,
+                    "selected_count": 0,
+                    "selected_indexes": [],
+                    "options": [],
+                }
+            )
+        readable = (
+            self.options if self.read_cap is None else self.options[: self.read_cap]
+        )
+        return json.dumps(
+            dict(
+                self._state(),
+                tag=self.tag,
+                is_select=True,
+                options=[dict(o) for o in readable],
+            )
+        )
+
+    def _apply(self, js_function: str) -> str:
+        """Set ``selectedIndex``, then fire ``input`` and ``change``.
+
+        The wanted ``{index, value}`` is read out of the script the product
+        sent, because ``Element.apply`` carries no arguments — a criterion
+        reaches the page embedded in the function source or not at all. The
+        ``value`` is re-checked against the option that is there NOW, exactly as
+        the product's own script does: the options can be replaced between the
+        read and the write (a dependent dropdown repopulating), and an index
+        resolved against the old list addresses a different option in the new
+        one.
+        """
+        match = re.search(r"const want = (\{.*?\});", js_function, re.DOTALL)
+        want = json.loads(match.group(1)) if match else {}
+        index = want.get("index", -1)
+        option = self.options[index] if 0 <= index < len(self.options) else None
+        if option is None or option["value"] != want.get("value"):
+            return json.dumps(dict(self._state(), applied=False, stale=True))
+        before = self.selected_indexes
+        self.selected_index = index
+        if before != self.selected_indexes:
+            # Chrome fires nothing when the selection lands where it already
+            # was — measured: a typeahead query that resolves to the currently
+            # selected option produces no ``change`` at all. The comparison is
+            # of the SET, never of ``selectedIndex``: see that setter.
+            self.events.extend(("input", "change"))
+            if self.on_selected is not None:
+                self.on_selected(self)
+        return json.dumps(dict(self._state(), applied=True, stale=False))
+
+    async def apply(self, js_function: str, *args: Any, **kwargs: Any) -> Any:
+        self.apply_calls.append(js_function)
+        if self._answer is not _UNSET:
+            return self._answer
+        if "dispatchEvent" in js_function:
+            return self._apply(js_function)
+        return self._read()
+
+
+class FakeFileInput:
+    """A nodriver ``Element`` double for an ``<input type="file">`` (F-877).
+
+    One measured rule, and it is the whole of the upload defect: when the input
+    has no ``multiple`` attribute and more than one path is sent,
+    ``DOM.setFileInputFiles`` **succeeds** — the raw CDP call answers ``None``,
+    no error anywhere — and Chrome keeps only the **first** file. Measured on
+    Chrome 152 against a freshly loaded page: two paths in, ``files.length ==
+    1``. A double that simply stored whatever it was handed could not express
+    that, which is exactly the answer ``upload_file`` reported.
+
+    ``size`` is ``len(name)`` — a stand-in, because a hermetic double has no
+    file to stat. It exists so a pin can prove ``total_bytes`` is read from the
+    ``FileList`` rather than composed from the request.
+    """
+
+    def __init__(
+        self,
+        multiple: bool = False,
+        files: tuple[str, ...] = (),
+        tag: str = "input",
+        accepts: bool = True,
+        answer: Any = _UNSET,
+    ) -> None:
+        self.multiple = multiple
+        self.files = list(files)
+        self.tag = tag
+        self.accepts = accepts
+        self.attrs = {"type": "file", "id": "upload"}
+        self.tag_name = tag
+        self._answer = answer
+        self.sent: list[tuple[str, ...]] = []
+        self.apply_calls: list[str] = []
+
+    async def send_file(self, *paths: str) -> None:
+        """``DOM.setFileInputFiles``, with Chrome's measured truncation rule."""
+        self.sent.append(tuple(paths))
+        if not self.accepts:
+            return
+        names = [Path(str(p)).name for p in paths]
+        self.files = names if self.multiple else names[:1]
+
+    async def apply(self, js_function: str, *args: Any, **kwargs: Any) -> Any:
+        self.apply_calls.append(js_function)
+        if self._answer is not _UNSET:
+            return self._answer
+        return json.dumps(
+            {
+                "tag": self.tag,
+                "has_files": self.tag == "input",
+                "count": len(self.files),
+                "multiple": self.multiple,
+                "total_bytes": sum(len(n) for n in self.files),
+            }
+        )
 
 
 class FakeDiscoveredTarget:

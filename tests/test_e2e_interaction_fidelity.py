@@ -380,10 +380,12 @@ async def test_rich_input_types(fixture_app_server):
       * color  (tool-gap, now REPORTED): type_text cannot drive the color
         control -> value stays "#000000" and the tool raises; execute_script
         sets it.
-    select_option IS exercised here and pinned as a FINDING (see the value+index
-    asserts below): a second evaluate-path call on the same document silently
-    no-ops yet returns True -- a ``const select`` re-declaration collision
-    (dom_handler.py:513-536); route M4-Ph1/M5b.
+    select_option IS exercised here, and what it answers is no longer a bare
+    ``True`` (F-877): a record naming the index the control now holds. The old
+    FINDING this block carried -- a second evaluate-path call on the same
+    document silently no-ops yet returns True, a ``const select``
+    re-declaration collision -- was closed by F-831 and is now unrepresentable:
+    both arms act on the already-resolved element and the selection is read back.
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
@@ -465,11 +467,15 @@ async def test_rich_input_types(fixture_app_server):
         # rework made both arms act on the already-resolved element, so a
         # same-document index call now genuinely moves the selection and fires
         # its change event. SOFT golden updated deliberately with that fix.
-        assert await select(instance_id=iid, selector="#select-fidelity", value="two")
-        assert await _wait_action(iid, "change:select-fidelity:two")
+        # F-877: the answer is a record, so the assert names the index the
+        # control landed on rather than a truthiness the shape change retired.
         assert (
-            await select(instance_id=iid, selector="#select-fidelity", index=2) is True
-        )
+            await select(instance_id=iid, selector="#select-fidelity", value="two")
+        )["selected_index"] == 1
+        assert await _wait_action(iid, "change:select-fidelity:two")
+        assert (await select(instance_id=iid, selector="#select-fidelity", index=2))[
+            "selected_index"
+        ] == 2
         assert (
             await eval_js(iid, "document.getElementById('select-fidelity').value")
             == "three"
