@@ -23,8 +23,14 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from stealth_chrome_devtools_mcp.observability import sentry_init
+
+if TYPE_CHECKING:
+    # Type-only: every embedded import in this file is LAZY, inside the function
+    # that needs it, so a read-only verb never drags the backend in at import.
+    from stealth_chrome_devtools_mcp.embedded.backend_liveness import Surveyed
 
 
 def _server():
@@ -203,7 +209,7 @@ def _backend_log_location(pid: int | None) -> str:
     return str(resolve_log_dir() / filename)
 
 
-def _survey_records() -> list:
+def _survey_records() -> list[Surveyed]:
     """THE one probe pass over every recorded backend, for the two CLI verbs
     that need per-entry answers (F-880).
 
@@ -232,7 +238,7 @@ def _survey_records() -> list:
     )
 
 
-def _dead_record_line(surveyed: list) -> str:
+def _dead_record_line(surveyed: list[Surveyed]) -> str:
     """The one-line summary of dead records, or "" when none is (F-880).
 
     READ-ONLY, and it names the verb that writes. `doctor` must stay read-only

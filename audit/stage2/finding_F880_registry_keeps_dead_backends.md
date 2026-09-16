@@ -166,8 +166,8 @@ Three modules could own this, and the split follows the roles each one already h
   these entries" beside "drop this context" — and it re-reads the record itself rather
   than being handed a list of survivors, so the merge is real (§3.3).
 - **`backend_liveness.forget_dead` — the one COMPOSITION**, so no caller ever writes
-  "survey, filter, forget" a second time. Three callers consume it: the cold-start lock
-  holder, `cleanup --apply`, and nothing else.
+  "survey, filter, forget" a second time. Exactly ONE caller writes through it:
+  `cleanup --apply`. `doctor` consumes `survey` and never writes.
 
 Rejected alternatives, with the reason each one fails a stated constraint:
 
@@ -190,9 +190,35 @@ Rejected alternatives, with the reason each one fails a stated constraint:
    rule — "no function here may take a default path", and by extension no policy that
    is not about the file — points the other way. The registry owns *which bytes to
    write*; whether a backend is alive is `backend_liveness`'s sentence.
-3. **A `cleanup`-only prune with no automatic path.** Rejected as a half-answer to
-   F-868 §6: it leaves "who prunes" answered only by "a human who remembers to". The
-   automatic caller costs five lines and fires on exactly the occasion §6 named.
+3. **An automatic prune in `singleton._start_backend_holding_lock`** — §6's own
+   candidate, and the one this PR *implemented, measured and then backed out*. Three
+   things came out of trying it, and they are the evidence §6 asked for:
+   (a) It is not free of consequence for the port it runs beside. Placed at the top of
+   the locked block it forgot the entry for the very port the cold start was about,
+   which **deleted the record two later steps read** — the `backend stale (source
+   changed), evicting` diagnostic (`backend_on_port(..., port)`) and
+   `_terminate_backend`'s recorded-pid fallback. `tests/test_singleton_version_aware.py::
+   TestStartBackendHoldingLockEvicts::test_logs_source_change_eviction_once` went RED
+   and named it. A `spare_port` argument fixes it cleanly — the cold start already owns
+   every decision about that port, including `record_backend`'s supersede-by-port — so
+   this is a solved problem, not a blocker.
+   (b) It probes ports that the existing suite does not stub. That same test does not
+   patch `_server_is_healthy`, so the prune opened a REAL loopback connection to 19222
+   from a unit test. `spare_port` removed it in that case; the general shape (a probing
+   writer on the cold-start path) needs every cold-start test to state its liveness
+   premise.
+   (c) **It costs `singleton.py` ten lines it does not have.** The file is at 985 of the
+   1000-LOC default with no grandfather row, and F-868 §6's closing bullet paid to get
+   it there precisely because "a gate that passes and a file nobody can edit" is not a
+   pass. 995/1000 would put it back. No cheap, principled extraction exists: the three
+   candidates (`_is_our_backend` + `_backend_pid_on_port` + `_port_is_foreign_held`) are
+   all patched by name across the suite, so each needs a call-time wrapper that eats the
+   saving, and the only large blocks left (`_proxy_streams`, `_await_backend_http` /
+   `_backend_http_ready`) are the liveness PRIMITIVES `backend_liveness` deliberately
+   takes as arguments so they stay here.
+   It is therefore a named follow-up (§6), not a silent omission — and `cleanup --apply`
+   is not a half-answer: it is an explicit `--apply` verb, which is exactly the contract
+   §6 said a read-only verb could not honour.
 4. **Pruning on every proxy start**, outside `_exclusive_lock`. Rejected: every
    production writer of this record runs under that lock, and a lock-free writer on the
    hottest path in the product (dozens of concurrent proxy starts — the herd) is how a
@@ -236,11 +262,8 @@ way to do something already done. `doctor`'s line still reads `no port recorded`
 **`embedded/backend_registry.py`**: `forget_entries(path, entries)` — §3.3, beside
 `forget_backend`.
 
-**`embedded/singleton.py`**: five lines at the top of `_start_backend_holding_lock`'s
-locked block — the one automatic prune, on the one path that has just failed to find a
-reusable backend, in the one process holding the lock. It runs **before** the two early
-returns so a cold start that loses the race still pays its hygiene. 985 → 990 LOC
-(default 1000; no grandfather row, none added).
+**`embedded/singleton.py`**: **unchanged**, 985 LOC before and after — see rejected
+alternative 3 and §6.
 
 **`cli.py`**:
 
@@ -258,17 +281,21 @@ What the operator now sees (shape, on a record like §1's):
 
 ```
 $ stealth-chrome-devtools doctor
+contexts    :
   backend  win-session-1  port 52554  pid 136672  version 2.1.6  responsive  (can show windows)
-  backend  win-session-2  port 7169  pid 89892  version 2.1.1  down  (dead record)  (can show windows)
-  backend  headless  port 19222  pid 67720  version 2.1.3  down  (dead record)  (headless only)
-  2 dead record(s) (win-session-2, headless) — nothing is listening and the
-  recorded pid is not a backend of ours; run `cleanup --apply` to forget them
+  backend  win-session-2  port 7169  pid 89892  version 2.1.1  down  (can show windows)  (dead record)
+  backend  headless  port 19222  pid 67720  version 2.1.3  down  (headless only)  (dead record)
+  2 dead record(s) (win-session-2, headless) — nothing is listening and the recorded pid is not a backend of ours; run `cleanup --apply` to forget them
 
 $ stealth-chrome-devtools cleanup
-backend records: 2 dead (win-session-2, headless) — re-run with --apply to forget
+backend records: 3 recorded, 2 dead (win-session-2, headless) — re-run with --apply to forget
 $ stealth-chrome-devtools cleanup --apply
 backend records: forgot 2 dead (win-session-2, headless)
 ```
+
+The `(dead record)` marker is appended AFTER the capability note, not between it and the
+verdict, so `doctor`'s existing `"down  (can show windows)"` pin still reads what it
+always did — the marker is additive to that line, not a rewrite of it.
 
 ## 5. Pins
 
@@ -287,32 +314,53 @@ signalled.
 | `TestForgetEntries::test_forgets_only_the_named_entries` | the whole record being replaced |
 | `…::test_a_context_re_recorded_since_the_probe_survives` | the lost update §3.3 exists to prevent |
 | `…::test_forgetting_the_last_entry_leaves_an_empty_readable_record` | `clear_record`'s job being done here |
-| `…::test_nothing_dead_writes_nothing` | a write on every cold start |
+| `…::test_nothing_dead_writes_nothing` | a write whenever the record is merely read |
 | `TestForgetDead::test_a_foreign_display_contexts_dead_entry_is_forgotten` | the F-808 over-reading that would leave the maintainer's record dirty forever |
 | `…::test_the_live_entry_survives_its_dead_siblings` | the §1 record, verbatim, end to end |
-| `TestColdStartPrunes::test_the_lock_holder_forgets_dead_entries` | the automatic caller being dropped |
+| `…::test_a_wedged_sibling_is_left_alone` | the one state that must never be forgotten, through the composition |
+| `…::test_no_recorded_backend_writes_nothing` | the same mtime guard through `forget_dead` |
 | `TestCliDeadRecords::test_cleanup_dry_run_names_them_and_forgets_nothing` | `cleanup` writing without `--apply` |
 | `TestCliDeadRecords::test_cleanup_apply_forgets_them` | the verb being wired to a second sweep |
+| `TestCliDeadRecords::test_cleanup_says_nothing_when_no_record_is_dead` | a clean record reading as a problem |
 | `TestCliDeadRecords::test_doctor_names_them_and_forgets_nothing` | doctor breaking its read-only contract |
 
-RED was confirmed against `main`'s tree before the fix: `forget_entries` / `survey`
-did not exist, so the registry and liveness pins error on the missing attribute, and
-the two CLI pins fail on absent output.
+**RED, measured** against `main` = `b0ae010` before any production line changed:
+17 failed, 1 passed of 18. The failures are `AttributeError: module
+'…backend_liveness' has no attribute 'survey'` (the liveness and registry pins) and
+missing output (the CLI pins) — not harness errors. The one green was the guard pin
+that is vacuously true when nothing writes at all; it is stated here rather than
+counted as evidence. GREEN after the fix: 17/17 (one pin was replaced when rejected
+alternative 3 was backed out — see §6).
 
 ## 6. Not claimed / follow-ups
 
 - **F-868 §6's first bullet is CLOSED by this finding.** Its two questions are answered
-  in §3.2 (who prunes: the cold-start lock holder and `cleanup --apply`, nobody else)
-  and §3.1 (the port objection: the test is `down` **and** pid-not-ours, so the port is
-  observed empty, not merely not-ours). A pointer has been added to that file.
-- **The prune does not fire while a reusable backend exists.** `ensure_server_running`
-  returns from `_find_running_server` without taking the lock, so a machine whose
-  backend is healthy keeps its dead siblings until the next cold start (reboot, backend
-  death, version upgrade) or until an operator runs `cleanup --apply`. This is
-  deliberate — see rejected alternative 4 — and it is why the operator verb exists
-  rather than being redundant with the automatic path. Making the prune unconditional
-  on every proxy start would need a lock-free writer on the herd path and is NOT
-  recommended without a measurement.
+  in §3.2 (who prunes: `cleanup --apply`, an explicit `--apply` verb, so the read-only
+  contract that bullet names is untouched) and §3.1 (the port objection: the test is
+  `down` **and** pid-not-ours, so the port is observed to hold no listener, not merely
+  no listener of ours). A pointer has been added to that file.
+- **OPEN, with the groundwork done: the automatic prune at
+  `singleton._start_backend_holding_lock`.** It was implemented in this branch and
+  backed out; rejected alternative 3 records the three things learned, and two of them
+  are findings in their own right. The design that works is
+  `forget_dead(..., spare_port=port)` — the cold start already owns every decision about
+  the port it is spawning on (reuse gate, source-change diagnostic, eviction,
+  `record_backend`'s supersede-by-port), and pruning that one entry first *deletes the
+  record those steps read*. What blocks it today is `singleton.py`'s ten remaining lines
+  of budget, and the honest fix is an extraction, not a bigger cap. Until then a machine
+  with a healthy backend keeps its dead siblings until an operator runs
+  `cleanup --apply` — `ensure_server_running` returns from `_find_running_server`
+  without ever taking the lock, so the automatic path would not have fired in the §1
+  state anyway. It WOULD fire on the next genuine cold start (reboot, backend death,
+  version upgrade), which is worth having; it is not worth 995/1000.
+- **A probing writer on the cold-start path needs every cold-start test to state its
+  liveness premise.** While alternative 3 was in the tree,
+  `test_singleton_version_aware.py::…::test_logs_source_change_eviction_once` opened a
+  real loopback connection to port 19222, because it stubs `_clear_stale_backend` and
+  `_start_server_process` but not `_server_is_healthy`. Nothing was harmed (the port is
+  free on this machine), but a unit test that reaches the network is a defect waiting
+  for a machine where it is not free. Anyone reviving the automatic prune should stub
+  the two primitives in that file first.
 - **A recycled pid reads as not-ours, which is the safe direction here** but is worth
   stating: `_is_our_backend` is a command-line check, so a pid reused by an unrelated
   process makes the entry *more* likely to be forgotten — and correctly, since the
