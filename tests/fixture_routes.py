@@ -2076,7 +2076,9 @@ def _r_state_store(handler, query: str) -> None:
 # (``esDelayed``), so a value that arrives is proof the tool waited for it, and
 # a rejection carrying a known reason (``esRejects``), so the error the tool
 # raises can be matched against text nothing else on the page holds. ``esNever``
-# is the un-settling Promise the ``timeout_ms`` bound is measured against.
+# is the un-settling Promise the ``timeout_ms`` bound is measured against, and
+# ``esSettled`` records what ``esDelayed`` last resolved — the observable the
+# late-settlement node (F-883 B1) polls instead of sleeping.
 ES_SENTINEL = "fixture-es-async-page"
 ES_REJECT_REASON = "es-rejected-on-purpose"
 ES_VALUE_TOKEN = "es-fetched-value"
@@ -2087,9 +2089,10 @@ def es_async_page() -> str:
     """The exact page ``/es_async.html`` serves."""
     script = """
 (function () {
+  window.esSettled = null;
   window.esDelayed = function (ms, value) {
     return new Promise(function (ok) {
-      setTimeout(function () { ok(value); }, ms);
+      setTimeout(function () { window.esSettled = value; ok(value); }, ms);
     });
   };
   window.esRejects = function (reason) {

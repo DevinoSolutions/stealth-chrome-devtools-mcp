@@ -159,17 +159,62 @@ def _clamp_timeout(timeout_ms: int, default: int = 30_000) -> int:
     return max(1, min(timeout_ms, MAX_TIMEOUT_MS))
 
 
-async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
-    """Wrap a CDP coroutine with asyncio.wait_for to prevent infinite hangs.
+def _discard_outcome(task: asyncio.Task) -> None:
+    """Read an abandoned task's outcome so asyncio never logs it (F-883 B1).
 
-    When a Chrome DevTools Protocol connection is stale or dead, awaiting a
-    CDP operation blocks forever.  This wrapper raises a clear error after
-    *timeout* seconds so the caller (and the MCP client) gets a response
-    instead of hanging indefinitely.
+    A task nobody awaits whose exception is never retrieved is reported by the
+    event loop at garbage-collection time as "Task exception was never
+    retrieved". That line would be about a call the caller has already been told
+    timed out, so it is noise — but the RETRIEVAL is not optional, because
+    without it the traceback surfaces in the backend log with no correlation id
+    and reads like a crash.
+    """
+    if not task.cancelled():
+        task.exception()
+
+
+async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
+    """Bound a CDP coroutine so a stale connection cannot hang the caller.
+
+    When a Chrome DevTools Protocol connection is stale or dead, awaiting a CDP
+    operation blocks forever. This wrapper raises a clear error after *timeout*
+    seconds so the caller (and the MCP client) gets a response instead.
+
+    **The work is SHIELDED from our own deadline** (F-883 B1), and that is what
+    keeps the connection alive rather than merely the caller unblocked. A bare
+    ``wait_for(coro)`` cancels *coro* on expiry, which cancels ``nodriver``'s
+    ``Transaction`` — a bare ``asyncio.Future`` — while its entry is STILL
+    registered in ``Connection.mapper`` (``send()`` is
+    ``self.mapper[the_id] = tx; return await tx``, with no ``finally``). When
+    Chrome answers late, ``Connection._listener`` does
+    ``tx = self.mapper.pop(id); tx(**message)``, and ``Transaction.__call__``
+    ends in ``set_result`` with no cancelled-future guard, inside the listener's
+    ``else:`` branch with no ``try``/``except``. The ``InvalidStateError``
+    propagates out of ``_listener`` and **ends the listener task**: from that
+    moment the connection dispatches no responses and no events, so every later
+    call on that tab hangs until its own timeout, and the operator sees the
+    generic "the browser may have crashed" — about a browser that is fine.
+
+    Measured on Chrome 152 / nodriver 0.47 for BOTH shapes that reach it: an
+    ``execute_script`` whose Promise settles after ``timeout_ms``, and a
+    ``navigate`` that times out while Chrome answers ``Page.navigate`` late
+    (F-882's shape). Both left ``Connection._listener()`` finished with
+    ``InvalidStateError('invalid state')`` and the next call on that instance
+    timing out.
+
+    So the task is detached and only the SHIELD is cancelled: the transaction is
+    never cancelled, Chrome's late answer lands on a healthy future, the
+    listener lives, and the value is discarded. The deadline is unchanged — this
+    adds no second bound, it only stops our own bound from corrupting the
+    connection it was protecting. What it costs is named rather than hidden: a
+    timed-out multi-step operation now runs to completion in the background
+    instead of stopping part-way, which is the price of not killing the tab.
     """
     t = timeout or CDP_OPERATION_TIMEOUT
+    task = asyncio.ensure_future(coro)
+    task.add_done_callback(_discard_outcome)
     try:
-        return await asyncio.wait_for(coro, timeout=t)
+        return await asyncio.wait_for(asyncio.shield(task), timeout=t)
     except TimeoutError:
         tag = f" (instance {instance_id})" if instance_id else ""
         raise ToolError(

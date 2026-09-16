@@ -49,6 +49,29 @@ One behaviour is deliberately slower: a Promise that never settles used to answe
 `{}` instantly and is now killed at `timeout_ms` (`_clamp_timeout` +
 `_with_cdp_timeout`, the one home for that clamp — no second deadline inside the
 eval seam), reported as a timeout. The tab is usable immediately afterwards.
+
+**And `_with_cdp_timeout` is now SHIELDED, which fixes a latent crash the review
+made reachable.** A bare `asyncio.wait_for` cancels the work on expiry, which
+cancels nodriver's `Transaction` while it is still registered in
+`Connection.mapper`; when Chrome answers LATE, the listener task `set_result`s a
+cancelled future, dies of the `InvalidStateError`, and every later call on that
+tab times out with the generic "the browser may have crashed". Measured on Chrome
+152 for a Promise that settles after `timeout_ms` — and for a `navigate` that
+times out while Chrome commits late, which is F-882's shape and is still live
+below the wrapper in `browser_manager.navigate`'s own `wait_for` (handed to that
+finding; see the F-883 finding §2f). The wrapper now awaits `asyncio.shield` over
+a detached task: the deadline is unchanged, the late answer lands on a healthy
+future and is discarded, and the instance stays usable — pinned hermetically
+(nodriver's mechanism with a bare Future) and on real Chrome. What it costs: a
+timed-out multi-step operation runs to completion in the background instead of
+stopping part-way.
+
+The F-812 retry is keyed on the raw `exceptionDetails` now, not on the message:
+class `SyntaxError` AND no stack frame in the description (measured: a compile
+complaint's description is bare; every thrown Error's carries `\n    at`). So
+`throw new Error("Illegal return statement")` — page-authored — no longer re-runs a
+side-effecting script twice. A page that also overwrites `.stack` still can, and
+the finding says so.
 Everything else is byte-identical: a plain sync return, a nested object/array
 (including falsy leaves), `0`/`""`/`false`/`null`/`undefined`, `Infinity`, `args`,
 a synchronous throw, a non-serialisable value and a cycle all answer exactly as

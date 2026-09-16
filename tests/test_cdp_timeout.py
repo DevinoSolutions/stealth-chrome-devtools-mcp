@@ -130,23 +130,94 @@ class TestWithCdpTimeoutMechanism:
         assert results == ["done-0.1", "done-0.2", "done-0.3"]
 
     @pytest.mark.asyncio
-    async def test_timeout_cancels_inner_coroutine(self):
-        """After timeout, the inner coroutine should be cancelled."""
+    async def test_timeout_does_not_cancel_the_inner_coroutine(self):
+        """F-883 B1 — inverted from the pin that stood here ("the inner
+        coroutine should be cancelled"), deliberately and in the same PR.
+
+        Cancelling the inner coroutine cancels nodriver's ``Transaction`` while
+        it is still registered in ``Connection.mapper``; Chrome's late answer
+        then ``set_result``s a cancelled future inside the listener task, the
+        ``InvalidStateError`` ends the listener, and every later call on that
+        tab times out. Measured on Chrome 152 for a late-settling Promise AND
+        for a navigation that times out (F-882's shape). The deadline is
+        unchanged; only the shield is cancelled, and the work runs on.
+        """
         cancelled = False
+        finished = False
 
         async def trackable():
-            nonlocal cancelled
+            nonlocal cancelled, finished
             try:
-                await asyncio.sleep(9999)
+                await asyncio.sleep(1.5)
             except asyncio.CancelledError:
                 cancelled = True
                 raise
+            finished = True
 
-        with pytest.raises(Exception, match="timed out"):
-            await _with_cdp_timeout(trackable(), timeout=1)
+        with pytest.raises(ToolError, match="timed out"):
+            await _with_cdp_timeout(trackable(), timeout=0.5)
 
-        await asyncio.sleep(0.1)  # Let cancellation propagate
-        assert cancelled, "Inner coroutine should have been cancelled"
+        await asyncio.sleep(1.5)  # let the abandoned work run to its end
+        assert not cancelled, "the shield, not the work, is what the timeout cancels"
+        assert finished, "the abandoned work must run to completion, not stop"
+
+    @pytest.mark.asyncio
+    async def test_a_late_set_result_lands_on_a_healthy_future(self):
+        """The exact nodriver mechanism, hermetically: ``send()`` is
+        ``await tx`` on a bare Future that the LISTENER later ``set_result``s.
+        Under the old wrapper that future was cancelled at the timeout and the
+        late ``set_result`` raised ``InvalidStateError`` — in the listener, which
+        died of it. Under the shield it is a normal completion."""
+        transaction: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        async def send():
+            return await transaction
+
+        with pytest.raises(ToolError, match="timed out"):
+            await _with_cdp_timeout(send(), timeout=0.2)
+
+        assert not transaction.cancelled(), "the Transaction must never be cancelled"
+        transaction.set_result(
+            "late"
+        )  # what Connection._listener does — must not raise
+        await asyncio.sleep(0)
+        assert transaction.result() == "late"
+
+    @pytest.mark.asyncio
+    async def test_the_abandoned_outcome_is_retrieved_so_asyncio_stays_quiet(self):
+        """A task nobody awaits whose exception is never retrieved is logged by
+        the loop as "Task exception was never retrieved" — about a call already
+        reported as timed out. The done-callback retrieves it. Pinned on the
+        callback itself for both terminal states, because the loop's message is
+        emitted from ``Task.__del__`` and is not something a test can await."""
+        from stealth_chrome_devtools_mcp.embedded.tool_runtime import _discard_outcome
+
+        async def fails():
+            raise ValueError("late failure")
+
+        failed = asyncio.ensure_future(fails())
+        with pytest.raises(ValueError):
+            await failed
+        _discard_outcome(failed)  # must not raise
+
+        async def hangs():
+            await asyncio.sleep(9999)
+
+        cancelled = asyncio.ensure_future(hangs())
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        _discard_outcome(cancelled)  # must not raise either
+
+    @pytest.mark.asyncio
+    async def test_a_result_that_arrives_in_time_is_still_returned(self):
+        """The shield changes nothing on the happy path."""
+
+        async def quick():
+            await asyncio.sleep(0.05)
+            return {"ok": True}
+
+        assert await _with_cdp_timeout(quick(), timeout=5) == {"ok": True}
 
 
 # ---------------------------------------------------------------------------

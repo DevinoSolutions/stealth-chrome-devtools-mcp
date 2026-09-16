@@ -21,6 +21,7 @@ rather than waited out.
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -143,6 +144,44 @@ async def test_a_promise_that_never_settles_is_killed_at_timeout_ms(
 
         # The connection is still usable: the abandoned Promise is the PAGE's,
         # and nothing was left holding the renderer.
+        after = await execute(instance_id=iid, script="return 6 * 7;")
+        assert after == {"success": True, "result": 42, "error": None}
+    finally:
+        await _close(iid)
+
+
+async def test_a_promise_that_settles_after_the_timeout_leaves_the_instance_usable(
+    fixture_app_server,
+):
+    """F-883 B1. The never-settling node above cannot see this: Chrome never
+    answers there, so nothing reaches the listener. Here Chrome DOES answer —
+    LATE — and before the shield in ``_with_cdp_timeout`` that answer landed on
+    a cancelled ``Transaction``, raised ``InvalidStateError`` inside nodriver's
+    listener task and ended it: measured, the follow-up call timed out and the
+    instance was dead. The settle time is comfortably past ``timeout_ms`` and
+    the follow-up is sent only after the late answer has had time to arrive."""
+    iid, execute = await _on_the_page(fixture_app_server)
+    try:
+        with pytest.raises(ToolError) as raised:
+            await execute(
+                instance_id=iid,
+                script="return window.esDelayed(2500, 'late');",
+                timeout_ms=800,
+            )
+        assert "timed out" in str(raised.value).lower()
+
+        # Wait for the LATE answer to have been SENT — the page records the
+        # settlement on ``window.esSettled`` in the same tick Chrome answers the
+        # abandoned command. Polled through the tool, bounded, never a fixed
+        # sleep: every poll is itself a call that times out if the listener died.
+        deadline = time.monotonic() + 8.0
+        settled = None
+        while settled != "late" and time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+            probe = await execute(instance_id=iid, script="return window.esSettled;")
+            settled = probe["result"]
+        assert settled == "late", "the page never recorded the late settlement"
+
         after = await execute(instance_id=iid, script="return 6 * 7;")
         assert after == {"success": True, "result": 42, "error": None}
     finally:

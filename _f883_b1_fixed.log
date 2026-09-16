@@ -1,0 +1,18 @@
+
+--- A: execute_script, Promise settles at 9s, timeout_ms=1500 ---
+  mapper before : []
+  call          : ToolError: CDP operation timed out after 2s (instance b3adf315-f88a-4eb5-9cf7-59943837dbab). The brow
+  mapper after  : [9]  (abandoned tx still registered?)
+  waiting for Chrome's LATE answer ...
+  mapper late   : []
+  listener: ALIVE
+  follow-up 6*7 : {'success': True, 'result': 42, 'error': None}
+
+--- B: navigate to a 9s-header route, timeout=2 (F-882 shape) http://127.0.0.1:26891/slow ---
+  mapper before : []
+  call          : ToolError: CDP operation timed out after 30s (instance cece1db6-9538-4b1b-a345-131f92e2d94e). The bro
+  mapper after  : [8]  (abandoned tx still registered?)
+  waiting for Chrome's LATE answer ...
+  mapper late   : [8]
+  listener: DEAD (InvalidStateError: invalid state)
+  follow-up 6*7 : ToolError: CDP operation timed out after 10s (instance cece1db6-9538-4b1b-a345-131f92e2d94e). The bro

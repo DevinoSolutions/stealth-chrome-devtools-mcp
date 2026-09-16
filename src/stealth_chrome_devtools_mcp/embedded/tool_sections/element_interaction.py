@@ -386,8 +386,12 @@ async def execute_script(
     `const d = await (await fetch(u)).json(); return d.id;` both give you the data.
     A Promise that REJECTS raises with its reason — it is never reported as a
     success. A script that never settles is killed at `timeout_ms`, exactly like a
-    blocking one. (Before 2.1.9 a returned Promise came back as `{}` and a
-    rejection as `{}` with `success: true`.)
+    blocking one; a Promise that settles AFTER `timeout_ms` is discarded and the
+    instance stays usable. Note the flip side: a TRAILING expression that is a
+    Promise is now awaited too — `fetch('/slow')` as the last statement blocks up
+    to `timeout_ms` where it used to answer `{}` at once; write `void fetch(...)`
+    for fire-and-forget. (Before this fix a returned Promise came back as `{}`
+    and a rejection as `{}` with `success: true`.)
 
     ⚠️ Non-blocking code only. The script runs on the page's main thread, so
     anything that blocks it freezes the whole tab and makes every later call time

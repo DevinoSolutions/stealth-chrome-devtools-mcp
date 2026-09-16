@@ -55,10 +55,30 @@ Promise that never settles blocks the send exactly as a ``while(true)`` blocks t
 renderer, and the bound for both is the caller's: ``tool_runtime._clamp_timeout``
 + ``_with_cdp_timeout`` at the tool body, the ONE home for that clamp. This module
 deliberately does not pass CDP's own ``timeout`` as well — a second deadline is a
-second answer to "how long may a script run", and the two would drift.
+second answer to "how long may a script run", and the two would drift. And a
+Promise that settles AFTER that bound must not kill the tab: that is
+``_with_cdp_timeout``'s shield (F-883 B1), not anything here — a send this module
+made is never cancelled, only abandoned, so Chrome's late answer lands on a
+healthy future.
 
-A leaf: ``nodriver`` + ``tool_errors``, tab as an argument. It imports no other
-embedded module, and nothing else in the tree may evaluate caller JS.
+**Why the retry is keyed on the RECORD, not the message.** A ``ToolError``'s text
+is built from ``exception.description``, which a page controls:
+``throw new Error("Illegal return statement")`` would send a side-effecting script
+round the wrapper a second time. So :func:`_function_body_reason` reads the raw
+``exceptionDetails``: the class must be ``SyntaxError`` AND the description must
+carry no stack frame — measured on Chrome 152, a compile complaint's description is
+the bare ``SyntaxError: <message>`` while every thrown or rejected Error's is
+``error.stack`` and always contains a ``\n    at`` frame. (``stackTrace`` itself is
+NOT sent without ``Runtime.enable``, so it cannot be the witness.) What that still
+does not close is a page that constructs a ``SyntaxError`` and overwrites its
+``.stack`` to a bare message — measured, it passes — and the finding's §6 says so.
+
+A leaf: ``nodriver`` + ``tool_errors``, tab as an argument; it imports no other
+embedded module. It is THE seam for ``execute_script``. ``cdp_function_executor``
+still evaluates caller-authored source through its own KEEP-contract path
+(``inject_and_execute_script``, ``call_discovered_function``) — fixed for the same
+defect in its own home, deliberately not re-routed here, because it carries a
+different error convention (`{"success": False}` dicts, never a raise).
 """
 
 import json
@@ -86,6 +106,14 @@ _FUNCTION_BODY_COMPLAINTS: tuple[tuple[str, str], ...] = (
     (ILLEGAL_RETURN, "top-level 'return'"),
     (TOP_LEVEL_AWAIT, "top-level 'await'"),
 )
+
+#: The class Chrome gives a COMPILE complaint. A page can throw one too, which is
+#: why the class alone is not the trigger — see :func:`_function_body_reason`.
+_COMPILE_CLASS = "SyntaxError"
+
+#: The start of a stack frame inside an Error's ``description`` (Chrome puts
+#: ``error.stack`` there). A compile complaint has none: nothing ran.
+_STACK_FRAME = "\n    at "
 
 #: "the CDP result carried no ``value`` field at all", which is NOT the same
 #: thing as a ``value`` that IS ``None`` (an explicit JS ``null``). Reading an
@@ -150,15 +178,25 @@ def script_value(remote_object: object, exception_details: object) -> object:
     return json_value(remote_object)
 
 
-def _function_body_reason(message: str) -> str | None:
+def _function_body_reason(exception_details: object) -> str | None:
     """The phrase naming which compile complaint means "evaluate this as a
-    function body", or ``None`` for any other failure.
+    function body", or ``None`` for any other outcome — including no exception.
 
     Narrowness is the point: a script that fails for a reason of its own keeps
     its error and is never evaluated twice, so nothing that already worked
-    acquires a second execution or a changed meaning.
+    acquires a second execution or a changed meaning. Read off the raw record,
+    never off a message: the class must be Chrome's compile class and the
+    description must carry no stack frame, so ``throw new Error("Illegal return
+    statement")`` — page-authored text — is a throw, not a compile complaint,
+    and is not sent round again (module docstring, "keyed on the RECORD").
     """
-    lowered = message.lower()
+    exception = getattr(exception_details, "exception", None)
+    if getattr(exception, "class_name", None) != _COMPILE_CLASS:
+        return None
+    described = str(getattr(exception, "description", None) or "")
+    if _STACK_FRAME in described:
+        return None
+    lowered = described.lower()
     for complaint, reason in _FUNCTION_BODY_COMPLAINTS:
         if complaint in lowered:
             return reason
@@ -236,21 +274,26 @@ async def run(tab: Tab, script: str, args: list[object] | None = None) -> object
     what keeps ``await`` legal on both paths rather than on one of them.
     """
     if args:
-        serialized_args = ",".join(json.dumps(a) for a in args)
+        try:
+            serialized_args = ",".join(json.dumps(a) for a in args)
+        except (TypeError, ValueError) as e:
+            # Unreachable through MCP (args arrive as parsed JSON), but the one
+            # home is where a non-JSON argument joins the error convention.
+            raise ToolError(f"Script args are not JSON-serializable: {e!s}") from e
         expression = f"(async function() {{ {script} }})({serialized_args})"
     else:
         expression = script
 
     answer = await evaluate(tab, expression)
 
-    # Outside the send on purpose: a script that THREW is a failure of the
-    # script, not of the CDP call, so it must not be re-wrapped in the
-    # "Failed to execute script" (operational) message. F-795.
-    try:
+    # The RECORD decides whether this is a compile complaint about our own
+    # evaluation strategy (retry) or the script's own failure (raise) — and the
+    # retry re-evaluates the bare source, so it is only ever taken on the bare
+    # path: the args wrapper is already an async function body and cannot
+    # produce either complaint. Outside the send on purpose: a script that THREW
+    # is a failure of the script, not of the CDP call, so it must not be
+    # re-wrapped in the "Failed to execute script" (operational) message. F-795.
+    reason = None if args else _function_body_reason(answer[1])
+    if reason is None:
         return script_value(*answer)
-    except ToolError as exception:
-        reason = _function_body_reason(str(exception))
-        if reason is None:
-            raise
-
     return await as_async_function_body(tab, script, reason)

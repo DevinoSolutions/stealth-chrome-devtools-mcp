@@ -216,8 +216,14 @@ async def test_any_other_failure_is_still_evaluated_exactly_once():
     assert len(tab.cdp_frames) == 1
 
 
+# The shapes below are Chrome 152's, measured (finding §4, nit 1): a COMPILE
+# complaint's description is the bare ``SyntaxError: <message>``; every thrown
+# or rejected Error's description is ``error.stack`` and carries a frame.
+_FRAME = "\n    at <anonymous>:1:7"
+
+
 @pytest.mark.parametrize(
-    ("message", "expected"),
+    ("description", "expected"),
     [
         ("SyntaxError: Illegal return statement", "top-level 'return'"),
         (
@@ -225,18 +231,62 @@ async def test_any_other_failure_is_still_evaluated_exactly_once():
             "level bodies of modules",
             "top-level 'await'",
         ),
-        ("ReferenceError: nope is not defined", None),
         ("SyntaxError: Unexpected token '}'", None),
+        ("ReferenceError: nope is not defined" + _FRAME, None),
+        # The impostors (nit 1): a page THROWING the compile complaint's words.
+        # Its class is not SyntaxError, or its description carries a frame —
+        # either way it is a throw, and a throw is never sent round again.
+        ("Error: Illegal return statement" + _FRAME, None),
+        ("SyntaxError: Illegal return statement" + _FRAME, None),
+        ("SyntaxError: await is only valid in async functions" + _FRAME, None),
         ("", None),
     ],
 )
-def test_the_complaint_table_is_the_whole_trigger(message, expected):
+def test_the_record_is_the_whole_trigger(description, expected):
+    """The retry is keyed on the raw ``exceptionDetails`` — class AND the
+    absence of a stack frame — never on a message a page could author."""
     # Imported inside the test on purpose: the module is F-883's own, so a run
     # against the unfixed tree must RED on the assertions rather than on a
     # collection-time ImportError that says nothing about behaviour.
     from stealth_chrome_devtools_mcp.embedded import script_evaluation
 
-    assert script_evaluation._function_body_reason(message) == expected
+    _thrown, details = js_threw(description)
+    assert script_evaluation._function_body_reason(details) == expected
+
+
+def test_no_exception_is_no_trigger():
+    from stealth_chrome_devtools_mcp.embedded import script_evaluation
+
+    assert script_evaluation._function_body_reason(None) is None
+
+
+@pytest.mark.asyncio
+async def test_a_page_throwing_the_complaints_words_is_not_run_twice():
+    """Nit 1's defect, end to end: ``throw new Error("Illegal return
+    statement")`` used to match the message and re-run a side-effecting script
+    inside the wrapper. It is a throw; it costs ONE evaluation and raises."""
+    tab = FakeTab(evaluate_result=js_threw("Error: Illegal return statement" + _FRAME))
+
+    with pytest.raises(ToolError) as raised:
+        await DOMHandler.execute_script(
+            tab, "side.effect(); throw new Error('Illegal return statement')"
+        )
+
+    assert len(tab.cdp_frames) == 1, "a throw is never evaluated twice"
+    assert "Illegal return statement" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_the_args_path_never_retries_without_its_args():
+    """The retry re-evaluates the BARE source, so on the args path it would
+    drop the args. The args wrapper is already an async function body and
+    cannot produce either compile complaint; the gate makes that explicit."""
+    tab = FakeTab(evaluate_result=ILLEGAL_RETURN)
+
+    with pytest.raises(ToolError):
+        await DOMHandler.execute_script(tab, "return 1;", args=[7])
+
+    assert len(tab.cdp_frames) == 1
 
 
 # ---------------------------------------------------------------------------

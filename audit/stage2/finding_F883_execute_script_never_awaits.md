@@ -141,6 +141,58 @@ Both are fixed in their own home by making the wrapper `async` and awaiting the
 inner call — no second evaluate path is added, and the sends already carried the
 flag that makes it work.
 
+### 2f. B1 — a Promise that settles AFTER `timeout_ms` killed the tab (review blocker; fixed)
+
+Turning on `awaitPromise` made a latent crash reachable, and it was the worst
+class this product has: silent, surviving the call that caused it, and reported
+to the operator as "the browser may have crashed". Found by the independent
+review of `68cf1c4`; reproduced here before anything was changed.
+
+`tool_runtime._with_cdp_timeout` was a bare `asyncio.wait_for(coro)`. On expiry
+it cancels *coro*, which cancels nodriver's `Transaction` — a bare
+`asyncio.Future` — while its entry is STILL in `Connection.mapper`:
+`Connection.send` is `self.mapper[the_id] = tx; return await tx`, with no
+`finally`. When Chrome answers late, `Connection._listener` does
+`tx = self.mapper.pop(id); tx(**message)`; `Transaction.__call__` ends in
+`set_result` with no cancelled-future guard, inside the listener's `else:` branch
+with no `try`/`except`. The `InvalidStateError` propagates out of `_listener`
+and **ends the listener task**. From then on the connection dispatches no
+responses and no events; every later call on that tab times out.
+
+Measured (Chrome 152, nodriver 0.47, the branch's own `esDelayed`), both shapes:
+
+| shape | before the shield | after |
+|---|---|---|
+| A. `execute_script("return esDelayed(9000,'late')", timeout_ms=1500)`, then `6*7` on the same instance | `Connection.mapper` held `[9]` after the timeout; after the late answer `_listener_task.done() == True` with `InvalidStateError('invalid state')`; follow-up `CDP operation timed out after 10s` | listener `ALIVE`, follow-up `{'success': True, 'result': 42}` |
+| B. `navigate(url=<9 s-header route>)`, times out, then `6*7` | `mapper` held `[8]`; listener `DEAD (InvalidStateError)`; follow-up timed out | **still dead** — see below |
+
+At 2.1.8 shape A is unreachable for `execute_script` only because without
+`awaitPromise` the call never times out; **shape B is live on 2.1.8** and on
+every release that has `navigate`'s inner `wait_for`.
+
+**Shape B is F-882's shape, and it is a release-blocking product defect.**
+`navigate` is bounded twice: the tool body's `_with_cdp_timeout` (now shielded)
+AND `browser_manager.navigate`'s own bare
+`asyncio.wait_for(navigation_milestone.navigate(...), timeout=timeout_seconds)`
+at `browser_manager.py:1181` (plus the two `tab.evaluate` reads at `:1193` /
+`:1197` under the remaining budget). The inner `wait_for` cancels the
+`Page.navigate` transaction; when Chrome commits late — the F-882 report is
+exactly a navigation that times out while the page *does* load — the listener
+dies and the instance is dead from then on. That is a strong mechanical candidate
+for the user's "browsers randomly closing" / "sessions randomly disconnect"
+reports: the browser is fine, the tab's CDP listener is gone, and every tool
+answers with the generic timeout. `browser_manager.navigate` and
+`navigation_milestone` are owned by the F-882 agent and are deliberately NOT
+touched here; the measurement and the census below are handed over instead.
+
+**Census of the other bare `asyncio.wait_for` sites over a CDP send** (each is
+the same cancellation-while-registered shape; none is changed in this PR):
+`browser_manager.py:1181/1193/1197` (navigate), `:875/:894/:904/:929/:950`
+(close paths — the connection is being torn down, benign), `cdp_function_executor.py:846`,
+`tool_errors.py:213` (`_require_landing_ok`'s settled-URL read),
+`tool_sections/browser_management.py:372` (`get_instance_state`, deliberately not
+the wrapper), `tool_sections/debugging.py:71/:109`.
+
 ---
 
 ## 3. Fix (this PR)
@@ -191,6 +243,35 @@ second deadline is a second answer to "how long may a script run". A Promise tha
 never settles blocks the send exactly as `while(true)` blocks the renderer, and
 both are killed by the same wrapper.
 
+**The bound is SHIELDED, at its one home (B1).** `_with_cdp_timeout` now runs the
+work as a detached task and awaits `asyncio.shield(task)` under the same
+`wait_for`: on expiry the shield is cancelled, the task is not, nodriver's
+`Transaction` is never cancelled, Chrome's late answer lands on a healthy future,
+the listener lives, and the value is discarded. A done-callback
+(`_discard_outcome`) retrieves the abandoned outcome so asyncio never logs "Task
+exception was never retrieved" about a call already reported as timed out. The
+deadline is byte-identical; the reviewer's proposed location
+(`script_evaluation.evaluate`) was rejected by the coordinator as a second way —
+every tool bounded by the wrapper had the same exposure — and the two
+alternatives the reviewer rejected (popping our `mapper` entry, which turns the
+later `pop` into a `KeyError` that kills the listener the same way; a hand-built
+Transaction double in the hot path) were not re-litigated. What the shield COSTS
+is named in its docstring: a timed-out multi-step operation now runs to
+completion in the background instead of stopping part-way.
+
+**The retry is keyed on the RECORD, not the message (review nit 1).** A page
+controls `exception.description`, so `throw new Error("Illegal return statement")`
+used to send a side-effecting script round the wrapper twice — pre-existing from
+F-812, and F-883 had added a second spoofable phrase. `_function_body_reason`
+now reads the raw `exceptionDetails`: `exception.class_name` must be
+`SyntaxError` AND the description must carry no stack frame. Measured on Chrome
+152: a compile complaint's description is the bare `SyntaxError: <message>`;
+every thrown or rejected Error's is `error.stack` and carries `\n    at`. The
+reviewer's suggested witness — absence of `exceptionDetails.stackTrace` — does
+NOT work as stated: nodriver reports `stack_trace=None` for every shape,
+including page throws, because Chrome sends it only under `Runtime.enable`, which
+this seam does not send. The residual is in §6.
+
 **The docstring now describes the tool.** It states that top-level `await` works,
 that a returned Promise is awaited for you, that a rejection raises and is never
 reported as a success, and that a script that never settles is killed at
@@ -231,7 +312,28 @@ subtype=promise, value={})` when it was not, which is what Chrome sends
 green for the defect, which is exactly how the first draft of two of these nodes
 passed against 2.1.8 before the model existed.
 
-### Hermetic — `tests/test_execute_script_async.py` (22 nodes)
+### B1 pins — RED without the shield, GREEN with it (same tree, shield lines removed)
+
+```
+tests/test_e2e_execute_script_async.py::test_a_promise_that_settles_after_the_timeout_leaves_the_instance_usable
+    RED:   ToolError: CDP operation timed out after 10s   (the follow-up 6*7 — dead tab)
+tests/test_cdp_timeout.py::TestWithCdpTimeoutMechanism::test_timeout_does_not_cancel_the_inner_coroutine
+    RED:   AssertionError: the shield, not the work, is what the timeout cancels
+tests/test_cdp_timeout.py::TestWithCdpTimeoutMechanism::test_a_late_set_result_lands_on_a_healthy_future
+    RED:   AssertionError: the Transaction must never be cancelled
+                                                            -> 3 passed in 15.28 s
+```
+
+The second hermetic node is nodriver's exact mechanism with a bare `Future` in
+the Transaction's place: after the timeout, `set_result` on it must be a normal
+completion — under the old wrapper it was the `InvalidStateError` that killed the
+listener. `test_timeout_cancels_inner_coroutine`, the pin that stood in that
+file asserting the OLD behaviour, is inverted deliberately in the same PR. The
+E2E node polls `window.esSettled` through the tool itself — every poll is a call
+that would time out if the listener were dead — rather than sleeping, and its
+settle time (2.5 s) is comfortably past its `timeout_ms` (800).
+
+### Hermetic — `tests/test_execute_script_async.py` (28 nodes)
 
 Pins the MECHANISM, because a `FakeTab` cannot resolve a Promise — only Chrome
 can: `awaitPromise` rides on both sends; `userGesture` /
@@ -247,7 +349,7 @@ expressions the fix deliberately rewrote (`(async () => …)`,
 `(async function() …)`), and `tests/test_error_typing.py`'s wrapped-retry node
 now names the seam's new home.
 
-### Real Chrome — `tests/test_e2e_execute_script_async.py` (7 nodes)
+### Real Chrome — `tests/test_e2e_execute_script_async.py` (8 nodes)
 
 Against `/es_async.html`, appended at the END of `tests/fixture_routes.py` as
 `es_*`: a deliberately inert local page whose only contribution is three Promises
@@ -260,10 +362,14 @@ One node each: top-level `await`; a returned Promise's value; a rejected Promise
 → `ToolError` carrying its reason; a never-settling Promise → timeout inside a
 window around `timeout_ms=1500` **and the tab still usable afterwards**; a sync
 throw (unchanged); a nested object/array through both the direct and the awaited
-path (same shape, falsy leaves included); and `args`, plain and awaited.
+path (same shape, falsy leaves included); `args`, plain and awaited; and the B1
+pin — a Promise that settles AFTER `timeout_ms` (`esDelayed(2500)` under
+`timeout_ms=800`), after which the instance must still answer.
 
 No fixed sleep is an oracle. The un-settling node reads a clock only to bound an
-answer it already has, because `timeout_ms` is the thing under test.
+answer it already has, because `timeout_ms` is the thing under test; the
+late-settle node polls `window.esSettled` THROUGH the tool until the page has
+recorded the settlement, so every poll is itself the liveness witness.
 
 ### One SOFT golden, updated deliberately
 
@@ -333,13 +439,42 @@ round trips, a global on the page, and a race, in place of one `await`.
    operational (`Failed to execute script: …`), not as the script's own. Correct
    — the script did not throw — but the message names CDP rather than the cycle.
 
-4. **The never-settling Promise is bounded, not cancelled in the page.** The
-   `asyncio.wait_for` at the tool body cancels the *send*; the Promise itself
-   stays pending in the page until the document goes away. That costs nothing
-   measurable (a pending Promise holds no thread) and the tab is usable
-   immediately afterwards — measured — but it is not the same thing as killing
-   the work. CDP's `Runtime.evaluate` `timeout` would do that, and is deliberately
-   not used: see §3's "no new deadline".
+4. **A timed-out script is bounded, not cancelled in the page.** The wrapper
+   abandons the *send* (shielded — B1); the Promise stays pending in the page
+   until the document goes away, and the detached task holds its `Transaction`
+   in `Connection.mapper` until Chrome answers, or forever for a Promise that
+   never settles (one dict entry — the shape 2.1.8 already left behind). The tab
+   is usable afterwards for BOTH settlement shapes that were measured — never
+   settles (`esNever`) and settles late (`esDelayed`, §2f) — and both are pinned
+   on real Chrome. A Promise that settles late is DISCARDED, not delivered.
+   CDP's `Runtime.evaluate` `timeout` would kill the work in the page and is
+   deliberately not used: see §3's "no new deadline".
+
+4b. **The shield changes what a timed-out MULTI-STEP operation does.** Before,
+   `wait_for` cancelled it part-way (and, if a send was in flight, killed the
+   listener); now it runs to completion detached. A `type_text` that times out
+   keeps typing in the background; a `scroll_page` keeps settling. Named as the
+   price of not killing the tab — the alternative was a dead instance — and it
+   is bounded by the operation's own remaining work, never by a new deadline.
+
+4c. **`navigate`'s inner `wait_for` is NOT shielded — release-blocking, handed
+   over (§2f).** `browser_manager.py:1181` cancels the `Page.navigate` transaction
+   itself, below the shielded wrapper, so a navigation that times out while
+   Chrome commits late STILL kills the tab (measured, this PR's own probe, after
+   the shield). It is F-882's shape; the file is the F-882 agent's; the census of
+   every other bare `asyncio.wait_for` over a CDP send is in §2f for the
+   follow-up finding.
+
+4d. **The retry trigger can still be spoofed by a page that overwrites `.stack`.**
+   `const e = new SyntaxError('Illegal return statement'); e.stack = 'SyntaxError:
+   Illegal return statement'; throw e;` — measured: `class_name='SyntaxError'`,
+   no frame in the description — passes the record check and re-runs the script
+   inside the wrapper. The trivial impostors (`throw new Error(...)`, a plain
+   `throw new SyntaxError(...)`) no longer do. The only airtight fix is not to
+   decide from Chrome's error record at all (a JS parse on our side), which is
+   out of proportion; "a page that goes to that length can make our client run
+   its script twice" is now a written decision rather than an accident, and a
+   pin holds the narrowed rule.
 
 5. **`inject_and_execute_script` and `call_javascript_function` are fixed but not
    re-homed.** They keep their `{"success": …}` dict shape, which is
@@ -355,6 +490,18 @@ round trips, a global on the page, and a race, in place of one `await`.
    CDP is sent. F-883 makes the *recommended* alternative (`await fetch`) actually
    work; it does not loosen the guard, and a script that tries to block the
    renderer still costs zero round trips.
+
+7a. **`json.dumps` on `args` now joins the convention** (review nit 4): a
+   non-JSON-serializable entry raises `ToolError` from the one home instead of a
+   raw `TypeError`. Unreachable through MCP (args arrive as parsed JSON).
+
+7b. **A trailing expression that is a Promise is now awaited** (review nit 5):
+   `fetch('/slow')` as the last statement used to answer `{}` at once and now
+   blocks up to `timeout_ms`. That is the intended fix; the docstring names the
+   one-token remedy (`void fetch(...)`).
+
+7c. **The version string is gone from the docstring** (review nit 7): "Before
+   this fix", not "Before 2.1.9" — the CHANGELOG entry is under `## Unreleased`.
 
 7. **`execute_python_in_browser` was not audited.** It translates Python to JS and
    runs it through its own path in `cdp_function_executor`; whether it shares this
