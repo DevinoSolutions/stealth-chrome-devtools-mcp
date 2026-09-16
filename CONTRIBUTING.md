@@ -180,6 +180,82 @@ golden exists to give.
 
 ---
 
+## Lifecycle resilience: the invariants `test_e2e_lifecycle_resilience.py` guards
+
+Two operator symptoms — *"the MCP server went to `CONNECTION_CLOSED` mid-session"* and
+*"my browsers closed on their own"* — have the same shape in the code: something
+decided the shared backend was no longer the backend. Five machines can decide it, and
+each has its own finding: the proxy watchdog's condemnation (F-820),
+`proxy_selfheal`'s heal/teardown (F-838, F-843), a source-fingerprint eviction
+(F-829), orphan reaping (`process_cleanup` + `browser_pid_registry`'s owner stamps),
+and MCP session hygiene (F-862).
+
+`tests/test_e2e_lifecycle_resilience.py` drives a REAL fleet — the installed console
+launcher over stdio JSON-RPC, a detached backend on an isolated `HOME` and an
+OS-assigned port, real headless Chrome — applies one stress per node, and asserts the
+same four things every time:
+
+1. the backend pid recorded in the isolated `server.json` is **unchanged**;
+2. every browser spawned before the stress is **alive AND usable** — pid running *and*
+   a CDP round trip (`get_active_tab` + `execute_script`) answers, which is what
+   separates "the process is still there" from "the browser still works";
+3. every `tools/call` on a surviving proxy got **exactly one non-error frame**, and no
+   proxy's stdout reached **EOF** (an EOF *is* the client's `CONNECTION_CLOSED`);
+4. **zero lifecycle incidents** in the proxy/backend logs written during the stress.
+
+**If you change a lifecycle log line, that module is what breaks.** The incident
+oracle is the product's own text, because `observability.capture_lifecycle` is a no-op
+under the suite's `STEALTH_MCP_NO_ERROR_REPORTING=1` and only the piggybacked log line
+survives. `LIFECYCLE_INCIDENTS` maps each kind to its substring, and
+`test_lifecycle_incident_patterns_match_the_product_strings` asserts each substring
+still occurs in the module that emits it — so a rename turns *that* node red instead
+of leaving six stress nodes matching nothing. A watchdog STRIKE
+(`probe failed n/3`) is deliberately **not** an incident: F-820 exists precisely so
+strikes alone never condemn, and a node that failed on one would re-assert the defect.
+Strikes are counted and printed.
+
+**If you add a periodic reaper, re-derive the idle window.** The idle node out-waits
+the longest periodic period in the tree, computed from
+`session_hygiene.ABANDONED_AFTER_SECONDS + SWEEP_INTERVAL_SECONDS` and asserting that
+`Settings.browser_idle_timeout` still defaults to `0`. A new reaper with a longer
+period must be added to that derivation, never left implicit.
+
+**The one open defect this module pins (`xfail(strict=True)`): an eviction closes
+another session's browser, silently.** When a backend is replaced **on the same
+port** — the F-829 source-fingerprint eviction, and by extension `restart` — the
+cold-start lock calls `singleton._clear_stale_backend` → `_terminate_backend` on the
+running backend, and afterwards the browser that backend owned is gone — measured six
+times with no exception, on the pid captured at spawn. (Which of the two candidate
+mechanisms kills it was not isolated: dying with the terminated backend, or being
+reaped as unowned by the replacement's orphan recovery, since `browser_pid_registry`
+stamps the *backend* as owner.) The other
+session is never told: its log carries no condemnation, no heal and no teardown — at
+most one transient `probe failed 1/3` that resets itself. Both of the proxy's death
+witnesses are PORT-scoped — `backend_watchdog.watch_liveness` probes the port, which
+the replacement binds and answers, so the three strikes needed to open a confirmation
+never accumulate; and the streamable-HTTP bridge is per-request, so nothing "breaks"
+for `_confirm_bridge_verdict`. What actually died is the MCP **session**, and nothing
+watches that, which makes `proxy_selfheal`'s entire recovery unreachable on the most
+common way a backend goes away. The client-visible half *varies* (5 of 6 runs the
+loser answered `Session terminated` forever; 1 of 6 it kept answering over a backend
+that no longer had its browser), so the node asserts the half that did not vary — the
+browser — and prints the rest.
+
+The proposed universal rule, for whoever fixes it: make the watchdog's per-tick check
+**session-scoped as well as port-scoped**. The backend already hands each proxy an
+`mcp-session-id`; a proxy that gets an invalid-session answer for its OWN id knows its
+backend is gone even though the port answers. Feed that into the existing
+`watch_liveness` verdict and the existing heal path fires, so an evicted session
+re-bridges instead of bricking. A second, independent rule removes the churn rather
+than the symptom: give the backend record an **order** (installed version, then a
+monotonic stamp written at record time) and let only a strictly-newer client evict —
+`backend_registry.fingerprint_mismatch` answers "these digests differ", never "mine is
+newer", so today nothing makes an eviction ping-pong impossible; an older or
+equal-but-different client should adopt the running backend, or exit naming both
+digests and the upgrade that reconciles them.
+
+---
+
 ## Branch / PR / commit conventions
 
 - Work on a branch; **do not** commit to `main` directly.

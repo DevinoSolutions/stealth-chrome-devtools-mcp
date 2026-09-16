@@ -1,5 +1,57 @@
 # Changelog
 
+## Unreleased
+
+### Tests — lifecycle resilience E2E (disconnects, browsers closing)
+
+`tests/test_e2e_lifecycle_resilience.py` — eight nodes that drive a REAL fleet (the
+installed console launcher over stdio JSON-RPC, a detached backend on an isolated
+`HOME` and an OS-assigned port, real headless Chrome) and assert, after each stress:
+the recorded backend pid is unchanged; every browser spawned before the stress is
+still alive AND answers a CDP round trip; every `tools/call` on a surviving proxy got
+exactly one non-error frame and no proxy's stdout reached EOF; and ZERO lifecycle
+incidents were written to the proxy/backend logs. The incident vocabulary is the
+product's own log lines (`confirmed unusable`, `confirmed gone after a lost
+connection`, `backend healed: re-bridging`, `backend unhealable after`, `times in a
+row`, `backend stale (source changed), evicting`) — read from the logs rather than
+from `capture_lifecycle`, which is a no-op under the suite's
+`STEALTH_MCP_NO_ERROR_REPORTING=1` — and one hermetic node asserts each of those
+substrings still occurs in the module that emits it, so a reworded line turns the
+vocabulary red instead of making every stress node vacuous. A watchdog STRIKE is
+deliberately not an incident (F-820) and is counted and printed instead.
+
+Stresses, one node each, with the measured wall time and the numbers asserted on:
+CPU saturation (20 s, `os.cpu_count()*2` normal-priority busy loops, two proxies
+calling every ~1 s); a hard-killed sibling proxy; 30 `initialize`+DELETE liveness
+sessions plus five clean proxy connect/disconnect cycles; a session idle past
+`session_hygiene.ABANDONED_AFTER_SECONDS + SWEEP_INTERVAL_SECONDS` (the longest
+periodic reaper in the tree, derived from those constants rather than typed); a
+three-proxy 60 s soak of navigate/scroll/type/screenshot against the new
+`/life/lifecycle.html` fixture route; and two proxies whose package source
+fingerprints differ, sharing one state dir.
+
+**One finding, pinned as `xfail(strict=True)` and not fixed here: a
+source-fingerprint eviction CLOSES ANOTHER SESSION'S BROWSER, silently.** Measured
+six times with no exception. The evicting proxy's cold-start lock calls
+`singleton._clear_stale_backend` → `_terminate_backend` on the running backend, and
+afterwards the browser that backend owned is gone (measured on the pid captured at
+spawn; which of the two candidate mechanisms kills it — dying with the terminated
+backend, or being reaped as unowned by the replacement's orphan recovery, since
+`browser_pid_registry` stamps the BACKEND as owner — was not isolated). The
+other session never asked for that and is never told: its proxy log carries no
+condemnation, no heal and no teardown — at most one transient `probe failed 1/3` that
+resets itself. Both of the proxy's death witnesses are PORT-scoped and the replacement
+binds the SAME port, so `backend_watchdog` keeps getting an answer and the
+streamable-HTTP bridge never "breaks" for `_confirm_bridge_verdict`; what actually
+died is the MCP SESSION, which nothing watches, leaving `proxy_selfheal`'s entire
+recovery unreachable on the most common way a backend goes away. The client-visible
+half varies (5 of 6 runs: every later call answers
+`{"code": 32600, "message": "Session terminated"}`; 1 of 6: the session kept answering
+over a backend that no longer had its browser), so the node asserts the half that did
+not vary. The eviction itself converges — exactly one wave in all six runs, asserted
+by a sibling node — but only because the loser never notices, not because any rule
+makes a ping-pong impossible. Two proposed universal rules are in `CONTRIBUTING.md`.
+
 ## 2.1.8
 
 ### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)
