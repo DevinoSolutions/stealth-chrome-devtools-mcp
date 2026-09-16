@@ -106,6 +106,39 @@ This is a tool **schema change** — `scroll_page`'s `output_schema` in
 already serves. A caller that treated the old `true` as proof must read
 `scrolled` / `at_edge` / `settled` instead.
 
+### Fixed — `scroll_page` could not move an app shell (F-878)
+
+A page laid out as `body{overflow:hidden}` plus one scrolling `div` — the
+default of every SPA starter template, and where infinite feeds, virtualised
+lists and lazy loading live — is not scrolled by `window.scrollTo` at all.
+F-875 made that visible (`scrolled: false`, `max_scroll_y: 0`) rather than
+silently wrong; this makes it work. `scroll_page` now picks the page's **real**
+scroller and drives that.
+
+Which element is "the" scroller when several overflow was measured before it was
+decided: twelve `data:` fixtures through the product path against real headless
+Chrome 152. `document.scrollingElement` alone — what the tool used until now —
+is right **4 times out of 12**. The two obvious heuristics score 9 and 8: the
+largest-area rule with a coverage floor finds nothing in a three-column mail
+layout and lets a scrollbar's width (0.8 %) rank a `body` that can move 20 px
+above a shell that can move 7023; the element-under-the-viewport-centre rule
+walks INWARD to a page's own data grid and is blind behind a `position:fixed`
+scrim. The rule that ships scores 12/12: **if the document scroller can move on
+the requested axis it IS the scroller** (so a plain page, a quirks-mode page, a
+scroll-snap page and a nested box inside a scrolling document are all unchanged,
+and the JS generated for them is byte-identical to before), otherwise the
+element with the largest viewport-clipped area that can move on that axis, near
+ties broken by the larger extent. The axis comes from the direction, so
+`direction="right"` now finds a horizontal-only strip that neither heuristic
+could see.
+
+The record grew two fields, because the pick is a judgement and a caller is
+entitled to see it: `scroller` (`{tag, id, classes}` of the element that was
+actually driven — shape only, bounded in the page itself) and
+`scroller_is_document`. The `scroll_page` **description** in
+`tests/goldens/tool_surface.json` changes with them; the input and output
+schemas do not, and no other tool moved.
+
 ## 2.1.6
 
 ### Fixed — `get_instance_state` reported empty storage as if it were the truth (F-869)
