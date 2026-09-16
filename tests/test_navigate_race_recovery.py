@@ -8,14 +8,19 @@ F-817, escaping raw because `navigate` decided recoverability from its OWN
 substring list — and a `KeyError` whose arg is a CDP event class matches none of
 those markers, so the very first attempt re-raised it at the caller.
 
+Since F-881 the navigation leaves the product through `send(Page.navigate)`
+rather than `tab.get` (whose wait was a 0.5 s sleep), so the racing double
+raises from THAT send; what is pinned is unchanged — the race reaches navigate's
+retry, and the verdict comes from the one classifier.
+
 The fix is reach, not a second classifier: `_is_recoverable_navigation_error`
 asks `element_resolution.recoverable_race` — the one home for "is this a known
 nodriver race" — and navigate's own budget (2 attempts) is untouched. These pins
 therefore assert both halves: the races are recovered, and the verdict comes
 from that one function (patch it out and navigate stops recovering).
 
-Hermetic: a fake tab whose `get()` raises the real nodriver exception objects,
-built the way the library builds them.
+Hermetic: a fake tab whose `Page.navigate` send raises the real nodriver
+exception objects, built the way the library builds them.
 """
 
 from __future__ import annotations
@@ -50,31 +55,37 @@ def _stale_node() -> ProtocolException:
 
 
 class _RacingTab(FakeTab):
-    """A tab whose FIRST ``get()`` raises ``error``; the next one navigates."""
+    """A tab whose FIRST ``Page.navigate`` raises ``error``; the next navigates.
+
+    ``navigate_urls`` is every url a ``Page.navigate`` was sent for, raced or
+    not — the ``get_calls`` of the ``tab.get`` era."""
 
     def __init__(self, error: BaseException) -> None:
         super().__init__(url=URL, evaluate_map=NAV_EVALUATES)
         self._error: BaseException | None = error
+        self.navigate_urls: list[str] = []
 
-    async def get(self, url: str, *args: Any, **kwargs: Any) -> Any:
-        if self._error is not None:
-            error, self._error = self._error, None
-            self.get_calls.append(url)
-            raise error
-        return await super().get(url, *args, **kwargs)
+    async def send(self, cdp_obj: Any, *args: Any, **kwargs: Any) -> Any:
+        if getattr(getattr(cdp_obj, "gi_code", None), "co_name", None) == "navigate":
+            self.navigate_urls.append(next(cdp_obj)["params"]["url"])
+            cdp_obj.close()
+            if self._error is not None:
+                error, self._error = self._error, None
+                raise error
+            return self._navigate(self.navigate_urls[-1])
+        return await super().send(cdp_obj, *args, **kwargs)
 
 
 @pytest.fixture
 def navigating_manager(monkeypatch):
-    """A ``BrowserManager`` whose instance bookkeeping and post-nav waits are
-    stubbed, leaving ``tab.get`` and the retry decision as the live behaviour."""
+    """A ``BrowserManager`` whose instance bookkeeping is stubbed, leaving the
+    ``Page.navigate`` send and the retry decision as the live behaviour."""
 
     async def noop(*args, **kwargs):
         return None
 
     monkeypatch.setattr(BrowserManager, "touch_instance", noop)
     monkeypatch.setattr(BrowserManager, "update_instance_state", noop)
-    monkeypatch.setattr(BrowserManager, "_wait_for_navigation_condition", noop)
     return BrowserManager()
 
 
@@ -106,7 +117,7 @@ async def test_navigate_recovers_from_the_nodriver_handler_race(
     result = await navigating_manager.navigate(instance_id="iid-1", url=URL)
 
     assert result["success"] is True
-    assert tab.get_calls == [URL, URL]  # raced once, recovered on the retry
+    assert tab.navigate_urls == [URL, URL]  # raced once, recovered on the retry
 
 
 async def test_navigate_recovers_from_the_stale_document_race(
@@ -119,7 +130,7 @@ async def test_navigate_recovers_from_the_stale_document_race(
     result = await navigating_manager.navigate(instance_id="iid-1", url=URL)
 
     assert result["success"] is True
-    assert tab.get_calls == [URL, URL]
+    assert tab.navigate_urls == [URL, URL]
 
 
 async def test_navigate_still_refuses_to_retry_an_unrelated_failure(
@@ -132,7 +143,7 @@ async def test_navigate_still_refuses_to_retry_an_unrelated_failure(
     with pytest.raises(RuntimeError, match="boom"):
         await navigating_manager.navigate(instance_id="iid-1", url=URL)
 
-    assert tab.get_calls == [URL]
+    assert tab.navigate_urls == [URL]
 
 
 # ---------------------------------------------------------------------------
@@ -165,4 +176,4 @@ async def test_navigate_stops_recovering_when_the_one_classifier_says_no(
     with pytest.raises(KeyError):
         await navigating_manager.navigate(instance_id="iid-1", url=URL)
 
-    assert tab.get_calls == [URL]
+    assert tab.navigate_urls == [URL]

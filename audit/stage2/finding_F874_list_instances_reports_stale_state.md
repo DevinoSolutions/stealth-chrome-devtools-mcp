@@ -198,3 +198,13 @@ true of both the defect and the fix.
   deliberately NOT fixed in this PR: the honest answer changes `scroll_page`'s
   return from `bool` to a record, which is its own schema change and its own
   deliberate golden update.
+* **Follow-up, F-881:** this finding's e2e test failed twice on Windows gates at
+  its FIRST assertion — `navigate`'s own `title`, `''` for a `data:` page with a
+  `<title>` — before `list_instances` was asked anything. Measured: `navigate`'s
+  `wait_until="load"` wait had never waited (nodriver's `Tab.wait(t)` takes a
+  duration; an event class skips it), and the 0.5 s `tab.get` sleep that stood in
+  for it is not a guarantee on a loaded runner. Row 2's "the `navigate` tool had
+  returned `title: ""`" is in part that defect, not only Amazon's late title. The
+  target-info title this finding reads trails `document.title` by ~1–3 ms and both
+  are after `load`; `tab_identity` is unchanged. See
+  `finding_F881_navigate_returns_before_load.md`.
