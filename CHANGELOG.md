@@ -37,6 +37,18 @@ as characterization — it is the liveness check behaving as designed.
 `snapshot.exists()` arms of the fallback collapsed into one call site, which
 paid for the comment that explains the widening.
 
+The contention hint that decorates a failed concurrent spawn no longer asserts
+the mechanism. It said the spawns "contend for the same Chrome profile", but the
+only fact that module has is an integer, and after both F-834 layers concurrent
+spawns are handed distinct reserved clone directories — so that sentence was
+frequently false. Measured false on the coverage gate's macOS/ARM64 cell (run
+35150887345, attempt 2): a fleet that had already serialised its one
+master-taking lead spawn still lost a follower to `ConnectionRefusedError`, with
+every follower on its own directory, where a two-core runner under five
+simultaneous Chrome launches is the likelier cause. The paragraph now says which
+part of it is measured, offers both causes without picking one, and keeps the one
+remedy that serves either. The `no_sandbox` disclaimer is unchanged.
+
 ### Fixed — F-885: proxy/backend-death tests touched the developer's live `~/.stealth-mcp` record
 
 `tests/test_proxy_backend_death.py::TestProxyExitsOnBackendDeath` ran an

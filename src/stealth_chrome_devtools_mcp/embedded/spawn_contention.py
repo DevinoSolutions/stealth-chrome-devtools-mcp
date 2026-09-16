@@ -9,6 +9,20 @@ actual cause (N spawns funnelling into one profile directory) was found. A
 failed spawn that overlapped siblings therefore says so, and says so *about* the
 advice, so the next reader does not chase it again.
 
+**It names the count, never the mechanism.** The only fact this module has is an
+integer: how many spawns were in flight. Whether they shared a directory is not
+knowable here, and since F-834's own layers it is frequently FALSE — concurrent
+spawns are handed distinct, reserved clone directories (stage 2 per ATTEMPT,
+stage 1 for the loser of the master race), so the shared-profile mechanism the
+2026-08-30 incident turned on is one candidate among two rather than the answer.
+Measured on the coverage gate's macOS/ARM64 cell (run 35150887345, attempt 2): a
+fleet that had ALREADY serialised its one master-taking lead spawn still lost a
+follower to ``ConnectionRefusedError``, with all five followers on their own
+directories — for that failure the old wording's "contend for the same Chrome
+profile" was simply untrue, and the likelier cause was a two-core runner. The
+paragraph therefore says what is measured, offers both causes, and lets the one
+remedy that serves both stand: serialize, or retry once the others settle.
+
 **A sibling of ``spawn_exhaustion``, deliberately not folded into it.** That
 module answers "is this machine out of browser-process capacity" and its own
 docstring is explicit that a different question deserves a different predicate
@@ -46,9 +60,12 @@ def contention_hint(in_flight: int) -> str | None:
         return None
     return (
         f"\n\nSpawn diagnostics: {in_flight} spawn_browser calls were in flight "
-        "in this backend when this one failed. Concurrent spawns contend for the "
-        "same Chrome profile — only one process may hold a user-data-dir — and "
-        "that is a known cause of this exact connect failure (F-834). Any "
+        "in this backend when this one failed. That COUNT is measured; what "
+        "these spawns were contending FOR is not, and this hint does not guess. "
+        "Two causes fit, and concurrent spawning is a known cause of this exact "
+        "connect failure under either (F-834): Chrome's own profile singleton "
+        "lets only one process hold a user-data-dir, and N simultaneous Chrome "
+        "launches cost CPU, memory and process handles. Any "
         "'running as root / pass no_sandbox=True' advice in the message above "
         "comes from nodriver and does NOT apply here: the sandbox setting is "
         "unrelated to this failure.\n"

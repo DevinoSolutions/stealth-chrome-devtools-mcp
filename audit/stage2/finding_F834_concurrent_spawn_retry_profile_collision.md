@@ -204,9 +204,11 @@ entry at FIRE time; the sweep-start snapshot was the defer-time answer.
 
 ### Layer 3 — honest error text (`spawn_contention.py`, new leaf)
 
-`contention_hint(in_flight)` renders a paragraph naming the count, the cause,
-and — explicitly — that nodriver's root/`no_sandbox` advice does **not** apply
-here. It is appended at the one composition site in `browser_manager`, right
+`contention_hint(in_flight)` renders a paragraph naming the count, the two
+candidate causes, and — explicitly — that nodriver's root/`no_sandbox` advice
+does **not** apply here. (It named ONE cause as *the* cause until the stage-1
+work below; see "The hint names the count, never the mechanism".) It is
+appended at the one composition site in `browser_manager`, right
 beside F-811's `exhaustion_hint`, each carrying its own `"\n\n"` so the site
 stays a bare concatenation. `BrowserManager` tracks `_spawns_in_flight` and the
 per-burst `_spawn_peak_in_flight`; the hint reads the **peak**, because one
@@ -284,6 +286,30 @@ swallowed first failure. Before: one instance and two
 because you are running as root? …`.
 
 Pins: `tests/test_concurrent_spawn_collision.py` (stage-1 section).
+
+### The hint names the count, never the mechanism
+
+`contention_hint` said: *"Concurrent spawns contend for the same Chrome profile
+— only one process may hold a user-data-dir — and that is a known cause of this
+exact connect failure."* The module has exactly one fact: an integer. Whether
+the spawns shared a directory is not knowable at that site, and after both
+stages of F-834 it is frequently FALSE — concurrent spawns are handed distinct,
+reserved clone directories (stage 2 per ATTEMPT, stage 1 for the loser of the
+master race).
+
+Measured on the coverage gate's macOS/ARM64 cell, run 35150887345 attempt 2: the
+fleet test had **already serialised** its one master-taking lead spawn, so the
+five followers each resolved to their own protected clone directory — and one of
+them still failed with `ConnectionRefusedError: [Errno 61]` carrying this hint.
+For that failure the sentence was simply untrue, and a two-core runner under five
+simultaneous Chrome launches is the likelier cause.
+
+The paragraph now states what is measured (the count), offers both causes without
+picking one, and keeps the one remedy that serves either — serialize, or retry
+once the others settle. The `no_sandbox` disclaimer and the self-separating
+`"\n\n"` are unchanged, and F-834 is still mentioned exactly once, which is what
+`tests/test_concurrent_spawn_collision.py` pins the disclaimer's position
+against.
 
 ### Residual (NOT fixed here)
 

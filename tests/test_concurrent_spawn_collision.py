@@ -299,6 +299,32 @@ def test_contention_hint_carries_its_own_separator_and_never_raises():
     assert "3" in hint
 
 
+def test_the_hint_names_the_count_and_never_asserts_a_shared_directory():
+    """The paragraph may claim only what this module can know: an integer.
+
+    F-834's own layers hand concurrent spawns DISTINCT reserved directories —
+    stage 2 per ATTEMPT, stage 1 for the loser of the master race — so a hint
+    that states they "contend for the same Chrome profile" asserts a mechanism
+    it never measured, and one that is frequently false. Measured false on the
+    coverage gate's macOS/ARM64 cell (run 35150887345, attempt 2): a fleet that
+    had already serialised its one master-taking lead spawn still lost a
+    FOLLOWER to `ConnectionRefusedError` with every follower on its own
+    directory, where the likelier cause was a two-core runner.
+    """
+    hint = spawn_contention.contention_hint(5)
+
+    assert "5 spawn_browser calls were in flight" in hint
+    assert "same Chrome profile" not in hint, "the hint asserted the mechanism"
+    assert "measured" in hint, "the hint must say which part of it IS known"
+    # Both causes offered, neither asserted as the answer.
+    assert "user-data-dir" in hint and "CPU" in hint
+    # The one remedy that serves both causes survives.
+    assert "Serialize the spawns" in hint
+    # F-834 stays a single occurrence: the no_sandbox disclaimer is pinned above
+    # as the text AFTER it, and a second mention would split that assertion.
+    assert hint.count("F-834") == 1
+
+
 def test_in_flight_counters_return_to_zero_after_a_burst(doomed_manager):
     """A leaked count or a leaked PEAK would decorate every later solo failure
     with a stale contention paragraph — pin the finally and the burst reset."""
