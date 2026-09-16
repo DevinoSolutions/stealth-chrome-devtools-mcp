@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -588,6 +589,135 @@ async def test_a_cancelled_poll_still_kills_the_browser_it_launched(
         await task
 
     assert delegation.killed == [(4242, 1000.0)]
+
+
+# ---------------------------------------------------------------------------
+# F-879: the /TR schtasks would silently truncate
+# ---------------------------------------------------------------------------
+
+
+def _tr_of(schtasks: FakeSchtasks) -> str:
+    """The ``/TR`` of the one ``/Create`` call, exactly as schtasks received it."""
+    create = next(call for call in schtasks.calls if call[0] == "/Create")
+    return create[create.index("/TR") + 1]
+
+
+class TestTheStoredCommandLengthCap:
+    """``schtasks /Create`` STORES at most ``TR_MAX_CHARS`` characters of ``/TR``,
+    drops the rest and still exits 0 — measured under F-867 on Windows 11
+    10.0.26200, not read off the documentation (which says "~261").
+
+    A truncated command names a launcher script that does not exist, so the task
+    is created, runs, fails with Last Result 2 and logs nowhere. This module then
+    burns its whole 20 s readiness deadline and raises an error blaming the
+    DevTools port — the one thing that was never wrong. The cap is therefore a
+    hard refusal taken BEFORE anything is created, not a warning after the fact.
+    """
+
+    async def test_chromes_own_command_line_never_reaches_tr(self, delegation):
+        """The property that makes the cap survivable at all: the launcher SCRIPT
+        carries Chrome's argv, so a pathological profile path and a proxy's worth
+        of switches cost ``/TR`` nothing."""
+        schtasks = delegation.install(FakeSchtasks())
+        profile = "C:/" + "p" * 400
+        await desktop_launch.launch_and_attach(
+            "C:/Program Files/Google/Chrome/chrome.exe",
+            [
+                f"--proxy-server=http://user:{'x' * 200}@127.0.0.1:65000",
+                "--host-resolver-rules=" + "MAP a b," * 40,
+            ],
+            profile,
+        )
+        command = _tr_of(schtasks)
+        assert len(command) <= desktop_launch.TR_MAX_CHARS
+        # Stated positively too: the long values DID reach Chrome. A /TR that is
+        # short because the args were dropped would pass the length assertion.
+        assert f"--user-data-dir={profile}" in schtasks.chrome_argv
+        assert profile not in command
+
+    async def test_a_state_dir_that_would_truncate_refuses_before_schtasks(
+        self, delegation, monkeypatch
+    ):
+        """The defect. ``/TR`` is short only because the STATE dir is short: a
+        redirected home (a roaming profile, a UNC home share) pushes the launcher
+        path past the cap, and every byte past it is dropped in silence.
+
+        Refused before the launch dir is even created, so the operator gets the
+        real reason instead of a 20 s wait and the wrong one.
+        """
+        deep = delegation.state_dir / ("d" * 120) / ("e" * 120)
+        monkeypatch.setattr(backend_registry, "STATE_DIR", deep)
+        schtasks = delegation.install(FakeSchtasks())
+        with pytest.raises(tool_errors.ToolError) as err:
+            await desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
+        message = str(err.value)
+        assert "F-879" in message
+        numbers = [int(n) for n in re.findall(r"\d+", message)]
+        # Both numbers, because either alone is unactionable: the measured cap,
+        # and how far over this machine actually is.
+        assert desktop_launch.TR_MAX_CHARS in numbers
+        assert any(n > desktop_launch.TR_MAX_CHARS for n in numbers)
+        # Nothing was created: no task, no scratch dir, no schtasks call at all.
+        assert schtasks.calls == []
+        assert not deep.exists()
+        assert delegation.started == []
+
+    def test_the_shipped_layout_leaves_room(self, monkeypatch):
+        """``~/.stealth-mcp`` with a ``TOKEN_CHARS`` token has to fit, or the
+        headed hand-off refuses on a perfectly normal machine. Pure: it composes
+        a string and touches no disk."""
+        monkeypatch.setattr(backend_registry, "STATE_DIR", Path.home() / ".stealth-mcp")
+        script = (
+            desktop_launch._launch_dir() / f"{'a' * desktop_launch.TOKEN_CHARS}.ps1"
+        )
+        assert len(desktop_launch._tr_command(script)) <= desktop_launch.TR_MAX_CHARS
+
+    def test_a_command_of_exactly_the_cap_is_accepted(self, monkeypatch):
+        """The boundary is inclusive: 253 is what schtasks STORES, so a command
+        of exactly that length arrives whole."""
+        monkeypatch.setattr(
+            backend_registry, "STATE_DIR", _state_dir_for(desktop_launch.TR_MAX_CHARS)
+        )
+        command = desktop_launch._tr_command(_a_script_path())
+        assert len(command) == desktop_launch.TR_MAX_CHARS
+
+    def test_one_character_more_is_refused(self, monkeypatch):
+        over = desktop_launch.TR_MAX_CHARS + 1
+        monkeypatch.setattr(backend_registry, "STATE_DIR", _state_dir_for(over))
+        with pytest.raises(tool_errors.ToolError) as err:
+            desktop_launch._tr_command(_a_script_path())
+        assert str(over) in str(err.value)
+
+
+def _a_script_path() -> Path:
+    return desktop_launch._launch_dir() / f"{'a' * desktop_launch.TOKEN_CHARS}.ps1"
+
+
+def _state_dir_for(command_length: int) -> Path:
+    """A state dir whose ``/TR`` comes out exactly *command_length* long.
+
+    Built by search rather than arithmetic, so a miscounted quote shows up as a
+    failure to CONSTRUCT the case and not as a test quietly checking the wrong
+    length. Mirrors ``tests/test_backend_launch.py``'s ``_launch_dir_for``.
+    """
+    token = "a" * desktop_launch.TOKEN_CHARS
+    for pad in range(1, 400):
+        state = Path("C:/" + "d" * pad)
+        script = state / desktop_launch.LAUNCH_DIR_NAME / f"{token}.ps1"
+        if len(desktop_launch._TR_TEMPLATE.format(script=script)) == command_length:
+            return state
+    raise AssertionError(f"no state dir gives a {command_length}-char command")
+
+
+def test_backend_launch_reads_this_modules_tr_cap():
+    """One measured number, one home. ``backend_launch`` composes a ``/TR`` for
+    the same API through this module's ``_schtasks`` seam (F-867), so a second
+    ``253`` over there is a number that can drift from this one.
+    """
+    from stealth_chrome_devtools_mcp.embedded import backend_launch
+
+    assert not hasattr(backend_launch, "TR_MAX_CHARS")
+    assert not hasattr(backend_launch, "TOKEN_CHARS")
 
 
 # ---------------------------------------------------------------------------

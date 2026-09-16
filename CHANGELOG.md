@@ -1,5 +1,99 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — nothing ever forgot a dead backend record (F-880)
+
+`~/.stealth-mcp/server.json` had a writer for every backend that arrived and none for
+any that left. On the maintainer's machine it held three entries: a live backend
+(`win-session-1`, 2.1.6) beside two whose ports had no listener and whose recorded pids
+had not existed for days (`win-session-2` at 2.1.1, `headless` at 2.1.3). The only rule
+that ever removed anything was `record_backend`'s supersede-by-port, which by
+construction only touches the port being claimed — a dead sibling on another port stayed
+for good. F-868 had already stopped such an entry being *reported* as the backend;
+what was left was a record that only grows, a cold-start probe against ports nobody
+listens on, and a `doctor` listing naming backends that do not exist.
+
+`backend_liveness` gains the ONE deadness rule (`survey` / `dead_entries` /
+`forget_dead`), and it takes **two witnesses**: the port must probe `down` AND the
+recorded pid must not be a running backend of ours. Neither alone will do. A backend is
+recorded at Popen time, *before* it binds, so a sibling is `down` for the whole of its
+cold start while its process is alive — the socket alone would race every cold start on
+the machine. And "the pid is gone" says nothing about whether the port is free (F-868
+§6's stated objection), which requiring `down` answers directly: the port has just been
+observed to hold no listener at all. A **wedged** backend is therefore never dead — it
+holds its port, `restart` is its verb, and its record is how the eviction path finds a
+pid to kill — and an entry whose `port` is not an int is reported, never forgotten.
+
+The write is `backend_registry.forget_entries`, which re-reads the record and drops only
+entries still matching on display context **and** port **and** pid, so a context
+re-recorded while the probe was running survives. It never unlinks the file: forgetting
+the last entry leaves a readable empty record, exactly as `forget_backend` does.
+
+Two operator-facing changes. `cleanup` prints a `backend records:` line — how many are
+recorded and how many are dead — and `--apply` forgets them; it is the disk-hygiene verb
+and a record naming nothing is residue. `doctor` marks each dead line `(dead record)`,
+names them in one summary line and points at `cleanup --apply`; it stays read-only.
+Both read the SAME survey pass, so a wedged sibling costs one probe per run rather than
+one per question.
+
+Display context is deliberately not consulted: a `down` entry belonging to another
+desktop is forgotten like any other. Adoption's asymmetry (F-808) exists to stop a
+client *reusing* a foreign desktop's live backend; it has nothing to say about one whose
+process is gone.
+
+`cli._probe_recorded_backend` is deleted — its whole content was the ladder plus the
+word `no port recorded`, and that word is `backend_liveness.NO_PORT` now.
+
+### Fixed — `scroll_page` could not move an app shell (F-878)
+
+A page laid out as `body{overflow:hidden}` plus one scrolling `div` — the
+default of every SPA starter template, and where infinite feeds, virtualised
+lists and lazy loading live — is not scrolled by `window.scrollTo` at all.
+F-875 made that visible (`scrolled: false`, `max_scroll_y: 0`) rather than
+silently wrong; this makes it work. `scroll_page` now picks the page's **real**
+scroller and drives that.
+
+Which element is "the" scroller when several overflow was measured before it was
+decided: twelve `data:` fixtures through the product path against real headless
+Chrome 152. `document.scrollingElement` alone — what the tool used until now —
+is right **4 times out of 12**. The two obvious heuristics score 9 and 8: the
+largest-area rule with a coverage floor finds nothing in a three-column mail
+layout and lets a scrollbar's width (0.8 %) rank a `body` that can move 20 px
+above a shell that can move 7023; the element-under-the-viewport-centre rule
+walks INWARD to a page's own data grid and is blind behind a `position:fixed`
+scrim. The rule that ships scores 12/12: **if the document scroller can move on
+the requested axis it IS the scroller** (so a plain page, a quirks-mode page, a
+scroll-snap page and a nested box inside a scrolling document are all unchanged,
+and the scroll call generated for them is the same `window.scrollTo` /
+`window.scrollBy` it always was), otherwise the
+element with the largest viewport-clipped area that can move on that axis, near
+ties broken by the larger extent. The axis comes from the direction, so
+`direction="right"` now finds a horizontal-only strip that neither heuristic
+could see.
+
+The record grew two fields, because the pick is a judgement and a caller is
+entitled to see it: `scroller` (`{tag, id, classes}` of the element that was
+actually driven — shape only, bounded in the page itself) and
+`scroller_is_document`. The `scroll_page` **description** in
+`tests/goldens/tool_surface.json` changes with them; the input and output
+schemas do not, and no other tool moved.
+
+Driving a nested element also moves the end-of-scroll latch F-875 introduced, and
+where it goes is not a matter of taste: measured on Chrome 152 across the same
+twelve fixtures, an ELEMENT scroll's `scrollend` fires **at that element** — for
+smooth and instant alike, on both axes, including a scroll-snap container — and
+does **not** bubble to `window` or `document`, while a DOCUMENT scroll's fires at
+`document`/`window` and never at `document.scrollingElement`. There is one right
+target per scroller kind and both wrong choices fail the same silent way: the
+listener never fires, the settle burns its whole 10 s budget, and the tool reports
+`settled: false` about a scroll that finished in a second. So the listener is armed
+on the very expression that receives the scroll. No scroller kind needs the
+degraded read-agreement path; that still exists only for a browser without
+`onscrollend`. Re-measured end to end on all twelve fixtures after the change:
+every one picks correctly, settles, and lands at its true final offset, in 0.50 s
+to 1.61 s.
+
 ## 2.1.7
 
 ### Fixed — `list_instances` reported the last navigation, not the instance (F-874)
@@ -122,6 +216,45 @@ This is a tool **schema change** — `scroll_page`'s `output_schema` in
 already serves. A caller that treated the old `true` as proof must read
 `scrolled` / `at_edge` / `settled` instead.
 
+<<<<<<< HEAD
+### Fixed — the headed desktop hand-off could send a `/TR` schtasks truncates (F-879)
+
+`schtasks /Create` stores at most **253** characters of `/TR`, drops everything
+past that and **exits 0** — measured under F-867 on Windows 11 10.0.26200, and
+eight characters short of the "~261" the documentation gives. F-867 guarded the
+backend's own scheduler rung against it and left the headed browser hand-off
+(F-810, `desktop_launch`) named as the remaining exposure: that path composed its
+`/TR` with no length check at all.
+
+What it cost, had a machine hit it: the task is created and reported successful,
+then names a launcher script whose path lost its tail, so at run time it fails
+with Last Result 2 and writes to no log anywhere. `launch_and_attach` then polls
+for the whole 20 s readiness deadline and raises an error blaming the DevTools
+port — the one component that was never involved.
+
+Chrome's own command line was never the problem and has not moved: the launcher
+*script* already carries its argv, which is why a 400-character profile path and
+a proxy's worth of switches cost `/TR` nothing. What spends the budget is the
+state dir, and that is what is now checked — before the launch directory is
+created, so an impossible layout costs no directory, no scheduled task and no
+deadline. The error names the measured cap, the actual length and the path that
+is long.
+
+The cap has one home and it is the `schtasks` seam itself: `TR_MAX_CHARS`,
+`TOKEN_CHARS` and `tr_overflow` now live in `desktop_launch` beside `_schtasks`,
+and `backend_launch` reads them there at call time exactly as it already reaches
+there for `_schtasks`, `_cleanup` and `_read_pid`. It carries no `253` of its
+own, and the comparison is single-homed too, so the two composers cannot drift on
+the cap or on its inclusive boundary. The headed path *raises* where the backend
+rung *drops a rung*: the backend has a plain spawn to fall to and a killable
+backend beats none, while a delegated headed launch has no fallback at all. The
+per-attempt token here is 12 hex characters now rather than 32, which is 20 more
+characters of headroom and one spelling of the token length instead of two.
+
+Not verified without a real `schtasks`: the 253 figure is F-867's measurement,
+carried over unchanged. Everything this change adds is asserted hermetically
+against the faked seam — no test creates a scheduled task.
+=======
 ### Fixed — `type_text` reported success for text it never entered, and for an Enter that could not submit (F-873)
 
 Measured on 2.1.6 over real stdio transport, headed Chrome 152: `type_text` returned
@@ -163,55 +296,126 @@ private-use codepoints (U+E009 for Ctrl, U+E017 for Delete) through `send_keys`,
 CDP has never understood, so all three characters landed verbatim and nothing was
 cleared, corrupting the field it was asked to empty; it and `paste_text` now share the
 one CDP select-all + Delete.
+>>>>>>> origin/main
 
-### Fixed — `scroll_page` could not move an app shell (F-878)
+### Fixed — `paste_text` and `click_element` reported a dispatch, not a result (F-876)
 
-A page laid out as `body{overflow:hidden}` plus one scrolling `div` — the
-default of every SPA starter template, and where infinite feeds, virtualised
-lists and lazy loading live — is not scrolled by `window.scrollTo` at all.
-F-875 made that visible (`scrolled: false`, `max_scroll_y: 0`) rather than
-silently wrong; this makes it work. `scroll_page` now picks the page's **real**
-scroller and drives that.
+The two tools F-873 named and left. Measured through the product code path on
+Chrome 152.0.7977.83, headless, on a throwaway profile.
 
-Which element is "the" scroller when several overflow was measured before it was
-decided: twelve `data:` fixtures through the product path against real headless
-Chrome 152. `document.scrollingElement` alone — what the tool used until now —
-is right **4 times out of 12**. The two obvious heuristics score 9 and 8: the
-largest-area rule with a coverage floor finds nothing in a three-column mail
-layout and lets a scrollbar's width (0.8 %) rank a `body` that can move 20 px
-above a shell that can move 7023; the element-under-the-viewport-centre rule
-walks INWARD to a page's own data grid and is blind behind a `position:fixed`
-scrim. The rule that ships scores 12/12: **if the document scroller can move on
-the requested axis it IS the scroller** (so a plain page, a quirks-mode page, a
-scroll-snap page and a nested box inside a scrolling document are all unchanged,
-and the scroll call generated for them is the same `window.scrollTo` /
-`window.scrollBy` it always was), otherwise the
-element with the largest viewport-clipped area that can move on that axis, near
-ties broken by the larger extent. The axis comes from the direction, so
-`direction="right"` now finds a horizontal-only strip that neither heuristic
-could see.
+`paste_text` sent one `Input.insertText` and returned `True` without asking the page
+anything. Five of seven controls take that insert and move nothing — `readonly`,
+`range`, `color`, an `<input type="date">` on this build, and a non-editable `<div>` —
+and the tool answered `True` for all five. It now reads the field back through the same
+`text_entry` leaf `type_text` uses, with the baseline taken **after** the clear, and
+raises naming the selector and two counts and never the pasted text (the field may be a
+password box). An empty paste is not a refusal and is not checked.
 
-The record grew two fields, because the pick is a judgement and a caller is
-entitled to see it: `scroller` (`{tag, id, classes}` of the element that was
-actually driven — shape only, bounded in the page itself) and
-`scroller_is_document`. The `scroll_page` **description** in
-`tests/goldens/tool_surface.json` changes with them; the input and output
-schemas do not, and no other tool moved.
+`click_element` returned `True` for a click the target never received, in six shapes:
+an overlay above it ate the click (the page logged the overlay, not the button); a
+`disabled` control, a `pointer-events:none` target, a zero-size target and a
+`visibility:hidden` target each received nothing; and an off-viewport target took a
+click at negative coordinates that reached nobody. A `display:none` target went
+further — `Element.mouse_click` raises there, so the tool silently fell back to the
+in-page `el.click()`, an **untrusted** click, in a tool whose whole point is trusted
+input.
 
-Driving a nested element also moves the end-of-scroll latch F-875 introduced, and
-where it goes is not a matter of taste: measured on Chrome 152 across the same
-twelve fixtures, an ELEMENT scroll's `scrollend` fires **at that element** — for
-smooth and instant alike, on both axes, including a scroll-snap container — and
-does **not** bubble to `window` or `document`, while a DOCUMENT scroll's fires at
-`document`/`window` and never at `document.scrollingElement`. There is one right
-target per scroller kind and both wrong choices fail the same silent way: the
-listener never fires, the settle burns its whole 10 s budget, and the tool reports
-`settled: false` about a scroll that finished in a second. So the listener is armed
-on the very expression that receives the scroll. No scroller kind needs the
-degraded read-agreement path; that still exists only for a browser without
-`onscrollend`. Re-measured end to end on all twelve fixtures after the change:
-every one picks correctly, settles, and lands at its true final offset, in 0.50 s
-to 1.61 s.
+**`click_element` now returns a record instead of a bool** — `{"selector",
+"dispatch", "point", "size", "target", "hit", "hit_is_target", "reason"}`. `dispatch`
+is `"coordinate"` or `"synthetic"`, so the fallback is labelled rather than silent;
+`hit` is the tag/id/classes (never the text) of whatever `document.elementFromPoint`
+returned at the exact point the click went to; `reason` is `null` when the click
+reached the target and otherwise one of `not-rendered`, `off-viewport`, `zero-size`,
+`not-visible`, `pointer-events-none`, `covered`, `disabled`. The point is the centre of
+`getClientRects()[0]`, which is byte-equal to the point nodriver clicks — the bounding
+box's centre is 28.5 px off for an element wrapped over several line boxes and would
+name a point the click never used. The synthetic fallback is kept, because for a
+`display:none` element it is the only thing that reaches it at all.
+
+The tool deliberately gains **no** "did the page react" oracle and raises for none of
+the six shapes: a navigation, a mutation or a fetch may all legitimately be absent
+after a correct click, so the record reports what is decidable and the caller decides.
+A new leaf `embedded/click_target.py` owns the one read and the closed reason set.
+
+Also corrected: the refusal message shared by both text tools says "entered" rather
+than "typed" (`paste_text` reaches the same controls through an insert, not keys) and
+no longer names `date` — the local build refused digits into a date field but PR #110's
+gate measured all three CI cells accepting them, so it is build-dependent and is not
+claimed.
+
+### Fixed — `select_option` selected nothing and said it had; `upload_file` counted the request, not the files (F-877)
+
+Measured on Chrome 152.0.7977.83 through the product code path, on a throwaway
+profile. The two tools F-876 named and left unmeasured, and the same sentence a third
+and fourth time: the tool reported the success of its own dispatch, not of the
+interaction.
+
+`select_option` answered `True` for **eleven** cases that did not select what was
+asked, and three of them were worse than a silent no-op. A `value=` that names no
+option does not merely fail — `select.value = …` sets `selectedIndex` to `-1`, so it
+**cleared the selection the page already had**, fired a `change` announcing it, and
+reported success. A selector pointing at an `<input type="text">` had its `value`
+**written**, because nothing checked that the element was a `<select>` at all. And the
+`text=` arm was `send_keys`, so its real consumer was Chrome's `<select>` typeahead —
+a live buffer with a ~1 s timeout shared with the previous call, searching from the
+option after the current one, resolving a `label=`/text collision onto the wrong
+option — which on a `<select disabled>`, a control that cannot take focus, sent the
+characters wherever focus already was: measured, a request for the disabled select
+moved a **different** select on the page, with a trusted `input`+`change` pair, and
+the tool answered `True`. An out-of-range `index=`, a `text=` matching nothing and an
+empty `<select>` each changed nothing and answered `True` too.
+
+**`select_option` now returns a record instead of a bool** — `{"selector", "by",
+"selected_index", "selected_count", "option_count", "multiple", "changed"}`. It reads
+the options first, resolves the criterion to an index in one stated rule (exact
+`option.text`, then exact `option.label`, then a case-insensitive prefix over either,
+skipping `disabled` options — the prefix tier is kept because the typeahead had it and
+callers may rely on it), refuses before writing anything when nothing matches, then
+sets `selectedIndex` and dispatches `input` **and** `change` (the pair, and the order,
+Chrome's own typeahead produces; the shipped arms fired `change` alone, and fired it
+even when nothing moved). The control is read back after those handlers have run, so a
+page that resets the select inside its own `change` handler is caught. Nothing types,
+so a request can only ever move the control it named. `changed: false` is a success —
+"it was already on that option" and "it refused" are different facts a bool could not
+tell apart.
+
+`upload_file` was honest in ten of eleven measured cases — every "resolved to the wrong
+thing" case already raised — but its answer was composed from the caller's own argument
+list before the CDP call and regardless of it. Two paths into an input with no
+`multiple` attribute: `DOM.setFileInputFiles` **succeeds** (the raw call reports no
+error) and Chrome keeps only the first file, while the tool reported `count: 2`.
+**It now returns** `{"selector", "requested", "attached", "multiple", "total_bytes"}`,
+read from the input's own `FileList`, and raises when the input holds a different
+number of files than were sent. The old `uploaded` field is gone: it echoed **absolute
+local paths**, which name the operating user, into a value that travels to the client.
+
+No message either tool raises carries an option's text or value, a file path or a file
+name — a `<select>` is frequently a list of account numbers, and a raised `ToolError`
+reaches the caller, the debug ring and Sentry at once. A new leaf
+`embedded/control_state.py` owns both reads, the matching rule and both verdicts.
+
+**What this costs, plainly.** The `text=` arm's events are now **untrusted**
+(`isTrusted: false`) where real keystrokes produced trusted ones — there is no trusted
+alternative that is not the typeahead being removed, and the `value=`/`index=` arms
+were already untrusted, so a page gating on `event.isTrusted` was already unreachable
+through two of three arms and is now unreachable through all three. A caller relying on
+the typeahead's **wraparound** — asking for a prefix that matches the option already
+selected in order to advance to the *next* match — now gets the current option and
+`changed: false` instead of a move; that behaviour was never documented and is not
+kept. And an `index=` inside a `<select>` with more than 2000 options cannot be
+resolved, because the option read is bounded; that case gets its own message naming the
+cap, never "no option matches".
+
+Also fixed in passing, the same leak class one guard earlier: `upload_file`'s
+"File not found" now reports the path's position, the count, its length and its suffix
+instead of the absolute path, which named the operating user in an error that reaches
+the client, the debug ring and Sentry.
+
+Deliberately unchanged, and named in the finding: a `multiple` `<select>` still cannot
+be driven past one selection (the signature takes one criterion — the record now says
+so); a `disabled` `<option>` stays reachable by `value=`/`index=` and unreachable by
+`text=`, which is what Chrome does; and `upload_file` still attaches to a `disabled`
+input and still ignores `accept=`, because CDP does.
 
 ## 2.1.6
 

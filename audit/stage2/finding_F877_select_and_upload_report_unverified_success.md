@@ -1,0 +1,504 @@
+# F-877 — `select_option` reports success for an option it never selected (and for a control it never touched), and `upload_file` reports the files it was *given*, never the files the input *holds*
+
+**Status:** FIXED in this PR (product defect; live on 2.1.6 and on `main` at `b0ae010`)
+**Opened by:** `audit/stage2/finding_F876_paste_and_click_report_unverified_success.md` §6, which named both tools as the two remaining interaction tools that "answer `True` without asking the page anything" and explicitly left them unmeasured
+**Source at:** `fix/F876-paste-click-verified` = `6f0bb6f` (= `main` `b0ae010` + the F-873 fix + the F-876 fix)
+**Severity:** HIGH for `select_option` (eleven measured cases answer `True` having changed nothing the caller asked for — and one of them silently changes a **different** `<select>` on the page), MEDIUM for `upload_file` (one measured case answers a count of 2 for an input that holds 1; the rest of the class is structural — nothing is ever read back, and the success payload echoes absolute file paths)
+
+---
+
+## 1. What was measured, and where
+
+Everything below is a measurement, not a reading of the code. All of it:
+
+* **Chrome 152.0.7977.83** (`HeadlessChrome/152.0.0.0`, protocol `1.3`, build
+  `@79460ebecaa5625e57a5fb679a735659e73dc687`), headless, Windows 11 — the same
+  build F-873 and F-876 measured on.
+* Driving the **product code path**: `DOMHandler.select_option` /
+  `DOMHandler.upload_file` / `element_resolution.resolve_element`, imported from
+  this worktree's `src/`.
+* Each run on its own throwaway `--user-data-dir` under
+  `%TEMP%\f877*\profile`. Never `~/.stealth-mcp`, never ports 19222/52554/7169,
+  no process killed that the probe did not start, no credential entered anywhere.
+* Against a local `file://` page written by the probe itself (no network), which
+  logs every `input`/`change` event it receives with `event.isTrusted` and the
+  control's value at that moment.
+
+Three probes:
+
+1. **§2a/§2c, sequential** — every case against one long-lived page, which is how
+   a real session reaches these tools (state carries over between calls). This is
+   the probe that surfaced the cross-control leak.
+2. **§2a/§2c, isolated** — each case re-loads the page first, so no case can
+   inherit another's focus or Chrome's typeahead buffer. Every number quoted below
+   is from this probe unless the row says "sequential".
+3. **§2b, the text arm's real matching rule** — what Chrome's `<select>` typeahead
+   actually matches, since that is the whole of today's `text=` implementation.
+
+---
+
+## 2. Measured truth
+
+### 2a. `select_option` — eleven cases answer `True` for a selection that did not happen
+
+`DOMHandler.select_option(tab, selector, value=/text=/index=)`. `before`/`after` are
+the `<select>`'s own `selectedIndex` and `value`, read straight from the page on
+either side of the call. "page saw" is the event log, `isTrusted` included.
+
+| # | call | before | after | page saw | answered | honest? |
+|---|---|---|---|---|---|---|
+| 1 | `#sel-basic, value="two"` | `0` / `one` | `1` / `two` | `change:false` | `true` | yes |
+| 2 | `#sel-basic, index=2` | `1` / `two` | `2` / `three` | `change:false` | `true` | yes |
+| 3 | `#sel-basic, text="Beta"` | `0` / `one` | `1` / `two` | `input:true`, `change:true` | `true` | yes |
+| 4 | `#sel-basic, value="nonexistent"` | `0` / `one` | **`-1` / `""`** | `change:false` | `true` | **no** — and it *destroyed* the existing selection |
+| 5 | `#sel-basic, index=99` | `-1` / `""` | `-1` / `""` | *(nothing)* | `true` | **no** |
+| 6 | `#sel-basic, index=-1` | `-1` / `""` | `-1` / `""` | *(nothing)* | `true` | **no** |
+| 7 | `#sel-basic, text="Delta"` | `0` / `one` | `0` / `one` | *(nothing)* | `true` | **no** |
+| 8 | `#sel-disabled, text="Beta"` (fresh page) | `0` / `one` | `0` / `one` | *(nothing)* | `true` | **no** |
+| 9 | `#sel-disabled, text="Beta"` (focus elsewhere, buffer expired) | `0` / `one` | `0` / `one` | **`input:true` + `change:true` on `#sel-basic`, which moved `one` → `two`** | `true` | **no — it changed a different control** |
+| 10 | `#sel-empty` (0 options), `value="one"` | `-1` / `""` | `-1` / `""` | `change:false` | `true` | **no** |
+| 11 | `#sel-empty` (0 options), `index=0` | `-1` / `""` | `-1` / `""` | *(nothing)* | `true` | **no** |
+| 12 | `#sel-optdisabled, text="Delta Two"` (a `disabled` `<option>`) | `0` / `d1` | `0` / `d1` | *(nothing)* | `true` | **no** |
+| 13 | `#not-file` — an `<input type="text">` | `value ""` | **`value "x"`** | `change:false` | `true` | **no — it wrote into a text box** |
+| 14 | `#a-div` — a `<div>` | — | an expando `div.value = "x"` | *(nothing)* | `true` | **no** |
+| 15 | `#sel-multi` (`multiple`), `value="two"` | `[]` | `["two"]` | `change:false` | `true` | yes (but see §6) |
+| 16 | `#sel-optdisabled, value="d2"` (a `disabled` `<option>`) | `0` / `d1` | `1` / `d2` | `change:false` | `true` | yes-ish (see §6) |
+| 17 | `#sel-basic`, no criteria at all | `1` / `two` | `1` / `two` | *(nothing)* | **raises** | yes |
+| 18 | `#nope` — no such element | — | — | *(nothing)* | **raises** | yes |
+
+Eleven of eighteen (rows 4–14) answer `True` for something that did not happen.
+Three of those eleven are worse than a silent no-op:
+
+* **Row 4** does not merely fail to select — `select.value = "nonexistent"` sets
+  `selectedIndex` to `-1`, i.e. it **clears the selection the page already had**,
+  fires a `change` saying so, and reports success. A caller who asked for a value
+  that is not in the list gets a form in a state no user could have produced.
+* **Row 9** is the one that is not a no-op at all. `send_keys` focuses the element
+  first; a `disabled` `<select>` cannot take focus, so the keys go wherever focus
+  already was. Measured in isolation (probe 3: select `#sel-basic` by text, wait
+  1.5 s for Chrome's typeahead buffer to expire, then ask for `#sel-disabled`):
+  `#sel-disabled` is untouched and `#sel-basic` moves from `one` to `two`, with a
+  **trusted** `input` + `change` pair. The tool answers `True`. Nothing in the
+  answer distinguishes this from row 3.
+* **Row 13** is the same shape one control over: there is no check anywhere that
+  the resolved element is a `<select>` at all, so `select.value = "x"` writes into
+  whatever it resolved to. On an `<input type="text">` that is a real value change
+  with a real `change` event.
+
+### 2b. What the `text=` arm actually matches
+
+The `text=` arm is `await select_element.send_keys(text)` — nodriver dispatches one
+`char` event per character, and what consumes them is **Chrome's own `<select>`
+typeahead**. So the tool's documented "Option text content" is in fact a
+typeahead query, with all of that mechanism's properties. Measured, each case on a
+freshly loaded page:
+
+| query | against | result |
+|---|---|---|
+| `"Beta"` | `Alpha` / `Beta` / `Gamma` | selects `Beta` — exact text works |
+| `"Bet"` | same | selects `Beta` — **a prefix is enough** |
+| `"beta"` | same | selects `Beta` — **case-insensitive** |
+| `"Delta"` | same | selects nothing |
+| `"Delta Two"` | `Delta` / `Delta Two` *(disabled)* / `Epsilon` | selects nothing — **typeahead skips a `disabled` option** |
+| `"Spaced Out"` | `<option>\n Spaced   Out\n</option>` (`.text` is `"Spaced Out"`) | no change event — the match resolves to the option that was **already** selected (typeahead searches from the option *after* the current one and wraps) |
+| `"TextOne"` | `<option label="LabelOne">TextOne</option>` / `TextTwo` | selects **`TextTwo`** — the wrong option |
+| `"Gamma"` immediately after a previous `text=` call (sequential probe) | `Alpha` / `Beta` / `Gamma` | selects nothing — the previous query is still in Chrome's buffer, so the search string is `"AlphaGamma"` |
+
+So the arm is: case-insensitive **prefix** matching, over a **live buffer with a
+~1 s timeout shared with the previous call**, searching **from the option after the
+current one** with wraparound, skipping `disabled` options, and resolving
+`label=`/text collisions in a way that picked the wrong option here. It is not
+"select the option whose text is X", and it answers `True` for every one of those
+outcomes.
+
+Two of those properties are load-bearing for the fix and are preserved by it: the
+prefix match and the case-insensitivity (§4a). The rest are the defect.
+
+### 2c. `upload_file` — the count is the request, not the result
+
+`DOMHandler.upload_file(tab, selector, paths)`. `after` is the input's own
+`files.length` and `files[i].name`, read from the page.
+
+| # | call | input | answered | `input.files` after | page saw | honest? |
+|---|---|---|---|---|---|---|
+| 1 | one path | `<input type="file">` | `{"uploaded": ["C:\\...\\a.txt"], "count": 1}` | `["a.txt"]`, 1 | `input:true`, `change:true` | yes, but see below |
+| 2 | **two paths** | `<input type="file">` (no `multiple`) | `{"uploaded": [a, b], "count": 2}` | **`["a.txt"]`, 1** | `input:true`, `change:true` | **no** |
+| 3 | two paths | `<input type="file" multiple>` | `{"uploaded": [a, b], "count": 2}` | `["a.txt", "b.txt"]`, 2 | `input:true`, `change:true` | yes |
+| 4 | one path | `<input type="file" disabled>` | `{"uploaded": [a], "count": 1}` | `["a.txt"]`, 1 | `input:true`, `change:true` | yes — CDP attaches to a `disabled` input, which a user could not (§6) |
+| 5 | one `.txt` | `<input type="file" accept=".png">` | `{"uploaded": [a], "count": 1}` | `["a.txt"]`, 1 | `input:true`, `change:true` | yes — `accept` is a picker filter, not a constraint (§6) |
+| 6 | a path that does not exist | `<input type="file">` | **raises** `File not found: …` | unchanged | *(nothing)* | yes |
+| 7 | one path | `<input type="text">` | **raises** `Selector '#not-file' is an <input type="text">, not type="file".` | — | *(nothing)* | yes |
+| 8 | one path | `<input>` with **no `type` attribute** | **raises** `Node is not a file input element [code: -32000]` | — | *(nothing)* | yes — but that is *Chrome's* refusal, not the guard's: `element.attrs` is `{'id': 'no-type'}`, so `input_type` is `""` and the guard passes |
+| 9 | one path | `<div>` | **raises** `resolved to <div>, not a file input.` | — | *(nothing)* | yes |
+| 10 | zero paths | `<input type="file">` | **raises** `No file paths provided` | unchanged | *(nothing)* | yes |
+| 11 | one path | `#nope` | **raises** `File input not found: #nope` | — | *(nothing)* | yes |
+
+`upload_file` is in much better shape than `select_option`, and this finding says so
+with the numbers: **ten of eleven** measured cases are honest, and every
+"resolved to the wrong thing" case already raises. The defect is narrower and it is
+exactly two things:
+
+* **Row 2 is a false count.** `DOM.setFileInputFiles` with two files on an input
+  that has no `multiple` attribute **succeeds** — the raw CDP call returns `None`,
+  no error, no exception anywhere — and Chrome keeps only the first file. The tool
+  reports `count: 2`. Driven again over an input that already held a file
+  (sequential probe), Chrome keeps the **previous** file and fires no event at all,
+  and the tool still reports `count: 2`.
+* **Nothing is ever read back**, structurally. `{"uploaded": resolved, "count":
+  len(resolved)}` is built entirely from the argument list, before the CDP call and
+  regardless of it; it is the same sentence F-873 and F-876 wrote about `True`.
+  There is no measurement here that can turn row 2 into a lie *and* leave rows 1
+  and 3 honest, because none of the three asked the page anything — row 2 is simply
+  the case where the unasked question would have had a different answer.
+
+There is a third, non-behavioural problem in the same payload: `uploaded` carries
+**absolute local paths** (`C:\Users\amind\AppData\Local\Temp\f877-…\a.txt`), which
+name the operating user, into a value that travels to the MCP client. That is the
+discipline F-869 names for a page's localStorage and F-876 names for an overlay's
+text, one payload over.
+
+---
+
+## 3. Root cause
+
+One sentence, and it is F-873's, third and fourth time: **the tool reports the
+success of its own dispatch, not the success of the interaction.**
+
+Concretely, in `dom_handler.py`:
+
+* `select_option`'s three arms each end in a bare `return True` placed immediately
+  after the thing they dispatched. The `value` arm returns after assigning
+  `select.value`; the `index` arm returns after evaluating a script **whose entire
+  body is inside an `if` that may not have run**; the `text` arm returns after
+  `send_keys`, which is a keystroke dispatch whose consumer is a browser feature
+  the tool does not model and cannot observe.
+* There is no check that the resolved element is a `<select>`, so rows 13 and 14
+  are not even about selects.
+* `upload_file` composes its answer from `resolved` — the list it built from the
+  caller's own argument — and never reads `input.files`.
+
+The shape is identical to the two siblings, and so is the fix.
+
+---
+
+## 4. Fix
+
+A new leaf, `embedded/control_state.py`, owns **"what does this form control hold
+now, and did it take what was asked"** for both controls. `dom_handler.py` keeps
+only the ORDER, exactly as it does for `type_text` / `paste_text` / `click_element`
+after F-873 and F-876. The leaf imports `tool_errors` only, takes the element as an
+argument, and every read is **one `JSON.stringify` round trip** (`Element.apply`
+deep-serializes an object at every depth — F-872's rule, F-869's mechanism).
+
+### 4a. `select_option`: resolve the option in one place, then read what the control holds
+
+Two `Element.apply` calls, each one `JSON.stringify` round trip, in this order:
+
+1. `READ_SELECT_JS` answers the `<select>`'s tag, its `multiple` flag, its standing
+   selection and its options — `index`, `value`, `text`, `label` and `disabled` for
+   each, bounded at `MAX_OPTIONS` (2000). A tag that is not `select` answers
+   `is_select: false` and the tool raises, so rows 13 and 14 become a refusal rather
+   than a write into someone else's control. `option.text` is Chrome's COLLAPSED text
+   and `option.label` falls back to it, so the caller's string is compared against
+   what a browser RENDERS;
+2. `control_state.resolve_option` — a pure Python function, which is the point: the
+   ONE matching rule, spelled out where it can be read and unit-tested rather than
+   delegated to a browser feature:
+   * `index=` — the integer, if it is in range;
+   * `value=` — the first `<option>` whose `value` is exactly that string;
+   * `text=` — exact match on `option.text`, then exact match on `option.label`,
+     then a case-insensitive **prefix** match on either, skipping `disabled`
+     options. The prefix tier and the case-insensitivity are there because §2b
+     measured them to be what the shipped arm did when it worked, and a fix that
+     dropped them would break a caller who relies on `text="Bet"`. What is gone is
+     the buffer, the wraparound, the `label`/text collision and the ability to
+     type into a different element entirely;
+3. if nothing resolved, `verify_matched` raises **having written nothing** — row 4's
+   destroyed selection cannot happen, because no assignment is reached;
+4. otherwise `apply_js(index, value)` sets `selectedIndex` and, **only if the
+   selected-index SET moved** — never `selectedIndex` itself, see below —
+   dispatches
+   `input` and then `change`, both bubbling — the pair, and the order, Chrome's
+   own typeahead produced in §2b (`input:true` then `change:true`). The shipped
+   `value`/`index` arms fired `change` alone, no `input` at all, and fired it
+   even when nothing had changed (§2a rows 10 and 13 both announce a `change`
+   for a control that did not move); Chrome fires nothing when a selection lands
+   where it already was (measured, §2b's `"Spaced Out"` row);
+5. and reads the control back **after** those events have run (they are synchronous,
+   so a page handler that resets the select has already run) in the same answer.
+
+**"Did anything move" is asked of the SET, and this is the one place the fix could
+have regressed the shipped `value` arm.** On a `<select multiple>` holding `[0, 2]`,
+assigning `selectedIndex = 0` runs the spec's setter, which selects exactly that
+option and deselects every other — so option 2 is dropped while `selectedIndex`
+itself never budges, because it already answered `0`. A comparison of that one number
+calls the write a no-op, fires nothing, and leaves the page believing it still holds
+two options, while the record — which compares `selected_indexes` — reports
+`changed: true`: the record and the events would disagree. The shipped `value` arm
+fired `change` unconditionally, so that would have been a REGRESSION rather than a
+refinement. Pinned in both lanes and both pins proved load-bearing by reverting the
+one line (§5b).
+
+That second script is also the one place the two-call split is paid for: the options
+can be replaced between the read and the write — a dependent dropdown repopulating —
+and an index resolved against the old list addresses a different option in the new
+one, so the write re-checks the option's `value` against the index it was given and
+refuses as `stale` rather than selecting the wrong thing.
+
+`control_state.verify_selected` is the second verdict: a stale write, or a
+`selectedIndex` that is not where it was aimed. `select_option` returns a record:
+
+```json
+{
+  "selector": "#country",
+  "by": "text",
+  "selected_index": 2,
+  "selected_count": 1,
+  "option_count": 12,
+  "multiple": false,
+  "changed": true
+}
+```
+
+No option **text** and no option **value** is in it, and none is in any message the
+leaf raises — a `<select>` is frequently a list of account numbers, and a raised
+`ToolError` reaches the caller, the debug ring and Sentry at once (F-873's
+discipline, unchanged). Indices and counts carry the whole of what a caller needs
+to check, and `changed` distinguishes "it was already on that option" from "it
+moved", which a bare `True` never could.
+
+### 4b. `upload_file`: read `input.files`
+
+`READ_FILES_JS` is one `Element.apply` returning `{count, names, total_bytes}` read from
+`input.files` **after** `send_file`. `control_state.verify_attached` raises when the
+input holds a different number of files than were requested — which is row 2, and
+which also covers "the input holds nothing" as its zero case. The record:
+
+```json
+{
+  "selector": "#avatar",
+  "requested": 2,
+  "attached": 2,
+  "multiple": true,
+  "total_bytes": 3
+}
+```
+
+`uploaded` — the absolute-path echo — is **gone**, and no path or file name appears
+in any message the leaf raises. The caller supplied the paths; what it did not know
+is how many of them the input took.
+
+### 4c. The return-shape changes
+
+Both are HARD golden regenerations of `tests/goldens/tool_surface.json`
+(`PYTHONUTF8=1 python tools/dump_tool_surface.py --write`), done deliberately, in
+this PR, with this justification:
+
+| tool | was | now |
+|---|---|---|
+| `select_option` | `bool` — `True if selected successfully.` | the object above; the description says what the fields are and that a failed selection raises |
+| `upload_file` | `{"uploaded": [absolute paths], "count": int}` | `{"selector", "requested", "attached", "multiple", "total_bytes"}` |
+
+Neither record carries a `"selected": true` / `"uploaded": true` flag, for F-876
+§4c's reason: it would be redundant with the counts, a failure raises, and a
+redundant field is a second way to ask the same question.
+
+---
+
+## 5. Verification
+
+* `tests/test_select_upload_verification.py` — hermetic pins (`FakeTab` plus the
+  new `FakeSelect` and `FakeFileInput` in `tests/fakes.py`, both modelled on
+  `FakeTextField`/`FakeClickTarget`: the answer is COMPUTED from the double's own
+  state, never supplied by a test, so no fixture here can encode the bug).
+* `tests/test_e2e_select_upload_verification.py` — real-Chrome pins on their own
+  `tmp_empty_root` session root, marked exactly like the F-873/F-876 siblings.
+* Counts and the RED→GREEN transition are in §5b.
+
+### 5a. Characterization pins deliberately flipped
+
+| test | was | now | why |
+|---|---|---|---|
+| `tests/goldens/tool_surface.json` (`select_option`, `upload_file`) | see §4c | see §4c | the HARD wire-surface golden, regenerated deliberately per `CONTRIBUTING.md`: both tools' return type and docstring changed on purpose, in this PR |
+| `test_xpath_dispatch.py::test_select_option_acts_on_the_resolved_element_not_a_second_lookup` | `assert … is True`, one `apply` | the record's `selected_index`, and `querySelector` absent from BOTH scripts | a return-shape change plus a second script; the test's claim (the tool acts on the already-resolved element, never a second lookup) is untouched. Its hand-rolled `_Select` double is replaced by `fakes.FakeSelect` — modelling option semantics a second time is what that class exists to prevent |
+| `test_e2e_interaction_fidelity.py::test_rich_input_types` (2 asserts + the docstring's FINDING paragraph) | `assert await select(...)`, `… is True` | `["selected_index"] == 1` / `== 2` | the faithful translation of the old claim plus the one it could not make. The FINDING paragraph it carried (a `const select` re-declaration collision) was closed by F-831 and is now unrepresentable, so the paragraph says that rather than standing as an open defect |
+| `test_e2e_interaction.py::test_upload_screenshot_and_content`, `test_browser_integration.py::TestFileUpload` (4 asserts) | `res["count"]` | `res["attached"]` | same claim, but `count` was the request echoed and `attached` is read from `input.files`; the key names which question it answers |
+| `test_e2e_hard_dom.py::test_contenteditable_and_multiselect` (docstring) | `select_option sets select.value = <one value> (dom_handler.py:519)` | the same claim through `control_state` | the mechanism moved; the pinned behaviour (exactly one option ends up selected, even on a `<select multiple>`) did not, and its asserts are byte-unchanged |
+| `tests/fixture_app/interactions.html` + `app.js` | — | the F-877 block: a `disabled` select, an empty select, a `multiple` select, a select carrying a `disabled` option and a `label=`/text collision, and three file inputs (plain, `multiple`, `disabled`) | every one is a shape §2a/§2b/§2c measured. No existing test touches any of them. The selects log `input` AND `change` with `isTrusted`, so "fired the pair" is assertable from the action log alone |
+| `tests/fakes.py` | — | gains `FakeSelect` and `FakeFileInput` | both compute their answer from their own state, never from a test, and both model a MEASURED rule rather than the code: an option's `value`/`text`/`label` can all differ, assigning `selectedIndex` fires nothing by itself and Chrome fires nothing at all when the selection lands where it already was, and `DOM.setFileInputFiles` keeps only the first file on a non-`multiple` input |
+
+### 5b. Numbers
+
+* `tests/test_select_upload_verification.py` at the RED commit (`552b375`):
+  **31 failed, 4 passed** of 35 nodes. Every failure is the defect, not a harness
+  error — `DID NOT RAISE ToolError` for the eleven silent rows, `TypeError: 'bool'
+  object is not subscriptable` for the record rows, `assert ['Beta'] == []` for the
+  keystroke that must no longer be sent, and `assert [] == ['input', 'change']` for
+  the event pair. At the fix: **35 passed**, and **38 passed** after the review pass
+  added the multiple-select event pin, the read-cap message pin and the
+  missing-path no-leak pin.
+
+  Both halves of the multiple-select pin were proved **load-bearing** by reverting
+  the one line each home owns. Reverting `control_state._APPLY_SELECT_JS`'s set
+  comparison to `select.selectedIndex !== want.index` fails the E2E node in a real
+  Chrome with `assert [] == ['input:sel-multi:one:untrusted',
+  'change:sel-multi:one:untrusted']` — no events for a write that dropped an option.
+  Reverting `FakeSelect._apply`'s mirror of the same rule fails the hermetic node
+  with `assert [] == ['input', 'change']`. Both were restored and both lanes are
+  green again.
+* `tests/test_e2e_select_upload_verification.py` at the fix: **20 passed in 52.8 s**
+  against a real Chrome 152.0.7977.83, first run, no flake. It was not run at the RED
+  commit: its `select_option` rows assert a record shape the shipped tool cannot
+  produce, so every one would have failed on the same `TypeError` the hermetic half
+  already records.
+* Narrow confirmation lane, `STEALTH_MCP_NO_ERROR_REPORTING=1 PYTHONUTF8=1`:
+  `test_select_upload_verification` + `test_dom_handler` + `test_tool_dispatch` +
+  `test_mcp_protocol_surface` + `test_error_typing` + `test_silent_excepts_log` +
+  `test_tool_sections_contract` + `test_doc_claims` + `test_release_contract` +
+  `test_xpath_dispatch` + `test_tool_errors` + `test_observability`:
+  **278 passed**.
+* The integration nodes whose asserts this PR flipped, run individually:
+  `test_e2e_interaction::test_interaction_controls_and_log`,
+  `::test_upload_screenshot_and_content` and `test_browser_integration::TestFileUpload`
+  — **6 passed**; `test_e2e_interaction_fidelity::test_rich_input_types` — **1
+  passed**; `test_e2e_hard_dom::test_contenteditable_and_multiselect` — **1 passed**.
+* LOC (`tools/check_file_budgets.py`'s own rule — every line, blanks and comments
+  included): `dom_handler.py` 940 → **975**, `control_state.py` **439**,
+  `tool_sections/element_interaction.py` 519 → **535**, `tests/fakes.py` 1097 →
+  **1349**. All under the 1000-LOC default; no `GRANDFATHER` row is involved and none
+  moved. `dom_handler.py` grows by 35 despite losing both bodies' logic, and the 35
+  are docstring plus the no-leak message: the two methods keep only the ORDER (and,
+  for `upload_file`, its two pre-flight guards) and say why the order is load-bearing
+  in each. **Its headroom is 25 lines** — flagged here because the next change to that
+  file should expect to pay for itself, and the file is not grandfathered, so there is
+  no cap to ratchet.
+  *Paid, one merge later:* when F-875/F-876/F-877/F-873 met on one branch the file
+  reached **1007** and the pre-commit gate refused it. The "why the order is
+  load-bearing" argument for both tools moved into `control_state.py`'s module
+  docstring, next to the code that makes the order matter, and the handler's two
+  docstrings became one-line pointers; and the is-it-a-file-input guard moved into
+  the leaf as `control_state.require_file_input` (the twin of `verify_matched`'s
+  `is_select` gate, the same question about the other control). `upload_file` keeps
+  ONE pre-flight guard in its own body, every-path-must-exist. `dom_handler.py`
+  1007 → **987**, `control_state.py` 439 → **484**; no behaviour, message or
+  golden moved.
+* The full unit lane and the full integration lane are the coordinator's pre-push gate
+  and are deliberately **not** claimed here.
+
+---
+
+## 6. Not claimed / deliberately unchanged / what remains
+
+* **A `multiple` `<select>` still cannot be driven to more than one selection.**
+  The tool's signature takes exactly one `value` / `text` / `index`, so "the value
+  list is partially valid" is not a state this API can be asked for at all.
+  Measured (§2a row 15): `select.value = "two"` on a `multiple` select **replaces**
+  the whole selection with that one option. The fix reports the resulting
+  `selected_count` truthfully — which is how a caller now discovers the limit — and
+  deliberately does not add a list parameter: that is a new capability, not a
+  correction, and it belongs to whoever wants it with its own measurement.
+* **A `disabled` `<option>` is still selectable through `value=`/`index=` and still
+  unreachable through `text=`.** Measured, rows 12 and 16: the shipped `value` arm
+  selects it (Chrome permits the assignment), the typeahead the `text` arm rode
+  refuses it. The fix preserves both, because both are what the browser does and
+  because unifying them would be this tool deciding something Chrome already
+  decides (F-876's reasoning for the `disabled` click, verbatim). The asymmetry is
+  named here rather than left to be discovered.
+* **A `disabled` `<select>` is now selected rather than refused, and no
+  "is this control enabled" guard is added.** Measured (§2a row 9 vs the
+  sequential probe's `disabled-select value="two"` row): the shipped `value` arm
+  already selected on a `disabled` select, honestly and successfully — Chrome
+  permits the assignment — and only the `text` arm was broken there, because
+  `send_keys` needs focus the control cannot take. The fix makes the third arm
+  uniform with the two that already worked, which is the smallest change that
+  removes the leak; adding a refusal would be this tool deciding something Chrome
+  does not, and it would break the legitimate case of a control a script enables
+  between the resolve and the set. What can no longer happen is the leak itself:
+  nothing types, so the only control a call can move is the one it named.
+* **`upload_file` still attaches to a `disabled` input, and still ignores
+  `accept=`.** Measured, rows 4 and 5: `DOM.setFileInputFiles` attaches in both
+  cases and Chrome fires a trusted `change`. A user could do neither. The tool does
+  not refuse, for the same reason as above — CDP is the mechanism the tool is built
+  on and this is what it does — and the record now says truthfully how many files
+  the input holds, which is the fact a caller was missing.
+* **`upload_file`'s type guard still cannot see an `<input>` with no `type`
+  attribute.** Measured, row 8: `element.attrs` is `{'id': 'no-type'}`, so
+  `input_type` is `""` and the guard passes; Chrome refuses the CDP call and the
+  tool raises with Chrome's own wording (`Node is not a file input element [code:
+  -32000]`). The outcome is correct and the message is diagnostic, so this PR does
+  not widen the guard to consult the live DOM — that would be a second round trip
+  to re-decide something already decided, and its only effect would be the wording.
+  Named because a future reader will otherwise re-find it.
+* **There is still no "did the page react" oracle**, and this finding does not want
+  one — F-876 §6, unchanged. What `select_option` now asserts is stronger than
+  F-873's "did anything change", because a `<select>` has a bounded, exact oracle
+  (the resolved target index either is selected afterwards or is not) that a text
+  field does not. That is why `select_option` raises for "already on the requested
+  option **and** the requested option is not what it holds" and returns
+  `changed: false` — not a failure — when the control was simply already there.
+* **`type_text`'s tool-wrapper docstring still says `bool: True if typed
+  successfully.`** F-876 §6 named this one-line truthfulness fix as a follow-up and
+  this PR, changing two *other* tools' goldens, deliberately does not widen into it
+  a second time. It remains open.
+* **The release ledger still carries `E8-1` (and `E8-2`) as OPEN, and this PR does
+  not close them.** `tools/release_tool_claims.json` and
+  `tools/gen_release_contract.py` say `select_option` "returns True while the option
+  did not change" (`E8-1`) and `click_element` "returns True for a disabled control"
+  (`E8-2`). F-876 closed the second and left its row standing; this PR closes the
+  first and does the same, for the same reason and deliberately: the rows are a
+  single register with its own regeneration step and its own
+  `tests/test_release_contract.py` assertion that each id APPEARS, so retiring one is
+  a ledger change, not a tool change, and it should retire the whole F-873/F-876/F-877
+  family in one pass with one justification rather than three PRs each editing the
+  same table. Naming it here is the handover.
+* **`upload_file` still accepts `file_paths` as a bare string or a list**, and a bare
+  string is wrapped into a one-element list by the wrapper. That is unchanged and is
+  what makes `requested` well defined for both shapes.
+* **The events `select_option` now fires are UNTRUSTED, and that is a real loss.**
+  `new Event('change', {bubbles: true})` carries `isTrusted: false`, where the
+  keystrokes the `text=` arm used to send produced TRUSTED `input`/`change` from
+  Chrome itself (§2b measured exactly that pair). There is no trusted alternative
+  that is not the typeahead this fix removes — a trusted `<select>` change requires
+  either the typeahead's buffer or the native dropdown, which CDP cannot drive — and
+  the `value=`/`index=` arms were already untrusted, so the honest statement is: a
+  page gating on `event.isTrusted` was already unreachable through two of the three
+  arms and is now unreachable through all three. Named here, in
+  `control_state.py`'s module docstring and in the tool's own docstring, on
+  `click_target`'s precedent: it labels its untrusted path `synthetic` rather than
+  leaving a caller to find out.
+* **`MAX_OPTIONS` costs an in-range `index=` on a very large `<select>`.** The option
+  read is bounded at 2000 because the matching rule runs in Python, so an
+  `index=2500` on a control with 3000 options cannot be resolved. It is not reported
+  as "no option matches" — that would be false, and its remedy is different — but with
+  its own message naming the control's true `option_count` and the cap. A `value=` or
+  `text=` beyond the cap is indistinguishable from "not present", which the generic
+  message's two counts (on the control / read) make diagnosable but does not name.
+  Raising the cap is a one-constant change; the alternative — matching in the page —
+  is what this fix deliberately moved out.
+* **The stale guard is value-equality at the index, and it has a residual.** A list
+  replaced between the read and the write whose option at that index happens to carry
+  the SAME `value` passes the guard, and that option is selected. The alternative is
+  re-sending the whole option list to compare, which is the payload the bound above
+  exists to avoid; the caller is not misled either way, because the selection is read
+  back and reported. Named in the module docstring rather than left to be re-found.
+* **`upload_file`'s "File not found" message was fixed in passing**, because it is the
+  same leak class one guard earlier: it put an ABSOLUTE path — which names the
+  operating user — into a `ToolError` that reaches the caller, the debug ring and
+  Sentry. It now reports the path's position, the count, its character length and its
+  suffix (a file TYPE, not a name; a typed extension is the usual cause), keeps the
+  `File not found` prefix so the two existing pins that match on it are byte-unchanged,
+  and is itself pinned with the same canary-filename technique the other two
+  no-leak pins use. The tag/type guard's messages are untouched: they name the
+  selector and the element's own tag, never a path.
+* **`select_option`'s new `text=` matching rule is a rule, and a rule can be wrong
+  for someone.** It is three tiers (exact `text`, exact `label`, case-insensitive
+  prefix over both, `disabled` options skipped) and it is chosen to keep every
+  §2b case that worked working. A caller who was relying on Chrome's wraparound —
+  asking for a prefix that matches the *currently selected* option in order to
+  advance to the *next* matching one — will now get the current option and
+  `changed: false` rather than a move. That is a deliberate loss of a behaviour no
+  documentation ever claimed, and it is named rather than hidden.
+* **Rows 9 and 13 are fixed by construction, not by verification.** The leaf never
+  sends a keystroke and refuses a non-`<select>` before assigning anything, so the
+  "typed into a different control" and "wrote into a text box" outcomes are not
+  reachable to be verified. Their pins assert the raise, not a read-back.

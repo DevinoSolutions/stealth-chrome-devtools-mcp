@@ -56,8 +56,9 @@ if TYPE_CHECKING:
 
 # ``nodriver`` (~200 ms) and ``requests`` (~78 ms) are imported inside the two
 # functions that use them, not here. Both are on the DELEGATION path, while this
-# module's ``_schtasks`` / ``_read_pid`` / ``_cleanup`` seams are also the one
-# home ``backend_launch`` reaches for on every backend cold start (F-867) — and
+# module's ``_schtasks`` / ``_read_pid`` / ``_cleanup`` seams and its ``/TR``
+# budget (``TR_MAX_CHARS`` / ``TOKEN_CHARS`` / ``tr_overflow``, F-879) are also
+# the one home ``backend_launch`` reaches for on every backend cold start — and
 # the stdio proxy that does that never touches nodriver otherwise. Paying a
 # second of import for a browser it will not launch is a cost the proxy's
 # startup cannot justify.
@@ -72,6 +73,20 @@ PORT_READY_TIMEOUT = 20.0
 POLL_INTERVAL = 0.25
 SCHTASKS_TIMEOUT = 15
 DEVTOOLS_PROBE_TIMEOUT = 2
+# The longest ``/TR`` schtasks STORES, and the one home for that number: every
+# caller of ``_schtasks`` in the tree composes a ``/TR`` against it (F-879).
+# Measured, not documented — this module used to repeat the documented "~261",
+# which is wrong by eight characters. On Windows 11 10.0.26200 (2026-09-14) a
+# 255-character command came back from ``/Create`` with exit 0 and was stored as
+# its first 253 characters, so the task ran against a truncated path, failed with
+# Last Result 2 (ERROR_FILE_NOT_FOUND) and logged nowhere. There is nothing in
+# the return value to branch on, so the length has to be checked BEFORE the call.
+TR_MAX_CHARS = 253
+# Length of a per-attempt token, shared for the same reason the cap is: it names
+# the task and the scratch files, and the scratch path is most of what ``/TR``
+# has to fit. 48 bits per attempt is ample for a name that lives for one launch,
+# and 12 characters instead of 32 is 20 more characters of headroom (F-867).
+TOKEN_CHARS = 12
 # How far apart two readings of one process's start time may be and still be
 # the same process. psutil reports it deterministically, so this only absorbs
 # float representation — it is NOT slack for "probably the same pid".
@@ -193,6 +208,52 @@ def _schtasks(args: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def tr_overflow(command: str) -> int | None:
+    """*command*'s length when schtasks would store it TRUNCATED, else ``None``.
+
+    THE one home for the comparison, not just for the number (F-879). Both
+    ``/TR`` composers in the tree — this module's launcher script and
+    ``backend_launch``'s pythonw intermediary — ask here, so neither can drift on
+    the cap, on the boundary (``TR_MAX_CHARS`` is what schtasks STORES, so a
+    command of exactly that length arrives whole) or on forgetting to ask.
+
+    Returns the length rather than a bool because every caller reports it: a cap
+    alone tells an operator nothing about how far over their machine is.
+    """
+    return len(command) if len(command) > TR_MAX_CHARS else None
+
+
+# The one spelling of what the scheduler is told to run. A format string rather
+# than an f-string inline so ``_tr_command`` and its pin measure the same shape.
+_TR_TEMPLATE = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script}"'
+
+
+def _tr_command(script: Path) -> str:
+    """The ``/TR`` for the one-shot task, or ``ToolError`` if it cannot fit.
+
+    THE one composition site, and it cannot hand back a command schtasks would
+    truncate — the refusal is the whole point, because a truncated command is
+    accepted with exit 0 and then fails at run time where nothing is watching.
+
+    ``powershell.exe`` is left to PATH deliberately, unlike ``_system_binary``'s
+    treatment of ``schtasks.exe``: the task runs as the logged-on user, whose
+    PATH we are not the ones setting, and an absolute system path would spend
+    about 30 of the 253 characters on a name Windows resolves anyway.
+    """
+    command = _TR_TEMPLATE.format(script=script)
+    over = tr_overflow(command)
+    if over is not None:
+        raise ToolError(
+            f"F-879: the desktop-launch task command is {over} characters, past "
+            f"the {TR_MAX_CHARS} schtasks stores — it would be truncated with no "
+            "error at all, and the task would then fail at run time with nothing "
+            f"logged. It is the state dir that is long: {_launch_dir()}. That "
+            "path is this account's home plus one fixed subdirectory, so a home "
+            "on a deep or redirected profile path is what spends the budget."
+        )
+    return command
+
+
 def _ps_quote(value: str) -> str:
     """Single-quote a PowerShell literal. Paths here routinely contain spaces."""
     return "'" + str(value).replace("'", "''") + "'"
@@ -201,9 +262,11 @@ def _ps_quote(value: str) -> str:
 def _launcher_script(executable: str, args: list[str], pid_file: Path) -> str:
     """The PowerShell the scheduled task runs on the user's desktop.
 
-    ``schtasks /Create /TR`` truncates around 261 characters, so the real command
-    line cannot live there — the task runs this file, and the file carries the
-    args. ``-PassThru`` gives us the pid, which is the only thing we need back.
+    ``schtasks /Create`` stores only ``TR_MAX_CHARS`` of ``/TR`` (253, measured —
+    see that constant), so the real command line cannot live there: the task runs
+    this file, and the file carries the args. That is what makes a pathological
+    profile path or a proxy's worth of switches cost ``/TR`` nothing at all.
+    ``-PassThru`` gives us the pid, which is the only thing we need back.
 
     **Two quoting layers, both load-bearing.** ``subprocess.list2cmdline`` builds
     the Windows command line by the MS C-runtime rules Chrome's own argv parser
@@ -335,9 +398,13 @@ def _cleanup(task_name: str, *paths: Path) -> None:
 
 
 async def _run_task(
-    task_name: str, script: Path, port: int, pid_file: Path, delegated: _Delegated
+    task_name: str, command: str, port: int, pid_file: Path, delegated: _Delegated
 ) -> int:
     """Create + run the one-shot task, then wait for Chrome. Returns its pid.
+
+    Takes the ``/TR`` already composed (and already length-checked by
+    ``_tr_command``) rather than the script path, because the refusal has to
+    happen before the launch dir is created, not here.
 
     Also RECORDS that pid into *delegated* as soon as it is known to belong to a
     live process, because the two failure paths that matter — the readiness
@@ -345,7 +412,6 @@ async def _run_task(
     already on the user's desktop, and the return value cannot reach the caller
     to have it killed.
     """
-    command = f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script}"'
     # No /RU or /RP: a task that runs only when the current user is logged on
     # needs no stored credentials and no admin rights.
     created = await asyncio.to_thread(
@@ -445,19 +511,23 @@ async def launch_and_attach(
     config.host = "127.0.0.1"
     config.port = port
     args = config()
-    token = uuid.uuid4().hex
+    token = uuid.uuid4().hex[:TOKEN_CHARS]
     task_name = f"{TASK_PREFIX}{token}"
     launch_dir = _launch_dir()
-    launch_dir.mkdir(parents=True, exist_ok=True)
     script = launch_dir / f"{token}.ps1"
     pid_file = launch_dir / f"{token}.pid"
+    # Composed FIRST, because it is the one thing that can be known to be
+    # impossible before anything exists: an over-long /TR raises here, with no
+    # directory created, no task to delete and no 20s deadline to burn.
+    command = _tr_command(script)
+    launch_dir.mkdir(parents=True, exist_ok=True)
     script.write_text(
         _launcher_script(browser_executable, args, pid_file), encoding="utf-8"
     )
     delegated = _Delegated()
     attached = False
     try:
-        pid = await _run_task(task_name, script, port, pid_file, delegated)
+        pid = await _run_task(task_name, command, port, pid_file, delegated)
         debug_logger.log_info(
             "desktop_launch",
             "launch_and_attach",

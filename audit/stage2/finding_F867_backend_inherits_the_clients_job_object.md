@@ -385,10 +385,15 @@ unmeasured.
 * **A backend that dies for any other reason** — an upgrade's source-change eviction, a
   deliberate `restart` — still KILLS the browsers it owned on the way back up rather
   than re-adopting them. Unchanged from 2.1.4, and unrelated to the job.
-* **`desktop_launch._run_task` has no `/TR` length guard at all** (F-810, the headed
-  browser path). Its command is roughly 60 characters plus the script path, so it is
-  comfortable today and this is not a live defect — but it is the same silent
-  truncation, on the same API, one function away: a deep enough state dir would push it
-  past 253 and produce the same exit-0 success, the same Last Result 2, and the same
-  absence of any error to log. `backend_launch` now guards its own `/TR`;
-  `desktop_launch` does not. Worth its own finding rather than a drive-by fix here.
+* ~~**`desktop_launch._run_task` has no `/TR` length guard at all**~~ — **CLOSED**, see
+  `finding_F879_desktop_launch_tr_guard.md`. It was the same silent truncation on the
+  same API one function away: a deep enough state dir would push it past 253 and produce
+  the same exit-0 success, the same Last Result 2 and the same absence of any error to
+  log, surfacing as a 20 s timeout blaming the DevTools port. The guard landed as its own
+  finding, as this bullet asked. Note what moved with it: `TR_MAX_CHARS` and
+  `TOKEN_CHARS` are **no longer defined in `backend_launch`** — they live beside
+  `_schtasks` in `desktop_launch` (with `tr_overflow`, the one home for the comparison
+  too), and this module's scheduler rung reads them there at call time, so there is one
+  measured 253 in the tree rather than two that could drift. The two paths still differ
+  on what over-length MEANS: a rung boundary here, a raised `ToolError` there, because
+  the headed hand-off has no fallback rung and this one does.
