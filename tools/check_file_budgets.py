@@ -72,9 +72,18 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # (WARNING + traceback, propagate to get_instance_state's partial record).
     # The row had zero headroom, so the extraction was the only way in; a
     # one-line ratchet is small but it is the honest actual. Cap == actual.
+    # F-881 RATCHETS DOWN 1528 -> 1496. `navigate`'s milestone wait — which was
+    # `tab.get` (a 0.5 s sleep) plus `_wait_for_navigation_condition` (a no-op:
+    # nodriver's `Tab.wait(t)` takes a duration, not an event class) — is the
+    # new navigation_milestone.py leaf, keyed on the loaderId Page.navigate
+    # answers with. This file keeps the retry budget and the post-navigation
+    # reads, and makes ONE call under the budget it always had; a timeout after
+    # Page.navigate answered is reported, not retried on a replaced tab. The
+    # signature-echo Args/Returns block of `navigate` paid for that (the
+    # plan_F856 mechanism). Cap == actual.
     "embedded/browser_manager.py": (
-        1528,
-        "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869",
+        1496,
+        "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its

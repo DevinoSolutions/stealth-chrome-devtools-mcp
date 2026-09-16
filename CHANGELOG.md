@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)
+
+Two Windows full gates failed the same way on unrelated PRs: `navigate` to a `data:`
+page whose `<title>` is in its own URL answered `title: ""`. Measured on Chrome 152:
+the tool's `load` wait was `tab.wait(cdp.page.LoadEventFired)`, and nodriver 0.47's
+`Tab.wait(t)` takes a *duration* — a class is truthy, so the whole wait was skipped
+(0.02 ms). `domcontentloaded` was the same no-op. What stood in for a wait was the
+`tab.get(url)` before it: `Page.navigate` plus a `Tab.wait()` that, with nothing having
+enabled the `Page` domain on the tab, saw no event and slept a flat 0.5 s. Every
+navigation paid that half second, and on a loaded runner it was not enough for the
+parser to reach `<title>` before `document.title` was read.
+
+`navigation_milestone` is the ONE home for `wait_until` now. It arms a
+`Page.lifecycleEvent` listener BEFORE sending `Page.navigate` (the response and the new
+document's events are not ordered — `DOMContentLoaded` was measured 0.3 ms before the
+response, `load` 0.3 ms after), and returns when the event named for **that response's
+`loaderId`** has been seen, whether it arrived before the response or after. An older
+document's `load` does not count; a same-document navigation (`loaderId: null`, no
+events at all) returns at the response; a navigation Chrome could not perform commits
+its error page under the same `loaderId` and fires `load` for it, so the F-802/F-833
+`chrome-error://` detector is unchanged. `networkidle` is still F-787's fixed sleep —
+now after the committed document rather than after the 0.5 s — and that finding stays
+open. An unknown `wait_until` raises naming the three accepted values instead of silently
+meaning `load`.
+
+Both directions of the change are visible. Faster: a `data:` navigation answers in
+~20 ms instead of ~525 ms, and after `load`. Slower, deliberately: a page whose `load`
+takes longer than ~0.5 s now makes `navigate` wait for it, up to the budget; and a
+committed page that never reaches `load` — an open transfer, a hanging subresource —
+under the default `wait_until="load"` used to return `success: true` at ~0.5 s and now
+times out with the existing message. That second class is pinned hermetically but is
+**untested on Chrome**: the resilience suite characterizes the hang-after-headers route
+under `networkidle` only. Likewise `net::ERR_ABORTED` (a download, or a navigation
+superseded before commit, including a JS/meta redirect that commits before the first
+document's `load`) commits nothing for the loader being waited on, so it runs to the
+budget and raises the timeout instead of answering with the previous page's url and
+title.
+
+What a timeout costs is drawn at acceptance. `navigate`'s one stale-tab recovery (a
+`TimeoutError` on attempt 1 → `_replace_main_tab`, which CLOSES the caller's tab and
+re-navigates with a full second budget) now applies only to a `Page.navigate` Chrome
+never answered — the hang-before-headers shape, where the tab may indeed be stale. A
+timeout after `Page.navigate` answered is the page's own — slow, never loading, or a
+download — and is reported once, on the caller's tab, within one budget; retrying it
+would have discarded a page that exists, triggered a download twice, and cost 60 s by
+default.
+
 ### Fixed — `scroll_page` returned `true` for a scroll that had not happened (F-875)
 
 `DOMHandler.scroll_page` ended in one `tab.evaluate`, a fixed
@@ -74,8 +121,6 @@ This is a tool **schema change** — `scroll_page`'s `output_schema` in
 `{result: boolean}` to the `{type: object}` every other dict-returning tool
 already serves. A caller that treated the old `true` as proof must read
 `scrolled` / `at_edge` / `settled` instead.
-
-<<<<<<< HEAD
 
 ### Fixed — `paste_text` and `click_element` reported a dispatch, not a result (F-876)
 
@@ -282,7 +327,6 @@ characters of headroom and one spelling of the token length instead of two.
 Not verified without a real `schtasks`: the 253 figure is F-867's measurement,
 carried over unchanged. Everything this change adds is asserted hermetically
 against the faked seam — no test creates a scheduled task.
-=======
 
 ### Fixed — nothing ever forgot a dead backend record (F-880)
 
@@ -417,7 +461,6 @@ private-use codepoints (U+E009 for Ctrl, U+E017 for Delete) through `send_keys`,
 CDP has never understood, so all three characters landed verbatim and nothing was
 cleared, corrupting the field it was asked to empty; it and `paste_text` now share the
 one CDP select-all + Delete.
->>>>>>> origin/main
 
 ## 2.1.6
 

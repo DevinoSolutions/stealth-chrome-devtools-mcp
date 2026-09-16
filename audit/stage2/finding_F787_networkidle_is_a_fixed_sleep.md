@@ -26,6 +26,18 @@ other two conditions are real: `domcontentloaded` awaits
 `Page.domContentEventFired` and the default `load` awaits `Page.loadEventFired`,
 both under the remaining budget. Only `networkidle` is synthetic.
 
+> **Corrected by F-881 (2026-09-16).** The paragraph above was a reading of the
+> source, not a measurement, and its second sentence is false: the "real" waits
+> were `tab.wait(<event class>)`, which nodriver 0.47 reads as a *duration* and
+> skips outright (measured 0.02 ms). All three conditions were synthetic. The
+> `load`/`domcontentloaded` waits are real since F-881 (`navigation_milestone`,
+> keyed on the navigation's `loaderId`); `networkidle` is still this finding's
+> fixed sleep, now taken after the committed document (`init`) rather than after
+> `tab.get`'s 0.5 s, and the finding stays OPEN. The implementation now lives in
+> `embedded/navigation_milestone.py`, not `_wait_for_navigation_condition`,
+> which is deleted; `Page.lifecycleEvent`'s own `networkIdle` is one table row
+> away when this is taken up. See `finding_F881_navigate_returns_before_load.md`.
+
 What that produces, measured against W10's `/fault/hang-after-headers`
 controller — a route that commits a chunked `200`, flushes a partial body, and
 then sends nothing at all until the test releases it:
