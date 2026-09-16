@@ -18,8 +18,15 @@ Isolation, stated exactly. ``backend_registry.STATE_DIR`` is
 to move it is to move the child's home. That is ``release_gate_harness.
 _isolated_env``'s job and it is used here unchanged: the subprocess resolves
 ``Path.home()`` inside a ``tmp_path`` at its own import time, and the developer's
-real ``~/.stealth-mcp`` is never opened — a property asserted below by reading
-the real record's bytes before and after, rather than merely intended.
+real ``~/.stealth-mcp`` is never opened.
+
+That last claim is ASSERTED below rather than merely intended — but only where
+there is something to assert it against. On a developer machine the real record
+exists and its bytes are compared before and after, which is the check that
+matters, because that is the only machine where a leak could cost anything. On
+CI the file is absent, ``_real_state_bytes`` answers ``None`` both times and the
+comparison is vacuously true. It is kept on both for one reason: a check that
+runs only where it is convenient is a check nobody notices has stopped running.
 
 The two entries are the two shapes the finding is about, and they are
 DIFFERENT on purpose:

@@ -34,7 +34,7 @@ import pytest
 # import. The second exec is unconditional — both modules load server.py under
 # their own module object in every lane; what this import changed is that it now
 # also happens when this file runs alone.
-from e2e_helpers import await_visible_window, runtime
+from e2e_helpers import await_visible_window, instance_entry, runtime
 
 # We need to import server.py as a module (it uses bare imports internally)
 _spec = importlib.util.spec_from_file_location(
@@ -961,10 +961,9 @@ class TestListInstancesLiveState:
     ALPHA = "data:text/html,<title>Alpha</title><h1>A</h1>"
     GAMMA = "data:text/html,<title>Gamma</title><h1>G</h1>"
 
-    @staticmethod
-    def _entry(listing, iid):
-        [entry] = [e for e in listing if e["instance_id"] == iid]
-        return entry
+    #: ``e2e_helpers.instance_entry`` — the one row lookup for this tier. It was
+    #: written out by hand here and twice more before it had a home.
+    _entry = staticmethod(instance_entry)
 
     @staticmethod
     def _same_url(reported, expected):

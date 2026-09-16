@@ -28,6 +28,35 @@ os.environ.setdefault(
     "STEALTH_MCP_CLONE_OUTPUT_DIR",
     str(Path(tempfile.gettempdir()) / "stealth-mcp-test-clone-output"),
 )
+# The same redirect, for the OTHER root a test can write to: the browser-session
+# root that holds the master profile and every clone. This closes the structural
+# gap named in
+# ``audit/stage2/finding_F841_resilience_test_deletes_real_master_profile.md``
+# ("the whole e2e tier spawns against the operator's real
+# STEALTH_MCP_BROWSER_SESSION_ROOT") and it has to be HERE, at conftest import
+# time, rather than in a fixture. Two reasons, both measured:
+#
+# * ``get_settings()`` is ``@lru_cache``d. ``_reset_settings_cache`` below clears
+#   it at each test's SETUP, so whatever ``os.environ`` says at that moment is
+#   what the product reads for the rest of the test. A per-test fixture that
+#   patches the env cannot win that race against an autouse fixture ordered
+#   ahead of it — and the E2E modules' ``_warmup`` is exactly such a fixture: it
+#   spawns a browser, and therefore resolves the root, BEFORE ``tmp_empty_root``
+#   is set up. Measured: a six-browser fleet node declaring ``tmp_empty_root``
+#   wrote six 108 MB named profiles into the developer's real
+#   ``C:\stealth-mcp-browser-sessions\sessions``.
+# * Only the session root needs setting. ``master_profile_dir`` /
+#   ``clone_root_dir`` / ``master_snapshot_dir`` all derive from it when their
+#   own vars are unset, which is the same single knob the release gate sets.
+#
+# ``setdefault``, so the gate's ``runner.temp`` value still wins, and a FIXED
+# path rather than a fresh temp dir per session so the master profile is cloned
+# once on this machine instead of once per run. Nothing here is the operator's
+# root, which is the whole point.
+os.environ.setdefault(
+    "STEALTH_MCP_BROWSER_SESSION_ROOT",
+    str(Path(tempfile.gettempdir()) / "stealth-mcp-test-browser-sessions"),
+)
 os.environ.setdefault("STEALTH_MCP_NO_AUTO_RECOVERY", "1")
 # Test runs must not ship their deliberately-injected failures to the real
 # Sentry project: sentry_init() is on by default, LoggingIntegration forwards

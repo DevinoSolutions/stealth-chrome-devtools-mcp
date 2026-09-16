@@ -622,6 +622,11 @@ async def test_concurrent_calls_on_one_session_overlap_rather_than_queue(
     manual run's apparent queue was therefore upstream of the wire, in how the
     CLIENT issues its calls, and this node is what keeps that diagnosis from
     having to be made again from logs.
+
+    Coverage, stated so nobody reads more into it: this module is
+    ``transport``-marked and ``.github/workflows/release-gate.yml`` deselects
+    ``transport`` on macOS (F-773), so the gate decides this node on Windows and
+    Linux only.
     """
     profiles = [f"w13-overlap-{index}" for index in range(CONCURRENCY_PROBES)]
     spawn_started = time.monotonic()

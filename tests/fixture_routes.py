@@ -52,6 +52,20 @@ cannot wedge a server thread, never a synchronization point. Disconnects are
 expected during a fault and are recorded rather than raised, and
 :func:`release_all_faults` lets fixture finalization prove every handler left
 before the server is shut down.
+
+The ``cov_*`` block at the end of this file is the SECOND deliberate exception,
+and unlike W10's it really is elapsed time: ``/cov/slow_asset``,
+``/cov/slow_page.html`` and the delay ``/cov/slow_load.html`` threads into the
+first of those each ``time.sleep`` for a ``?ms=`` the caller names. They exist
+because their consumers measure *when* an answer arrived — whether a navigation
+waited for its page's own ``load`` (F-881) and whether three requests in flight
+overlap — and neither question can be asked of an event a test releases, since
+the release itself would be the thing being timed. What keeps them safe is the
+rule they DO share with the fault routes: the delay is never a synchronization
+point (nothing waits for one to finish before doing something else), it is
+capped at :data:`COV_MAX_DELAY_MS` whatever the URL asks for, a request with no
+``?ms=`` answers immediately so the hermetic route enumeration cannot park a
+thread, and a peer that gave up first is recorded rather than raised.
 """
 
 from __future__ import annotations
@@ -2197,6 +2211,13 @@ COV_PLAIN_TITLE = "cov-plain"
 COV_SHELL_TITLE = "cov-shell"
 COV_FORM_TITLE = "cov-form"
 
+#: ``/cov/form.html``'s title AFTER its own button has been clicked. The click
+#: handler is the only writer, so this title exists on a page NO ``navigate``
+#: call ever saw — which is F-874 §1 row 1, and the only way a listing
+#: assertion can go red against a cache whose two writers are spawn and
+#: navigate.
+COV_CLICKED_TITLE = "cov-clicked"
+
 #: ``/cov/slow_load.html``'s title BEFORE its ``load`` event and AFTER it. The
 #: page sets the second one from a ``load`` listener and nowhere else, so a
 #: navigation that answered at COMMIT can only ever read the first — which is
@@ -2297,6 +2318,7 @@ document.getElementById('cov-select').addEventListener('change', function (event
 document.getElementById('cov-button').addEventListener('click', function () {
   window.__covForm.clicks.push('cov-button');
   document.getElementById('cov-clicked').textContent = 'CLICKED';
+  document.title = '__CLICKED_TITLE__';
 });
 """
     body = (
@@ -2310,7 +2332,7 @@ document.getElementById('cov-button').addEventListener('click', function () {
         "</select>"
         "<button type='button' id='cov-button'>Press</button>"
         "<span id='cov-clicked'>NOT-CLICKED</span>"
-        f"<script>{script}</script>"
+        f"<script>{_fill(script, clicked_title=COV_CLICKED_TITLE)}</script>"
     )
     return _page(COV_FORM_TITLE, COV_FORM_SENTINEL, body)
 

@@ -11,10 +11,17 @@ that would have been red first. No `src/` change.
 - **`tests/test_e2e_fleet.py` (new)** — six headless browsers spawned, navigated and
   driven in three `asyncio.gather` calls, over a mix of page shapes (plain, a page
   whose `load` is held open, an app shell whose document cannot scroll, a form), with
-  every answer checked against the page's own state in JavaScript. Asserts
-  `list_instances` reports six live titles with `partial: false`, that closing the
-  fleet leaves no unreclaimable profile directory, and that the backend logged no
-  warning on the way through. Measured 12.4 s cold / 5.0 s warm locally.
+  every answer checked against the page's own state in JavaScript. Half the fleet is
+  UNNAMED, which is the advertised path and the manual run's own shape — one run
+  covers all three profile roles (`master`, `clone`, `explicit`). Two members move
+  their page WITHOUT the `navigate` tool (a click that retitles, and a `switch_tab`),
+  which is what makes the `list_instances` block red against F-874 rather than
+  decorative. Asserts six live titles with `partial: false`; that every disposable
+  auto-clone directory is gone after close while every named profile survives (both
+  halves of `spawn_browser`'s documented promise); that the fleet left no directory
+  nobody asked for; and that the backend logged no warning beyond the one named,
+  lane-structural clone-seed fallback. Measured `spawn 3.6s, navigate 1.3s,
+  actions 1.7s, total 6.7s`.
 - **`tests/test_e2e_load_milestone.py` (new)** — F-881 made red by construction: a
   page that commits at once and holds its `load` on a slow `<img>` for 1.8 s, whose
   title and `readyState` flip only at `load`. Plus the `domcontentloaded` control that
@@ -37,7 +44,17 @@ that would have been red first. No `src/` change.
   stdio wire: three `tools/call` in flight add ONE server-side hold, not three
   (measured baseline 0.15 s, held 2.18 s over a 2.0 s hold). The backend does not
   serialize concurrent calls.
-- **`tests/fixture_routes.py`** — six `cov_*` routes appended at EOF for the above.
+- **`tests/fixture_routes.py`** — six `cov_*` routes appended at EOF for the above, and
+  the module docstring's determinism rule now names them as its second deliberate
+  exception (they sleep on a `?ms=`, capped, never as a synchronization point).
+- **`tests/conftest.py`** — `STEALTH_MCP_BROWSER_SESSION_ROOT` is redirected to a temp
+  directory at conftest IMPORT time, beside the `STEALTH_MCP_CLONE_OUTPUT_DIR` line that
+  already used the idiom, so no test can reach the operator's real browser-session root.
+  A per-test fixture provably cannot do this — `get_settings()` is `lru_cache`d and every
+  E2E module's autouse `_warmup` spawns a browser before any function-scoped root fixture
+  is set up, which is how a fleet node declaring `tmp_empty_root` still wrote six 108 MB
+  profiles into the real root. Closes the structural gap F-841 left open; that finding is
+  updated with the measurement.
 
 ## 2.1.8
 

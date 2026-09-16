@@ -20,9 +20,14 @@ degenerating into "navigate is slow": asking for ``domcontentloaded`` over the
 SAME page must come back BEFORE that ``load``, with the pre-load title. If both
 nodes passed while the tool simply waited for everything, this one would fail.
 
-Both pages are served by the session fixture app, and the profile root is a
-temp dir (``tmp_empty_root``), so nothing here touches a real session root or
-the network.
+Both pages are served by the session fixture app, so nothing here reaches the
+network. Both spawns are UNNAMED, which means the master profile itself — the
+browser-session root is redirected for the whole session at
+``tests/conftest.py`` import time, and these nodes deliberately do NOT declare
+``tmp_empty_root``: an autouse ``_warmup`` spawns a browser before any
+function-scoped root fixture is set up, and ``get_settings`` is ``lru_cache``d,
+so a per-test root fixture here would be decorative. The comment in
+``conftest.py`` carries the measurement.
 """
 
 from __future__ import annotations
@@ -61,7 +66,7 @@ async def _warmup():
 
 
 async def test_navigate_waits_for_the_load_its_own_subresource_delayed(
-    fixture_app_server, tmp_empty_root
+    fixture_app_server,
 ):
     """``wait_until='load'`` returns only once the page's real ``load`` fired."""
     spawn = get_fn("spawn_browser")
@@ -99,7 +104,7 @@ async def test_navigate_waits_for_the_load_its_own_subresource_delayed(
 
 
 async def test_domcontentloaded_comes_back_before_that_same_load(
-    fixture_app_server, tmp_empty_root
+    fixture_app_server,
 ):
     """The control: the three milestones are still told apart.
 
