@@ -211,6 +211,48 @@ I18N_TYPED_KEYS = ("nfc", "nfd", "combining", "rtl")  # keystroke-synthesizable
 COMPOSITION_STEPS = ("か", "かん", "漢")  # ka -> kan -> kanji
 COMPOSITION_FINAL = "漢字"  # the committed string the page must hold
 
+# ── F-882 navigation supersession (the ``nav_*`` shapes) ────────────────────
+# Every way the document Chrome committed for a navigation's OWN loaderId can
+# be replaced before it reaches ``load`` — a head-script ``location.replace``,
+# a ``meta refresh``, a JS challenge that re-navigates itself, a page that
+# reloads once, a download that commits nothing, and a pending navigation the
+# page itself pre-empts. The live sites that showed these (a signed-out Gmail,
+# YouTube, Reddit's ``js_challenge``, Amazon's self-reload) are not fixtures:
+# they change under us and a test may never reach the network, so each shape is
+# reproduced here exactly and locally.
+NAV_LANDING_SENTINEL = "fixture-nav-landing-page"
+NAV_LANDING_TITLE = "Nav Landing"
+NAV_HEAD_REPLACE_SENTINEL = "fixture-nav-head-replace-page"
+NAV_META_REFRESH_SENTINEL = "fixture-nav-meta-refresh-page"
+NAV_SELF_RELOAD_SENTINEL = "fixture-nav-self-reload-page"
+NAV_RELOADED_TITLE = "Nav Reloaded"
+NAV_CHALLENGE_SENTINEL = "fixture-nav-js-challenge-page"
+NAV_SOLVED_SENTINEL = "fixture-nav-challenge-solved-page"
+NAV_SOLVED_TITLE = "Nav Challenge Solved"
+NAV_SOLUTION = "nav-solution-f882"
+NAV_CHALLENGE_COOKIE = "nav_jsc"
+NAV_CHAIN_SENTINEL = "fixture-nav-chain-final-page"
+NAV_CHAIN_TITLE = "Nav Chain Final"
+NAV_SLOW_DOC_SENTINEL = "fixture-nav-slow-doc-page"
+NAV_SLOW_DOC_TITLE = "Nav Slow Doc"
+NAV_PREEMPT_SENTINEL = "fixture-nav-preempt-page"
+NAV_PREEMPT_TITLE = "Nav Preempt"
+NAV_IFRAME_HOST_SENTINEL = "fixture-nav-iframe-host-page"
+NAV_IFRAME_HOST_TITLE = "Nav Iframe Host"
+NAV_DOWNLOAD_NAME = "nav-download.bin"
+NAV_DOWNLOAD_BODY = b"nav-download-body-e2e-f882"
+# The one thing a supersession fixture cannot express as an event: "this
+# document had not reached ``load`` yet" IS a duration. Both delayed routes read
+# it from ``?ms=``, defaulting to 0 so the hermetic enumeration backstop (which
+# requests every route with NO query) never waits, and both clamp to this
+# ceiling so a mistyped query cannot park a server thread.
+NAV_DELAY_CEILING_SECONDS = 5.0
+# A 1x1 transparent PNG — the smallest real subresource ``load`` must wait for.
+NAV_PIXEL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
 
 def w16_hash(text: str) -> str:
     """FNV-1a/32 over UTF-16 code units — the JS ``charCodeAt`` domain.
@@ -326,6 +368,11 @@ def _new_ledger() -> dict[str, Any]:
         "w16_shared": [],  # the shared worker's zero-client teardown report
         "w16_sw": [],  # service-worker install/activate reports
         "w16_asset": [],  # every NETWORK hit on the service-worker-cached asset
+        # F-882. Which documents the BROWSER actually fetched for one
+        # navigation, in order — the independent oracle for "our loader was
+        # superseded": a tool that answered without the second fetch having
+        # happened cannot agree with this.
+        "nav_paths": [],
     }
 
 
@@ -2097,6 +2144,264 @@ def _r_life_lifecycle(handler, query: str) -> None:
     _send_html(handler, life_lifecycle_page())
 
 
+# ── F-882 navigation-supersession pages and routes ──────────────────────────
+def nav_document(
+    sentinel: str, title: str | None, head: str = "", body: str = ""
+) -> str:
+    """One nav fixture document.
+
+    ``title=None`` emits NO ``<title>`` element at all, which is the half of
+    these shapes that makes a stale answer visible: ``document.title`` reads
+    ``""`` for the document the tool's own loader committed, and only the
+    document that REPLACES it has a title. ``_page`` cannot express that — it
+    always writes a title — and widening it would put a nav-only concern in the
+    builder every other shape shares.
+    """
+    return (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        f"{f'<title>{title}</title>' if title else ''}{head}</head><body>"
+        f"<p id='sentinel'>{sentinel}</p>{body}</body></html>"
+    )
+
+
+def nav_landing_page(origin: str) -> str:
+    """Where every superseding navigation lands. ``origin`` names which shape
+    sent us here, so a test reads the route taken rather than inferring it."""
+    return nav_document(
+        NAV_LANDING_SENTINEL,
+        NAV_LANDING_TITLE,
+        body=f"<p id='from'>{origin}</p>",
+    )
+
+
+def nav_head_replace_page(target: str) -> str:
+    """(a) A head script that ``location.replace``s while the parser is still
+    running: this document commits under the tool's loaderId and is destroyed
+    before it can fire ``load``."""
+    return nav_document(
+        NAV_HEAD_REPLACE_SENTINEL,
+        None,
+        head=f"<script>location.replace({json.dumps(target)});</script>",
+    )
+
+
+def nav_meta_refresh_page(target: str) -> str:
+    """(b) The same supersession with no script at all — Chrome's own
+    ``meta refresh`` at delay 0."""
+    return nav_document(
+        NAV_META_REFRESH_SENTINEL,
+        None,
+        head=f"<meta http-equiv='refresh' content='0;url={target}'>",
+    )
+
+
+_NAV_SELF_RELOAD_JS = """
+(function () {
+  var key = 'nav-reload-' + __TOKEN__;
+  if (sessionStorage.getItem(key)) { document.title = __TITLE__; return; }
+  sessionStorage.setItem(key, '1');
+  window.addEventListener('load', function () { location.reload(); });
+})();
+"""
+
+
+def nav_self_reload_page(token: str) -> str:
+    """(c) The Amazon shape: the FIRST document has no title and reloads itself
+    once at its own ``load``; the second sets one. ``sessionStorage`` keyed on
+    the caller's token is what makes "exactly once" a property of the page
+    rather than of how often the suite has run."""
+    return nav_document(
+        NAV_SELF_RELOAD_SENTINEL,
+        None,
+        head="<script>"
+        + _fill(
+            _NAV_SELF_RELOAD_JS,
+            token=json.dumps(token),
+            title=json.dumps(NAV_RELOADED_TITLE),
+        )
+        + "</script>",
+    )
+
+
+_NAV_CHALLENGE_JS = """
+(function () {
+  document.cookie = __COOKIE__ + '=' + __SOLUTION__ + '; path=/';
+  location.replace(__TARGET__);
+})();
+"""
+
+
+def nav_js_challenge_page(token: str) -> str:
+    """(d) Reddit's ``js_challenge``: an untitled interstitial that sets a
+    cookie and re-navigates itself to the solved URL. The cookie is the
+    server-side oracle — the landing route records it, so "the challenge really
+    ran" is not the page's own word."""
+    target = f"/nav/js-challenge?token={token}&solution={NAV_SOLUTION}&js_challenge=1"
+    return nav_document(
+        NAV_CHALLENGE_SENTINEL,
+        None,
+        head="<script>"
+        + _fill(
+            _NAV_CHALLENGE_JS,
+            cookie=json.dumps(f"{NAV_CHALLENGE_COOKIE}_{token}"),
+            solution=json.dumps(NAV_SOLUTION),
+            target=json.dumps(target),
+        )
+        + "</script>",
+    )
+
+
+def nav_chain_final_page(delay_ms: int) -> str:
+    """(e) The control: ONE loader (a 302 chain is one navigation) whose
+    ``load`` is held open by a slow IMAGE. An image and not a script, so
+    ``DOMContentLoaded`` and the ``<title>`` are early and only ``load`` is
+    late — which is the whole thing a ``wait_until='load'`` claims to wait
+    for."""
+    return nav_document(
+        NAV_CHAIN_SENTINEL,
+        NAV_CHAIN_TITLE,
+        body=f"<img id='slow' src='/nav/slow-asset?ms={delay_ms}' alt=''>",
+    )
+
+
+_NAV_PREEMPT_JS = """
+window.addEventListener('load', function () {
+  setTimeout(function () { location.replace(__TARGET__); }, __MS__);
+});
+"""
+
+
+def nav_preempt_page(delay_ms: int, target: str) -> str:
+    """(g) The pre-commit shape's first half: a loaded page that navigates
+    itself away on a timer. A test navigates FROM here to a document the server
+    answers slowly, so the page pre-empts a navigation that never committed."""
+    return nav_document(
+        NAV_PREEMPT_SENTINEL,
+        NAV_PREEMPT_TITLE,
+        head="<script>"
+        + _fill(_NAV_PREEMPT_JS, target=json.dumps(target), ms=delay_ms)
+        + "</script>",
+    )
+
+
+def nav_iframe_host_page() -> str:
+    """A titled document with a SAME-ORIGIN iframe whose own document replaces
+    itself: two loaders commit in the subframe while the main frame commits
+    once. Every ``Page.lifecycleEvent`` carries the frame it belongs to, so the
+    answer must stay the HOST's — a wait that counted subframe loaders would be
+    waiting on a document the caller never asked for."""
+    return nav_document(
+        NAV_IFRAME_HOST_SENTINEL,
+        NAV_IFRAME_HOST_TITLE,
+        body="<iframe id='child' src='/nav/head-replace'></iframe>",
+    )
+
+
+def _nav_delay_seconds(query: str) -> float:
+    """``?ms=`` as bounded seconds; 0 for anything that is not a plain count."""
+    raw = _query_value(query, "ms")
+    if not raw.isdigit():
+        return 0.0
+    return min(int(raw) / 1000.0, NAV_DELAY_CEILING_SECONDS)
+
+
+def _nav_record(handler) -> None:
+    _record(handler, "nav_paths", handler.path)
+
+
+def _r_nav_landing(handler, query: str) -> None:
+    _nav_record(handler)
+    _send_html(handler, nav_landing_page(_query_value(query, "from")))
+
+
+def _r_nav_head_replace(handler, query: str) -> None:
+    _nav_record(handler)
+    _send_html(handler, nav_head_replace_page("/nav/landing?from=head-replace"))
+
+
+def _r_nav_meta_refresh(handler, query: str) -> None:
+    _nav_record(handler)
+    _send_html(handler, nav_meta_refresh_page("/nav/landing?from=meta-refresh"))
+
+
+def _r_nav_self_reload(handler, query: str) -> None:
+    _nav_record(handler)
+    _send_html(handler, nav_self_reload_page(_query_value(query, "token")))
+
+
+def _r_nav_js_challenge(handler, query: str) -> None:
+    """The interstitial, or the solved page once the page has re-navigated.
+
+    The Cookie header is recorded on the SOLVED request only: that is the one
+    request whose presence proves the challenge document ran and re-navigated.
+    """
+    _nav_record(handler)
+    if _query_value(query, "js_challenge") != "1":
+        _send_html(handler, nav_js_challenge_page(_query_value(query, "token")))
+        return
+    _record(handler, "nav_paths", f"cookie={handler.headers.get('Cookie') or ''}")
+    _send_html(handler, nav_document(NAV_SOLVED_SENTINEL, NAV_SOLVED_TITLE))
+
+
+def _r_nav_chain_start(handler, query: str) -> None:
+    _nav_record(handler)
+    _send(handler, 302, [("Location", f"/nav/chain-mid?{query}")])
+
+
+def _r_nav_chain_mid(handler, query: str) -> None:
+    _nav_record(handler)
+    _send(handler, 302, [("Location", f"/nav/chain-final?{query}")])
+
+
+def _r_nav_chain_final(handler, query: str) -> None:
+    _nav_record(handler)
+    raw = _query_value(query, "ms")
+    _send_html(handler, nav_chain_final_page(int(raw) if raw.isdigit() else 0))
+
+
+def _r_nav_slow_asset(handler, query: str) -> None:
+    """The subresource that holds ``load`` open. Bounded by the ceiling."""
+    time.sleep(_nav_delay_seconds(query))
+    _send(handler, 200, [("Content-Type", "image/png")], NAV_PIXEL_PNG)
+
+
+def _r_nav_slow_doc(handler, query: str) -> None:
+    """A DOCUMENT the server answers slowly — so a navigation to it is pending,
+    not committed, for as long as the caller asked."""
+    time.sleep(_nav_delay_seconds(query))
+    _nav_record(handler)
+    _send_html(handler, nav_document(NAV_SLOW_DOC_SENTINEL, NAV_SLOW_DOC_TITLE))
+
+
+def _r_nav_preempt(handler, query: str) -> None:
+    _nav_record(handler)
+    raw = _query_value(query, "ms")
+    _send_html(
+        handler,
+        nav_preempt_page(int(raw) if raw.isdigit() else 0, "/nav/landing?from=preempt"),
+    )
+
+
+def _r_nav_iframe_host(handler, query: str) -> None:
+    _nav_record(handler)
+    _send_html(handler, nav_iframe_host_page())
+
+
+def _r_nav_download(handler, query: str) -> None:
+    """(f) A navigation that commits NOTHING: Chrome turns it into a download
+    and answers ``Page.navigate`` with ``net::ERR_ABORTED``."""
+    _nav_record(handler)
+    _send(
+        handler,
+        200,
+        [
+            ("Content-Type", "application/octet-stream"),
+            ("Content-Disposition", f'attachment; filename="{NAV_DOWNLOAD_NAME}"'),
+        ],
+        NAV_DOWNLOAD_BODY,
+    )
+
+
 ROUTES: dict[tuple[str, str], Route] = {
     # MQ-114
     ("GET", "/spa_history.html"): _r_spa,
@@ -2158,6 +2463,20 @@ ROUTES: dict[tuple[str, str], Route] = {
     # MQ-161…162
     ("GET", "/i18n/text.html"): _r_i18n_text,
     ("GET", "/i18n/composition.html"): _r_i18n_composition,
+    # F-882 — the seven navigation-supersession shapes (a)…(g).
+    ("GET", "/nav/landing"): _r_nav_landing,
+    ("GET", "/nav/head-replace"): _r_nav_head_replace,
+    ("GET", "/nav/meta-refresh"): _r_nav_meta_refresh,
+    ("GET", "/nav/self-reload"): _r_nav_self_reload,
+    ("GET", "/nav/js-challenge"): _r_nav_js_challenge,
+    ("GET", "/nav/chain-start"): _r_nav_chain_start,
+    ("GET", "/nav/chain-mid"): _r_nav_chain_mid,
+    ("GET", "/nav/chain-final"): _r_nav_chain_final,
+    ("GET", "/nav/slow-asset"): _r_nav_slow_asset,
+    ("GET", "/nav/slow-doc"): _r_nav_slow_doc,
+    ("GET", "/nav/preempt"): _r_nav_preempt,
+    ("GET", "/nav/download"): _r_nav_download,
+    ("GET", "/nav/iframe-host"): _r_nav_iframe_host,
     # Shared driver page + the server-side oracle ledger.
     ("GET", "/dynamic_probe.html"): _r_dynamic_probe,
     ("GET", "/e2e/reset"): _r_reset,
@@ -2188,6 +2507,15 @@ DYNAMIC_PAGES: dict[str, str] = {
     "/i18n/text.html": "fixture-w16-i18n-text",
     "/i18n/composition.html": "fixture-w16-i18n-composition",
     "/life/lifecycle.html": LIFE_SENTINEL,
+    "/nav/landing": NAV_LANDING_SENTINEL,
+    "/nav/head-replace": NAV_HEAD_REPLACE_SENTINEL,
+    "/nav/meta-refresh": NAV_META_REFRESH_SENTINEL,
+    "/nav/self-reload": NAV_SELF_RELOAD_SENTINEL,
+    "/nav/js-challenge": NAV_CHALLENGE_SENTINEL,
+    "/nav/chain-final": NAV_CHAIN_SENTINEL,
+    "/nav/slow-doc": NAV_SLOW_DOC_SENTINEL,
+    "/nav/preempt": NAV_PREEMPT_SENTINEL,
+    "/nav/iframe-host": NAV_IFRAME_HOST_SENTINEL,
 }
 
 

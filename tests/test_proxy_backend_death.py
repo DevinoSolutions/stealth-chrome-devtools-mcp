@@ -51,6 +51,7 @@ from release_gate_harness import (
     REGISTRY_TOOL_COUNT,
     RawStdioWire,
     _backend_pid_from_state,
+    _isolated_env,
     _terminate_process_tree,
     gate_work_dir,
     gate_workspace,
@@ -226,11 +227,24 @@ class TestProxyExitsOnBackendDeath:
     async def test_proxy_returns_when_backend_dies_and_cannot_be_healed(
         self, tmp_path, monkeypatch
     ):
-        import os
         import subprocess
         import sys
 
         from stealth_chrome_devtools_mcp.embedded.singleton import _proxy_streams
+
+        # F-885: `_proxy_streams` runs IN-PROCESS in this test, and its death
+        # confirmation (`_same_identity_backend_ready`, wired in as
+        # `confirm_alive`) reads `singleton.SERVER_STATE_FILE` directly —
+        # unpatched, that is the developer's live ~/.stealth-mcp/server.json,
+        # which a real run can share with other live Claude Code sessions.
+        # Same idiom as test_singleton_version_aware.py's `isolated_state`.
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        monkeypatch.setattr(singleton, "STATE_DIR", state_dir)
+        monkeypatch.setattr(singleton, "PORT_FILE", state_dir / "server.port")
+        monkeypatch.setattr(
+            singleton, "SERVER_STATE_FILE", state_dir / "server.json", raising=False
+        )
 
         async def unhealable(_dead_port, **_kwargs):
             return None
@@ -240,8 +254,24 @@ class TestProxyExitsOnBackendDeath:
         monkeypatch.setattr(proxy_selfheal, "heal_backend", unhealable)
 
         port = _free_port()
-        env = dict(os.environ)
-        env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(tmp_path / "sessions")
+        # F-885: the spawned backend subprocess is a SEPARATE process — the
+        # monkeypatches above never reach it. Without a redirected HOME it
+        # writes its own boot/backend logs straight into the developer's real
+        # ~/.stealth-mcp/logs (measured: backend-<pid>.log and
+        # backend-<pid>-fault.log landed there). Same isolated-env idiom
+        # `TestBackendDeathWithACallInFlight` uses via `gate_workspace`.
+        home_dir = tmp_path / "home"
+        session_root = tmp_path / "sessions"
+        log_dir = tmp_path / "logs"
+        clone_dir = tmp_path / "clone-output"
+        for directory in (home_dir, session_root, log_dir, clone_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+        env = _isolated_env(
+            home_dir=home_dir,
+            session_root=session_root,
+            log_dir=log_dir,
+            clone_dir=clone_dir,
+        )
         env["STEALTH_BROWSER_DEBUG"] = "false"
 
         backend = subprocess.Popen(
