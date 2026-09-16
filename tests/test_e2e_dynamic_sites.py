@@ -295,7 +295,12 @@ async def test_intersection_observer_lazy_load(instance, fixture_origin_pair):
     assert await eval_js(instance, "window.__lazy.observed") is False
     assert _unwrap(await query(instance_id=instance, selector="#lazy-token")) == []
 
-    assert await scroll(instance_id=instance, direction="bottom", smooth=False) is True
+    # F-875: the tool answers with a record, not ``True``. What this test needs
+    # from it is that the page REALLY moved (the observer fires on intersection,
+    # so a scroll that did not happen would make the next assert a false pass) —
+    # which is exactly the claim the old ``is True`` could not make.
+    scrolled = await scroll(instance_id=instance, direction="bottom", smooth=False)
+    assert scrolled["scrolled"] is True, scrolled
 
     assert (
         await wait_for_element(

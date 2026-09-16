@@ -2,49 +2,6 @@
 
 ## Unreleased
 
-### Fixed — nothing ever forgot a dead backend record (F-880)
-
-`~/.stealth-mcp/server.json` had a writer for every backend that arrived and none for
-any that left. On the maintainer's machine it held three entries: a live backend
-(`win-session-1`, 2.1.6) beside two whose ports had no listener and whose recorded pids
-had not existed for days (`win-session-2` at 2.1.1, `headless` at 2.1.3). The only rule
-that ever removed anything was `record_backend`'s supersede-by-port, which by
-construction only touches the port being claimed — a dead sibling on another port stayed
-for good. F-868 had already stopped such an entry being *reported* as the backend;
-what was left was a record that only grows, a cold-start probe against ports nobody
-listens on, and a `doctor` listing naming backends that do not exist.
-
-`backend_liveness` gains the ONE deadness rule (`survey` / `dead_entries` /
-`forget_dead`), and it takes **two witnesses**: the port must probe `down` AND the
-recorded pid must not be a running backend of ours. Neither alone will do. A backend is
-recorded at Popen time, *before* it binds, so a sibling is `down` for the whole of its
-cold start while its process is alive — the socket alone would race every cold start on
-the machine. And "the pid is gone" says nothing about whether the port is free (F-868
-§6's stated objection), which requiring `down` answers directly: the port has just been
-observed to hold no listener at all. A **wedged** backend is therefore never dead — it
-holds its port, `restart` is its verb, and its record is how the eviction path finds a
-pid to kill — and an entry whose `port` is not an int is reported, never forgotten.
-
-The write is `backend_registry.forget_entries`, which re-reads the record and drops only
-entries still matching on display context **and** port **and** pid, so a context
-re-recorded while the probe was running survives. It never unlinks the file: forgetting
-the last entry leaves a readable empty record, exactly as `forget_backend` does.
-
-Two operator-facing changes. `cleanup` prints a `backend records:` line — how many are
-recorded and how many are dead — and `--apply` forgets them; it is the disk-hygiene verb
-and a record naming nothing is residue. `doctor` marks each dead line `(dead record)`,
-names them in one summary line and points at `cleanup --apply`; it stays read-only.
-Both read the SAME survey pass, so a wedged sibling costs one probe per run rather than
-one per question.
-
-Display context is deliberately not consulted: a `down` entry belonging to another
-desktop is forgotten like any other. Adoption's asymmetry (F-808) exists to stop a
-client *reusing* a foreign desktop's live backend; it has nothing to say about one whose
-process is gone.
-
-`cli._probe_recorded_backend` is deleted — its whole content was the ladder plus the
-word `no port recorded`, and that word is `backend_liveness.NO_PORT` now.
-
 ### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)
 
 Two Windows full gates failed the same way on unrelated PRs: `navigate` to a `data:`
@@ -92,136 +49,78 @@ download — and is reported once, on the caller's tab, within one budget; retry
 would have discarded a page that exists, triggered a download twice, and cost 60 s by
 default.
 
-## 2.1.7
+### Fixed — `scroll_page` returned `true` for a scroll that had not happened (F-875)
 
-### Fixed — `list_instances` reported the last navigation, not the instance (F-874)
+`DOMHandler.scroll_page` ended in one `tab.evaluate`, a fixed
+`asyncio.sleep(0.5 if smooth else 0.1)` and an unconditional `return True`,
+documented as "True if scrolled successfully". `True` reported that the evaluate
+had not thrown. Measured against real Chrome 152 on 2.1.6, three different
+states wore that one word: the scroll arrived; the scroll was **still in
+flight** (4910 of 7039 px on an 8016 px document when the nap ended, 1747 of
+1815 on a real stackoverflow page); and there was **nothing to scroll at all** —
+a Cloudflare interstitial exactly one viewport tall, `scrollY` `0` before and
+after, `true` returned. A caller that read elements after it read the wrong
+viewport, and the shortfall grew with the page, which is exactly the
+lazy-loading case `direction="bottom"` exists for.
 
-Measured on 2.1.6 over real stdio with ten headed browsers (Chrome 152, Windows
-11): `list_instances` said `current_url: "https://www.youtube.com/"` /
-`"YouTube"` for an instance whose active tab was at
-`…/results?search_query=lofi+hip+hop+radio`, and `get_active_tab` on that same
-`instance_id` answered correctly in the same second. Three more instances the
-same way — a tab that had been `switch_tab`'d away from, a title the page set
-after load (`title: null` for a titled Amazon page), and a `data:` URL whose
-`title` was still the Wikipedia page before it. `BrowserInstance.current_url` /
-`.title` had exactly two writers in the tree, the spawn and the `navigate` tool,
-so every other way a page can move — an in-page click, a script navigation, a
-redirect, `switch_tab`, a late `document.title` — left the tool reporting a
-moment that had passed. Nothing raised; the record was well-formed and the field
-was named `current_url`.
+The nap is a **settle** now and the bool is a **record**. `scroll_page` reads
+the page's scroll offsets and extent before the scroll, then scrolls and waits
+for the page itself to say the scroll finished — bounded, not slept through —
+and answers
+with `scrolled` (the scroll OFFSET changed), `at_edge` (the page is as far as
+`direction` goes), `settled` (the offset stopped moving inside the budget),
+`settle_seconds`, the requested `direction`/`amount`/`smooth`, and
+`scroll_x_before`/`scroll_y_before`/`scroll_x_after`/`scroll_y_after`/
+`max_scroll_x`/`max_scroll_y`. Both axes, because `direction="right"` moves X
+and a Y-only record would call a working horizontal scroll a no-op.
 
-The read now has one home. `embedded/tab_identity.py` owns the
-`{tab_id, url, title, type}` record and the `Target.getTargets` refresh in front
-of it, and `list_tabs`, `get_active_tab` and `list_instances` all go through it —
-the first two had been writing the same four expressions out by hand, and the
-third had not been asking at all. The refresh is a real round trip rather than a
-read of `tab.target` as it stands, because that metadata is only as fresh as
-whatever `Target.targetInfoChanged` nodriver has already processed;
-`get_active_tab` loses its `await tab` in the trade, which refreshed nothing,
-cost a 0.5 s floor and raised `TypeError` on a rediscovered target (F-771).
+Offsets and extent are never compared together — a lazy-loading page grows its
+document while standing perfectly still, so comparing whole readings would call
+that growth a scroll (with identical `scroll_y_before`/`scroll_y_after` in the
+same record) and would stop a still-loading page from ever settling. The extent
+reported is the final read's.
 
-An `active` record now carries the LIVE `current_url`/`title` and
-`partial: false`. If that read fails it carries `partial: true`, a
-`detail_error`, and the last navigation's values under the names
-`last_navigated_url` / `last_navigated_title` — and deliberately **no**
-`current_url` key, because a cached value under that name is the defect. The
-`stored` tier and `get_instance_state`'s two partial records, neither of which
-has a live browser to read, carry the same honest pair. `BrowserInstance`'s
-fields are renamed to match what they have always held. Each entry is bounded by
-the CDP budget and the entries are gathered concurrently, so one wedged browser
-costs its own row and one budget for the whole listing, not one per instance.
+A page with nothing to scroll is **reported**, never raised — `max_scroll_y: 0`,
+`scrolled: false`, `at_edge: true` — because a one-viewport document is a
+legitimate page. `ToolError` is still raised only for operational failure, and
+only once (the leaf's own message is no longer re-wrapped): an invalid
+direction, a **negative `amount`** (both rejected before any round trip —
+`amount` is a distance and `direction` is the only thing that carries a sign, so
+the old `down, -500` that silently scrolled up and the old `up, -500` that died
+as a JS syntax error are now one clear refusal), and an evaluate that did not
+answer with the JSON the read asks for.
 
-A second defect on the same cache is fixed with it: `update_instance_state`
-guarded both fields on truthiness, so `navigate` reporting `title: ""` — Amazon
-sets its title late, a bare `data:text/html` document never sets one — left the
-previous page's title standing. It is `is not None` now; an empty title is what
-the page has.
+**What ends the wait is `scrollend`, not the reads.** Stopping when two
+consecutive reads agree on the offset is a guess about timing, and it is wrong:
+a plain document smooth scroll runs on Chrome's compositor thread while
+`window.scrollY` is read on the main thread, so a blocked main thread makes the
+reads go stale while the scroll keeps going. Measured on Chrome 152, the run of
+agreeing mid-flight reads lasts exactly as long as the renderer's long task
+(120 ms → 121 ms, 250 → 250, 400 → 400) — unbounded, so no read count and no
+fixed quiet window can see through it. The scroll now arms a one-shot
+`scrollend` listener in the same round trip that performs it, and the position
+read reports that latch: `scrollend` latches, so jank can only delay when the
+end is observed, never fake it. A scroll that moves nothing fires no `scrollend`
+at all, so the same round trip also answers "will this move anything",
+synchronously — which is what keeps an instant scroll and a one-viewport page on
+the 0.12 s fast path.
 
-`scroll_page` returning `true` for a scroll that has not happened was measured
-in the same session and is a different defect with a different remedy; it is
-open as `audit/stage2/finding_F875_scroll_page_returns_true_without_scrolling.md`.
+The read and the settle live in the new leaf `embedded/scroll_position.py`,
+which also holds the one table for what a direction means (its axis, its edge
+and its JS). The read is one `JSON.stringify` round trip off
+`document.scrollingElement` — the element CSSOM View says `scrollTo` moves, and
+now the same element `bottom` targets, so the destination and the reported
+`max_scroll_y` cannot disagree. Measured with the fix on an 8000 px `data:` page
+in a 977 px viewport: a smooth scroll to the bottom answers after 1.59 s at
+7023/7023 instead of at 0.5 s and 70 % of the way, an instant scroll answers in
+0.126 s (against the old nap's 0.109 s), and the one-viewport page answers in
+0.119 s with `scrolled: false`.
 
-<<<<<<< HEAD
-### Fixed — the headed desktop hand-off could send a `/TR` schtasks truncates (F-879)
-
-`schtasks /Create` stores at most **253** characters of `/TR`, drops everything
-past that and **exits 0** — measured under F-867 on Windows 11 10.0.26200, and
-eight characters short of the "~261" the documentation gives. F-867 guarded the
-backend's own scheduler rung against it and left the headed browser hand-off
-(F-810, `desktop_launch`) named as the remaining exposure: that path composed its
-`/TR` with no length check at all.
-
-What it cost, had a machine hit it: the task is created and reported successful,
-then names a launcher script whose path lost its tail, so at run time it fails
-with Last Result 2 and writes to no log anywhere. `launch_and_attach` then polls
-for the whole 20 s readiness deadline and raises an error blaming the DevTools
-port — the one component that was never involved.
-
-Chrome's own command line was never the problem and has not moved: the launcher
-*script* already carries its argv, which is why a 400-character profile path and
-a proxy's worth of switches cost `/TR` nothing. What spends the budget is the
-state dir, and that is what is now checked — before the launch directory is
-created, so an impossible layout costs no directory, no scheduled task and no
-deadline. The error names the measured cap, the actual length and the path that
-is long.
-
-The cap has one home and it is the `schtasks` seam itself: `TR_MAX_CHARS`,
-`TOKEN_CHARS` and `tr_overflow` now live in `desktop_launch` beside `_schtasks`,
-and `backend_launch` reads them there at call time exactly as it already reaches
-there for `_schtasks`, `_cleanup` and `_read_pid`. It carries no `253` of its
-own, and the comparison is single-homed too, so the two composers cannot drift on
-the cap or on its inclusive boundary. The headed path *raises* where the backend
-rung *drops a rung*: the backend has a plain spawn to fall to and a killable
-backend beats none, while a delegated headed launch has no fallback at all. The
-per-attempt token here is 12 hex characters now rather than 32, which is 20 more
-characters of headroom and one spelling of the token length instead of two.
-
-Not verified without a real `schtasks`: the 253 figure is F-867's measurement,
-carried over unchanged. Everything this change adds is asserted hermetically
-against the faked seam — no test creates a scheduled task.
-=======
-### Fixed — `type_text` reported success for text it never entered, and for an Enter that could not submit (F-873)
-
-Measured on 2.1.6 over real stdio transport, headed Chrome 152: `type_text` returned
-`{"result": true}` when the characters never reached the page (Amazon's and Gmail's
-search boxes, `.value` still `""` afterwards, three runs each), and `parse_newlines`'s
-trailing newline never submitted the form it was typed into. Two defects, one shape —
-the tool reported the success of its own dispatch, not the success of the interaction.
-The Enter was a `KeyboardEvent` constructed *inside the page* by `element.apply`; an
-event a script constructs is `isTrusted: false` and carries no `charCode`, and a
-form's implicit submission is performed by Blink on the **keypress** of a trusted
-Enter. Measured against a one-input form with a submit listener: the synthetic
-keydown submits 0 times, a trusted `rawKeyDown` (which fires no keypress) submits 0
-times, and only a `keyDown` carrying `text="\r"` submits — while adding a separate
-`char` event on top fires a second keypress and submits **twice**. And nothing
-between "dispatch the events" and `return True` ever asked the page whether the
-characters had landed: measured on the same Chrome, `readonly`, `range` and `color`
-controls each accept every key event and leave their value exactly where it was, and
-the tool answered `True` for all three. (`<input type="date">` did the same on this
-machine's Chrome 152, but that one is build- and locale-dependent — CI's headless
-Chrome accepted the digits on Windows, macOS and Linux alike — so it is pinned as the
-invariant rather than as a refusal: never a success over a value that did not move.)
-Key presses and the "did the page
-take it" check now live in `embedded/text_entry.py`: every key goes out as one
-`Input.dispatchKeyEvent` `keyDown` carrying `text` plus a `keyUp` (so `keydown`,
-`keypress` and `input` all fire, all trusted — the shipped path sent a lone `char`
-event per character, so a page whose autocomplete or shortcuts are bound to `keydown`
-saw a value appear with no key pressed), and after each line's characters the
-element's own text is read back and compared against the baseline taken just before
-them. A control that took every event and moved nothing now raises `ToolError` naming
-the selector and the counts — never the typed text, since the raised error reaches the
-debug ring and, as the exception itself, the caller and Sentry, and the field may be a
-password box. The verification asks "did anything change" rather than "does it contain
-exactly what I typed", deliberately: an input mask, an autocomplete that rewrites and a
-`number` field that normalises all DID receive the input, and a stricter test would have
-turned each into a new false alarm; the cost of the looser rule, named in the finding,
-is that a control whose value is legitimately identical afterwards now raises.
-`type_text`'s clear fallback also stopped being a no-op — it sent WebDriver's
-private-use codepoints (U+E009 for Ctrl, U+E017 for Delete) through `send_keys`, which
-CDP has never understood, so all three characters landed verbatim and nothing was
-cleared, corrupting the field it was asked to empty; it and `paste_text` now share the
-one CDP select-all + Delete.
->>>>>>> origin/main
+This is a tool **schema change** — `scroll_page`'s `output_schema` in
+`tests/goldens/tool_surface.json` moves from FastMCP's `_WrappedResult`
+`{result: boolean}` to the `{type: object}` every other dict-returning tool
+already serves. A caller that treated the old `true` as proof must read
+`scrolled` / `at_edge` / `settled` instead.
 
 ### Fixed — `paste_text` and `click_element` reported a dispatch, not a result (F-876)
 
@@ -341,6 +240,227 @@ be driven past one selection (the signature takes one criterion — the record n
 so); a `disabled` `<option>` stays reachable by `value=`/`index=` and unreachable by
 `text=`, which is what Chrome does; and `upload_file` still attaches to a `disabled`
 input and still ignores `accept=`, because CDP does.
+
+### Fixed — `scroll_page` could not move an app shell (F-878)
+
+A page laid out as `body{overflow:hidden}` plus one scrolling `div` — the
+default of every SPA starter template, and where infinite feeds, virtualised
+lists and lazy loading live — is not scrolled by `window.scrollTo` at all.
+F-875 made that visible (`scrolled: false`, `max_scroll_y: 0`) rather than
+silently wrong; this makes it work. `scroll_page` now picks the page's **real**
+scroller and drives that.
+
+Which element is "the" scroller when several overflow was measured before it was
+decided: twelve `data:` fixtures through the product path against real headless
+Chrome 152. `document.scrollingElement` alone — what the tool used until now —
+is right **4 times out of 12**. The two obvious heuristics score 9 and 8: the
+largest-area rule with a coverage floor finds nothing in a three-column mail
+layout and lets a scrollbar's width (0.8 %) rank a `body` that can move 20 px
+above a shell that can move 7023; the element-under-the-viewport-centre rule
+walks INWARD to a page's own data grid and is blind behind a `position:fixed`
+scrim. The rule that ships scores 12/12: **if the document scroller can move on
+the requested axis it IS the scroller** (so a plain page, a quirks-mode page, a
+scroll-snap page and a nested box inside a scrolling document are all unchanged,
+and the scroll call generated for them is the same `window.scrollTo` /
+`window.scrollBy` it always was), otherwise the
+element with the largest viewport-clipped area that can move on that axis, near
+ties broken by the larger extent. The axis comes from the direction, so
+`direction="right"` now finds a horizontal-only strip that neither heuristic
+could see.
+
+The record grew two fields, because the pick is a judgement and a caller is
+entitled to see it: `scroller` (`{tag, id, classes}` of the element that was
+actually driven — shape only, bounded in the page itself) and
+`scroller_is_document`. The `scroll_page` **description** in
+`tests/goldens/tool_surface.json` changes with them; the input and output
+schemas do not, and no other tool moved.
+
+Driving a nested element also moves the end-of-scroll latch F-875 introduced, and
+where it goes is not a matter of taste: measured on Chrome 152 across the same
+twelve fixtures, an ELEMENT scroll's `scrollend` fires **at that element** — for
+smooth and instant alike, on both axes, including a scroll-snap container — and
+does **not** bubble to `window` or `document`, while a DOCUMENT scroll's fires at
+`document`/`window` and never at `document.scrollingElement`. There is one right
+target per scroller kind and both wrong choices fail the same silent way: the
+listener never fires, the settle burns its whole 10 s budget, and the tool reports
+`settled: false` about a scroll that finished in a second. So the listener is armed
+on the very expression that receives the scroll. No scroller kind needs the
+degraded read-agreement path; that still exists only for a browser without
+`onscrollend`. Re-measured end to end on all twelve fixtures after the change:
+every one picks correctly, settles, and lands at its true final offset, in 0.50 s
+to 1.61 s.
+
+### Fixed — the headed desktop hand-off could send a `/TR` schtasks truncates (F-879)
+
+`schtasks /Create` stores at most **253** characters of `/TR`, drops everything
+past that and **exits 0** — measured under F-867 on Windows 11 10.0.26200, and
+eight characters short of the "~261" the documentation gives. F-867 guarded the
+backend's own scheduler rung against it and left the headed browser hand-off
+(F-810, `desktop_launch`) named as the remaining exposure: that path composed its
+`/TR` with no length check at all.
+
+What it cost, had a machine hit it: the task is created and reported successful,
+then names a launcher script whose path lost its tail, so at run time it fails
+with Last Result 2 and writes to no log anywhere. `launch_and_attach` then polls
+for the whole 20 s readiness deadline and raises an error blaming the DevTools
+port — the one component that was never involved.
+
+Chrome's own command line was never the problem and has not moved: the launcher
+*script* already carries its argv, which is why a 400-character profile path and
+a proxy's worth of switches cost `/TR` nothing. What spends the budget is the
+state dir, and that is what is now checked — before the launch directory is
+created, so an impossible layout costs no directory, no scheduled task and no
+deadline. The error names the measured cap, the actual length and the path that
+is long.
+
+The cap has one home and it is the `schtasks` seam itself: `TR_MAX_CHARS`,
+`TOKEN_CHARS` and `tr_overflow` now live in `desktop_launch` beside `_schtasks`,
+and `backend_launch` reads them there at call time exactly as it already reaches
+there for `_schtasks`, `_cleanup` and `_read_pid`. It carries no `253` of its
+own, and the comparison is single-homed too, so the two composers cannot drift on
+the cap or on its inclusive boundary. The headed path *raises* where the backend
+rung *drops a rung*: the backend has a plain spawn to fall to and a killable
+backend beats none, while a delegated headed launch has no fallback at all. The
+per-attempt token here is 12 hex characters now rather than 32, which is 20 more
+characters of headroom and one spelling of the token length instead of two.
+
+Not verified without a real `schtasks`: the 253 figure is F-867's measurement,
+carried over unchanged. Everything this change adds is asserted hermetically
+against the faked seam — no test creates a scheduled task.
+
+### Fixed — nothing ever forgot a dead backend record (F-880)
+
+`~/.stealth-mcp/server.json` had a writer for every backend that arrived and none for
+any that left. On the maintainer's machine it held three entries: a live backend
+(`win-session-1`, 2.1.6) beside two whose ports had no listener and whose recorded pids
+had not existed for days (`win-session-2` at 2.1.1, `headless` at 2.1.3). The only rule
+that ever removed anything was `record_backend`'s supersede-by-port, which by
+construction only touches the port being claimed — a dead sibling on another port stayed
+for good. F-868 had already stopped such an entry being *reported* as the backend;
+what was left was a record that only grows, a cold-start probe against ports nobody
+listens on, and a `doctor` listing naming backends that do not exist.
+
+`backend_liveness` gains the ONE deadness rule (`survey` / `dead_entries` /
+`forget_dead`), and it takes **two witnesses**: the port must probe `down` AND the
+recorded pid must not be a running backend of ours. Neither alone will do. A backend is
+recorded at Popen time, *before* it binds, so a sibling is `down` for the whole of its
+cold start while its process is alive — the socket alone would race every cold start on
+the machine. And "the pid is gone" says nothing about whether the port is free (F-868
+§6's stated objection), which requiring `down` answers directly: the port has just been
+observed to hold no listener at all. A **wedged** backend is therefore never dead — it
+holds its port, `restart` is its verb, and its record is how the eviction path finds a
+pid to kill — and an entry whose `port` is not an int is reported, never forgotten.
+
+The write is `backend_registry.forget_entries`, which re-reads the record and drops only
+entries still matching on display context **and** port **and** pid, so a context
+re-recorded while the probe was running survives. It never unlinks the file: forgetting
+the last entry leaves a readable empty record, exactly as `forget_backend` does.
+
+Two operator-facing changes. `cleanup` prints a `backend records:` line — how many are
+recorded and how many are dead — and `--apply` forgets them; it is the disk-hygiene verb
+and a record naming nothing is residue. `doctor` marks each dead line `(dead record)`,
+names them in one summary line and points at `cleanup --apply`; it stays read-only.
+Both read the SAME survey pass, so a wedged sibling costs one probe per run rather than
+one per question.
+
+Display context is deliberately not consulted: a `down` entry belonging to another
+desktop is forgotten like any other. Adoption's asymmetry (F-808) exists to stop a
+client *reusing* a foreign desktop's live backend; it has nothing to say about one whose
+process is gone.
+
+`cli._probe_recorded_backend` is deleted — its whole content was the ladder plus the
+word `no port recorded`, and that word is `backend_liveness.NO_PORT` now.
+
+## 2.1.7
+
+### Fixed — `list_instances` reported the last navigation, not the instance (F-874)
+
+Measured on 2.1.6 over real stdio with ten headed browsers (Chrome 152, Windows
+11): `list_instances` said `current_url: "https://www.youtube.com/"` /
+`"YouTube"` for an instance whose active tab was at
+`…/results?search_query=lofi+hip+hop+radio`, and `get_active_tab` on that same
+`instance_id` answered correctly in the same second. Three more instances the
+same way — a tab that had been `switch_tab`'d away from, a title the page set
+after load (`title: null` for a titled Amazon page), and a `data:` URL whose
+`title` was still the Wikipedia page before it. `BrowserInstance.current_url` /
+`.title` had exactly two writers in the tree, the spawn and the `navigate` tool,
+so every other way a page can move — an in-page click, a script navigation, a
+redirect, `switch_tab`, a late `document.title` — left the tool reporting a
+moment that had passed. Nothing raised; the record was well-formed and the field
+was named `current_url`.
+
+The read now has one home. `embedded/tab_identity.py` owns the
+`{tab_id, url, title, type}` record and the `Target.getTargets` refresh in front
+of it, and `list_tabs`, `get_active_tab` and `list_instances` all go through it —
+the first two had been writing the same four expressions out by hand, and the
+third had not been asking at all. The refresh is a real round trip rather than a
+read of `tab.target` as it stands, because that metadata is only as fresh as
+whatever `Target.targetInfoChanged` nodriver has already processed;
+`get_active_tab` loses its `await tab` in the trade, which refreshed nothing,
+cost a 0.5 s floor and raised `TypeError` on a rediscovered target (F-771).
+
+An `active` record now carries the LIVE `current_url`/`title` and
+`partial: false`. If that read fails it carries `partial: true`, a
+`detail_error`, and the last navigation's values under the names
+`last_navigated_url` / `last_navigated_title` — and deliberately **no**
+`current_url` key, because a cached value under that name is the defect. The
+`stored` tier and `get_instance_state`'s two partial records, neither of which
+has a live browser to read, carry the same honest pair. `BrowserInstance`'s
+fields are renamed to match what they have always held. Each entry is bounded by
+the CDP budget and the entries are gathered concurrently, so one wedged browser
+costs its own row and one budget for the whole listing, not one per instance.
+
+A second defect on the same cache is fixed with it: `update_instance_state`
+guarded both fields on truthiness, so `navigate` reporting `title: ""` — Amazon
+sets its title late, a bare `data:text/html` document never sets one — left the
+previous page's title standing. It is `is not None` now; an empty title is what
+the page has.
+
+`scroll_page` returning `true` for a scroll that has not happened was measured
+in the same session and is a different defect with a different remedy; it is
+fixed separately, below.
+
+### Fixed — `type_text` reported success for text it never entered, and for an Enter that could not submit (F-873)
+
+Measured on 2.1.6 over real stdio transport, headed Chrome 152: `type_text` returned
+`{"result": true}` when the characters never reached the page (Amazon's and Gmail's
+search boxes, `.value` still `""` afterwards, three runs each), and `parse_newlines`'s
+trailing newline never submitted the form it was typed into. Two defects, one shape —
+the tool reported the success of its own dispatch, not the success of the interaction.
+The Enter was a `KeyboardEvent` constructed *inside the page* by `element.apply`; an
+event a script constructs is `isTrusted: false` and carries no `charCode`, and a
+form's implicit submission is performed by Blink on the **keypress** of a trusted
+Enter. Measured against a one-input form with a submit listener: the synthetic
+keydown submits 0 times, a trusted `rawKeyDown` (which fires no keypress) submits 0
+times, and only a `keyDown` carrying `text="\r"` submits — while adding a separate
+`char` event on top fires a second keypress and submits **twice**. And nothing
+between "dispatch the events" and `return True` ever asked the page whether the
+characters had landed: measured on the same Chrome, `readonly`, `range` and `color`
+controls each accept every key event and leave their value exactly where it was, and
+the tool answered `True` for all three. (`<input type="date">` did the same on this
+machine's Chrome 152, but that one is build- and locale-dependent — CI's headless
+Chrome accepted the digits on Windows, macOS and Linux alike — so it is pinned as the
+invariant rather than as a refusal: never a success over a value that did not move.)
+Key presses and the "did the page
+take it" check now live in `embedded/text_entry.py`: every key goes out as one
+`Input.dispatchKeyEvent` `keyDown` carrying `text` plus a `keyUp` (so `keydown`,
+`keypress` and `input` all fire, all trusted — the shipped path sent a lone `char`
+event per character, so a page whose autocomplete or shortcuts are bound to `keydown`
+saw a value appear with no key pressed), and after each line's characters the
+element's own text is read back and compared against the baseline taken just before
+them. A control that took every event and moved nothing now raises `ToolError` naming
+the selector and the counts — never the typed text, since the raised error reaches the
+debug ring and, as the exception itself, the caller and Sentry, and the field may be a
+password box. The verification asks "did anything change" rather than "does it contain
+exactly what I typed", deliberately: an input mask, an autocomplete that rewrites and a
+`number` field that normalises all DID receive the input, and a stricter test would have
+turned each into a new false alarm; the cost of the looser rule, named in the finding,
+is that a control whose value is legitimately identical afterwards now raises.
+`type_text`'s clear fallback also stopped being a no-op — it sent WebDriver's
+private-use codepoints (U+E009 for Ctrl, U+E017 for Delete) through `send_keys`, which
+CDP has never understood, so all three characters landed verbatim and nothing was
+cleared, corrupting the field it was asked to empty; it and `paste_text` now share the
+one CDP select-all + Delete.
 
 ## 2.1.6
 

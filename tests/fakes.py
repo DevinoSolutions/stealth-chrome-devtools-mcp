@@ -541,6 +541,480 @@ class FakeTab:
         return resp(name) if callable(resp) else resp
 
 
+class ScrollingTab(FakeTab):
+    """A :class:`FakeTab` that models a scrolling document (F-875).
+
+    ``scroll_page`` is the one tool whose answer is about a value the PAGE owns
+    and that moves on its own, so a canned ``evaluate_result`` cannot express
+    what it has to be held to. This double owns that value and applies the same
+    rules Chrome does:
+
+    * the position-read script is answered with a **JSON string**, because
+      ``Tab.evaluate`` always requests deep serialization and an object literal
+      would arrive as BiDi ``RemoteValue`` nodes (the F-869/F-872 trap — see
+      :func:`js_aspect_answer`);
+    * ``window.scrollTo`` / ``window.scrollBy`` move the position, clamped to
+      ``[0, max]`` exactly as a real scroller clamps it, so "the page is one
+      viewport tall" is modelled by geometry (``doc_height == viewport_height``)
+      rather than by a flag;
+    * ``behavior: 'smooth'`` does NOT arrive instantly. The animation is advanced
+      one step per POSITION READ, which is what makes a mid-flight read
+      deterministic without a real clock: a product that reads once and returns
+      sees ``smooth_steps``-th of the way, the measured F-875 shortfall;
+    * the scroll answers ``{moves, supported}`` and arms an ``ended`` latch that
+      the read reports, exactly as ``scroll_position``'s scroll wrapper does.
+      ``ended`` is set when the animation REACHES its target — never before —
+      which is what makes ``stall_at`` meaningful: with a stall the position
+      repeats while ``ended`` is still 0, so a settle that stops on repeated
+      reads is caught and one that waits for the latch is not;
+    * ``nested_id=…`` makes the page an **app shell** (F-878): the document
+      scroller has nothing to scroll, the geometry belongs to a nested ``div``,
+      and — the part that matters — a ``window`` scroll therefore moves
+      NOTHING, exactly as real Chrome reported for
+      ``html,body{overflow:hidden}`` + a full-viewport ``div{overflow:auto}``.
+      Which element a script addresses is read off the script itself
+      (``_el([…])`` vs ``window``), so the double never has to be told which
+      product version is driving it. **The latch follows the same target**: a
+      scroll that addresses the nested div latches only if the listener was
+      armed on the div, and a ``window`` scroll only if it was armed on
+      ``window`` — which is what real Chrome does (F-878 measured that an
+      element's ``scrollend`` does not bubble to ``window``, and a document's is
+      never dispatched at ``document.scrollingElement``), and it is what makes an
+      arm-on-the-wrong-target bug visible here rather than only in the browser.
+
+
+    Nothing here is written from the defect: the scripts are interpreted as
+    Chrome interprets them, the scroller pick is answered by Chrome's rule
+    rather than the product's, and the read answers with the geometry the page
+    would report.
+    """
+
+    #: The prefix every script this double interprets as a QUESTION starts with:
+    #: ``scroll_position``'s reads and its scroller pick are both one
+    #: ``JSON.stringify`` round trip (the scroll scripts NAME
+    #: ``document.scrollingElement`` too, so the element is not the marker).
+    #: Named once, here, like :data:`ANIMATION_JS_MARKER`.
+    POSITION_JS_MARKER = "JSON.stringify("
+
+    #: What separates the two ``JSON.stringify`` questions (F-878): only the
+    #: SCROLLER pick asks the page for computed overflow. The read never does.
+    SCROLLER_JS_MARKER = "getComputedStyle"
+
+    #: ``…scrollBy({top: N, left: M, …})`` — the two deltas, signed. The
+    #: receiver is deliberately not matched: ``window`` for a document scroller
+    #: and the resolved element for a nested one are the same operation, and
+    #: WHICH one moves is decided by :meth:`_drives_nested`.
+    _BY = re.compile(r"\.scrollBy\(\{top:\s*(-?\d+),\s*left:\s*(-?\d+)")
+    #: ``…scrollTo({top: <expr>, left: N, …})`` — the vertical target as
+    #: written; any ``…scrollHeight`` in it means "the bottom" (the target is an
+    #: expression, not a fixed string, and it may itself contain commas, so the
+    #: capture is non-greedy up to the one ``left:``).
+    _TO = re.compile(r"\.scrollTo\(\{top:\s*(.+?),\s*left:\s*(-?\d+)")
+    #: The resolver call the product emits for a NESTED scroller, and the index
+    #: path inside it: ``_el([1,0])`` — ``_el(null)`` is the document.
+    _EL = re.compile(r"_el\(\s*(null|\[[\d,\s]*\])\s*\)")
+    #: Does this ``JSON.stringify`` round trip SCROLL? Since F-875 the scroll is
+    #: a wrapper that also arms a latch and reports ``{moves, supported}``, so it
+    #: is a ``JSON.stringify`` like the read and the pick, and the scroll CALL is
+    #: what tells them apart.
+    _SCROLL_CALL = re.compile(r"\.scroll(?:To|By)\(\{")
+    #: ``var T=…;`` — the object the product armed ``scrollend`` on AND scrolls.
+    #: Read separately from :meth:`_drives_nested` on purpose: the two agreeing
+    #: is the product's job, not this double's assumption.
+    _TARGET_BIND = re.compile(r"var T=([^;]+);")
+
+    def __init__(
+        self,
+        *,
+        doc_height: int = 8016,
+        viewport_height: int = 977,
+        doc_width: int = 1280,
+        viewport_width: int = 1280,
+        scroll_y: int = 0,
+        scroll_x: int = 0,
+        smooth_steps: int = 4,
+        never_settles: bool = False,
+        growing_content: int = 0,
+        nested_id: str | None = None,
+        nested_classes: tuple[str, ...] = ("shell",),
+        nested_path: tuple[int, ...] = (1, 0),
+        document_height: int | None = None,
+        document_width: int | None = None,
+        stale_path: bool = False,
+        stall_at: int = 0,
+        stall_reads: int = 0,
+        scrollend_supported: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.doc_height = doc_height
+        self.viewport_height = viewport_height
+        self.doc_width = doc_width
+        self.viewport_width = viewport_width
+        self.scroll_y = scroll_y
+        self.scroll_x = scroll_x
+        self.smooth_steps = smooth_steps
+        #: When set, this page is an APP SHELL (F-878): the geometry above
+        #: belongs to a nested ``div`` and the DOCUMENT scroller has nothing to
+        #: scroll at all — the shape measured on real Chrome 152 for
+        #: ``html,body{overflow:hidden}`` + a full-viewport ``div{overflow:auto}``
+        #: (``html``: ``max_y 0``, ``overflow: hidden``; the shell: ``max_y
+        #: 7023``). ``window.scrollTo`` therefore moves NOTHING here, which is
+        #: what makes the pre-F-878 product measurably wrong against this double
+        #: rather than merely unexercised.
+        self.nested_id = nested_id
+        self.nested_classes = nested_classes
+        self.nested_path = nested_path
+        #: The DOCUMENT's own content box, when it is NOT the scroller. Default
+        #: ``None`` means exactly one viewport — nothing to scroll, the app
+        #: shell above. Setting it makes the page BOTH-scrollable (fixture d: a
+        #: 400 px ``overflow:auto`` box inside an 8000 px document), which is
+        #: the only shape that can tell rule 1 (the ``scrollingElement``
+        #: precedence) from rule 2. The document then has its OWN offsets and
+        #: its own smooth flight, because it is a different scroll container.
+        self.document_height = document_height
+        self.document_width = document_width
+        self.doc_scroll_y = 0
+        self.doc_scroll_x = 0
+        #: The chosen element is no longer in the document when the READ gets
+        #: there — a page that re-rendered mid-scroll. ``_RESOLVE_JS`` falls
+        #: back to the document scroller, so every later round trip addresses
+        #: the DOCUMENT however the path is spelled, which is what makes the
+        #: record name what it read rather than what it picked.
+        self.stale_path = stale_path
+        #: A page whose content keeps arriving never stops moving — the
+        #: budget-exhaustion case. One pixel per read is enough to model it.
+        self.never_settles = never_settles
+        #: Pixels of content appended per read WITHOUT the viewport moving: the
+        #: lazy-loading page that has stopped scrolling but is still filling in.
+        #: Its offset is stable and its EXTENT is not, which is the one shape
+        #: that tells an offset comparison from a whole-``Position`` one.
+        self.growing_content = growing_content
+        #: The F-875/CI-35046780659 shape: from the ``stall_at``-th read of a
+        #: flight, the position REPEATS for ``stall_reads`` reads and then
+        #: resumes. On a real page that is the renderer's main thread blocked
+        #: while the compositor keeps scrolling — measured stall length equals
+        #: the long task, so it is unbounded and no count of agreeing reads can
+        #: see through it.
+        self.stall_at = stall_at
+        self.stall_reads = stall_reads
+        #: ``'onscrollend' in window``. ``False`` drives the read-agreement
+        #: fallback, the only path where ``START_GRACE_SECONDS`` still matters.
+        self.scrollend_supported = scrollend_supported
+        self._reads_in_flight = 0
+        self._stalled = 0
+        self._ended = False
+        #: Which container the last scroll armed its ``scrollend`` listener on.
+        #: Only that container's arrival sets the latch (:meth:`_arrive`).
+        self._armed_nested = False
+        self._flight: tuple[int, int] | None = None
+        self._doc_flight: tuple[int, int] | None = None
+        #: Every position read, in order — so a test can count round trips.
+        self.position_reads: list[str] = []
+        #: Every scroller pick, in order — so a test can pin that it is ONE per
+        #: call and not one per settle poll (F-878 measured 2.59 ms per pick on
+        #: a 6007-element page, which is why it is picked once).
+        self.scroller_picks: list[str] = []
+
+    @property
+    def max_scroll_y(self) -> int:
+        return max(0, self.doc_height - self.viewport_height)
+
+    @property
+    def max_scroll_x(self) -> int:
+        return max(0, self.doc_width - self.viewport_width)
+
+    @property
+    def document_is_the_scroller(self) -> bool:
+        """Is there no nested scroller at all? Then everything is the document."""
+        return self.nested_id is None
+
+    @property
+    def doc_content_height(self) -> int:
+        if self.document_is_the_scroller:
+            return self.doc_height
+        return (
+            self.viewport_height
+            if self.document_height is None
+            else (self.document_height)
+        )
+
+    @property
+    def doc_content_width(self) -> int:
+        if self.document_is_the_scroller:
+            return self.doc_width
+        return (
+            self.viewport_width
+            if self.document_width is None
+            else (self.document_width)
+        )
+
+    @property
+    def doc_max_scroll_y(self) -> int:
+        return max(0, self.doc_content_height - self.viewport_height)
+
+    @property
+    def doc_max_scroll_x(self) -> int:
+        return max(0, self.doc_content_width - self.viewport_width)
+
+    def _target_of(
+        self, expression: str, *, x: int, y: int, max_x: int, max_y: int, content: int
+    ) -> tuple[int, int] | None:
+        """The (x, y) a scroll script asks OF ONE CONTAINER, or ``None``.
+
+        *content* is that container's ``scrollHeight`` — what a ``scrollTo``
+        naming ``…scrollHeight`` heads for. Every bound is passed in, because
+        since F-878 a page can have two containers and a ``window`` script must
+        clamp against the DOCUMENT's extent even when a nested div is taller.
+        """
+        by = self._BY.search(expression)
+        if by is not None:
+            target_x, target_y = x + int(by.group(2)), y + int(by.group(1))
+        else:
+            to = self._TO.search(expression)
+            if to is None:
+                return None
+            top = to.group(1).strip()
+            target_x = int(to.group(2))
+            target_y = content if "scrollHeight" in top else int(top)
+        return (
+            max(0, min(int(target_x), max_x)),
+            max(0, min(int(target_y), max_y)),
+        )
+
+    def _step(
+        self, flight: tuple[int, int] | None, x: int, y: int
+    ) -> tuple[int, int, tuple[int, int] | None, bool]:
+        """One animation frame of *flight* from (*x*, *y*).
+
+        Returns ``(x, y, flight, arrived)`` — ``arrived`` is the frame on which
+        this container REACHED its target, i.e. the frame Chrome would dispatch
+        ``scrollend`` on.
+        """
+        if flight is None:
+            return (x, y, None, False)
+        target_x, target_y = flight
+        step_x = -(-abs(target_x - x) // self.smooth_steps)
+        step_y = -(-abs(target_y - y) // self.smooth_steps)
+        x += min(step_x, abs(target_x - x)) * (1 if target_x >= x else -1)
+        y += min(step_y, abs(target_y - y)) * (1 if target_y >= y else -1)
+        arrived = (x, y) == flight
+        return (x, y, None if arrived else flight, arrived)
+
+    def _arrive(self, *, nested: bool) -> None:
+        """A container reached its target — does the armed listener SEE it?
+
+        Chrome's answer, measured on the F-878 fixtures (Chrome 152): an
+        element's ``scrollend`` is dispatched at that element and does NOT
+        bubble to ``window``; a document's reaches ``window`` and ``document``
+        and is NEVER dispatched at ``document.scrollingElement``. So a latch
+        armed on the wrong object never fires, and the settle would spend its
+        whole budget. Modelling that here rather than assuming it is what makes
+        an arm-on-the-wrong-target bug a RED test instead of a browser-only one.
+        """
+        if nested == self._armed_nested:
+            self._ended = True
+
+    def _advance(self) -> None:
+        """One animation frame's worth of movement, charged per read."""
+        if self.growing_content:
+            self.doc_height += self.growing_content
+        if self.never_settles:
+            self.scroll_y = min(self.scroll_y + 1, self.max_scroll_y)
+            self.doc_height += 1  # the content that keeps arriving
+            return
+        if self._flight is None and self._doc_flight is None:
+            return
+        self._reads_in_flight += 1
+        # The renderer stalled: the value the read can see does not advance,
+        # while the scroll itself has NOT finished. This is the F-875 /
+        # CI-35046780659 shape, and it is what tells a settle that waits for the
+        # page's own end-of-scroll from one that stops on repeated reads.
+        if (
+            self.stall_reads
+            and self._reads_in_flight >= self.stall_at
+            and self._stalled < self.stall_reads
+        ):
+            self._stalled += 1
+            return
+        self.scroll_x, self.scroll_y, self._flight, nested_arrived = self._step(
+            self._flight, self.scroll_x, self.scroll_y
+        )
+        self.doc_scroll_x, self.doc_scroll_y, self._doc_flight, doc_arrived = (
+            self._step(self._doc_flight, self.doc_scroll_x, self.doc_scroll_y)
+        )
+        if nested_arrived:
+            # The primary state is the NESTED element only when there is one.
+            self._arrive(nested=not self.document_is_the_scroller)
+        if doc_arrived:
+            self._arrive(nested=False)
+
+    def _drives_nested(self, expression: str) -> bool:
+        """Does this script address the NESTED scroller rather than the window?
+
+        ``_el([…])`` is the resolver the product emits for a nested scroller and
+        ``_el(null)``/no call at all is the document. On a page that has no
+        nested scroller the answer is always ``False`` and the geometry is the
+        document's, so every pre-F-878 test reads exactly as it did.
+
+        ``stale_path`` is the one case where the SCRIPT says nested and the
+        answer is ``False``: ``_RESOLVE_JS`` falls back to the document scroller
+        when the path resolves to nothing, and this models that fallback rather
+        than the spelling.
+        """
+        if self.nested_id is None or self.stale_path:
+            return False
+        found = self._EL.search(expression)
+        return found is not None and found.group(1) != "null"
+
+    def _armed_on_nested(self, expression: str) -> bool:
+        """Was the ``scrollend`` listener armed on the nested element?
+
+        Read off the ``var T=…`` binding, NOT off which container the script
+        moves — so a product that scrolls the div and listens on ``window``
+        (or the reverse) is caught here rather than only in a browser. Under
+        ``stale_path`` the binding still SAYS ``_el([…])`` but resolves to the
+        document element, which is not a target a document scroll's ``scrollend``
+        is ever dispatched at (measured) — so it is not "nested" either, and
+        nothing latches. That costs nothing in practice, because a stale path
+        lands on a document whose ``moves`` is already false.
+        """
+        bound = self._TARGET_BIND.search(expression)
+        if bound is None:
+            return False
+        target = bound.group(1)
+        if "_el(" not in target:
+            return False
+        return not self.stale_path and "null" not in target
+
+    def _scroller_answer(self, expression: str) -> str:
+        """The page's answer to the scroller pick — Chrome's rule, not the product's.
+
+        Rule 1 first, because that is the order Chrome's own geometry imposes:
+        if the DOCUMENT can move on the asked-for axis it is the scroller, and
+        that is true of a plain page (F-878 fixture a) and of a page that has a
+        nested scroller as well (fixture d). Only when the document cannot move
+        — ``html,body{overflow:hidden}``, measured as ``max_y 0`` — does the
+        pick fall through to the one nested ``div{overflow:auto}``.
+        """
+        axis = "x" if "'x'" in expression else "y"
+        doc_extent = self.doc_max_scroll_x if axis == "x" else self.doc_max_scroll_y
+        if doc_extent > 0 or self.document_is_the_scroller:
+            return json.dumps({"path": None, "document": True})
+        return json.dumps({"path": list(self.nested_path), "document": False})
+
+    def _read_answer(self, expression: str) -> str:
+        """The geometry, identity and end-latch of the element the read addressed.
+
+        ``ended`` is the LATCH, not a per-element fact: the page keeps one
+        (``window.__stealthMcpScroll``) whatever it armed the listener on, so
+        the read reports it regardless of which element it is reading.
+        """
+        ended = self._ended and self.scrollend_supported
+        if not self._drives_nested(expression):
+            return json.dumps(
+                {
+                    "x": self.doc_scroll_x
+                    if not self.document_is_the_scroller
+                    else self.scroll_x,
+                    "y": self.doc_scroll_y
+                    if not self.document_is_the_scroller
+                    else self.scroll_y,
+                    "max_x": self.doc_max_scroll_x,
+                    "max_y": self.doc_max_scroll_y,
+                    "tag": "html",
+                    "id": "",
+                    "classes": [],
+                    "document": True,
+                    "ended": ended,
+                }
+            )
+        return json.dumps(
+            {
+                "x": self.scroll_x,
+                "y": self.scroll_y,
+                "max_x": self.max_scroll_x,
+                "max_y": self.max_scroll_y,
+                "tag": "div",
+                "id": self.nested_id,
+                "classes": list(self.nested_classes),
+                "document": False,
+                "ended": ended,
+            }
+        )
+
+    async def evaluate(self, expression: str, *args: Any, **kwargs: Any) -> Any:
+        self.evaluate_calls.append(expression)
+        if expression.startswith(self.POSITION_JS_MARKER):
+            if self.SCROLLER_JS_MARKER in expression:
+                self.scroller_picks.append(expression)
+                return self._scroller_answer(expression)
+            if self._SCROLL_CALL.search(expression):
+                return self._apply_scroll(expression)
+            self.position_reads.append(expression)
+            self._advance()
+            return self._read_answer(expression)
+        return self._answer_for_js(expression)
+
+    def _apply_scroll(self, expression: str) -> Any:
+        """The scroll round trip: arm the latch and scroll ONE container.
+
+        Which container the script drives is read off the script (``_el([…])``
+        vs ``window``); which one the LISTENER was armed on is read off the
+        ``var T=…`` binding, independently, so the two can disagree — and when
+        they do, nothing ever latches. See :meth:`_arrive`.
+        """
+        nested = self._drives_nested(expression)
+        # WHICH state holds the offsets, and whether that state is a NESTED
+        # element, are two questions: on a page with no nested scroller at all
+        # the document IS the scroller and its offsets live in the primary
+        # state, but nothing about it is nested.
+        on_primary = nested or self.document_is_the_scroller
+        if on_primary:
+            bounds = {
+                "x": self.scroll_x,
+                "y": self.scroll_y,
+                "max_x": self.max_scroll_x,
+                "max_y": self.max_scroll_y,
+                "content": self.doc_height,
+            }
+            here = (self.scroll_x, self.scroll_y)
+        else:
+            bounds = {
+                "x": self.doc_scroll_x,
+                "y": self.doc_scroll_y,
+                "max_x": self.doc_max_scroll_x,
+                "max_y": self.doc_max_scroll_y,
+                "content": self.doc_content_height,
+            }
+            here = (self.doc_scroll_x, self.doc_scroll_y)
+        target = self._target_of(expression, **bounds)
+        if target is None:  # pragma: no cover - the regex already matched
+            return self._answer_for_js(expression)
+
+        moves = target != here
+        self._ended = False
+        self._reads_in_flight = 0
+        self._stalled = 0
+        self._armed_nested = self._armed_on_nested(expression)
+        flight = None
+        if moves:
+            if "'smooth'" in expression:
+                flight = target
+            else:
+                here = target
+        if on_primary:
+            self.scroll_x, self.scroll_y = here
+            self._flight = flight
+        else:
+            self.doc_scroll_x, self.doc_scroll_y = here
+            self._doc_flight = flight
+        if moves and flight is None:
+            # An instant scroll is over before the evaluate returns.
+            self._arrive(nested=nested)
+        return json.dumps({"moves": moves, "supported": self.scrollend_supported})
+
+
 # ---------------------------------------------------------------------------
 # JS-aspect transport fidelity (F-846 animations, F-872 the other four)
 # ---------------------------------------------------------------------------
