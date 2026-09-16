@@ -43,17 +43,21 @@ def manager(monkeypatch):
     return BrowserManager()
 
 
-def _with_tab(monkeypatch, tab):
+def _with_tab(monkeypatch, tab) -> list[str]:
+    """Bind *tab* as the navigation tab; the returned list records every
+    stale-tab recovery (``_replace_main_tab`` reason) the manager asked for."""
+    replacements: list[str] = []
+
     async def get_navigation_tab(self, instance_id):
         return tab
 
     async def replace_main_tab(self, instance_id, reason, close_existing=True):
-        # A timed-out attempt earns one stale-tab recovery (F-824's budget); the
-        # pins here are about the wait, so the retry lands on the same double.
+        replacements.append(reason)
         return tab
 
     monkeypatch.setattr(BrowserManager, "get_navigation_tab", get_navigation_tab)
     monkeypatch.setattr(BrowserManager, "_replace_main_tab", replace_main_tab)
+    return replacements
 
 
 def _navigate_frames(tab: FakeTab) -> list[str]:
@@ -115,14 +119,50 @@ async def test_load_is_waited_for_and_a_page_that_never_loads_times_out(
     monkeypatch, manager
 ):
     """The same page under the default ``load``: it must NOT be reported as
-    navigated. RED at 3311be9: ``DID NOT RAISE`` (success with ``title ""``)."""
+    navigated. RED at 3311be9: ``DID NOT RAISE`` (success with ``title ""``).
+
+    And it is NOT retried: Chrome accepted the navigation (``Page.navigate``
+    answered), so the page is there and merely never reaches ``load`` — a
+    replaced tab would discard it and spend a second full budget. One
+    ``Page.navigate``, no ``_replace_main_tab``."""
     tab = FakeTab(
         lifecycle="after", last_milestone="DOMContentLoaded", title_at_dcl="Alpha"
     )
-    _with_tab(monkeypatch, tab)
+    replacements = _with_tab(monkeypatch, tab)
 
     with pytest.raises(ToolError, match="timed out"):
         await manager.navigate(instance_id="iid-1", url=URL, timeout=150)
+
+    assert _navigate_frames(tab) == [URL]
+    assert replacements == []
+
+
+class _UnansweringTab(FakeTab):
+    """A tab whose ``Page.navigate`` never answers — the hang-before-headers
+    shape, where Chrome has not accepted anything and the tab may be stale."""
+
+    async def send(self, cdp_obj, *args, **kwargs):
+        if getattr(getattr(cdp_obj, "gi_code", None), "co_name", None) == "navigate":
+            self.cdp_frames.append(next(cdp_obj))
+            cdp_obj.close()
+            await asyncio.get_running_loop().create_future()
+        return await super().send(cdp_obj, *args, **kwargs)
+
+
+async def test_a_navigation_chrome_never_accepted_keeps_its_one_recovery_retry(
+    monkeypatch, manager
+):
+    """The other side of the line: no ``Page.navigate`` answer means the tab may
+    be stale (F-824), so the one-shot recovery on a fresh tab stays — two
+    attempts, then the pinned timeout."""
+    tab = _UnansweringTab()
+    replacements = _with_tab(monkeypatch, tab)
+
+    with pytest.raises(ToolError, match="timed out"):
+        await manager.navigate(instance_id="iid-1", url=URL, timeout=100)
+
+    assert _navigate_frames(tab) == [URL, URL]
+    assert len(replacements) == 1
 
 
 async def test_the_milestone_is_keyed_on_the_responses_loader_id(monkeypatch, manager):
@@ -150,12 +190,24 @@ async def test_a_same_document_navigation_returns_at_the_response(monkeypatch, m
 async def test_an_unknown_wait_until_raises_naming_the_accepted_values(
     monkeypatch, manager
 ):
-    """It used to mean ``load`` silently — which then meant nothing at all."""
+    """It used to mean ``load`` silently — which then meant nothing at all.
+
+    Checked BEFORE the retry loop: a typo costs no CDP send (no referrer header,
+    no ``Page.navigate``) and no stale-tab recovery."""
     tab = FakeTab(lifecycle="before", title_at_load="Alpha")
-    _with_tab(monkeypatch, tab)
+    replacements = _with_tab(monkeypatch, tab)
 
     with pytest.raises(ToolError, match=r"load.*domcontentloaded.*networkidle"):
-        await manager.navigate(instance_id="iid-1", url=URL, wait_until="commit")
+        await manager.navigate(
+            instance_id="iid-1",
+            url=URL,
+            wait_until="commit",
+            referrer="https://r.test/",
+        )
+
+    assert tab.send_calls == []
+    assert tab.cdp_frames == []
+    assert replacements == []
 
 
 # ---------------------------------------------------------------------------

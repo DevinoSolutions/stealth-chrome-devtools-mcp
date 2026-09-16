@@ -1139,23 +1139,18 @@ class BrowserManager:
         timeout: int = 30000,  # noqa: ASYNC109  plan_M7
         referrer: str | None = None,
     ) -> dict[str, Any]:
-        """
-        Navigate with timeout enforcement and one automatic tab-recovery retry.
+        """Navigate (``timeout`` in ms) and answer ``{url, title, success}``.
 
-        Args:
-            instance_id (str): Browser instance id.
-            url (str): Target URL.
-            wait_until (str): Wait condition after navigation.
-            timeout (int): Timeout in milliseconds.
-            referrer (Optional[str]): Optional referrer header.
-
-        Returns:
-            Dict[str, Any]: Navigation result payload.
+        One stale-tab recovery retry (F-824) — but only for a failure Chrome
+        never accepted; a timeout after ``Page.navigate`` answered is the page's
+        own and is reported, not retried (F-881).
         """
         timeout_seconds = max(timeout, 1) / 1000
         last_error: Exception | None = None
+        navigation_milestone.require(wait_until)  # a typo costs no CDP send (F-881)
 
         for attempt in range(2):
+            progress = navigation_milestone.Progress()
             await self.touch_instance(instance_id)
             if attempt == 0:
                 tab = await self.get_navigation_tab(instance_id)
@@ -1181,13 +1176,11 @@ class BrowserManager:
                         )
                     )
 
-                # The ONE navigation wait (F-881): Page.navigate plus the
-                # lifecycle milestone `wait_until` names, keyed on the loaderId
-                # the response carries — never `tab.get`, whose wait was a
-                # 0.5 s sleep, nor `tab.wait(<event class>)`, which was a no-op.
+                # The ONE navigation wait (F-881) — never `tab.get` (a 0.5 s
+                # sleep) nor `tab.wait(<event class>)` (a no-op).
                 await asyncio.wait_for(
                     navigation_milestone.navigate(
-                        tab, url, wait_until, timeout_seconds
+                        tab, url, wait_until, timeout_seconds, progress
                     ),
                     timeout=timeout_seconds,
                 )
@@ -1225,7 +1218,12 @@ class BrowserManager:
                     f"{instance_id}: {error}",
                     {"url": url, "attempt": attempt + 1},
                 )
-                if attempt == 1 or not self._is_recoverable_navigation_error(error):
+                # A timeout after Chrome ACCEPTED the navigation is the page's own
+                # (slow, never loading, a download): a replaced tab would discard
+                # a page that exists and spend a second budget (F-881).
+                pages_own = isinstance(error, TimeoutError) and progress.accepted
+                retry = self._is_recoverable_navigation_error(error) and not pages_own
+                if attempt == 1 or not retry:
                     if isinstance(error, asyncio.TimeoutError):
                         raise tool_errors.ToolError(
                             f"Navigation to {url} timed out after {timeout}ms"

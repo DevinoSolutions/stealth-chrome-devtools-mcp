@@ -46,6 +46,18 @@ navigation. No deadline is enforced here — the caller wraps the whole thing in
 its navigation budget, exactly as it wrapped ``tab.get``; *budget_seconds* is
 handed in only so F-787's sleep can be clipped to it as it always was.
 
+**What a cancelled attempt still tells the caller.** The caller's ``wait_for``
+cancels this coroutine on timeout, so nothing can be RETURNED from a timed-out
+attempt — :class:`Progress` is the one field it writes on the way, ``accepted``:
+``Page.navigate`` answered, i.e. Chrome took the navigation on THIS tab. That is
+the line between the two timeouts ``BrowserManager.navigate`` used to treat as
+one. Before it, the tab may be stale or racing and the one-shot recovery on a
+fresh tab (F-824's budget) is the right answer. After it, the page is Chrome's —
+committed and slow, committed and never reaching ``load``, or a download
+(``net::ERR_ABORTED``, nothing commits) — and replacing the tab would throw away
+a page that exists, or trigger the download twice, and spend a second full
+budget doing it. So a timeout after acceptance is REPORTED, never retried.
+
 A leaf: ``nodriver`` and ``tool_errors`` only; the tab arrives as an argument.
 """
 
@@ -53,6 +65,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from nodriver import cdp
@@ -74,24 +87,46 @@ MILESTONES: dict[str, str] = {
 NETWORKIDLE_SLEEP_SECONDS = 2.0
 
 
-def _accepted() -> str:
-    return ", ".join(repr(name) for name in MILESTONES)
+@dataclass
+class Progress:
+    """What one attempt got as far as, readable after the caller cancelled it.
+
+    ``accepted``: ``Page.navigate`` answered — Chrome took the navigation on this
+    tab, so a timeout from here on is the page's, not a stale tab's.
+    """
+
+    accepted: bool = False
 
 
-async def navigate(tab: Tab, url: str, wait_until: str, budget_seconds: float) -> None:
-    """Send ``Page.navigate`` for *url* and return once THAT navigation has
-    reached the milestone *wait_until* names.
+def require(wait_until: str) -> str:
+    """The lifecycle event name *wait_until* stands for, or ``ToolError``.
 
-    Raises ``ToolError`` for a *wait_until* outside :data:`MILESTONES` — it used
-    to mean ``load`` silently, which then meant nothing at all.
+    Called by the tool BEFORE its retry loop, so a caller's typo costs no CDP
+    send and no "attempt failed" log line — it used to mean ``load`` silently,
+    which then meant nothing at all.
     """
     milestone = MILESTONES.get(wait_until)
     if milestone is None:
+        accepted = ", ".join(repr(name) for name in MILESTONES)
         raise ToolError(
             f"wait_until={wait_until!r} is not a navigation milestone; "
-            f"accepted values are {_accepted()}."
+            f"accepted values are {accepted}."
         )
+    return milestone
 
+
+async def navigate(
+    tab: Tab,
+    url: str,
+    wait_until: str,
+    budget_seconds: float,
+    progress: Progress | None = None,
+) -> None:
+    """Send ``Page.navigate`` for *url* and return once THAT navigation has
+    reached the milestone *wait_until* names, marking *progress* on the way.
+    """
+    milestone = require(wait_until)
+    progress = progress if progress is not None else Progress()
     loop = asyncio.get_running_loop()
     started = loop.time()
     seen: set[tuple[str, str]] = set()
@@ -108,11 +143,14 @@ async def navigate(tab: Tab, url: str, wait_until: str, budget_seconds: float) -
 
     tab.add_handler(cdp.page.LifecycleEvent, on_lifecycle)
     try:
-        # nodriver sends Page.enable ahead of this the first time a Page-event
-        # handler is registered; the flag is per devtools session and cheap to
-        # restate (~1 ms), which beats tracking it per tab.
+        # nodriver re-sends Page.enable ahead of this on EVERY navigation: once
+        # the listener below is removed, its next send forgets `cdp.page` from
+        # `enabled_domains` (connection.py's _register_handlers), so the domain
+        # reads as new each time. Both commands are idempotent, ~1 ms together,
+        # and that beats tracking either flag per tab.
         await tab.send(cdp.page.set_lifecycle_events_enabled(enabled=True))
         _frame_id, loader_id, _error_text = await tab.send(cdp.page.navigate(url))
+        progress.accepted = True
         if loader_id is None:
             return  # same-document: nothing will fire (measured)
         wanted = (str(loader_id), milestone)
