@@ -49,6 +49,44 @@ the page has.
 in the same session and is a different defect with a different remedy; it is
 open as `audit/stage2/finding_F875_scroll_page_returns_true_without_scrolling.md`.
 
+### Fixed — the headed desktop hand-off could send a `/TR` schtasks truncates (F-879)
+
+`schtasks /Create` stores at most **253** characters of `/TR`, drops everything
+past that and **exits 0** — measured under F-867 on Windows 11 10.0.26200, and
+eight characters short of the "~261" the documentation gives. F-867 guarded the
+backend's own scheduler rung against it and left the headed browser hand-off
+(F-810, `desktop_launch`) named as the remaining exposure: that path composed its
+`/TR` with no length check at all.
+
+What it cost, had a machine hit it: the task is created and reported successful,
+then names a launcher script whose path lost its tail, so at run time it fails
+with Last Result 2 and writes to no log anywhere. `launch_and_attach` then polls
+for the whole 20 s readiness deadline and raises an error blaming the DevTools
+port — the one component that was never involved.
+
+Chrome's own command line was never the problem and has not moved: the launcher
+*script* already carries its argv, which is why a 400-character profile path and
+a proxy's worth of switches cost `/TR` nothing. What spends the budget is the
+state dir, and that is what is now checked — before the launch directory is
+created, so an impossible layout costs no directory, no scheduled task and no
+deadline. The error names the measured cap, the actual length and the path that
+is long.
+
+The cap has one home and it is the `schtasks` seam itself: `TR_MAX_CHARS`,
+`TOKEN_CHARS` and `tr_overflow` now live in `desktop_launch` beside `_schtasks`,
+and `backend_launch` reads them there at call time exactly as it already reaches
+there for `_schtasks`, `_cleanup` and `_read_pid`. It carries no `253` of its
+own, and the comparison is single-homed too, so the two composers cannot drift on
+the cap or on its inclusive boundary. The headed path *raises* where the backend
+rung *drops a rung*: the backend has a plain spawn to fall to and a killable
+backend beats none, while a delegated headed launch has no fallback at all. The
+per-attempt token here is 12 hex characters now rather than 32, which is 20 more
+characters of headroom and one spelling of the token length instead of two.
+
+Not verified without a real `schtasks`: the 253 figure is F-867's measurement,
+carried over unchanged. Everything this change adds is asserted hermetically
+against the faked seam — no test creates a scheduled task.
+
 ## 2.1.6
 
 ### Fixed — `get_instance_state` reported empty storage as if it were the truth (F-869)
