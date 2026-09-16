@@ -188,6 +188,31 @@
     <div id="plain-div">PLAIN-DIV-TEXT</div>
     <div id="editable-div" contenteditable="true"></div>
 
+    <!-- F-877: the <select> shapes select_option answered True for without
+         selecting anything, and the file inputs upload_file reported a count
+         for without reading input.files. None is touched by any other test. -->
+    <select id="sel-disabled" disabled>
+      <option value="one">Alpha</option>
+      <option value="two">Beta</option>
+    </select>
+    <select id="sel-empty"></select>
+    <select id="sel-multi" multiple size="3">
+      <option value="one">Alpha</option>
+      <option value="two">Beta</option>
+      <option value="three">Gamma</option>
+    </select>
+    <!-- A disabled <option> (unreachable by typeahead, reachable by value) and
+         an option whose label= differs from its inner text, which is the
+         collision Chrome's typeahead resolved to the WRONG option. -->
+    <select id="sel-labels">
+      <option value="d1">Delta</option>
+      <option value="d2" disabled>Delta Two</option>
+      <option value="l1" label="LabelThree">TextThree</option>
+    </select>
+    <input type="file" id="file-single" />
+    <input type="file" id="file-multi" multiple />
+    <input type="file" id="file-disabled" disabled />
+
     <!-- Anchor destination, far down the page. -->
     <div id="anchor-target">ANCHOR-TARGET-TEXT</div>
 

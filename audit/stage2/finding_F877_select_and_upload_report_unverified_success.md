@@ -209,10 +209,13 @@ deep-serializes an object at every depth — F-872's rule, F-869's mechanism).
      type into a different element entirely;
 3. if nothing resolved, returns `matched: false` **having changed nothing** (row 4's
    destroyed selection cannot happen: no assignment is reached);
-4. otherwise sets `selectedIndex`, then dispatches `input` and then `change`, both
-   bubbling — the pair, and the order, Chrome's own typeahead produced in §2b
-   (`input:true` then `change:true`). The shipped `value`/`index` arms fired
-   `change` alone and no `input` at all;
+4. otherwise sets `selectedIndex` and, **only if the index moved**, dispatches
+   `input` and then `change`, both bubbling — the pair, and the order, Chrome's
+   own typeahead produced in §2b (`input:true` then `change:true`). The shipped
+   `value`/`index` arms fired `change` alone, no `input` at all, and fired it
+   even when nothing had changed (§2a rows 10 and 13 both announce a `change`
+   for a control that did not move); Chrome fires nothing when a selection lands
+   where it already was (measured, §2b's `"Spaced Out"` row);
 5. reads the control back **after** those events have run (they are synchronous, so
    a page handler that resets the select has already run) and returns
    `{matched, target_index, before, after, tag, multiple, option_count, …}` as a
@@ -321,12 +324,17 @@ Recorded at the fix commit — see the PR body.
   because unifying them would be this tool deciding something Chrome already
   decides (F-876's reasoning for the `disabled` click, verbatim). The asymmetry is
   named here rather than left to be discovered.
-* **A `disabled` `<select>` now raises instead of silently typing somewhere else,
-  but it is the read-back that raises, not a pre-check.** There is no
-  "is this control enabled" guard added: the fix resolves the option, sets it, and
-  reports that the control did not move. A `<select disabled>` whose `disabled` is
-  removed by a script between the resolve and the set therefore still succeeds,
-  which is the correct outcome and the one a pre-check would have broken.
+* **A `disabled` `<select>` is now selected rather than refused, and no
+  "is this control enabled" guard is added.** Measured (§2a row 9 vs the
+  sequential probe's `disabled-select value="two"` row): the shipped `value` arm
+  already selected on a `disabled` select, honestly and successfully — Chrome
+  permits the assignment — and only the `text` arm was broken there, because
+  `send_keys` needs focus the control cannot take. The fix makes the third arm
+  uniform with the two that already worked, which is the smallest change that
+  removes the leak; adding a refusal would be this tool deciding something Chrome
+  does not, and it would break the legitimate case of a control a script enables
+  between the resolve and the set. What can no longer happen is the leak itself:
+  nothing types, so the only control a call can move is the one it named.
 * **`upload_file` still attaches to a `disabled` input, and still ignores
   `accept=`.** Measured, rows 4 and 5: `DOM.setFileInputFiles` attaches in both
   cases and Chrome fires a trusted `change`. A user could do neither. The tool does
