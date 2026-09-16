@@ -323,6 +323,25 @@ no reason in it.
 * **Cross-origin iframes are not measured.** They are separate CDP targets and
   their lifecycle events never reach this connection at all; the frame filter is
   measured against a SAME-origin subframe (§2c), which is the harder case.
+* **On the abort path the chain adopts the FIRST main-frame `init`, whatever it
+  is.** With `own is None` there is no "after ours committed" gate to pass, so
+  any commit in that frame during the grace becomes the chain head — including
+  one belonging to a *concurrent* `navigate`/`reload_page` on the same tab rather
+  than to the page that pre-empted us. Two tool calls moving one tab at once is
+  a caller's race and is not serialized here (the same stance F-881 §6 takes for
+  a concurrent `Tab.wait()`); the url and title answered would still be truthful
+  about what the tab is showing, but the `success: true` would name a url the
+  caller did not ask for. Left because the alternative — refusing to adopt
+  anything on the abort path — is the 30 s timeout this finding exists to close.
+* **`LANDING_JS` trusts the page's own `JSON.stringify`.** A page can replace it
+  and author the `(url, title)` pair `landing()` returns, which is the input
+  F-802/F-833's `chrome-error://` detector reads. This is a property of the
+  idiom, not of this change: `page_storage.READ_JS` (F-869) has the identical
+  exposure and for the identical reason — `Tab.evaluate` returns deep-serialized
+  values raw, so a JSON string is the only shape that survives the transport.
+  Recorded rather than fixed because a second way to read a url would be the
+  defect this repo's fourth convention names, and because the honest fix is
+  `Runtime.evaluate` with an isolated world, which is its own finding.
 * **The `commit`-named replay is ignored, not consumed.** If a future Chrome
   emitted `init` for a replay, the chain would adopt the page being left. The
   measurement above is the only thing standing between those two readings, which

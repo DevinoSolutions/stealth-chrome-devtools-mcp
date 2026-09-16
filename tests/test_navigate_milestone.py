@@ -553,15 +553,21 @@ async def test_a_document_that_loads_before_its_replacement_answers_at_its_own(
 
 
 async def test_networkidle_still_keys_to_the_first_commit(monkeypatch, manager):
-    """F-787's fixed sleep is keyed to the commit, and the commit is ours: the
+    """F-787's fixed sleep is keyed to the commit, and the commit is OURS: the
     chain cannot reach past a milestone that is already satisfied when our own
-    document lands. Stated here so the choice is a pin and not an accident."""
+    document lands. The discriminating assertion is the url — a chain that waited
+    for the REPLACEMENT's commit would have folded it, and the fake moves
+    ``tab.url`` to `LANDING` at exactly that event, so it would answer `LANDING`.
+
+    The mocked sleep does NOT yield, deliberately: F-787's two seconds are not
+    really being taken here, so the fake's page must not advance across them
+    either. What this node pins is the instant the WAIT ended; what the page did
+    during a sleep it never took is not a fact about the rule."""
     slept: list[float] = []
     real_sleep = asyncio.sleep
 
     async def observed_sleep(delay, *args, **kwargs):
         slept.append(delay)
-        await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", observed_sleep)
     tab = FakeTab(
@@ -578,4 +584,10 @@ async def test_networkidle_still_keys_to_the_first_commit(monkeypatch, manager):
     )
 
     assert result["success"] is True
+    assert result["url"] == URL  # ours, not the document that replaced it
     assert 2.0 in slept
+    # ... and the replacement WAS queued, so the assertion above is a choice the
+    # code made rather than a shape that never arose.
+    for _ in range(4):
+        await real_sleep(0)
+    assert tab.url == LANDING

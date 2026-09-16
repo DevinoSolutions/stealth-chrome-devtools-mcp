@@ -135,10 +135,10 @@ NETWORKIDLE_SLEEP_SECONDS = 2.0
 
 #: The ``Page.lifecycleEvent`` name a document commits under. Never ``commit``,
 #: which is what ``Page.setLifecycleEventsEnabled`` replays the CURRENT document
-#: under (F-882 §2) — the page we are leaving, not one that replaced us.
+#: under (F-882 §2d) — the page we are leaving, not one that replaced us.
 COMMIT = "init"
 
-#: The one ``errorText`` under which our own loader never commits (F-882 §2f).
+#: The one ``errorText`` under which our own loader never commits (F-882 §2e).
 ABORTED = "net::ERR_ABORTED"
 
 #: How long an abort waits for the document that took its place before it is
@@ -215,7 +215,14 @@ class _Chain:
             and (self.progress.committed or self.own is None)
         ):
             self.loaders.append(loader_id)
-            self.progress.superseded = len(self.loaders) - (self.own is not None)
+            # How many documents took our place. On the normal path `loaders[0]`
+            # is OURS and does not count. On the abort path ours never committed
+            # and the chain HEAD is itself a document that took our place, so it
+            # DOES count — a pre-empted navigation reporting `superseded by 1` is
+            # the decision, not an off-by-one: the one fact the caller needs is
+            # that something other than what they asked for is on this tab.
+            own_in_chain = 1 if self.own is not None else 0
+            self.progress.superseded = len(self.loaders) - own_in_chain
         if loader_id not in self.loaders:
             return  # an older document's event, or the replay's
         self.seen.add((loader_id, name))
@@ -276,11 +283,14 @@ async def landing(tab: Tab) -> tuple[str, str]:
 
 def _aborted_error(url: str) -> ToolError:
     """The one message for a navigation Chrome accepted and then abandoned."""
+    # Names the ONE cause measured for this shape (§2e) and leaves the rest of
+    # the class unnamed: a message that listed causes nobody observed would read
+    # as evidence and is not.
     return ToolError(
         f"Navigation to {url} was aborted by Chrome ({ABORTED}) and no document "
-        "was committed: the URL served a download (Content-Disposition: "
-        "attachment), an empty body the browser does not navigate to, or an "
-        "external protocol handler. The tab is still showing the previous page."
+        "was committed: the URL is a download (Content-Disposition: attachment) "
+        "or something else Chrome does not navigate to. The tab is still "
+        "showing the previous page."
     )
 
 
