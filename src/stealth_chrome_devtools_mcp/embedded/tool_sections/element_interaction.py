@@ -104,9 +104,9 @@ async def click_element(
     selector: str,
     text_match: str | None = None,
     timeout: int = 10000,
-) -> bool:
+) -> dict[str, Any]:
     """
-    Click an element.
+    Click an element, and report where the click actually went.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -115,7 +115,15 @@ async def click_element(
         timeout (int): Timeout in ms (default 10000, max 60000). Clicks rarely need more than 5s — only increase for dynamically loaded elements. Values above 60000 are capped.
 
     Returns:
-        bool: True if clicked successfully.
+        Dict[str, Any]: {"selector", "dispatch", "point", "size", "target", "hit",
+            "hit_is_target", "reason"}. "dispatch" is "coordinate" (a real trusted
+            click at "point") or "synthetic" (the element has no box, so the click
+            was an in-page el.click() — untrusted and not hit-tested). "hit" is the
+            tag/id/classes of whatever document.elementFromPoint returned at that
+            point, so an overlay that ate the click is visible. "reason" is null
+            when the click reached the target, else one of "not-rendered",
+            "off-viewport", "zero-size", "not-visible", "pointer-events-none",
+            "covered", "disabled". Whether the PAGE then reacted is not claimed.
     """
     timeout = rt._clamp_timeout(timeout, default=10_000)
     tab = await _require_tab(rt.browser_manager, instance_id)
@@ -180,7 +188,10 @@ async def type_text(
         shift_enter (bool): If True, use Shift+Enter instead of Enter (for chat apps).
 
     Returns:
-        bool: True if typed successfully.
+        bool: True — the characters were typed AND the field's own read-back
+            showed them land. Raises if the element's text did not move (a
+            readonly/range/color control, a non-editable element, or a script
+            that cancels the input).
     """
     if isinstance(delay_ms, str):
         delay_ms = int(delay_ms)
@@ -207,7 +218,9 @@ async def paste_text(
         clear_first (bool): Clear field before pasting.
 
     Returns:
-        bool: True if pasted successfully.
+        bool: True — the text was pasted AND the page took it. Raises if the
+            element's text did not move (a readonly/range/color control, a
+            non-editable element, or a script that cancels the input).
     """
     tab = await _require_tab(rt.browser_manager, instance_id)
     return await rt._with_cdp_timeout(
