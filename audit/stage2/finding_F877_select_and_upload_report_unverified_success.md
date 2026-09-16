@@ -404,6 +404,20 @@ redundant field is a second way to ask the same question.
   successfully.`** F-876 §6 named this one-line truthfulness fix as a follow-up and
   this PR, changing two *other* tools' goldens, deliberately does not widen into it
   a second time. It remains open.
+* **The release ledger still carries `E8-1` (and `E8-2`) as OPEN, and this PR does
+  not close them.** `tools/release_tool_claims.json` and
+  `tools/gen_release_contract.py` say `select_option` "returns True while the option
+  did not change" (`E8-1`) and `click_element` "returns True for a disabled control"
+  (`E8-2`). F-876 closed the second and left its row standing; this PR closes the
+  first and does the same, for the same reason and deliberately: the rows are a
+  single register with its own regeneration step and its own
+  `tests/test_release_contract.py` assertion that each id APPEARS, so retiring one is
+  a ledger change, not a tool change, and it should retire the whole F-873/F-876/F-877
+  family in one pass with one justification rather than three PRs each editing the
+  same table. Naming it here is the handover.
+* **`upload_file` still accepts `file_paths` as a bare string or a list**, and a bare
+  string is wrapped into a one-element list by the wrapper. That is unchanged and is
+  what makes `requested` well defined for both shapes.
 * **`select_option`'s new `text=` matching rule is a rule, and a rule can be wrong
   for someone.** It is three tiers (exact `text`, exact `label`, case-insensitive
   prefix over both, `disabled` options skipped) and it is chosen to keep every
