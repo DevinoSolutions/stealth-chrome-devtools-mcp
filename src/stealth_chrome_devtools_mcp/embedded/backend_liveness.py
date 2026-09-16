@@ -62,10 +62,12 @@ def probe_port(
     """THE liveness ladder for ONE port — socket, then a real MCP `initialize`:
     "down" | "wedged" | "responsive" (F-301's third state, which a bare socket
     check cannot see). Read-only. THE one home for those four lines (F-868),
-    with three readers: the candidate walk below, `restart_backend`'s report of
-    the port it spawned on, and doctor's `cli._probe_recorded_backend`, which
-    adds only the one word this cannot reach ("no port recorded") and was a
-    verbatim copy of this ladder until now.
+    with three readers: the candidate walk below, :func:`_survey_one` (so
+    doctor's per-entry line and the deadness rule read the same ladder), and
+    `restart_backend`'s report of the port it spawned on. Doctor used to reach
+    it through `cli._probe_recorded_backend`, an adapter that added only the one
+    word this cannot reach — :data:`NO_PORT` now, here, and the adapter deleted
+    (F-880). It was a verbatim copy of this ladder before F-868.
     """
     if not is_healthy(port):
         return "down"
