@@ -1,0 +1,367 @@
+# F-876 — `paste_text` reports success for text the page refused, and `click_element` reports success for a click the target never received
+
+**Status:** FIXED in this PR (product defect; live on 2.1.6 and on `main` at `b0ae010`)
+**Opened by:** `audit/stage2/finding_F873_type_text_reports_success_without_typing.md` §6, which named both tools as sharing `type_text`'s shape and left them out of that PR on purpose
+**Source at:** `fix/F873-type-text-silent-failure` = `258e1df` (= `main` `b0ae010` + the F-873 fix)
+**Severity:** HIGH for `paste_text` (same class as F-873: the tool answers `True` for text the page did not take, five of seven measured controls), MEDIUM for `click_element` (the click is really dispatched, but the tool cannot say WHERE it landed — five of eight measured shapes deliver the click to something other than the target, or to nothing at all, and every one of them answers `True`).
+
+---
+
+## 1. What was measured, and where
+
+Everything below is a measurement, not a reading of the code. All of it:
+
+* **Chrome 152.0.7977.83** (`C:\Program Files\Google\Chrome\Application\chrome.exe`),
+  headless, Windows 11 — the same build F-873 measured on.
+* Driving the **product code path**: `DOMHandler.paste_text` /
+  `DOMHandler.click_element` / `element_resolution.resolve_element`, imported from
+  this worktree's `src/`.
+* Each run on its own throwaway `--user-data-dir` under `%TEMP%\f876*\profile`.
+  Never `~/.stealth-mcp`, never ports 19222/52554/7169, no process killed that the
+  probe did not start.
+* Against a local `file://` page written by the probe itself (no network).
+
+Three probes: the tool-answer matrices (§2a, §2b), the per-path/per-trust
+breakdown (§2c), and the click-point equivalence check the fix's design rests on
+(§2d).
+
+---
+
+## 2. Measured truth
+
+### 2a. `paste_text` — five of seven controls refuse the text and the tool says `True`
+
+`DOMHandler.paste_text(tab, selector, text)` with its default `clear_first=True`.
+`before`/`after` are the element's own `value` and `textContent`, read straight
+from the page on either side of the call.
+
+| selector | pasted | before (`value` / `text`) | after (`value` / `text`) | tool answered | honest? |
+|---|---|---|---|---|---|
+| `<input readonly>` | `INJECT` | `""` / `""` | `""` / `""` | `true` | **no** |
+| `<input type=range value=50>` | `80` | `"50"` / `""` | `"50"` / `""` | `true` | **no** |
+| `<input type=date>` | `2024-01-02` | `""` / `""` | `""` / `""` | `true` | **no** |
+| `<input type=color>` | `#123456` | `"#000000"` / `""` | `"#000000"` / `""` | `true` | **no** |
+| non-editable `<div>` | `INJECT` | `undefined` / `"PLAIN"` | `""` / `"PLAIN"` | `true` | **no** |
+| `<div contenteditable>` | `hello-ce` | `undefined` / `""` | `""` / `"hello-ce"` | `true` | yes |
+| plain `<input>` | `usb c hub` | `""` / `""` | `"usb c hub"` / `""` | `true` | yes |
+
+Exactly F-873's §2b matrix, reproduced through the *other* text tool. `paste_text`
+inserts with `Input.insertText` rather than per-character key events, and that
+difference changes nothing: the five refusing controls refuse an insert just as
+they refused the keys.
+
+One row deserves its own sentence, because it is new. The non-editable `<div>`'s
+`value` is `undefined` **before** the call and `""` **after** it. Nothing about
+the paste did that: `clear_first`'s programmatic `elem.value = ''` does not throw
+on a `<div>` — it silently **creates an expando property** called `value` on the
+element. So the tool's own clear step is what invented the empty string, and any
+read-back that trusts `elem.value` on a non-input reads that expando rather than
+the element's content. The read-back this fix uses (`text_entry.READ_JS`) is
+unaffected *because* its baseline is taken AFTER the clear, so the expando is
+present in both samples and the comparison is still "did anything move".
+
+### 2b. `click_element` — what the page actually received
+
+Same run, `DOMHandler.click_element(tab, selector)`, the page logging every
+`click` listener it owns.
+
+| case | tool answered | what the page received |
+|---|---|---|
+| plain `<button>` (control) | `true` | `click:plainbtn` |
+| `<button>` fully covered by a `z-index:10` overlay | `true` | **`click:overlay`** — the overlay, not the target |
+| `<button>` under a `pointer-events:none` overlay (control) | `true` | `click:pen` — passes through, correct |
+| `<button disabled>` | `true` | **nothing** |
+| `<button style="pointer-events:none">` | `true` | **nothing** |
+| zero-size `<button>` (`width:0;height:0`, still laid out) | `true` | **nothing** |
+| `<button style="display:none">` | `true` | `click:gone` — but see §2c: an **untrusted, synthetic** click |
+| `<button style="visibility:hidden">` | `true` | **nothing** |
+| resolved, then removed from the DOM before the click | raises | nothing |
+
+Five of the eight either deliver the click to a different element or deliver it to
+nobody, and the tool reports the same `True` for all of them as for the control.
+The detached case is the one that already behaves: the tool re-resolves the
+selector and `resolve_element` answers nothing, so it raises
+`ToolError: Failed to click element: Element not found: #detach`. (Driving the
+*stale handle* directly, as a caller cannot, `Element.mouse_click` raises
+`Exception: could not find position for <button id="detach">`.)
+
+### 2c. Which path each click took, and whether it was trusted
+
+The same seven targets, with `Element.mouse_click` (the primary path) and
+`Element.click` (the error-only fallback) driven separately from a clean log, and
+`event.isTrusted` recorded:
+
+| case | `getClientRects()[0]` | `elementFromPoint` at that point | `mouse_click` | page saw (primary) | page saw (fallback) |
+|---|---|---|---|---|---|
+| plain button | 45.7 × 21 | `BUTTON#plainbtn` (same) | returned | `click:plainbtn:trusted` | `click:plainbtn:untrusted` |
+| covered | 66.4 × 21 | **`DIV#overlay`** | returned | `click:overlay:trusted` | `click:covered:untrusted` |
+| disabled | 67.9 × 21 | `BUTTON#disabled` (same) | returned | *(nothing)* | *(nothing)* |
+| `pointer-events:none` | 67.1 × 21 | **`BODY`** | returned | *(nothing)* | `click:pe-none:untrusted` |
+| zero-size | **0 × 0** | **`BODY`** | returned | *(nothing)* | `click:zero:untrusted` |
+| `display:none` | **no box at all** | `HTML` | **raises** `could not find position` | *(nothing)* | `click:gone:untrusted` |
+| `visibility:hidden` | 24.9 × 21 | **`BODY`** | returned | *(nothing)* | `click:vis-hidden:untrusted` |
+
+Three facts come out of this table and all three are load-bearing:
+
+1. **`elementFromPoint` at the click point is a complete oracle for "did the
+   target get it".** It names the overlay for the covered case, `BODY` for the
+   three that hit nothing, and the target itself for the two that work — and for
+   `disabled`, where the hit-test *does* name the button and Chrome still
+   suppresses the activation, so the element's own `disabled` flag is the second
+   fact the record needs.
+2. **`display:none` silently downgrades the tool to a synthetic click.**
+   `mouse_click` raises (no content quads), `click_element`'s `except` logs at
+   DEBUG and falls back to `Element.click`, which is `(el) => el.click()` inside
+   the page: an **untrusted** click with no coordinate and no hit-testing. The
+   whole thrust of `tests/test_e2e_interaction_fidelity.py::test_click_fidelity_is_trusted_input`
+   is that this tool dispatches trusted input; the caller is never told when it
+   did not.
+3. **The fallback is not useless**, which is why this fix does not delete it: for
+   `pointer-events:none`, zero-size, `visibility:hidden` and `display:none` it is
+   the only thing that reaches the element at all. It is a different *kind* of
+   click, and the honest fix is to name which one happened.
+
+### 2d. The click point has to be `getClientRects()[0]`, not `getBoundingClientRect()`
+
+`Element.mouse_click` clicks `Position(quads[0]).center`, where the quads come
+from `DOM.getContentQuads` — the element's **first box**, not its bounding box.
+A record that named a different point would be describing a click that never
+happened. Measured on four shapes:
+
+| element | nodriver's click centre | `getClientRects()[0]` centre | `getBoundingClientRect()` centre |
+|---|---|---|---|
+| plain `<button>` | `(22.828125, 10.5)` | `(22.828125, 10.5)` | `(22.828125, 10.5)` |
+| `<a>` wrapped over **4 line boxes** | `(39.5859375, 30.5)` | `(39.5859375, 30.5)` | `(39.5859375, **59**)` |
+| padded + bordered `<button>` | `(54.984375, 136.5)` | `(54.984375, 136.5)` | `(54.984375, 136.5)` |
+| inline `<img>` | `(133.765625, 126.0)` | `(133.765625, 126.0)` | `(133.765625, 126.0)` |
+
+`getClientRects()[0]` is byte-equal to nodriver's centre in every shape including
+the wrapped inline, where the bounding box is 28.5 px off. So the aim probe reads
+`getClientRects()[0]`, falling back to `getBoundingClientRect()` only when the
+element has no client rects at all (which is the `display:none` row, where the
+bounding box is all zeros and the record says "no box" rather than inventing a
+point at the origin).
+
+---
+
+## 3. Root cause
+
+**Both are one sentence, and it is F-873's sentence.** `paste_text` ends
+
+```python
+await tab.send(cdp.input_.insert_text(text))
+return True
+```
+
+and `click_element` ends
+
+```python
+await element.mouse_click()   # or, on any error, await element.click()
+return True
+```
+
+Neither asks the page anything between the dispatch and the `return`. The tool
+reports **the success of its own dispatch, not the success of the interaction** —
+which is exactly what F-873's §3 concluded about `type_text`, one level up from
+either tool's mechanics.
+
+The two differ in what an honest answer even *is*, and that is why they get
+different fixes:
+
+* For `paste_text` the question is closed and already has a home: "did the
+  element's text move". `text_entry` answers it.
+* For `click_element` there is no such oracle. "Did the page react" is unbounded
+  (a navigation, a fetch, a re-render, nothing at all — a correct click on a
+  correct button may legitimately change nothing observable). What IS bounded and
+  IS decidable is two facts: which *kind* of click was dispatched, and what was
+  under the click point. §2c shows those two together explain every measured
+  failure. So `click_element` gains a record, not a verdict.
+
+---
+
+## 4. Fix
+
+### 4a. `paste_text` joins `text_entry`'s read-back — no new mechanism
+
+`dom_handler.paste_text` now reads the baseline with `text_entry.entered_text`
+**after** the clear, sends the one `Input.insertText`, reads again, and hands both
+to `text_entry.verify_received`. Not one line of new "read a field back" code: the
+leaf F-873 created is the one home and this is its second consumer, which is the
+whole reason it took an element as an argument.
+
+Consequences that follow from reusing it rather than re-deriving it:
+
+* the failure message carries **the selector and two counts and nothing else** —
+  never the pasted text, because a raised `ToolError` reaches the caller, the
+  debug ring (`log_tool_failure`, ring-only per F-782/F-835) and Sentry, and the
+  field may be a password box (F-873 §4b, F-869's discipline);
+* the check is **"did anything change"**, with the same named cost: a control
+  that normalises the paste back to the string it already held now raises
+  (F-873 §4a, and §6 below);
+* empty `text` is not a failure — pasting nothing that changes nothing is not a
+  refusal, and the guard is skipped, exactly as `type_text` skips an empty line.
+
+`paste_text`'s signature and return type are **unchanged** (`bool`). What changed
+is that the `True` is now earned.
+
+### 4b. `click_element` gains a record, and a new leaf owns its one JS read
+
+New leaf `embedded/click_target.py` — **THE one home for "where was this click
+aimed, and what was under that point"**:
+
+* `AIM_JS` + `aim(element)` — the ONE read. A single `Element.apply` returning a
+  JSON **string** (same shape discipline, and the same reason, as
+  `text_entry.READ_JS` and `page_storage.READ_JS`: `apply` hands back
+  `result[0].value`, and a script that threw lands there as `None`, so a non-`str`
+  answer is "could not be read" and says so rather than being mistaken for an
+  empty answer). It reports the target's first client rect, the click point
+  computed from it (§2d), `document.elementFromPoint` at exactly that point, and
+  four flags that §2c proved are needed to read the hit: `disabled`,
+  computed `pointer-events`, computed `visibility`, and whether the hit element is
+  the target or inside it.
+* `Shape` — the tag/id/class descriptor, and the ONLY thing said about any
+  element. **No text content, ever**, on either the target or the hit: an overlay
+  is frequently a modal or a consent banner and its text is the page's, not the
+  tool's to echo into an MCP payload. The class list is bounded by `MAX_CLASSES`.
+* `reason(...)` — the closed code set, decided in one place from the facts above,
+  in the order measurement requires: `not-rendered` → `zero-size` →
+  `not-visible` → `pointer-events-none` → `covered` → `disabled` → `None`.
+  `pointer-events-none` is checked before `covered` because both are true for that
+  shape (§2c) and only one of them is the cause; `disabled` is last because it is
+  the one shape where the hit-test names the target and the click is still inert.
+* `record(...)` — composes the returned dict. `COORDINATE` / `SYNTHETIC` are the
+  two dispatch kinds and they are this module's constants.
+
+A leaf in the sense `CLAUDE.md` uses: it imports `tool_errors` and nothing else
+from the package, the element arrives as an argument, and it has **no error
+policy** — the one thing it raises is "the page did not answer with the promised
+JSON", the same not-a-policy `text_entry.entered_text` raises.
+
+`dom_handler.click_element` keeps the ORDER and the POLICY:
+
+```
+resolve → scroll_into_view → sleep → aim (one apply, BEFORE the click)
+        → mouse_click, or on error DEBUG-log + element.click()
+        → record(selector, aim, dispatch)
+```
+
+The aim is read **before** the click and the docstring says so: it is the state
+the click was aimed at. Reading it afterwards would describe a page the click may
+already have changed (a modal that closed, a navigation that detached the node),
+and for the `display:none` row there would be no node left to ask at all.
+
+**What `click_element` deliberately does NOT do:**
+
+* It does not raise for any of the five failing shapes. Every one of them is a
+  fact about the page, not a failure of the tool: a real user clicking those
+  coordinates gets the same result, and an agent clicking a `display:none`
+  element on purpose is a legitimate use the synthetic fallback serves. The
+  record names what happened; the caller decides.
+* It does not delete the synthetic fallback (§2c fact 3) — it labels it.
+* It does not acquire a "did the page react" oracle. Navigation, DOM mutation and
+  network are unbounded and the absence of any of them is not evidence. Named as
+  a limit in §6.
+
+### 4c. The return-shape change
+
+`click_element` returns `dict[str, object]` instead of `bool`:
+
+```json
+{
+  "selector": "#covered",
+  "dispatch": "coordinate",
+  "point": {"x": 41.1953125, "y": 18.5},
+  "size": {"width": 66.390625, "height": 21.0},
+  "target": {"tag": "button", "id": "covered", "classes": []},
+  "hit": {"tag": "div", "id": "overlay", "classes": []},
+  "hit_is_target": false,
+  "reason": "covered"
+}
+```
+
+There is no `"clicked": true` field. It would be redundant — `dispatch` is
+present on every successful return and strictly more informative, and a failure
+raises — and a redundant field is a second way to ask the same question.
+
+`point`, `size` and `hit` are `null` together for the `not-rendered` row, because
+an element with no box has no click point to name.
+
+---
+
+## 5. Verification
+
+* `tests/test_paste_click_verification.py` — hermetic pins (`FakeTab`,
+  `FakeTextField` and the new `FakeClickTarget`, all from `tests/fakes.py`).
+* `tests/test_e2e_paste_click_verification.py` — real-Chrome pins on their own
+  `tmp_empty_root` session root, marked exactly like the F-873 sibling.
+* Counts, the RED→GREEN transition and the narrow confirmation lane are recorded
+  in §5b.
+
+### 5a. Characterization pins deliberately flipped (SOFT goldens)
+
+| test | was | now | why |
+|---|---|---|---|
+| `tests/goldens/tool_surface.json` (`click_element`) | `output_schema` `{"result": {"type": "boolean"}}`, description ending `bool: True if clicked successfully.` | the record's object schema, description ending with the record's fields | the HARD wire-surface golden, regenerated **deliberately** with this justification per `CONTRIBUTING.md`: the tool's return type and its docstring both changed on purpose, and this is the same PR |
+| `tests/goldens/tool_surface.json` (`paste_text`) | description ending `bool: True if pasted successfully.` | `bool: True — the text was pasted AND the page took it.` | the old line was the claim this finding shows to be false; the schema is unchanged |
+| `test_e2e_interaction_fidelity.py::test_form_semantics` (disabled arm) | `assert await click(...) is True` with a comment calling the silence a FINDING | asserts the record's `reason == "disabled"` | the pin's own comment ("the tool cannot tell you the control was inert (FINDING: no disabled-state guard)") named this fix |
+| `test_e2e_interaction_fidelity.py::test_click_respects_occlusion_and_offscreen` | asserted only the page's action log | additionally asserts the record names the overlay | the occlusion the test already proved is now also *reported*, which is the change |
+| `test_xpath_dispatch.py::test_the_issue_15_repro_selector_clicks` | `assert await DOMHandler.click_element(...) is True` | asserts the returned record's `selector` | a return-shape change; the test's claim (one grammar, both tools) is untouched. Its `_FakeElement` gains an `apply` |
+| `test_silent_excepts_log.py::test_click_element_mouse_click_fallback_logs_at_debug` | `assert result is True` | asserts `dispatch == "synthetic"` | same return-shape change; the DEBUG line it exists to pin is byte-unchanged, and the new assert additionally proves the fallback is *labelled* |
+| `tests/fakes.py` | — | gains `FakeClickTarget` | a page-backed element double whose aim answer is COMPUTED from its own state, on `FakeTextField`'s model, so no fixture can encode the bug |
+
+### 5b. Numbers
+
+Filled in at the fix commit — see the PR body and the commit messages for the
+RED counts, the GREEN counts and the narrow confirmation lane.
+
+---
+
+## 6. Not claimed / deliberately unchanged / what remains
+
+* **There is still no "did the page react" oracle, and this finding does not want
+  one.** Navigation, DOM mutation, network activity and focus changes are all
+  unbounded, all racy, and none of their absence is evidence: a correct click on a
+  correct button can legitimately change nothing a tool can see within any
+  deadline. What `click_element` now reports is bounded and decidable — which kind
+  of click was dispatched, and what was under the point — and §2c shows that pair
+  explains every measured failure. A caller that needs "did it work" still has to
+  assert on the page.
+* **The aim is read BEFORE the click, so it describes the page the click was aimed
+  at, not the page afterwards.** A page that moves an overlay away in the same
+  frame as the click is reported as covered; a page that puts one up is not. That
+  is the correct claim to make (see §4b) but it is a claim about a moment, and it
+  is stated in the tool's docstring rather than left for a caller to discover.
+* **`reason: "covered"` does not name a CAUSE beyond the hit element's shape.**
+  The record says the click point was over `div#overlay`; it does not say why, and
+  it deliberately carries none of that element's text (§4b). An operator who needs
+  to know what the overlay IS has `query_elements` and `get_page_content`.
+* **The disabled row still dispatches a real coordinate click.** Chrome suppresses
+  the activation; the tool does not pre-check and refuse. Adding a refusal would
+  be a second way to decide what the browser already decides, and it would break
+  the legitimate case of clicking a control that a script enables between the
+  probe and the click. The record names it; the click still goes out.
+* **`paste_text` inherits both of F-873's named costs verbatim** — a control that
+  legitimately normalises the pasted text back to the identical string now raises,
+  and a control that accepts only part of what was pasted still answers `True`
+  (F-873 §4a and §6). They are the price of "did anything change", and the
+  narrower alternative is the one that finding rejects.
+* **`type_text`'s tool-wrapper docstring still says `bool: True if typed
+  successfully.`** F-873 corrected `DOMHandler.type_text`'s docstring and left the
+  `tool_sections/element_interaction.py` wrapper's Returns line alone, so the
+  served surface still makes the claim F-873 disproved. This PR corrects
+  `paste_text`'s and `click_element`'s because it is changing those two tools; the
+  third is a one-line truthfulness fix to the same golden and is deliberately left
+  as a named follow-up rather than widened into this diff.
+* **`select_option` and `upload_file` are the two remaining interaction tools that
+  answer `True` without asking the page anything.** `select_option`'s `text` arm
+  in particular still calls `send_keys` on a `<select>` and returns unconditionally
+  (`dom_handler.py`), which is F-873's shape a third time, and `upload_file`
+  returns the paths it was given rather than the files the input holds. Both are
+  out of scope here and neither has been measured; naming them is the claim, not
+  diagnosing them.
+* **The overlay/covered detection uses `document.elementFromPoint`, which does not
+  pierce shadow roots or the top layer the way `elementsFromPoint` chains do.** A
+  target inside an open shadow root reports its HOST as the hit element, not
+  itself, so `hit_is_target` can read `false` for a click that in fact reached the
+  target. Not measured here, named as a known edge; the fixture page's shadow-root
+  cases live in `tests/test_e2e_hard_dom.py` and are untouched by this PR.
