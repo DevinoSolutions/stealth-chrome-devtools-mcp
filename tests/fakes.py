@@ -345,6 +345,15 @@ class FakeTab:
             except StopIteration:
                 pass
             cdp_obj.close()  # never leave the generator un-iterated
+        if name == "dispatch_key_event" and frame:
+            # Chrome's own routing: a key event carrying ``text`` is inserted at
+            # the caret of the FOCUSED element (F-873). Modelled per EVENT, not
+            # per character, so a path that dispatches both a ``keyDown`` with
+            # ``text`` and a separate ``char`` double-inserts here exactly as it
+            # double-fires ``keypress`` in a real Chrome (measured, 152).
+            field = self._select_result
+            if isinstance(field, FakeTextField) and field.focused:
+                field.receive(frame["params"])
         if name == "evaluate" and name not in self._cdp_responses and frame:
             # ``Runtime.evaluate`` reaches the SAME canned answers as
             # ``evaluate()`` — see ``_answer_for_js``. An explicit
@@ -382,6 +391,12 @@ class ScrollingTab(FakeTab):
       one step per POSITION READ, which is what makes a mid-flight read
       deterministic without a real clock: a product that reads once and returns
       sees ``smooth_steps``-th of the way, the measured F-875 shortfall;
+    * the scroll answers ``{moves, supported}`` and arms an ``ended`` latch that
+      the read reports, exactly as ``scroll_position``'s scroll wrapper does.
+      ``ended`` is set when the animation REACHES its target — never before —
+      which is what makes ``stall_at`` meaningful: with a stall the position
+      repeats while ``ended`` is still 0, so a settle that stops on repeated
+      reads is caught and one that waits for the latch is not;
     * ``nested_id=…`` makes the page an **app shell** (F-878): the document
       scroller has nothing to scroll, the geometry belongs to a nested ``div``,
       and — the part that matters — a ``window`` scroll therefore moves
@@ -389,7 +404,14 @@ class ScrollingTab(FakeTab):
       ``html,body{overflow:hidden}`` + a full-viewport ``div{overflow:auto}``.
       Which element a script addresses is read off the script itself
       (``_el([…])`` vs ``window``), so the double never has to be told which
-      product version is driving it.
+      product version is driving it. **The latch follows the same target**: a
+      scroll that addresses the nested div latches only if the listener was
+      armed on the div, and a ``window`` scroll only if it was armed on
+      ``window`` — which is what real Chrome does (F-878 measured that an
+      element's ``scrollend`` does not bubble to ``window``, and a document's is
+      never dispatched at ``document.scrollingElement``), and it is what makes an
+      arm-on-the-wrong-target bug visible here rather than only in the browser.
+
 
     Nothing here is written from the defect: the scripts are interpreted as
     Chrome interprets them, the scroller pick is answered by Chrome's rule
@@ -421,6 +443,15 @@ class ScrollingTab(FakeTab):
     #: The resolver call the product emits for a NESTED scroller, and the index
     #: path inside it: ``_el([1,0])`` — ``_el(null)`` is the document.
     _EL = re.compile(r"_el\(\s*(null|\[[\d,\s]*\])\s*\)")
+    #: Does this ``JSON.stringify`` round trip SCROLL? Since F-875 the scroll is
+    #: a wrapper that also arms a latch and reports ``{moves, supported}``, so it
+    #: is a ``JSON.stringify`` like the read and the pick, and the scroll CALL is
+    #: what tells them apart.
+    _SCROLL_CALL = re.compile(r"\.scroll(?:To|By)\(\{")
+    #: ``var T=…;`` — the object the product armed ``scrollend`` on AND scrolls.
+    #: Read separately from :meth:`_drives_nested` on purpose: the two agreeing
+    #: is the product's job, not this double's assumption.
+    _TARGET_BIND = re.compile(r"var T=([^;]+);")
 
     def __init__(
         self,
@@ -440,6 +471,9 @@ class ScrollingTab(FakeTab):
         document_height: int | None = None,
         document_width: int | None = None,
         stale_path: bool = False,
+        stall_at: int = 0,
+        stall_reads: int = 0,
+        scrollend_supported: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -486,6 +520,23 @@ class ScrollingTab(FakeTab):
         #: Its offset is stable and its EXTENT is not, which is the one shape
         #: that tells an offset comparison from a whole-``Position`` one.
         self.growing_content = growing_content
+        #: The F-875/CI-35046780659 shape: from the ``stall_at``-th read of a
+        #: flight, the position REPEATS for ``stall_reads`` reads and then
+        #: resumes. On a real page that is the renderer's main thread blocked
+        #: while the compositor keeps scrolling — measured stall length equals
+        #: the long task, so it is unbounded and no count of agreeing reads can
+        #: see through it.
+        self.stall_at = stall_at
+        self.stall_reads = stall_reads
+        #: ``'onscrollend' in window``. ``False`` drives the read-agreement
+        #: fallback, the only path where ``START_GRACE_SECONDS`` still matters.
+        self.scrollend_supported = scrollend_supported
+        self._reads_in_flight = 0
+        self._stalled = 0
+        self._ended = False
+        #: Which container the last scroll armed its ``scrollend`` listener on.
+        #: Only that container's arrival sets the latch (:meth:`_arrive`).
+        self._armed_nested = False
         self._flight: tuple[int, int] | None = None
         self._doc_flight: tuple[int, int] | None = None
         #: Every position read, in order — so a test can count round trips.
@@ -563,16 +614,36 @@ class ScrollingTab(FakeTab):
 
     def _step(
         self, flight: tuple[int, int] | None, x: int, y: int
-    ) -> tuple[int, int, tuple[int, int] | None]:
-        """One animation frame of *flight* from (*x*, *y*) — the new (x, y, flight)."""
+    ) -> tuple[int, int, tuple[int, int] | None, bool]:
+        """One animation frame of *flight* from (*x*, *y*).
+
+        Returns ``(x, y, flight, arrived)`` — ``arrived`` is the frame on which
+        this container REACHED its target, i.e. the frame Chrome would dispatch
+        ``scrollend`` on.
+        """
         if flight is None:
-            return (x, y, None)
+            return (x, y, None, False)
         target_x, target_y = flight
         step_x = -(-abs(target_x - x) // self.smooth_steps)
         step_y = -(-abs(target_y - y) // self.smooth_steps)
         x += min(step_x, abs(target_x - x)) * (1 if target_x >= x else -1)
         y += min(step_y, abs(target_y - y)) * (1 if target_y >= y else -1)
-        return (x, y, None if (x, y) == flight else flight)
+        arrived = (x, y) == flight
+        return (x, y, None if arrived else flight, arrived)
+
+    def _arrive(self, *, nested: bool) -> None:
+        """A container reached its target — does the armed listener SEE it?
+
+        Chrome's answer, measured on the F-878 fixtures (Chrome 152): an
+        element's ``scrollend`` is dispatched at that element and does NOT
+        bubble to ``window``; a document's reaches ``window`` and ``document``
+        and is NEVER dispatched at ``document.scrollingElement``. So a latch
+        armed on the wrong object never fires, and the settle would spend its
+        whole budget. Modelling that here rather than assuming it is what makes
+        an arm-on-the-wrong-target bug a RED test instead of a browser-only one.
+        """
+        if nested == self._armed_nested:
+            self._ended = True
 
     def _advance(self) -> None:
         """One animation frame's worth of movement, charged per read."""
@@ -582,12 +653,31 @@ class ScrollingTab(FakeTab):
             self.scroll_y = min(self.scroll_y + 1, self.max_scroll_y)
             self.doc_height += 1  # the content that keeps arriving
             return
-        self.scroll_x, self.scroll_y, self._flight = self._step(
+        if self._flight is None and self._doc_flight is None:
+            return
+        self._reads_in_flight += 1
+        # The renderer stalled: the value the read can see does not advance,
+        # while the scroll itself has NOT finished. This is the F-875 /
+        # CI-35046780659 shape, and it is what tells a settle that waits for the
+        # page's own end-of-scroll from one that stops on repeated reads.
+        if (
+            self.stall_reads
+            and self._reads_in_flight >= self.stall_at
+            and self._stalled < self.stall_reads
+        ):
+            self._stalled += 1
+            return
+        self.scroll_x, self.scroll_y, self._flight, nested_arrived = self._step(
             self._flight, self.scroll_x, self.scroll_y
         )
-        self.doc_scroll_x, self.doc_scroll_y, self._doc_flight = self._step(
-            self._doc_flight, self.doc_scroll_x, self.doc_scroll_y
+        self.doc_scroll_x, self.doc_scroll_y, self._doc_flight, doc_arrived = (
+            self._step(self._doc_flight, self.doc_scroll_x, self.doc_scroll_y)
         )
+        if nested_arrived:
+            # The primary state is the NESTED element only when there is one.
+            self._arrive(nested=not self.document_is_the_scroller)
+        if doc_arrived:
+            self._arrive(nested=False)
 
     def _drives_nested(self, expression: str) -> bool:
         """Does this script address the NESTED scroller rather than the window?
@@ -607,6 +697,26 @@ class ScrollingTab(FakeTab):
         found = self._EL.search(expression)
         return found is not None and found.group(1) != "null"
 
+    def _armed_on_nested(self, expression: str) -> bool:
+        """Was the ``scrollend`` listener armed on the nested element?
+
+        Read off the ``var T=…`` binding, NOT off which container the script
+        moves — so a product that scrolls the div and listens on ``window``
+        (or the reverse) is caught here rather than only in a browser. Under
+        ``stale_path`` the binding still SAYS ``_el([…])`` but resolves to the
+        document element, which is not a target a document scroll's ``scrollend``
+        is ever dispatched at (measured) — so it is not "nested" either, and
+        nothing latches. That costs nothing in practice, because a stale path
+        lands on a document whose ``moves`` is already false.
+        """
+        bound = self._TARGET_BIND.search(expression)
+        if bound is None:
+            return False
+        target = bound.group(1)
+        if "_el(" not in target:
+            return False
+        return not self.stale_path and "null" not in target
+
     def _scroller_answer(self, expression: str) -> str:
         """The page's answer to the scroller pick — Chrome's rule, not the product's.
 
@@ -624,7 +734,13 @@ class ScrollingTab(FakeTab):
         return json.dumps({"path": list(self.nested_path), "document": False})
 
     def _read_answer(self, expression: str) -> str:
-        """The geometry and identity of whichever element the read addressed."""
+        """The geometry, identity and end-latch of the element the read addressed.
+
+        ``ended`` is the LATCH, not a per-element fact: the page keeps one
+        (``window.__stealthMcpScroll``) whatever it armed the listener on, so
+        the read reports it regardless of which element it is reading.
+        """
+        ended = self._ended and self.scrollend_supported
         if not self._drives_nested(expression):
             return json.dumps(
                 {
@@ -640,6 +756,7 @@ class ScrollingTab(FakeTab):
                     "id": "",
                     "classes": [],
                     "document": True,
+                    "ended": ended,
                 }
             )
         return json.dumps(
@@ -652,6 +769,7 @@ class ScrollingTab(FakeTab):
                 "id": self.nested_id,
                 "classes": list(self.nested_classes),
                 "document": False,
+                "ended": ended,
             }
         )
 
@@ -661,55 +779,70 @@ class ScrollingTab(FakeTab):
             if self.SCROLLER_JS_MARKER in expression:
                 self.scroller_picks.append(expression)
                 return self._scroller_answer(expression)
+            if self._SCROLL_CALL.search(expression):
+                return self._apply_scroll(expression)
             self.position_reads.append(expression)
             self._advance()
             return self._read_answer(expression)
-        if self._drives_nested(expression) or self.document_is_the_scroller:
-            return self._apply_scroll(expression, nested=True)
-        return self._apply_scroll(expression, nested=False)
+        return self._answer_for_js(expression)
 
-    def _apply_scroll(self, expression: str, *, nested: bool) -> Any:
-        """Move ONE container the way the script asks, clamped to ITS extent."""
-        if nested:
-            target = self._target_of(
-                expression,
-                x=self.scroll_x,
-                y=self.scroll_y,
-                max_x=self.max_scroll_x,
-                max_y=self.max_scroll_y,
-                content=self.doc_height,
-            )
+    def _apply_scroll(self, expression: str) -> Any:
+        """The scroll round trip: arm the latch and scroll ONE container.
+
+        Which container the script drives is read off the script (``_el([…])``
+        vs ``window``); which one the LISTENER was armed on is read off the
+        ``var T=…`` binding, independently, so the two can disagree — and when
+        they do, nothing ever latches. See :meth:`_arrive`.
+        """
+        nested = self._drives_nested(expression)
+        # WHICH state holds the offsets, and whether that state is a NESTED
+        # element, are two questions: on a page with no nested scroller at all
+        # the document IS the scroller and its offsets live in the primary
+        # state, but nothing about it is nested.
+        on_primary = nested or self.document_is_the_scroller
+        if on_primary:
+            bounds = {
+                "x": self.scroll_x,
+                "y": self.scroll_y,
+                "max_x": self.max_scroll_x,
+                "max_y": self.max_scroll_y,
+                "content": self.doc_height,
+            }
+            here = (self.scroll_x, self.scroll_y)
         else:
-            target = self._target_of(
-                expression,
-                x=self.doc_scroll_x,
-                y=self.doc_scroll_y,
-                max_x=self.doc_max_scroll_x,
-                max_y=self.doc_max_scroll_y,
-                content=self.doc_content_height,
-            )
-        if target is None:
+            bounds = {
+                "x": self.doc_scroll_x,
+                "y": self.doc_scroll_y,
+                "max_x": self.doc_max_scroll_x,
+                "max_y": self.doc_max_scroll_y,
+                "content": self.doc_content_height,
+            }
+            here = (self.doc_scroll_x, self.doc_scroll_y)
+        target = self._target_of(expression, **bounds)
+        if target is None:  # pragma: no cover - the regex already matched
             return self._answer_for_js(expression)
-        here = (
-            (self.scroll_x, self.scroll_y)
-            if nested
-            else (
-                self.doc_scroll_x,
-                self.doc_scroll_y,
-            )
-        )
-        if "'smooth'" in expression:
-            flight = None if target == here else target
-        else:
-            flight = None
-            here = target
-        if nested:
+
+        moves = target != here
+        self._ended = False
+        self._reads_in_flight = 0
+        self._stalled = 0
+        self._armed_nested = self._armed_on_nested(expression)
+        flight = None
+        if moves:
+            if "'smooth'" in expression:
+                flight = target
+            else:
+                here = target
+        if on_primary:
             self.scroll_x, self.scroll_y = here
             self._flight = flight
         else:
             self.doc_scroll_x, self.doc_scroll_y = here
             self._doc_flight = flight
-        return None
+        if moves and flight is None:
+            # An instant scroll is over before the evaluate returns.
+            self._arrive(nested=nested)
+        return json.dumps({"moves": moves, "supported": self.scrollend_supported})
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +984,84 @@ def fake_element(node_id: int = 1, **attrs: Any) -> SimpleNamespace:
     ``NodeId(n) == n``, so assertions comparing against a plain int still hold.
     """
     return SimpleNamespace(node_id=cdp_dom.NodeId(node_id), **attrs)
+
+
+class FakeTextField:
+    """A nodriver ``Element`` double for a text control, PAGE-BACKED (F-873).
+
+    Models the one thing the typing path depends on and nothing else: a CDP key
+    event carrying ``text`` inserts that text at the caret — **only if the
+    control accepts typed characters**. ``accepts=False`` is the whole of
+    F-873's "reported success, typed nothing" class: a ``readonly`` input, a
+    ``range``/``date``/``color`` control, or a page whose script cancels the
+    key. In every one of them Chrome DELIVERS the events and the value never
+    moves (measured on Chrome 152 — see the finding's §2 matrix), which is why
+    a double that simply appended whatever it was sent could not express the
+    defect at all.
+
+    ``"\\r"``/``"\\n"`` are deliberately NOT inserted into a single-line
+    control: a literal newline character is dropped by Chrome (measured), so
+    the ONLY thing that can produce a newline or a submit is a real Enter key
+    press, which is what the Enter pins assert against ``FakeTab.cdp_frames``.
+
+    ``content_editable=True`` is the OTHER control shape the typing path has to
+    hold: such an element has no ``.value`` at all (measured — it is
+    ``undefined``), it carries its text in ``textContent``, and it takes an
+    Enter as a newline where a single-line ``<input>`` drops it. The double
+    reports itself as ``editable`` in the read-back so the surrounding contract
+    is pinnable here; whether the JS picks the right property is the page's to
+    evaluate and its witness is a real Chrome
+    (``tests/test_e2e_hard_dom.py::test_contenteditable_and_multiselect``).
+
+    The read-back answer is COMPUTED from this object's own state, never
+    supplied by the test, so no fixture here can quietly encode the bug.
+    """
+
+    def __init__(
+        self,
+        value: str = "",
+        accepts: bool = True,
+        content_editable: bool = False,
+        multiline: bool = False,
+    ) -> None:
+        self.value = value
+        self.accepts = accepts
+        self.content_editable = content_editable
+        self.multiline = multiline
+        self.focused = False
+        self.apply_calls: list[str] = []
+
+    async def focus(self) -> None:
+        self.focused = True
+
+    async def apply(self, js_function: str, *args: Any, **kwargs: Any) -> Any:
+        """``Element.apply`` — ``Runtime.callFunctionOn(returnByValue=True)``.
+
+        Answers the three functions the typing path sends: the focus call, the
+        programmatic clear, and the read-back (whose answer is a JSON STRING,
+        which is what ``return_by_value`` really hands back).
+        """
+        self.apply_calls.append(js_function)
+        if "focus()" in js_function:
+            self.focused = True
+            return None
+        if "elem.value = ''" in js_function:
+            self.value = ""
+            return None
+        if "JSON.stringify" in js_function:
+            return json.dumps({"editable": self.content_editable, "text": self.value})
+        return None
+
+    def receive(self, params: dict[str, Any]) -> None:
+        """Insert one key event's ``text``, the way the renderer would."""
+        text = params.get("text")
+        if not text or params.get("type") == "keyUp":
+            return
+        if not self.accepts:
+            return
+        if text in ("\r", "\n") and not (self.multiline or self.content_editable):
+            return
+        self.value += "\n" if text == "\r" else text
 
 
 class FakeDiscoveredTarget:

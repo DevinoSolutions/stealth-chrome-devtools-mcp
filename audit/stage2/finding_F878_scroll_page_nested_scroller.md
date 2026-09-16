@@ -159,6 +159,57 @@ Four distinct failure modes, each measured rather than reasoned:
 | **B** — centre point, walk to first scrollable ancestor | **8 / 12** | g, h, i (wrong pick); j (axis-blind) |
 | **the chosen rule** (§4) | **12 / 12** | — |
 
+### 3.5 Where does `scrollend` fire — and does it fire at all for an element?
+
+F-875's settle waits for the page's own `scrollend` rather than for two reads to
+agree (F-875 §8). Driving a nested element raises a question that cannot be
+assumed: does `scrollend` fire on an element scroller the way it does on the
+document, and is the listener target the same? Measured, same method as §3 —
+Chrome 152, headless, through `spawn_browser → navigate`, one listener on the
+ELEMENT, one on `window` and one on `document`, then one scroll, then the three
+counters read back:
+
+| fixture | scroller | behavior | at element | at `window` | at `document` | `'onscrollend' in` target |
+|---|---|---|---|---|---|---|
+| a control | document | smooth | 0 | **1** | **1** | true |
+| a control | document | instant | 0 | **1** | **1** | true |
+| f quirks | document (`body`) | smooth | 0 | **1** | **1** | true |
+| b app shell | `div#shell` | smooth | **1** | 0 | 0 | true |
+| b app shell | `div#shell` | instant | **1** | 0 | 0 | true |
+| c two panes | `div#main` | smooth | **1** | 0 | 0 | true |
+| e2 snap nested | `div#deck` | smooth | **1** | 0 | 0 | true |
+| j horizontal (x axis) | `div#strip` | smooth | **1** | 0 | 0 | true |
+| j horizontal (x axis) | `div#strip` | instant | **1** | 0 | 0 | true |
+| b app shell, NO-OP scroll | `div#shell` | smooth | 0 | 0 | 0 | true |
+
+Three things follow, and all three are load-bearing:
+
+1. **`scrollend` DOES fire for a nested scroller** — smooth and instant, on both
+   axes, including inside a `scroll-snap` container. No element case needs a
+   degraded fallback, so none is added: the read-agreement path stays exactly
+   what F-875 left it, the fallback for a browser without `onscrollend`.
+2. **It does not bubble, and the document's is never dispatched at
+   `document.scrollingElement`.** The two are mirror images: an element scroll is
+   invisible at `window`, a document scroll is invisible at the scrolling
+   element. So there is exactly ONE right target per scroller kind, and **both**
+   wrong choices fail the same silent way — the latch never sets, the settle
+   burns its whole 10 s budget, and the tool reports `settled: false` about a
+   scroll that finished in a second. The listener is therefore armed on the SAME
+   expression that receives the scroll (`var T = …`), which is `window` for the
+   document scroller and the resolved element for a nested one, and a hermetic
+   pin reads that target back out of the generated script rather than trusting
+   it (§5.4).
+3. **A no-op scroll fires nothing anywhere** — not at the element, not at
+   `window`. So `moves` cannot be inferred from the event, it has to be computed,
+   and for a nested scroller it has to be computed against **that element's**
+   extent on the requested axis, not the document's. That is what `SCROLL_JS`
+   does, synchronously, from the clamped target, before any frame.
+
+`'onscrollend' in …` is true for an `HTMLElement` as well as for `window`, so the
+feature detect is one expression on the target and needs no branch. (`'scrollend'
+in window` is false on Chrome 152 — F-875 measured that; the `on`-prefixed form
+is the one that answers.)
+
 ---
 
 ## 4. The chosen rule, and why the others lose
@@ -179,14 +230,17 @@ page: that is what the window scrolls, what the user's wheel scrolls at rest,
 and what `document.scrollingElement` is defined to name. Fixture d is the proof:
 a 400 px scrollable box sits inside a 6023 px scrolling document, and any
 "largest scrollable" rule without rule 1 in front of it would have to be talked
-out of choosing the box. Rule 1 also means **the SCROLL SCRIPT for a document
+out of choosing the box. Rule 1 also means **the SCROLL CALL for a document
 scroller is byte-identical to F-875's** — `window.scrollTo` / `window.scrollBy`,
-the same six templates, for all twelve direction/`smooth` combinations — so the
-fix cannot regress the four fixtures that already worked. The claim is scoped to
-the scroll scripts on purpose: `READ_JS` **did** change, from
-`window.scrollX`/`scrollY` to the chosen element's `scrollLeft`/`scrollTop`
-(equal by definition for the document scroller, and measured equal in both
-compatibility modes), plus the resolver and the identity fields.
+the same six templates, for all twelve direction/`smooth` combinations, and the
+`scrollend` listener still armed on `window` — so the fix cannot regress the four
+fixtures that already worked. The claim is scoped to that call on purpose. The
+script AROUND it is not byte-identical and is not claimed to be: `READ_JS`
+changed from `window.scrollX`/`scrollY` to the chosen element's
+`scrollLeft`/`scrollTop` (equal by definition for the document scroller, and
+measured equal in both compatibility modes), `SCROLL_JS` binds the target and the
+extent to names (`var T=window; var E=(document.scrollingElement||…)`) instead of
+spelling them at each use, and the resolver and the identity fields are new.
 
 **Rule 2 beats B (the centre walk) on three measured grounds:** B looks
 *inward* (g), B is blind to what is painted over the centre (h), and B's answer
@@ -260,9 +314,18 @@ gained one call and two record fields and nothing else (it is at 984 of its
   a `{target}` and an `{extent}` placeholder instead of naming `window` and
   `document.scrollingElement` inline. For the document the substitution is
   literally `window` and `(document.scrollingElement||document.documentElement)`,
-  so **the generated JS for a document scroller is byte-identical to F-875's** —
-  which is the mechanical form of "the control fixture is unchanged". For a
-  nested scroller both become `_el([…])`.
+  so **the scroll call generated for a document scroller is byte-identical to
+  F-875's** — which is the mechanical form of "the control fixture is unchanged".
+  For a nested scroller both become `_el([…])`.
+* **`SCROLL_JS` arms F-875's `scrollend` latch on the scroller that was picked.**
+  The prologue binds `var T = {target}` (the scroll's receiver) and
+  `var E = {extent}` (the same object, for the document spelled as the scrolling
+  element so `scrollHeight` is readable), and the listener goes on `T`. `moves`
+  and `supported` are computed off `E` and `T` respectively, so a nested
+  scroller's "will this change anything" is answered against ITS extent on the
+  requested axis and its own `onscrollend`. §3.5 is why this is a measurement and
+  not a style choice: arming on `window` for an app shell, or on the element for
+  a plain page, never fires and would burn the full settle budget in silence.
 * **`_json_answer`** — the "the evaluate did not answer with the JSON we asked
   for" ladder, factored out of `read` because `scroller` needs exactly the same
   one. Messages still report shape and count only: a type name, a character
@@ -288,22 +351,32 @@ Nothing else in the record moved. `scrolled` still compares offsets only,
 ### 5.3 Measured with the fix
 
 Real Chrome 152, headless, Windows 11, through `spawn_browser → navigate →
-scroll_page`, same twelve fixtures:
+scroll_page`, same twelve fixtures, on the MERGED code (F-878's pick plus F-875
+§8's `scrollend` latch, armed per §3.5). `settle` is the record's
+`settle_seconds`; a latch armed on the wrong target would show here as
+`settled` missing and `settle` ≈ 10.0:
 
 ```
-a  control        scroller html      is_document=true    y 7023/7023  scrolled settled at_edge
-b  app shell      scroller div#shell is_document=false   y 7023/7023  scrolled settled at_edge
-c  two panes      scroller div#main  is_document=false   y 8023/8023  scrolled settled at_edge
-d  nested-in-doc  scroller html      is_document=true    y 6023/6023  scrolled settled at_edge
-e  snap document  scroller html      is_document=true    y 2931/2931  scrolled settled at_edge
-e2 snap nested    scroller div#deck  is_document=false   y 2931/2931  scrolled settled at_edge
-f  quirks         scroller body      is_document=true    y 7023/7023  scrolled settled at_edge
-g  shell+grid     scroller div#shell is_document=false   y 6098/6098  scrolled settled at_edge
-h  shell+scrim    scroller div#shell is_document=false   y 7023/7023  scrolled settled at_edge
-i  three columns  scroller div#reader is_document=false  y 8023/8023  scrolled settled at_edge
-j  horizontal     scroller div#strip is_document=false   x  500/7112  scrolled settled            (direction="right", amount=500 — so NOT at_edge, correctly)
-k  stray overflow scroller div#shell is_document=false   y 7023/7023  scrolled settled at_edge
+a  control        html        is_document=true   y 7023/7023  settle=1.485  scrolled settled at_edge
+b  app shell      div#shell   is_document=false  y 7023/7023  settle=1.602  scrolled settled at_edge
+c  two panes      div#main    is_document=false  y 8023/8023  settle=1.606  scrolled settled at_edge
+d  nested-in-doc  html        is_document=true   y 6023/6023  settle=1.365  scrolled settled at_edge
+e  snap document  html        is_document=true   y 2931/2931  settle=1.093  scrolled settled at_edge
+e2 snap nested    div#deck    is_document=false  y 2931/2931  settle=1.001  scrolled settled at_edge
+f  quirks         body        is_document=true   y 7023/7023  settle=1.475  scrolled settled at_edge
+g  shell+grid     div#shell   is_document=false  y 6098/6098  settle=1.470  scrolled settled at_edge
+h  shell+scrim    div#shell   is_document=false  y 7023/7023  settle=1.482  scrolled settled at_edge
+i  three columns  div#reader  is_document=false  y 8023/8023  settle=1.595  scrolled settled at_edge
+j  horizontal     div#strip   is_document=false  x  500/7112  settle=0.502  scrolled settled            (direction="right", amount=500 — so NOT at_edge, correctly)
+k  stray overflow div#shell   is_document=false  y 7023/7023  settle=1.598  scrolled settled at_edge
 ```
+
+Twelve of twelve pick the §3.1 human answer, every one `settled`, every one at
+its true final offset, and every settle is the length of the smooth animation
+(0.50–1.61 s) — none is anywhere near the 10 s budget, which is the end-to-end
+form of §3.5's "the latch is on the right target". The pre-merge run of the same
+matrix (F-878 alone, on F-875's read-agreement settle) picked the same twelve
+elements and landed at the same twelve offsets.
 
 ### 5.4 Tests and goldens
 
@@ -316,7 +389,16 @@ k  stray overflow scroller div#shell is_document=false   y 7023/7023  scrolled s
   shell can move 7023 px. The double models **two independent scroll
   containers**, so it can express fixture d (a page where the document AND a
   nested div can both move) and a **stale path** (`stale_path=True`: the
-  resolver falls back to the document however the script is spelled).
+  resolver falls back to the document however the script is spelled). Since
+  the F-875 §8 merge it also reads the latch's ARM TARGET out of the generated
+  script (`var T=…`) independently of which container the scroll call moves, and
+  only latches when the armed target is the container that moved — which is
+  exactly §3.5's asymmetry, so arming on the wrong target is a RED test here and
+  not a browser-only symptom: `test_the_scrollend_listener_is_armed_on_the_element_that_scrolls`
+  (a nested scroll must arm on `_el(…)`, a document scroll on `window`) and
+  `test_a_stalled_nested_scroll_is_not_a_finished_one` (a nested smooth scroll
+  whose latch has not set is reported `settled: false`, never as finished on the
+  strength of two agreeing reads).
 * **What a hermetic pin here cannot hold.** `ScrollingTab` is not a JS engine:
   it applies Chrome's rule to its own geometry rather than executing
   `SCROLLER_JS`. So the hermetic fixture-d pin holds the tool's **wiring** —
@@ -331,7 +413,10 @@ k  stray overflow scroller div#shell is_document=false   y 7023/7023  scrolled s
   Chrome on fixture d (the `scrollingElement` precedence, the load-bearing pin
   for rule 1), the app shell (b), the outer-vs-inner shell (g) and the
   horizontal strip (j), each cross-checked against the page's own `scrollTop` /
-  `scrollLeft` and against what the *other* container did. **All twelve matrix
+  `scrollLeft` and against what the *other* container did. The app-shell pin also
+  asserts `settle_seconds < 5.0`, so a latch armed on `window` for a nested
+  scroller (a full 10 s budget, then `settled: false`) fails it outright rather
+  than merely slowing it. **All twelve matrix
   fixtures are declared there as `data:` constants** (`F878_MATRIX`), in the
   finding's own lettering, so §3 is reproducible from the repo and not only
   from this prose — the four that carry assertions are the four a candidate
@@ -378,6 +463,16 @@ k  stray overflow scroller div#shell is_document=false   y 7023/7023  scrolled s
   the document's, and `scroller_is_document` agrees with it. `scrolled` is also
   `False` across such a fallback by construction: `Position.moved_from` refuses
   to call the difference between two DIFFERENT elements' offsets a scroll.
+* **The `scrollend` target measurement is Chrome 152's.** §3.5 establishes
+  where the event is dispatched on this Chrome; the CSSOM View draft says an
+  element's `scrollend` fires at the element and the document's at the
+  `Document`, so the asymmetry is the specification and not a quirk, but no
+  other engine or version was measured. A browser that lacked `onscrollend` on
+  the armed target takes the read-agreement fallback (`supported` is asked of
+  the target, not of `window`); a browser that HAD it but dispatched the event
+  somewhere else would spend the 10 s budget and report `settled: false` — the
+  cost is bounded and the record is honest, but it is a cost, and only Chrome
+  152 is measured not to pay it.
 * **Not measured: `iframe` content.** The pick walks `document.querySelectorAll`
   in the top document only. A page whose content is inside a same-origin iframe
   will report the top document's scroller. `scroll_page` has never crossed a

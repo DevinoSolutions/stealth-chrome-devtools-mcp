@@ -8,7 +8,7 @@ from typing import Any
 
 from nodriver import Tab, cdp
 
-from stealth_chrome_devtools_mcp.embedded import scroll_position
+from stealth_chrome_devtools_mcp.embedded import scroll_position, text_entry
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     resolve_by_text,
@@ -403,6 +403,15 @@ class DOMHandler:
         """
         Type text with human-like delays and optional newline parsing.
 
+        Every key press and the "did the page take it" check belong to
+        ``text_entry``; what lives here is the ORDER (F-873). A line's
+        characters are verified BEFORE that line's Enter, never after: an Enter
+        that submits may navigate the page away, and a read against the
+        detached element would report a failure the page had in fact accepted.
+        An empty line is skipped entirely, which is what keeps the common
+        ``"query\\n"`` \u2014 type, submit, done \u2014 from reading back across its own
+        navigation.
+
         Args:
             tab (Tab): The browser tab object.
             selector (str): CSS selector for the input element.
@@ -414,7 +423,12 @@ class DOMHandler:
                 (for chat apps).
 
         Returns:
-            bool: True if typing succeeded, False otherwise.
+            bool: True \u2014 the characters were typed AND the page took them.
+
+        Raises:
+            ToolError: the selector resolved to nothing, the element could not
+                be read back, or every key event was delivered and the
+                element's text did not move.
         """
         try:
             element = await resolve_element(tab, selector)
@@ -429,58 +443,20 @@ class DOMHandler:
                     await element.apply("(elem) => { elem.value = ''; }")
                 except Exception as e:
                     debug_logger.log_debug("dom_handler", "type_text", str(e))
-                    await element.send_keys("\ue009" + "a")  # Ctrl+A fallback
-                    await element.send_keys("\ue017")
+                    await text_entry.clear_via_keyboard(tab)
                 await asyncio.sleep(0.1)
 
-            if parse_newlines:
-                lines = text.split("\n")
-                for i, line in enumerate(lines):
-                    for char in line:
-                        await element.send_keys(char)
-                        await asyncio.sleep(delay_ms / 1000)
-
-                    if i < len(lines) - 1:
-                        if shift_enter:
-                            await element.apply("""(elem) => {
-                                const start = elem.selectionStart;
-                                const end = elem.selectionEnd;
-                                const value = elem.value;
-                                elem.value = value.substring(0, start)
-                                    + '\\n' + value.substring(end);
-                                elem.selectionStart = elem.selectionEnd = start + 1;
-
-                                elem.dispatchEvent(new KeyboardEvent('keydown', {
-                                    key: 'Enter',
-                                    code: 'Enter',
-                                    shiftKey: true,
-                                    bubbles: true
-                                }));
-                                elem.dispatchEvent(
-                                    new Event('input', { bubbles: true }));
-                            }""")
-                        else:
-                            await element.apply("""(elem) => {
-                                const start = elem.selectionStart;
-                                const end = elem.selectionEnd;
-                                const value = elem.value;
-                                elem.value = value.substring(0, start)
-                                    + '\\n' + value.substring(end);
-                                elem.selectionStart = elem.selectionEnd = start + 1;
-
-                                elem.dispatchEvent(new KeyboardEvent('keydown', {
-                                    key: 'Enter',
-                                    code: 'Enter',
-                                    bubbles: true
-                                }));
-                                elem.dispatchEvent(
-                                    new Event('input', { bubbles: true }));
-                            }""")
-                        await asyncio.sleep(delay_ms / 1000)
-            else:
-                for char in text:
-                    await element.send_keys(char)
-                    await asyncio.sleep(delay_ms / 1000)
+            delay = delay_ms / 1000
+            lines = text.split("\n") if parse_newlines else [text]
+            for index, line in enumerate(lines):
+                if line:
+                    before = await text_entry.entered_text(element, selector)
+                    await text_entry.type_characters(tab, element, line, delay)
+                    after = await text_entry.entered_text(element, selector)
+                    text_entry.verify_received(selector, line, before, after)
+                if index < len(lines) - 1:
+                    await text_entry.press_enter(tab, shift=shift_enter)
+                    await asyncio.sleep(delay)
 
             return True
 
@@ -519,40 +495,7 @@ class DOMHandler:
                     await element.apply("(elem) => { elem.value = ''; }")
                 except Exception as e:
                     debug_logger.log_debug("dom_handler", "paste_text", str(e))
-                    await tab.send(
-                        cdp.input_.dispatch_key_event(  # Ctrl+A fallback
-                            "rawKeyDown",
-                            modifiers=2,  # Ctrl
-                            key="a",
-                            code="KeyA",
-                            windows_virtual_key_code=65,
-                        )
-                    )
-                    await tab.send(
-                        cdp.input_.dispatch_key_event(
-                            "keyUp",
-                            modifiers=2,  # Ctrl
-                            key="a",
-                            code="KeyA",
-                            windows_virtual_key_code=65,
-                        )
-                    )
-                    await tab.send(
-                        cdp.input_.dispatch_key_event(
-                            "rawKeyDown",
-                            key="Delete",
-                            code="Delete",
-                            windows_virtual_key_code=46,
-                        )
-                    )
-                    await tab.send(
-                        cdp.input_.dispatch_key_event(
-                            "keyUp",
-                            key="Delete",
-                            code="Delete",
-                            windows_virtual_key_code=46,
-                        )
-                    )
+                    await text_entry.clear_via_keyboard(tab)
                 await asyncio.sleep(0.1)
 
             await tab.send(cdp.input_.insert_text(text))
@@ -942,19 +885,25 @@ class DOMHandler:
             one-viewport document is a legitimate page, and it is reported.
         """
         try:
-            # ONE pick per call, and it validates first: an unknown direction or
-            # a negative amount must still cost no round trip (F-878).
+            # ONE pick per call, and it validates first: an invalid direction or
+            # a negative amount must cost no round trip at all — not even this
+            # one, which since F-878 is the first (F-875 guarded the before-read
+            # by building the script first; the pick now stands in that place).
             on = await scroll_position.scroller(tab, direction, amount)
-            script = scroll_position.script(direction, amount, smooth, on)
-            before = await scroll_position.read(tab, on)
-            await tab.evaluate(script)
-            # Nothing can move a page that is already at the edge it was sent
-            # to, so that case waits for no animation to start — which is what
-            # keeps a one-viewport page on the two-read fast path.
+            scroll_js = scroll_position.script(direction, amount, smooth, on)
+            before = (await scroll_position.read(tab, on)).position
+            # ONE round trip: arms the end-of-scroll latch ON THE SCROLLER and
+            # scrolls it.
+            scrolled = await scroll_position.start(tab, scroll_js)
+            # The page's own answer to "will anything move", not a guess from
+            # the offsets: a scroll that moves nothing never fires `scrollend`,
+            # so waiting for one would burn the whole budget. This is what keeps
+            # a one-viewport page and an instant scroll on the fast path.
             settled = await scroll_position.settle(
                 tab,
                 before,
-                start_grace=0.0 if before.at_edge(direction) else None,
+                awaiting_end=scrolled.moves and scrolled.supported,
+                start_grace=None if scrolled.moves else 0.0,
                 on=on,
             )
             after = settled.position

@@ -84,6 +84,64 @@ async def test_smooth_scroll_is_waited_out_not_napped_through():
     assert len(tab.position_reads) > 2
 
 
+async def test_a_mid_flight_stall_is_not_a_finished_scroll():
+    """Two agreeing reads are not a stop condition — CI gate run 35046780659.
+
+    On macOS/ARM64 the record reported ``scroll_y_after: 3498`` while the page
+    read 4898 immediately after: two reads agreed 1400 px from the end, in the
+    fast part of an ease-out curve. A plain document smooth scroll runs on the
+    COMPOSITOR thread while ``window.scrollY`` is read on the MAIN thread, so a
+    blocked main thread makes the reads go stale while the scroll keeps going —
+    measured here on Chrome 152, the run of agreeing mid-flight reads lasts
+    exactly as long as the renderer's long task (120 ms -> 121 ms, 250 -> 250,
+    400 -> 400), i.e. unbounded.
+
+    So the settle waits for the PAGE to say the scroll ended. This fake stalls
+    for three reads mid-flight and then resumes; the old rule stopped on the
+    stalled value, which is what makes this pin load-bearing.
+    """
+    tab = ScrollingTab(
+        doc_height=DOC_HEIGHT,
+        viewport_height=VIEWPORT_HEIGHT,
+        smooth_steps=8,
+        stall_at=2,
+        stall_reads=3,
+    )
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=True)
+
+    assert record["scroll_y_after"] == MAX_SCROLL_Y, record
+    assert record["settled"] is True
+    assert record["at_edge"] is True
+    # The stall really did repeat a mid-flight value the old rule would have
+    # stopped on, rather than the fake quietly never stalling.
+    assert tab.stall_reads == 3
+    assert len(tab.position_reads) > 8
+
+
+async def test_without_scrollend_the_settle_falls_back_to_read_agreement():
+    """A browser with no ``onscrollend`` still settles, by the weaker rule.
+
+    ``'onscrollend' in window`` is the feature test (measured on Chrome 152:
+    ``'scrollend' in window`` is ``false`` there — the event is not an own
+    property of ``window``, the handler is). When it is absent there is nothing
+    better than read agreement, and ``START_GRACE_SECONDS`` still guards the
+    start; this pin keeps that path alive rather than hanging for the budget.
+    """
+    tab = ScrollingTab(
+        doc_height=DOC_HEIGHT,
+        viewport_height=VIEWPORT_HEIGHT,
+        smooth_steps=2,
+        scrollend_supported=False,
+    )
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=True)
+
+    assert record["settled"] is True
+    assert record["scroll_y_after"] == MAX_SCROLL_Y
+    assert record["settle_seconds"] < 2.0, record
+
+
 async def test_a_page_that_only_grew_is_not_a_page_that_scrolled():
     """Extent up, offset unmoved: ``scrolled`` is about the VIEWPORT.
 
@@ -399,8 +457,67 @@ async def test_a_document_scroller_is_still_driven_through_window():
 
     scrolls = [e for e in tab.evaluate_calls if ".scrollTo(" in e or ".scrollBy(" in e]
     assert scrolls, tab.evaluate_calls
-    assert all(e.startswith("window.scrollTo(") for e in scrolls), scrolls
+    # The scroll CALL, inside F-875's latch wrapper: still `window.scrollTo`,
+    # and the resolver is not even present.
+    assert all("window.scrollTo({top: E.scrollHeight" in e for e in scrolls), scrolls
     assert all("_el(" not in e for e in scrolls), scrolls
+    # And the `scrollend` listener is armed on `window` — the ONE target a
+    # document scroll's `scrollend` actually reaches (F-878 measured that it is
+    # never dispatched at `document.scrollingElement`).
+    assert all("var T=window;" in e for e in scrolls), scrolls
+
+
+async def test_the_scrollend_listener_is_armed_on_the_element_that_scrolls():
+    """One right target per scroller kind, and both wrong choices hang silently.
+
+    Measured on Chrome 152 across the F-878 fixtures: an ELEMENT's ``scrollend``
+    is dispatched at that element and does NOT bubble to ``window`` or
+    ``document``; a DOCUMENT's reaches ``window`` and ``document`` and is NEVER
+    dispatched at ``document.scrollingElement``. So a listener on ``window`` for
+    an app shell — or on the element for a plain page — can never fire, and the
+    settle would spend its whole 10 s budget and then report ``settled: false``
+    about a scroll that finished in a second. Nothing raises; it is exactly the
+    silent class this pair of findings exists to close.
+
+    The binding is asserted rather than the behaviour because the behaviour is
+    the browser's; ``ScrollingTab`` latches only when the armed target matches
+    the container that moved, so the behavioural half is held by every other
+    pin in this file.
+    """
+    shell = _app_shell()
+    await DOMHandler.scroll_page(shell, direction="bottom", smooth=True)
+    nested_scrolls = [e for e in shell.evaluate_calls if ".scrollTo(" in e]
+    assert nested_scrolls, shell.evaluate_calls
+    assert all("var T=_el([1, 0]);" in e for e in nested_scrolls), nested_scrolls
+    assert all("var T=window;" not in e for e in nested_scrolls), nested_scrolls
+
+    plain = ScrollingTab(doc_height=DOC_HEIGHT, viewport_height=VIEWPORT_HEIGHT)
+    await DOMHandler.scroll_page(plain, direction="bottom", smooth=True)
+    doc_scrolls = [e for e in plain.evaluate_calls if ".scrollTo(" in e]
+    assert doc_scrolls, plain.evaluate_calls
+    assert all("var T=window;" in e for e in doc_scrolls), doc_scrolls
+    assert all("_el(" not in e for e in doc_scrolls), doc_scrolls
+
+
+async def test_a_stalled_nested_scroll_is_not_a_finished_one():
+    """F-875's jank case, on F-878's app shell — the two fixes must compose.
+
+    A blocked main thread makes consecutive reads agree for as long as the block
+    lasts (measured 120 ms → 121, 250 → 250, 400 → 400: unbounded), and that is
+    what failed CI on macOS/ARM64 for a DOCUMENT scroll. A nested scroller is
+    driven by the same compositor and read on the same main thread, so it has
+    the same exposure — and it is only safe here because the latch is armed on
+    the div, which is where Chrome dispatches its ``scrollend``.
+    """
+    tab = _app_shell(smooth_steps=6, stall_at=2, stall_reads=8)
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=True)
+
+    assert record["scroller_is_document"] is False, record
+    assert record["scroll_y_after"] == SHELL_MAX_Y, record
+    assert record["scrolled"] is True
+    assert record["settled"] is True
+    assert record["at_edge"] is True
 
 
 async def test_the_scroller_is_picked_once_per_call_not_once_per_poll():

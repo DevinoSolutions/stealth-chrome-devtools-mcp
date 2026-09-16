@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.7
 
 ### Fixed — `list_instances` reported the last navigation, not the instance (F-874)
 
@@ -64,8 +64,9 @@ viewport, and the shortfall grew with the page, which is exactly the
 lazy-loading case `direction="bottom"` exists for.
 
 The nap is a **settle** now and the bool is a **record**. `scroll_page` reads
-the page's scroll offsets and extent before the scroll, evaluates it, then polls
-until two consecutive reads agree — bounded, not slept through — and answers
+the page's scroll offsets and extent before the scroll, then scrolls and waits
+for the page itself to say the scroll finished — bounded, not slept through —
+and answers
 with `scrolled` (the scroll OFFSET changed), `at_edge` (the page is as far as
 `direction` goes), `settled` (the offset stopped moving inside the budget),
 `settle_seconds`, the requested `direction`/`amount`/`smooth`, and
@@ -89,6 +90,21 @@ the old `down, -500` that silently scrolled up and the old `up, -500` that died
 as a JS syntax error are now one clear refusal), and an evaluate that did not
 answer with the JSON the read asks for.
 
+**What ends the wait is `scrollend`, not the reads.** Stopping when two
+consecutive reads agree on the offset is a guess about timing, and it is wrong:
+a plain document smooth scroll runs on Chrome's compositor thread while
+`window.scrollY` is read on the main thread, so a blocked main thread makes the
+reads go stale while the scroll keeps going. Measured on Chrome 152, the run of
+agreeing mid-flight reads lasts exactly as long as the renderer's long task
+(120 ms → 121 ms, 250 → 250, 400 → 400) — unbounded, so no read count and no
+fixed quiet window can see through it. The scroll now arms a one-shot
+`scrollend` listener in the same round trip that performs it, and the position
+read reports that latch: `scrollend` latches, so jank can only delay when the
+end is observed, never fake it. A scroll that moves nothing fires no `scrollend`
+at all, so the same round trip also answers "will this move anything",
+synchronously — which is what keeps an instant scroll and a one-viewport page on
+the 0.12 s fast path.
+
 The read and the settle live in the new leaf `embedded/scroll_position.py`,
 which also holds the one table for what a direction means (its axis, its edge
 and its JS). The read is one `JSON.stringify` round trip off
@@ -105,6 +121,48 @@ This is a tool **schema change** — `scroll_page`'s `output_schema` in
 `{result: boolean}` to the `{type: object}` every other dict-returning tool
 already serves. A caller that treated the old `true` as proof must read
 `scrolled` / `at_edge` / `settled` instead.
+
+### Fixed — `type_text` reported success for text it never entered, and for an Enter that could not submit (F-873)
+
+Measured on 2.1.6 over real stdio transport, headed Chrome 152: `type_text` returned
+`{"result": true}` when the characters never reached the page (Amazon's and Gmail's
+search boxes, `.value` still `""` afterwards, three runs each), and `parse_newlines`'s
+trailing newline never submitted the form it was typed into. Two defects, one shape —
+the tool reported the success of its own dispatch, not the success of the interaction.
+The Enter was a `KeyboardEvent` constructed *inside the page* by `element.apply`; an
+event a script constructs is `isTrusted: false` and carries no `charCode`, and a
+form's implicit submission is performed by Blink on the **keypress** of a trusted
+Enter. Measured against a one-input form with a submit listener: the synthetic
+keydown submits 0 times, a trusted `rawKeyDown` (which fires no keypress) submits 0
+times, and only a `keyDown` carrying `text="\r"` submits — while adding a separate
+`char` event on top fires a second keypress and submits **twice**. And nothing
+between "dispatch the events" and `return True` ever asked the page whether the
+characters had landed: measured on the same Chrome, `readonly`, `range` and `color`
+controls each accept every key event and leave their value exactly where it was, and
+the tool answered `True` for all three. (`<input type="date">` did the same on this
+machine's Chrome 152, but that one is build- and locale-dependent — CI's headless
+Chrome accepted the digits on Windows, macOS and Linux alike — so it is pinned as the
+invariant rather than as a refusal: never a success over a value that did not move.)
+Key presses and the "did the page
+take it" check now live in `embedded/text_entry.py`: every key goes out as one
+`Input.dispatchKeyEvent` `keyDown` carrying `text` plus a `keyUp` (so `keydown`,
+`keypress` and `input` all fire, all trusted — the shipped path sent a lone `char`
+event per character, so a page whose autocomplete or shortcuts are bound to `keydown`
+saw a value appear with no key pressed), and after each line's characters the
+element's own text is read back and compared against the baseline taken just before
+them. A control that took every event and moved nothing now raises `ToolError` naming
+the selector and the counts — never the typed text, since the raised error reaches the
+debug ring and, as the exception itself, the caller and Sentry, and the field may be a
+password box. The verification asks "did anything change" rather than "does it contain
+exactly what I typed", deliberately: an input mask, an autocomplete that rewrites and a
+`number` field that normalises all DID receive the input, and a stricter test would have
+turned each into a new false alarm; the cost of the looser rule, named in the finding,
+is that a control whose value is legitimately identical afterwards now raises.
+`type_text`'s clear fallback also stopped being a no-op — it sent WebDriver's
+private-use codepoints (U+E009 for Ctrl, U+E017 for Delete) through `send_keys`, which
+CDP has never understood, so all three characters landed verbatim and nothing was
+cleared, corrupting the field it was asked to empty; it and `paste_text` now share the
+one CDP select-all + Delete.
 
 ### Fixed — `scroll_page` could not move an app shell (F-878)
 
@@ -126,7 +184,8 @@ walks INWARD to a page's own data grid and is blind behind a `position:fixed`
 scrim. The rule that ships scores 12/12: **if the document scroller can move on
 the requested axis it IS the scroller** (so a plain page, a quirks-mode page, a
 scroll-snap page and a nested box inside a scrolling document are all unchanged,
-and the JS generated for them is byte-identical to before), otherwise the
+and the scroll call generated for them is the same `window.scrollTo` /
+`window.scrollBy` it always was), otherwise the
 element with the largest viewport-clipped area that can move on that axis, near
 ties broken by the larger extent. The axis comes from the direction, so
 `direction="right"` now finds a horizontal-only strip that neither heuristic
@@ -138,6 +197,21 @@ actually driven — shape only, bounded in the page itself) and
 `scroller_is_document`. The `scroll_page` **description** in
 `tests/goldens/tool_surface.json` changes with them; the input and output
 schemas do not, and no other tool moved.
+
+Driving a nested element also moves the end-of-scroll latch F-875 introduced, and
+where it goes is not a matter of taste: measured on Chrome 152 across the same
+twelve fixtures, an ELEMENT scroll's `scrollend` fires **at that element** — for
+smooth and instant alike, on both axes, including a scroll-snap container — and
+does **not** bubble to `window` or `document`, while a DOCUMENT scroll's fires at
+`document`/`window` and never at `document.scrollingElement`. There is one right
+target per scroller kind and both wrong choices fail the same silent way: the
+listener never fires, the settle burns its whole 10 s budget, and the tool reports
+`settled: false` about a scroll that finished in a second. So the listener is armed
+on the very expression that receives the scroll. No scroller kind needs the
+degraded read-agreement path; that still exists only for a browser without
+`onscrollend`. Re-measured end to end on all twelve fixtures after the change:
+every one picks correctly, settles, and lands at its true final offset, in 0.50 s
+to 1.61 s.
 
 ## 2.1.6
 

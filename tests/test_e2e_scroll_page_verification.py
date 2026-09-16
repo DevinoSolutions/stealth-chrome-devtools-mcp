@@ -319,7 +319,13 @@ async def test_an_app_shell_is_scrolled_even_though_the_window_cannot_be(
         assert record["scroll_y_after"] == record["max_scroll_y"], record
         assert record["scrolled"] is True
         assert record["at_edge"] is True
-        assert record["settled"] is True
+        # The decisive one for the F-875 merge: `scrollend` for an ELEMENT
+        # scroll is dispatched at that element and does NOT bubble to `window`,
+        # so a latch armed on `window` here could never fire and this would be
+        # `False` after the whole 10 s budget. Bounded explicitly so a
+        # budget-burn reads as a failure rather than as a slow pass.
+        assert record["settled"] is True, record
+        assert record["settle_seconds"] < 5.0, record
         # The element's own answer, and the window's.
         assert record["scroll_y_after"] == await eval_js(
             iid, "Math.round(document.getElementById('shell').scrollTop)"
