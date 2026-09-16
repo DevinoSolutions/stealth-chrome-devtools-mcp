@@ -18,6 +18,7 @@ pinned is the product's reading of a moving value, not a canned answer.
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -275,6 +276,361 @@ async def test_an_instant_scroll_stays_on_the_fast_path():
 
 
 # ---------------------------------------------------------------------------
+# F-878 — the page whose real scroller is a nested element
+#
+# F-875 §7.5 left this open and F-878 measured it: twelve ``data:`` fixtures
+# against real Chrome 152, on which ``document.scrollingElement`` alone is right
+# 4 times out of 12. The geometry below is the measured app shell — ``html``
+# with ``overflow: hidden`` and ``max_y 0``, a full-viewport ``div#shell`` that
+# can move 7023 px — and ``ScrollingTab``'s nested mode applies Chrome's rule to
+# it, so ``window.scrollTo`` moves nothing here exactly as it moves nothing
+# there.
+# ---------------------------------------------------------------------------
+
+#: The measured app shell (F-878 §3.1, fixture b).
+SHELL_HEIGHT = 8000
+SHELL_VIEWPORT = 977
+SHELL_MAX_Y = SHELL_HEIGHT - SHELL_VIEWPORT
+
+
+def _app_shell(**kwargs) -> ScrollingTab:
+    """``html,body{overflow:hidden}`` + one full-viewport ``div#shell``."""
+    return ScrollingTab(
+        doc_height=SHELL_HEIGHT,
+        viewport_height=SHELL_VIEWPORT,
+        nested_id="shell",
+        nested_classes=("shell",),
+        **kwargs,
+    )
+
+
+async def test_an_app_shell_is_scrolled_not_reported_as_unscrollable():
+    """The finding: `body{overflow:hidden}` + a scrolling `div` must move.
+
+    Before F-878 this answered ``scrolled: false``, ``max_scroll_y: 0``,
+    ``at_edge: true`` — honest since F-875, and useless: the tool could not move
+    the content of the layout every SPA starter template ships.
+    """
+    tab = _app_shell()
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=True)
+
+    assert record["scrolled"] is True
+    assert record["scroll_y_before"] == 0
+    assert record["scroll_y_after"] == SHELL_MAX_Y
+    assert record["max_scroll_y"] == SHELL_MAX_Y
+    assert record["at_edge"] is True
+    assert record["settled"] is True
+
+
+async def test_the_record_names_the_element_it_drove():
+    """A pick is a judgement, so the caller gets to see it (finding §5.2).
+
+    Shape only — a tag, an id, the classes — never the element's text.
+    """
+    tab = _app_shell()
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=False)
+
+    assert record["scroller_is_document"] is False
+    assert record["scroller"] == {"tag": "div", "id": "shell", "classes": ["shell"]}
+
+
+async def test_a_plain_document_is_still_named_as_the_document():
+    """The control: rule 1 stops at ``document.scrollingElement`` and says so."""
+    tab = ScrollingTab(doc_height=DOC_HEIGHT, viewport_height=VIEWPORT_HEIGHT)
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=False)
+
+    assert record["scroller_is_document"] is True
+    assert record["scroller"] == {"tag": "html", "id": "", "classes": []}
+    assert record["scroll_y_after"] == MAX_SCROLL_Y
+
+
+async def test_the_committed_matrix_is_the_findings_twelve_fixtures():
+    """``F878_MATRIX`` is what makes §3 reproducible — so it needs a witness.
+
+    The matrix constants carry no assertions of their own (only four of the
+    twelve do), which is the point: they exist so a future reader can re-measure
+    the finding from the repo. That leaves nothing to notice a fixture dropped
+    from the dict or a constant renamed out of it, and the reproducibility claim
+    would quietly become false. Pinned HERE rather than beside the constants
+    because this file has no ``integration`` mark: the e2e module is deselected
+    by the pre-push lane (``-m "not integration"``), so a pin living there would
+    not run on the one gate that always runs.
+    """
+    from test_e2e_scroll_page_verification import F878_MATRIX
+
+    assert set(F878_MATRIX) == {
+        "a_control",
+        "b_app_shell",
+        "c_two_panes",
+        "d_nested_in_scrolling_doc",
+        "e_snap_document",
+        "e2_snap_nested",
+        "f_quirks",
+        "g_shell_with_grid",
+        "h_shell_under_scrim",
+        "i_three_columns",
+        "j_h_strip",
+        "k_stray_overflow",
+    }
+    # Each is a distinct page: a copy-pasted constant would still count twelve.
+    assert len(set(F878_MATRIX.values())) == 12
+    # And f is the ONE quirks-mode fixture, so it must carry no doctype.
+    assert "DOCTYPE" not in F878_MATRIX["f_quirks"]
+    assert all(
+        "DOCTYPE" in page for key, page in F878_MATRIX.items() if key != "f_quirks"
+    )
+
+
+async def test_a_scrolling_document_wins_over_a_nested_scroller():
+    """Rule 1 is a PRECEDENCE: fixture d's 400 px box must not win (F-878 §4).
+
+    What this pin holds is the WIRING — that when the page answers "the
+    document", the tool drives the document, reports the document's offsets and
+    leaves the nested container exactly where it was. It cannot hold the RULE
+    itself: ``ScrollingTab`` is not a JS engine, so it applies Chrome's rule to
+    its own geometry rather than executing ``SCROLLER_JS``. Swapping rules 1 and
+    2 in the product is caught by
+    ``test_e2e_scroll_page_verification.py::test_a_scrolling_document_is_the_page_even_with_a_nested_scroller``,
+    where real Chrome runs the real script.
+
+    (The double gives both containers the same viewport height; fixture d's box
+    is really 400 px tall. Nothing here depends on that number — only on both
+    containers being able to move.)
+    """
+    tab = ScrollingTab(
+        doc_height=5000,  # the nested box's content
+        viewport_height=SHELL_VIEWPORT,
+        nested_id="box",
+        nested_classes=("box",),
+        document_height=8000,  # ...inside a document that scrolls too
+    )
+    assert tab.doc_max_scroll_y > 0 and tab.max_scroll_y > 0, "both must be scrollable"
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=False)
+
+    assert record["scroller_is_document"] is True, record
+    assert record["scroller"] == {"tag": "html", "id": "", "classes": []}
+    assert record["scrolled"] is True
+    assert record["scroll_y_after"] == record["max_scroll_y"] == tab.doc_max_scroll_y
+    # The box never moved: driving it would have been the defect rule 1 prevents.
+    assert tab.scroll_y == 0, tab.scroll_y
+
+
+async def test_a_stale_path_reports_the_element_it_actually_read():
+    """The record names what the READ found, never what the PICK hoped for.
+
+    ``_RESOLVE_JS`` falls back to the document scroller when the chosen
+    element is no longer in the document — a page that re-rendered mid-scroll.
+    Both shapes that produces are here: the identity is the document's, and
+    ``scroller_is_document`` agrees with it. A record that kept naming
+    ``div#shell`` while reading ``html`` would be F-875's defect in a new place.
+    """
+    tab = _app_shell(stale_path=True)
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=False)
+
+    assert record["scroller_is_document"] is True, record
+    assert record["scroller"] == {"tag": "html", "id": "", "classes": []}
+    # The pick still asked for the shell — this is a fallback, not a re-pick.
+    assert tab.scroller_picks, tab.evaluate_calls
+    assert any("_el([1, 0])" in e for e in tab.evaluate_calls), tab.evaluate_calls
+    # And the record is honest about the document it fell back to: it cannot move.
+    assert record["max_scroll_y"] == 0
+    assert record["scrolled"] is False
+
+
+async def test_a_document_scroller_is_still_driven_through_window():
+    """Rule 1 is a precedence, and the SCROLL script it produces is F-875's.
+
+    **Green before the fix as well as after, deliberately** — it does not pin
+    the new behaviour, it pins that the old behaviour survived it. The measured
+    reason (finding §4): if the document can move, the document IS the page, and
+    keeping ``window`` in the generated scroll JS is the mechanical form of "the
+    control fixture is unchanged". (The scroll scripts only — ``READ_JS`` did
+    move, to the element's ``scrollLeft``/``scrollTop`` plus the resolver.)
+    """
+    tab = ScrollingTab(doc_height=DOC_HEIGHT, viewport_height=VIEWPORT_HEIGHT)
+
+    await DOMHandler.scroll_page(tab, direction="bottom", smooth=False)
+
+    scrolls = [e for e in tab.evaluate_calls if ".scrollTo(" in e or ".scrollBy(" in e]
+    assert scrolls, tab.evaluate_calls
+    # The scroll CALL, inside F-875's latch wrapper: still `window.scrollTo`,
+    # and the resolver is not even present.
+    assert all("window.scrollTo({top: E.scrollHeight" in e for e in scrolls), scrolls
+    assert all("_el(" not in e for e in scrolls), scrolls
+    # And the `scrollend` listener is armed on `window` — the ONE target a
+    # document scroll's `scrollend` actually reaches (F-878 measured that it is
+    # never dispatched at `document.scrollingElement`).
+    assert all("var T=window;" in e for e in scrolls), scrolls
+
+
+async def test_the_scrollend_listener_is_armed_on_the_element_that_scrolls():
+    """One right target per scroller kind, and both wrong choices hang silently.
+
+    Measured on Chrome 152 across the F-878 fixtures: an ELEMENT's ``scrollend``
+    is dispatched at that element and does NOT bubble to ``window`` or
+    ``document``; a DOCUMENT's reaches ``window`` and ``document`` and is NEVER
+    dispatched at ``document.scrollingElement``. So a listener on ``window`` for
+    an app shell — or on the element for a plain page — can never fire, and the
+    settle would spend its whole 10 s budget and then report ``settled: false``
+    about a scroll that finished in a second. Nothing raises; it is exactly the
+    silent class this pair of findings exists to close.
+
+    The pin therefore reads BOTH names out of every generated script — the
+    ``var T=…`` the listener is armed on and the receiver of the ``.scrollTo`` /
+    ``.scrollBy`` call — and requires them to be the same expression, for all
+    six directions and both ``smooth`` values, on a nested scroller and on a
+    plain page alike. The binding is asserted rather than the behaviour because
+    the behaviour is the browser's; ``ScrollingTab`` latches only when the armed
+    target matches the container that moved, so the behavioural half is held by
+    every other pin in this file.
+    """
+    from stealth_chrome_devtools_mcp.embedded import scroll_position
+
+    armed = re.compile(r"var T=([^;]+);")
+    receiver = re.compile(r"(?<![\w.])(window|_el\([^)]*\))\.scroll(?:To|By)\(\{")
+
+    def scroll_script(tab: ScrollingTab) -> str:
+        scripts = [
+            e for e in tab.evaluate_calls if ".scrollTo(" in e or ".scrollBy(" in e
+        ]
+        assert len(scripts) == 1, tab.evaluate_calls
+        return scripts[0]
+
+    for direction in sorted(scroll_position.DIRECTIONS):
+        for smooth in (True, False):
+            shell = _app_shell()
+            await DOMHandler.scroll_page(shell, direction=direction, smooth=smooth)
+            plain = ScrollingTab(doc_height=DOC_HEIGHT, viewport_height=VIEWPORT_HEIGHT)
+            await DOMHandler.scroll_page(plain, direction=direction, smooth=smooth)
+
+            for script in (scroll_script(shell), scroll_script(plain)):
+                target = armed.search(script)
+                call = receiver.search(script)
+                assert target and call, (direction, smooth, script)
+                assert target.group(1) == call.group(1), (direction, smooth, script)
+
+            # And the kind is right. The plain page always arms `window`. The
+            # shell arms its div on the axis the div can move; on the horizontal
+            # axis nothing on that page can move, so rule 3 hands the pick back
+            # to the document, and the assertion above holds the receiver to
+            # the same `window` the listener went on.
+            assert "var T=window;" in scroll_script(plain), (direction, smooth)
+            if scroll_position._DIRECTIONS[direction].axis == "y":
+                assert "var T=_el([1, 0]);" in scroll_script(shell), (direction, smooth)
+
+
+async def test_a_stalled_nested_scroll_is_not_a_finished_one():
+    """F-875's jank case, on F-878's app shell — the two fixes must compose.
+
+    A blocked main thread makes consecutive reads agree for as long as the block
+    lasts (measured 120 ms → 121, 250 → 250, 400 → 400: unbounded), and that is
+    what failed CI on macOS/ARM64 for a DOCUMENT scroll. A nested scroller is
+    driven by the same compositor and read on the same main thread, so it has
+    the same exposure — and it is only safe here because the latch is armed on
+    the div, which is where Chrome dispatches its ``scrollend``.
+    """
+    tab = _app_shell(smooth_steps=6, stall_at=2, stall_reads=8)
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=True)
+
+    assert record["scroller_is_document"] is False, record
+    assert record["scroll_y_after"] == SHELL_MAX_Y, record
+    assert record["scrolled"] is True
+    assert record["settled"] is True
+    assert record["at_edge"] is True
+
+
+async def test_the_scroller_is_picked_once_per_call_not_once_per_poll():
+    """Measured at 2.59 ms per pick on a 6007-element page (finding §4).
+
+    A full 10 s settle polls ~200 times; re-selecting each time would spend half
+    a second of the page's main thread answering a question whose answer does
+    not change.
+    """
+    tab = _app_shell(smooth_steps=4)
+
+    await DOMHandler.scroll_page(tab, direction="bottom", smooth=True)
+
+    assert len(tab.scroller_picks) == 1, tab.scroller_picks
+    assert len(tab.position_reads) > 2
+
+
+async def test_a_nested_scroller_is_asked_for_on_the_direction_s_own_axis():
+    """``right`` moves X, so the pick is an X-axis question (finding §4, j).
+
+    Fixture j is a strip with ``overflow-x: auto; overflow-y: hidden``: neither
+    candidate heuristic could see it, because both were written for one axis.
+    """
+    tab = ScrollingTab(
+        doc_height=977,
+        viewport_height=977,
+        doc_width=9000,
+        viewport_width=1888,
+        nested_id="strip",
+        nested_classes=("strip",),
+    )
+
+    record = await DOMHandler.scroll_page(
+        tab, direction="right", amount=500, smooth=False
+    )
+
+    assert tab.scroller_picks and "'x'" in tab.scroller_picks[0], tab.scroller_picks
+    assert record["scrolled"] is True
+    assert record["scroll_x_after"] == 500
+    assert record["max_scroll_x"] == 9000 - 1888
+    assert record["scroller_is_document"] is False
+
+
+async def test_an_invalid_request_still_costs_no_round_trip_with_the_pick_in_front():
+    """The pick is now the FIRST round trip, so it must validate before making it.
+
+    **Green before the fix as well as after, deliberately** — it does not pin
+    the new behaviour, it pins that F-875's two refusals (an unknown direction,
+    a negative amount) survived it. Both are decided from the request alone, and
+    putting a round trip in front of them would have quietly retired both pins
+    while leaving them passing against the OLD first call.
+    """
+    tab = _app_shell()
+
+    with pytest.raises(ToolError) as bad_direction:
+        await DOMHandler.scroll_page(tab, direction="sideways")
+    assert str(bad_direction.value) == "Invalid scroll direction: sideways"
+
+    with pytest.raises(ToolError) as bad_amount:
+        await DOMHandler.scroll_page(tab, direction="up", amount=-500)
+    assert "Invalid scroll amount: -500" in str(bad_amount.value)
+
+    assert tab.evaluate_calls == []
+
+
+async def test_an_unreadable_scroller_pick_raises_rather_than_guessing():
+    """The pick is a round trip like any other, and speaks the same convention.
+
+    Falling back to "the document" on an unreadable answer would report a record
+    about an element nobody chose — F-875's defect in a new place.
+    """
+
+    class _MuteTab(ScrollingTab):
+        async def evaluate(self, expression, *args, **kwargs):
+            if self.SCROLLER_JS_MARKER in expression:
+                return None
+            return await super().evaluate(expression, *args, **kwargs)
+
+    tab = _MuteTab(doc_height=DOC_HEIGHT, viewport_height=VIEWPORT_HEIGHT)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.scroll_page(tab, direction="down")
+
+    assert type(caught.value) is ToolError
+    assert "Failed to scroll page" not in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
 # Transport + error convention
 # ---------------------------------------------------------------------------
 
@@ -299,7 +655,14 @@ async def test_an_unreadable_position_raises_tool_error():
 
     class _MuteTab(ScrollingTab):
         async def evaluate(self, expression, *args, **kwargs):
-            if expression.startswith(self.POSITION_JS_MARKER):
+            # The READ only. Since F-878 the scroller PICK is a
+            # ``JSON.stringify`` round trip too and it happens FIRST, so muting
+            # every one of them would make this pin about the pick's message
+            # instead of the read's — a different claim wearing the same name.
+            if (
+                expression.startswith(self.POSITION_JS_MARKER)
+                and self.SCROLLER_JS_MARKER not in expression
+            ):
                 return None
             return await super().evaluate(expression, *args, **kwargs)
 

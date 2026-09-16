@@ -908,16 +908,16 @@ class DOMHandler:
         tab: Tab, direction: str = "down", amount: int = 500, smooth: bool = True
     ) -> dict[str, object]:
         """
-        Scroll the page and report where it actually ended up (F-875).
+        Scroll the page and report where it actually ended up (F-875, F-878).
 
         The answer used to be an unconditional ``True``, which reported that the
         evaluate did not throw while promising that the page scrolled — three
         different states wearing one word. It is a record now: the position
-        before and after, the page's extent, and what was asked for, so
-        "arrived", "still moving when the budget ran out" and "there was nothing
-        to scroll" are all sayable. Reading the position and waiting for it to
-        stop is ``scroll_position``'s; this method owns the script, the budget
-        and the record.
+        before and after, the page's extent, the element that was driven, and
+        what was asked for, so "arrived", "still moving when the budget ran out"
+        and "there was nothing to scroll" are all sayable. Picking the scroller,
+        reading its position and waiting for it to stop are all
+        ``scroll_position``'s; this method owns the budget and the record.
 
         Args:
             tab (Tab): The browser tab object.
@@ -930,8 +930,9 @@ class DOMHandler:
             Dict[str, object]: ``scrolled`` (the scroll OFFSET changed, never
             the extent), ``at_edge``, ``settled`` (the offset stopped moving
             within the budget), ``settle_seconds``, the requested
-            ``direction``/``amount``/``smooth``, and the six offsets — see the
-            tool's own docstring.
+            ``direction``/``amount``/``smooth``, the six offsets, and
+            ``scroller``/``scroller_is_document`` — see the tool's own
+            docstring.
 
         Raises:
             ToolError: an invalid direction or a negative amount (both decided
@@ -940,11 +941,15 @@ class DOMHandler:
             one-viewport document is a legitimate page, and it is reported.
         """
         try:
-            # Built first: an invalid direction or a negative amount must cost
-            # no round trip at all, not even the before-read.
-            scroll_js = scroll_position.script(direction, amount, smooth)
-            before = (await scroll_position.read(tab)).position
-            # ONE round trip: arms the end-of-scroll latch AND scrolls.
+            # ONE pick per call, and it validates first: an invalid direction or
+            # a negative amount must cost no round trip at all — not even this
+            # one, which since F-878 is the first (F-875 guarded the before-read
+            # by building the script first; the pick now stands in that place).
+            on = await scroll_position.scroller(tab, direction, amount)
+            scroll_js = scroll_position.script(direction, amount, smooth, on)
+            before = (await scroll_position.read(tab, on)).position
+            # ONE round trip: arms the end-of-scroll latch ON THE SCROLLER and
+            # scrolls it.
             scrolled = await scroll_position.start(tab, scroll_js)
             # The page's own answer to "will anything move", not a guess from
             # the offsets: a scroll that moves nothing never fires `scrollend`,
@@ -955,14 +960,14 @@ class DOMHandler:
                 before,
                 awaiting_end=scrolled.moves and scrolled.supported,
                 start_grace=None if scrolled.moves else 0.0,
+                on=on,
             )
             after = settled.position
             return {
-                # OFFSETS only. A lazy-loading page grows its extent while
-                # standing perfectly still, and comparing whole ``Position``
-                # values would report that growth as "it scrolled" with
-                # identical before/after offsets in the same record.
-                "scrolled": after.offset != before.offset,
+                # OFFSETS only, and only when both readings are about the same
+                # element — ``Position.moved_from`` is the one home for that
+                # comparison and its docstring is the why.
+                "scrolled": after.moved_from(before),
                 "at_edge": after.at_edge(direction),
                 "settled": settled.settled,
                 "settle_seconds": round(settled.seconds, 3),
@@ -975,6 +980,11 @@ class DOMHandler:
                 "scroll_y_after": after.y,
                 "max_scroll_x": after.max_x,
                 "max_scroll_y": after.max_y,
+                # Both from the FINAL READ, never from the pick: a path that
+                # went stale fell back to the document, and the record has to
+                # name what it actually drove (F-878).
+                "scroller": after.descriptor,
+                "scroller_is_document": after.is_document,
             }
 
         except ToolError:

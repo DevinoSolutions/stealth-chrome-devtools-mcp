@@ -45,6 +45,55 @@ process is gone.
 `cli._probe_recorded_backend` is deleted — its whole content was the ladder plus the
 word `no port recorded`, and that word is `backend_liveness.NO_PORT` now.
 
+### Fixed — `scroll_page` could not move an app shell (F-878)
+
+A page laid out as `body{overflow:hidden}` plus one scrolling `div` — the
+default of every SPA starter template, and where infinite feeds, virtualised
+lists and lazy loading live — is not scrolled by `window.scrollTo` at all.
+F-875 made that visible (`scrolled: false`, `max_scroll_y: 0`) rather than
+silently wrong; this makes it work. `scroll_page` now picks the page's **real**
+scroller and drives that.
+
+Which element is "the" scroller when several overflow was measured before it was
+decided: twelve `data:` fixtures through the product path against real headless
+Chrome 152. `document.scrollingElement` alone — what the tool used until now —
+is right **4 times out of 12**. The two obvious heuristics score 9 and 8: the
+largest-area rule with a coverage floor finds nothing in a three-column mail
+layout and lets a scrollbar's width (0.8 %) rank a `body` that can move 20 px
+above a shell that can move 7023; the element-under-the-viewport-centre rule
+walks INWARD to a page's own data grid and is blind behind a `position:fixed`
+scrim. The rule that ships scores 12/12: **if the document scroller can move on
+the requested axis it IS the scroller** (so a plain page, a quirks-mode page, a
+scroll-snap page and a nested box inside a scrolling document are all unchanged,
+and the scroll call generated for them is the same `window.scrollTo` /
+`window.scrollBy` it always was), otherwise the
+element with the largest viewport-clipped area that can move on that axis, near
+ties broken by the larger extent. The axis comes from the direction, so
+`direction="right"` now finds a horizontal-only strip that neither heuristic
+could see.
+
+The record grew two fields, because the pick is a judgement and a caller is
+entitled to see it: `scroller` (`{tag, id, classes}` of the element that was
+actually driven — shape only, bounded in the page itself) and
+`scroller_is_document`. The `scroll_page` **description** in
+`tests/goldens/tool_surface.json` changes with them; the input and output
+schemas do not, and no other tool moved.
+
+Driving a nested element also moves the end-of-scroll latch F-875 introduced, and
+where it goes is not a matter of taste: measured on Chrome 152 across the same
+twelve fixtures, an ELEMENT scroll's `scrollend` fires **at that element** — for
+smooth and instant alike, on both axes, including a scroll-snap container — and
+does **not** bubble to `window` or `document`, while a DOCUMENT scroll's fires at
+`document`/`window` and never at `document.scrollingElement`. There is one right
+target per scroller kind and both wrong choices fail the same silent way: the
+listener never fires, the settle burns its whole 10 s budget, and the tool reports
+`settled: false` about a scroll that finished in a second. So the listener is armed
+on the very expression that receives the scroll. No scroller kind needs the
+degraded read-agreement path; that still exists only for a browser without
+`onscrollend`. Re-measured end to end on all twelve fixtures after the change:
+every one picks correctly, settles, and lands at its true final offset, in 0.50 s
+to 1.61 s.
+
 ## 2.1.7
 
 ### Fixed — `list_instances` reported the last navigation, not the instance (F-874)

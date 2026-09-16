@@ -140,7 +140,7 @@ it in would put two unrelated schema changes behind one review.
   `overflow:hidden`, a scrolling `div`). `document.body.scrollHeight` would be
   wrong there, but that is a separate hypothesis and this report is not evidence
   for it. **Still true after the fix, and now VISIBLE rather than silent** — see
-  §7's "what this does not fix".
+  §7.5, which is now a pointer: it was measured and closed as **F-878**.
 * **Not measured:** `direction` values other than `bottom`. The `return True` is
   unconditional for all of them, so the truthfulness defect is shared; the
   magnitude is not. *(The fix is per-direction by construction: the record
@@ -300,18 +300,35 @@ and after reads) for an answer that is true.
   IntersectionObserver check that a non-scroll would have turned into a false
   pass, and now asserts `scrolled is True`.
 
-### 7.5 What this does NOT fix
+### 7.5 What this does NOT fix — **taken up and closed as F-878**
 
-§6's first bullet stands (and see §8 for the one thing §7 got wrong the first
-time): a page whose real scroller is a nested element (`body`
-`overflow: hidden` + a scrolling `div`) is still not scrolled by
-`window.scrollBy`/`scrollTo`, and `document.scrollingElement`'s extent is not
-that div's. What has changed is that the tool no longer LIES about it — such a
-page now answers `scrolled: false`, `max_scroll_y: 0`, `at_edge: true` instead
-of `true`, so the caller can see it and reach for `execute_script`. Making
-`scroll_page` find and drive a nested scroller is a separate change with its own
-evidence requirement (which element is "the" scroller when several overflow?)
-and is the named follow-up from this finding.
+§6's first bullet stood when this was written: a page whose real scroller is a
+nested element (`body` `overflow: hidden` + a scrolling `div`) was still not
+scrolled by `window.scrollBy`/`scrollTo`, and `document.scrollingElement`'s
+extent is not that div's. What THIS fix changed is that the tool no longer LIES
+about it — such a page answered `scrolled: false`, `max_scroll_y: 0`,
+`at_edge: true` instead of `true`, so the caller could see it and reach for
+`execute_script`.
+
+The named follow-up — *which element is "the" scroller when several overflow?* —
+is **`audit/stage2/finding_F878_scroll_page_nested_scroller.md`**, and it is
+FIXED. It answered the question with twelve `data:` fixtures measured through
+the product path against real Chrome 152 (on which `document.scrollingElement`
+alone is right 4 times out of 12, the two obvious heuristics 9 and 8, and the
+document-first + largest-viewport-clipped-area rule that shipped 12/12), and it
+extended THIS finding's leaf rather than adding a second path: `scroll_position`
+picks the scroller once per call and `dom_handler.scroll_page` reports it as
+`scroller` / `scroller_is_document`. Rule 1 of that rule — if the document
+scroller can move, it IS the page — is what keeps everything measured here
+unchanged: the same element is driven by the same `window.scrollTo` /
+`window.scrollBy` call, and the `scrollend` listener is still armed on
+`window`. (F-878 measured why that last clause has to be said out loud: an
+ELEMENT scroll's `scrollend` fires at the element and does not bubble to
+`window`, while a DOCUMENT scroll's is never dispatched at
+`document.scrollingElement` — so §8's latch has one right target per scroller
+kind, and F-878 arms it on whatever received the scroll.) F-878 §6 carries
+what IT does not claim (iframes, shadow DOM, a page whose only scroller is
+tiny).
 
 ---
 
