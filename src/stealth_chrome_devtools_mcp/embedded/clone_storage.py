@@ -1028,28 +1028,28 @@ async def _fallback_profile_selection(
     previous_selection: dict[str, Any],
     attempt: int,
 ) -> dict[str, Any] | None:
-    # A failed attempt always retries onto a CLONE, which IS reserved
-    # (``_protect_clone_dir``). F-834 stage 1 widened this from clone-only to the
-    # MASTER loser: the master branch above asks ``_profile_has_running_browser``,
-    # a LIVENESS check and never a reservation (see ``_dir_unavailable``), so
-    # every concurrent unnamed spawn is told master is free, Chrome's own profile
-    # singleton picks one winner, and the losers used to get no retry at all.
-    # Master itself stays unreserved — a reservation needs a matching release on
-    # the close path and a leaked one would force every later spawn to clone.
-    # ``explicit`` is NOT widened: walking a caller's NAMED profile to a clone is
-    # an identity change, and ``resolve_profile_selection`` owns that walk (F-871).
-    if previous_selection.get("profile_role") not in ("clone", "master"):
+    # What the NEXT attempt drives (F-834 stage 1). A ``clone`` re-clones below;
+    # the two non-clone roles retry the SAME directory, which this attempt's
+    # F-860 reap has just freed — a NAMED profile is the identity the caller
+    # asked for and is never walked or swapped for a clone, and a master no
+    # sibling took is still the best profile here, while one a sibling DID take
+    # falls through. No wait first, and no reservation on master: CLAUDE.md's row.
+    role = previous_selection.get("profile_role")
+    if role == "explicit" or (
+        role == "master" and _profile_hold(master_profile_dir()) is None
+    ):
+        return dict(previous_selection)
+    if role not in ("clone", "master"):
         return None
 
     snapshot = master_snapshot_dir()
     if not snapshot.exists():
         return None
-    kind = "master-snapshot-retry" if attempt == 0 else "master-snapshot-final"
-    suffix = "retry" if attempt == 0 else "snapshot"
+    final = attempt > 0
     return await resolve_profile_selection(
         None,
         force_clone=True,
         source_override=snapshot,
-        source_kind=kind,
-        clone_suffix=suffix,
+        source_kind="master-snapshot-final" if final else "master-snapshot-retry",
+        clone_suffix="snapshot" if final else "retry",
     )

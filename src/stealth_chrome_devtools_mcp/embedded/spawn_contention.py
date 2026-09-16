@@ -19,8 +19,13 @@ Measured on the coverage gate's macOS/ARM64 cell (run 35150887345, attempt 2): a
 fleet that had ALREADY serialised its one master-taking lead spawn still lost a
 follower to ``ConnectionRefusedError``, with all five followers on their own
 directories — for that failure the old wording's "contend for the same Chrome
-profile" was simply untrue, and the likelier cause was a two-core runner. The
-paragraph therefore says what is measured, offers both causes, and lets the one
+profile" was simply untrue. The follower was NAMED (`fleet-tabswitch`) and alone
+on its own un-walked directory; Chrome HAD started (F-860's reaper found its pid
+running there and killed it) and simply had not opened its DevTools port inside
+nodriver 0.47's connect deadline — 0.25 s plus five 0.5 s naps
+(`nodriver/core/browser.py:413-425`), a constant that does not scale with load,
+against a 3-vCPU runner taking five launches at once. The paragraph therefore
+says what is measured, offers both causes including that one, and lets the one
 remedy that serves both stand: serialize, or retry once the others settle.
 
 **A sibling of ``spawn_exhaustion``, deliberately not folded into it.** That
@@ -65,7 +70,10 @@ def contention_hint(in_flight: int) -> str | None:
         "Two causes fit, and concurrent spawning is a known cause of this exact "
         "connect failure under either (F-834): Chrome's own profile singleton "
         "lets only one process hold a user-data-dir, and N simultaneous Chrome "
-        "launches cost CPU, memory and process handles. Any "
+        "launches cost CPU, memory and process handles — on a small runner a "
+        "browser that STARTS but misses nodriver's fixed ~2.75 s connect "
+        "deadline, a constant that does not scale with load, fails exactly like "
+        "one that never started. Any "
         "'running as root / pass no_sandbox=True' advice in the message above "
         "comes from nodriver and does NOT apply here: the sandbox setting is "
         "unrelated to this failure.\n"

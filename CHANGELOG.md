@@ -2,52 +2,68 @@
 
 ## Unreleased
 
-### Fixed — F-834 stage 1: a concurrent unnamed `spawn_browser` that lost the master profile failed outright
+### Fixed — F-834 stage 1: a `spawn_browser` whose first attempt failed got no second attempt unless it was already on a clone
 
-Three concurrent `spawn_browser` calls with no `user_data_dir` all select the
-MASTER profile, because that branch of `clone_storage.resolve_profile_selection`
-asks `_profile_has_running_browser` — a LIVENESS check, never a reservation, and
-every concurrent spawn is pre-launch when it asks. Chrome's own process
-singleton then lets exactly one of them open the directory. The other two got no
-retry: `_fallback_profile_selection` answered `None` for every role that was not
-`clone`, so `spawn_browser`'s three-attempt loop re-raised on the first failure
-and the caller saw `Failed to connect to browser` plus nodriver's misleading
-"running as root / pass `no_sandbox=True`" advice — the same advice F-834's own
-contention hint exists to disclaim. The retry budget was always there; the loser
-had nowhere to spend it.
+Two measured shapes, one hole. A NAMED follower on the coverage gate's
+macOS/ARM64 cell (run 35150887345, attempt 2) failed with
+`ConnectionRefusedError` while alone on its own un-walked directory: Chrome had
+STARTED there — the F-860 reaper found its pid running and killed it — and had
+simply not opened its DevTools port inside nodriver 0.47's connect deadline,
+0.25 s plus five 0.5 s naps, a constant that does not scale with load, on a
+3-vCPU runner taking five launches at once. And three concurrent unnamed spawns
+all select the master profile, so two of them lose Chrome's own process
+singleton. In both shapes `_fallback_profile_selection` answered `None` for
+every role that was not `clone`, so the three-attempt loop re-raised on the
+first failure. The retry budget was always there; the spawn had nowhere to spend
+it. Meanwhile the product's own contention hint was advising the caller to
+"retry this one once the others have settled".
 
-A `master`-role loser now falls back exactly as a `clone`-role one does, onto a
-clone directory — which IS reserved, via `_protect_clone_dir`, and is unique per
-ATTEMPT since F-834 stage 2. No reservation was added on master itself: that
-would need a matching release on the close path, and a leaked one would silently
-force every later spawn to clone forever. A NAMED (`explicit`) profile is
-deliberately not widened either, because handing back a clone is an identity
-change and `resolve_profile_selection` already owns that walk with a warning
-(F-871). The attempt count is unchanged.
+The fallback now covers all three roles, and only a `clone` re-clones. A named
+profile retries **the same directory** — never a clone and never `<name>-2`,
+because the caller asked for that profile's cookies and logins, and the one
+place that walk may happen is the resolver, which reports it (F-871). A master
+retries the same directory too when nothing holds it, and falls through to a
+reserved clone when a sibling took it, since retrying a directory another Chrome
+owns fails the same way again. What frees the directory in time is the failed
+attempt's own F-860 reap.
+
+Master itself is still never reserved: the release would have to live on the
+close path, and a leaked reservation would silently force every later spawn to
+clone forever. The attempt count is unchanged, and the retry does not wait for
+the sibling wave — `_spawns_in_flight` is decremented in the `finally` around
+one attempt, so a spawn deciding its retry is not counted in it (measured: the
+count reads 0 at every retry decision), and every member of a failing wave would
+read a number excluding all the waiters and be released together.
 
 Measured hermetically through the real tool body, with Chrome's process
-singleton modelled at the one place it acts: three concurrent unnamed spawns go
-from **1 of 3** live on **1** profile directory to **3 of 3** live on **3**
-distinct directories, the two retrying instances each reporting their swallowed
-first failure in `spawn_diagnostics.profile_selection.spawn_retries`. That three
-concurrent selections all still answer `master` is unchanged and is now pinned
-as characterization — it is the liveness check behaving as designed.
+singleton modelled once and read from both sides:
 
-`clone_storage.py` is still 1055 lines, its grandfathered cap: the two
-`snapshot.exists()` arms of the fallback collapsed into one call site, which
-paid for the comment that explains the widening.
+| | before | after |
+|---|---|---|
+| three concurrent unnamed spawns | 1 of 3 live, 1 directory | 3 of 3 live, 3 directories |
+| serialised lead + five named followers | 0 of 6 live | 6 of 6 live, every follower on the directory it asked for |
 
-The contention hint that decorates a failed concurrent spawn no longer asserts
-the mechanism. It said the spawns "contend for the same Chrome profile", but the
-only fact that module has is an integer, and after both F-834 layers concurrent
-spawns are handed distinct reserved clone directories — so that sentence was
-frequently false. Measured false on the coverage gate's macOS/ARM64 cell (run
-35150887345, attempt 2): a fleet that had already serialised its one
-master-taking lead spawn still lost a follower to `ConnectionRefusedError`, with
-every follower on its own directory, where a two-core runner under five
-simultaneous Chrome launches is the likelier cause. The paragraph now says which
-part of it is measured, offers both causes without picking one, and keeps the one
-remedy that serves either. The `no_sandbox` disclaimer is unchanged.
+`clone_storage.py` is still 1055 lines, its grandfathered cap.
+
+That three concurrent selections all still answer `master` is unchanged and is
+now pinned as characterization: the master branch of
+`clone_storage.resolve_profile_selection` asks `_profile_has_running_browser`,
+which is a LIVENESS check and never a reservation, and every concurrent spawn is
+pre-launch when it asks. That reading is the design; what was broken was what
+happened to the callers who then lost.
+
+### Changed — F-834: the contention hint names the count it measured, not a mechanism it did not
+
+The paragraph appended to a failed concurrent spawn said those spawns "contend
+for the same Chrome profile". The only fact that module has is an integer, and
+after both F-834 layers concurrent spawns are handed distinct reserved clone
+directories — so the sentence was frequently false, and measurably false for the
+macOS follower above, which was alone on its own directory. The paragraph now
+says which part of it is measured, offers both causes without picking one —
+Chrome's profile singleton, and what N simultaneous launches cost a small runner,
+including a browser that starts and still misses nodriver's fixed connect
+deadline — and keeps the one remedy that serves either. The `no_sandbox`
+disclaimer is unchanged.
 
 ### Fixed — F-885: proxy/backend-death tests touched the developer's live `~/.stealth-mcp` record
 

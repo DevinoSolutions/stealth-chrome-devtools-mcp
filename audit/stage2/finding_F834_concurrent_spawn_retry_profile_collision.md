@@ -231,7 +231,7 @@ a distinct directory; it landed nowhere. See below.
 
 **Status: FIXED** (branch `fix/F834-stage1-master-fallback`).
 
-### What was still broken
+### What was still broken (the master half)
 
 `_fallback_profile_selection` returned `None` for every `profile_role` that was
 not `clone`, so `tool_sections/browser_management.py::spawn_browser`'s
@@ -251,39 +251,92 @@ now pinned as characterization — the master branch asks
 "a LIVENESS check, NOT a reservation — every concurrent spawn is pre-launch when
 it asks".
 
+### The second datum: a NAMED follower, alone on its own directory
+
+macOS/ARM64 coverage cell, run 35150887345 attempt 2, job log line 658. The
+fleet test had **already serialised** its one master-taking lead spawn. One of
+the five NAMED followers (`fleet-tabswitch`) still failed, with
+`ConnectionRefusedError: [Errno 61]` — alone on its own un-walked directory,
+with no sibling anywhere near it.
+
+Chrome had **started**: F-860's reaper found pid 7447 running on that directory
+and killed it. What it had not done was open its DevTools port inside nodriver
+0.47's connect deadline — `nodriver/core/browser.py:413-425`, 0.25 s plus five
+0.5 s naps, ≈ 2.75 s, **a constant that does not scale with load** — on a 3-vCPU
+runner taking five launches at once. That is a race with a stopwatch, not with a
+sibling for a directory.
+
+The hole is the same one as the master case, entered from the other side:
+`_fallback_profile_selection` returned `None` for every non-`clone` role, so the
+`explicit` attempt re-raised on its first failure too. And the product's own
+`contention_hint` was telling the user to *"retry this one once the others have
+settled"* — advice the product could take itself, since the reap had just freed
+the very directory the retry needed.
+
 ### The fix
 
-One widened guard in the ONE fallback home: a `master`-role previous selection
-falls back exactly as a `clone`-role one does, onto a clone directory — which IS
-reserved, via `_protect_clone_dir`. No master reservation was added (the release
-problem above stands), the attempt count is untouched, and `explicit` is
-deliberately NOT widened: walking a caller's NAMED profile to a clone is an
-identity change, and the one place that walk may happen is
-`resolve_profile_selection`, where F-871 reports it.
+One rule, single-homed in the ONE fallback, covering all three roles:
 
-The two `snapshot.exists()` arms collapsed into one call site as part of the
-same edit, which is what paid for the new comment: `clone_storage.py` sits at
-its grandfathered 1055-LOC cap with zero headroom, and the file is still 1055
-lines — a ratchet was neither needed nor taken.
+| previous role | what the next attempt drives | why |
+|---|---|---|
+| `clone` | a fresh clone (unchanged) | per-ATTEMPT unique, reserved |
+| `explicit` | **the same directory** | the caller named that profile; a clone is a different identity and so is `<name>-2` |
+| `master`, nobody holds it | **the same directory** | the reap just freed it and master is still the best profile here |
+| `master`, a sibling holds it | a reserved clone | retrying a directory another Chrome owns fails the same way again |
+
+No reservation was added on master (the release problem above stands), the
+attempt count is untouched, and a named profile is never walked or swapped — the
+one place that walk may happen is `resolve_profile_selection`, where F-871
+reports it.
+
+**No wait before the retry**, and that is measured rather than assumed.
+`BrowserManager._spawns_in_flight` is incremented inside `spawn_browser` and
+decremented in its `finally`, so a spawn sitting in the tool body's `except`
+handler — exactly where a "wait until the wave settles" gate would go — is NOT
+counted. Pinned in
+`test_a_spawn_deciding_its_retry_is_not_counted_in_flight`: the count reads `0`
+at every retry decision. Every member of a failing wave would therefore read a
+number that excludes every other waiter, reach the same verdict at the same
+instant and be released together — the gate cannot see the herd it exists to
+break up. It would buy nothing and cost every failing spawn its own latency. The
+retry budget is the bound, and the failed attempt has already spent nodriver's
+whole ≈ 2.75 s deadline before the fallback is even asked.
+
+The two `snapshot.exists()` arms collapsed into one call site and the
+`kind`/`suffix` pair folded into the call, which is what paid for the new
+comment: `clone_storage.py` sits at its grandfathered 1055-LOC cap with zero
+headroom, and the file is still 1055 lines — a ratchet was neither needed nor
+taken, twice.
 
 ### Measurement (hermetic, no Chrome)
 
-Three CONCURRENT unnamed `spawn_browser` calls through the real tool body
-against a temp session root, with Chrome's process singleton modelled at the one
-place it acts (first launch to reach a user-data-dir wins it; every later launch
-against that same directory fails as a second Chrome does):
+Both shapes through the real `spawn_browser` tool body against a temp session
+root. Chrome is modelled only where Chrome's own behaviour IS the mechanism, and
+its process singleton is modelled ONCE — the launcher bounces off it and
+`profile_lock` reads it, as a real lock on disk serves both.
+
+**Shape A — the master race.** Three concurrent unnamed spawns; the first launch
+to reach a user-data-dir wins it and every later launch against that same
+directory fails, as a second Chrome does when it hands its command line to the
+incumbent and exits.
+
+**Shape B — the macOS cell.** One serialised lead on master, then five NAMED
+followers whose first launch each starts Chrome and misses the connect deadline;
+the failed attempt's reap frees the directory again.
 
 | | before | after |
 |---|---|---|
-| live instances | 1 / 3 | 3 / 3 |
-| distinct profile dirs | 1 | 3 |
-| launch attempts | 3 | 5 |
+| A: live instances | 1 / 3 | 3 / 3 |
+| A: distinct profile dirs | 1 | 3 |
+| A: launch attempts | 3 | 5 |
+| B: live followers | 0 / 5 | 5 / 5 |
+| B: followers on the directory they ASKED for | no | yes, 5 / 5, none walked |
+| B: launch attempts (lead + 5) | 6 | 12 |
 
-After: `i1` on `master`, `i2` and `i3` on
-`…-<pid>-1-retry` / `…-<pid>-2-retry`, each with `spawn_retries` carrying its
-swallowed first failure. Before: one instance and two
-`ToolError: Failed to spawn browser: Failed to connect to browser -- Possibly
-because you are running as root? …`.
+Shape B before is the incident entire: the lead and all five followers raise,
+six of six. After, the lead retries master (nothing took it) and each follower
+retries its own named directory, every one reporting its swallowed first failure
+in `spawn_retries` and none carrying a `walked_to`.
 
 Pins: `tests/test_concurrent_spawn_collision.py` (stage-1 section).
 
