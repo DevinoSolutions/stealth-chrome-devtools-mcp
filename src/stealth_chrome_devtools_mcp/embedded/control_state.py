@@ -39,6 +39,19 @@ over either. The last tier is not taste — ``"Bet"`` and ``"beta"`` both reache
 ``Beta`` through the typeahead, so a caller may be relying on it, and a fix that
 dropped it would break them.
 
+**The events this module fires are UNTRUSTED, and that is a real loss.**
+``new Event('change', {bubbles: true})`` carries ``isTrusted: false``, where the
+keystrokes the ``text=`` arm used to send produced TRUSTED ``input``/``change``
+from Chrome itself (measured — see the §2b matrix). There is no trusted
+alternative that is not the typeahead this module exists to remove, and the
+``value``/``index`` arms were already untrusted, so the trade is: two of the
+three arms are unchanged, the third loses trust and gains the ability to name its
+own control. A page that gates on ``event.isTrusted`` was already unreachable
+through two of the three arms and is now unreachable through all three. Named
+here, in the tool's docstring and in the finding's §6, on ``click_target``'s
+precedent — it labels its untrusted path ``synthetic`` rather than leaving the
+caller to find out.
+
 **Two reads, in that order, and each is one ``JSON.stringify`` round trip.**
 :data:`READ_SELECT_JS` answers the option list and the standing selection;
 :func:`apply_js` sets ``selectedIndex`` and dispatches ``input`` then ``change``
@@ -134,8 +147,24 @@ READ_SELECT_JS = """(select) => {
 #: The ONE selection write. The wanted ``{index, value}`` is embedded in the
 #: source because ``Element.apply`` carries no arguments — a criterion reaches
 #: the page in the function body or not at all.
+#:
+#: ``moved`` is computed from the selected-index **SET**, never from
+#: ``selectedIndex``. On a ``<select multiple>`` holding ``[0, 2]``, assigning
+#: ``selectedIndex = 0`` deselects option 2 — the spec's setter selects exactly
+#: the option it names — while ``selectedIndex`` itself does not budge, so a
+#: comparison of that one number would call the write a no-op, fire nothing, and
+#: leave the page believing it still holds two options. That is also the ONE
+#: place this fix could have regressed the shipped ``value`` arm, which fired
+#: ``change`` unconditionally.
+#:
+#: The stale guard is value-equality at the index, and its residual is named
+#: here rather than discovered later: a list replaced between the read and the
+#: write whose option at that index happens to carry the SAME ``value`` passes
+#: the guard. That is the correct trade — the alternative is re-sending the whole
+#: option list to compare, which is the payload this module's bound exists to
+#: avoid — and the caller is not misled, because the selection is still read back
+#: and reported.
 _APPLY_SELECT_JS = """(select) => {
-    const want = __WANT__;
     const state = () => ({
         selected_index: select.selectedIndex,
         selected_count: select.selectedOptions.length,
@@ -144,14 +173,17 @@ _APPLY_SELECT_JS = """(select) => {
         option_count: select.options.length,
         multiple: !!select.multiple
     });
+    const same = (a, b) => a.length === b.length
+        && a.every((v, i) => v === b[i]);
+    const want = __WANT__;
     const option = select.options[want.index];
     if (!option || String(option.value == null ? '' : option.value) !== want.value) {
         return JSON.stringify(Object.assign(
             {applied: false, stale: true}, state()));
     }
-    const moved = select.selectedIndex !== want.index;
+    const before = state().selected_indexes;
     select.selectedIndex = want.index;
-    if (moved) {
+    if (!same(before, state().selected_indexes)) {
         select.dispatchEvent(new Event('input', {bubbles: true}));
         select.dispatchEvent(new Event('change', {bubbles: true}));
     }
@@ -291,25 +323,47 @@ def _count(facts: dict[str, object], key: str) -> int:
 
 
 def verify_matched(
-    selector: str, by: str, facts: dict[str, object], target: int
+    selector: str,
+    by: str,
+    facts: dict[str, object],
+    target: int,
+    requested_index: int | None = None,
 ) -> None:
     """Raise unless the criterion names an option of a real ``<select>``.
 
     Nothing has been written when this raises: the shipped ``value`` arm cleared
     the page's standing selection on its way to answering ``True``, and the
     order here is what makes that unreachable.
+
+    ``requested_index`` exists for exactly one message. An ``index=`` that is
+    genuinely inside the control but past :data:`MAX_OPTIONS` is not "no option
+    matches" — it is "this control is larger than one read", a different fact
+    with a different remedy, and the caller should not be told the option does
+    not exist when it does.
     """
     if not facts.get("is_select"):
         raise ToolError(
             f"'{selector}' resolved to <{facts.get('tag') or 'unknown'}>, not a "
             "<select>. Point the selector at a <select> element."
         )
-    if target < 0:
+    if target >= 0:
+        return
+    total = _count(facts, "option_count")
+    read = len(options_of(facts))
+    if (
+        by == BY_INDEX
+        and requested_index is not None
+        and read <= requested_index < total
+    ):
         raise ToolError(
-            f"no option of '{selector}' matches the requested {by} "
-            f"({_count(facts, 'option_count')} option(s) on the control, "
-            f"{len(options_of(facts))} read). Nothing was changed."
+            f"index {requested_index} is within '{selector}''s {total} options "
+            f"but beyond the {MAX_OPTIONS}-option read cap, so it could not be "
+            "resolved. Nothing was changed."
         )
+    raise ToolError(
+        f"no option of '{selector}' matches the requested {by} "
+        f"({total} option(s) on the control, {read} read). Nothing was changed."
+    )
 
 
 def verify_selected(selector: str, target: int, facts: dict[str, object]) -> None:

@@ -384,10 +384,18 @@ class DOMHandler:
                 raise ToolError("No file paths provided")
 
             resolved: list[str] = []
-            for raw_path in file_paths:
+            for position, raw_path in enumerate(file_paths, start=1):
                 path = Path(str(raw_path)).expanduser()  # noqa: ASYNC240  plan_M7
                 if not path.is_file():
-                    raise ToolError(f"File not found: {path}")
+                    # Shape and position, never the path (F-877): an absolute
+                    # path names the operating user, and this message reaches
+                    # the caller, the debug ring and Sentry exactly as the
+                    # leaf's do. The suffix stays — a file TYPE, not a name.
+                    raise ToolError(
+                        f"File not found: path {position} of {len(file_paths)} "
+                        f"does not exist ({len(str(path))} characters, suffix "
+                        f"{path.suffix or 'none'!r})"
+                    )
                 resolved.append(str(path.resolve()))
 
             element = await resolve_element(tab, selector, timeout=timeout / 1000)
@@ -612,7 +620,7 @@ class DOMHandler:
             target = control_state.resolve_option(
                 options, by=by, value=value, text=text, index=index
             )
-            control_state.verify_matched(selector, by, before, target)
+            control_state.verify_matched(selector, by, before, target, index)
 
             after = await control_state.apply_selection(
                 select_element,

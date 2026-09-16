@@ -183,6 +183,23 @@ name — a `<select>` is frequently a list of account numbers, and a raised `Too
 reaches the caller, the debug ring and Sentry at once. A new leaf
 `embedded/control_state.py` owns both reads, the matching rule and both verdicts.
 
+**What this costs, plainly.** The `text=` arm's events are now **untrusted**
+(`isTrusted: false`) where real keystrokes produced trusted ones — there is no trusted
+alternative that is not the typeahead being removed, and the `value=`/`index=` arms
+were already untrusted, so a page gating on `event.isTrusted` was already unreachable
+through two of three arms and is now unreachable through all three. A caller relying on
+the typeahead's **wraparound** — asking for a prefix that matches the option already
+selected in order to advance to the *next* match — now gets the current option and
+`changed: false` instead of a move; that behaviour was never documented and is not
+kept. And an `index=` inside a `<select>` with more than 2000 options cannot be
+resolved, because the option read is bounded; that case gets its own message naming the
+cap, never "no option matches".
+
+Also fixed in passing, the same leak class one guard earlier: `upload_file`'s
+"File not found" now reports the path's position, the count, its length and its suffix
+instead of the absolute path, which named the operating user in an error that reaches
+the client, the debug ring and Sentry.
+
 Deliberately unchanged, and named in the finding: a `multiple` `<select>` still cannot
 be driven past one selection (the signature takes one criterion — the record now says
 so); a `disabled` `<option>` stays reachable by `value=`/`index=` and unreachable by

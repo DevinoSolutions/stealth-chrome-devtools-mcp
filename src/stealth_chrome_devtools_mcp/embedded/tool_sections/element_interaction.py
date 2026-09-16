@@ -258,6 +258,9 @@ async def select_option(
             success. No option text or value is echoed back. Raises if the
             element is not a <select>, if no option matches, or if the page did
             not keep the selection.
+            The "input" and "change" events this fires are UNTRUSTED
+            (isTrusted: false), and are dispatched only when the selection
+            actually moved. A page that gates on event.isTrusted will not react.
     """
     tab = await _require_tab(rt.browser_manager, instance_id)
 

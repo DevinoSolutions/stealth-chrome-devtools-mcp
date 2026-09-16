@@ -215,8 +215,9 @@ Two `Element.apply` calls, each one `JSON.stringify` round trip, in this order:
      type into a different element entirely;
 3. if nothing resolved, `verify_matched` raises **having written nothing** — row 4's
    destroyed selection cannot happen, because no assignment is reached;
-4. otherwise `apply_js(index, value)` sets `selectedIndex` and, **only if the index
-   moved**, dispatches
+4. otherwise `apply_js(index, value)` sets `selectedIndex` and, **only if the
+   selected-index SET moved** — never `selectedIndex` itself, see below —
+   dispatches
    `input` and then `change`, both bubbling — the pair, and the order, Chrome's
    own typeahead produced in §2b (`input:true` then `change:true`). The shipped
    `value`/`index` arms fired `change` alone, no `input` at all, and fired it
@@ -225,6 +226,18 @@ Two `Element.apply` calls, each one `JSON.stringify` round trip, in this order:
    where it already was (measured, §2b's `"Spaced Out"` row);
 5. and reads the control back **after** those events have run (they are synchronous,
    so a page handler that resets the select has already run) in the same answer.
+
+**"Did anything move" is asked of the SET, and this is the one place the fix could
+have regressed the shipped `value` arm.** On a `<select multiple>` holding `[0, 2]`,
+assigning `selectedIndex = 0` runs the spec's setter, which selects exactly that
+option and deselects every other — so option 2 is dropped while `selectedIndex`
+itself never budges, because it already answered `0`. A comparison of that one number
+calls the write a no-op, fires nothing, and leaves the page believing it still holds
+two options, while the record — which compares `selected_indexes` — reports
+`changed: true`: the record and the events would disagree. The shipped `value` arm
+fired `change` unconditionally, so that would have been a REGRESSION rather than a
+refinement. Pinned in both lanes and both pins proved load-bearing by reverting the
+one line (§5b).
 
 That second script is also the one place the two-call split is paid for: the options
 can be replaced between the read and the write — a dependent dropdown repopulating —
@@ -321,7 +334,18 @@ redundant field is a second way to ask the same question.
   error — `DID NOT RAISE ToolError` for the eleven silent rows, `TypeError: 'bool'
   object is not subscriptable` for the record rows, `assert ['Beta'] == []` for the
   keystroke that must no longer be sent, and `assert [] == ['input', 'change']` for
-  the event pair. At the fix: **35 passed**.
+  the event pair. At the fix: **35 passed**, and **38 passed** after the review pass
+  added the multiple-select event pin, the read-cap message pin and the
+  missing-path no-leak pin.
+
+  Both halves of the multiple-select pin were proved **load-bearing** by reverting
+  the one line each home owns. Reverting `control_state._APPLY_SELECT_JS`'s set
+  comparison to `select.selectedIndex !== want.index` fails the E2E node in a real
+  Chrome with `assert [] == ['input:sel-multi:one:untrusted',
+  'change:sel-multi:one:untrusted']` — no events for a write that dropped an option.
+  Reverting `FakeSelect._apply`'s mirror of the same rule fails the hermetic node
+  with `assert [] == ['input', 'change']`. Both were restored and both lanes are
+  green again.
 * `tests/test_e2e_select_upload_verification.py` at the fix: **20 passed in 52.8 s**
   against a real Chrome 152.0.7977.83, first run, no flake. It was not run at the RED
   commit: its `select_option` rows assert a record shape the shipped tool cannot
@@ -339,13 +363,15 @@ redundant field is a second way to ask the same question.
   — **6 passed**; `test_e2e_interaction_fidelity::test_rich_input_types` — **1
   passed**; `test_e2e_hard_dom::test_contenteditable_and_multiselect` — **1 passed**.
 * LOC (`tools/check_file_budgets.py`'s own rule — every line, blanks and comments
-  included): `dom_handler.py` 940 → **967**, `control_state.py` **385**,
-  `tool_sections/element_interaction.py` 519 → **532**, `tests/fakes.py` 1097 →
-  **1307**. All under the 1000-LOC default; no `GRANDFATHER` row is involved and none
-  moved. `dom_handler.py` grows by 27 despite losing both bodies' logic, and the 27
-  are docstring: the two methods keep only the ORDER and say why the order is
-  load-bearing in each. Its headroom is now 33 lines, and the next change to it should
-  expect to pay for itself.
+  included): `dom_handler.py` 940 → **975**, `control_state.py` **439**,
+  `tool_sections/element_interaction.py` 519 → **535**, `tests/fakes.py` 1097 →
+  **1349**. All under the 1000-LOC default; no `GRANDFATHER` row is involved and none
+  moved. `dom_handler.py` grows by 35 despite losing both bodies' logic, and the 35
+  are docstring plus the no-leak message: the two methods keep only the ORDER (and,
+  for `upload_file`, its two pre-flight guards) and say why the order is load-bearing
+  in each. **Its headroom is 25 lines** — flagged here because the next change to that
+  file should expect to pay for itself, and the file is not grandfathered, so there is
+  no cap to ratchet.
 * The full unit lane and the full integration lane are the coordinator's pre-push gate
   and are deliberately **not** claimed here.
 
@@ -418,6 +444,42 @@ redundant field is a second way to ask the same question.
 * **`upload_file` still accepts `file_paths` as a bare string or a list**, and a bare
   string is wrapped into a one-element list by the wrapper. That is unchanged and is
   what makes `requested` well defined for both shapes.
+* **The events `select_option` now fires are UNTRUSTED, and that is a real loss.**
+  `new Event('change', {bubbles: true})` carries `isTrusted: false`, where the
+  keystrokes the `text=` arm used to send produced TRUSTED `input`/`change` from
+  Chrome itself (§2b measured exactly that pair). There is no trusted alternative
+  that is not the typeahead this fix removes — a trusted `<select>` change requires
+  either the typeahead's buffer or the native dropdown, which CDP cannot drive — and
+  the `value=`/`index=` arms were already untrusted, so the honest statement is: a
+  page gating on `event.isTrusted` was already unreachable through two of the three
+  arms and is now unreachable through all three. Named here, in
+  `control_state.py`'s module docstring and in the tool's own docstring, on
+  `click_target`'s precedent: it labels its untrusted path `synthetic` rather than
+  leaving a caller to find out.
+* **`MAX_OPTIONS` costs an in-range `index=` on a very large `<select>`.** The option
+  read is bounded at 2000 because the matching rule runs in Python, so an
+  `index=2500` on a control with 3000 options cannot be resolved. It is not reported
+  as "no option matches" — that would be false, and its remedy is different — but with
+  its own message naming the control's true `option_count` and the cap. A `value=` or
+  `text=` beyond the cap is indistinguishable from "not present", which the generic
+  message's two counts (on the control / read) make diagnosable but does not name.
+  Raising the cap is a one-constant change; the alternative — matching in the page —
+  is what this fix deliberately moved out.
+* **The stale guard is value-equality at the index, and it has a residual.** A list
+  replaced between the read and the write whose option at that index happens to carry
+  the SAME `value` passes the guard, and that option is selected. The alternative is
+  re-sending the whole option list to compare, which is the payload the bound above
+  exists to avoid; the caller is not misled either way, because the selection is read
+  back and reported. Named in the module docstring rather than left to be re-found.
+* **`upload_file`'s "File not found" message was fixed in passing**, because it is the
+  same leak class one guard earlier: it put an ABSOLUTE path — which names the
+  operating user — into a `ToolError` that reaches the caller, the debug ring and
+  Sentry. It now reports the path's position, the count, its character length and its
+  suffix (a file TYPE, not a name; a typed extension is the usual cause), keeps the
+  `File not found` prefix so the two existing pins that match on it are byte-unchanged,
+  and is itself pinned with the same canary-filename technique the other two
+  no-leak pins use. The tag/type guard's messages are untouched: they name the
+  selector and the element's own tag, never a path.
 * **`select_option`'s new `text=` matching rule is a rule, and a rule can be wrong
   for someone.** It is three tiers (exact `text`, exact `label`, case-insensitive
   prefix over both, `disabled` options skipped) and it is chosen to keep every

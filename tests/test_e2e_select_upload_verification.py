@@ -299,11 +299,25 @@ async def test_a_non_select_element_is_refused_not_written_to(
         await close(instance_id=iid)
 
 
-async def test_a_multiple_select_reports_what_it_now_holds(
+async def test_a_multiple_select_that_drops_options_fires_the_events(
     fixture_app_server, tmp_empty_root
 ):
-    """One criterion in, one option selected — the record says so, which is how
-    a caller discovers the limit the signature imposes (finding §6)."""
+    """The one place this fix could have REGRESSED the shipped `value` arm, in a
+    real Blink rather than against a double.
+
+    The control starts holding options 0 AND 2 — set directly, which fires
+    nothing, so the action log is clean when the tool is called. Asking for
+    index 0 runs the spec's `selectedIndex` setter, which selects exactly that
+    option and deselects every other: option 2 is dropped while `selectedIndex`
+    itself never budges, because it already answered 0. A "did anything move"
+    asked of that one number would fire nothing and leave the page believing it
+    still holds two options, while the record — which compares the SET — says
+    `changed: true`. The shipped `value` arm fired `change` unconditionally, so
+    that would be a regression, not a refinement.
+
+    One criterion in, one option out is also how a caller discovers the limit
+    the signature imposes (finding §6).
+    """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
     select_option = get_fn("select_option")
@@ -312,14 +326,33 @@ async def test_a_multiple_select_reports_what_it_now_holds(
     iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
     try:
         await navigate_and_settle(iid, f"{base}/{PAGE}")
-
-        record = await select_option(
-            instance_id=iid, selector="#sel-multi", value="two"
+        await eval_js(
+            iid,
+            "(() => { const s = document.querySelector('#sel-multi');"
+            " s.options[0].selected = true; s.options[2].selected = true;"
+            " return s.selectedOptions.length; })()",
         )
+        assert (
+            await eval_js(
+                iid, "document.querySelector('#sel-multi').selectedOptions.length"
+            )
+            == 2
+        )
+        assert (await _selected(iid, "#sel-multi"))[0] == 0, (
+            "selectedIndex already answers 0, so it cannot see the drop"
+        )
+        assert not [a for a in await read_actions(iid) if "sel-multi" in a]
+
+        record = await select_option(instance_id=iid, selector="#sel-multi", index=0)
 
         assert record["multiple"] is True
-        assert record["selected_count"] == 1
-        assert record["selected_index"] == 1
+        assert record["selected_index"] == 0
+        assert record["selected_count"] == 1, "option 2 was dropped"
+        assert record["changed"] is True
+        assert [a for a in await read_actions(iid) if "sel-multi" in a] == [
+            "input:sel-multi:one:untrusted",
+            "change:sel-multi:one:untrusted",
+        ]
     finally:
         await close(instance_id=iid)
 

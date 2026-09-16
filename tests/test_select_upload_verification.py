@@ -285,6 +285,30 @@ async def test_the_value_arm_still_reaches_a_disabled_option():
     assert element.selected_index == 1
 
 
+async def test_a_multiple_select_that_drops_options_fires_the_events():
+    """The one place this fix could have REGRESSED the shipped ``value`` arm.
+
+    A ``<select multiple>`` holding ``[0, 2]``, asked for index 0: the spec's
+    ``selectedIndex`` setter selects exactly that option and deselects every
+    other, so option 2 is dropped — while ``selectedIndex`` itself never budges,
+    because it already answered 0. "Did anything move" asked of that one number
+    says no, fires nothing, and leaves the page believing it still holds two
+    options; the record, which compares the SET, says `changed: true`. The
+    record and the events would disagree, and the shipped `value` arm fired
+    `change` unconditionally, so that would be a regression rather than a
+    refinement.
+    """
+    tab, element = _select_tab(multiple=True, selected=(0, 2))
+
+    result = await DOMHandler.select_option(tab, SELECT, index=0)
+
+    assert element.selected_indexes == [0], "the setter deselects the rest"
+    assert element.selected_index == 0, "and the index itself did not move"
+    assert element.events == ["input", "change"]
+    assert result["selected_count"] == 1
+    assert result["changed"] is True
+
+
 async def test_a_multiple_select_reports_how_many_options_it_holds():
     """The tool's signature takes ONE criterion, so a ``multiple`` select can
     never be driven past one selection (finding §6). The record says so."""
@@ -407,6 +431,26 @@ async def test_the_option_read_is_bounded():
     assert str(control_state.MAX_OPTIONS) in control_state.READ_SELECT_JS
 
 
+async def test_an_index_inside_the_control_but_past_the_read_cap_says_so():
+    """ "This control is larger than one read" is not "no option matches".
+
+    The bound is real and so is its cost: an ``index=`` past ``MAX_OPTIONS``
+    cannot be resolved even though the option exists. The caller must not be
+    told the option does not exist when it does — the remedy is different.
+    """
+    tab, element = _select_tab(
+        options=tuple((f"v{i}", f"Opt {i}") for i in range(4)), read_cap=2
+    )
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.select_option(tab, SELECT, index=3)
+
+    message = str(caught.value)
+    assert "read cap" in message
+    assert "no option" not in message
+    assert element.events == []
+
+
 # ---------------------------------------------------------------------------
 # upload_file -- the input has to actually hold the files
 # ---------------------------------------------------------------------------
@@ -523,3 +567,27 @@ async def test_a_path_that_does_not_exist_still_raises_before_any_dispatch(tmp_p
         await DOMHandler.upload_file(tab, UPLOAD, [str(tmp_path / "nope.txt")])
 
     assert element.sent == []
+
+
+async def test_the_missing_path_message_carries_no_path_or_file_name(tmp_path):
+    """The same leak class this finding closes, one guard earlier.
+
+    ``File not found: {path}`` put an ABSOLUTE path — which names the operating
+    user — into a ToolError that reaches the caller, the debug ring and Sentry.
+    Position, count, length and the suffix are the diagnostic; the name is the
+    caller's document.
+    """
+    absent = tmp_path / "Q3-severance-agreement.pdf"
+    present = tmp_path / "b.txt"
+    present.write_text("y", encoding="utf-8")
+    tab, _ = _upload_tab(multiple=True)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.upload_file(tab, UPLOAD, [str(present), str(absent)])
+
+    message = str(caught.value)
+    assert "severance" not in message
+    assert str(tmp_path) not in message
+    assert "File not found" in message
+    assert "2 of 2" in message, "which of the paths it was is the diagnostic"
+    assert ".pdf" in message

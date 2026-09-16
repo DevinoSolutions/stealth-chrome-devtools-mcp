@@ -764,10 +764,22 @@ class FakeSelect:
       and ``change`` pair, in that order and bubbling, is what Chrome's own
       typeahead produced for a real selection (measured), so this double
       records exactly what the code under test dispatched and a pin can assert
-      the pair rather than trusting it.
+      the pair rather than trusting it;
+    * the selection is a **SET**, and the spec's ``selectedIndex`` SETTER
+      selects exactly the option it names and deselects every other. That is
+      why the state here is a tuple and not a single int: a ``<select
+      multiple>`` holding ``[0, 2]`` still answers ``selectedIndex == 0`` after
+      index 0 is assigned, so a double that modelled the selection as one
+      number could not express the write that silently drops option 2 while
+      that number does not budge.
 
     The answer to both reads is COMPUTED from this object's own state, never
     supplied by a test, so no fixture here can quietly encode the bug.
+
+    ``read_cap`` is the product's ``MAX_OPTIONS`` truncation, stated by the test
+    rather than imported: the read answers at most that many options while
+    ``option_count`` stays the control's true length, exactly as the real script
+    does. ``None`` by default, so no pin that does not ask for it moves.
 
     ``on_selected`` is the page: a callable invoked right after the events are
     dispatched, with this double as its argument. It exists so a pin can model
@@ -789,11 +801,21 @@ class FakeSelect:
         tag: str = "select",
         on_selected: Any = None,
         answer: Any = _UNSET,
+        selected: tuple[int, ...] | None = None,
+        read_cap: int | None = None,
     ) -> None:
         self.tag = tag
         self.multiple = multiple
+        self.read_cap = read_cap
         self.options = [self._option(i, raw) for i, raw in enumerate(options)]
-        self.selected_index = selected_index
+        #: ``selectedOptions``' indices, ascending. ``selected=`` states the set
+        #: directly — the only way to express a real multi-selection — while
+        #: ``selected_index=`` is the one-option shorthand every other pin uses.
+        self.selected: list[int] = (
+            sorted(selected)
+            if selected is not None
+            else ([] if selected_index < 0 else [selected_index])
+        )
         self.on_selected = on_selected
         self._answer = answer
         self.events: list[str] = []
@@ -823,9 +845,25 @@ class FakeSelect:
 
     @property
     def selected_indexes(self) -> list[int]:
-        """``selectedOptions``' indices. ``selectedIndex == -1`` selects none —
-        which is the state ``select.value = "nope"`` leaves behind (measured)."""
-        return [] if self.selected_index < 0 else [self.selected_index]
+        """``selectedOptions``' indices."""
+        return list(self.selected)
+
+    @property
+    def selected_index(self) -> int:
+        """``HTMLSelectElement.selectedIndex`` — the FIRST selected option, or
+        ``-1`` when none is, which is the state ``select.value = "nope"`` leaves
+        behind (measured)."""
+        return self.selected[0] if self.selected else -1
+
+    @selected_index.setter
+    def selected_index(self, index: int) -> None:
+        """The spec's setter: selects exactly that option, deselects every other.
+
+        On a multiple select holding ``[0, 2]``, assigning ``0`` leaves the
+        GETTER answering ``0`` while the set shrinks to ``[0]`` — which is why
+        "did anything move" can only be asked of the set.
+        """
+        self.selected = [] if index < 0 else [index]
 
     def _state(self) -> dict[str, Any]:
         return {
@@ -850,12 +888,15 @@ class FakeSelect:
                     "options": [],
                 }
             )
+        readable = (
+            self.options if self.read_cap is None else self.options[: self.read_cap]
+        )
         return json.dumps(
             dict(
                 self._state(),
                 tag=self.tag,
                 is_select=True,
-                options=[dict(o) for o in self.options],
+                options=[dict(o) for o in readable],
             )
         )
 
@@ -877,12 +918,13 @@ class FakeSelect:
         option = self.options[index] if 0 <= index < len(self.options) else None
         if option is None or option["value"] != want.get("value"):
             return json.dumps(dict(self._state(), applied=False, stale=True))
-        moved = self.selected_index != index
+        before = self.selected_indexes
         self.selected_index = index
-        if moved:
+        if before != self.selected_indexes:
             # Chrome fires nothing when the selection lands where it already
             # was — measured: a typeahead query that resolves to the currently
-            # selected option produces no ``change`` at all.
+            # selected option produces no ``change`` at all. The comparison is
+            # of the SET, never of ``selectedIndex``: see that setter.
             self.events.extend(("input", "change"))
             if self.on_selected is not None:
                 self.on_selected(self)
