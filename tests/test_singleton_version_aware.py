@@ -613,13 +613,33 @@ class TestStaleBackendEvictionEndToEnd:
         import sys
         import time
 
+        from release_gate_harness import _isolated_env
+
         monkeypatch.setattr(singleton, "STATE_DIR", tmp_path)
         monkeypatch.setattr(singleton, "PORT_FILE", tmp_path / "server.port")
         monkeypatch.setattr(singleton, "SERVER_STATE_FILE", tmp_path / "server.json")
 
         port = _free_port()
-        env = dict(os.environ)
-        env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(tmp_path / "sessions")
+        # F-885b: the spawned backend is a SEPARATE process, so the STATE_DIR
+        # monkeypatches above (which only affect THIS test process's own
+        # singleton calls below) never reach it — only HOME/USERPROFILE do.
+        # `env = dict(os.environ)` plus a bare STEALTH_MCP_BROWSER_SESSION_ROOT
+        # left the child's own HOME unredirected, so its
+        # `bootstrap_backend_process_logging()` wrote straight into the
+        # developer's real ~/.stealth-mcp/logs (and then pruned it). Same
+        # isolated-env idiom `test_singleton_fast_handshake.py` uses.
+        home_dir = tmp_path / "child-home"
+        session_root = tmp_path / "sessions"
+        log_dir = tmp_path / "logs"
+        clone_dir = tmp_path / "clone-output"
+        for directory in (home_dir, session_root, log_dir, clone_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+        env = _isolated_env(
+            home_dir=home_dir,
+            session_root=session_root,
+            log_dir=log_dir,
+            clone_dir=clone_dir,
+        )
         env["STEALTH_BROWSER_DEBUG"] = "false"
         backend = subprocess.Popen(
             [

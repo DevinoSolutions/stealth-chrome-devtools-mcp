@@ -95,6 +95,40 @@ New real-Chrome coverage: `tests/test_e2e_navigation_truthfulness.py`
 against local fixture routes, with the page's own sentinel and the fixture
 server's request ledger as oracles independent of the tool under test.
 
+### Fixed — F-885b: two more tests wrongly cleared by F-885's sweep, plus the retention consequence
+
+An independent reviewer of F-885 found two sites its §4 sweep had wrongly
+cleared, both the same unisolated-subprocess shape: `tests/test_tool_registry.py::
+TestCountTripwire::test_list_sections_printed_total_matches_registry` spawned
+`python -m stealth_chrome_devtools_mcp --transport http --list-sections` with
+no `env=` override at all, on the theory that `--list-sections` "exits before
+serving" — it does, but `embedded/server.py`'s `__main__` calls
+`bootstrap_backend_process_logging()` as its first statement, six lines before
+that branch, so the process still writes a "backend process starting" line
+and a `-fault.log` into the real `~/.stealth-mcp/logs/`. And
+`tests/test_singleton_version_aware.py::TestStaleBackendEvictionEndToEnd::
+test_clear_stale_backend_terminates_real_backend` spawned a real
+`--transport http` backend with `env = dict(os.environ)` plus only
+`STEALTH_MCP_BROWSER_SESSION_ROOT` — byte-for-byte the pattern F-885 replaced
+elsewhere, missed here because the file's `isolated_state` fixture (which this
+one test does not use) made the whole file look covered. Both fixed with the
+same `release_gate_harness._isolated_env`-based redirect.
+
+The reviewer also identified that the class is worse than log pollution:
+every `configure_logging()` call ends by calling `prune_old_logs()`, which
+unlinks every `*.log*` file in the resolved log dir beyond the newest 50 or
+older than 7 days — so an unisolated test subprocess applies the product's own
+retention policy to the developer's real backend/proxy logs and deletes the
+oldest of it. Measured directly: running the two unpatched tests against the
+real `~/.stealth-mcp/logs/` (294 files beforehand) left it at 295, not 298 —
+`prune_old_logs` had already reaped older real entries to make room for the
+four new files the unpatched subprocesses wrote. Running the fixed tests left
+the directory's file set byte-identical.
+
+A repo-wide re-sweep of `tests/` for the same shape (any spawn of product code
+with an env that does not redirect HOME/USERPROFILE or `STEALTH_MCP_LOG_DIR`)
+found no further instances. See §6 of the finding doc for the full writeup.
+
 ## 2.1.8
 
 ### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)

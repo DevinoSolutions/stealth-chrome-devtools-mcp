@@ -150,12 +150,36 @@ class TestCountTripwire:
         assert section_sum == self.EXPECTED_TOOL_COUNT
         assert f"with {section_sum} tools" in server.build_arg_parser().description
 
-    def test_list_sections_printed_total_matches_registry(self):
+    def test_list_sections_printed_total_matches_registry(self, tmp_path):
         """F-108: `--list-sections` prints the registry-derived total (and
         per-section counts), so a documented count can't silently diverge from
         the real tool surface."""
         import subprocess
         import sys as _sys
+
+        from release_gate_harness import _isolated_env
+
+        # F-885b: `embedded/server.py`'s `__main__` calls
+        # `bootstrap_backend_process_logging()` as its FIRST statement, six
+        # lines before the `--list-sections` branch, so this spawn writes a
+        # "backend process starting" line and a `-fault.log`, then PRUNES
+        # `~/.stealth-mcp/logs/` (every `configure_logging` call ends with
+        # `prune_old_logs`) — all against the developer's real HOME, with no
+        # `env=` override at all. Same isolated-env idiom
+        # `test_singleton_fast_handshake.py`'s `_isolated_subprocess_env`
+        # uses for a subprocess pytest cannot monkeypatch.
+        home_dir = tmp_path / "home"
+        session_root = tmp_path / "sessions"
+        log_dir = tmp_path / "logs"
+        clone_dir = tmp_path / "clone-output"
+        for directory in (home_dir, session_root, log_dir, clone_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+        env = _isolated_env(
+            home_dir=home_dir,
+            session_root=session_root,
+            log_dir=log_dir,
+            clone_dir=clone_dir,
+        )
 
         section_sum = sum(len(v) for v in server.SECTION_TOOLS.values())
         proc = subprocess.run(
@@ -170,6 +194,7 @@ class TestCountTripwire:
             capture_output=True,
             text=True,
             timeout=90,
+            env=env,
         )
         assert proc.returncode == 0, proc.stderr
         assert f"Total: {section_sum} tools" in proc.stdout
