@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### Fixed — a cold start no longer closes another session's browsers (F-886)
+
+**The two symptoms operators report — "my browsers randomly closed" and "the MCP
+server disconnected mid-session" — were one cause.** A stdio proxy starting up
+next to a backend it would not adopt terminated it, and the decision consulted
+only IDENTITY: `backend_registry.fingerprint_mismatch` answers "these two source
+digests differ", never "that one is busy". Two clients running the same released
+version off different source bytes — a `uvx @latest` session beside a `uv tool`
+install, an editable checkout beside either — each read the other as stale, and
+whichever started second killed the one already working.
+
+The browser did NOT die with its backend. Measured at 0.25 s resolution: the
+incumbent backend was terminated at t+9.11 s and its browser was still running
+4.43 s later, until the REPLACEMENT's orphan recovery reaped it
+(`process_cleanup.recovery: Killed 1 orphaned browser processes`) — an owner we
+had just killed ourselves is indistinguishable from one that crashed last week.
+Meanwhile the surviving proxy never learned: both of its death witnesses are
+PORT-scoped and the replacement binds the same port, so the watchdog's strikes
+never reached three and the per-request bridge never broke. Its later calls
+answered `{"code": 32600, "message": "Session terminated"}` with no condemnation,
+no heal and no teardown in its log.
+
+**The rule, new module `embedded/backend_eviction.py`:** a backend that is one of
+ours, running, of an identity we would not adopt, and still owning at least one
+live browser is PROTECTED — never terminated, never bound over. The arriving
+client spawns its own on a fresh port and both sessions keep their browsers.
+`singleton` asks it at the bind site (`_select_backend_port`) and again at the
+kill site (`_clear_stale_backend`). An IDLE stale backend is evicted exactly as
+before, so the edit-source-get-a-fresh-backend flow (issue #14) is unchanged in
+the case it actually happens in; `stop` and `restart` are deliberately ungated,
+and our own wedged backend is still replaceable.
+
+`server.json` is now **schema v3** — `backends` is a LIST, so one display context
+can hold one backend per identity. v2 (every 2.0.4-2.1.8 record, key still
+authoritative for the display context) and v1 still read, so an upgrade adopts
+the running backend rather than evicting it. `record_backend` supersedes by port
+and by (display context, identity), so our own respawn still replaces our own
+entry and nothing accumulates. `forget_backend` is deleted — `forget_entries` was
+already the entry-precise sibling, and `stop_backend` now forgets the one entry
+it stopped, so a sibling identity survives a `stop`.
+
+Measured on the real fleet (`tests/test_e2e_lifecycle_resilience.py`, `S5`):
+before, 7 of 7 runs evicted a backend, killed the loser's browser and left it
+answering `Session terminated`; after, zero eviction waves, zero lifecycle
+incidents, both browsers alive and both sessions served. The `xfail(strict)` on
+`S5b` is removed. Full write-up:
+`audit/stage2/finding_F886_eviction_kills_sibling_browsers.md`.
+
 ### Tests — lifecycle resilience E2E (disconnects, browsers closing)
 
 `tests/test_e2e_lifecycle_resilience.py` — eight nodes that drive a REAL fleet (the
@@ -41,8 +89,12 @@ three-proxy 60 s soak of navigate/scroll/type/screenshot against the new
 fingerprints differ, sharing one state dir.
 
 **One finding, pinned as `xfail(strict=True)` and not fixed here: a
-source-fingerprint eviction CLOSES ANOTHER SESSION'S BROWSER, silently.** Measured
-six times with no exception. The evicting proxy's cold-start lock calls
+source-fingerprint eviction CLOSES ANOTHER SESSION'S BROWSER, silently.**
+(Filed as F-886 and FIXED by the entry above, in the same Unreleased block: the
+`xfail` is gone, both S5 nodes assert, and the unisolated "which of two
+mechanisms" below was settled — it is the replacement's orphan recovery, 4.43 s
+after the kill.) Measured six times with no exception. The evicting proxy's
+cold-start lock calls
 `singleton._clear_stale_backend` → `_terminate_backend` on the running backend, and
 afterwards the browser that backend owned is gone (measured on the pid captured at
 spawn; which of the two candidate mechanisms kills it — dying with the terminated
@@ -67,6 +119,8 @@ fleet ends on exactly one live recorded backend, asserted by a sibling node whos
 fixture first proves with the product's own `_source_fingerprint` that the two sides
 really differ — but only because the loser never notices, not because any rule makes
 a ping-pong impossible. Two proposed universal rules are in `CONTRIBUTING.md`.
+(Superseded by F-886 above, in this same block: the convergence node now asserts ZERO
+waves and TWO live recorded backends, one per identity, and the `xfail` is gone.)
 
 `tests/release_gate_harness.py`'s `_pick_free_port` no longer hands an isolated
 workspace whatever loopback port the OS assigned: it refuses the product's default

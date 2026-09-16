@@ -96,6 +96,7 @@ from e2e_helpers import CAN_RUN
 from release_gate_harness import (
     RawStdioWire,
     _backend_pid_from_state,
+    _backend_pids_from_state,
     _pid_running,
     gate_work_dir,
     gate_workspace,
@@ -173,6 +174,11 @@ LIFECYCLE_INCIDENTS: dict[str, tuple[str, ...]] = {
 
 # NOT an incident: F-820 exists precisely so a missed probe is not a verdict.
 STRIKE_MARKER = "probe failed"
+# NOT an incident either: F-886's bind-site line, written by the proxy that
+# found another session's backend still serving browsers and spawned its own
+# beside it instead of evicting it. S5 asserts its PRESENCE — it is the proof
+# the fix path was taken, rather than the fleet converging by some accident.
+STEP_ASIDE_MARKER = "spawning ours beside it"
 
 
 async def test_lifecycle_incident_patterns_match_the_product_strings() -> None:
@@ -200,6 +206,7 @@ async def test_lifecycle_incident_patterns_match_the_product_strings() -> None:
     watchdog = (src / "embedded" / "backend_watchdog.py").read_text(encoding="utf-8")
     selfheal = (src / "embedded" / "proxy_selfheal.py").read_text(encoding="utf-8")
     singleton = (src / "embedded" / "singleton.py").read_text(encoding="utf-8")
+    eviction = (src / "embedded" / "backend_eviction.py").read_text(encoding="utf-8")
 
     homes = {
         "condemned:watchdog": watchdog,
@@ -218,6 +225,7 @@ async def test_lifecycle_incident_patterns_match_the_product_strings() -> None:
                 f"check"
             )
     assert STRIKE_MARKER in watchdog
+    assert STEP_ASIDE_MARKER in eviction
 
 
 # ── The idle window, computed from the product's own constants ───────────────
@@ -1324,6 +1332,15 @@ async def _mixed_version_waves(launcher, space, variant_root: Path) -> dict:
         # read BEFORE the workspace tears its own backend down: convergence
         # means exactly one of them is.
         "backends_alive": {pid: _process_alive(pid) for pid in pids},
+        # EVERY backend the record names at the end, not just the one the
+        # timeline followed (F-886). The timeline reads the FIRST entry, which
+        # is the incumbent; the arriving proxy's own backend is a SECOND entry
+        # under the same display context, and "both are recorded and both are
+        # running" is the post-fix invariant the timeline alone cannot see.
+        "recorded_at_end": {
+            pid: _process_alive(pid)
+            for pid in _backend_pids_from_state(space["home_dir"])
+        },
         "instances": instances,
         # Every browser this node spawned, by the pid it had AT SPAWN — so a
         # browser killed with its evicted backend is reported as dead rather
@@ -1375,7 +1392,11 @@ async def mixed_fleet(launcher, tmp_path_factory):
             report = await _mixed_version_waves(launcher, mixed_space, variant_root)
             report["elapsed"] = time.monotonic() - started
             report["fingerprints"] = fingerprints
-            report["incidents"] = _incidents(_lines_since(mixed_space, offsets))
+            lines = _lines_since(mixed_space, offsets)
+            report["incidents"] = _incidents(lines)
+            report["stepped_aside"] = sum(
+                1 for _, line in lines if STEP_ASIDE_MARKER in line
+            )
             report["proxy_warnings"] = workspace_proxy_warnings(mixed_space)[-4000:]
     finally:
         if work_dir != fallback:
@@ -1383,6 +1404,7 @@ async def mixed_fleet(launcher, tmp_path_factory):
 
     print(
         f"\nS5: {report['elapsed']:.1f}s  waves={report['waves']}  "
+        f"stepped_aside={report['stepped_aside']}  "
         f"timeline={report['backend_pid_timeline']}  "
         f"backends_alive={report['backends_alive']}  "
         f"served_at_end={report['served_at_end']}  "
@@ -1401,162 +1423,114 @@ async def mixed_fleet(launcher, tmp_path_factory):
 async def test_s5_mixed_source_fingerprints_converge(mixed_fleet):
     """S5: two proxies whose SOURCE FINGERPRINT differs, one state dir, 60s.
 
-    The invariant the operator needs is CONVERGENCE, not agreement: whichever
-    backend wins, it must win ONCE. One eviction wave costs one cold start and
-    one set of browsers; an unbounded ping-pong costs a set of browsers every
-    few seconds for as long as both sessions live, which is the "browsers
-    randomly closing" report with a mixed-version fleet behind it.
+    Since F-886 the invariant is stronger than convergence: NOBODY IS EVICTED.
+    The second proxy finds a backend it would not adopt, sees that it still owns
+    a live browser, and spawns its own on a fresh port beside it — the
+    ``STEP_ASIDE_MARKER`` line — so the recorded backend never changes hands,
+    both sessions keep answering, and the log carries no lifecycle incident at
+    all. ``server.json`` (schema v3) holds both backends under the one display
+    context, which is what lets a THIRD proxy of either identity adopt its own
+    rather than spawn a fourth.
 
-    Its own workspace, deliberately: this node churns backends by construction,
-    and doing that on the module's shared backend would make every earlier
-    node's teardown a consequence of this one.
+    Its own workspace, deliberately: this node churns identities by
+    construction, and doing that on the module's shared backend would make every
+    earlier node's teardown a consequence of this one.
 
-    WHAT WAS MEASURED (local Windows, 2.1.8, six runs). ONE wave every time,
-    then stable: the variant proxy's cold-start lock evicts the same-source
-    backend once (``backend stale (source changed), evicting``, the only
-    incident line in the whole run) and spawns its own; no second eviction
-    follows inside the window. Timelines, as seconds since the first proxy
-    started paired with the recorded backend pid: ``[(4.9, A), (11.0, B)]``,
-    ``[(4.8, A), (10.5, B)]``, ``[(4.8, A), (10.5, B)]``,
-    ``[(5.1, A), (10.7, B)]``, ``[(4.8, A), (10.6, B)]``,
-    ``[(7.6, A), (17.1, B)]``.
+    WHAT WAS MEASURED BEFORE THE FIX (local Windows, 2.1.8, seven runs — six at
+    the finding, one instrumented at 0.25s resolution): ONE wave every time. The
+    variant proxy's cold-start lock evicted the same-source backend
+    (``backend stale (source changed), evicting``, the only incident line in
+    the run); the evicted backend's browser outlived it by 4.43s and was then
+    reaped by the replacement's orphan recovery (``process_cleanup.recovery:
+    Killed 1 orphaned browser processes``); the loser's later calls answered
+    ``Session terminated`` (5 of 6) with no condemnation, no heal and no
+    teardown in its log, because both death witnesses are PORT-scoped and the
+    replacement bound the same port. Timelines, as seconds since the first
+    proxy started paired with the recorded backend pid: ``[(4.9, A), (11.0,
+    B)]``, ``[(4.8, A), (10.5, B)]``, ``[(4.8, A), (10.5, B)]``, ``[(5.1, A),
+    (10.7, B)]``, ``[(4.8, A), (10.6, B)]``, ``[(7.6, A), (17.1, B)]``,
+    ``[(7.4, A), (16.3, B)]``.
 
-    It does NOT ping-pong, and the reason is not the reassuring one: the loser
-    never notices. The replacement binds the SAME port, so the victim proxy's
-    watchdog probe succeeds against it and its bridge never breaks — the loser
-    therefore never condemns, never heals, and never evicts back. What it does
-    from the CLIENT's side varied across runs (5 of 6: every later call answers
-    ``Session terminated``; 1 of 6: it kept answering normally), so this node
-    asserts only that SOMEBODY is still served. What did not vary at all is that
-    the evicted backend's BROWSER died, and that is the sibling node below —
-    where the actual defect lives.
+    WHAT IS MEASURED NOW. Zero waves, every run: the arriving proxy finds a
+    backend it would not adopt, sees that it still owns a live browser, and
+    spawns its own on a fresh port beside it — the ``STEP_ASIDE_MARKER`` line —
+    so the recorded incumbent never changes hands, both sessions keep answering,
+    and the whole run writes no lifecycle incident at all. ``server.json``
+    (schema v3) ends holding BOTH backends under the one display context, both
+    running, which is what lets a third proxy of either identity adopt rather
+    than spawn a fourth. Local Windows: ``S5`` 61.4s, both S5 nodes plus the
+    vocabulary pin 99.3s; the whole module 420.0s, 8 passed, 0 xfail.
 
-    WHAT IS STILL WRONG, and is deliberately NOT what this node asserts. The
-    eviction rule has no ORDER: ``backend_registry.fingerprint_mismatch``
-    answers "these two digests differ", never "mine is newer", and
-    ``singleton._start_backend_holding_lock`` evicts on that alone (via
-    ``_clear_stale_backend`` -> ``_terminate_backend``). Convergence here is a
-    consequence of which side happens to notice first, not of a rule that makes
-    ping-pong impossible — so this is a REGRESSION ORACLE for the shape, never a
-    proof that the shape cannot recur under a different arrival order or a
-    longer-lived fleet. The universal rule that would make it impossible is
-    written up in CONTRIBUTING.md: give the record an order (installed version,
-    then a monotonic stamp written at record time) and let only a strictly-newer
-    client evict; an older or equal-but-different client adopts the running
-    backend, or exits naming both digests and the upgrade that reconciles them.
-    Product code is deliberately NOT touched on this branch.
+    WHAT THIS NODE ASSERTS, and why each one. The two sides' fingerprints really
+    differ (proven by the product's own digest in the fixture — without it a
+    copy that failed to move the digest would run a same-source fleet and report
+    "no eviction, browsers alive", a pass about nothing). Zero waves. No
+    incident. At least one step-aside line, so a run that converged by some
+    OTHER means cannot read as proof of this fix. Both recorded backends alive
+    at the end — read through the harness's ``_backend_pids_from_state``, not
+    the timeline, because the timeline follows the FIRST entry and the arriving
+    proxy's backend is the second. Both sides had a browser, and both sides are
+    still served.
 
-    WHAT THIS NODE MEANS UNDER EITHER RULE. Its assertions are the ones that
-    hold today (one wave) AND under an adopt rule (zero waves): the fingerprints
-    the two sides run really differ (proven by the product's own digest in the
-    fixture), at most one wave, and the fleet ENDS on exactly one live recorded
-    backend — every earlier recorded pid gone, the last one running. The
-    stronger property "a newer install must take effect over an older running
-    backend" is deliberately NOT here: it is the identity gate's own contract
-    (``test_singleton_version_aware``) and the fix agent's to pin alongside the
-    rule it chooses, because this fleet has no "newer" side — only a
-    different one.
+    The stronger property "a newer install must take effect over an older
+    running backend" is deliberately NOT here: it is the identity gate's own
+    contract (``test_singleton_version_aware``), and this fleet has no "newer"
+    side — only a different one. The rule lives in
+    ``embedded/backend_eviction.py``; the two sites that ask it are
+    ``singleton._select_backend_port`` (bind) and
+    ``singleton._clear_stale_backend`` (kill); the write-up is
+    ``audit/stage2/finding_F886_eviction_kills_sibling_browsers.md``.
     """
     report = mixed_fleet
     assert report["fingerprints"]["same"] != report["fingerprints"]["variant"]
-    assert report["waves"] <= 1, (
-        f"the fleet did not converge: {report['waves']} eviction wave(s) in "
+    assert report["waves"] == 0, (
+        f"a backend was evicted: {report['waves']} wave(s) in "
         f"{MIXED_VERSION_SECONDS:.0f}s (timeline "
         f"{report['backend_pid_timeline']}); each wave killed a backend's "
         f"browsers, which is the operator's 'all my browsers closed' report"
     )
-    alive = [pid for pid, running in report["backends_alive"].items() if running]
-    assert alive == report["backend_pids"][-1:], (
-        f"the fleet must end on exactly ONE live recorded backend, the last one "
-        f"recorded; alive={alive} timeline={report['backend_pid_timeline']}"
+    assert not report["incidents"], (
+        f"lifecycle incident(s) during a mixed-fingerprint fleet: "
+        f"{[(k, line) for k, _, line in report['incidents']]}"
+    )
+    assert report["stepped_aside"] >= 1, (
+        "the second proxy did not take the F-886 step-aside path — no "
+        f"'{STEP_ASIDE_MARKER}' line in any proxy log; the fleet converged by "
+        "some other means and this node is no longer proving the fix.\n"
+        f"{report['proxy_warnings']}"
+    )
+    assert sorted(report["recorded_at_end"].values()) == [True, True], (
+        f"the fleet must end on TWO live recorded backends, one per source "
+        f"identity; recorded_at_end={report['recorded_at_end']} "
+        f"timeline={report['backend_pid_timeline']}"
     )
     # The fleet shape itself, so a run where one side never got a browser up
     # turns THIS node red rather than quietly weakening its sibling.
     assert set(report["browsers_alive"]) == {"same", "variant"}, (
-        f"both sides must have had a browser before the eviction; got "
-        f"{report['browsers_alive']} (instances {report['instances']})"
+        f"both sides must have had a browser; got {report['browsers_alive']} "
+        f"(instances {report['instances']})"
     )
-    # At least one session must still be served at the end. Which one, and
-    # whether the loser also still answers, is NOT asserted: it varied across
-    # runs (5 of 6 left the loser answering 'Session terminated', 1 left it
-    # answering normally), and pinning a coin-flip is how a node starts flaking.
-    # What did NOT vary is the loser's BROWSER, which is the sibling node.
-    survivors = [
-        name for name, state in report["served_at_end"].items() if state == "ok"
-    ]
-    assert survivors, (
-        f"no session survived the mixed-fingerprint fleet at all: "
-        f"{report['served_at_end']}"
+    assert report["served_at_end"] == {"same": "ok", "variant": "ok"}, (
+        f"a session stopped being served: {report['served_at_end']}"
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MEASURED DEFECT (2.1.8) — a source-fingerprint eviction CLOSES ANOTHER "
-        "SESSION'S BROWSER. Six runs, no exception: the evicting proxy's "
-        "cold-start lock calls singleton._clear_stale_backend -> "
-        "_terminate_backend on the running backend, and afterwards the browser "
-        "that backend owned is gone (measured on the pid captured at spawn). "
-        "Which of the two candidate mechanisms does the killing was NOT "
-        "isolated: the browser dying with the terminated backend, or the "
-        "replacement's orphan recovery reaping it as unowned "
-        "(browser_pid_registry stamps the BACKEND as owner). "
-        "The other session never asked for that and is never told: its proxy "
-        "log carries no condemnation, no heal and no teardown — only transient "
-        "strikes that reset themselves (usually one 'probe failed 1/3'; once "
-        "'2/3'). The proxy's FAST death witness is PORT-only and the "
-        "replacement binds the SAME port: backend_watchdog.watch_liveness "
-        "probes with singleton._backend_http_ready, which asks the port and "
-        "not the identity, so the replacement answers it, the three strikes "
-        "needed to open the confirmation phase never accumulate, and the "
-        "confirmation that IS identity-scoped (_same_identity_backend_ready) "
-        "is never reached; the streamable-HTTP bridge is per-request, so "
-        "nothing 'breaks' for _confirm_bridge_verdict either. What actually "
-        "died is the MCP SESSION, and nothing watches that — so "
-        "proxy_selfheal's entire recovery is unreachable on the most common "
-        "way a backend goes away. "
-        "The client-visible half varies (5 of 6 runs: every later call answers "
-        "{'code': 32600, 'message': 'Session terminated'}; 1 of 6: the session "
-        "kept answering normally over a backend that no longer had its "
-        "browser), which is why THIS node asserts the half that did not vary. "
-        "This is 'my browsers randomly closed' and 'the MCP server disconnected "
-        "mid-session', from one cause. See CONTRIBUTING.md for the proposed "
-        "universal rule."
-    ),
-)
 async def test_s5_an_eviction_must_not_close_another_sessions_browser(mixed_fleet):
-    """S5b: no browser spawned before a mixed-fingerprint eviction may die.
+    """S5b: no browser spawned before a mixed-fingerprint fleet forms may die.
 
     This is the user's actual requirement, stated as an invariant: a browser
     belongs to the session that asked for it, and no other session's cold start
-    may take it away. It currently does not hold — the evicted backend's browser
-    is killed on every run — so the node is a strict ``xfail`` carrying the
-    measurement, and it flips to a pass the day a fix lands.
+    may take it away. It was a strict ``xfail`` at 2.1.8 — the evicted backend's
+    browser was killed on every run — and F-886 flipped it: the arriving
+    proxy now refuses to evict a backend that still owns live browsers and
+    spawns beside it instead.
 
     Deliberately asserted on the browser pid captured AT SPAWN rather than on
-    the registry, because the winning backend rewrites ``browser_pids.json`` and
-    an absent entry would otherwise read as "nothing to check". Deliberately NOT
-    asserted on whether the loser's session still answers: that varied across
-    runs (see the ``xfail`` reason) and pinning a coin-flip is how a node starts
-    flaking. The ``served_at_end`` map is printed on every run so the
-    client-visible half stays visible without being asserted.
+    the registry, because a winning backend used to rewrite ``browser_pids.json``
+    and an absent entry would otherwise read as "nothing to check".
 
-    Shares :func:`mixed_fleet` with the convergence node, so this finding costs
-    no extra run.
-
-    PROPOSED UNIVERSAL RULES (for the fix agent; not applied on this branch).
-    Two, independent, and both are in CONTRIBUTING.md. (1) Make the proxy's
-    liveness question SESSION-scoped as well as port-scoped: the backend already
-    hands each proxy an ``mcp-session-id``, so a proxy that gets an
-    invalid-session answer for its OWN id knows its backend is gone even though
-    the port answers — feed that into ``watch_liveness`` and the existing heal
-    path fires, so the loser re-bridges instead of being bricked. (2) Give the
-    backend record an ORDER (installed version, then a monotonic stamp written
-    at record time) and let only a strictly-newer client evict;
-    ``backend_registry.fingerprint_mismatch`` answers "these digests differ",
-    never "mine is newer", so nothing today makes the eviction — or a ping-pong
-    of them — impossible.
+    Shares :func:`mixed_fleet` with the convergence node, so this costs no
+    extra run.
     """
     report = mixed_fleet
     assert all(report["browsers_alive"].values()), (

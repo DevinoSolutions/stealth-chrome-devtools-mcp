@@ -25,6 +25,7 @@ from pathlib import Path
 import psutil
 
 from stealth_chrome_devtools_mcp.embedded import (
+    backend_eviction,
     backend_liveness,
     backend_registry,
     backend_watchdog,
@@ -186,6 +187,22 @@ def _probe_backend_status() -> tuple[str, int | None]:
     )
 
 
+def _identity_matches(entry: backend_registry.BackendEntry | None) -> bool:
+    """True iff ``entry`` records OUR version AND a source digest that does not
+    CONTRADICT ours — the identity half of the reuse gate, with no probe.
+
+    Extracted (F-886) because a second reader appeared: the eviction guard has
+    to know whether the backend it is about to terminate is a STRANGER's, and
+    re-spelling "version equal, fingerprint not mismatched" there would be a
+    second answer to the question :func:`_same_identity_backend_ready` opens
+    with. The two now share this one, so #14's version rule and F-829's
+    three-state digest rule cannot drift apart.
+    """
+    return (entry or {}).get("version") == _server_version() and (
+        not backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
+    )
+
+
 def _same_identity_backend_ready(port: int, patience: float | None = None) -> bool:
     """True iff ``server.json`` records OUR identity on ``port`` — the version
     matches and the fingerprint does not CONTRADICT it (issue #14/F-206 never
@@ -212,9 +229,7 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     # The entry recorded ON THIS PORT, not merely the first: under F-808's
     # per-context record another desktop's backend says nothing about `port`.
     entry = backend_registry.backend_on_port(_read_server_state(), port) or {}
-    if entry.get("version") != _server_version():
-        return False
-    if backend_registry.fingerprint_mismatch(entry, _source_fingerprint()):
+    if not _identity_matches(entry):
         return False
     patience = REUSE_PATIENCE_SECONDS if patience is None else patience
     # Busy backends answer slowly, so the patient path probes with the wider
@@ -268,77 +283,58 @@ def _is_our_backend(pid) -> bool:
     return "stealth_chrome_devtools_mcp" in joined and "--transport" in joined
 
 
+# ── Eviction: the four bindings of `backend_eviction` ────────────────────────
+# The rule ("a backend still serving live browsers is never evicted", F-886) and
+# the act (terminate, and the port-release wait) both live in that leaf, which
+# is where the measurement and the argument are. What stays here is the wiring
+# that knows which record, which state dir and which probes are OURS — and it
+# stays as four WRAPPERS on purpose, not as four re-exported names: the suite
+# patches `_terminate_backend` / `_backend_pid_on_port` / `_clear_stale_backend`
+# on THIS module, and a wrapper resolves its collaborators at CALL time, so such
+# a patch still steers everything downstream of it.
 def _backend_pid_on_port(port: int) -> int | None:
-    """Return the pid of OUR backend listening on ``port``, or None.
-
-    A foreign process holding the port is deliberately ignored (never returned
-    for termination).
-    """
-    try:
-        conns = psutil.net_connections(kind="inet")
-    except (psutil.Error, OSError):
-        return None
-    for conn in conns:
-        laddr = getattr(conn, "laddr", None)
-        if (
-            laddr
-            and getattr(laddr, "port", None) == port
-            and conn.status == psutil.CONN_LISTEN
-            and conn.pid
-            and _is_our_backend(conn.pid)
-        ):
-            return conn.pid
-    return None
+    """The pid of OUR backend listening on ``port``, or None."""
+    return backend_eviction.pid_on_port(port, is_ours=_is_our_backend)
 
 
 def _terminate_backend(port: int) -> bool:
-    """Terminate OUR backend associated with ``port``, if one is identifiable.
+    """Terminate OUR backend on ``port``; True iff one was found and killed."""
+    entry = backend_registry.backend_on_port(_read_server_state(), port)
+    return backend_eviction.terminate(
+        port,
+        pid_on_port=_backend_pid_on_port,
+        recorded_pid=entry.get("pid") if entry else None,
+        is_ours=_is_our_backend,
+        is_healthy=_server_is_healthy,
+    )
 
-    Resolves the pid by open port first, then falls back to the recorded pid
-    in ``server.json`` (guarded by ``_is_our_backend`` either way) — a pid
-    that is not positively identified as our backend (e.g. a recycled pid now
-    running an unrelated process) is never touched. Best-effort and bounded —
-    never raises. Returns whether a backend of ours was found and terminated.
+
+def _protecting_browsers(port: int) -> list[int]:
+    """The live browsers that make the backend on ``port`` UNEVICTABLE (F-886),
+    empty when it may be terminated and bound over."""
+    return backend_eviction.protected(
+        backend_registry.backend_on_port(_read_server_state(), port),
+        state_dir=STATE_DIR,
+        identity_matches=_identity_matches,
+        is_ours=_is_our_backend,
+        is_running=psutil.pid_exists,
+    )
+
+
+def _clear_stale_backend(port: int) -> list[int]:
+    """Free ``port`` for a fresh backend of ours; the browsers that STOPPED it,
+    empty when the caller may spawn (F-886).
+
+    The reuse check is asked of the PORT, not of `_find_running_server`, which
+    under F-808's adoption order may name another display context's backend, on
+    another port.
     """
-    pid = _backend_pid_on_port(port)
-    if pid is None:
-        entry = backend_registry.backend_on_port(_read_server_state(), port)
-        recorded = entry.get("pid") if entry else None
-        if _is_our_backend(recorded):
-            pid = recorded
-    if pid is None:
-        return False
-
-    try:
-        proc = psutil.Process(pid)
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except psutil.TimeoutExpired:
-            proc.kill()
-    except (psutil.Error, OSError):
-        pass
-
-    # Give the OS a moment to release the port so a fresh backend can bind.
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        if not _server_is_healthy(port):
-            return True
-        time.sleep(0.1)
-    return True
-
-
-def _clear_stale_backend(port: int) -> None:
-    """Terminate a stale/legacy backend of ours squatting ``port`` so a
-    correctly-versioned backend can bind on it.
-
-    No-op when THIS port already holds a reusable same-identity backend —
-    asked of the port, not of `_find_running_server`, which under F-808's
-    adoption order may name another display context's backend, on another port.
-    """
-    if _same_identity_backend_ready(port, patience=0.0):
-        return  # a reusable same-version backend is already there
-    _terminate_backend(port)
+    return backend_eviction.clear_stale(
+        port,
+        reusable=lambda: _same_identity_backend_ready(port, patience=0.0),
+        protecting=lambda: _protecting_browsers(port),
+        terminate_backend=lambda: _terminate_backend(port),
+    )
 
 
 def _backend_interpreter() -> str:
@@ -569,7 +565,13 @@ def _start_backend_holding_lock(port: int) -> None:
             # holding the port; evict it under the lock so our fresh, correctly
             # versioned backend can bind — otherwise the proxy would fall back to
             # the old backend and the upgrade would silently not take effect.
-            _clear_stale_backend(port)
+            # F-886: unless it is a stranger's backend still serving live
+            # browsers, which is never evicted. Selection normally hands us a
+            # free port in that case; if the record changed under us since, the
+            # honest answer is to spawn nothing rather than kill it, and the
+            # next proxy start re-selects.
+            if _clear_stale_backend(port):
+                return
             _start_server_process(port)
             _wait_for_server(port)
             # Keep the lock past socket-bind, until the backend answers a real
@@ -614,9 +616,10 @@ def stop_backend() -> tuple[str, int | None]:
         # context undiscoverable, and the next proxy start would spawn a second
         # one beside it. Clear the file only once nothing is left recorded, so
         # the single-backend case still ends with no record on disk at all.
-        ctx = entry.get("display_context") if entry else None
-        if ctx is not None:
-            backend_registry.forget_backend(SERVER_STATE_FILE, str(ctx))
+        # F-886: by ENTRY, not by display context — a context can now hold two
+        # clients' backends, and `stop` stopped exactly one port.
+        if entry is not None:
+            backend_registry.forget_entries(SERVER_STATE_FILE, [entry])
         if not backend_registry.read_backends(SERVER_STATE_FILE):
             _clear_server_state()
         if terminated:
@@ -688,6 +691,13 @@ def _select_backend_port(preferred: int = DEFAULT_PORT) -> int:
     would supersede-evict (F-808), or a target the OS FORBIDS us outright
     (F-509's field residual) — each forces an OS-assigned fallback via the one
     picker, ``proxy_forwarder.bindable_port``: recoverable, not a 120s outage.
+
+    F-886 adds one more such target: a port held by a STRANGER's backend that
+    still owns live browsers, which may never be evicted. The clause is
+    identity-gated by construction, because ``_protecting_browsers`` is — a
+    backend of our OWN identity is never protected, so ``restart_backend``,
+    which seeds selection and then terminates exactly the port it gets back,
+    still lands on and replaces its own backend instead of walking away.
     """
     # lazy; no module-top cycle
     from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import bindable_port
@@ -696,7 +706,12 @@ def _select_backend_port(preferred: int = DEFAULT_PORT) -> int:
     recorded = backend_registry.port_for_context(SERVER_STATE_FILE, own)
     target = preferred if recorded is None else recorded
     taken = backend_registry.port_conflict(SERVER_STATE_FILE, target, own)
-    return bindable_port(target, force_new=taken or _port_is_foreign_held(target))
+    return bindable_port(
+        target,
+        force_new=taken
+        or _port_is_foreign_held(target)
+        or backend_eviction.stepping_aside(target, _protecting_browsers(target)),
+    )
 
 
 def ensure_server_running(port: int = DEFAULT_PORT) -> int | None:

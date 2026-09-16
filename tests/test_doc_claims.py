@@ -167,7 +167,7 @@ class TestLoadBearingSymbols:
                 "SCHEMA_VERSION",
                 "read_backends",
                 "record_backend",
-                "forget_backend",
+                "forget_entries",
                 "clear_record",
                 "adoption_candidates",
                 "window_capable_first",
@@ -191,8 +191,16 @@ class TestLoadBearingSymbols:
             "embedded.browser_pid_registry": [
                 "OWNER_PID",
                 "OWNER_CREATE_TIME",
+                "RECORD_NAME",
                 "read_entries",
                 "update_entries",
+            ],
+            "embedded.backend_eviction": [
+                "pid_on_port",
+                "terminate",
+                "owned_browsers",
+                "protected",
+                "clear_stale",
             ],
             "embedded.tool_registry": ["SECTION_TOOLS", "ToolRegistry"],
             "embedded.tool_errors": [

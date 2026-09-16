@@ -587,9 +587,10 @@ def _proxy_warnings(*dirs: Path) -> str:
 def _backend_entries(home_dir: Path) -> list[dict[str, object]]:
     """Every backend entry ``<home_dir>/.stealth-mcp/server.json`` records.
 
-    THE one parse of the record in this harness. Reads BOTH schemas — the flat
-    v1 shape (one entry, the record itself) and F-808's v2
-    ``{"schema": 2, "backends": {ctx: entry}}`` — because this harness drives
+    THE one parse of the record in this harness. Reads ALL THREE schemas — the
+    flat v1 shape (one entry, the record itself), F-808's v2
+    ``{"schema": 2, "backends": {ctx: entry}}`` and F-886's v3
+    ``{"schema": 3, "backends": [entry, ...]}`` — because this harness drives
     the INSTALLED artifact as a black box and restates the contract rather than
     importing the package under test (the same reason ``REGISTRY_TOOL_COUNT``
     is a literal here). A missing, unreadable or malformed record is an empty
@@ -603,18 +604,43 @@ def _backend_entries(home_dir: Path) -> list[dict[str, object]]:
         return []
     if not isinstance(state, dict):
         return []
-    if isinstance(state.get("backends"), dict):
-        return [e for e in state["backends"].values() if isinstance(e, dict)]
-    return [state]
+    backends = state.get("backends")
+    # v2 keys the entries by display context; v3 (F-886) is a list, so one
+    # context can hold one backend per source IDENTITY. Both normalize to the
+    # same list of entries here, and v1 is the record itself.
+    if isinstance(backends, dict):
+        backends = list(backends.values())
+    if not isinstance(backends, list):
+        return [state]
+    return [e for e in backends if isinstance(e, dict)]
 
 
 def _backend_pid_from_state(home_dir: Path) -> int | None:
-    """The isolated backend's recorded pid. The isolated HOME holds exactly
-    one backend, so "some recorded entry" and "the one we spawned" are the
-    same thing."""
+    """The isolated backend's recorded pid — the FIRST entry's.
+
+    An isolated HOME holds one backend per IDENTITY; every gate node runs one
+    identity, so "some recorded entry" and "the one we spawned" are the same
+    thing. The one node that runs two (``test_e2e_lifecycle_resilience``'s S5)
+    reads the first as the incumbent it spawned first, which is exactly the pid
+    that must not change."""
     entries = _backend_entries(home_dir)
     pid = entries[0].get("pid") if entries else None
     return pid if isinstance(pid, int) else None
+
+
+def _backend_pids_from_state(home_dir: Path) -> list[int]:
+    """EVERY backend pid the record names, in recorded order — what teardown
+    consults (F-886).
+
+    A workspace that ran two source identities has two detached backends, and
+    terminating only the first would leak the second past the block that owns
+    it. The singular reader above stays, because every ASSERTION in the suite
+    is about THE backend a node ran on, which is the first."""
+    return [
+        pid
+        for entry in _backend_entries(home_dir)
+        if isinstance(pid := entry.get("pid"), int)
+    ]
 
 
 def _recorded_ports(home_dir: Path) -> frozenset[int]:
@@ -1773,9 +1799,12 @@ async def run_release_gate_journey(
         # The detached backend usually dies with the proxy (keep_alive=False);
         # terminate is the bounded backstop. The release claim is "no backend
         # process remains", not "we were the ones to kill it".
-        backend_pid = _backend_pid_from_state(home_dir)
-        if backend_pid is not None and _pid_running(backend_pid):
-            _terminate_process_tree(backend_pid, TERMINATE_TIMEOUT)
+        # EVERY recorded backend, not just the first (F-886): a workspace that
+        # ran two source identities has two detached backends, and this block
+        # promised to own all of them.
+        for backend_pid in _backend_pids_from_state(home_dir):
+            if _pid_running(backend_pid):
+                _terminate_process_tree(backend_pid, TERMINATE_TIMEOUT)
         # Ownership is decided by cmdline, not by descent: the integration cell
         # spawns Chrome in-process, so a foreign renderer or crashpad helper is
         # also a new descendant of this pytest process and must not be killed
@@ -1890,9 +1919,12 @@ def gate_workspace(
     try:
         yield space
     finally:
-        backend_pid = _backend_pid_from_state(home_dir)
-        if backend_pid is not None and _pid_running(backend_pid):
-            _terminate_process_tree(backend_pid, TERMINATE_TIMEOUT)
+        # EVERY recorded backend, not just the first (F-886): a workspace that
+        # ran two source identities has two detached backends, and this block
+        # promised to own all of them.
+        for backend_pid in _backend_pids_from_state(home_dir):
+            if _pid_running(backend_pid):
+                _terminate_process_tree(backend_pid, TERMINATE_TIMEOUT)
         # Ownership is decided by cmdline, not by descent: the integration cell
         # spawns Chrome in-process, so a foreign renderer or crashpad helper is
         # also a new descendant of this pytest process and must not be killed

@@ -242,47 +242,50 @@ the longest periodic period in the tree, computed from
 `Settings.browser_idle_timeout` still defaults to `0`. A new reaper with a longer
 period must be added to that derivation, never left implicit.
 
-**The one open defect this module pins (`xfail(strict=True)`): an eviction closes
-another session's browser, silently.** When a backend is replaced **on the same
-port** — the F-829 source-fingerprint eviction, and by extension `restart` — the
-cold-start lock calls `singleton._clear_stale_backend` → `_terminate_backend` on the
-running backend, and afterwards the browser that backend owned is gone — measured six
-times with no exception, on the pid captured at spawn. (Which of the two candidate
-mechanisms kills it was not isolated: dying with the terminated backend, or being
-reaped as unowned by the replacement's orphan recovery, since `browser_pid_registry`
-stamps the *backend* as owner.) The other
-session is never told: its log carries no condemnation, no heal and no teardown —
-only transient strikes that reset themselves (usually one `probe failed 1/3`; once
-`2/3`). The proxy's **fast** death witness is port-only: `backend_watchdog.watch_liveness`
-probes with `singleton._backend_http_ready`, which asks the port and not the identity,
-and the replacement binds the SAME port and answers it — so the three strikes that
-would open the confirmation phase never accumulate, and the confirmation that *is*
-identity-scoped (`_same_identity_backend_ready`) is never reached; the
-streamable-HTTP bridge is per-request, so nothing "breaks" for
-`_confirm_bridge_verdict` either. What actually died is the MCP **session**, and
-nothing watches that, which makes `proxy_selfheal`'s entire recovery unreachable on
-the most common way a backend goes away. The client-visible half *varies* (5 of 6 runs the
-loser answered `Session terminated` forever; 1 of 6 it kept answering over a backend
-that no longer had its browser), so the node asserts the half that did not vary — the
-browser — and prints the rest.
+**The rule that keeps a session's browsers alive (F-886).** When a backend was
+replaced **on the same port**, the browser that backend owned used to die. It was NOT
+killed with its backend: measured at 0.25 s resolution, it outlived the terminated
+backend by **4.43 s** and was then reaped by the REPLACEMENT's orphan recovery
+(`process_cleanup.recovery: Killed 1 orphaned browser processes`), because
+`browser_pid_registry` stamps the *backend* as owner and an owner we just killed is
+indistinguishable from one that crashed last week. The surviving session was never
+told either: both of the proxy's death witnesses are PORT-scoped and the replacement
+binds the same port, so `backend_watchdog.watch_liveness` kept getting an answer, the
+per-request bridge never "broke" for `_confirm_bridge_verdict`, and what actually died
+was the MCP **session**, which nothing watches.
 
-The proposed universal rule, for whoever fixes it: make the watchdog's per-tick check
-**session-scoped as well as port-scoped**. The backend already hands each proxy an
-`mcp-session-id`; a proxy that gets an invalid-session answer for its OWN id knows its
-backend is gone even though the port answers. Feed that into the existing
-`watch_liveness` verdict and the existing heal path fires, so an evicted session
-re-bridges instead of bricking. A second, independent rule removes the churn rather
-than the symptom: give the backend record an **order** (installed version, then a
-monotonic stamp written at record time) and let only a strictly-newer client evict —
-`backend_registry.fingerprint_mismatch` answers "these digests differ", never "mine is
-newer", so today nothing makes an eviction ping-pong impossible; an older or
-equal-but-different client should adopt the running backend, or exit naming both
-digests and the upgrade that reconciles them. The convergence node is written to
-hold under either rule (at most one wave; the fleet ends on exactly one live recorded
-backend); the stronger property "a newer install must take effect" is the identity
-gate's own contract (`test_singleton_version_aware`) and belongs beside whichever
-rule the fix chooses, not in this fleet, which has no "newer" side — only a
-different one.
+So `embedded/backend_eviction.py` is now **the one home for whether a backend may be
+terminated at all**, and its rule is: a backend that is one of ours, running, of an
+identity we would NOT adopt, and still owning at least one **live browser** is
+PROTECTED — never terminated, never bound over. The arriving client spawns its own on
+a fresh port and `server.json` (schema v3, a list) records both. `singleton` asks at
+the bind site (`_select_backend_port`) and again at the kill site
+(`_clear_stale_backend`).
+
+**If you touch eviction, these are the constraints.** An IDLE stale backend must stay
+evictable — that is the issue-#14 upgrade flow (edit source, get a fresh backend), and
+protecting every live backend would accumulate one per source edit with nothing in the
+tree able to reclaim it. A backend of OUR OWN identity is never protected, which is
+what keeps `restart` landing on and replacing its own wedged backend. `stop` and
+`restart` call `backend_eviction.terminate` directly and ungated, because an operator
+asking IS the authority the rule otherwise supplies. And an unreadable
+`browser_pids.json` must resolve toward EVICTING, because refusing on one would brick
+every cold start on the machine.
+
+**Still open, and now safe to do.** Make the proxy's liveness question
+**session-scoped as well as port-scoped**: the backend already hands each proxy an
+`mcp-session-id`, and a proxy that gets an invalid-session answer for its OWN id knows
+its backend is gone even though the port answers. Feed that into the existing
+`watch_liveness` verdict and the existing heal path fires, so a session evicted while
+holding NO browser re-bridges instead of bricking — the one residual F-886 leaves. It
+was *unsafe* before F-886 and is safe now: the heal calls `ensure_server_running`,
+whose cold start could previously evict the replacement and start an unbounded
+eviction war. What is deliberately NOT wanted is an **ordered** eviction (version,
+then a record-time stamp): with two clients at the same version and different source
+bytes — the measured case — the arriving one is always later, so the order permits
+exactly the eviction that does the harm, and where it does bite it still kills the
+older session's browsers. See
+`audit/stage2/finding_F886_eviction_kills_sibling_browsers.md` §3.
 
 **Isolated workspaces never bind a port the developer is using.** The harness's
 `_pick_free_port` refuses the product's default singleton port and every port the

@@ -18,18 +18,26 @@ Corollary: no function here may take a default path. This module's own
 ``SERVER_STATE_FILE`` names the real file; a default would bind it at def-time
 and bypass every caller's redirection. ``test_backend_registry.py`` pins this.
 
-Schema (plan_F808 Task 3). v2 keys the record by **display context**, so one
-machine can hold a headless backend and a desktop backend at once and discovery
-can pick the one that can actually show a window::
+Schema. v3 (F-886) is a LIST of entries, each carrying its own display
+context::
 
-    {"schema": 2, "backends": {"<display_context>": {port, version, pid,
-                                                     source_fingerprint,
-                                                     display_context}}}
+    {"schema": 3, "backends": [{port, version, pid, source_fingerprint,
+                                display_context}, ...]}
 
-A v1 record — the flat ``{port, version, pid, source_fingerprint}`` every
-release up to 2.0.3 wrote — still reads, as ONE backend classified
-``UNVERIFIED`` (treated as window-capable). Dropping it instead would evict a
-perfectly healthy backend the moment a user upgrades.
+v2 (plan_F808 Task 3) keyed the same entries by display context, one slot per
+context, and that SLOT is what made F-886 possible: two clients on the same
+desktop running the same version off different source bytes competed for one
+entry, so recording either one erased the other and the erased one's proxy could
+no longer confirm its own backend. A list holds both. What replaces the slot is
+:func:`record_backend`'s supersede rule — by port, and by (display context,
+identity) — so our own respawn still replaces our own entry and nothing
+accumulates; a FOREIGN identity's entry is kept, which is the whole point.
+
+A v2 record still reads, with the KEY authoritative for ``display_context``
+exactly as it was. A v1 record — the flat ``{port, version, pid,
+source_fingerprint}`` every release up to 2.0.3 wrote — still reads too, as ONE
+backend classified ``UNVERIFIED`` (treated as window-capable). Dropping either
+would evict a perfectly healthy backend the moment a user upgrades.
 
 **Supersede by port.** Recording a backend drops every other entry claiming the
 same port, whatever context it is filed under, before filing this one. The port
@@ -79,7 +87,11 @@ PORT_FILE = STATE_DIR / "server.port"
 # backend (issue #14).
 SERVER_STATE_FILE = STATE_DIR / "server.json"
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+# The shape this module still READS but no longer writes. Named rather than
+# spelled as a literal inside the reader, so "which schemas do we accept" is a
+# question the constants answer.
+LEGACY_KEYED_SCHEMA = 2
 
 # Windows refuses an atomic replace while another process holds the target open
 # (see _commit); a few short retries outlast that window.
@@ -108,23 +120,31 @@ def backends_in(state: BackendEntry | None) -> list[BackendEntry]:
 
     Every other accessor here is derived from this one, so "how a record is
     laid out" is answered in exactly one place. Each returned entry carries a
-    ``display_context``: for v2 it comes from the key (the key is authoritative,
-    so a hand-edited file cannot disagree with itself); for a v1 flat record it
-    defaults to ``UNVERIFIED``, which :mod:`display_context` treats as
-    window-capable. Anything unreadable — missing file, corrupt JSON, a
-    non-object top level, a v2 file whose ``backends`` is not a mapping — is no
-    backends, never an exception: this record is a cache, and discovery must not
-    be able to fail on it.
+    ``display_context``: for v3 it is the entry's OWN field, defaulting to
+    ``UNVERIFIED`` when a hand edit dropped it; for v2 it comes from the key
+    (the key stays authoritative there, so a hand-edited v2 file cannot disagree
+    with itself); for a v1 flat record it defaults to ``UNVERIFIED``, which
+    :mod:`display_context` treats as window-capable. Anything unreadable —
+    missing file, corrupt JSON, a non-object top level, a v3 file whose
+    ``backends`` is not a list, a v2 file whose ``backends`` is not a mapping —
+    is no backends, never an exception: this record is a cache, and discovery
+    must not be able to fail on it.
     """
     if not isinstance(state, dict):
         return []
-    if state.get("schema") == SCHEMA_VERSION:
-        backends = state.get("backends")
-        if not isinstance(backends, dict):
-            return []
+    schema, backends = state.get("schema"), state.get("backends")
+    if schema == SCHEMA_VERSION:
+        raw = backends if isinstance(backends, list) else []
+        return [
+            {**entry, "display_context": str(entry.get("display_context", UNVERIFIED))}
+            for entry in raw
+            if isinstance(entry, dict)
+        ]
+    if schema == LEGACY_KEYED_SCHEMA:
+        keyed = backends.items() if isinstance(backends, dict) else ()
         return [
             {**entry, "display_context": str(ctx)}
-            for ctx, entry in backends.items()
+            for ctx, entry in keyed
             if isinstance(entry, dict)
         ]
     if isinstance(state.get("port"), int):
@@ -213,8 +233,15 @@ def adoption_candidates(path: Path, own_context: str) -> list[BackendEntry]:
 
 
 def port_for_context(path: Path, display_context: str) -> int | None:
-    """The port recorded for ONE context, or None when that context has no
-    entry (or its entry names nothing usable as a port).
+    """The FIRST port recorded for ONE context, or None when that context has
+    no entry (or its entry names nothing usable as a port).
+
+    "First" and not "ours" deliberately, now that a context can hold two
+    clients' backends (F-886). Its one caller, ``singleton._select_backend_port``,
+    uses the answer as a SEED — where a backend on this desktop last ran — and
+    then tests the seed itself: a port whose occupant we would not adopt, or may
+    not evict, forces an OS-assigned fallback. So naming a sibling's port here
+    costs one extra test, never a collision.
 
     ``singleton._select_backend_port`` asks with its own context: a spawn
     should land back on the port ITS desktop last used. "Whichever entry comes
@@ -361,8 +388,8 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
     source_fingerprint: str | None,
     display_context: str,
 ) -> None:
-    """Record one backend's identity under its display context, replacing any
-    previous entry for that SAME context and leaving the others untouched.
+    """Record one backend's identity, replacing the entries this one
+    SUPERSEDES and leaving every other untouched.
 
     Identity is the port, the package version that started it, its pid, and a
     fingerprint of the source it is running: discovery reuses a backend only
@@ -372,40 +399,44 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
     :func:`fingerprint_mismatch` later reads it as unknown rather than as an
     empty digest that contradicts every future one.
 
-    Also supersedes by port: any OTHER entry claiming this port is a leftover
-    (only one process can hold a loopback listener) and is dropped rather than
-    left to shadow this one forever. The module docstring carries the full
-    argument; entries on other ports, UNVERIFIED included, survive.
+    **Two supersede rules, and the second one is F-886's whole schema change.**
+
+    By PORT: any other entry claiming this port is a leftover (only one process
+    can hold a loopback listener) and is dropped rather than left to shadow this
+    one forever. The module docstring carries the full argument; entries on
+    other ports, UNVERIFIED included, survive.
+
+    By (DISPLAY CONTEXT, IDENTITY): an entry for our own context running our own
+    version AND our own source digest describes a predecessor of THIS backend —
+    the same client's previous cold start, respawned onto a different port — so
+    it is dropped and nothing accumulates. An entry for the same context running
+    a DIFFERENT identity is another client's live backend and is KEPT. v2 kept
+    one slot per context and so dropped it, which is how an eviction could
+    leave the surviving session unable to confirm its own backend.
+
+    The two digests are compared through :func:`fingerprint_mismatch`, not with
+    ``==``, so F-829's UNREADABLE sentinel keeps its one meaning here too: a
+    predecessor recorded while the source could not be hashed is not thereby a
+    stranger whose entry we must preserve forever.
     """
-    entries: dict[str, BackendEntry] = {}
-    for recorded in read_backends(path):
-        if recorded.get("port") == port:
-            continue
-        entries[str(recorded["display_context"])] = recorded
-    entries[display_context] = {
+    entry: BackendEntry = {
         "port": port,
         "version": version,
         "pid": pid,
         "source_fingerprint": source_fingerprint,
         "display_context": display_context,
     }
-    _write(path, entries)
-
-
-def forget_backend(path: Path, display_context: str) -> None:
-    """Drop one context's entry, keeping every other context's.
-
-    Forgetting the last one leaves a readable EMPTY record rather than removing
-    the file; deleting it is :func:`clear_record`'s job. ``singleton.stop_backend``
-    composes the two — forget the stopped backend's own context, then clear only
-    once nothing is left recorded — so stopping one backend cannot make another
-    display context's live backend undiscoverable.
-    """
-    entries = {
-        str(e["display_context"]): e
-        for e in read_backends(path)
-        if e["display_context"] != display_context
-    }
+    entries = [
+        recorded
+        for recorded in read_backends(path)
+        if recorded.get("port") != port
+        and not (
+            recorded.get("display_context") == display_context
+            and recorded.get("version") == version
+            and not fingerprint_mismatch(recorded, source_fingerprint)
+        )
+    ]
+    entries.append(entry)
     _write(path, entries)
 
 
@@ -413,9 +444,13 @@ def forget_entries(path: Path, entries: list[BackendEntry]) -> list[str]:
     """Drop the NAMED entries, keeping every other; return the display contexts
     actually forgotten, in recorded order (F-880).
 
-    :func:`forget_backend`'s sibling — "drop these entries" beside "drop this
-    context" — and the one write behind
-    ``backend_liveness.forget_dead``. Whether an entry deserves forgetting is
+    THE one way an entry leaves this record short of :func:`clear_record`, and
+    the one write behind ``backend_liveness.forget_dead`` and behind
+    ``singleton.stop_backend``. It absorbed ``forget_backend`` ("drop this whole
+    display context"), which F-886 deleted rather than kept beside it: once a
+    context can hold two clients' backends, "drop the context" is no longer a
+    statement anybody means — ``stop_backend`` stops ONE port and must forget
+    exactly that entry. Whether an entry deserves forgetting is
     NOT decided here: this module owns the file, never liveness, and a probe
     passed in through this door would make it the second place in the tree that
     knows what ``down`` means.
@@ -433,22 +468,22 @@ def forget_entries(path: Path, entries: list[BackendEntry]) -> list[str]:
 
     Nothing matched is nothing written, so the common case costs zero writes and
     cannot bump the file's mtime. Forgetting the LAST entry leaves a readable
-    empty record exactly as :func:`forget_backend` does; unlinking the file
-    stays :func:`clear_record`'s job, and ``PORT_FILE`` is never touched here.
+    empty record rather than removing the file; unlinking it stays
+    :func:`clear_record`'s job, and ``PORT_FILE`` is never touched here.
     """
     condemned = {
         (str(e["display_context"]), e.get("port"), e.get("pid")) for e in entries
     }
     if not condemned:
         return []
-    survivors: dict[str, BackendEntry] = {}
+    survivors: list[BackendEntry] = []
     forgotten: list[str] = []
     for recorded in read_backends(path):
         context = str(recorded["display_context"])
         if (context, recorded.get("port"), recorded.get("pid")) in condemned:
             forgotten.append(context)
             continue
-        survivors[context] = recorded
+        survivors.append(recorded)
     if forgotten:
         _write(path, survivors)
     return forgotten
@@ -479,8 +514,8 @@ def _commit(tmp: Path, path: Path) -> None:
             return
 
 
-def _write(path: Path, entries: dict[str, BackendEntry]) -> None:
-    """Write the v2 record atomically: stage into a sibling temp file, then
+def _write(path: Path, entries: list[BackendEntry]) -> None:
+    """Write the v3 record atomically: stage into a sibling temp file, then
     ``Path.replace`` (i.e. ``os.replace``) — so a reader concurrent with a write
     sees the whole old record or the whole new one, never a truncated file, and
     a crash mid-write cannot leave the record unparseable.

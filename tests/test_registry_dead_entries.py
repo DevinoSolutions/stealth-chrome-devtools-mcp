@@ -135,10 +135,33 @@ class TestForgetEntries:
     def test_a_context_re_recorded_since_the_probe_survives(self, record):
         """The lost update this merge exists to prevent: we probed one entry and
         found it dead, but by the time we write, that context has been recorded
-        again on a NEW port with a NEW pid. It is not the entry we condemned."""
+        again on a NEW port with a NEW pid. It is not the entry we condemned.
+
+        The re-record carries the SAME identity (version + digest), so under
+        F-886's supersede rule it replaced the dead entry — there is nothing
+        left matching what we condemned, and nothing is forgotten."""
         record(v2_record(win_session_2=_entry("win-session-2", DEAD_PORT, 89892)))
         dead = [_entry("win-session-2", DEAD_PORT, 89892)]
         # Another proxy re-records the same context between the probe and write.
+        backend_registry.record_backend(
+            record.path,
+            port=40404,
+            version="2.1.1",
+            pid=1234,
+            source_fingerprint="fp",
+            display_context="win-session-2",
+        )
+
+        assert backend_registry.forget_entries(record.path, dead) == []
+        [survivor] = backend_registry.read_backends(record.path)
+        assert (survivor["port"], survivor["pid"]) == (40404, 1234)
+
+    def test_a_foreign_identity_recorded_beside_the_dead_entry_survives(self, record):
+        """F-886: a DIFFERENT identity recorded under the same context no
+        longer erases the dead entry, so the dead one is still there to be
+        forgotten — and the newcomer is untouched by that forgetting."""
+        record(v2_record(win_session_2=_entry("win-session-2", DEAD_PORT, 89892)))
+        dead = [_entry("win-session-2", DEAD_PORT, 89892)]
         backend_registry.record_backend(
             record.path,
             port=40404,
@@ -148,7 +171,7 @@ class TestForgetEntries:
             display_context="win-session-2",
         )
 
-        assert backend_registry.forget_entries(record.path, dead) == []
+        assert backend_registry.forget_entries(record.path, dead) == ["win-session-2"]
         [survivor] = backend_registry.read_backends(record.path)
         assert (survivor["port"], survivor["pid"]) == (40404, 1234)
 

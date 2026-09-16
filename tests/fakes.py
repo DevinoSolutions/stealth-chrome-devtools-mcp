@@ -168,6 +168,13 @@ def v2_record(**backends: dict) -> dict:
     is the code under test in several of those cases, so a fixture that went
     through it could not express a record that function would never write — a
     hand-edited one, or a pre-supersede pair.
+
+    Since F-886 the writer emits schema v3 (a LIST of entries, so one display
+    context can hold two clients' backends) and v2 is the LEGACY keyed shape
+    every 2.0.4-2.1.8 record has. Deliberately still v2 here: every reader that
+    consumes this builder goes through `backends_in`, so these fixtures are also
+    what keeps the v2 read path exercised — the path an upgrading user's record
+    takes on its first start.
     """
     return {
         "schema": 2,
