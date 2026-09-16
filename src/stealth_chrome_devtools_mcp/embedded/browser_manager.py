@@ -16,6 +16,7 @@ from nodriver import Browser, Tab
 
 from stealth_chrome_devtools_mcp.embedded import (
     desktop_launch,
+    navigation_milestone,
     page_storage,
     spawn_contention,
     spawn_exhaustion,
@@ -1130,39 +1131,6 @@ class BrowserManager:
             close_existing=False,
         )
 
-    @staticmethod
-    async def _wait_for_navigation_condition(
-        tab: Tab,
-        wait_until: str,
-        timeout_seconds: float,
-    ) -> None:
-        """
-        Wait for a navigation milestone within the remaining timeout budget.
-
-        Args:
-            tab (Tab): Browser tab.
-            wait_until (str): Desired wait condition.
-            timeout_seconds (float): Remaining timeout budget in seconds.
-        """
-        if timeout_seconds <= 0:
-            raise TimeoutError("Navigation wait budget exhausted")
-
-        if wait_until == "domcontentloaded":
-            await asyncio.wait_for(
-                tab.wait(uc.cdp.page.DomContentEventFired),
-                timeout=timeout_seconds,
-            )
-            return
-
-        if wait_until == "networkidle":
-            await asyncio.sleep(min(timeout_seconds, 2.0))
-            return
-
-        await asyncio.wait_for(
-            tab.wait(uc.cdp.page.LoadEventFired),
-            timeout=timeout_seconds,
-        )
-
     async def navigate(
         self,
         instance_id: str,
@@ -1213,13 +1181,15 @@ class BrowserManager:
                         )
                     )
 
-                await asyncio.wait_for(tab.get(url), timeout=timeout_seconds)
-
-                elapsed = time.monotonic() - start_time
-                await self._wait_for_navigation_condition(
-                    tab,
-                    wait_until,
-                    timeout_seconds - elapsed,
+                # The ONE navigation wait (F-881): Page.navigate plus the
+                # lifecycle milestone `wait_until` names, keyed on the loaderId
+                # the response carries — never `tab.get`, whose wait was a
+                # 0.5 s sleep, nor `tab.wait(<event class>)`, which was a no-op.
+                await asyncio.wait_for(
+                    navigation_milestone.navigate(
+                        tab, url, wait_until, timeout_seconds
+                    ),
+                    timeout=timeout_seconds,
                 )
 
                 elapsed = time.monotonic() - start_time

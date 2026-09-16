@@ -47,7 +47,13 @@ def _with_tab(monkeypatch, tab):
     async def get_navigation_tab(self, instance_id):
         return tab
 
+    async def replace_main_tab(self, instance_id, reason, close_existing=True):
+        # A timed-out attempt earns one stale-tab recovery (F-824's budget); the
+        # pins here are about the wait, so the retry lands on the same double.
+        return tab
+
     monkeypatch.setattr(BrowserManager, "get_navigation_tab", get_navigation_tab)
+    monkeypatch.setattr(BrowserManager, "_replace_main_tab", replace_main_tab)
 
 
 def _navigate_frames(tab: FakeTab) -> list[str]:

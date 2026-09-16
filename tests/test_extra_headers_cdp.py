@@ -154,15 +154,15 @@ async def test_spawn_sends_no_header_command_when_extra_headers_is_empty(
 
 @pytest.fixture
 def navigating_manager(monkeypatch):
-    """A ``BrowserManager`` whose instance bookkeeping and post-nav waits are
-    stubbed, leaving the referrer ``tab.send`` as the only live behaviour."""
+    """A ``BrowserManager`` whose instance bookkeeping is stubbed, leaving the
+    referrer ``tab.send`` and the navigation itself (``FakeTab``'s ``Page.navigate``
+    model, F-881) as the live behaviour."""
 
     async def noop(*args, **kwargs):
         return None
 
     monkeypatch.setattr(BrowserManager, "touch_instance", noop)
     monkeypatch.setattr(BrowserManager, "update_instance_state", noop)
-    monkeypatch.setattr(BrowserManager, "_wait_for_navigation_condition", noop)
     return BrowserManager()
 
 
