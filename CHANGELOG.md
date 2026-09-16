@@ -70,11 +70,27 @@ now after the committed document rather than after the 0.5 s — and that findin
 open. An unknown `wait_until` raises naming the three accepted values instead of silently
 meaning `load`.
 
-A `data:` navigation answers in ~20 ms instead of ~525 ms, and after `load`. What a
-timed-out wait now catches that a silent success used to hide: `net::ERR_ABORTED` (a
-download, or a navigation superseded before commit) commits nothing, so it runs to the
-budget and raises the existing timeout instead of answering with the previous page's
-url and title.
+Both directions of the change are visible. Faster: a `data:` navigation answers in
+~20 ms instead of ~525 ms, and after `load`. Slower, deliberately: a page whose `load`
+takes longer than ~0.5 s now makes `navigate` wait for it, up to the budget; and a
+committed page that never reaches `load` — an open transfer, a hanging subresource —
+under the default `wait_until="load"` used to return `success: true` at ~0.5 s and now
+times out with the existing message. That second class is pinned hermetically but is
+**untested on Chrome**: the resilience suite characterizes the hang-after-headers route
+under `networkidle` only. Likewise `net::ERR_ABORTED` (a download, or a navigation
+superseded before commit, including a JS/meta redirect that commits before the first
+document's `load`) commits nothing for the loader being waited on, so it runs to the
+budget and raises the timeout instead of answering with the previous page's url and
+title.
+
+What a timeout costs is drawn at acceptance. `navigate`'s one stale-tab recovery (a
+`TimeoutError` on attempt 1 → `_replace_main_tab`, which CLOSES the caller's tab and
+re-navigates with a full second budget) now applies only to a `Page.navigate` Chrome
+never answered — the hang-before-headers shape, where the tab may indeed be stale. A
+timeout after `Page.navigate` answered is the page's own — slow, never loading, or a
+download — and is reported once, on the caller's tab, within one budget; retrying it
+would have discarded a page that exists, triggered a download twice, and cost 60 s by
+default.
 
 ## 2.1.7
 
