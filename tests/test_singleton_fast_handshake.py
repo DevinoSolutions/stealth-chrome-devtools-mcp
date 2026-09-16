@@ -17,7 +17,30 @@ import pytest
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCRequest, JSONRPCResponse
 
+from release_gate_harness import _isolated_env
 from stealth_chrome_devtools_mcp.embedded.singleton import _proxy_streams
+
+
+def _isolated_subprocess_env(tmp_path) -> dict[str, str]:
+    """F-885: a subprocess spawned by these tests is a SEPARATE process, so a
+    monkeypatch in this pytest process never reaches it — only HOME/USERPROFILE
+    (which drive `Path.home()`, and therefore `backend_registry.STATE_DIR`) do.
+    Without this, the child's own singleton machinery reads/writes the
+    developer's live ``~/.stealth-mcp`` record, which other Claude Code
+    sessions may be sharing right now. Same isolated-env idiom
+    ``release_gate_harness.gate_workspace`` uses for the real-launcher gate."""
+    home_dir = tmp_path / "home"
+    session_root = tmp_path / "sessions"
+    log_dir = tmp_path / "logs"
+    clone_dir = tmp_path / "clone-output"
+    for directory in (home_dir, session_root, log_dir, clone_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    return _isolated_env(
+        home_dir=home_dir,
+        session_root=session_root,
+        log_dir=log_dir,
+        clone_dir=clone_dir,
+    )
 
 
 def _free_port() -> int:
@@ -149,13 +172,11 @@ class TestFastHandshakeEndToEnd:
 
     @pytest.mark.asyncio
     async def test_initialize_local_then_tools_list_forwarded(self, tmp_path):
-        import os
         import subprocess
         import sys
 
         port = _free_port()
-        env = dict(os.environ)
-        env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(tmp_path / "sessions")
+        env = _isolated_subprocess_env(tmp_path)
         env["STEALTH_BROWSER_DEBUG"] = "false"
 
         backend = subprocess.Popen(
@@ -236,13 +257,11 @@ class TestProxyExitsOnClientDisconnect:
 
     @pytest.mark.asyncio
     async def test_proxy_returns_when_client_stream_closes(self, tmp_path):
-        import os
         import subprocess
         import sys
 
         port = _free_port()
-        env = dict(os.environ)
-        env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(tmp_path / "sessions")
+        env = _isolated_subprocess_env(tmp_path)
         env["STEALTH_BROWSER_DEBUG"] = "false"
 
         backend = subprocess.Popen(
@@ -317,7 +336,6 @@ class TestEntrypointExitsOnDisconnect:
 
     def test_stdio_entrypoint_exits_when_stdin_closes(self, tmp_path):
         import json
-        import os
         import queue
         import subprocess
         import sys
@@ -326,8 +344,16 @@ class TestEntrypointExitsOnDisconnect:
         import psutil
 
         port = _free_port()
-        env = dict(os.environ)
-        env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(tmp_path / "sessions")
+        # F-885: this runs the REAL entrypoint with no ``--transport`` flag, so
+        # it goes through ``ensure_server_running`` for real. Without a
+        # redirected HOME, `_select_backend_port` prefers the port already
+        # recorded for THIS display context — the developer's live backend's
+        # port, not `--singleton-port` — and a source-fingerprint mismatch
+        # (this checkout vs. whatever is running there) makes
+        # `_start_backend_holding_lock` evict and kill it before cold-starting
+        # a replacement. Isolating HOME keeps this entrypoint's whole singleton
+        # lifecycle inside a throwaway record it cannot collide with.
+        env = _isolated_subprocess_env(tmp_path)
         env["STEALTH_MCP_NO_AUTO_RECOVERY"] = "1"
 
         proc = subprocess.Popen(
