@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Fixed — F-882b: a slow fixture document recorded itself into the NEXT test's ledger
+
+`tests/fixture_routes.py`'s `/nav/slow-doc` route slept first and appended to
+the server-side `nav_paths` ledger afterwards, where every other `/nav/*` route
+records on arrival. The one caller of that route pre-empts the navigation, so
+the browser abandons the request while the handler thread goes on sleeping for
+the full 2.5 s; by the time it records, the next test has already called
+`/e2e/reset` and the entry lands in a ledger that belongs to a different
+navigation. Measured: CI run 35150887345 (release-gate integration, Windows/
+X64, PR #123) failed the subframe node of
+`tests/test_e2e_navigation_truthfulness.py`, whose ledger must be exactly three
+paths, with the previous node's `/nav/slow-doc?ms=2500` at its head. The route
+records before it sleeps now, and a hermetic pin in
+`tests/test_fixture_dynamic_routes.py` holds the request open at the delay and
+reads the ledger while the response is still withheld — no browser and no
+wall-clock budget.
+
 ### Fixed — F-885: proxy/backend-death tests touched the developer's live `~/.stealth-mcp` record
 
 `tests/test_proxy_backend_death.py::TestProxyExitsOnBackendDeath` ran an

@@ -2337,9 +2337,17 @@ def _r_nav_slow_asset(handler, query: str) -> None:
 
 def _r_nav_slow_doc(handler, query: str) -> None:
     """A DOCUMENT the server answers slowly — so a navigation to it is pending,
-    not committed, for as long as the caller asked."""
-    time.sleep(_nav_delay_seconds(query))
+    not committed, for as long as the caller asked.
+
+    Recorded BEFORE the delay, like every other ``/nav/*`` route: ``nav_paths``
+    is what the browser FETCHED, and the fetch is the arrival. Recording after
+    the delay instead attributes the request to whichever ledger is current
+    when the delay ENDS — and this route exists to be pre-empted, so the client
+    abandons the request while this thread sleeps on and the entry lands in the
+    next test's freshly reset ledger. Measured: CI run 35150887345.
+    """
     _nav_record(handler)
+    time.sleep(_nav_delay_seconds(query))
     _send_html(handler, nav_document(NAV_SLOW_DOC_SENTINEL, NAV_SLOW_DOC_TITLE))
 
 
