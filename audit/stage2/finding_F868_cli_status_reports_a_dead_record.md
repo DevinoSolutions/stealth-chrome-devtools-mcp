@@ -235,6 +235,18 @@ extraction landed (§6), and the new leaf is 91.
 
 ## 6. Not claimed / follow-ups
 
+- **Pruning stale records: CLOSED by F-880** —
+  `audit/stage2/finding_F880_registry_keeps_dead_backends.md`. Both questions below are
+  answered there. *Who prunes:* `cleanup --apply`, and nobody else — it is an explicit
+  `--apply` verb, not a read-only one, so the contract this bullet names is not
+  strained; `doctor` reports dead records and still writes nothing. *The port
+  objection* — "a backend whose pid is gone is not necessarily a backend whose PORT is
+  free" — is answered by making the test STRONGER than a pid check: an entry is dead
+  only when it probes `down` (so the port has just been observed to hold no listener at
+  all) **and** its pid is not a backend of ours (so a sibling recorded at Popen time,
+  mid cold start, is never forgotten). A `wedged` entry is never dead. F-880 §6 keeps
+  the cold-start-under-the-lock site as a named, argued follow-up rather than shipping
+  it, with the evidence for why it is not free. The original text is kept below.
 - **Pruning stale records is NOT done here, deliberately.** It is a separate decision
   with a real safety argument on both sides, and it needs an owner:
   - *Who would prune?* The only process that can prune honestly is one that has just

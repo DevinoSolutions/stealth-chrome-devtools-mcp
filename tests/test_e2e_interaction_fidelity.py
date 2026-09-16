@@ -180,15 +180,21 @@ async def test_click_respects_occlusion_and_offscreen(fixture_app_server):
         await navigate_and_settle(iid, f"{base}/interactions.html")
         await _query_at_least(iid, "#covered-btn", 1)
 
-        # Occlusion: the overlay (topmost at the coordinate) receives the click.
-        assert await click(instance_id=iid, selector="#covered-btn")
+        # Occlusion: the overlay (topmost at the coordinate) receives the click,
+        # and since F-876 the record NAMES it -- a bare `assert await click(...)`
+        # is vacuous for a dict return, and was near-vacuous before it.
+        covered = await click(instance_id=iid, selector="#covered-btn")
+        assert covered["reason"] == "covered"
+        assert covered["hit"]["id"] == "overlay-trap"
         assert await _wait_action(iid, "click:overlay-trap")
         actions = await read_actions(iid)
         assert "click:overlay-trap" in actions
         assert "click:covered-btn" not in actions  # occlusion honored
 
         # pointer-events:none overlay -> the real click passes through.
-        assert await click(instance_id=iid, selector="#pen-covered-btn")
+        assert (await click(instance_id=iid, selector="#pen-covered-btn"))[
+            "hit_is_target"
+        ] is True
         assert await _wait_action(iid, "click:pen-covered-btn")
         actions = await read_actions(iid)
         assert "click:pen-covered-btn" in actions
@@ -196,7 +202,9 @@ async def test_click_respects_occlusion_and_offscreen(fixture_app_server):
 
         # Offscreen: no manual scroll; the tool scrolls it into view and clicks.
         assert await eval_js(iid, "window.scrollY") == 0
-        assert await click(instance_id=iid, selector="#offscreen-btn")
+        assert (await click(instance_id=iid, selector="#offscreen-btn"))[
+            "dispatch"
+        ] == "coordinate"
         assert await _wait_action(iid, "click:offscreen-btn")
         assert await eval_js(iid, "window.scrollY") > 0  # auto-scrolled
     finally:
@@ -302,7 +310,9 @@ async def test_form_semantics(fixture_app_server):
         await _query_at_least(iid, "#disabled-btn", 1)
 
         # Positive control first: the label click forwards to the checkbox.
-        assert await click(instance_id=iid, selector="#label-for-check")
+        assert (await click(instance_id=iid, selector="#label-for-check"))[
+            "hit_is_target"
+        ] is True
         assert await _wait_action(iid, "change:labeled-check:on")
 
         # Disabled: the browser dispatches nothing on a disabled control, and
@@ -323,7 +333,9 @@ async def test_form_semantics(fixture_app_server):
         assert "INJECT" not in readonly_val
 
         # Constraint validation: empty required field blocks submit + fires invalid.
-        assert await click(instance_id=iid, selector="#validated-submit")
+        assert (await click(instance_id=iid, selector="#validated-submit"))[
+            "hit_is_target"
+        ] is True
         assert await _wait_action(iid, "invalid:required-input")
         assert "submit:validated-form" not in await read_actions(iid)
 
@@ -331,11 +343,15 @@ async def test_form_semantics(fixture_app_server):
         assert await type_text(
             instance_id=iid, selector="#required-input", text="filled"
         )
-        assert await click(instance_id=iid, selector="#validated-submit")
+        assert (await click(instance_id=iid, selector="#validated-submit"))[
+            "hit_is_target"
+        ] is True
         assert await _wait_action(iid, "submit:validated-form")
 
         # Reset fires reset and clears the field.
-        assert await click(instance_id=iid, selector="#reset-btn")
+        assert (await click(instance_id=iid, selector="#reset-btn"))[
+            "hit_is_target"
+        ] is True
         assert await _wait_action(iid, "reset:validated-form")
     finally:
         await close(instance_id=iid)
@@ -355,8 +371,12 @@ async def test_rich_input_types(fixture_app_server):
         dispatching input DOES log, proving the gap is the control, not the page.
       * number (spec-correct): type_text lands digits -> value "42",
         ``input:number-input`` logs. The positive control for the three raises.
-      * date   (tool-gap, now REPORTED): type_text cannot fill the segmented
-        date field -> value stays "" and the tool raises; execute_script sets it.
+      * date   (ENVIRONMENT-DEPENDENT): whether Chrome's segmented date control
+        takes typed digits varies by build/locale -- local headless Chrome 152
+        refuses, all three release-gate cells accepted in run 35039244942. So
+        this pins only the invariant F-873 established: the tool either raises
+        with the value unmoved, or returns with the value moved -- never
+        "returned true while unchanged". execute_script sets it either way.
       * color  (tool-gap, now REPORTED): type_text cannot drive the color
         control -> value stays "#000000" and the tool raises; execute_script
         sets it.
@@ -403,13 +423,19 @@ async def test_rich_input_types(fixture_app_server):
         )
         assert any(a.startswith("input:number-input:") for a in await read_actions(iid))
 
-        # date: the segmented field cannot be filled by typing -> raises.
-        with pytest.raises(ToolError):
+        # date: build/locale decides whether the segments take digits, so pin
+        # the F-873 invariant instead of either answer.
+        date_before = await eval_js(iid, "document.getElementById('date-input').value")
+        date_raised = None
+        try:
             await type_text(instance_id=iid, selector="#date-input", text="2025-06-15")
-        assert (
-            await eval_js(iid, "document.getElementById('date-input').value")
-            != "2025-06-15"
-        )
+        except ToolError as exc:
+            date_raised = exc
+        date_after = await eval_js(iid, "document.getElementById('date-input').value")
+        if date_raised is not None:
+            assert date_after == date_before, (date_before, date_after)
+        else:
+            assert date_after != date_before, (date_before, date_after)
         await execute(
             instance_id=iid,
             script=(

@@ -634,6 +634,12 @@ class FakeClickTarget:
       suppresses — which is why ``disabled`` is a separate fact and not a
       hit-test outcome).
 
+    ``disabled`` here is what ``:disabled`` MATCHES, not the ``elem.disabled``
+    IDL attribute: a ``<button>`` inside a ``<fieldset disabled>`` reports
+    ``elem.disabled === false``, matches ``:disabled``, hit-tests to itself and
+    receives nothing (measured). The double carries the one that decides the
+    answer, so a test can express that shape without a real fieldset.
+
     The aim answer is a JSON **string** COMPUTED from this object's own state —
     never supplied by a test — for the same reason ``FakeTextField``'s read-back
     is: a fixture that hands over the answer can quietly encode the bug.

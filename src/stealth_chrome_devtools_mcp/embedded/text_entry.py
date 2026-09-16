@@ -184,6 +184,18 @@ async def type_characters(tab: Tab, element: Element, text: str, delay: float) -
             await asyncio.sleep(delay)
 
 
+#: The programmatic clear — THE one spelling of it (F-876). ``type_text`` and
+#: ``paste_text`` each wrote this string out inline, which is two ways to say one
+#: thing in the one path this work unified; the fallback WHEN it throws stays with
+#: the caller, because that is policy and this is the sentence.
+#:
+#: It is deliberately narrow. On a non-input element ``elem.value = ''`` does not
+#: throw — it silently creates an expando property named ``value`` (measured on a
+#: ``<div>``, Chrome 152) — so this clears a field and reports nothing about
+#: whether there was a field to clear. That question is :func:`entered_text`'s.
+CLEAR_JS = "(elem) => { elem.value = ''; }"
+
+
 async def clear_via_keyboard(tab: Tab) -> None:
     """Select-all + Delete, for when a programmatic ``elem.value = ''`` fails.
 

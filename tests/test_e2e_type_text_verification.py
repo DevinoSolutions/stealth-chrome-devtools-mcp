@@ -6,8 +6,17 @@ every claim F-873 rests on is a claim about Blink:
 
 * only a trusted **keypress** performs a form's implicit submission, and the
   only way to get one from CDP is a ``keyDown`` carrying ``text``;
-* a ``readonly``/``range``/``date``/``color`` control accepts every key event
-  and moves nothing — the shape the tool used to answer ``True`` for.
+* a ``readonly``/``range``/``color`` control accepts every key event and moves
+  nothing — the shape the tool used to answer ``True`` for.
+
+``date`` is deliberately NOT in that list. Whether Chrome's segmented date
+control takes typed digits is **environment-dependent**: on this machine's
+headed AND headless Chrome 152.0.7977.83 (Windows 11) ``2024-01-02`` left the
+value at ``""``, while CI's headless Chrome accepted the digits on all three
+cells — Windows/X64, macOS/ARM64 and Linux/X64 — in release-gate run
+35039244942. So the date pin below asserts the only thing that is true
+everywhere, which is also the whole of F-873: the tool never answers ``True``
+over a value that did not move.
 
 Runs against ``interactions.html``, which already logs
 ``key:<down|up|press>:<key>:<trust>``, ``input:<id>:<value>`` and
@@ -107,18 +116,20 @@ async def test_typing_emits_the_full_trusted_key_lifecycle(
     [
         ("#readonly-input", "INJECT"),
         ("#range-input", "80"),
-        ("#date-input", "2024-01-02"),
         ("#color-input", "#123456"),
     ],
 )
 async def test_a_control_that_refuses_the_text_raises(
     fixture_app_server, tmp_empty_root, selector, text
 ):
-    """Defect B, in the four shapes a real Chrome reproduces deterministically.
+    """Defect B, in the three shapes a real Chrome reproduces EVERYWHERE.
 
     Each of these takes every key event and leaves its value exactly where it
-    was (measured, Chrome 152). ``type_text`` used to answer ``True`` for all
-    four; it now names the selector and says nothing landed.
+    was — measured on local headless Chrome 152 and on all three release-gate
+    cells (Windows/X64, macOS/ARM64, Linux/X64) in run 35039244942.
+    ``type_text`` used to answer ``True`` for all three; it now names the
+    selector and says nothing landed. ``date`` is environment-dependent and
+    has its own pin below.
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
@@ -135,6 +146,52 @@ async def test_a_control_that_refuses_the_text_raises(
         message = str(caught.value)
         assert selector in message
         assert text not in message  # shape and count only, never the content
+    finally:
+        await close(instance_id=iid)
+
+
+async def test_a_date_control_is_never_silently_ignored(
+    fixture_app_server, tmp_empty_root
+):
+    """The one claim about ``<input type="date">`` that holds on every machine.
+
+    Whether Chrome's segmented date control takes ``2024-01-02`` as typed
+    digits varies by build and locale (see the module docstring: local
+    headless Chrome 152 refuses, all three CI cells accept). Pinning either
+    ANSWER would be a false claim on the other machine; what F-873 actually
+    fixed is the pair that must never occur together. So: either the tool
+    RAISED and the value did not move, or it returned and the value DID move.
+    "Returned ``True`` over an unchanged value" — the defect — fails here on
+    both kinds of Chrome.
+    """
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    type_text = get_fn("type_text")
+    close = get_fn("close_instance")
+
+    iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+    try:
+        await navigate_and_settle(iid, f"{base}/interactions.html")
+        before = await eval_js(iid, "document.getElementById('date-input').value")
+
+        raised = None
+        try:
+            await type_text(instance_id=iid, selector="#date-input", text="2024-01-02")
+        except ToolError as exc:
+            raised = exc
+
+        after = await eval_js(iid, "document.getElementById('date-input').value")
+        if raised is not None:
+            assert after == before, (
+                f"type_text raised {raised!s} but the date control DID move: "
+                f"{before!r} -> {after!r}"
+            )
+            assert "#date-input" in str(raised)
+        else:
+            assert after != before, (
+                "type_text answered success over a date control whose value "
+                f"never moved ({before!r}) — this is F-873 itself"
+            )
     finally:
         await close(instance_id=iid)
 

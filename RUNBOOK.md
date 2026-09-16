@@ -22,9 +22,9 @@ console script is not on PATH. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for th
 | Verb | What it does |
 |---|---|
 | `status` | backend state as one of three printed outcomes — `not running`, `running (responsive)`, or `running but UNRESPONSIVE … wedged` — plus pid, log path, version, browser-session root, and the two disk caps |
-| `doctor` | environment check: Python, platform, browser-session root, backend, port occupant, **one line per recorded backend with its display context and whether it can show a window**, Chrome |
+| `doctor` | environment check: Python, platform, browser-session root, backend, port occupant, **one line per recorded backend with its display context and whether it can show a window**, which of those records are **dead**, Chrome |
 | `profiles` | list on-disk profiles with size, role, and in-use flag |
-| `cleanup` | reclaim disk — delete idle auto-clones over the clone cap and trim idle named profiles over the browser-session cap (**dry run** unless `--apply`) |
+| `cleanup` | reclaim disk — delete idle auto-clones over the clone cap, trim idle named profiles over the browser-session cap, and **forget dead backend records** (**dry run** unless `--apply`) |
 | `stop` | stop the first recorded backend — its live browser sessions die with it; another desktop's backend keeps running and stays recorded |
 | `restart` | terminate + fresh cold-start spawn (the recovery for a **wedged** backend) |
 | `kill-orphans` | reap browser processes orphaned by a dead backend (refuses against a live backend unless `--force`) |
@@ -262,6 +262,16 @@ deletes idle auto-clones over the clone cap and trims regenerable data from idle
 profiles over the browser-session cap — **logins are kept**. Override caps for one run
 with `--clone-cap-gb` / `--browser-session-cap-gb` (`0` disables a cap). `profiles`
 lists what is on disk first.
+
+`cleanup` also reports the `backend records:` line — how many backends `server.json`
+records and how many of those are **dead** (F-880: nothing is listening on the recorded
+port AND the recorded pid is not a backend of ours). Nothing else in the product ever
+forgets an entry, so a machine accumulates one per display context it has ever run a
+backend in; `--apply` forgets the dead ones. A **wedged** backend is never dead — it
+holds its port and `restart` is its verb — and a backend recorded moments ago but still
+binding its socket is not dead either, which is why the pid is the second witness.
+`doctor` names the same records and marks them `(dead record)`, but never writes: it is
+a read-only verb.
 
 ### Code edit didn't take effect
 There is no live reload. A source edit changes the **source fingerprint**, so the next

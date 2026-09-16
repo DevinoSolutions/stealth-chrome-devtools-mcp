@@ -23,8 +23,14 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from stealth_chrome_devtools_mcp.observability import sentry_init
+
+if TYPE_CHECKING:
+    # Type-only: every embedded import in this file is LAZY, inside the function
+    # that needs it, so a read-only verb never drags the backend in at import.
+    from stealth_chrome_devtools_mcp.embedded.backend_liveness import Surveyed
 
 
 def _server():
@@ -203,24 +209,52 @@ def _backend_log_location(pid: int | None) -> str:
     return str(resolve_log_dir() / filename)
 
 
-def _probe_recorded_backend(port: int | None) -> str:
-    """One recorded backend's liveness on a port the caller already holds, in
-    the ONE liveness vocabulary (plan_M8 SS2.1-B): down / wedged / responsive,
-    plus "no port recorded" for an entry naming nothing usable as a port.
+def _survey_records() -> list[Surveyed]:
+    """THE one probe pass over every recorded backend, for the two CLI verbs
+    that need per-entry answers (F-880).
 
-    That fourth word is the whole of what this adds. The ladder itself is
-    `singleton._probe_port` and is CALLED, not copied (F-868) — it used to be
-    the same four lines in both files, justified by a note that
-    `_probe_backend_status` "reads the FIRST recorded backend" and so could not
-    answer per-entry. It no longer does, and duplicating a liveness ladder was
-    a second way to answer one question regardless. Reached THROUGH the module,
-    never by importing the name, so a test that patches singleton still wins.
+    `backend_liveness.survey` owns both the liveness vocabulary (including the
+    one word the down/wedged/responsive ladder cannot reach, `NO_PORT`, which
+    `_probe_recorded_backend` used to add here before this function replaced it)
+    and the two-witness deadness rule. This is only the BINDING: our record
+    path, and the two witnesses reached THROUGH `singleton` at call time, never
+    imported by name, so a test that patches `singleton._probe_port` or
+    `singleton._is_our_backend` still wins.
+
+    Ordering is `backend_registry.window_capable_first`'s, so doctor presents
+    the same preference discovery applies rather than re-deriving one; the
+    survey itself is order-agnostic.
     """
-    from stealth_chrome_devtools_mcp.embedded import singleton
+    from stealth_chrome_devtools_mcp.embedded import (
+        backend_liveness,
+        backend_registry,
+        singleton,
+    )
 
-    if port is None:
-        return "no port recorded"
-    return singleton._probe_port(port)
+    return backend_liveness.survey(
+        backend_registry.window_capable_first(singleton.SERVER_STATE_FILE),
+        probe=singleton._probe_port,
+        pid_is_ours=singleton._is_our_backend,
+    )
+
+
+def _dead_record_line(surveyed: list[Surveyed]) -> str:
+    """The one-line summary of dead records, or "" when none is (F-880).
+
+    READ-ONLY, and it names the verb that writes. `doctor` must stay read-only
+    by contract (module docstring, `STEALTH_MCP_NO_AUTO_RECOVERY=1`), so it may
+    report residue but may not reclaim it; `cleanup --apply` does that, through
+    the same `backend_liveness` home rather than a second sweep."""
+    from stealth_chrome_devtools_mcp.embedded import backend_liveness
+
+    dead = backend_liveness.dead_entries(surveyed)
+    if not dead:
+        return ""
+    contexts = ", ".join(str(e.get("display_context")) for e in dead)
+    return (
+        f"{len(dead)} dead record(s) ({contexts}) — nothing is listening and the "
+        "recorded pid is not a backend of ours; run `cleanup --apply` to forget them"
+    )
 
 
 def _doctor_backend_lines() -> list[str]:
@@ -239,6 +273,12 @@ def _doctor_backend_lines() -> list[str]:
     Ordering is `backend_registry.window_capable_first`'s, so doctor presents
     the same preference discovery applies rather than re-deriving one.
 
+    Since F-880 both the per-entry verdict and the `(dead record)` marker come
+    from ONE `_survey_records()` pass, so a wedged sibling is probed once per
+    doctor run and not once per question asked about it. The marker is appended
+    AFTER the capability note, which stays token-driven: where that backend's
+    windows WOULD appear is true of a record whether or not anything is there.
+
     The remedy is suppressed only by a window-capable backend that is actually
     RESPONSIVE. A desktop backend recorded but dead — the desktop logged out —
     would otherwise hide the advice in precisely the state that needs it: an
@@ -254,21 +294,19 @@ def _doctor_backend_lines() -> list[str]:
     about their own machine — the advice degrades to an optimisation. Only with
     nobody logged on is the spawn genuinely refused.
     """
-    from stealth_chrome_devtools_mcp.embedded import (
-        backend_registry,
-        desktop_launch,
-        singleton,
-    )
+    from stealth_chrome_devtools_mcp.embedded import backend_registry, desktop_launch
     from stealth_chrome_devtools_mcp.embedded.display_context import HEADLESS
 
     lines: list[str] = []
     serviceable = False
-    for entry in backend_registry.window_capable_first(singleton.SERVER_STATE_FILE):
+    surveyed = _survey_records()
+    for item in surveyed:
+        entry = item.entry
         context = str(entry.get("display_context"))
         port = backend_registry.recorded_int(entry, "port")
         pid = backend_registry.recorded_int(entry, "pid")
         version = entry.get("version")
-        status = _probe_recorded_backend(port)
+        status = item.verdict
         serviceable = serviceable or (context != HEADLESS and status == "responsive")
         lines.append(
             f"backend  {context}  port {port if port is not None else '-'}  "
@@ -276,12 +314,16 @@ def _doctor_backend_lines() -> list[str]:
             f"version {version if isinstance(version, str) else '-'}  "
             f"{status}  "
             f"({'headless only' if context == HEADLESS else 'can show windows'})"
+            f"{'  (dead record)' if item.dead else ''}"
         )
     if not lines:
         # Not the headless-only diagnosis: with nothing recorded the next
         # session cold-starts a backend in whatever context it runs in, so
         # there is no remedy to give yet.
         return ["backend  (none recorded)"]
+    dead_line = _dead_record_line(surveyed)
+    if dead_line:
+        lines.append(dead_line)
     if not serviceable:
         # "no LIVE backend": the lines above may well show a capable one that
         # is down, and a remedy contradicting the list it follows is worse than
@@ -367,6 +409,44 @@ def _cmd_profiles(_args) -> int:
     return 0
 
 
+def _cleanup_backend_records(apply: bool) -> None:
+    """Report — and with ``--apply`` reclaim — dead entries in `server.json`
+    (F-880). A record naming a backend that does not exist is residue on disk,
+    and reclaiming residue is exactly this verb's job.
+
+    Both halves go through `backend_liveness`, the ONE home for the deadness
+    rule: the dry run surveys, `--apply` calls `forget_dead`, which surveys
+    again under the read-merge-write protocol rather than trusting a list the
+    operator has had time to invalidate. No second sweep, and the dry run
+    cannot disagree with what `--apply` then does — the same property the
+    profile selectors above already have.
+    """
+    from stealth_chrome_devtools_mcp.embedded import backend_liveness, singleton
+
+    surveyed = _survey_records()
+    if not apply:
+        dead = backend_liveness.dead_entries(surveyed)
+        named = (
+            f" ({', '.join(str(e.get('display_context')) for e in dead)})"
+            if dead
+            else ""
+        )
+        print(
+            f"backend records: {len(surveyed)} recorded, {len(dead)} dead{named}"
+            + (" — re-run with --apply to forget" if dead else "")
+        )
+        return
+    forgotten = backend_liveness.forget_dead(
+        singleton.SERVER_STATE_FILE,
+        probe=singleton._probe_port,
+        pid_is_ours=singleton._is_our_backend,
+    )
+    if forgotten:
+        print(f"backend records: forgot {len(forgotten)} dead ({', '.join(forgotten)})")
+    else:
+        print(f"backend records: {len(surveyed)} recorded, 0 dead")
+
+
 def _cmd_cleanup(args) -> int:
     cs = _clone_storage()
     clone_root = cs.clone_root_dir()
@@ -386,6 +466,9 @@ def _cmd_cleanup(args) -> int:
         f"caps        : clone {_human(clone_cap)} | "
         f"browser-session {_human(session_cap)}"
     )
+    # Before the disk section's early return: a dead backend record is residue
+    # whether or not any profile is over cap (F-880).
+    _cleanup_backend_records(args.apply)
     if not to_delete and not to_trim:
         print("nothing to reclaim - storage is within caps.")
         return 0
