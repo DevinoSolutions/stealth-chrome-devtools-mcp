@@ -31,6 +31,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import socket
 from pathlib import Path
 from types import GeneratorType, SimpleNamespace
@@ -359,6 +360,145 @@ class FakeTab:
             return js_result(answer)
         resp = self._cdp_responses.get(name, None)
         return resp(name) if callable(resp) else resp
+
+
+class ScrollingTab(FakeTab):
+    """A :class:`FakeTab` that models a scrolling document (F-875).
+
+    ``scroll_page`` is the one tool whose answer is about a value the PAGE owns
+    and that moves on its own, so a canned ``evaluate_result`` cannot express
+    what it has to be held to. This double owns that value and applies the same
+    rules Chrome does:
+
+    * the position-read script is answered with a **JSON string**, because
+      ``Tab.evaluate`` always requests deep serialization and an object literal
+      would arrive as BiDi ``RemoteValue`` nodes (the F-869/F-872 trap — see
+      :func:`js_aspect_answer`);
+    * ``window.scrollTo`` / ``window.scrollBy`` move the position, clamped to
+      ``[0, max]`` exactly as a real scroller clamps it, so "the page is one
+      viewport tall" is modelled by geometry (``doc_height == viewport_height``)
+      rather than by a flag;
+    * ``behavior: 'smooth'`` does NOT arrive instantly. The animation is advanced
+      one step per POSITION READ, which is what makes a mid-flight read
+      deterministic without a real clock: a product that reads once and returns
+      sees ``smooth_steps``-th of the way, the measured F-875 shortfall.
+
+    Nothing here is written from the defect: the scripts are interpreted as
+    Chrome interprets them, and the read answers with the geometry the page
+    would report.
+    """
+
+    #: The prefix that identifies the product's position-read script and no
+    #: other JS: ``scroll_position.READ_JS`` is the only expression ``scroll_page``
+    #: evaluates that is a ``JSON.stringify`` (the scroll scripts NAME
+    #: ``document.scrollingElement`` too, so the element is not the marker).
+    #: Named once, here, like :data:`ANIMATION_JS_MARKER`.
+    POSITION_JS_MARKER = "JSON.stringify("
+
+    #: ``window.scrollBy({top: N, left: M, …})`` — the two deltas, signed.
+    _BY = re.compile(r"window\.scrollBy\(\{top:\s*(-?\d+),\s*left:\s*(-?\d+)")
+    #: ``window.scrollTo({top: <expr>, left: N, …})`` — the vertical target as
+    #: written; ``document.body.scrollHeight`` means "the bottom".
+    _TO = re.compile(r"window\.scrollTo\(\{top:\s*([^,]+),\s*left:\s*(-?\d+)")
+
+    def __init__(
+        self,
+        *,
+        doc_height: int = 8016,
+        viewport_height: int = 977,
+        doc_width: int = 1280,
+        viewport_width: int = 1280,
+        scroll_y: int = 0,
+        scroll_x: int = 0,
+        smooth_steps: int = 4,
+        never_settles: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.doc_height = doc_height
+        self.viewport_height = viewport_height
+        self.doc_width = doc_width
+        self.viewport_width = viewport_width
+        self.scroll_y = scroll_y
+        self.scroll_x = scroll_x
+        self.smooth_steps = smooth_steps
+        #: A page whose content keeps arriving never stops moving — the
+        #: budget-exhaustion case. One pixel per read is enough to model it.
+        self.never_settles = never_settles
+        self._flight: tuple[int, int] | None = None
+        #: Every position read, in order — so a test can count round trips.
+        self.position_reads: list[str] = []
+
+    @property
+    def max_scroll_y(self) -> int:
+        return max(0, self.doc_height - self.viewport_height)
+
+    @property
+    def max_scroll_x(self) -> int:
+        return max(0, self.doc_width - self.viewport_width)
+
+    def _clamped(self, x: int, y: int) -> tuple[int, int]:
+        return (
+            max(0, min(int(x), self.max_scroll_x)),
+            max(0, min(int(y), self.max_scroll_y)),
+        )
+
+    def _target_of(self, expression: str) -> tuple[int, int] | None:
+        """The (x, y) a scroll script asks for, or ``None`` if it is not one."""
+        by = self._BY.search(expression)
+        if by is not None:
+            return self._clamped(
+                self.scroll_x + int(by.group(2)), self.scroll_y + int(by.group(1))
+            )
+        to = self._TO.search(expression)
+        if to is None:
+            return None
+        top = to.group(1).strip()
+        y = self.doc_height if "scrollHeight" in top else int(top)
+        return self._clamped(int(to.group(2)), y)
+
+    def _advance(self) -> None:
+        """One animation frame's worth of movement, charged per read."""
+        if self.never_settles:
+            self.scroll_y = min(self.scroll_y + 1, self.max_scroll_y)
+            self.doc_height += 1  # the content that keeps arriving
+            return
+        if self._flight is None:
+            return
+        target_x, target_y = self._flight
+        step_x = -(-abs(target_x - self.scroll_x) // self.smooth_steps)
+        step_y = -(-abs(target_y - self.scroll_y) // self.smooth_steps)
+        self.scroll_x += min(step_x, abs(target_x - self.scroll_x)) * (
+            1 if target_x >= self.scroll_x else -1
+        )
+        self.scroll_y += min(step_y, abs(target_y - self.scroll_y)) * (
+            1 if target_y >= self.scroll_y else -1
+        )
+        if (self.scroll_x, self.scroll_y) == self._flight:
+            self._flight = None
+
+    async def evaluate(self, expression: str, *args: Any, **kwargs: Any) -> Any:
+        self.evaluate_calls.append(expression)
+        if expression.startswith(self.POSITION_JS_MARKER):
+            self.position_reads.append(expression)
+            self._advance()
+            return json.dumps(
+                {
+                    "x": self.scroll_x,
+                    "y": self.scroll_y,
+                    "max_x": self.max_scroll_x,
+                    "max_y": self.max_scroll_y,
+                }
+            )
+        target = self._target_of(expression)
+        if target is None:
+            return self._answer_for_js(expression)
+        if "'smooth'" in expression:
+            self._flight = None if target == (self.scroll_x, self.scroll_y) else target
+        else:
+            self.scroll_x, self.scroll_y = target
+            self._flight = None
+        return None
 
 
 # ---------------------------------------------------------------------------

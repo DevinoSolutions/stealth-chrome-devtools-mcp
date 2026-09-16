@@ -299,9 +299,12 @@ async def wait_for_element(
 
 async def scroll_page(
     instance_id: str, direction: str = "down", amount: int = 500, smooth: bool = True
-) -> bool:
+) -> dict[str, object]:
     """
-    Scroll the page.
+    Scroll the page and report where it ended up.
+
+    Waits for the position to stop changing before answering, so a smooth scroll
+    is reported at where it LANDED, not where it had reached.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -310,7 +313,13 @@ async def scroll_page(
         smooth (bool): Use smooth scrolling.
 
     Returns:
-        bool: True if scrolled successfully.
+        Dict[str, object]: ``scrolled`` (the position CHANGED), ``at_edge`` (the
+        page is as far as ``direction`` goes — true for a page with nothing to
+        scroll, whose ``max_scroll_y`` is 0), ``settled`` (the position stopped
+        changing within the budget; false means it was still moving),
+        ``settle_seconds``, the requested ``direction``/``amount``/``smooth``,
+        and ``scroll_x_before``/``scroll_y_before``/``scroll_x_after``/
+        ``scroll_y_after``/``max_scroll_x``/``max_scroll_y``.
     """
     if isinstance(amount, str):
         amount = int(amount)

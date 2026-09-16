@@ -8,6 +8,7 @@ from typing import Any
 
 from nodriver import Tab, cdp
 
+from stealth_chrome_devtools_mcp.embedded import scroll_position
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     resolve_by_text,
@@ -906,55 +907,65 @@ class DOMHandler:
     @staticmethod
     async def scroll_page(
         tab: Tab, direction: str = "down", amount: int = 500, smooth: bool = True
-    ) -> bool:
+    ) -> dict[str, object]:
         """
-        Scroll the page in specified direction.
+        Scroll the page and report where it actually ended up (F-875).
+
+        The answer used to be an unconditional ``True``, which reported that the
+        evaluate did not throw while promising that the page scrolled — three
+        different states wearing one word. It is a record now: the position
+        before and after, the page's extent, and what was asked for, so
+        "arrived", "still moving when the budget ran out" and "there was nothing
+        to scroll" are all sayable. Reading the position and waiting for it to
+        stop is ``scroll_position``'s; this method owns the script, the budget
+        and the record.
 
         Args:
             tab (Tab): The browser tab object.
-            direction (str): Direction to scroll ('down', 'up', 'right',
-                'left', 'top', 'bottom').
-            amount (int): Amount to scroll in pixels.
+            direction (str): 'down', 'up', 'right', 'left', 'top' or 'bottom'.
+            amount (int): Pixels to scroll (ignored for 'top' and 'bottom').
             smooth (bool): Use smooth scrolling.
 
         Returns:
-            bool: True if scroll succeeded, False otherwise.
+            Dict[str, object]: ``scrolled`` (the position CHANGED), ``at_edge``,
+            ``settled`` (it stopped moving within the budget),
+            ``settle_seconds``, the requested ``direction``/``amount``/
+            ``smooth``, and the six offsets — see the tool's own docstring.
+
+        Raises:
+            ToolError: an invalid direction, or an operational failure of the
+            evaluate itself. A page with nothing to scroll is NOT one of these:
+            a one-viewport document is a legitimate page, and it is reported.
         """
         try:
-            behavior = "'smooth'" if smooth else "'instant'"
-
-            if direction == "down":
-                script = (
-                    f"window.scrollBy({{top: {amount}, left: 0, behavior: {behavior}}})"
-                )
-            elif direction == "up":
-                script = (
-                    f"window.scrollBy({{top: -{amount}, "
-                    f"left: 0, behavior: {behavior}}})"
-                )
-            elif direction == "right":
-                script = (
-                    f"window.scrollBy({{top: 0, left: {amount}, behavior: {behavior}}})"
-                )
-            elif direction == "left":
-                script = (
-                    f"window.scrollBy({{top: 0, left: -{amount}, "
-                    f"behavior: {behavior}}})"
-                )
-            elif direction == "top":
-                script = f"window.scrollTo({{top: 0, left: 0, behavior: {behavior}}})"
-            elif direction == "bottom":
-                script = (
-                    "window.scrollTo({top: document.body.scrollHeight, "
-                    f"left: 0, behavior: {behavior}}})"
-                )
-            else:
-                raise ValueError(f"Invalid scroll direction: {direction}")
-
+            # Built first: an unknown direction must cost no round trip.
+            script = scroll_position.script(direction, amount, smooth)
+            before = await scroll_position.read(tab)
             await tab.evaluate(script)
-            await asyncio.sleep(0.5 if smooth else 0.1)
-
-            return True
+            # Nothing can move a page that is already at the edge it was sent
+            # to, so that case waits for no animation to start — which is what
+            # keeps a one-viewport page on the two-read fast path.
+            settled = await scroll_position.settle(
+                tab,
+                before,
+                start_grace=0.0 if before.at_edge(direction) else None,
+            )
+            after = settled.position
+            return {
+                "scrolled": after != before,
+                "at_edge": after.at_edge(direction),
+                "settled": settled.settled,
+                "settle_seconds": round(settled.seconds, 3),
+                "direction": direction,
+                "amount": amount,
+                "smooth": smooth,
+                "scroll_x_before": before.x,
+                "scroll_y_before": before.y,
+                "scroll_x_after": after.x,
+                "scroll_y_after": after.y,
+                "max_scroll_x": after.max_x,
+                "max_scroll_y": after.max_y,
+            }
 
         except Exception as e:
             raise ToolError(f"Failed to scroll page: {e!s}")
