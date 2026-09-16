@@ -8,7 +8,7 @@ from typing import Any
 
 from nodriver import Tab, cdp
 
-from stealth_chrome_devtools_mcp.embedded import text_entry
+from stealth_chrome_devtools_mcp.embedded import click_target, text_entry
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     resolve_by_text,
@@ -290,9 +290,18 @@ class DOMHandler:
         selector: str,
         text_match: str | None = None,
         timeout: int = 10000,  # noqa: ASYNC109  plan_M7
-    ) -> bool:
+    ) -> dict[str, Any]:
         """
         Click an element with smart retry logic.
+
+        Where the click WENT belongs to ``click_target``; what lives here is the
+        ORDER (F-876). The aim is read once, AFTER ``scroll_into_view`` and
+        BEFORE the click, so the record describes the page the click was aimed
+        at: reading it afterwards would describe a page the click may already
+        have changed, and a ``display:none`` target has no box left to ask
+        about. The synthetic fallback is kept — for such a target it is the only
+        thing that reaches the element at all — and is now LABELLED rather than
+        silent.
 
         Args:
             tab (Tab): The browser tab object.
@@ -301,7 +310,11 @@ class DOMHandler:
             timeout (int): Timeout in milliseconds.
 
         Returns:
-            bool: True if click succeeded, False otherwise.
+            Dict[str, Any]: where the click went — see ``click_target.record``.
+
+        Raises:
+            ToolError: the selector resolved to nothing, or the page could not
+                be asked where a click on it would land.
         """
         try:
             element = None
@@ -317,13 +330,17 @@ class DOMHandler:
             await element.scroll_into_view()
             await asyncio.sleep(0.5)
 
+            aim = await click_target.aim(element, selector)
+
             try:
                 await element.mouse_click()
+                dispatch = click_target.COORDINATE
             except Exception as e:
                 debug_logger.log_debug("dom_handler", "click_element", str(e))
                 await element.click()
+                dispatch = click_target.SYNTHETIC
 
-            return True
+            return click_target.record(selector, aim, dispatch)
 
         except Exception as e:
             raise ToolError(f"Failed to click element: {e!s}")
@@ -471,6 +488,13 @@ class DOMHandler:
         Paste text instantly using nodriver's insert_text method.
         This is much faster than typing character by character.
 
+        The read-back that decides whether the page TOOK the text is
+        ``text_entry``'s, shared with ``type_text`` (F-876): the baseline is read
+        AFTER the clear — a baseline read before it would be the preset value,
+        and a control that refused everything would still look like it had moved
+        — and an empty ``text`` is skipped, because pasting nothing that changes
+        nothing is not a refusal.
+
         Args:
             tab (Tab): The browser tab object.
             selector (str): CSS selector for the input element.
@@ -478,7 +502,12 @@ class DOMHandler:
             clear_first (bool): Clear input before pasting.
 
         Returns:
-            bool: True if pasting succeeded, False otherwise.
+            bool: True — the text was pasted AND the page took it.
+
+        Raises:
+            ToolError: the selector resolved to nothing, the element could not
+                be read back, or the insert was delivered and the element's text
+                did not move.
         """
         from nodriver import cdp
 
@@ -498,7 +527,14 @@ class DOMHandler:
                     await text_entry.clear_via_keyboard(tab)
                 await asyncio.sleep(0.1)
 
+            if not text:
+                await tab.send(cdp.input_.insert_text(text))
+                return True
+
+            before = await text_entry.entered_text(element, selector)
             await tab.send(cdp.input_.insert_text(text))
+            after = await text_entry.entered_text(element, selector)
+            text_entry.verify_received(selector, text, before, after)
 
             return True
 

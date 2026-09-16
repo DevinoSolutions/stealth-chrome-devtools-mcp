@@ -274,10 +274,11 @@ async def test_form_semantics(fixture_app_server):
     """PINS: disabled rejects clicks, readonly rejects typed text, constraint
     validation blocks submit while invalid, label click forwards, reset fires.
 
-    * Disabled: click_element on #disabled-btn returns True (the tool dispatches a
-      coordinate click regardless) but the browser suppresses events on disabled
-      controls, so ``click:disabled-btn`` NEVER logs -- the tool cannot tell you the
-      control was inert (FINDING: no disabled-state guard in dom_handler).
+    * Disabled: click_element still dispatches a coordinate click, and the browser
+      still suppresses events on disabled controls, so ``click:disabled-btn`` NEVER
+      logs -- but since F-876 the tool REPORTS it: the record's ``reason`` reads
+      ``"disabled"`` where this pin used to assert a bare ``True`` and call the
+      silence a FINDING.
     * Label forwarding (positive control): clicking <label for=labeled-check>
       toggles the checkbox -> ``change:labeled-check:on`` (proves the log works).
     * Readonly: type_text into #readonly-input does not land the typed text (char
@@ -304,9 +305,12 @@ async def test_form_semantics(fixture_app_server):
         assert await click(instance_id=iid, selector="#label-for-check")
         assert await _wait_action(iid, "change:labeled-check:on")
 
-        # Disabled: the tool reports success, but no click event is dispatched by
-        # the browser on a disabled control.
-        assert await click(instance_id=iid, selector="#disabled-btn") is True
+        # Disabled: the browser dispatches nothing on a disabled control, and
+        # since F-876 the TOOL says so — the record's reason names it instead of
+        # the bare True this line used to pin as a FINDING.
+        assert (await click(instance_id=iid, selector="#disabled-btn"))[
+            "reason"
+        ] == "disabled"
         assert "click:disabled-btn" not in await read_actions(iid)
 
         # Readonly: typed text is rejected, and F-873 means the TOOL says so

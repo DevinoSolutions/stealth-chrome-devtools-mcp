@@ -39,7 +39,7 @@ from the page on either side of the call.
 |---|---|---|---|---|---|
 | `<input readonly>` | `INJECT` | `""` / `""` | `""` / `""` | `true` | **no** |
 | `<input type=range value=50>` | `80` | `"50"` / `""` | `"50"` / `""` | `true` | **no** |
-| `<input type=date>` | `2024-01-02` | `""` / `""` | `""` / `""` | `true` | **no** |
+| `<input type=date>` † | `2024-01-02` | `""` / `""` | `""` / `""` | `true` | **no** |
 | `<input type=color>` | `#123456` | `"#000000"` / `""` | `"#000000"` / `""` | `true` | **no** |
 | non-editable `<div>` | `INJECT` | `undefined` / `"PLAIN"` | `""` / `"PLAIN"` | `true` | **no** |
 | `<div contenteditable>` | `hello-ce` | `undefined` / `""` | `""` / `"hello-ce"` | `true` | yes |
@@ -49,6 +49,14 @@ Exactly F-873's §2b matrix, reproduced through the *other* text tool. `paste_te
 inserts with `Input.insertText` rather than per-character key events, and that
 difference changes nothing: the five refusing controls refuse an insert just as
 they refused the keys.
+
+† **`date` is a build-dependent row and is not pinned.** It refused the insert on
+this local Chrome 152.0.7977.83 build, which is why it is in the matrix. PR #110's
+gate measured all three CI cells **accepting** digit entry into an
+`<input type="date">`, so a refusal is not a property of the control. The E2E pins
+here therefore parametrize `readonly`, `range`, `color` and the non-editable
+`<div>` only, and `date` is out of the hint `text_entry.verify_received` raises
+for the same reason (§4a).
 
 One row deserves its own sentence, because it is new. The non-editable `<div>`'s
 `value` is `undefined` **before** the call and `""` **after** it. Nothing about
@@ -75,9 +83,10 @@ Same run, `DOMHandler.click_element(tab, selector)`, the page logging every
 | zero-size `<button>` (`width:0;height:0`, still laid out) | `true` | **nothing** |
 | `<button style="display:none">` | `true` | `click:gone` — but see §2c: an **untrusted, synthetic** click |
 | `<button style="visibility:hidden">` | `true` | **nothing** |
+| `<button style="position:absolute;left:-500px;top:-500px">` | `true` | **nothing** |
 | resolved, then removed from the DOM before the click | raises | nothing |
 
-Five of the eight either deliver the click to a different element or deliver it to
+Six of the nine either deliver the click to a different element or deliver it to
 nobody, and the tool reports the same `True` for all of them as for the control.
 The detached case is the one that already behaves: the tool re-resolves the
 selector and `resolve_element` answers nothing, so it raises
@@ -100,6 +109,18 @@ The same seven targets, with `Element.mouse_click` (the primary path) and
 | zero-size | **0 × 0** | **`BODY`** | returned | *(nothing)* | `click:zero:untrusted` |
 | `display:none` | **no box at all** | `HTML` | **raises** `could not find position` | *(nothing)* | `click:gone:untrusted` |
 | `visibility:hidden` | 24.9 × 21 | **`BODY`** | returned | *(nothing)* | `click:vis-hidden:untrusted` |
+| off-viewport (`left:-500px`) | 33.5 × 21 at **`(-483.2, -489.5)`** | **`null`** | returned | *(nothing)* | — |
+
+Two rows of that table need their own sentence. The off-viewport button keeps a
+real 33.5 × 21 box at a **negative** point; `scroll_into_view()` does **not**
+bring it back (it is `position:absolute` outside the flow, and the point is
+unchanged after the scroll — measured both before and after); the coordinate
+click is dispatched at those negative coordinates and reaches nobody; and
+`document.elementFromPoint` answers `null` there, which is a distinct fact from
+"something else was on top" and gets its own reason code. Separately, a button
+inside an **open shadow root** hit-tests to `DIV#host` (`same: false`,
+`host.contains(button)` — i.e. the element's own `contains` — `false`), which is
+Chrome's retargeting and is a known edge of this whole approach (§6).
 
 Three facts come out of this table and all three are load-bearing:
 
@@ -224,11 +245,14 @@ aimed, and what was under that point"**:
   is frequently a modal or a consent banner and its text is the page's, not the
   tool's to echo into an MCP payload. The class list is bounded by `MAX_CLASSES`.
 * `reason(...)` — the closed code set, decided in one place from the facts above,
-  in the order measurement requires: `not-rendered` → `zero-size` →
-  `not-visible` → `pointer-events-none` → `covered` → `disabled` → `None`.
-  `pointer-events-none` is checked before `covered` because both are true for that
-  shape (§2c) and only one of them is the cause; `disabled` is last because it is
-  the one shape where the hit-test names the target and the click is still inert.
+  in the order measurement requires: `not-rendered` → `off-viewport` →
+  `zero-size` → `not-visible` → `pointer-events-none` → `covered` → `disabled` →
+  `None`. `pointer-events-none` is checked before `covered` because both are true
+  for that shape (§2c) and only one of them is the cause; `off-viewport` is
+  checked before `zero-size` because `elementFromPoint` answering `null` is a
+  different fact from a degenerate box, and only one of the two can be read from
+  the hit; `disabled` is last because it is the one shape where the hit-test names
+  the target and the click is still inert.
 * `record(...)` — composes the returned dict. `COORDINATE` / `SYNTHETIC` are the
   two dispatch kinds and they are this module's constants.
 
@@ -303,16 +327,45 @@ an element with no box has no click point to name.
 |---|---|---|---|
 | `tests/goldens/tool_surface.json` (`click_element`) | `output_schema` `{"result": {"type": "boolean"}}`, description ending `bool: True if clicked successfully.` | the record's object schema, description ending with the record's fields | the HARD wire-surface golden, regenerated **deliberately** with this justification per `CONTRIBUTING.md`: the tool's return type and its docstring both changed on purpose, and this is the same PR |
 | `tests/goldens/tool_surface.json` (`paste_text`) | description ending `bool: True if pasted successfully.` | `bool: True — the text was pasted AND the page took it.` | the old line was the claim this finding shows to be false; the schema is unchanged |
-| `test_e2e_interaction_fidelity.py::test_form_semantics` (disabled arm) | `assert await click(...) is True` with a comment calling the silence a FINDING | asserts the record's `reason == "disabled"` | the pin's own comment ("the tool cannot tell you the control was inert (FINDING: no disabled-state guard)") named this fix |
-| `test_e2e_interaction_fidelity.py::test_click_respects_occlusion_and_offscreen` | asserted only the page's action log | additionally asserts the record names the overlay | the occlusion the test already proved is now also *reported*, which is the change |
-| `test_xpath_dispatch.py::test_the_issue_15_repro_selector_clicks` | `assert await DOMHandler.click_element(...) is True` | asserts the returned record's `selector` | a return-shape change; the test's claim (one grammar, both tools) is untouched. Its `_FakeElement` gains an `apply` |
+| `test_e2e_interaction_fidelity.py::test_form_semantics` (disabled arm) | `assert await click(...) is True` with a docstring bullet calling the silence a FINDING | asserts the record's `reason == "disabled"` | the pin's own comment ("the tool cannot tell you the control was inert (FINDING: no disabled-state guard)") named this fix. Kept to **one assert + its docstring bullet**, because `fix/F873-type-text-silent-failure` also edits this file |
+| `test_e2e_dynamic_sites.py` (6 asserts) | `assert await click(...) is True` | `assert (await click(...))["dispatch"] == "coordinate"` | the faithful translation of the old claim ("a click was really dispatched") and deliberately **not** the stronger `reason is None`, which would be a new claim on six real pages this PR did not measure |
+| `test_xpath_dispatch.py::test_the_issue_15_repro_selector_clicks` | `assert await DOMHandler.click_element(...) is True` | asserts the returned record's `selector` | a return-shape change; the test's claim (one grammar, both tools) is untouched. Its `_FakeElement` gains an `apply` answering the minimum well-formed aim — that double exists to pin which resolution surface a selector reaches, and modelling geometry is `FakeClickTarget`'s job |
 | `test_silent_excepts_log.py::test_click_element_mouse_click_fallback_logs_at_debug` | `assert result is True` | asserts `dispatch == "synthetic"` | same return-shape change; the DEBUG line it exists to pin is byte-unchanged, and the new assert additionally proves the fallback is *labelled* |
-| `tests/fakes.py` | — | gains `FakeClickTarget` | a page-backed element double whose aim answer is COMPUTED from its own state, on `FakeTextField`'s model, so no fixture can encode the bug |
+| `test_silent_excepts_log.py::test_paste_text_clear_fallback_logs_at_debug` | `element.apply` failed for EVERY call | only the clear fails; the read-back answers | the read-back is a second `apply` on the same element, so a double that fails all of them would make the tool raise for an unreadable field before it ever reached the clear fallback this test pins |
+| `tests/fakes.py` | — | gains `FakeClickTarget`; `FakeTextField` gains `insert()` | the click double's aim answer is COMPUTED from its own state (including the off-viewport rule, derived from its geometry rather than asserted), on `FakeTextField`'s model, so no fixture can encode the bug. `insert()` is the ONE place the text double commits text, reached by both the key-event and the `Input.insertText` seam |
+| `tests/fixture_app/interactions.html` + `app.js` | — | five new targets (`pe-none`, `zero-size`, `display-none`, `vis-hidden`, `offviewport`) and two paste targets (a plain and a contenteditable `<div>`) | every one is a shape §2b/§2c measured; each logs its own click with `isTrusted`, so "the target received nothing" and "it received a SYNTHETIC one" are distinguishable from the action log alone. No existing test clicks any of them |
 
 ### 5b. Numbers
 
-Filled in at the fix commit — see the PR body and the commit messages for the
-RED counts, the GREEN counts and the narrow confirmation lane.
+* `tests/test_paste_click_verification.py` at the RED commit (`654e35c`): **18
+  failed, 4 passed** of 22 nodes. Every failure is the defect, not a harness
+  error — `DID NOT RAISE ToolError` for the paste rows, `isinstance(True, dict)`
+  / `'bool' object is not subscriptable` for the click rows, `At index 1 diff:
+  'mouse_click' != 'aim'` for the ordering pin (no aim is read at all), and an
+  `ImportError` for the leaf that does not exist yet. At the fix: **23 passed**
+  (the extra node is the `off-viewport` reason, added once probe 4 measured it).
+* `tests/test_e2e_paste_click_verification.py` at the RED commit: **13 failed, 4
+  passed** of 17 nodes, same reasons. At the fix: **17 passed** in 48.6 s (the
+  `date` paste row was dropped and the `off-viewport` click row added — see the
+  `†` note in §2a).
+* Narrow confirmation lane, `STEALTH_MCP_NO_ERROR_REPORTING=1 PYTHONUTF8=1`,
+  `test_paste_click_verification` + `test_type_text_verification` +
+  `test_dom_handler` + `test_tool_dispatch` + `test_mcp_protocol_surface` +
+  `test_error_typing` + `test_silent_excepts_log` + `test_tool_sections_contract`
+  + `test_doc_claims` + `test_xpath_dispatch` + `test_release_contract`:
+  **191 passed**.
+* The five integration nodes whose asserts this PR flipped, run individually:
+  `test_e2e_interaction_fidelity::test_form_semantics` and
+  `::test_click_respects_occlusion_and_offscreen` — **2 passed**;
+  `test_e2e_dynamic_sites::test_spa_history_route_swap_and_requery`,
+  `::test_virtualized_and_finite_infinite_lists`,
+  `::test_custom_elements_slots_and_popup_lifecycle` — **3 passed**.
+* LOC (`tools/check_file_budgets.py`'s own rule — every line, blanks and comments
+  included): `dom_handler.py` 904 → **940**, `text_entry.py` 250 → **261**,
+  `click_target.py` **251**. All three under the 1000-LOC default; no
+  `GRANDFATHER` row is involved and none moved.
+* The full unit lane and the full integration lane are the coordinator's
+  pre-push gate and are deliberately **not** claimed here.
 
 ---
 
@@ -359,9 +412,21 @@ RED counts, the GREEN counts and the narrow confirmation lane.
   returns the paths it was given rather than the files the input holds. Both are
   out of scope here and neither has been measured; naming them is the claim, not
   diagnosing them.
-* **The overlay/covered detection uses `document.elementFromPoint`, which does not
-  pierce shadow roots or the top layer the way `elementsFromPoint` chains do.** A
-  target inside an open shadow root reports its HOST as the hit element, not
-  itself, so `hit_is_target` can read `false` for a click that in fact reached the
-  target. Not measured here, named as a known edge; the fixture page's shadow-root
-  cases live in `tests/test_e2e_hard_dom.py` and are untouched by this PR.
+* **The overlay/covered detection uses `document.elementFromPoint`, which
+  retargets across a shadow boundary.** Measured (§2c): a button inside an OPEN
+  shadow root hit-tests to `DIV#host`, and the button's own `contains(host)` is
+  `false`, so `hit_is_target` reads `false` and `reason` reads `covered` for a
+  click that in fact reached the button. That is a false alarm, it is named here
+  rather than discovered later, and the narrower fix (`elementsFromPoint` /
+  walking `shadowRoot.elementFromPoint`) is a second traversal this PR
+  deliberately does not add. The fixture page's shadow-root cases live in
+  `tests/test_e2e_hard_dom.py` and are untouched.
+* **`verify_received`'s message changed wording**, from "typed N character(s)" to
+  "entered N character(s)", and its hint no longer names `date`. The first is
+  because `paste_text` reaches the same controls through one `Input.insertText`
+  and a message about key events would be about the wrong mechanism half the
+  time. The second is evidence, not taste: the local Chrome 152 build refused
+  digits into a date field and PR #110's gate measured all three CI cells
+  accepting them, so naming it as a known refusal would be a claim the evidence
+  does not support. No test pinned the old wording; F-873's finding quotes it as
+  a historical measurement and is deliberately left alone.

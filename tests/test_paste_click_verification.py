@@ -232,6 +232,7 @@ async def test_click_point_is_the_centre_of_the_first_client_rect():
             "not-visible",
         ),
         ({"hit": ("div", "overlay", ())}, "covered"),
+        ({"rect": (-500.0, -500.0, 33.5, 21.0)}, "off-viewport"),
     ],
 )
 async def test_click_record_names_why_the_target_could_not_have_taken_it(

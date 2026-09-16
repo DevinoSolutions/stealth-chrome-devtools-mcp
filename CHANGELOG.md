@@ -87,6 +87,51 @@ CDP has never understood, so all three characters landed verbatim and nothing wa
 cleared, corrupting the field it was asked to empty; it and `paste_text` now share the
 one CDP select-all + Delete.
 
+### Fixed — `paste_text` and `click_element` reported a dispatch, not a result (F-876)
+
+The two tools F-873 named and left. Measured through the product code path on
+Chrome 152.0.7977.83, headless, on a throwaway profile.
+
+`paste_text` sent one `Input.insertText` and returned `True` without asking the page
+anything. Five of seven controls take that insert and move nothing — `readonly`,
+`range`, `color`, an `<input type="date">` on this build, and a non-editable `<div>` —
+and the tool answered `True` for all five. It now reads the field back through the same
+`text_entry` leaf `type_text` uses, with the baseline taken **after** the clear, and
+raises naming the selector and two counts and never the pasted text (the field may be a
+password box). An empty paste is not a refusal and is not checked.
+
+`click_element` returned `True` for a click the target never received, in six shapes:
+an overlay above it ate the click (the page logged the overlay, not the button); a
+`disabled` control, a `pointer-events:none` target, a zero-size target and a
+`visibility:hidden` target each received nothing; and an off-viewport target took a
+click at negative coordinates that reached nobody. A `display:none` target went
+further — `Element.mouse_click` raises there, so the tool silently fell back to the
+in-page `el.click()`, an **untrusted** click, in a tool whose whole point is trusted
+input.
+
+**`click_element` now returns a record instead of a bool** — `{"selector",
+"dispatch", "point", "size", "target", "hit", "hit_is_target", "reason"}`. `dispatch`
+is `"coordinate"` or `"synthetic"`, so the fallback is labelled rather than silent;
+`hit` is the tag/id/classes (never the text) of whatever `document.elementFromPoint`
+returned at the exact point the click went to; `reason` is `null` when the click
+reached the target and otherwise one of `not-rendered`, `off-viewport`, `zero-size`,
+`not-visible`, `pointer-events-none`, `covered`, `disabled`. The point is the centre of
+`getClientRects()[0]`, which is byte-equal to the point nodriver clicks — the bounding
+box's centre is 28.5 px off for an element wrapped over several line boxes and would
+name a point the click never used. The synthetic fallback is kept, because for a
+`display:none` element it is the only thing that reaches it at all.
+
+The tool deliberately gains **no** "did the page react" oracle and raises for none of
+the six shapes: a navigation, a mutation or a fetch may all legitimately be absent
+after a correct click, so the record reports what is decidable and the caller decides.
+A new leaf `embedded/click_target.py` owns the one read and the closed reason set.
+
+Also corrected: the refusal message shared by both text tools says "entered" rather
+than "typed" (`paste_text` reaches the same controls through an insert, not keys) and
+no longer names `date` — the local build refused digits into a date field but PR #110's
+gate measured all three CI cells accepting them, so it is build-dependent and is not
+claimed.
+
 ## 2.1.6
 
 ### Fixed — `get_instance_state` reported empty storage as if it were the truth (F-869)

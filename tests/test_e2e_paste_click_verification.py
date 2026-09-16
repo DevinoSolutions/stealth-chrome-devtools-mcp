@@ -60,7 +60,6 @@ async def _wait_action(iid, entry, timeout=5.0):
     [
         ("#readonly-input", "INJECT"),
         ("#range-input", "80"),
-        ("#date-input", "2024-01-02"),
         ("#color-input", "#123456"),
         ("#plain-div", "INJECT"),
     ],
@@ -68,10 +67,15 @@ async def _wait_action(iid, entry, timeout=5.0):
 async def test_a_control_that_refuses_the_paste_raises(
     fixture_app_server, tmp_empty_root, selector, text
 ):
-    """The five shapes Chrome 152 reproduces deterministically (finding §2a).
+    """The shapes that refuse the insert on EVERY build measured (finding §2a).
 
     Each takes the ``Input.insertText`` and leaves its text exactly where it was.
-    ``paste_text`` used to answer ``True`` for all five.
+    ``paste_text`` used to answer ``True`` for all of them.
+
+    ``<input type="date">`` refused the insert on the local Chrome 152 build and
+    is in the finding's matrix, but it is deliberately NOT parametrized here:
+    PR #110's gate measured all three CI cells ACCEPTING digits into a date
+    field, so a pin asserting a refusal would be pinning one build's behaviour.
     """
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
@@ -184,6 +188,7 @@ async def test_a_click_that_reaches_its_target_says_so(
         ("#pe-none-btn", "pointer-events-none"),
         ("#zero-size-btn", "zero-size"),
         ("#vis-hidden-btn", "not-visible"),
+        ("#offviewport-btn", "off-viewport"),
     ],
 )
 async def test_a_click_the_target_cannot_receive_is_named(

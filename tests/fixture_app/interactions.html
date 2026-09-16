@@ -66,6 +66,14 @@
       #vis-hidden-btn {
         visibility: hidden;
       }
+      /* A real 33.5x21 box at a NEGATIVE point: scroll_into_view does not bring
+         it back, the coordinate click goes to (-483, -489) and
+         document.elementFromPoint answers null there. */
+      #offviewport-btn {
+        position: absolute;
+        left: -500px;
+        top: -500px;
+      }
     </style>
   </head>
   <body>
@@ -176,6 +184,7 @@
     <button id="zero-size-btn">Z</button>
     <button id="display-none-btn">Display none</button>
     <button id="vis-hidden-btn">Visibility hidden</button>
+    <button id="offviewport-btn">Off viewport</button>
     <div id="plain-div">PLAIN-DIV-TEXT</div>
     <div id="editable-div" contenteditable="true"></div>
 

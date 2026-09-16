@@ -656,7 +656,9 @@ class FakeClickTarget:
         text: str = "SECRET-BUTTON-LABEL",
         mouse_click_error: Exception | None = None,
         aim_answer: Any = _UNSET,
+        viewport: tuple[float, float] = (1280.0, 720.0),
     ) -> None:
+        self.viewport = viewport
         self.tag = tag
         self.element_id = element_id
         self.classes = tuple(classes)
@@ -676,16 +678,31 @@ class FakeClickTarget:
     def _self_shape(self) -> dict[str, Any]:
         return {"tag": self.tag, "id": self.element_id, "classes": list(self.classes)}
 
-    def _hit_shape(self) -> dict[str, Any] | None:
-        if not self.rendered:
-            return None
-        if self.hit is None:
-            return self._self_shape()
-        tag, element_id, classes = self.hit
-        return {"tag": tag, "id": element_id, "classes": list(classes)}
+    def _in_viewport(self, x: float, y: float) -> bool:
+        """``document.elementFromPoint`` answers ``null`` outside the viewport.
+
+        Measured (F-876 §2c): an ``absolute; left:-500px`` button keeps a real
+        33.5 x 21 box at a NEGATIVE point, ``scroll_into_view`` does not bring it
+        back, and the hit-test there is ``null`` — a different fact from "another
+        element was on top", which is why the double derives it from the geometry
+        rather than letting a test assert it directly.
+        """
+        width, height = self.viewport
+        return 0 <= x <= width and 0 <= y <= height
 
     def _aim(self) -> str:
         left, top, width, height = self.rect if self.rendered else (0.0, 0.0, 0.0, 0.0)
+        point = (
+            {"x": left + width / 2, "y": top + height / 2} if self.rendered else None
+        )
+        visible_point = point is not None and self._in_viewport(point["x"], point["y"])
+        if not visible_point:
+            hit: dict[str, Any] | None = None
+        elif self.hit is None:
+            hit = self._self_shape()
+        else:
+            tag, element_id, classes = self.hit
+            hit = {"tag": tag, "id": element_id, "classes": list(classes)}
         return json.dumps(
             {
                 "rendered": self.rendered,
@@ -695,14 +712,10 @@ class FakeClickTarget:
                     "width": width,
                     "height": height,
                 },
-                "point": (
-                    {"x": left + width / 2, "y": top + height / 2}
-                    if self.rendered
-                    else None
-                ),
+                "point": point,
                 "target": self._self_shape(),
-                "hit": self._hit_shape(),
-                "hit_is_target": self.rendered and self.hit is None,
+                "hit": hit,
+                "hit_is_target": visible_point and self.hit is None,
                 "disabled": self.disabled,
                 "pointer_events": self.pointer_events,
                 "visibility": self.visibility,

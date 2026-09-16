@@ -153,7 +153,7 @@
     "tags": []
   },
   "click_element": {
-    "description": "Click an element.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath.\n    text_match (Optional[str]): Click element with matching text.\n    timeout (int): Timeout in ms (default 10000, max 60000). Clicks rarely need more than 5s — only increase for dynamically loaded elements. Values above 60000 are capped.\n\nReturns:\n    bool: True if clicked successfully.",
+    "description": "Click an element, and report where the click actually went.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath.\n    text_match (Optional[str]): Click element with matching text.\n    timeout (int): Timeout in ms (default 10000, max 60000). Clicks rarely need more than 5s — only increase for dynamically loaded elements. Values above 60000 are capped.\n\nReturns:\n    Dict[str, Any]: {\"selector\", \"dispatch\", \"point\", \"size\", \"target\", \"hit\",\n        \"hit_is_target\", \"reason\"}. \"dispatch\" is \"coordinate\" (a real trusted\n        click at \"point\") or \"synthetic\" (the element has no box, so the click\n        was an in-page el.click() — untrusted and not hit-tested). \"hit\" is the\n        tag/id/classes of whatever document.elementFromPoint returned at that\n        point, so an overlay that ate the click is visible. \"reason\" is null\n        when the click reached the target, else one of \"not-rendered\",\n        \"off-viewport\", \"zero-size\", \"not-visible\", \"pointer-events-none\",\n        \"covered\", \"disabled\". Whether the PAGE then reacted is not claimed.",
     "enabled": true,
     "input_schema": {
       "properties": {
@@ -190,18 +190,8 @@
       "type": "object"
     },
     "output_schema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "_WrappedResult",
-      "type": "object",
-      "x-fastmcp-wrap-result": true
+      "additionalProperties": true,
+      "type": "object"
     },
     "tags": []
   },
@@ -2635,7 +2625,7 @@
     "tags": []
   },
   "paste_text": {
-    "description": "Paste text instantly into an input field.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath.\n    text (str): Text to paste.\n    clear_first (bool): Clear field before pasting.\n\nReturns:\n    bool: True if pasted successfully.",
+    "description": "Paste text instantly into an input field.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath.\n    text (str): Text to paste.\n    clear_first (bool): Clear field before pasting.\n\nReturns:\n    bool: True — the text was pasted AND the page took it. Raises if the\n        element's text did not move (a readonly/range/color control, a\n        non-editable element, or a script that cancels the input).",
     "enabled": true,
     "input_schema": {
       "properties": {

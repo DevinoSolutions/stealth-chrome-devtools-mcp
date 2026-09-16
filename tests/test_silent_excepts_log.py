@@ -13,6 +13,7 @@ sets propagate=False), forced to DEBUG so both WARNING and DEBUG sites are
 observed uniformly across this file.
 """
 
+import json
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -111,12 +112,30 @@ class TestDomHandlerSilentExcepts:
         element.scroll_into_view = AsyncMock()
         element.mouse_click = AsyncMock(side_effect=RuntimeError("mouse-fail"))
         element.click = AsyncMock()
+        # F-876: the aim is read once, BEFORE the click. The fallback chain this
+        # test pins is unchanged; what it now also proves is that the fallback is
+        # LABELLED rather than reported as an ordinary click.
+        element.apply = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "rendered": True,
+                    "rect": {"left": 0, "top": 0, "width": 10, "height": 10},
+                    "point": {"x": 5, "y": 5},
+                    "target": {"tag": "button", "id": "btn", "classes": []},
+                    "hit": {"tag": "button", "id": "btn", "classes": []},
+                    "hit_is_target": True,
+                    "disabled": False,
+                    "pointer_events": "auto",
+                    "visibility": "visible",
+                }
+            )
+        )
         tab = MagicMock()
         tab.select = AsyncMock(return_value=element)
 
         result = await DOMHandler.click_element(tab, "#btn")
 
-        assert result is True
+        assert result["dispatch"] == "synthetic"
         element.click.assert_awaited_once()
         assert len(captured_backend_records) == 1
         record = captured_backend_records[0]
@@ -156,7 +175,17 @@ class TestDomHandlerSilentExcepts:
 
         element = MagicMock()
         element.focus = AsyncMock()
-        element.apply = AsyncMock(side_effect=RuntimeError("paste-clear-fail"))
+        # F-876: only the CLEAR fails. The read-back is a separate apply on the
+        # same element and must still answer, or the tool would raise for an
+        # unreadable field before it ever reached the clear fallback this pins.
+        reads = iter(["", "hello"])
+
+        async def _apply(js_function, *args, **kwargs):
+            if "elem.value = ''" in js_function:
+                raise RuntimeError("paste-clear-fail")
+            return json.dumps({"editable": False, "text": next(reads)})
+
+        element.apply = _apply
         tab = MagicMock()
         tab.select = AsyncMock(return_value=element)
         tab.send = AsyncMock()

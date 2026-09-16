@@ -269,7 +269,13 @@
       // F-876: each of these logs its own click with isTrusted, so "the target
       // never received it" and "it received a SYNTHETIC one" are distinguishable
       // from the action log alone.
-      ["pe-none-btn", "zero-size-btn", "display-none-btn", "vis-hidden-btn"].forEach(
+      [
+        "pe-none-btn",
+        "zero-size-btn",
+        "display-none-btn",
+        "vis-hidden-btn",
+        "offviewport-btn",
+      ].forEach(
         function (id) {
           on(id, "click", function (e) {
             window.logAction(
