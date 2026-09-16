@@ -1033,3 +1033,57 @@ class TestListInstancesLiveState:
         finally:
             with contextlib.suppress(Exception):
                 await close(instance_id=iid)
+
+    @pytest.mark.asyncio
+    async def test_an_instance_with_nothing_live_to_read_is_reported_partial(
+        self, tmp_empty_root
+    ):
+        """The THIRD record shape, in a real Chrome: ``partial: True``.
+
+        F-874's whole argument is that a cached value must never be served
+        under a name that claims to be current. The degraded record is the
+        other half of that promise — when the live read cannot happen, the
+        entry says so, names the failure, and hands back the ``last_navigated``
+        pair under names that admit what they are. The hermetic half
+        (``tests/test_list_instances_live_state.py``) can make a fake fail on
+        demand; what only Chrome can settle is that a REAL instance in this
+        state produces exactly this shape and not an exception, a missing row,
+        or a stale ``title``.
+
+        Closing the instance's only tab is how the state is reached honestly:
+        no process is killed and no socket is broken, so nothing here depends
+        on how fast a dying websocket reports itself — the listing is a dict
+        read plus one refused lookup, and it answered in 0.00 s locally
+        (Chrome 152, Windows 11). The instance itself stays in the manager,
+        which is precisely the situation the record exists for.
+        """
+        spawn = _get_fn("spawn_browser")
+        close = _get_fn("close_instance")
+        navigate = _get_fn("navigate")
+        list_instances = _get_fn("list_instances")
+        list_tabs = _get_fn("list_tabs")
+        close_tab = _get_fn("close_tab")
+
+        result = await spawn(headless=True, **_sandbox_kwargs())
+        iid = result["instance_id"]
+        try:
+            await navigate(instance_id=iid, url=self.ALPHA)
+            for tab in await list_tabs(instance_id=iid):
+                await close_tab(instance_id=iid, tab_id=tab["tab_id"])
+
+            entry = self._entry(await list_instances(), iid)
+            assert entry["source"] == "active"
+            assert entry["partial"] is True
+            # Named failure, not a silent row.
+            assert "Could not read the active tab" in entry["detail_error"]
+            # The cached pair is handed back ONLY under the names that say so.
+            assert entry["last_navigated_title"] == "Alpha"
+            assert self._same_url(entry["last_navigated_url"], self.ALPHA)
+            # And never under a name that would claim to be current — this one
+            # assertion is the whole finding: the defect WAS a `title` key
+            # holding a value nobody had re-read.
+            assert "current_url" not in entry
+            assert "title" not in entry
+        finally:
+            with contextlib.suppress(Exception):
+                await close(instance_id=iid)

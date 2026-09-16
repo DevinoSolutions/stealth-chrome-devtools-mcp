@@ -65,6 +65,14 @@ not, and each of them was found by asking a question only a wire lane can ask:
 * **A thrown script was reported as a success** (F-795), found incidentally when
   this module's first probe script used an illegal ``return``. FIXED in 2.0.1:
   the eval path now raises, and the node that found it asserts the failure.
+* **Concurrent calls really do overlap.** A manual ten-browser run looked like
+  the backend was executing one call at a time, and nothing in the suite could
+  have told the difference — MQ-139's nodes assert answer ROUTING, which a
+  strictly serial server satisfies perfectly.
+  ``test_concurrent_calls_on_one_session_overlap_rather_than_queue`` measures
+  it instead, and the answer is that three in-flight calls add ONE server-side
+  hold and not three. It owns no MQ id (it narrows MQ-139, as F-790/F-793/F-795
+  do) and it is a regression oracle, not a characterization.
 
 MQ binding. The ids below are bound to runtime evidence by the ``--mq`` flags on
 the ``transport`` cell's ``release_evidence.py emit`` step in
@@ -162,6 +170,19 @@ NAV_TIMEOUT_MS = 20_000
 HELD_NAV_TIMEOUT_MS = 40_000  # a route held open on purpose; released by the test
 
 HTTP_TIMEOUT = 10
+
+# ── The overlap probe's constants (see the node for the argument) ───────────
+#: How many requests are put in flight together. Three is enough to tell one
+#: hold from N holds and cheap enough to pay three real Chrome launches for.
+CONCURRENCY_PROBES = 3
+#: How long the FIXTURE holds each response. Large enough that three of them
+#: dwarf the measured baseline on any cell, small enough to stay far inside
+#: ``NAV_TIMEOUT_MS``.
+CONCURRENCY_HOLD_MS = 2_000
+#: The line between "one hold was added" (overlapping) and "three holds were
+#: added" (a queue), placed halfway between the two so neither a slow cell nor
+#: a fast one can decide the node. It is a KIND threshold, not a budget.
+CONCURRENCY_SERIAL_FLOOR = 2.0 * CONCURRENCY_HOLD_MS / 1000.0
 
 # F-790's control bound. The working (master-profile) spawn path answers in
 # under a second on the same machine and in the same session, so a control spawn
@@ -563,6 +584,97 @@ async def test_two_named_instances_stay_isolated_under_interleaved_calls(
     listed = await _call(wire, "list_instances", {})
     remaining = {entry["instance_id"] for entry in _tool_payload(listed)}
     assert not ({alpha, beta} & remaining), "closed instances still listed"
+
+
+async def test_concurrent_calls_on_one_session_overlap_rather_than_queue(
+    wire, fixture_app_server
+):
+    """MQ-139, the half the answer-routing nodes above cannot see: do three
+    requests in flight on ONE session actually run at the same time?
+
+    Those nodes prove each answer comes back on its own id. They would pass
+    unchanged against a server that executed the three strictly one after
+    another, which is what a manual ten-browser run appeared to show: ten
+    ``spawn_browser`` calls issued at once were logged ~150 ms after each
+    other's completion, and ten ``navigate`` calls never had more than two in
+    flight. If that serialization is real it is a throughput property of the
+    product that nothing in the suite would notice.
+
+    The delay is a FIXTURE-SIDE sleep (``/cov/slow_page.html?ms=``), not
+    JavaScript and not a browser wait. It has to be: page script runs on
+    Blink's single main thread, so three in-page delays would serialize per
+    instance no matter what the wire did, and the node would be measuring
+    Chrome. Held in the fixture server's own handler thread, the only thing
+    that can make the three overlap is the request path itself. Three separate
+    instances for the same reason — one instance behind a parked operation is
+    F-793, a different and already-characterized question.
+
+    The measurement is SELF-CALIBRATING and that is what makes it safe on a
+    2-core cell: the same three navigations are run first with no delay at all,
+    so the fixed cost (three round trips, three real page loads) is measured
+    on this machine rather than guessed. Serial execution shows up as three
+    holds added to that baseline, overlapping execution as one. The threshold
+    sits halfway between, so the node can only go red on a change of KIND.
+
+    Measured (Windows 11, Chrome 152, over the real installed launcher):
+    ``3 concurrent spawns 1.89s; baseline 0.15s, held 2.18s, added 2.03s`` for
+    a 2.0 s hold — one hold, not three. **The product does not serialize.** The
+    manual run's apparent queue was therefore upstream of the wire, in how the
+    CLIENT issues its calls, and this node is what keeps that diagnosis from
+    having to be made again from logs.
+    """
+    profiles = [f"w13-overlap-{index}" for index in range(CONCURRENCY_PROBES)]
+    spawn_started = time.monotonic()
+    instances = await asyncio.gather(
+        *(_spawn(wire, profile=profile) for profile in profiles)
+    )
+    spawn_seconds = time.monotonic() - spawn_started
+    try:
+
+        async def _wall(hold_ms: int) -> float:
+            url = f"{fixture_app_server}/cov/slow_page.html?ms={hold_ms}"
+            started = time.monotonic()
+            ids = [
+                await wire.call_tool(
+                    "navigate",
+                    {
+                        "instance_id": instance_id,
+                        "url": url,
+                        "timeout": NAV_TIMEOUT_MS,
+                    },
+                )
+                for instance_id in instances
+            ]
+            frames = await asyncio.gather(
+                *(wire.response(request_id, OUTER_BOUND) for request_id in ids)
+            )
+            elapsed = time.monotonic() - started
+            for request_id, frame in zip(ids, frames, strict=True):
+                _assert_ok(frame, request_id)
+                assert len(wire.frames_for(request_id)) == 1
+            return elapsed
+
+        baseline = await _wall(0)
+        held = await _wall(CONCURRENCY_HOLD_MS)
+        added = held - baseline
+        hold_seconds = CONCURRENCY_HOLD_MS / 1000.0
+        print(
+            f"\nW13 overlap: {CONCURRENCY_PROBES} concurrent spawns "
+            f"{spawn_seconds:.2f}s; {CONCURRENCY_PROBES} navigations, baseline "
+            f"{baseline:.2f}s, held {held:.2f}s, added {added:.2f}s "
+            f"(one hold {hold_seconds:.1f}s, "
+            f"{CONCURRENCY_PROBES} holds {CONCURRENCY_PROBES * hold_seconds:.1f}s)"
+        )
+        assert added < CONCURRENCY_SERIAL_FLOOR, (
+            f"{CONCURRENCY_PROBES} concurrent tools/call added {added:.2f}s over a "
+            f"{hold_seconds:.1f}s server-side hold (baseline {baseline:.2f}s, held "
+            f"{held:.2f}s) — that is one hold per request, so the session is "
+            "executing them as a queue rather than concurrently"
+        )
+    finally:
+        for instance_id in instances:
+            with contextlib.suppress(Exception):
+                await _close(wire, instance_id)
 
 
 async def test_execute_script_reports_failure_for_a_script_that_threw(

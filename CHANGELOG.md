@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+### Tests — real-Chrome E2E coverage for F-873…F-881
+
+Every defect in the 2.1.7/2.1.8 set was found by driving the shipped release against
+real sites with several browsers at once, after CI was green. This adds the coverage
+that would have been red first. No `src/` change.
+
+- **`tests/test_e2e_fleet.py` (new)** — six headless browsers spawned, navigated and
+  driven in three `asyncio.gather` calls, over a mix of page shapes (plain, a page
+  whose `load` is held open, an app shell whose document cannot scroll, a form), with
+  every answer checked against the page's own state in JavaScript. Asserts
+  `list_instances` reports six live titles with `partial: false`, that closing the
+  fleet leaves no unreclaimable profile directory, and that the backend logged no
+  warning on the way through. Measured 12.4 s cold / 5.0 s warm locally.
+- **`tests/test_e2e_load_milestone.py` (new)** — F-881 made red by construction: a
+  page that commits at once and holds its `load` on a slow `<img>` for 1.8 s, whose
+  title and `readyState` flip only at `load`. Plus the `domcontentloaded` control that
+  keeps the three milestones told apart.
+- **`tests/test_cli_backend_records_e2e.py` (new)** — F-880 through the REAL
+  `stealth-chrome-devtools` console script as a subprocess, against a hand-written
+  `server.json` in an isolated HOME: `doctor` names the `(dead record)` and the
+  `no port recorded` entry and writes nothing; `cleanup --apply` forgets exactly the
+  dead one and keeps the other. Both nodes assert the developer's real
+  `~/.stealth-mcp` was not touched.
+- **`tests/test_e2e_scroll_page_verification.py`** — the whole F-878 twelve-fixture
+  matrix is now asserted against the finding's own "right answer" column, not only the
+  four fixtures a candidate heuristic gets wrong. Re-measured 12/12.
+- **`tests/test_browser_integration.py`** — F-874's third record shape (`partial: true`
+  + `detail_error`, and NO `current_url`/`title` key) against a real instance.
+- **`tests/test_e2e_type_text_verification.py`** — a control that REWRITES what it
+  receives (a `dd-dd` mask) still succeeds, holding open F-873 §6's rule that the
+  check is "did anything change" and never "does it contain what I typed".
+- **`tests/test_wire_semantics.py`** — a self-calibrating overlap probe on the real
+  stdio wire: three `tools/call` in flight add ONE server-side hold, not three
+  (measured baseline 0.15 s, held 2.18 s over a 2.0 s hold). The backend does not
+  serialize concurrent calls.
+- **`tests/fixture_routes.py`** — six `cov_*` routes appended at EOF for the above.
+
 ## 2.1.8
 
 ### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)

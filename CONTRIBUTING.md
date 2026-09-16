@@ -70,6 +70,15 @@ Markers (`pyproject.toml`): **`integration`** (spawns real browsers), **`charact
 surfaces as a failing test you update deliberately). The default pre-push run is
 `-m "not integration"`.
 
+`integration` means **real browsers**, not "slow" or "not hermetic". The unmarked (unit)
+lane therefore also holds a small number of tests that shell out to the installed
+`stealth-chrome-devtools` console script as a real subprocess against a throwaway `HOME`
+(`tests/test_doc_examples.py`, `tests/test_cli_backend_records_e2e.py`) — no Chrome, no
+mock, and they run on every push. Use `release_gate_harness._isolated_env` +
+`resolve_launcher` for those: `backend_registry.STATE_DIR` is `Path.home()/".stealth-mcp"`
+with no env override, so redirecting the child's `HOME`/`USERPROFILE` *before* it starts
+is the only way a test can touch a backend record without touching yours.
+
 Coverage is **intentionally not** in `addopts` (it would slow every single-file TDD run
 and trip `--cov-fail-under` on partial runs). CI turns it on explicitly.
 

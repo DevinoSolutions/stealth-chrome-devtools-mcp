@@ -474,3 +474,87 @@ async def test_a_horizontal_only_scroller_is_found_on_the_x_axis(tmp_empty_root)
         assert down["scrolled"] is False
     finally:
         await close(instance_id=iid)
+
+
+#: The finding's own "the element a human calls the page" column (§3.1), the
+#: one authoritative answer per fixture. ``None`` means the document scroller:
+#: on **f** that is ``body`` and everywhere else ``html``, which is exactly the
+#: distinction ``scroller_is_document`` exists to absorb, so the expectation is
+#: written as "the document" and not as a tag name.
+F878_EXPECTED_SCROLLER = {
+    "a_control": None,
+    "b_app_shell": "shell",
+    "c_two_panes": "main",
+    "d_nested_in_scrolling_doc": None,
+    "e_snap_document": None,
+    "e2_snap_nested": "deck",
+    "f_quirks": None,
+    "g_shell_with_grid": "shell",
+    "h_shell_under_scrim": "shell",
+    "i_three_columns": "reader",
+    "j_h_strip": "strip",
+    "k_stray_overflow": "shell",
+}
+
+#: The one fixture whose scroller is horizontal, so the one asked a different
+#: direction — the finding asks **j** for ``right`` for the same reason.
+F878_HORIZONTAL = {"j_h_strip"}
+
+
+async def test_the_whole_f878_matrix_still_picks_what_the_finding_measured(
+    tmp_empty_root,
+):
+    """All TWELVE fixtures, not the four a candidate heuristic gets wrong.
+
+    The four nodes above are the discriminating ones: each is a shape where a
+    plausible alternative rule picks something else, so each fails if the rule
+    is swapped. That left eight fixtures declared in this file as a
+    reproduction handle with no assertion on them at all — which means a
+    regression confined to document-level scroll-snap (**e**), quirks mode
+    (**f**), a ``position:fixed`` scrim (**h**), an ambiguous multi-pane layout
+    (**c**, **i**) or the ``AREA_SLACK`` tie-break (**k**) would have been
+    invisible here. The finding's headline claim is *12/12*, and this is the
+    node that holds all twelve of it.
+
+    Deliberately ONE browser and ``smooth=False``: what is asserted is the
+    PICK, and the four nodes above already own the settle, the offsets and the
+    page's own agreement. One launch plus twelve navigations and twelve instant
+    scrolls measured 8.3 s locally (Chrome 152, Windows 11), and re-measured
+    12/12 against the finding's column — a per-fixture node would have cost
+    twelve browser launches to assert the same twelve facts.
+
+    The expectation is the finding's §3.1 "right answer" column, copied here
+    and nowhere else, so re-deriving the rule from taste fails loudly.
+    """
+    spawn = get_fn("spawn_browser")
+    scroll_page = get_fn("scroll_page")
+    close = get_fn("close_instance")
+
+    result = await spawn(headless=True, **sandbox_kwargs())
+    iid = result["instance_id"]
+    picked: dict[str, str | None] = {}
+    try:
+        for name, page in F878_MATRIX.items():
+            await navigate_and_settle(iid, page)
+            record = await scroll_page(
+                instance_id=iid,
+                direction="right" if name in F878_HORIZONTAL else "bottom",
+                smooth=False,
+            )
+            picked[name] = (
+                None if record["scroller_is_document"] else record["scroller"]["id"]
+            )
+            # A pick is only an answer if the element it names can actually
+            # move on the axis it was asked about — otherwise "the document,
+            # which cannot scroll" would satisfy every ``None`` row above.
+            extent = "max_scroll_x" if name in F878_HORIZONTAL else "max_scroll_y"
+            assert record[extent] > 0, (name, record)
+            assert record["scrolled"] is True, (name, record)
+    finally:
+        await close(instance_id=iid)
+
+    assert picked == F878_EXPECTED_SCROLLER, {
+        name: (picked[name], F878_EXPECTED_SCROLLER[name])
+        for name in F878_EXPECTED_SCROLLER
+        if picked.get(name) != F878_EXPECTED_SCROLLER[name]
+    }
