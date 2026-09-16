@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+### Fixed — `list_instances` reported the last navigation, not the instance (F-874)
+
+Measured on 2.1.6 over real stdio with ten headed browsers (Chrome 152, Windows
+11): `list_instances` said `current_url: "https://www.youtube.com/"` /
+`"YouTube"` for an instance whose active tab was at
+`…/results?search_query=lofi+hip+hop+radio`, and `get_active_tab` on that same
+`instance_id` answered correctly in the same second. Three more instances the
+same way — a tab that had been `switch_tab`'d away from, a title the page set
+after load (`title: null` for a titled Amazon page), and a `data:` URL whose
+`title` was still the Wikipedia page before it. `BrowserInstance.current_url` /
+`.title` had exactly two writers in the tree, the spawn and the `navigate` tool,
+so every other way a page can move — an in-page click, a script navigation, a
+redirect, `switch_tab`, a late `document.title` — left the tool reporting a
+moment that had passed. Nothing raised; the record was well-formed and the field
+was named `current_url`.
+
+The read now has one home. `embedded/tab_identity.py` owns the
+`{tab_id, url, title, type}` record and the `Target.getTargets` refresh in front
+of it, and `list_tabs`, `get_active_tab` and `list_instances` all go through it —
+the first two had been writing the same four expressions out by hand, and the
+third had not been asking at all. The refresh is a real round trip rather than a
+read of `tab.target` as it stands, because that metadata is only as fresh as
+whatever `Target.targetInfoChanged` nodriver has already processed;
+`get_active_tab` loses its `await tab` in the trade, which refreshed nothing,
+cost a 0.5 s floor and raised `TypeError` on a rediscovered target (F-771).
+
+An `active` record now carries the LIVE `current_url`/`title` and
+`partial: false`. If that read fails it carries `partial: true`, a
+`detail_error`, and the last navigation's values under the names
+`last_navigated_url` / `last_navigated_title` — and deliberately **no**
+`current_url` key, because a cached value under that name is the defect. The
+`stored` tier and `get_instance_state`'s two partial records, neither of which
+has a live browser to read, carry the same honest pair. `BrowserInstance`'s
+fields are renamed to match what they have always held. Each entry is bounded by
+the CDP budget and the entries are gathered concurrently, so one wedged browser
+costs its own row and one budget for the whole listing, not one per instance.
+
+A second defect on the same cache is fixed with it: `update_instance_state`
+guarded both fields on truthiness, so `navigate` reporting `title: ""` — Amazon
+sets its title late, a bare `data:text/html` document never sets one — left the
+previous page's title standing. It is `is not None` now; an empty title is what
+the page has.
+
+`scroll_page` returning `true` for a scroll that has not happened was measured
+in the same session and is a different defect with a different remedy; it is
+open as `audit/stage2/finding_F875_scroll_page_returns_true_without_scrolling.md`.
+
 ### Fixed — `type_text` reported success for text it never entered, and for an Enter that could not submit (F-873)
 
 Measured on 2.1.6 over real stdio transport, headed Chrome 152: `type_text` returned

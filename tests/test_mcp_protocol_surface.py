@@ -16,7 +16,14 @@ from __future__ import annotations
 import fastmcp
 import pytest
 
-from fakes import FakeBrowserManager, FakeStorage, call_tool, fake_instance
+from fakes import (
+    FakeBrowser,
+    FakeBrowserManager,
+    FakeStorage,
+    FakeTab,
+    call_tool,
+    fake_instance,
+)
 from stealth_chrome_devtools_mcp.embedded import server
 
 
@@ -46,9 +53,16 @@ async def test_list_instances_via_protocol_matches_seam(patched_server):
     through FastMCP's in-memory transport — proving the hermetic seam holds one
     layer up from the raw ``.fn`` calls.
     """
+    # An active entry is the LIVE tab (F-874), so the seeded instance needs a
+    # tab to be live FROM — its own cached pair is deliberately a different,
+    # older page, which is what makes this a shape assertion and not a tautology.
+    live = FakeTab(url="https://example.test", target_id="T-live")
+    live.target.title = "Example"
     patched_server(
         browser_manager=_ProtocolBrowserManager(
-            instances=[fake_instance("i1", "active", "https://example.test", "Example")]
+            instances=[fake_instance("i1", "active", "https://stale.test", "Stale")],
+            tabs={"i1": live},
+            browsers={"i1": FakeBrowser(tabs=[live])},
         ),
         in_memory_storage=FakeStorage(),
     )
@@ -69,6 +83,7 @@ async def test_list_instances_via_protocol_matches_seam(patched_server):
             "current_url": "https://example.test",
             "title": "Example",
             "source": "active",
+            "partial": False,
         }
     ]
 

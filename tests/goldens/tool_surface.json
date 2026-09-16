@@ -2390,7 +2390,7 @@
     "tags": []
   },
   "list_instances": {
-    "description": "List all active browser instances.\n\nReturns:\n    List[Dict[str, Any]]: List of browser instances with their current state.",
+    "description": "List all active browser instances.\n\nReturns:\n    List[Dict[str, Any]]: One record per instance. An ``active`` record\n    carries the LIVE ``current_url``/``title`` of the instance's active tab\n    (the same answer ``get_active_tab`` gives) and ``partial: False``; if\n    that read failed it carries ``partial: True``, ``detail_error`` and the\n    last navigation's values as ``last_navigated_url``/\n    ``last_navigated_title`` instead. A ``stored`` record has no live browser\n    to read at all, so it only ever carries the ``last_navigated_*`` pair.",
     "enabled": true,
     "input_schema": {
       "properties": {},
