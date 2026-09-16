@@ -238,3 +238,32 @@ class TestDocumentedToolCount:
         for stale in ("90 tools", "96 tools", "97 tools", "99 tools"):
             assert stale not in text, f"stale tool count '{stale}' still in docs"
         assert "94 tools" in text
+
+
+class TestChangelogIntegrity:
+    """The CHANGELOG is a statement about shipped artefacts; a merge must not
+    leave it half-said. Release 2.1.8's branch found ``<<<<<<< HEAD`` /
+    ``=======`` / ``>>>>>>> origin/main`` committed to ``main`` by two fix
+    merges (the F-875 and F-878 branches), wrapping the whole 2.1.7 section,
+    and nothing in the gate read the file. Two invariants, both cheap: no
+    conflict marker survives in a root doc, and no ``### `` heading is stated
+    twice (a section auto-placed by a clean merge AND re-added by hand reads as
+    two fixes)."""
+
+    MARKER = re.compile(r"^(<<<<<<< |=======$|>>>>>>> )", re.MULTILINE)
+
+    def test_no_conflict_markers_in_root_docs(self):
+        for d in ["CHANGELOG.md", *DOCS]:
+            text = (REPO / d).read_text(encoding="utf-8")
+            hit = self.MARKER.search(text)
+            assert hit is None, (
+                f"{d} carries a merge conflict marker at offset {hit.start()}: "
+                f"{hit.group(0)!r}"
+            )
+
+    def test_changelog_states_each_section_once(self):
+        text = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+        headings = [ln.strip() for ln in text.splitlines() if ln.startswith("### ")]
+        assert headings, "expected ### sections in CHANGELOG.md"
+        dupes = sorted({h for h in headings if headings.count(h) > 1})
+        assert not dupes, f"CHANGELOG.md states these sections more than once: {dupes}"
