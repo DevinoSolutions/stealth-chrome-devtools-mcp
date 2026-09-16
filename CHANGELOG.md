@@ -9,8 +9,13 @@ installed console launcher over stdio JSON-RPC, a detached backend on an isolate
 `HOME` and an OS-assigned port, real headless Chrome) and assert, after each stress:
 the recorded backend pid is unchanged; every browser spawned before the stress is
 still alive AND answers a CDP round trip; every `tools/call` on a surviving proxy got
-exactly one non-error frame and no proxy's stdout reached EOF; and ZERO lifecycle
-incidents were written to the proxy/backend logs. The incident vocabulary is the
+exactly one response frame, not an error, and no proxy's stdout reached EOF; and ZERO
+lifecycle incidents were written to the proxy/backend logs. The mixed-fingerprint
+fleet is the one deliberate exception to that set: it churns a backend by
+construction, so it runs in its own workspace, asserts browsers on the pid captured
+at spawn only (the winner rewrites `browser_pids.json`, so the registry cannot be its
+oracle) and is exempt from the zero-incident rule — the eviction line IS its
+measurement. The incident vocabulary is the
 product's own log lines (`confirmed unusable`, `confirmed gone after a lost
 connection`, `backend healed: re-bridging`, `backend unhealable after`, `times in a
 row`, `backend stale (source changed), evicting`) — read from the logs rather than
@@ -22,7 +27,12 @@ deliberately not an incident (F-820) and is counted and printed instead.
 
 Stresses, one node each, with the measured wall time and the numbers asserted on:
 CPU saturation (20 s, `os.cpu_count()*2` normal-priority busy loops, two proxies
-calling every ~1 s); a hard-killed sibling proxy; 30 `initialize`+DELETE liveness
+calling every ~1 s — a node with a stated limit: the strike count varied across
+runs on a 32-core box (0 in five runs, 6 in one, where answered calls also fell
+from 76-80 to 28; the *unstressed* 60 s soak logged 2 in another), and nothing
+condemned in any of them, so it guards "a saturated machine is not condemned as
+dead" and does not by itself exercise the confirmation phase a condemnation would
+need); a hard-killed sibling proxy; 30 `initialize`+DELETE liveness
 sessions plus five clean proxy connect/disconnect cycles; a session idle past
 `session_hygiene.ABANDONED_AFTER_SECONDS + SWEEP_INTERVAL_SECONDS` (the longest
 periodic reaper in the tree, derived from those constants rather than typed); a
@@ -39,18 +49,35 @@ spawn; which of the two candidate mechanisms kills it — dying with the termina
 backend, or being reaped as unowned by the replacement's orphan recovery, since
 `browser_pid_registry` stamps the BACKEND as owner — was not isolated). The
 other session never asked for that and is never told: its proxy log carries no
-condemnation, no heal and no teardown — at most one transient `probe failed 1/3` that
-resets itself. Both of the proxy's death witnesses are PORT-scoped and the replacement
-binds the SAME port, so `backend_watchdog` keeps getting an answer and the
-streamable-HTTP bridge never "breaks" for `_confirm_bridge_verdict`; what actually
+condemnation, no heal and no teardown — only transient strikes that reset themselves
+(usually one `probe failed 1/3`; once `2/3`). The proxy's FAST death witness is
+port-only: `backend_watchdog.watch_liveness` probes with
+`singleton._backend_http_ready`, which asks the port and not the identity, and the
+replacement binds the SAME port and answers it — so the three strikes that would open
+the confirmation phase never accumulate and the confirmation that IS identity-scoped
+(`_same_identity_backend_ready`) is never reached; the streamable-HTTP bridge is
+per-request, so nothing "breaks" for `_confirm_bridge_verdict` either. What actually
 died is the MCP SESSION, which nothing watches, leaving `proxy_selfheal`'s entire
 recovery unreachable on the most common way a backend goes away. The client-visible
 half varies (5 of 6 runs: every later call answers
 `{"code": 32600, "message": "Session terminated"}`; 1 of 6: the session kept answering
 over a backend that no longer had its browser), so the node asserts the half that did
-not vary. The eviction itself converges — exactly one wave in all six runs, asserted
-by a sibling node — but only because the loser never notices, not because any rule
-makes a ping-pong impossible. Two proposed universal rules are in `CONTRIBUTING.md`.
+not vary. The eviction itself converges — exactly one wave in all six runs, and the
+fleet ends on exactly one live recorded backend, asserted by a sibling node whose
+fixture first proves with the product's own `_source_fingerprint` that the two sides
+really differ — but only because the loser never notices, not because any rule makes
+a ping-pong impossible. Two proposed universal rules are in `CONTRIBUTING.md`.
+
+`tests/release_gate_harness.py`'s `_pick_free_port` no longer hands an isolated
+workspace whatever loopback port the OS assigned: it refuses the product's default
+singleton port and every port the developer's REAL `~/.stealth-mcp/server.json`
+records, and retries (raising after 32 picks rather than guessing). The ephemeral
+range covers both, and a throwaway backend squatting a live backend's recorded port
+while that backend is down would be adopted by the developer's next real proxy and
+die at workspace teardown — the suite handing out the very `CONNECTION_CLOSED` it
+exists to eliminate. The record parse is now ONE helper (`_backend_entries`) shared
+with `_backend_pid_from_state`, and `tests/test_release_gate_harness_ports.py` pins
+the pick hermetically.
 
 ## 2.1.8
 

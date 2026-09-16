@@ -199,9 +199,31 @@ same four things every time:
 2. every browser spawned before the stress is **alive AND usable** — pid running *and*
    a CDP round trip (`get_active_tab` + `execute_script`) answers, which is what
    separates "the process is still there" from "the browser still works";
-3. every `tools/call` on a surviving proxy got **exactly one non-error frame**, and no
+3. every `tools/call` on a surviving proxy got **exactly one response frame, not an
+   error** (`_call` and `assert_wire_healthy` count the frames per request id), and no
    proxy's stdout reached **EOF** (an EOF *is* the client's `CONNECTION_CLOSED`);
 4. **zero lifecycle incidents** in the proxy/backend logs written during the stress.
+
+The mixed-fingerprint fleet (S5) is the one deliberate exception: it churns a backend
+by construction, so it runs in its own workspace, checks browsers on the pid captured
+at spawn only (the winner rewrites `browser_pids.json`, so the registry cannot be its
+oracle), and is exempt from rule 4 — the eviction line *is* its measurement. Its
+fixture first proves, with the product's own `singleton._source_fingerprint` over a
+repointed `SOURCE_ROOT`, that the two roots the two proxies import really carry
+different digests, so a copy that failed to move the digest cannot pass as a
+same-source fleet.
+
+**The CPU node has a stated limit.** `os.cpu_count()*2` normal-priority busy loops
+made probes miss only *sometimes* on a 32-core box — 0 strikes in five runs, 6 in
+one (where answered calls also fell from 76-80 to 28), while the *unstressed* 60 s
+soak logged 2 in another — and nothing condemned in any of them. So the node guards
+"a saturated machine is not condemned as dead"; it does **not** prove the
+confirmation phase is correct (a strike *count* cannot say whether three ever landed
+consecutively on one proxy — `test_watchdog_busy_vs_dead` and
+`test_singleton_starvation_patience` own that), and it does not reproduce the
+100 %-CPU condemnation recorded in the team memory, which needed the proxy itself to
+be starved rather than merely the machine to be busy. A stronger stress would have to
+starve the proxy process, which is a different node and a different budget.
 
 **If you change a lifecycle log line, that module is what breaks.** The incident
 oracle is the product's own text, because `observability.capture_lifecycle` is a no-op
@@ -229,14 +251,17 @@ times with no exception, on the pid captured at spawn. (Which of the two candida
 mechanisms kills it was not isolated: dying with the terminated backend, or being
 reaped as unowned by the replacement's orphan recovery, since `browser_pid_registry`
 stamps the *backend* as owner.) The other
-session is never told: its log carries no condemnation, no heal and no teardown — at
-most one transient `probe failed 1/3` that resets itself. Both of the proxy's death
-witnesses are PORT-scoped — `backend_watchdog.watch_liveness` probes the port, which
-the replacement binds and answers, so the three strikes needed to open a confirmation
-never accumulate; and the streamable-HTTP bridge is per-request, so nothing "breaks"
-for `_confirm_bridge_verdict`. What actually died is the MCP **session**, and nothing
-watches that, which makes `proxy_selfheal`'s entire recovery unreachable on the most
-common way a backend goes away. The client-visible half *varies* (5 of 6 runs the
+session is never told: its log carries no condemnation, no heal and no teardown —
+only transient strikes that reset themselves (usually one `probe failed 1/3`; once
+`2/3`). The proxy's **fast** death witness is port-only: `backend_watchdog.watch_liveness`
+probes with `singleton._backend_http_ready`, which asks the port and not the identity,
+and the replacement binds the SAME port and answers it — so the three strikes that
+would open the confirmation phase never accumulate, and the confirmation that *is*
+identity-scoped (`_same_identity_backend_ready`) is never reached; the
+streamable-HTTP bridge is per-request, so nothing "breaks" for
+`_confirm_bridge_verdict` either. What actually died is the MCP **session**, and
+nothing watches that, which makes `proxy_selfheal`'s entire recovery unreachable on
+the most common way a backend goes away. The client-visible half *varies* (5 of 6 runs the
 loser answered `Session terminated` forever; 1 of 6 it kept answering over a backend
 that no longer had its browser), so the node asserts the half that did not vary — the
 browser — and prints the rest.
@@ -252,7 +277,20 @@ monotonic stamp written at record time) and let only a strictly-newer client evi
 `backend_registry.fingerprint_mismatch` answers "these digests differ", never "mine is
 newer", so today nothing makes an eviction ping-pong impossible; an older or
 equal-but-different client should adopt the running backend, or exit naming both
-digests and the upgrade that reconciles them.
+digests and the upgrade that reconciles them. The convergence node is written to
+hold under either rule (at most one wave; the fleet ends on exactly one live recorded
+backend); the stronger property "a newer install must take effect" is the identity
+gate's own contract (`test_singleton_version_aware`) and belongs beside whichever
+rule the fix chooses, not in this fleet, which has no "newer" side — only a
+different one.
+
+**Isolated workspaces never bind a port the developer is using.** The harness's
+`_pick_free_port` refuses the product's default singleton port and every port the
+developer's REAL `~/.stealth-mcp/server.json` records, and retries; the ephemeral
+range covers both, and a throwaway backend squatting a live backend's recorded port
+while that backend was down would be adopted by the developer's next real proxy and
+then die at workspace teardown. `tests/test_release_gate_harness_ports.py` pins the
+pick without a socket or a real home.
 
 ---
 
