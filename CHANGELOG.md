@@ -24,10 +24,14 @@ that would have been red first. No `src/` change.
   worktrees); and that the backend logged nothing at WARNING while the fleet was
   DRIVEN beyond the one named, lane-structural clone-seed fallback. A six-way
   concurrent close on Windows may add exactly two named teardown warnings (a Chrome
-  kill over `CLOSE_KILL_TIMEOUT`, a profile a dying Chrome still holds open — both
-  measured), tolerated only because the node has already proved their consequence
-  repaired. The spawn `gather` collects exceptions so a partial spawn failure closes
-  whatever did start. Measured `spawn 5.2s, navigate 1.3s, actions 2.3s, total 9.0s`.
+  kill over `settings.close_kill_timeout`, a profile a dying Chrome still holds open —
+  both measured), tolerated only because the node has already proved their
+  consequence repaired: the same poll that reclaims the clone directories also waits
+  for all six instances to leave the product's tracked-pid record, which is the
+  product itself vouching that every Chrome is dead — `close_instance` answers True
+  on the timeout path by design, so it cannot. The spawn `gather` collects exceptions
+  so a partial spawn failure closes whatever did start. Measured `spawn 5.2s,
+  navigate 1.3s, actions 2.3s, total 9.0s`.
 - **`tests/test_e2e_load_milestone.py` (new)** — F-881 made red by construction: a
   page that commits at once and holds its `load` on a slow `<img>` for 1.8 s, whose
   title and `readyState` flip only at `load`. Plus the `domcontentloaded` control that

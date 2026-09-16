@@ -446,8 +446,19 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
 
         # Every answer is in. Everything logged from here on belongs to the
         # teardown, which is held to a different (named) standard — see the gate
-        # at the end of the node.
+        # at the end of the node. This line belongs INSIDE the `try`, after the
+        # last answer assertion: if an answer fails it is never bound, but the
+        # gate is never reached either, and moving it earlier would move
+        # driving-phase warnings into the tolerated teardown window.
         answers_end = len(caplog.records)
+
+        # What the product's tracked-pid record held while all six were live.
+        # Read now so the post-close witness below is provably non-vacuous: an
+        # empty intersection after close means "left the record", not "never
+        # in it".
+        tracked_while_live = set(ids) & set(
+            runtime.process_cleanup._load_tracked_pids()
+        )
 
         print(
             f"\nfleet of {FLEET_SIZE}: spawn {spawn_seconds:.1f}s, "
@@ -498,16 +509,47 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     # since the idle reaper is not running. Driving it inside the poll turns
     # "deferred" into "eventually" without masking a real leak: the deadline
     # still decides, and a directory that is never reclaimed still fails.
+    #
+    # The same poll waits for the PROCESS witness, for all six members. The
+    # shared pid record (`browser_pids.json`, read through
+    # `process_cleanup._load_tracked_pids`) keeps an instance until the product
+    # itself has seen its Chrome die: `kill_browser_process` untracks a
+    # named/master entry only after its kill succeeded, and `finalize` /
+    # `cleanup_deferred_profiles` untrack a clone entry only once
+    # `psutil.pid_exists` is False AND its directory is gone. A reclaimed clone
+    # directory already implies a dead Chrome (Windows will not `rmtree` a
+    # profile a live one holds), but a named profile is meant to survive, so for
+    # those three members this record is the ONLY fact the node has about the
+    # process — and it is what earns the `Chrome kill … exceeded` tolerance
+    # below: `close_instance` answers True on that path by design and the
+    # manager's dict forgets the instance either way, so neither can vouch that
+    # the worker thread's kill ever landed. A kill that wedges keeps its pid
+    # tracked, `cleanup_deferred_profiles` skips a live pid, and the deadline
+    # turns that into a failure here rather than a Chrome that outlives the
+    # session.
+    def _lingering() -> set[str]:
+        return set(ids) & set(runtime.process_cleanup._load_tracked_pids())
+
     deadline = time.monotonic() + RECLAIM_BUDGET_SECONDS
     leftover = clone_dirs & _dirs_in(clone_root)
-    while leftover and time.monotonic() < deadline:
+    lingering = _lingering()
+    while (leftover or lingering) and time.monotonic() < deadline:
         await asyncio.sleep(0.25)
         runtime.process_cleanup.cleanup_deferred_profiles()
         leftover = clone_dirs & _dirs_in(clone_root)
+        lingering = _lingering()
     assert not leftover, (
         f"disposable auto-clone(s) still on disk {RECLAIM_BUDGET_SECONDS:.0f}s "
         f"after close: {sorted(leftover)}"
     )
+    assert not lingering, (
+        f"instance(s) still in the product's tracked-pid record "
+        f"{RECLAIM_BUDGET_SECONDS:.0f}s after close, i.e. a Chrome the product "
+        f"has not seen die: {sorted(lingering)}"
+    )
+    # …and the record really was the fleet's, so the line above is a fact about
+    # six departures and not about a record that never mentioned them.
+    assert tracked_while_live == set(ids), sorted(set(ids) - tracked_while_live)
 
     survivors = set(used_dirs.values()) & _dirs_in(clone_root)
     assert survivors == named_dirs, (
@@ -573,10 +615,13 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     # is left tracked for `cleanup_deferred_profiles` (measured on this run:
     # `[WinError 5] Access is denied` on a `Trusted Icons` png, and one kill over
     # the 5.0 s budget). Both are tolerated ONLY because the assertions above
-    # already proved each one's consequence was repaired: every `close_instance`
-    # answered True, no instance of ours is still `active`, and every disposable
-    # clone directory was gone inside the reclaim budget — which this node DROVE
-    # rather than waited for. The match is component + operation + sentence, so
+    # already proved each one's consequence was repaired: every disposable clone
+    # directory was gone inside the reclaim budget — which this node DROVE
+    # rather than waited for — and every one of the six instances had left the
+    # product's tracked-pid record, which is the product vouching that each
+    # Chrome is dead (`closed` being all True and `still_live` being empty are
+    # NOT that witness: both hold by design on the timeout path). The match is
+    # component + operation + sentence, so
     # the neighbouring warnings from those same operations are not excused;
     # `Blocking teardown failed` and `browser.stop() coroutine failed` have no
     # reaper behind them and should fail this node.
