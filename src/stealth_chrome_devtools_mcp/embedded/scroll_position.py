@@ -25,21 +25,54 @@ offsets are ``Math.round``ed because sub-pixel positions are real (zoom, HiDPI,
 the tail of a smooth animation) and a settle that compares floats would never
 see two reads agree.
 
-**A settle.** :func:`settle` polls that read until two consecutive answers agree,
+**A settle.** :func:`settle` waits for the page to say the scroll finished,
 bounded by :data:`SETTLE_BUDGET_SECONDS` — a settle, not a sleep. A fixed nap
 cannot be right for both cases it was serving: an instant scroll is done before
 the first frame, and the smooth scroll measured above was still moving three
-seconds in. Polling costs the instant case ~0.1 s (two reads one interval apart)
-and gives the smooth case as long as it actually needs.
+seconds in.
 
-:data:`START_GRACE_SECONDS` is the one subtlety. A smooth scroll begins on the
-next animation frame, so for the first few milliseconds "has not started" and
-"will never move" look identical, and two agreeing reads would settle on the
-BEFORE position and report ``scrolled: False`` — a new lie in place of the old
-one. While the agreed position still equals the origin, the grace has to pass
-before that counts as settled. The caller skips the grace (``start_grace=0``)
-when it already knows the page is at the requested edge, because then there is
-nothing to wait for: that is what keeps "one viewport tall" on the fast path.
+**Why the page has to say it, and not the reads.** The first version of this
+settle stopped when two consecutive reads agreed on the offset. That is not a
+stop condition, it is a guess, and CI gate run 35046780659 (macOS/ARM64) caught
+it: the record reported ``scroll_y_after: 3498`` while the page read 4898
+immediately afterwards — two reads agreed 1400 px from the end, in the FAST part
+of an ease-out curve. The mechanism, reproduced here on Chrome 152: a plain
+document smooth scroll runs on the COMPOSITOR thread, while ``window.scrollY``
+is read on the MAIN thread and only advances when a frame commits to main. Jank
+the main thread and the reads go stale while the scroll keeps going. Measured,
+with the renderer's main thread blocked for a fixed slice out of every 5 ms:
+
+===============  ==========================
+main-thread task  longest run of AGREEING
+                  mid-flight reads
+===============  ==========================
+none             0 ms (6 runs)
+120 ms           121 ms
+250 ms           250 ms
+400 ms           400 ms
+===============  ==========================
+
+The false-agreement window is exactly as long as the long task, i.e. unbounded.
+No count of agreeing reads and no fixed quiet window can be correct against
+that, so neither is used. Instead :data:`SCROLL_JS` arms a one-shot ``scrollend``
+listener in the same round trip that performs the scroll, and the read reports
+that latch. ``scrollend`` fires when the scroll position has finished changing,
+including at the end of a compositor-driven smooth scroll, and it LATCHES — so
+jank can only delay our observation of it and can never make a running scroll
+look finished. Measured across the same jank levels, ``ended`` was first
+observed at the true final position (7023/7023) every time, never early.
+
+**The one case that must not wait for it.** A scroll that moves nothing fires no
+``scrollend`` at all — a page already at the requested edge, or with nothing to
+scroll. So :data:`SCROLL_JS` also reports ``moves``, computed synchronously from
+the clamped target before any frame, and :func:`settle` only waits for the latch
+when the page said it would move. That answer is exact, which is why it replaced
+the old ``at_edge`` guess, and it is what keeps a one-viewport page and an
+instant scroll on the two-read fast path (0.126 s measured).
+
+:data:`START_GRACE_SECONDS` survives for the fallback alone: a browser with no
+``onscrollend`` still has to settle by read agreement, and there a smooth scroll
+that has not begun yet looks exactly like one that will never move.
 
 **What this module does not decide.** It never says whether a scroll
 *succeeded*: only where the page is, what its extent is
@@ -72,15 +105,23 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, keeps this module a leaf
 #: ``body.scrollHeight == documentElement.scrollHeight`` on every sampled page,
 #: which is why reading either by hand happened to work and why asking the
 #: browser which one it is costs nothing.
+#:
+#: It also carries ``ended`` — the latch :data:`SCROLL_JS` armed — because "has
+#: the scroll finished" and "where is it" must come from the SAME round trip: two
+#: separate reads could straddle the end of the animation and pair a finished
+#: flag with a stale offset, which is the very shape this finding retires.
 READ_JS = (
     "JSON.stringify((function(){"
     "var e=document.scrollingElement||document.documentElement||document.body;"
-    "if(!e){return {x:0,y:0,max_x:0,max_y:0};}"
+    "var s=window.__stealthMcpScroll;"
+    "var ended=!!(s&&s.ended);"
+    "if(!e){return {x:0,y:0,max_x:0,max_y:0,ended:ended};}"
     "return {"
     "x:Math.round(window.scrollX||0),"
     "y:Math.round(window.scrollY||0),"
     "max_x:Math.max(0,Math.round(e.scrollWidth-e.clientWidth)),"
-    "max_y:Math.max(0,Math.round(e.scrollHeight-e.clientHeight))"
+    "max_y:Math.max(0,Math.round(e.scrollHeight-e.clientHeight)),"
+    "ended:ended"
     "};"
     "})())"
 )
@@ -118,11 +159,23 @@ _KEYS = ("x", "y", "max_x", "max_y")
 
 
 class _Direction(NamedTuple):
-    """What one direction name means: which way, and the JS that goes there."""
+    """What one direction name means: which way, and the JS that goes there.
+
+    ``target_x``/``target_y`` are JS expressions for the offsets the scroll is
+    AIMED at, in terms of the current ``x0``/``y0``, evaluated in the same task
+    as the scroll itself. Clamped against the extent they give
+    :data:`SCROLL_JS` its ``moves`` answer — "will anything actually change" —
+    without waiting for a frame, which is what lets a no-op scroll answer at
+    once while a real one waits for the page to say it finished. ``top`` and
+    ``bottom`` pass ``left: 0``, so their ``target_x`` is ``0`` and not ``x0``:
+    they really do move a horizontally-scrolled page back to the left edge.
+    """
 
     axis: str
     towards_max: bool
     script: str
+    target_x: str
+    target_y: str
 
 
 #: THE one reading of a direction — its axis, the edge it heads for, and the JS
@@ -138,34 +191,96 @@ class _Direction(NamedTuple):
 #: a consistency fix, not a behaviour change on them.)
 _DIRECTIONS: dict[str, _Direction] = {
     "down": _Direction(
-        "y", True, "window.scrollBy({{top: {amount}, left: 0, behavior: {behavior}}})"
+        "y",
+        True,
+        "window.scrollBy({{top: {amount}, left: 0, behavior: {behavior}}})",
+        "x0",
+        "y0+{amount}",
     ),
     "up": _Direction(
         "y",
         False,
         "window.scrollBy({{top: {negative}, left: 0, behavior: {behavior}}})",
+        "x0",
+        "y0+{negative}",
     ),
     "right": _Direction(
-        "x", True, "window.scrollBy({{top: 0, left: {amount}, behavior: {behavior}}})"
+        "x",
+        True,
+        "window.scrollBy({{top: 0, left: {amount}, behavior: {behavior}}})",
+        "x0+{amount}",
+        "y0",
     ),
     "left": _Direction(
         "x",
         False,
         "window.scrollBy({{top: 0, left: {negative}, behavior: {behavior}}})",
+        "x0+{negative}",
+        "y0",
     ),
     "top": _Direction(
-        "y", False, "window.scrollTo({{top: 0, left: 0, behavior: {behavior}}})"
+        "y",
+        False,
+        "window.scrollTo({{top: 0, left: 0, behavior: {behavior}}})",
+        "0",
+        "0",
     ),
     "bottom": _Direction(
         "y",
         True,
-        "window.scrollTo({{top: (document.scrollingElement||"
-        "document.documentElement).scrollHeight, left: 0, behavior: {behavior}}})",
+        "window.scrollTo({{top: E.scrollHeight, left: 0, behavior: {behavior}}})",
+        "0",
+        "E.scrollHeight",
     ),
 }
 
 #: The directions a caller may ask for.
 DIRECTIONS = frozenset(_DIRECTIONS)
+
+#: The property the ``ended`` latch lives on. One namespaced name, overwritten
+#: by every scroll, with the previous scroll's listener removed first — so a
+#: page never accumulates them and a stale latch can never answer for a newer
+#: scroll.
+LATCH = "__stealthMcpScroll"
+
+#: The scroll, wrapped so the page answers two questions in the SAME round trip
+#: it is asked to scroll in:
+#:
+#: * ``moves`` — will this scroll change anything? Computed from the clamped
+#:   target against the current offset, synchronously, before any frame. A
+#:   scroll that moves nothing fires no ``scrollend``, so this is what tells
+#:   :func:`settle` not to wait for one.
+#: * ``supported`` — does this browser have ``onscrollend``? (Measured on
+#:   Chrome 152: ``'onscrollend' in window`` is ``true`` while
+#:   ``'scrollend' in window`` is ``false`` — the event is not an own property
+#:   of ``window``, the handler is.) When it is absent :func:`settle` falls back
+#:   to read agreement, which is weaker but is all there is.
+#:
+#: and arms the one-shot ``scrollend`` latch when, and only when, the page will
+#: move. Clamping repeats :data:`READ_JS`'s own ``max`` expressions because it
+#: is the same question — how far can this element go — asked about a target
+#: rather than about now.
+SCROLL_JS = (
+    "JSON.stringify((function(){{"
+    "var E=document.scrollingElement||document.documentElement||document.body;"
+    "if(!E){{return {{moves:false,supported:false}};}}"
+    "var mx=Math.max(0,Math.round(E.scrollWidth-E.clientWidth));"
+    "var my=Math.max(0,Math.round(E.scrollHeight-E.clientHeight));"
+    "var x0=Math.round(window.scrollX||0),y0=Math.round(window.scrollY||0);"
+    "var tx=Math.max(0,Math.min(Math.round({target_x}),mx));"
+    "var ty=Math.max(0,Math.min(Math.round({target_y}),my));"
+    "var moves=(tx!==x0)||(ty!==y0);"
+    "var old=window.{latch};if(old&&old.off){{old.off();}}"
+    "var st={{ended:0}};"
+    "function onEnd(){{st.ended=1;st.off();}}"
+    "st.off=function(){{window.removeEventListener('scrollend',onEnd);}};"
+    "window.{latch}=st;"
+    "var supported=('onscrollend' in window);"
+    "if(moves&&supported){{window.addEventListener('scrollend',onEnd);}}"
+    "{scroll};"
+    "return {{moves:moves,supported:supported}};"
+    "}})())"
+)
 
 
 def script(direction: str, amount: int, smooth: bool) -> str:
@@ -195,10 +310,16 @@ def script(direction: str, amount: int, smooth: bool) -> str:
             "cannot be negative — the direction carries the sign, so scroll the "
             "other way with direction='up' / 'left' instead."
         )
-    return known.script.format(
-        amount=amount,
-        negative=-amount,
-        behavior="'smooth'" if smooth else "'instant'",
+    fill = {
+        "amount": amount,
+        "negative": -amount,
+        "behavior": "'smooth'" if smooth else "'instant'",
+    }
+    return SCROLL_JS.format(
+        latch=LATCH,
+        scroll=known.script.format(**fill),
+        target_x=known.target_x.format(**fill),
+        target_y=known.target_y.format(**fill),
     )
 
 
@@ -269,14 +390,83 @@ class Settled(NamedTuple):
 
     #: Where the page was on the last read.
     position: Position
-    #: Did two consecutive reads agree before the budget ran out?
+    #: Did the scroll finish before the budget ran out?
     settled: bool
     #: How long the window actually cost, in seconds.
     seconds: float
 
 
-async def read(tab: Tab) -> Position:
-    """The page's scroll offsets and extent, in one round trip.
+class Reading(NamedTuple):
+    """One round trip's answer: where the page is, and whether it has stopped."""
+
+    position: Position
+    #: The ``scrollend`` latch :data:`SCROLL_JS` armed. Latched, so jank can only
+    #: DELAY this becoming visible — never make a running scroll look finished.
+    ended: bool
+
+
+class Scrolled(NamedTuple):
+    """What the scroll round trip itself reported."""
+
+    #: Will this scroll change the offset at all? ``False`` for a page already at
+    #: the requested edge, or with nothing to scroll — neither fires
+    #: ``scrollend``, so neither may be waited on.
+    moves: bool
+    #: Does this browser have ``onscrollend``?
+    supported: bool
+
+
+def _answer(raw: object, what: str) -> dict[str, object]:
+    """One JSON answer from the page, validated by SHAPE only.
+
+    The message never repeats the page's own text — a type name, a character
+    count and a field count say everything a diagnosis needs.
+    """
+    if not isinstance(raw, str):
+        raise ToolError(
+            f"Could not {what}: the evaluate answered with "
+            f"{type(raw).__name__}, not the JSON string it asks for."
+        )
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise ToolError(
+            f"Could not {what}: the evaluate answered with {len(raw)} "
+            "characters that are not JSON."
+        ) from exc
+    if not isinstance(data, dict):
+        raise ToolError(
+            f"Could not {what}: the answer was a "
+            f"{type(data).__name__}, not the object it asks for."
+        )
+    return data
+
+
+async def start(tab: Tab, scroll_js: str) -> Scrolled:
+    """Run a :func:`script` answer, and report what the page said about it.
+
+    ONE round trip: the wrapper arms the ``scrollend`` latch and performs the
+    scroll in the same task, so there is no window in which the scroll could
+    finish before anything was listening. It takes the BUILT script rather than
+    the request, so the caller can reject an invalid direction or a negative
+    amount before it spends a round trip on anything at all.
+
+    Raises:
+        ToolError: the answer is not the JSON :data:`SCROLL_JS` promises.
+    """
+    data = _answer(await tab.evaluate(scroll_js), "scroll")
+    if not isinstance(data.get("moves"), bool) or not isinstance(
+        data.get("supported"), bool
+    ):
+        raise ToolError(
+            "Could not scroll: the answer carried "
+            f"{len(data)} of the 2 fields the scroll reports."
+        )
+    return Scrolled(bool(data["moves"]), bool(data["supported"]))
+
+
+async def read(tab: Tab) -> Reading:
+    """The page's scroll offsets, extent and end-latch, in one round trip.
 
     Raises:
         ToolError: the evaluate did not answer with the JSON :data:`READ_JS`
@@ -286,48 +476,49 @@ async def read(tab: Tab) -> Position:
             reports SHAPE only — a type name and a key count — never the page's
             own text.
     """
-    raw = await tab.evaluate(READ_JS)
-    if not isinstance(raw, str):
-        raise ToolError(
-            "Could not read the page's scroll position: the evaluate answered "
-            f"with {type(raw).__name__}, not the JSON string the read asks for."
-        )
-    try:
-        data = json.loads(raw)
-    except ValueError as exc:
-        raise ToolError(
-            "Could not read the page's scroll position: the evaluate answered "
-            f"with {len(raw)} characters that are not JSON."
-        ) from exc
-    if not isinstance(data, dict) or not all(
-        isinstance(data.get(key), (int, float)) for key in _KEYS
-    ):
+    data = _answer(await tab.evaluate(READ_JS), "read the page's scroll position")
+    if not all(isinstance(data.get(key), (int, float)) for key in _KEYS):
         raise ToolError(
             "Could not read the page's scroll position: the answer carried "
-            f"{len(data) if isinstance(data, dict) else 0} of the "
-            f"{len(_KEYS)} fields the read asks for."
+            f"{len(data)} of the {len(_KEYS)} fields the read asks for."
         )
-    return Position(*(int(data[key]) for key in _KEYS))
+    return Reading(
+        Position(*(int(data[key]) for key in _KEYS)), bool(data.get("ended"))
+    )
 
 
 async def settle(
     tab: Tab,
     origin: Position,
+    awaiting_end: bool,
     budget: float | None = None,
     start_grace: float | None = None,
 ) -> Settled:
-    """Poll :func:`read` until two consecutive answers agree, or *budget* ends.
+    """Poll :func:`read` until the scroll has finished, or *budget* ends.
+
+    Two stop conditions, and which one applies is decided by the page, not by a
+    threshold:
+
+    * ``awaiting_end`` — the page said this scroll WILL move it and that it has
+      ``onscrollend``. The only thing that ends the wait is the latch: the page
+      itself saying the scroll finished. Nothing about the reads' timing can end
+      it early, which is the whole point (see the module docstring).
+    * otherwise — the page said nothing will move (already at the edge, or
+      nothing to scroll), or the browser has no ``scrollend``. Then there is no
+      end to wait for and the weaker rule applies: two consecutive reads that
+      agree on the OFFSET, with :data:`START_GRACE_SECONDS` forbidding an early
+      agreement on the origin itself.
 
     Args:
         tab: the tab to read.
         origin: where the page was before the scroll was asked for — the reading
             that :data:`START_GRACE_SECONDS` refuses to settle on early.
+        awaiting_end: wait for the page's own end-of-scroll signal (see above).
         budget: seconds to spend; :data:`SETTLE_BUDGET_SECONDS` when ``None``
             (read at call time, so the module global is the one knob).
         start_grace: seconds before a reading equal to *origin* may settle;
-            :data:`START_GRACE_SECONDS` when ``None``. Pass ``0`` when the page
-            is already at the edge the caller asked for — nothing will move, so
-            there is nothing to wait for.
+            :data:`START_GRACE_SECONDS` when ``None``. Ignored when
+            *awaiting_end*.
 
     Returns:
         Settled: the last reading, whether it settled, and what it cost.
@@ -339,22 +530,24 @@ async def settle(
     while True:
         # Read FIRST and sleep between reads, not before the first one: an
         # instant scroll is already applied when its evaluate returns, so the
-        # fast path costs two reads and ONE interval. The case that first sleep
-        # used to guard — a smooth scroll that has not begun — is the grace's,
-        # and the grace still holds it.
+        # fast path costs two reads and ONE interval.
         current = await read(tab)
         elapsed = _now() - started
-        # OFFSETS only. What "has it stopped" asks about is the viewport, not
-        # the document: an infinite-scroll page appends content for as long as
-        # you let it, so a whole-``Position`` comparison would spend the entire
-        # budget on a page that stopped moving in the first 100 ms and then
-        # report ``settled: false`` about a stationary viewport. The EXTENT the
-        # caller gets is the final read's, which is the freshest one there is.
-        if current.offset == previous and (
-            current.offset != origin.offset or elapsed >= grace
-        ):
-            return Settled(current, True, elapsed)
+        if awaiting_end:
+            finished = current.ended
+        else:
+            # OFFSETS only. What "has it stopped" asks about is the viewport,
+            # not the document: an infinite-scroll page appends content for as
+            # long as you let it, so a whole-``Position`` comparison would spend
+            # the entire budget on a page that stopped moving in the first
+            # 100 ms and then report ``settled: false`` about a stationary
+            # viewport. The EXTENT the caller gets is the final read's.
+            finished = current.position.offset == previous and (
+                current.position.offset != origin.offset or elapsed >= grace
+            )
+        if finished:
+            return Settled(current.position, True, elapsed)
         if elapsed >= limit:
-            return Settled(current, False, elapsed)
-        previous = current.offset
+            return Settled(current.position, False, elapsed)
+        previous = current.position.offset
         await _sleep(POLL_INTERVAL_SECONDS)

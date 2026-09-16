@@ -391,6 +391,12 @@ class ScrollingTab(FakeTab):
       one step per POSITION READ, which is what makes a mid-flight read
       deterministic without a real clock: a product that reads once and returns
       sees ``smooth_steps``-th of the way, the measured F-875 shortfall.
+    * the scroll answers ``{moves, supported}`` and arms an ``ended`` latch that
+      the read reports, exactly as ``scroll_position.SCROLL_JS`` does. ``ended``
+      is set when the animation REACHES its target — never before — which is
+      what makes ``stall_at`` meaningful: with a stall the position repeats
+      while ``ended`` is still 0, so a settle that stops on repeated reads is
+      caught and one that waits for the latch is not.
 
     Nothing here is written from the defect: the scripts are interpreted as
     Chrome interprets them, and the read answers with the geometry the page
@@ -424,6 +430,9 @@ class ScrollingTab(FakeTab):
         smooth_steps: int = 4,
         never_settles: bool = False,
         growing_content: int = 0,
+        stall_at: int = 0,
+        stall_reads: int = 0,
+        scrollend_supported: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -442,6 +451,20 @@ class ScrollingTab(FakeTab):
         #: Its offset is stable and its EXTENT is not, which is the one shape
         #: that tells an offset comparison from a whole-``Position`` one.
         self.growing_content = growing_content
+        #: The F-875/CI-35046780659 shape: from the ``stall_at``-th read of a
+        #: flight, the position REPEATS for ``stall_reads`` reads and then
+        #: resumes. On a real page that is the renderer's main thread blocked
+        #: while the compositor keeps scrolling — measured stall length equals
+        #: the long task, so it is unbounded and no count of agreeing reads can
+        #: see through it.
+        self.stall_at = stall_at
+        self.stall_reads = stall_reads
+        #: ``'onscrollend' in window``. ``False`` drives the read-agreement
+        #: fallback, the only path where ``START_GRACE_SECONDS`` still matters.
+        self.scrollend_supported = scrollend_supported
+        self._reads_in_flight = 0
+        self._stalled = 0
+        self._ended = False
         self._flight: tuple[int, int] | None = None
         #: Every position read, in order — so a test can count round trips.
         self.position_reads: list[str] = []
@@ -484,6 +507,16 @@ class ScrollingTab(FakeTab):
             return
         if self._flight is None:
             return
+        self._reads_in_flight += 1
+        # The renderer stalled: the value the read can see does not advance,
+        # while the scroll itself has NOT finished.
+        if (
+            self.stall_reads
+            and self._reads_in_flight >= self.stall_at
+            and self._stalled < self.stall_reads
+        ):
+            self._stalled += 1
+            return
         target_x, target_y = self._flight
         step_x = -(-abs(target_x - self.scroll_x) // self.smooth_steps)
         step_y = -(-abs(target_y - self.scroll_y) // self.smooth_steps)
@@ -495,9 +528,26 @@ class ScrollingTab(FakeTab):
         )
         if (self.scroll_x, self.scroll_y) == self._flight:
             self._flight = None
+            self._ended = True  # `scrollend`: the scroll REACHED its target
 
     async def evaluate(self, expression: str, *args: Any, **kwargs: Any) -> Any:
         self.evaluate_calls.append(expression)
+        target = self._target_of(expression)
+        if target is not None:
+            # The scroll round trip: arm the latch and scroll, as SCROLL_JS does.
+            moves = target != (self.scroll_x, self.scroll_y)
+            self._ended = False
+            self._reads_in_flight = 0
+            self._stalled = 0
+            if not moves:
+                self._flight = None
+            elif "'smooth'" in expression:
+                self._flight = target
+            else:
+                self.scroll_x, self.scroll_y = target
+                self._flight = None
+                self._ended = True
+            return json.dumps({"moves": moves, "supported": self.scrollend_supported})
         if expression.startswith(self.POSITION_JS_MARKER):
             self.position_reads.append(expression)
             self._advance()
@@ -507,17 +557,10 @@ class ScrollingTab(FakeTab):
                     "y": self.scroll_y,
                     "max_x": self.max_scroll_x,
                     "max_y": self.max_scroll_y,
+                    "ended": self._ended and self.scrollend_supported,
                 }
             )
-        target = self._target_of(expression)
-        if target is None:
-            return self._answer_for_js(expression)
-        if "'smooth'" in expression:
-            self._flight = None if target == (self.scroll_x, self.scroll_y) else target
-        else:
-            self.scroll_x, self.scroll_y = target
-            self._flight = None
-        return None
+        return self._answer_for_js(expression)
 
 
 # ---------------------------------------------------------------------------

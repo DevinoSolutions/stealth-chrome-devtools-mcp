@@ -884,17 +884,21 @@ class DOMHandler:
             one-viewport document is a legitimate page, and it is reported.
         """
         try:
-            # Built first: an unknown direction must cost no round trip.
-            script = scroll_position.script(direction, amount, smooth)
-            before = await scroll_position.read(tab)
-            await tab.evaluate(script)
-            # Nothing can move a page that is already at the edge it was sent
-            # to, so that case waits for no animation to start — which is what
-            # keeps a one-viewport page on the two-read fast path.
+            # Built first: an invalid direction or a negative amount must cost
+            # no round trip at all, not even the before-read.
+            scroll_js = scroll_position.script(direction, amount, smooth)
+            before = (await scroll_position.read(tab)).position
+            # ONE round trip: arms the end-of-scroll latch AND scrolls.
+            scrolled = await scroll_position.start(tab, scroll_js)
+            # The page's own answer to "will anything move", not a guess from
+            # the offsets: a scroll that moves nothing never fires `scrollend`,
+            # so waiting for one would burn the whole budget. This is what keeps
+            # a one-viewport page and an instant scroll on the fast path.
             settled = await scroll_position.settle(
                 tab,
                 before,
-                start_grace=0.0 if before.at_edge(direction) else None,
+                awaiting_end=scrolled.moves and scrolled.supported,
+                start_grace=None if scrolled.moves else 0.0,
             )
             after = settled.position
             return {

@@ -170,19 +170,20 @@ THE one home for "where is this page scrolled, and has it stopped". It owns:
   measured as `html` on every sampled page. Offsets are `Math.round`ed, because
   sub-pixel positions are real (zoom, HiDPI, the tail of a smooth animation) and
   a settle comparing floats would never see two reads agree.
-* **`settle`** — polls `read` until two consecutive answers agree, bounded by
+* **`settle`** — waits for the PAGE to say the scroll finished, bounded by
   `SETTLE_BUDGET_SECONDS = 10.0`. The bound is argued from both sides: it is
   roughly 3× the worst smooth scroll §1b measured (which arrived between the
   0.5 s and 3 s samples), and it is a THIRD of `CDP_OPERATION_TIMEOUT` (30 s),
   so a scroll that outlasts it is **reported** as `settled: false` rather than
-  raised as a CDP timeout — which is the whole point of the finding.
-  `START_GRACE_SECONDS = 0.3` is the one subtlety: a smooth scroll begins on the
-  next animation frame, so for the first frames "has not started" and "will
-  never move" are the same reading, and settling on it would have replaced one
-  lie with another. A reading equal to the ORIGIN may not settle before the
-  grace; the caller passes `start_grace=0` when the page is already at the
-  requested edge, because then nothing will move and there is nothing to wait
-  for. That is what keeps a one-viewport page on the two-read fast path.
+  raised as a CDP timeout — which is the whole point of the finding. What ends
+  the wait is `scrollend`, not the reads; §8 is the measurement that forced
+  that, and it is the one thing in this fix that a first attempt got wrong.
+* **`SCROLL_JS` / `start`** — the scroll and the arming of the `scrollend` latch
+  in ONE round trip, which also answers `moves` (will this change the offset at
+  all, computed from the clamped target synchronously) and `supported` (does
+  this browser have `onscrollend`). `moves` is what tells `settle` not to wait
+  for an event that will never fire, and it replaced an `at_edge` guess with the
+  page's own exact answer.
 * **`_DIRECTIONS` / `script` / `Position.at_edge`** — ONE table for what a
   direction means (its axis, the edge it heads for, and the JS that goes there),
   not a script table beside an edge table. It also retires a latent bug the old
@@ -301,7 +302,8 @@ and after reads) for an answer that is true.
 
 ### 7.5 What this does NOT fix
 
-§6's first bullet stands: a page whose real scroller is a nested element (`body`
+§6's first bullet stands (and see §8 for the one thing §7 got wrong the first
+time): a page whose real scroller is a nested element (`body`
 `overflow: hidden` + a scrolling `div`) is still not scrolled by
 `window.scrollBy`/`scrollTo`, and `document.scrollingElement`'s extent is not
 that div's. What has changed is that the tool no longer LIES about it — such a
@@ -310,3 +312,105 @@ of `true`, so the caller can see it and reach for `execute_script`. Making
 `scroll_page` find and drive a nested scroller is a separate change with its own
 evidence requirement (which element is "the" scroller when several overflow?)
 and is the named follow-up from this finding.
+
+---
+
+## 8. The settle's first stop condition was wrong, and CI caught it
+
+§7's first implementation stopped the settle when **two consecutive reads agreed
+on the offset**. That is not a stop condition; it is a guess about timing, and
+the full gate on PR #113 failed on it — **run 35046780659, job 104638194821,
+macOS/ARM64** (Windows and Linux passed), inside this finding's own verification:
+
+```
+tests/test_e2e_scroll_page_verification.py::test_a_smooth_scroll_is_reported_where_it_landed
+    assert record["scroll_y_after"] == await eval_js(...)
+E   assert 3498 == 4898
+```
+
+The record described a position the page had already left — the same class of
+untruth this finding exists to retire, now committed by the fix.
+
+### 8.1 The mechanism, measured
+
+A plain document smooth scroll runs on Chrome's **compositor** thread, while
+`window.scrollY` is read on the **main** thread and only advances when a frame
+commits to main. Block the main thread and the reads go stale while the scroll
+keeps going. Reproduced on this machine (Chrome 152 headless, Windows 11) by
+blocking the renderer's main thread for a fixed slice out of every 5 ms and
+polling at the product's own `POLL_INTERVAL_SECONDS`:
+
+| main-thread long task | longest run of AGREEING mid-flight reads |
+|---|---|
+| none | **0 ms** (6 runs, ~78 mid-flight read pairs) |
+| 120 ms | 121 ms (2 reads) |
+| 250 ms | 250 ms (2 reads) |
+| 400 ms | 400 ms (2 reads) |
+
+**The false-agreement window is exactly as long as the long task.** A long task
+is unbounded, so no count of agreeing reads and no fixed quiet window can be
+correct against it — both were considered and both are defeated by a long enough
+stall. The idle machine never reproduced it, which is why the CI cell saw it
+first: a loaded macOS/ARM64 runner is where a multi-hundred-millisecond renderer
+stall is ordinary.
+
+### 8.2 The fix: ask the page, do not infer from timing
+
+`SCROLL_JS` now arms a one-shot `scrollend` listener **in the same round trip
+that performs the scroll** (so there is no window where the scroll could finish
+before anything was listening), and `READ_JS` reports that latch alongside the
+offsets — the same round trip, so a finished flag can never be paired with a
+stale offset. `scrollend` fires when the scroll position has finished changing,
+including at the end of a compositor-driven smooth scroll, and it **latches**:
+jank can only delay our observation of it, never make a running scroll look
+finished. Measured across the same jank levels, `ended` was first observed at the
+true final position (7023/7023) **every time, never early**.
+
+The one case that must not wait for it is a scroll that moves nothing — a page
+already at the requested edge, or with nothing to scroll — because that fires no
+`scrollend` at all. So `SCROLL_JS` also answers `moves`, computed synchronously
+from the clamped target before any frame, measured correct on all six shapes
+(from the top, already at the bottom, `scrollBy` at the bottom, to the top,
+already at the top, and a one-viewport page). That exact answer replaced the
+`at_edge` guess the first implementation used. Feature detection is
+`'onscrollend' in window` — measured `true` on Chrome 152, where
+`'scrollend' in window` is `false`, the event not being an own property of
+`window`; without it the settle falls back to read agreement, which is weaker but
+is all there is.
+
+### 8.3 Measured after the rewrite
+
+Same page and viewport, through the product path, with the tool's answer checked
+against an independent `Math.round(window.scrollY)` immediately afterwards:
+
+```
+             idle                     renderer janked 250 ms / 5 ms
+smooth bottom  1.477 s  7023/7023  OK   0.512 s (already there)   OK
+smooth top     1.589 s     0/7023  OK   2.100 s     0/7023        OK
+instant bottom 0.124 s  7023/7023  OK   0.262 s  7023/7023        OK
+one viewport   0.119 s     0/0     OK   0.515 s     0/0           OK
+```
+
+`OK` = the record's `scroll_y_after` equals the page's own live read. It does in
+**every** case now, including under the jank that produced the CI failure. The
+fast path is unchanged (0.124 s instant, 0.119 s one-viewport, against F-875's
+0.126 s), because a scroll that moves nothing and an instant scroll both answer
+from the latch or the no-op flag rather than waiting.
+
+### 8.4 The pin, and that it is load-bearing
+
+`tests/test_scroll_page_verification.py::test_a_mid_flight_stall_is_not_a_finished_scroll`
+drives a `ScrollingTab` whose position repeats for three reads mid-flight and
+then resumes (`stall_at` / `stall_reads`), modelling exactly the measured
+renderer stall. Reverting the stop condition to read agreement while leaving the
+pin alone:
+
+```
+NEW (wait for the page)    scroll_y_after=7039 of max=7039  settled=True  at_edge=True   -> pin PASSES
+OLD (two agreeing reads)   scroll_y_after=880  of max=7039  settled=True  at_edge=False  -> pin FAILS
+```
+
+880 of 7039, reported as `settled: True` — the CI shape (3498 of 7039)
+reproduced hermetically. A second pin,
+`test_without_scrollend_the_settle_falls_back_to_read_agreement`, keeps the
+no-`onscrollend` path alive so it degrades rather than hanging for the budget.

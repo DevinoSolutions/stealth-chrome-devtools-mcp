@@ -64,8 +64,9 @@ viewport, and the shortfall grew with the page, which is exactly the
 lazy-loading case `direction="bottom"` exists for.
 
 The nap is a **settle** now and the bool is a **record**. `scroll_page` reads
-the page's scroll offsets and extent before the scroll, evaluates it, then polls
-until two consecutive reads agree — bounded, not slept through — and answers
+the page's scroll offsets and extent before the scroll, then scrolls and waits
+for the page itself to say the scroll finished — bounded, not slept through —
+and answers
 with `scrolled` (the scroll OFFSET changed), `at_edge` (the page is as far as
 `direction` goes), `settled` (the offset stopped moving inside the budget),
 `settle_seconds`, the requested `direction`/`amount`/`smooth`, and
@@ -88,6 +89,21 @@ direction, a **negative `amount`** (both rejected before any round trip —
 the old `down, -500` that silently scrolled up and the old `up, -500` that died
 as a JS syntax error are now one clear refusal), and an evaluate that did not
 answer with the JSON the read asks for.
+
+**What ends the wait is `scrollend`, not the reads.** Stopping when two
+consecutive reads agree on the offset is a guess about timing, and it is wrong:
+a plain document smooth scroll runs on Chrome's compositor thread while
+`window.scrollY` is read on the main thread, so a blocked main thread makes the
+reads go stale while the scroll keeps going. Measured on Chrome 152, the run of
+agreeing mid-flight reads lasts exactly as long as the renderer's long task
+(120 ms → 121 ms, 250 → 250, 400 → 400) — unbounded, so no read count and no
+fixed quiet window can see through it. The scroll now arms a one-shot
+`scrollend` listener in the same round trip that performs it, and the position
+read reports that latch: `scrollend` latches, so jank can only delay when the
+end is observed, never fake it. A scroll that moves nothing fires no `scrollend`
+at all, so the same round trip also answers "will this move anything",
+synchronously — which is what keeps an instant scroll and a one-viewport page on
+the 0.12 s fast path.
 
 The read and the settle live in the new leaf `embedded/scroll_position.py`,
 which also holds the one table for what a direction means (its axis, its edge

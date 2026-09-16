@@ -84,6 +84,64 @@ async def test_smooth_scroll_is_waited_out_not_napped_through():
     assert len(tab.position_reads) > 2
 
 
+async def test_a_mid_flight_stall_is_not_a_finished_scroll():
+    """Two agreeing reads are not a stop condition — CI gate run 35046780659.
+
+    On macOS/ARM64 the record reported ``scroll_y_after: 3498`` while the page
+    read 4898 immediately after: two reads agreed 1400 px from the end, in the
+    fast part of an ease-out curve. A plain document smooth scroll runs on the
+    COMPOSITOR thread while ``window.scrollY`` is read on the MAIN thread, so a
+    blocked main thread makes the reads go stale while the scroll keeps going —
+    measured here on Chrome 152, the run of agreeing mid-flight reads lasts
+    exactly as long as the renderer's long task (120 ms -> 121 ms, 250 -> 250,
+    400 -> 400), i.e. unbounded.
+
+    So the settle waits for the PAGE to say the scroll ended. This fake stalls
+    for three reads mid-flight and then resumes; the old rule stopped on the
+    stalled value, which is what makes this pin load-bearing.
+    """
+    tab = ScrollingTab(
+        doc_height=DOC_HEIGHT,
+        viewport_height=VIEWPORT_HEIGHT,
+        smooth_steps=8,
+        stall_at=2,
+        stall_reads=3,
+    )
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=True)
+
+    assert record["scroll_y_after"] == MAX_SCROLL_Y, record
+    assert record["settled"] is True
+    assert record["at_edge"] is True
+    # The stall really did repeat a mid-flight value the old rule would have
+    # stopped on, rather than the fake quietly never stalling.
+    assert tab.stall_reads == 3
+    assert len(tab.position_reads) > 8
+
+
+async def test_without_scrollend_the_settle_falls_back_to_read_agreement():
+    """A browser with no ``onscrollend`` still settles, by the weaker rule.
+
+    ``'onscrollend' in window`` is the feature test (measured on Chrome 152:
+    ``'scrollend' in window`` is ``false`` there — the event is not an own
+    property of ``window``, the handler is). When it is absent there is nothing
+    better than read agreement, and ``START_GRACE_SECONDS`` still guards the
+    start; this pin keeps that path alive rather than hanging for the budget.
+    """
+    tab = ScrollingTab(
+        doc_height=DOC_HEIGHT,
+        viewport_height=VIEWPORT_HEIGHT,
+        smooth_steps=2,
+        scrollend_supported=False,
+    )
+
+    record = await DOMHandler.scroll_page(tab, direction="bottom", smooth=True)
+
+    assert record["settled"] is True
+    assert record["scroll_y_after"] == MAX_SCROLL_Y
+    assert record["settle_seconds"] < 2.0, record
+
+
 async def test_a_page_that_only_grew_is_not_a_page_that_scrolled():
     """Extent up, offset unmoved: ``scrolled`` is about the VIEWPORT.
 
