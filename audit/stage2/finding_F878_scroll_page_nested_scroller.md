@@ -296,7 +296,7 @@ f  quirks         scroller body      is_document=true    y 7023/7023  scrolled s
 g  shell+grid     scroller div#shell is_document=false   y 6098/6098  scrolled settled at_edge
 h  shell+scrim    scroller div#shell is_document=false   y 7023/7023  scrolled settled at_edge
 i  three columns  scroller div#reader is_document=false  y 8023/8023  scrolled settled at_edge
-j  horizontal     scroller div#strip is_document=false   x 7112/7112  scrolled settled at_edge   (direction="right")
+j  horizontal     scroller div#strip is_document=false   x  500/7112  scrolled settled            (direction="right", amount=500 — so NOT at_edge, correctly)
 k  stray overflow scroller div#shell is_document=false   y 7023/7023  scrolled settled at_edge
 ```
 

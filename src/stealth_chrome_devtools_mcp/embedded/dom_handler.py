@@ -909,16 +909,16 @@ class DOMHandler:
         tab: Tab, direction: str = "down", amount: int = 500, smooth: bool = True
     ) -> dict[str, object]:
         """
-        Scroll the page and report where it actually ended up (F-875).
+        Scroll the page and report where it actually ended up (F-875, F-878).
 
         The answer used to be an unconditional ``True``, which reported that the
         evaluate did not throw while promising that the page scrolled — three
         different states wearing one word. It is a record now: the position
-        before and after, the page's extent, and what was asked for, so
-        "arrived", "still moving when the budget ran out" and "there was nothing
-        to scroll" are all sayable. Reading the position and waiting for it to
-        stop is ``scroll_position``'s; this method owns the script, the budget
-        and the record.
+        before and after, the page's extent, the element that was driven, and
+        what was asked for, so "arrived", "still moving when the budget ran out"
+        and "there was nothing to scroll" are all sayable. Picking the scroller,
+        reading its position and waiting for it to stop are all
+        ``scroll_position``'s; this method owns the budget and the record.
 
         Args:
             tab (Tab): The browser tab object.
@@ -931,8 +931,9 @@ class DOMHandler:
             Dict[str, object]: ``scrolled`` (the scroll OFFSET changed, never
             the extent), ``at_edge``, ``settled`` (the offset stopped moving
             within the budget), ``settle_seconds``, the requested
-            ``direction``/``amount``/``smooth``, and the six offsets — see the
-            tool's own docstring.
+            ``direction``/``amount``/``smooth``, the six offsets, and
+            ``scroller``/``scroller_is_document`` — see the tool's own
+            docstring.
 
         Raises:
             ToolError: an invalid direction or a negative amount (both decided
@@ -941,9 +942,11 @@ class DOMHandler:
             one-viewport document is a legitimate page, and it is reported.
         """
         try:
-            # Built first: an unknown direction must cost no round trip.
-            script = scroll_position.script(direction, amount, smooth)
-            before = await scroll_position.read(tab)
+            # ONE pick per call, and it validates first: an unknown direction or
+            # a negative amount must still cost no round trip (F-878).
+            on = await scroll_position.scroller(tab, direction, amount)
+            script = scroll_position.script(direction, amount, smooth, on)
+            before = await scroll_position.read(tab, on)
             await tab.evaluate(script)
             # Nothing can move a page that is already at the edge it was sent
             # to, so that case waits for no animation to start — which is what
@@ -952,6 +955,7 @@ class DOMHandler:
                 tab,
                 before,
                 start_grace=0.0 if before.at_edge(direction) else None,
+                on=on,
             )
             after = settled.position
             return {
@@ -972,6 +976,11 @@ class DOMHandler:
                 "scroll_y_after": after.y,
                 "max_scroll_x": after.max_x,
                 "max_scroll_y": after.max_y,
+                # Both from the FINAL READ, never from the pick: a path that
+                # went stale fell back to the document, and the record has to
+                # name what it actually drove (F-878).
+                "scroller": after.descriptor,
+                "scroller_is_document": after.is_document,
             }
 
         except ToolError:

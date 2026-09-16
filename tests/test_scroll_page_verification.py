@@ -415,7 +415,14 @@ async def test_an_unreadable_position_raises_tool_error():
 
     class _MuteTab(ScrollingTab):
         async def evaluate(self, expression, *args, **kwargs):
-            if expression.startswith(self.POSITION_JS_MARKER):
+            # The READ only. Since F-878 the scroller PICK is a
+            # ``JSON.stringify`` round trip too and it happens FIRST, so muting
+            # every one of them would make this pin about the pick's message
+            # instead of the read's — a different claim wearing the same name.
+            if (
+                expression.startswith(self.POSITION_JS_MARKER)
+                and self.SCROLLER_JS_MARKER not in expression
+            ):
                 return None
             return await super().evaluate(expression, *args, **kwargs)
 

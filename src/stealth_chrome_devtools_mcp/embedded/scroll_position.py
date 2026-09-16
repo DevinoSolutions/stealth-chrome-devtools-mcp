@@ -1,4 +1,5 @@
-"""THE one home for "where is this page scrolled, and has it stopped" (F-875).
+"""THE one home for "which element is the page's scroller, where is it
+scrolled, and has it stopped" (F-875, F-878).
 
 ``scroll_page`` used to end like this::
 
@@ -12,8 +13,18 @@ three different states and the tool answered ``True`` in all of them: the scroll
 arrived; the scroll was still in flight (4910 of 7039 px on an 8016 px document
 when the 0.5 s nap ended, and 1747 of 1815 on a real stackoverflow page); and
 there was nothing to scroll at all (a Cloudflare interstitial exactly one
-viewport tall, ``scrollY`` ``0`` before and after). Telling them apart needs two
-things this module owns and the tool composes:
+viewport tall, ``scrollY`` ``0`` before and after). Telling them apart needs
+three things this module owns and the tool composes:
+
+**A pick.** :func:`scroller` answers "which element IS the page's scroller on
+this axis" (F-878). F-875 left this open, and measured it: on twelve ``data:``
+fixtures against real Chrome 152, ``document.scrollingElement`` alone is the
+right answer **4 times out of 12**, because ``body{overflow:hidden}`` plus a
+scrolling ``div`` — the app shell every SPA starter template ships — is a page
+``window.scrollTo`` cannot move at all. The rule is document-first, then the
+largest viewport-clipped area on the requested axis; :data:`SCROLLER_JS` carries
+it and ``audit/stage2/finding_F878_scroll_page_nested_scroller.md`` carries the
+matrix that chose it over the alternatives.
 
 **A read.** :func:`read` asks the page for its scroll offsets and its extent in
 ONE ``JSON.stringify`` round trip. It is ``JSON.stringify`` for the reason
@@ -42,8 +53,10 @@ when it already knows the page is at the requested edge, because then there is
 nothing to wait for: that is what keeps "one viewport tall" on the fast path.
 
 **What this module does not decide.** It never says whether a scroll
-*succeeded*: only where the page is, what its extent is
-(:func:`Position.at_edge`), and whether the window has been spent. Composing
+*succeeded*: only which element it is about, where that element is, what its
+extent is (:func:`Position.at_edge`), and whether the window has been spent.
+It also never *judges* its own pick — which is why the record names the element
+it drove, so a caller who disagrees can see what to disagree with. Composing
 that into the tool's record — and choosing the budget to bound it with — is
 ``dom_handler.scroll_page``'s, because only the caller knows what was asked for.
 
@@ -64,23 +77,155 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 if TYPE_CHECKING:  # pragma: no cover - typing only, keeps this module a leaf
     from nodriver import Tab
 
-#: Offsets AND extent in one round trip, as a JSON *string* (module docstring).
-#: ``document.scrollingElement`` is what CSSOM-View names as the element
-#: ``window.scrollTo``/``scrollBy`` actually move — ``html`` in standards mode,
-#: ``body`` in quirks — so the extent reported here is the extent of the thing
-#: that was scrolled. The finding measured it as ``html`` with
-#: ``body.scrollHeight == documentElement.scrollHeight`` on every sampled page,
-#: which is why reading either by hand happened to work and why asking the
-#: browser which one it is costs nothing.
+#: The placeholder :func:`scroller`'s axis and the chosen element's index path
+#: are substituted into. A plain ``str.replace`` and not ``str.format``, because
+#: every script in this module is full of JS object literals and doubling their
+#: braces to protect them from a formatter is a transcription error waiting to
+#: happen.
+_AXIS_SLOT = "__AXIS__"
+_PATH_SLOT = "__PATH__"
+
+#: Slack in the area comparison :data:`SCROLLER_JS` ranks candidates by, and the
+#: reason it exists (F-878 §3.3, fixture k): a scroll container is narrower than
+#: its parent by exactly the scrollbar's width, so a plain ``area >`` let a
+#: ``body`` that could move 20 px outrank a shell that could move 7023. The
+#: measured artefact is **0.8 %** (1873 of 1888 px), so this band is six times
+#: it, while the smallest REAL difference in the matrix — a reading pane against
+#: a message list — is 29 %, an order of magnitude outside it. Within the band
+#: the larger scrollable extent wins; an exact tie falls to document order,
+#: which prefers the OUTER of two nested candidates, agreeing with the rule's
+#: own preference for the bigger box.
+AREA_SLACK = 0.05
+
+#: Bounds on the identity :data:`READ_JS` reports for the element it read. A tag
+#: name is the browser's; an ``id`` and a ``class`` are the PAGE's, and a
+#: CSS-in-JS class name has no natural length — so they are clamped. Nothing
+#: else about the element is ever read: no text, no attributes, no content.
+SCROLLER_ID_CHARS = 64
+SCROLLER_CLASS_CHARS = 32
+SCROLLER_CLASSES = 4
+
+#: THE one way a chosen scroller is addressed in a LATER round trip (F-878): an
+#: index path of ``children`` offsets from ``document.documentElement``, or
+#: ``null`` for the document scroller. A path and not a stashed reference,
+#: because ``tab.evaluate`` is stateless and ``window.__something = el`` would
+#: leave this tool's bookkeeping on the page. If the path no longer names an
+#: element — the page re-rendered mid-scroll — this falls back to the document
+#: scroller, and :data:`READ_JS` reports the element it ACTUALLY read, so the
+#: record cannot claim a div it did not drive.
+_RESOLVE_JS = (
+    "function _el(p){"
+    "var d=document.scrollingElement||document.documentElement||document.body;"
+    "if(p===null){return d;}"
+    "var e=document.documentElement;"
+    "for(var i=0;i<p.length&&e;i++){e=e.children[p[i]];}"
+    "return e||d;"
+    "}"
+)
+
+#: THE one home for "which element IS the page's scroller on this axis"
+#: (F-878). One ``JSON.stringify`` round trip, one pick per call — measured at
+#: 2.59 ms on a 6007-element page, which is cheap once and half a second of the
+#: page's main thread if it were re-asked on every settle poll.
+#:
+#: The rule, and the twelve-fixture matrix behind it, is
+#: ``audit/stage2/finding_F878_scroll_page_nested_scroller.md``:
+#:
+#: 1. **if the document scroller can move on this axis, it IS the scroller.** A
+#:    precedence, not a tie-break: that is what the window scrolls and what the
+#:    wheel scrolls at rest, and it is why a 400 px scrollable box inside a
+#:    6023 px scrolling document loses (fixture d) without the rule having to be
+#:    argued out of choosing it;
+#: 2. else the candidate with the largest VIEWPORT-CLIPPED area, among elements
+#:    that can move on this axis and whose computed overflow on this axis is
+#:    ``auto``/``scroll``, with :data:`AREA_SLACK` and the larger extent
+#:    breaking near-ties. Area and not the element under the viewport centre:
+#:    the centre walks INWARD to a page's own scrollable widget (fixture g) and
+#:    is blind behind a ``position:fixed`` scrim (fixture h), and it depends on
+#:    a single point that a layout shift can move;
+#: 3. else the document scroller anyway — "nothing scrolls" is an answer.
+#:
+#: ``overflow: hidden`` is deliberately NOT a candidate even though ``scrollTop``
+#: would move it: a page that hid its scrollbar meant that element not to be
+#: scrolled, and ``html,body{overflow:hidden}`` is the app-shell marker itself.
+SCROLLER_JS = (
+    "JSON.stringify((function(axis){"
+    "var vertical=axis==='y';"
+    "var d=document.scrollingElement||document.documentElement||document.body;"
+    "function ext(e){"
+    "return vertical?e.scrollHeight-e.clientHeight:e.scrollWidth-e.clientWidth;"
+    "}"
+    "if(d&&ext(d)>0){return {path:null,document:true};}"
+    "var vw=window.innerWidth,vh=window.innerHeight;"
+    "var best=null,bestArea=0,bestExtent=0;"
+    "var all=document.querySelectorAll('*');"
+    "for(var i=0;i<all.length;i++){"
+    "var e=all[i];"
+    "if(e===d){continue;}"
+    "var x=ext(e);"
+    "if(x<=0){continue;}"
+    "var cs=window.getComputedStyle(e);"
+    "var ov=vertical?cs.overflowY:cs.overflowX;"
+    "if(ov!=='auto'&&ov!=='scroll'){continue;}"
+    "var r=e.getBoundingClientRect();"
+    "var w=Math.max(0,Math.min(r.right,vw)-Math.max(r.left,0));"
+    "var h=Math.max(0,Math.min(r.bottom,vh)-Math.max(r.top,0));"
+    "var a=w*h;"
+    "if(a<=0){continue;}"
+    f"if(best===null||a>bestArea*{1 + AREA_SLACK}||"
+    f"(a>=bestArea*{1 - AREA_SLACK}&&x>bestExtent)){{"
+    "bestArea=Math.max(bestArea,a);bestExtent=x;best=e;"
+    "}"
+    "}"
+    "if(best===null){return {path:null,document:true};}"
+    "var p=[],e2=best;"
+    "while(e2&&e2!==document.documentElement){"
+    "var kids=e2.parentElement?e2.parentElement.children:null;"
+    "if(!kids){return {path:null,document:true};}"
+    "var k=-1;"
+    "for(var j=0;j<kids.length;j++){if(kids[j]===e2){k=j;break;}}"
+    "if(k<0){return {path:null,document:true};}"
+    "p.unshift(k);e2=e2.parentElement;"
+    "}"
+    "if(e2!==document.documentElement){return {path:null,document:true};}"
+    "return {path:p,document:false};"
+    "})(" + _AXIS_SLOT + "))"
+)
+
+#: Offsets AND extent in one round trip, as a JSON *string* (module docstring),
+#: for the element :func:`scroller` chose — ``document.scrollingElement`` when
+#: that is the answer, which is what CSSOM-View names as the element
+#: ``window.scrollTo``/``scrollBy`` actually move (``html`` in standards mode,
+#: ``body`` in quirks; F-878 measured both). The offsets are the ELEMENT's
+#: ``scrollLeft``/``scrollTop``, which for the document scroller is
+#: ``window.scrollX``/``scrollY`` by definition and was measured equal to it in
+#: both compatibility modes — one expression, no branch.
+#:
+#: It also reports WHAT it read (tag, id, bounded classes, and whether that is
+#: the document scroller). The identity belongs to the READ and not to the pick
+#: precisely so the record cannot lie: a path that went stale falls back to the
+#: document, and the record then names the document.
 READ_JS = (
     "JSON.stringify((function(){"
-    "var e=document.scrollingElement||document.documentElement||document.body;"
-    "if(!e){return {x:0,y:0,max_x:0,max_y:0};}"
+    + _RESOLVE_JS
+    + "var d=document.scrollingElement||document.documentElement||document.body;"
+    "var e=_el(" + _PATH_SLOT + ");"
+    "var c=e.className;"
+    "if(c&&c.baseVal!==undefined){c=c.baseVal;}"
+    "var names=String(c||'').trim().split(/\\s+/);"
+    "var out=[];"
+    f"for(var i=0;i<names.length&&out.length<{SCROLLER_CLASSES};i++){{"
+    f"if(names[i]){{out.push(names[i].slice(0,{SCROLLER_CLASS_CHARS}));}}"
+    "}"
     "return {"
-    "x:Math.round(window.scrollX||0),"
-    "y:Math.round(window.scrollY||0),"
+    "x:Math.round(e.scrollLeft||0),"
+    "y:Math.round(e.scrollTop||0),"
     "max_x:Math.max(0,Math.round(e.scrollWidth-e.clientWidth)),"
-    "max_y:Math.max(0,Math.round(e.scrollHeight-e.clientHeight))"
+    "max_y:Math.max(0,Math.round(e.scrollHeight-e.clientHeight)),"
+    "tag:String(e.tagName||'').toLowerCase(),"
+    f"id:String(e.id||'').slice(0,{SCROLLER_ID_CHARS}),"
+    "classes:out,"
+    "document:e===d"
     "};"
     "})())"
 )
@@ -131,45 +276,78 @@ class _Direction(NamedTuple):
 #:
 #: ``{negative}`` is the pre-negated amount because a literal ``-{amount}``
 #: turned a negative amount into JS's decrement operator (``--500``), a syntax
-#: error. ``bottom`` targets ``document.scrollingElement`` — the element CSSOM
-#: View says ``scrollTo`` moves and the one :data:`READ_JS` measures the extent
-#: of, so the target and the reported ``max_y`` cannot disagree. (F-875 measured
-#: ``body.scrollHeight == documentElement.scrollHeight`` on every sampled page:
-#: a consistency fix, not a behaviour change on them.)
+#: error. ``{target}`` is whatever :func:`scroller` chose and ``{extent}`` is
+#: the element whose ``scrollHeight`` ``bottom`` heads for — the SAME element
+#: :data:`READ_JS` measures ``max_y`` off, so the target and the reported extent
+#: cannot disagree. For a document scroller ``{target}`` is literally ``window``
+#: (F-878): the generated JS is then byte-identical to F-875's, which is the
+#: mechanical form of "rule 1 changes nothing about a plain page".
 _DIRECTIONS: dict[str, _Direction] = {
     "down": _Direction(
-        "y", True, "window.scrollBy({{top: {amount}, left: 0, behavior: {behavior}}})"
+        "y", True, "{target}.scrollBy({{top: {amount}, left: 0, behavior: {behavior}}})"
     ),
     "up": _Direction(
         "y",
         False,
-        "window.scrollBy({{top: {negative}, left: 0, behavior: {behavior}}})",
+        "{target}.scrollBy({{top: {negative}, left: 0, behavior: {behavior}}})",
     ),
     "right": _Direction(
-        "x", True, "window.scrollBy({{top: 0, left: {amount}, behavior: {behavior}}})"
+        "x", True, "{target}.scrollBy({{top: 0, left: {amount}, behavior: {behavior}}})"
     ),
     "left": _Direction(
         "x",
         False,
-        "window.scrollBy({{top: 0, left: {negative}, behavior: {behavior}}})",
+        "{target}.scrollBy({{top: 0, left: {negative}, behavior: {behavior}}})",
     ),
     "top": _Direction(
-        "y", False, "window.scrollTo({{top: 0, left: 0, behavior: {behavior}}})"
+        "y", False, "{target}.scrollTo({{top: 0, left: 0, behavior: {behavior}}})"
     ),
     "bottom": _Direction(
         "y",
         True,
-        "window.scrollTo({{top: (document.scrollingElement||"
-        "document.documentElement).scrollHeight, left: 0, behavior: {behavior}}})",
+        "{target}.scrollTo({{top: {extent}.scrollHeight, left: 0, "
+        "behavior: {behavior}}})",
     ),
 }
 
 #: The directions a caller may ask for.
 DIRECTIONS = frozenset(_DIRECTIONS)
 
+#: What ``{target}``/``{extent}`` become for the DOCUMENT scroller. ``window``
+#: keeps ``window.scrollTo``/``scrollBy`` as the literal path a plain page is
+#: driven by; the extent is read off the element CSSOM View says that moves.
+_WINDOW_TARGET = "window"
+_WINDOW_EXTENT = "(document.scrollingElement||document.documentElement)"
 
-def script(direction: str, amount: int, smooth: bool) -> str:
-    """The JS that scrolls *amount* pixels *direction*, smoothly or not.
+
+class Scroller(NamedTuple):
+    """WHICH element this call will scroll and read — addressing only.
+
+    It carries no identity on purpose: what the record says about the element
+    comes from the READ (:data:`READ_JS`), so a stale path that fell back to the
+    document cannot be reported as the div it hoped for.
+    """
+
+    #: ``children`` offsets from ``document.documentElement``, or ``None`` for
+    #: the document scroller.
+    path: tuple[int, ...] | None
+    #: Is the chosen element ``document.scrollingElement``?
+    is_document: bool
+
+    @property
+    def js(self) -> str:
+        """This scroller as a JS expression, for ``{target}``/``{extent}``."""
+        if self.path is None:
+            return _WINDOW_TARGET
+        return f"_el({list(self.path)})"
+
+
+#: The document scroller, for the one caller that has not asked yet.
+DOCUMENT = Scroller(None, True)
+
+
+def _validate(direction: str, amount: int) -> _Direction:
+    """The whole request, checked from the request alone — no round trip.
 
     *amount* is a distance, and *direction* is the only thing that carries a
     sign. A negative *amount* is therefore REJECTED rather than interpreted:
@@ -181,10 +359,14 @@ def script(direction: str, amount: int, smooth: bool) -> str:
     would say ``direction: "up"`` about a page that went down), which is the
     class of untruth this whole finding is about.
 
+    This is its own function because since F-878 the FIRST round trip the tool
+    makes is the scroller pick, not the scroll: both it and :func:`script` have
+    to refuse a bad request, and "costs no round trip" has to stay true of the
+    call that now happens first.
+
     Raises:
         ToolError: *direction* is not one of :data:`DIRECTIONS`, or *amount* is
-            negative. Both are decided before the page is asked anything, so a
-            bad request costs no round trip.
+            negative.
     """
     known = _DIRECTIONS.get(direction)
     if known is None:
@@ -195,11 +377,66 @@ def script(direction: str, amount: int, smooth: bool) -> str:
             "cannot be negative — the direction carries the sign, so scroll the "
             "other way with direction='up' / 'left' instead."
         )
-    return known.script.format(
+    return known
+
+
+def script(direction: str, amount: int, smooth: bool, on: Scroller = DOCUMENT) -> str:
+    """The JS that scrolls *on* by *amount* pixels *direction*, smoothly or not.
+
+    Args:
+        direction: one of :data:`DIRECTIONS`.
+        amount: pixels, never negative (see :func:`_validate`); ignored by
+            ``top``/``bottom``.
+        smooth: ``behavior: 'smooth'`` rather than ``'instant'``.
+        on: the element :func:`scroller` chose. The default is the document
+            scroller, which produces exactly the JS F-875 produced.
+
+    Raises:
+        ToolError: see :func:`_validate`.
+    """
+    known = _validate(direction, amount)
+    body = known.script.format(
+        target=on.js,
+        extent=_WINDOW_EXTENT if on.path is None else on.js,
         amount=amount,
         negative=-amount,
         behavior="'smooth'" if smooth else "'instant'",
     )
+    if on.path is None:
+        return body
+    return "(function(){" + _RESOLVE_JS + "return " + body + ";})()"
+
+
+async def scroller(tab: Tab, direction: str, amount: int) -> Scroller:
+    """Which element IS the page's scroller on *direction*'s axis (F-878)?
+
+    One :data:`SCROLLER_JS` round trip, once per ``scroll_page`` call. It
+    validates the whole request first, because this is the FIRST thing the tool
+    asks the page and a bad request must still cost nothing.
+
+    Raises:
+        ToolError: the request is invalid (:func:`_validate`), or the evaluate
+            did not answer with the JSON :data:`SCROLLER_JS` promises — shape
+            and count only, never the page's own text.
+    """
+    known = _validate(direction, amount)
+    data = _json_answer(
+        await tab.evaluate(SCROLLER_JS.replace(_AXIS_SLOT, f"'{known.axis}'")),
+        "scroller",
+    )
+    path = data.get("path")
+    if path is None:
+        return DOCUMENT
+    if not isinstance(path, list) or not all(
+        isinstance(step, int) and not isinstance(step, bool) and step >= 0
+        for step in path
+    ):
+        raise ToolError(
+            "Could not read the page's scroller: the answer's path was "
+            f"{type(path).__name__} with {len(path) if isinstance(path, list) else 0} "
+            "steps, not the list of child offsets the pick asks for."
+        )
+    return Scroller(tuple(path), bool(data.get("document")))
 
 
 def _now() -> float:
@@ -213,29 +450,51 @@ async def _sleep(seconds: float) -> None:
 
 
 class Position(NamedTuple):
-    """Where the page is scrolled, and how far it could be scrolled.
+    """Where the page is scrolled, how far it could be, and WHAT was read.
 
-    ``max_x``/``max_y`` are ``0`` for a document that fits its viewport — the
+    ``max_x``/``max_y`` are ``0`` for a scroller that fits its viewport — the
     honest description of a page with nothing to scroll, not an error.
 
-    The two halves mean different things and must never be compared together.
-    :attr:`offset` is WHERE THE PAGE IS; ``max_x``/``max_y`` describe the
-    DOCUMENT, which a lazy-loading page grows while standing perfectly still.
+    The two numeric halves mean different things and must never be compared
+    together. :attr:`offset` is WHERE THE PAGE IS; ``max_x``/``max_y`` describe
+    the CONTENT, which a lazy-loading page grows while standing perfectly still.
     Comparing whole ``Position`` values conflates them, and both ways round are
     lies this module exists to prevent: content appended below a stationary
     viewport would read as "it scrolled", and a page that had stopped moving but
     was still loading would never settle.
+
+    The identity (``tag``/``element_id``/``classes``/``is_document``) is here and
+    not on :class:`Scroller` because a scroll position is meaningless without
+    saying what was measured, and because the READ is the only place that knows
+    what was measured: a path that went stale falls back to the document, and
+    this then names the document (F-878).
     """
 
     x: int
     y: int
     max_x: int
     max_y: int
+    tag: str = ""
+    element_id: str = ""
+    classes: tuple[str, ...] = ()
+    is_document: bool = True
 
     @property
     def offset(self) -> tuple[int, int]:
         """Where the page is scrolled — the ONLY part that means "moved"."""
         return (self.x, self.y)
+
+    @property
+    def descriptor(self) -> dict[str, object]:
+        """The element that was read, as the record carries it — SHAPE ONLY.
+
+        A tag name, an ``id`` and the classes, each bounded by
+        :data:`SCROLLER_ID_CHARS` / :data:`SCROLLER_CLASS_CHARS` /
+        :data:`SCROLLER_CLASSES` in the page itself. Never the element's text,
+        its attributes or its content: this exists so a caller can SEE which
+        element a judgement picked, not to describe the page.
+        """
+        return {"tag": self.tag, "id": self.element_id, "classes": list(self.classes)}
 
     def at_edge(self, direction: str) -> bool:
         """Is the page already as far as *direction* can take it?
@@ -275,39 +534,73 @@ class Settled(NamedTuple):
     seconds: float
 
 
-async def read(tab: Tab) -> Position:
-    """The page's scroll offsets and extent, in one round trip.
+def _json_answer(raw: object, what: str) -> dict[str, object]:
+    """The one ladder for "did the evaluate answer with the JSON we asked for".
 
-    Raises:
-        ToolError: the evaluate did not answer with the JSON :data:`READ_JS`
-            promises. Reporting ``0`` for a read that did not happen would be
-            the same class of untruth this module exists to remove, so an
-            unreadable answer is operational failure (DESIGN §9). The message
-            reports SHAPE only — a type name and a key count — never the page's
-            own text.
+    Shared by :func:`read` and :func:`scroller` because both ask the page one
+    ``JSON.stringify`` question and both have the same answer to a non-answer:
+    it is operational failure (DESIGN §9), never a zero. Reporting ``scroll_y:
+    0`` for a read that did not happen — or "the document" for a pick that did
+    not happen — is the same class of untruth F-875 and F-878 exist to remove.
+
+    Every message reports SHAPE and COUNT only: a type name, a character count,
+    a field count. Never the page's own text.
     """
-    raw = await tab.evaluate(READ_JS)
     if not isinstance(raw, str):
         raise ToolError(
-            "Could not read the page's scroll position: the evaluate answered "
-            f"with {type(raw).__name__}, not the JSON string the read asks for."
+            f"Could not read the page's {what}: the evaluate answered with "
+            f"{type(raw).__name__}, not the JSON string it asks for."
         )
     try:
         data = json.loads(raw)
     except ValueError as exc:
         raise ToolError(
-            "Could not read the page's scroll position: the evaluate answered "
-            f"with {len(raw)} characters that are not JSON."
+            f"Could not read the page's {what}: the evaluate answered with "
+            f"{len(raw)} characters that are not JSON."
         ) from exc
-    if not isinstance(data, dict) or not all(
-        isinstance(data.get(key), (int, float)) for key in _KEYS
-    ):
+    if not isinstance(data, dict):
+        raise ToolError(
+            f"Could not read the page's {what}: the answer was "
+            f"{type(data).__name__}, not the object it asks for."
+        )
+    return data
+
+
+async def read(tab: Tab, on: Scroller = DOCUMENT) -> Position:
+    """*on*'s scroll offsets, extent and identity, in one round trip.
+
+    Args:
+        tab: the tab to read.
+        on: the scroller :func:`scroller` chose; the document by default.
+
+    Raises:
+        ToolError: the evaluate did not answer with the JSON :data:`READ_JS`
+            promises (see :func:`_json_answer`).
+    """
+    data = _json_answer(
+        await tab.evaluate(READ_JS.replace(_PATH_SLOT, _path_js(on))),
+        "scroll position",
+    )
+    if not all(isinstance(data.get(key), (int, float)) for key in _KEYS):
         raise ToolError(
             "Could not read the page's scroll position: the answer carried "
-            f"{len(data) if isinstance(data, dict) else 0} of the "
-            f"{len(_KEYS)} fields the read asks for."
+            f"{len(data)} fields but not the {len(_KEYS)} numbers it asks for."
         )
-    return Position(*(int(data[key]) for key in _KEYS))
+    classes = data.get("classes")
+    return Position(
+        *(int(data[key]) for key in _KEYS),
+        tag=str(data.get("tag") or ""),
+        element_id=str(data.get("id") or ""),
+        classes=tuple(str(name) for name in classes)
+        if isinstance(classes, list)
+        else (),
+        is_document=bool(data.get("document")),
+    )
+
+
+def _path_js(on: Scroller) -> str:
+    """*on*'s index path as the JS literal :data:`READ_JS` resolves."""
+    return "null" if on.path is None else str(list(on.path))
 
 
 async def settle(
@@ -315,6 +608,7 @@ async def settle(
     origin: Position,
     budget: float | None = None,
     start_grace: float | None = None,
+    on: Scroller = DOCUMENT,
 ) -> Settled:
     """Poll :func:`read` until two consecutive answers agree, or *budget* ends.
 
@@ -328,6 +622,11 @@ async def settle(
             :data:`START_GRACE_SECONDS` when ``None``. Pass ``0`` when the page
             is already at the edge the caller asked for — nothing will move, so
             there is nothing to wait for.
+        on: the scroller :func:`scroller` chose. It is polled, not re-picked:
+            the pick costs 2.59 ms of the page's main thread (measured on a
+            6007-element page) and a full budget is ~200 polls, so re-asking
+            would spend half a second answering a question whose answer does not
+            change.
 
     Returns:
         Settled: the last reading, whether it settled, and what it cost.
@@ -342,7 +641,7 @@ async def settle(
         # fast path costs two reads and ONE interval. The case that first sleep
         # used to guard — a smooth scroll that has not begun — is the grace's,
         # and the grace still holds it.
-        current = await read(tab)
+        current = await read(tab, on)
         elapsed = _now() - started
         # OFFSETS only. What "has it stopped" asks about is the viewport, not
         # the document: an infinite-scroll page appends content for as long as

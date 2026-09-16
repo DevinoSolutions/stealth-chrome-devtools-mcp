@@ -306,6 +306,10 @@ async def scroll_page(
     Waits for the position to stop changing before answering, so a smooth scroll
     is reported at where it LANDED, not where it had reached.
 
+    Drives the page's REAL scroller, which is not always the document: a page
+    laid out as an app shell (`body{overflow:hidden}` plus a scrolling `div`)
+    is scrolled by that div, and the record names whichever element was driven.
+
     Args:
         instance_id (str): Browser instance ID.
         direction (str): 'down', 'up', 'left', 'right', 'top', or 'bottom'.
@@ -315,13 +319,15 @@ async def scroll_page(
 
     Returns:
         Dict[str, object]: ``scrolled`` (the scroll OFFSET changed — a page that
-        merely grew while standing still is not scrolled), ``at_edge`` (the page
-        is as far as ``direction`` goes — true for a page with nothing to
-        scroll, whose ``max_scroll_y`` is 0), ``settled`` (the offset stopped
+        merely grew while standing still is not scrolled), ``at_edge`` (the
+        scroller is as far as ``direction`` goes — true when there is nothing to
+        scroll, i.e. ``max_scroll_y`` is 0), ``settled`` (the offset stopped
         changing within the budget; false means it was still moving),
         ``settle_seconds``, the requested ``direction``/``amount``/``smooth``,
-        and ``scroll_x_before``/``scroll_y_before``/``scroll_x_after``/
-        ``scroll_y_after``/``max_scroll_x``/``max_scroll_y``.
+        ``scroll_x_before``/``scroll_y_before``/``scroll_x_after``/
+        ``scroll_y_after``/``max_scroll_x``/``max_scroll_y``, plus ``scroller``
+        (``{tag, id, classes}`` of the element that was driven) and
+        ``scroller_is_document`` (false when it was a nested scroller).
     """
     if isinstance(amount, str):
         amount = int(amount)
