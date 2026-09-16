@@ -274,20 +274,29 @@ asking IS the authority the rule otherwise supplies. And an unreadable
 `browser_pids.json` must resolve toward EVICTING, because refusing on one would brick
 every cold start on the machine.
 
-**Still open, and now safe to do.** Make the proxy's liveness question
-**session-scoped as well as port-scoped**: the backend already hands each proxy an
-`mcp-session-id`, and a proxy that gets an invalid-session answer for its OWN id knows
-its backend is gone even though the port answers. Feed that into the existing
-`watch_liveness` verdict and the existing heal path fires, so a session evicted while
-holding NO browser re-bridges instead of bricking — the one residual F-886 leaves. It
-was *unsafe* before F-886 and is safe now: the heal calls `ensure_server_running`,
-whose cold start could previously evict the replacement and start an unbounded
-eviction war. What is deliberately NOT wanted is an **ordered** eviction (version,
-then a record-time stamp): with two clients at the same version and different source
-bytes — the measured case — the arriving one is always later, so the order permits
-exactly the eviction that does the harm, and where it does bite it still kills the
-older session's browsers. See
-`audit/stage2/finding_F886_eviction_kills_sibling_browsers.md` §3.
+**Still open, and NOT yet safe to do — read this before you wire it up.** The one
+residual F-886 leaves is that a session evicted while holding NO browser is bricked
+silently. The obvious fix is to make the proxy's liveness question **session-scoped as
+well as port-scoped**: `mcp.client.streamable_http` synthesises
+`{"code": 32600, "message": "Session terminated"}` at exactly one site, reached only
+from a 404 to a POST carrying a session id, and the bridge already sees that frame —
+so the signal is clean. **The consequence is not.** A browser-less session is not
+protected, so the replacement binds its port and supersedes its record entry; when it
+heals it finds only the replacement's entry, refuses it on identity, cold-starts
+against it — and the replacement, equally browser-less, is not protected either. It
+evicts back. That is the same unbounded eviction war one level down. Closing this
+needs one of two real decisions first: widen the protection from "owns a live browser"
+to "has a live client session" (which stops being a LOCAL read, and the rule has to be
+askable from a cold-start path where there is no backend to ask), or let a heal ADOPT
+the replacement rather than cold-start against it (which means running a session
+against source it did not start — what issue #14 exists to prevent).
+
+What is deliberately NOT wanted either way is an **ordered** eviction (version, then a
+record-time stamp): with two clients at the same version and different source bytes —
+the measured case — the arriving one is always later, so the order permits exactly the
+eviction that does the harm, and where it does bite it still kills the older session's
+browsers. See `audit/stage2/finding_F886_eviction_kills_sibling_browsers.md` §3 and §6
+residual 1.
 
 **Isolated workspaces never bind a port the developer is using.** The harness's
 `_pick_free_port` refuses the product's default singleton port and every port the

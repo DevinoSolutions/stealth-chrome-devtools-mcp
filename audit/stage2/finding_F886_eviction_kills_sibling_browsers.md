@@ -176,8 +176,10 @@ not as an idea (§6 keeps it):
   `ensure_server_running`, whose reuse gate rejects the replacement's identity,
   so it cold-starts — and under the pre-F-886 rule that cold start evicts the
   replacement. That is the unbounded eviction war S5a currently does not see,
-  manufactured deliberately. It is only safe once eviction is bounded, i.e.
-  after the chosen rule lands.
+  manufactured deliberately. The chosen rule bounds it only where the winner
+  holds browsers; where NEITHER side does — which is exactly the case this idea
+  would serve — the war is still constructible. §6 residual 1 carries the
+  counter-example and the two design decisions that would close it.
 
 ### Rejected — **ordered eviction (version, then a record-time stamp)**
 
@@ -282,18 +284,45 @@ workspace that ran two identities terminates both.
 
 ## 6. Residuals
 
-1. **A session with NO browser open is still bricked silently.** The rule
+1. **A session with NO browser open is still bricked silently, and
+   session-scoped liveness is STILL not safe to add on its own.** The rule
    protects browsers, not sessions. A proxy whose backend is evicted while it
    holds no browser still gets `Session terminated` on its next call, with no
-   condemnation, heal or teardown in its log. The fix is the rejected idea in
-   §3: make the proxy's liveness question SESSION-scoped as well as
-   port-scoped — the backend already answers an invalid-session error for a
-   session id it no longer knows, and the bridge already sees that frame in
-   `_proxy_streams.from_backend`, so feeding it to the existing heal path is a
-   bounded change in `proxy_selfheal` (the fast-witness home). It is SAFE to do
-   now and was not safe before, because a heal that reaches a cold start can no
-   longer kill a serving backend. Not done here: it is a second mechanism with
-   its own failure modes, and it removes no browser loss.
+   condemnation, heal or teardown in its log.
+
+   The SIGNAL is clean and worth recording, because it was the uncertain half.
+   `mcp.client.streamable_http` synthesises `{"code": 32600, "message":
+   "Session terminated"}` at exactly ONE site
+   (`_send_session_terminated_error`), reached only from `status_code == 404`
+   on a POST carrying a session id — i.e. only from "the backend does not know
+   my session". A backend TOOL cannot produce it (tool failures come back as
+   `result.isError`, not a JSON-RPC error), and the bridge already sees the
+   frame in `_proxy_streams.from_backend`. Pinning that literal against the
+   SDK's source is the same discipline `LIFECYCLE_INCIDENTS` already uses for
+   the product's own log lines.
+
+   **What is NOT resolved is the consequence, and I was wrong about it in an
+   earlier draft of this document.** I claimed F-886 made this safe. It does
+   not, and the counter-example is constructible without measurement. Session A
+   holds no browser, so it is not protected and B binds A's port;
+   `record_backend` supersedes by port, so A's entry is gone. A notices through
+   the new signal and heals via `ensure_server_running`. `_find_running_server`
+   finds only B's entry, whose identity differs, so it does not adopt; the cold
+   start selects B's port; and B — which has just started and may hold no
+   browser either — is therefore NOT protected. A evicts B. B's proxy, equally
+   browser-less, notices and evicts back. That is the unbounded eviction war,
+   one level down from where it was.
+
+   So this residual needs ONE of two further things before the signal can be
+   wired up, and both are real design decisions rather than plumbing: widen the
+   protection from "owns a live browser" to "has a live client session" (which
+   needs the backend to answer that question, so it is no longer the LOCAL read
+   that lets the rule be asked from a cold-start path), or make the heal ADOPT
+   the replacement instead of cold-starting against it (which means relaxing
+   the identity gate for a heal, i.e. running a session against source it did
+   not start — the thing issue #14 exists to prevent). Neither is a follow-up
+   to do quietly, and neither removes any browser loss, which is why this
+   branch stops here and says so.
 
 2. **A stepped-around backend outlives its usefulness.** When the last proxy of
    a stranded identity exits, its backend keeps running with no client. Nothing
