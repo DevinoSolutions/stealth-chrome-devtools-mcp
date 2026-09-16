@@ -113,7 +113,14 @@ that would have been red first. No `src/` change.
   then fails to connect gets no fallback (`_fallback_profile_selection` answers `None`
   for every non-clone role), which is how the macOS/ARM64 gate cell failed this node.
   That residual is recorded in the F-834 finding as still open; the test works around
-  it rather than asserting a concurrency the product documents it does not offer. Two members move
+  it rather than asserting a concurrency the product documents it does not offer. The
+  five that follow the lead spawn in as many lanes as the cell has cores (minimum two,
+  printed in the node's own diagnostic line): nodriver 0.47 gives a launching Chrome a
+  fixed ≈2.75 s to answer `/json/version`, and five simultaneous cold starts on a
+  3-vCPU runner lost one — a named directory nothing else wanted, whose Chrome was
+  alive when the reaper found it, so capacity rather than contention. No test-side
+  retry: retrying is the product's job, and its own three-attempt loop skips this case
+  only because of the F-834 stage-1 gap above. Two members move
   their page WITHOUT the `navigate` tool (a click that retitles, and a `switch_tab`),
   which is what makes the `list_instances` block red against F-874 rather than
   decorative. Asserts six live titles with `partial: false`; that of the six profile

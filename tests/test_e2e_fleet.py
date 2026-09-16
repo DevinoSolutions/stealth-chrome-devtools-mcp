@@ -28,9 +28,15 @@ nodes it would cost six fleets and stop being the shape that found the defects.
 
 The lead is the one deliberate serialization, and it is there because master
 carries no spawn reservation — measured, and the argument is at the spawn call
-below. Everything the product does promise to do concurrently still happens
-concurrently: two unnamed CLONE spawns and three named ones in a single
-``gather``, then six navigations, then six tool calls.
+below. The five that follow it spawn together, in as many lanes as the CELL can
+carry (``_spawn_lanes``): a developer box starts all five at once, a 3-vCPU
+runner three at a time, because nodriver 0.47 gives Chrome a fixed ≈2.75 s to
+answer ``/json/version`` and five simultaneous cold starts on three cores lost
+one on gate run 35150887345 — a NAMED directory nothing else wanted, whose
+Chrome was alive when the reaper found it, i.e. capacity rather than
+contention. Everything the product does promise to do concurrently still
+happens concurrently: unnamed CLONE spawns beside named ones, then six
+navigations in one ``gather``, then six tool calls in one ``gather``.
 
 **Two members move their page WITHOUT the ``navigate`` tool**, and that is what
 makes the listing block evidence rather than decoration. F-874 §2's mechanism is
@@ -68,6 +74,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -153,6 +160,35 @@ def _stealth_warnings(records):
 async def _warmup():
     await warmup_once()
     yield
+
+
+def _spawn_lanes(followers: int) -> int:
+    """How many Chrome launches this CELL may have in flight at once.
+
+    One per core, never fewer than two, never more than there are browsers to
+    start. It is a property of the machine rather than a constant because the
+    thing it has to fit inside is a constant: nodriver 0.47's connect deadline
+    is ``asyncio.sleep(0.25)`` then five tries ``0.5`` s apart
+    (``nodriver/core/browser.py:413-425``; its ``sleep`` is ``wait`` is
+    ``asyncio.sleep``), i.e. ≈2.75 s for Chrome to answer ``/json/version``,
+    and it does not stretch under load while Chrome's cold start does.
+
+    Measured: gate run 35150887345, macOS/ARM64 (3 vCPU), five concurrent
+    launches — one lost. It was ``sessions/fleet-tabswitch``, a NAMED directory
+    no other member asks for and which nothing else held (an F-871 walk would
+    have renamed it ``-2``), and its Chrome was alive when F-860's reaper found
+    it (``left browser pid 7447 running``). So the loss was capacity, not
+    profile contention: Chrome had started and had not opened its port inside
+    those 2.75 s. Windows and Linux passed the same commit.
+
+    Deliberately NOT paired with a test-side retry. The product's own hint says
+    "retry this one once the others have settled" and its tool body already has
+    a three-attempt loop; that loop skipped this failure only because
+    ``_fallback_profile_selection`` answers ``None`` for every non-clone role
+    (F-834 stage 1, measured, OPEN). A retry here would hide exactly that gap,
+    so this node stays one attempt per member.
+    """
+    return max(2, min(followers, os.cpu_count() or 2))
 
 
 def _clone_root():
@@ -318,11 +354,24 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     # processes live: `ConnectionRefusedError [WinError 1225]`), so this path is
     # exercised, not hypothetical. Collect first, bind `ids` from whatever DID
     # start, and re-raise from INSIDE the try.
+    # The wave itself is bounded by what the CELL can start at once — see
+    # `_spawn_lanes` for the deadline it has to fit inside and the gate run that
+    # measured it. On a developer box this is the whole wave (one `gather`,
+    # unchanged); on a 3-vCPU runner it is three at a time. The lane count is
+    # printed below, so every run says what this machine allowed rather than
+    # leaving it assumed.
     assert plan[0][2] is False, "the lead member must be the unnamed master-taker"
+    lane_count = _spawn_lanes(len(plan) - 1)
+    lanes = asyncio.Semaphore(lane_count)
+
+    async def _spawn_in_lane(row):
+        async with lanes:
+            return await _spawn(row)
+
     started = time.monotonic()
     lead = await _spawn(plan[0])
     followers = await asyncio.gather(
-        *(_spawn(row) for row in plan[1:]), return_exceptions=True
+        *(_spawn_in_lane(row) for row in plan[1:]), return_exceptions=True
     )
     spawned = [lead, *followers]
     spawn_seconds = time.monotonic() - started
@@ -514,8 +563,10 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
         )
 
         print(
-            f"\nfleet of {FLEET_SIZE}: spawn {spawn_seconds:.1f}s, "
-            f"navigate {nav_seconds:.1f}s, actions {act_seconds:.1f}s, "
+            f"\nfleet of {FLEET_SIZE}: spawn {spawn_seconds:.1f}s "
+            f"(1 lead + {len(plan) - 1} in {lane_count} lanes on "
+            f"{os.cpu_count()} cpus), navigate {nav_seconds:.1f}s, "
+            f"actions {act_seconds:.1f}s, "
             f"total {time.monotonic() - started:.1f}s "
             f"(roles {sorted(set(roles.values()))})"
         )
