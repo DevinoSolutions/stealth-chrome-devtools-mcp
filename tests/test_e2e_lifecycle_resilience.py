@@ -1328,8 +1328,14 @@ async def _mixed_version_waves(launcher, space, variant_root: Path) -> dict:
         # Every browser this node spawned, by the pid it had AT SPAWN — so a
         # browser killed with its evicted backend is reported as dead rather
         # than merely absent from a registry the winner rewrote.
+        # ``_process_alive``, never ``_pid_running``: the surviving side's
+        # browser still has a live backend to reparent to, so a killed Chrome
+        # can sit as a zombie and ``is_running`` would call it alive. S5b
+        # asserts on this dict, so a zombie-blind read would let the eviction
+        # fix pass over a dead browser — the one false pass this suite exists
+        # to prevent.
         "browsers_alive": {
-            name: _pid_running(pid) for name, pid in browser_pid_at_spawn.items()
+            name: _process_alive(pid) for name, pid in browser_pid_at_spawn.items()
         },
         "served_at_end": served,
     }

@@ -221,9 +221,11 @@ soak logged 2 in another — and nothing condemned in any of them. So the node g
 confirmation phase is correct (a strike *count* cannot say whether three ever landed
 consecutively on one proxy — `test_watchdog_busy_vs_dead` and
 `test_singleton_starvation_patience` own that), and it does not reproduce the
-100 %-CPU condemnation recorded in the team memory, which needed the proxy itself to
-be starved rather than merely the machine to be busy. A stronger stress would have to
-starve the proxy process, which is a different node and a different budget.
+100 %-CPU condemnation recorded in the team memory. On F-856's reading of that
+incident the proxy process itself had to be starved, not merely the machine kept
+busy — an inference from that design, not something this branch measured. A
+stronger stress would have to starve the proxy process, which is a different node
+and a different budget.
 
 **If you change a lifecycle log line, that module is what breaks.** The incident
 oracle is the product's own text, because `observability.capture_lifecycle` is a no-op
