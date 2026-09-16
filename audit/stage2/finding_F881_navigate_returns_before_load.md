@@ -177,34 +177,57 @@ now answers in ~20 ms instead of ~525 ms, and answers *after* `load`.
 
 ## 4. Verification
 
-Hermetic — `tests/test_navigate_milestone.py`. `tests/fakes.py`'s `FakeTab` now
-models a navigation the way Chrome answers one (built from §2d): `send(Page.navigate)`
+Hermetic — `tests/test_navigate_milestone.py`, 10 pins. `tests/fakes.py`'s `FakeTab`
+now models a navigation the way Chrome answers one (built from §2d): `send(Page.navigate)`
 answers `(frameId, loaderId, errorText)`, delivers `init`/`DOMContentLoaded`/`load`
 lifecycle events to registered handlers either BEFORE the response (`lifecycle="before"`),
-AFTER it on the loop (`"after"`), or never (`"never"`), and a `title_at_load=`
-page answers `document.title` as `""` until its `load` has been delivered — the
-measured Amazon/CI shape. RED at `3311be9` for the defect and nothing else:
+AFTER it one loop iteration each (`"after"`), or never (`"never"`); `last_milestone`
+stops the sequence early (a transfer that commits and hangs); `stale_load_for` also
+delivers an older loader's `load`; and a `title_at_load=` / `title_at_dcl=` page answers
+`document.title` as `""` until that milestone — the measured CI shape. `Tab.wait(t)`
+and `Tab.get` are modelled as nodriver 0.47 has them (a truthy `t` skips the wait;
+`get` returns after the FIRST event), which is what makes the RED below fail for the
+defect and not for a harness gap — the first RED run was `AttributeError: 'FakeTab'
+object has no attribute 'wait'`, which is not a RED, and adding the faithful `wait`
+was the answer.
 
-| pin | RED reason at `3311be9` |
+At `3311be9`: **5 RED, 5 passed** (the passes are shape pins for the fix, named so):
+
+| pin | at `3311be9` |
 |---|---|
-| `navigate` reports the title the page has at load, not at commit | `assert '' == 'Alpha'` — the CI failure, reproduced without Chrome |
-| a `load` that arrived before `Page.navigate` answered still counts | `assert '' == 'Alpha'` |
-| `domcontentloaded` returns on that event and does not wait for `load` | `assert '' == 'Alpha'` (`title_at_dcl`) |
-| the milestone is keyed on the response's `loaderId` — an older document's `load` does not end the wait | passes at HEAD only because HEAD never waits; it pins the fix's shape |
-| a same-document navigation returns at the response | shape pin |
-| an unknown `wait_until` raises naming the accepted values | `DID NOT RAISE` |
-| `networkidle` still sleeps F-787's fixed window after commit | shape pin |
+| `navigate` reports the title the page has at load, not at commit | RED `assert '' == 'Alpha'` — the CI failure, without Chrome |
+| a `load` that arrived before `Page.navigate` answered still counts | passed (shape) |
+| `domcontentloaded` returns on that event without waiting for `load` | RED `assert '' == 'Alpha'` |
+| under `load`, a page that never loads times out instead of answering | RED `DID NOT RAISE` (success with `title ""`) |
+| the milestone is keyed on the response's `loaderId` — an older document's `load` does not end the wait | RED `DID NOT RAISE` |
+| a same-document navigation returns at the response | passed (shape) |
+| an unknown `wait_until` raises naming the accepted values | RED `DID NOT RAISE` |
+| the lifecycle listener is removed afterwards | passed (vacuous at HEAD: no listener existed) |
+| a concurrent wait's `KeyError` on removal does not fail the navigation | passed (vacuous at HEAD) |
+| `networkidle` still sleeps F-787's fixed window after commit | passed (shape) |
+
+After the fix: 10/10, and the seven-file selection (`test_navigate_milestone`,
+`test_navigate_race_recovery`, `test_extra_headers_cdp`, `test_list_instances_live_state`,
+`test_tool_sections_contract`, `test_doc_claims`, `test_release_contract`) is 92 passed.
 
 The F-824 pins (`tests/test_navigate_race_recovery.py`) and the referrer pins
 (`tests/test_extra_headers_cdp.py`) are re-pointed from `tab.get` to the
 `Page.navigate` send, which is where the navigation now leaves the product;
-their assertions are unchanged in meaning.
+their assertions are unchanged in meaning. One referrer pin asserted "no CDP
+frame at all" where it meant "no `Network.setExtraHTTPHeaders` frame" — the
+faithful fake now records the `Page.navigate` frame a real navigation sends.
 
-Real Chrome — `tests/test_browser_integration.py::TestListInstancesLiveState`,
-unchanged, run five times in a row; and `tests/test_resilience.py`'s
-navigation nodes (hang-before-headers timeouts for all three `wait_until`
-values, the F-787 characterization at the hang-after-headers route, the error-page
-landing) — see the PR for counts.
+Real Chrome (headless, `tmp_empty_root`, one Chrome at a time):
+
+* `tests/test_browser_integration.py::TestListInstancesLiveState` — unchanged,
+  run five times in a row: **5/5 passed** (9.3 / 8.9 / 9.1 / 9.3 / 9.7 s).
+* `tests/test_resilience.py` + `tests/test_navigation_truthfulness.py` navigation
+  nodes (hang-before-headers timeouts for `load` and `networkidle`, the F-787
+  characterization at the hang-after-headers route, route-abort recovery, the
+  error-page landings): **36 passed**.
+* `tests/test_e2e_interaction.py`, `tests/test_e2e_hard_dom.py`,
+  `TestNavigateAndScreenshot` — the paths that chain `navigate` straight into a
+  click or a read, now ~0.5 s sooner: **17 passed**.
 
 **LOC:** `browser_manager.py` 1528 → below its cap: `_wait_for_navigation_condition`
 left and one call replaced two; the cap ratchets DOWN to the new actual.

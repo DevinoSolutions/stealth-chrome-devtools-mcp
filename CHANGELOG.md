@@ -45,6 +45,37 @@ process is gone.
 `cli._probe_recorded_backend` is deleted — its whole content was the ladder plus the
 word `no port recorded`, and that word is `backend_liveness.NO_PORT` now.
 
+### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)
+
+Two Windows full gates failed the same way on unrelated PRs: `navigate` to a `data:`
+page whose `<title>` is in its own URL answered `title: ""`. Measured on Chrome 152:
+the tool's `load` wait was `tab.wait(cdp.page.LoadEventFired)`, and nodriver 0.47's
+`Tab.wait(t)` takes a *duration* — a class is truthy, so the whole wait was skipped
+(0.02 ms). `domcontentloaded` was the same no-op. What stood in for a wait was the
+`tab.get(url)` before it: `Page.navigate` plus a `Tab.wait()` that, with nothing having
+enabled the `Page` domain on the tab, saw no event and slept a flat 0.5 s. Every
+navigation paid that half second, and on a loaded runner it was not enough for the
+parser to reach `<title>` before `document.title` was read.
+
+`navigation_milestone` is the ONE home for `wait_until` now. It arms a
+`Page.lifecycleEvent` listener BEFORE sending `Page.navigate` (the response and the new
+document's events are not ordered — `DOMContentLoaded` was measured 0.3 ms before the
+response, `load` 0.3 ms after), and returns when the event named for **that response's
+`loaderId`** has been seen, whether it arrived before the response or after. An older
+document's `load` does not count; a same-document navigation (`loaderId: null`, no
+events at all) returns at the response; a navigation Chrome could not perform commits
+its error page under the same `loaderId` and fires `load` for it, so the F-802/F-833
+`chrome-error://` detector is unchanged. `networkidle` is still F-787's fixed sleep —
+now after the committed document rather than after the 0.5 s — and that finding stays
+open. An unknown `wait_until` raises naming the three accepted values instead of silently
+meaning `load`.
+
+A `data:` navigation answers in ~20 ms instead of ~525 ms, and after `load`. What a
+timed-out wait now catches that a silent success used to hide: `net::ERR_ABORTED` (a
+download, or a navigation superseded before commit) commits nothing, so it runs to the
+budget and raises the existing timeout instead of answering with the previous page's
+url and title.
+
 ## 2.1.7
 
 ### Fixed — `list_instances` reported the last navigation, not the instance (F-874)
