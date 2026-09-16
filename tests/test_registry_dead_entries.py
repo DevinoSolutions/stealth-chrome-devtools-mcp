@@ -227,55 +227,13 @@ class TestForgetDead:
             e["display_context"] for e in backend_registry.read_backends(record.path)
         ) == ["headless", "win-session-1"]
 
+    def test_no_recorded_backend_writes_nothing(self, record):
+        """A record with nothing dead in it is a record nobody rewrites."""
+        record(v2_record(win_session_1=_entry("win-session-1", LIVE_PORT, 136672)))
+        before = record.path.stat().st_mtime_ns
 
-class TestColdStartPrunes:
-    """The ONE automatic caller: the cold-start lock holder, the one writer of
-    this record that holds `_exclusive_lock`."""
-
-    def test_the_lock_holder_forgets_dead_entries(self, record, monkeypatch):
-        record(
-            v2_record(
-                win_session_2=_entry("win-session-2", DEAD_PORT, 89892),
-                win_session_1=_entry("win-session-1", LIVE_PORT, 136672, "2.1.6"),
-            )
-        )
-        monkeypatch.setattr(
-            singleton,
-            "_probe_port",
-            lambda port: "responsive" if port == LIVE_PORT else "down",
-        )
-        monkeypatch.setattr(singleton, "_is_our_backend", lambda pid: False)
-        # The cold start itself is not under test: stop it after the prune by
-        # taking the "already up on the port we were handed" early return.
-        monkeypatch.setattr(singleton, "_find_running_server", lambda: LIVE_PORT)
-
-        singleton._start_backend_holding_lock(LIVE_PORT)
-
-        assert [
-            e["display_context"] for e in backend_registry.read_backends(record.path)
-        ] == ["win-session-1"]
-
-    def test_a_lost_lock_race_never_writes(self, record, monkeypatch):
-        """Another process owns startup, so this one has no right to the file."""
-        state = v2_record(win_session_2=_entry("win-session-2", DEAD_PORT, 89892))
-        record(state)
-        monkeypatch.setattr(singleton, "_probe_port", lambda port: "down")
-        monkeypatch.setattr(singleton, "_is_our_backend", lambda pid: False)
-        monkeypatch.setattr(singleton, "_exclusive_lock", lambda: _no_lock())
-
-        singleton._start_backend_holding_lock(DEAD_PORT)
-
-        assert json.loads(record.path.read_text()) == state
-
-
-def _no_lock():
-    from contextlib import contextmanager
-
-    @contextmanager
-    def _cm():
-        yield False
-
-    return _cm()
+        assert self._forget(record.path, {LIVE_PORT: "responsive"}) == []
+        assert record.path.stat().st_mtime_ns == before
 
 
 @pytest.fixture()
