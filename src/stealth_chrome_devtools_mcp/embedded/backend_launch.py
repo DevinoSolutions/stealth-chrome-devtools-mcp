@@ -59,9 +59,11 @@ kill a process GROUP, and the backend gets its own with ``start_new_session``.
      spawner's working directory (``clone_storage``'s last-resort clone seed
      reads it) travel in a JSON spec beside the launcher, in the user-private
      state dir, deleted in a ``finally``. ``/TR`` is stored truncated at 253
-     characters — measured, see ``TR_MAX_CHARS`` — so it carries only two paths
-     (F-810's precedent), the token is short, and the launcher addresses its
-     spec, pid and error files off its own path. A spawner killed mid-launch
+     characters — measured, and single-homed with the ``schtasks`` seam itself
+     as ``desktop_launch.TR_MAX_CHARS`` / ``tr_overflow`` (F-879) — so it
+     carries only two paths (F-810's precedent), the token is short
+     (``desktop_launch.TOKEN_CHARS``), and the launcher addresses its spec, pid
+     and error files off its own path. A spawner killed mid-launch
      leaves its task AND its spec behind, so the next scheduler spawn deletes
      any task whose spec is older than the pid deadline.
    * *The boot log and the pid.* A ``Popen`` stdout handle cannot cross the
@@ -77,8 +79,9 @@ kill a process GROUP, and the backend gets its own with ``start_new_session``.
    names F-867, so the log says which rung served.
 
 A leaf: it imports ``backend_registry`` for the state dir and reaches
-``desktop_launch`` lazily for the ONE ``schtasks`` seam, the ONE pid-file reader
-and the ONE task-teardown, so none of them gets a second home. That reach used
+``desktop_launch`` lazily for the ONE ``schtasks`` seam, the ONE pid-file reader,
+the ONE task-teardown and the ONE ``/TR`` length cap, so none of them gets a
+second home. That reach used
 to cost the proxy a whole second of nodriver import for a browser it never
 launches — the stdio branch imports no ``browser_manager`` — so
 ``desktop_launch`` now imports nodriver and requests inside the two delegation
@@ -120,17 +123,11 @@ POLL_INTERVAL = 0.1
 # whatever task it names was orphaned. Twice the deadline, because the age is
 # read against a wall clock and the spawn it belongs to may have started late.
 STALE_SPEC_SECONDS = 2 * PID_READY_TIMEOUT
-# The longest /TR schtasks STORES. Measured, not documented: on Windows 11
-# 10.0.26200 (2026-09-14) a 255-character command came back from /Create with
-# exit 0 and was stored as its first 253 characters — the launcher path's
-# trailing `y"` cut off — so the task ran pythonw against `….p`, Last Result 2
-# (ERROR_FILE_NOT_FOUND), and every session in the startup herd waited out the
-# 20 s pid deadline before falling to the plain rung. A command past this is a
-# rung boundary, never something to send and hope.
-TR_MAX_CHARS = 253
-# Length of a per-attempt token. Every character here costs four against the
-# /TR budget (the task name is not in /TR, but the script path is).
-TOKEN_CHARS = 12
+# The /TR length cap and the per-attempt token length are NOT here: they are
+# facts about the ``schtasks`` seam, whose one home is ``desktop_launch``
+# (``TR_MAX_CHARS``, ``TOKEN_CHARS``, ``tr_overflow``), and this module asks
+# there at call time exactly as it asks there for ``_schtasks`` itself (F-879).
+# A second 253 in this file is a number that can drift from the measured one.
 # How long to wait for a discarded partial-breakaway child to actually die.
 # Bounded: a spawn must not hang on a teardown that is only tidiness.
 DISCARD_WAIT_SECONDS = 5.0
@@ -538,6 +535,8 @@ def _scheduler_plan(interpreter_of: str) -> _SchedulerPlan | None:
     ``None`` means the rung does not exist here; each reason logs a WARNING
     naming F-867, because it is the reason a backend ends up killable.
     """
+    from stealth_chrome_devtools_mcp.embedded import desktop_launch
+
     if not _same_session_as_console():
         return None
     interpreter = _intermediary_interpreter(interpreter_of)
@@ -548,18 +547,22 @@ def _scheduler_plan(interpreter_of: str) -> _SchedulerPlan | None:
             interpreter_of,
         )
         return None
-    # 12 hex characters, not 32: the token appears in the task name, the five
+    # A short token, not a full uuid hex: it appears in the task name, the five
     # scratch file names and — the one that matters — the /TR command, which has
-    # 253 characters to fit two absolute paths into. 48 bits per attempt is
-    # ample for a name that lives for one spawn.
-    token = uuid.uuid4().hex[:TOKEN_CHARS]
+    # only ``TR_MAX_CHARS`` to fit two absolute paths into. Both numbers are
+    # ``desktop_launch``'s, so this rung and the headed hand-off cannot disagree
+    # about what schtasks stores (F-879).
+    token = uuid.uuid4().hex[: desktop_launch.TOKEN_CHARS]
     command = f'"{interpreter}" "{_launch_dir() / token}.py"'
-    if len(command) > TR_MAX_CHARS:
+    over = desktop_launch.tr_overflow(command)
+    if over is not None:
+        # A rung boundary here, where ``desktop_launch`` raises: that path has no
+        # rung to fall to, this one does, and a killable backend beats none.
         _logger.warning(
             "F-867: the scheduled-task command is %s characters, past the %s "
             "schtasks truncates at; using the plain spawn",
-            len(command),
-            TR_MAX_CHARS,
+            over,
+            desktop_launch.TR_MAX_CHARS,
         )
         return None
     return _SchedulerPlan(interpreter, token, command)
