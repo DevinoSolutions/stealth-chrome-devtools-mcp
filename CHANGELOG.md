@@ -40,6 +40,61 @@ All three were fixed with the same `_isolated_env`-based redirect.
 Full before/after measurement, the eviction trace, and the rest of the sweep
 are in `audit/stage2/finding_F885_proxy_death_test_touches_real_state.md`.
 
+### Fixed — `navigate` timed out on a loaded page whose document replaced itself (F-882)
+
+A ten-site fleet test on 2.1.8 (Chrome 152, Windows 11) raised
+`Navigation … timed out after 30000ms` for three of ten ordinary destinations —
+a signed-out `mail.google.com`, `youtube.com` and `reddit.com` — while the
+browser was sitting on a fully loaded page. Each of those sites replaces its
+first document with a second one (a head-script `location.replace`, a JS
+challenge that sets a cookie and re-navigates) BEFORE the first reaches `load`.
+The replacement commits under a NEW `loaderId`, fires its own `load`, and
+F-881's wait — keyed on the single `loaderId` `Page.navigate` answered with —
+had nothing left to wait for and spent the caller's whole budget. Measured on
+Chrome 152: the superseding document's commit landed 20.3-22.5 ms after ours
+across all four shapes.
+
+`navigation_milestone` follows the FRAME's loader CHAIN now: events are filtered
+to the frame `Page.navigate` returned (a same-origin iframe's two loaders carry
+the subframe's `frameId` and are ignored), a commit for that frame under a later
+loader extends the chain, and the milestone is satisfied when the LATEST document
+has reached it. A commit is `Page.lifecycleEvent` name `init` and never `commit`
+— because `Page.setLifecycleEventsEnabled(true)` REPLAYS the current document's
+whole lifecycle under that name (measured), and the tool sends it immediately
+before navigating, so the replay always describes the page being left.
+
+`net::ERR_ABORTED` is answered instead of waited on. It has two measured
+meanings: a download (`Content-Disposition: attachment`) commits nothing ever and
+leaves the tab where it was, and a page navigating itself away while our
+navigation is still pending cancels ours and commits its own 11.6-14.1 ms later
+(or, in two of six runs, just before the abort response arrived). So an abort
+waits `ABORTED_GRACE_SECONDS` (1 s, ~70x the worst measured gap, clipped to half
+the remaining budget) for the document that took our place, and only a grace that
+passes with nothing in it raises — naming the download rather than reporting a
+30 s timeout about a navigation that was over in 13 ms.
+
+Two smaller truths came out of the same work. The post-navigation read was two
+`tab.evaluate` round trips, and on a `meta refresh` page the refresh fired
+between them: the tool answered with the FIRST document's `url` and the SECOND
+document's `title`, a record no document ever had. It is one `JSON.stringify`
+round trip now (`navigation_milestone.landing`). And the one durable record of a
+failed navigation was `Navigation attempt 1 failed for <id>: ` — a `TimeoutError`
+stringifies to nothing — so the line now carries the exception type plus
+`Progress.describe()`: whether Chrome accepted the navigation, whether our
+document committed, and how many later documents superseded it. The raised
+`ToolError` carries the same clause.
+
+Deliberately unchanged: a document that reaches `load` BEFORE its replacement
+commits is still answered about at its own `load` (the `meta refresh` and
+self-reload shapes, and Amazon's `title: ""`), because that answer is true at the
+instant it is made and waiting past it would be a quiescence wait `navigate` does
+not promise. `networkidle` keys to the FIRST commit and F-787 stays open.
+
+New real-Chrome coverage: `tests/test_e2e_navigation_truthfulness.py`
+(`integration`, 8 nodes) drives all seven shapes plus the same-origin-iframe case
+against local fixture routes, with the page's own sentinel and the fixture
+server's request ledger as oracles independent of the tool under test.
+
 ### Tests — real-Chrome E2E coverage for F-873…F-881
 
 Every defect in the 2.1.7/2.1.8 set was found by driving the shipped release against

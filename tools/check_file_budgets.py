@@ -81,9 +81,21 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # Page.navigate answered is reported, not retried on a replaced tab. The
     # signature-echo Args/Returns block of `navigate` paid for that (the
     # plan_F856 mechanism). Cap == actual.
+    # F-882 RATCHETS DOWN 1496 -> 1493. The post-navigation read — what url and
+    # what title did this navigation land on — is `navigation_milestone.landing`
+    # now, ONE `JSON.stringify` round trip instead of two `tab.evaluate` calls
+    # that straddled a `meta refresh` on real Chrome and answered with the FIRST
+    # document's url and the SECOND document's title. This file keeps the
+    # policy: the budget the read runs under, the retry decision, and the
+    # failed-attempt warning (which now carries `Progress.describe()`, because a
+    # TimeoutError stringifies to nothing and the line ended at its colon). The
+    # row had zero headroom, so the two lines the warning and the enriched
+    # timeout message needed were paid for by folding `elapsed` into `remaining`
+    # and the three-line `_replace_main_tab(...)` call into one. Cap == actual.
     "embedded/browser_manager.py": (
-        1496,
-        "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881",
+        1493,
+        "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
+        " + F-882",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
