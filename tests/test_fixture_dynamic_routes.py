@@ -297,6 +297,9 @@ def test_reset_clears_the_server_side_ledger(origins):
                 "w16_shared": [],
                 "w16_sw": [],
                 "w16_asset": [],
+                # F-882's document-order ledger, listed literally for the same
+                # reason.
+                "nav_paths": [],
             }
         )
     )
