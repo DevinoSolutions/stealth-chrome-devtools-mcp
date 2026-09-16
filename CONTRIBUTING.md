@@ -213,19 +213,27 @@ repointed `SOURCE_ROOT`, that the two roots the two proxies import really carry
 different digests, so a copy that failed to move the digest cannot pass as a
 same-source fleet.
 
-**The CPU node has a stated limit.** `os.cpu_count()*2` normal-priority busy loops
-made probes miss only *sometimes* on a 32-core box — 0 strikes in five runs, 6 in
-one (where answered calls also fell from 76-80 to 28), while the *unstressed* 60 s
-soak logged 2 in another — and nothing condemned in any of them. So the node guards
-"a saturated machine is not condemned as dead"; it does **not** prove the
-confirmation phase is correct (a strike *count* cannot say whether three ever landed
-consecutively on one proxy — `test_watchdog_busy_vs_dead` and
-`test_singleton_starvation_patience` own that), and it does not reproduce the
-100 %-CPU condemnation recorded in the team memory. On F-856's reading of that
-incident the proxy process itself had to be starved, not merely the machine kept
-busy — an inference from that design, not something this branch measured. A
-stronger stress would have to starve the proxy process, which is a different node
-and a different budget.
+**Never assert a strike count; assert the implication.** `os.cpu_count()*2`
+normal-priority busy loops made probes miss only *sometimes* on a 32-core box — 0
+strikes in five runs, 6 in one (where answered calls also fell from 76-80 to 28),
+while the *unstressed* 60 s soak logged 2 in another — and nothing condemned in any
+of them. A count or a floor over 0,0,0,0,0,6,0 is a coin flip, so what every node
+asserts (`assert_strikes_concluded_correctly`, inside the shared incident check) is:
+**whenever a FULL strike run is reached on a port, the confirmation phase must have
+run for that port and answered `was busy, not dead`** — never silence, never
+`confirmed unusable`. That is exactly as strong as `watch_liveness`'s own branch,
+which logs precisely one of those two at `consecutive == failures_before_teardown`,
+so it is vacuous on a run where the load did not bite and a real end-to-end F-820
+oracle on one where it did, with no flake either way. The longest consecutive run is
+printed so which case a run hit is readable from the output. Below the limit the CPU
+node is deliberately silent about the confirmation phase, because the product never
+entered it — `test_watchdog_busy_vs_dead` and `test_singleton_starvation_patience`
+remain the nodes that enter it deliberately rather than when the box happens to be
+slow. The node also does not reproduce the 100 %-CPU condemnation recorded in the
+team memory. On F-856's reading of that incident the proxy process itself had to be
+starved, not merely the machine kept busy — an inference from that design, not
+something this branch measured. A stronger stress would have to starve the proxy
+process, which is a different node and a different budget.
 
 **If you change a lifecycle log line, that module is what breaks.** The incident
 oracle is the product's own text, because `observability.capture_lifecycle` is a no-op
