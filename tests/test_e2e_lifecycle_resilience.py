@@ -80,6 +80,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import psutil
@@ -146,22 +147,28 @@ TICK_SECONDS = 1.0
 
 # ── The lifecycle-incident vocabulary ────────────────────────────────────────
 # One entry per transition that ends, or nearly ends, a user's session. The
-# value is the substring the product's own ``logging`` call renders into the
-# proxy log; the comment names the constant it accompanies, so the pin below can
-# check the pair rather than trusting either half alone.
-LIFECYCLE_INCIDENTS: dict[str, str] = {
+# value is the set of substrings the product's own ``logging`` call renders into
+# the proxy log, ALL of which must appear in one line; the comment names the
+# function it comes from, so the pin below can check the pair rather than
+# trusting either half alone.
+#
+# A tuple rather than one substring because a single short phrase is a false
+# positive waiting to happen: ``times in a row`` on its own would fire on any
+# future line anywhere that happened to contain it. Spanning the `%d` that sits
+# in the middle of the real message is what makes the match specific.
+LIFECYCLE_INCIDENTS: dict[str, tuple[str, ...]] = {
     # backend_watchdog.watch_liveness — F-820's strikes CONCLUDED
-    "condemned:watchdog": "confirmed unusable",
+    "condemned:watchdog": ("backend on port", "confirmed unusable"),
     # proxy_selfheal._confirm_bridge_verdict — F-843's fast witness concluded
-    "condemned:connection_lost": "confirmed gone after a lost connection",
+    "condemned:connection_lost": ("confirmed gone after a lost connection",),
     # proxy_selfheal.heal_backend — the session survived, onto a NEW backend
-    "healed": "backend healed: re-bridging",
+    "healed": ("backend healed: re-bridging",),
     # proxy_selfheal.heal_backend — every attempt failed (reason=unhealable)
-    "teardown:unhealable": "backend unhealable after",
+    "teardown:unhealable": ("backend unhealable after",),
     # proxy_selfheal.drive — recoveries keep failing (reason=flapping)
-    "teardown:flapping": "times in a row",
+    "teardown:flapping": ("backend lost", "times in a row", "giving up"),
     # singleton._start_backend_holding_lock — F-829's source-change eviction
-    "eviction": "backend stale (source changed), evicting",
+    "eviction": ("backend stale (source changed), evicting",),
 }
 
 # NOT an incident: F-820 exists precisely so a missed probe is not a verdict.
@@ -181,6 +188,13 @@ async def test_lifecycle_incident_patterns_match_the_product_strings() -> None:
     ``async def`` only because the module pins one event loop (see
     ``pytestmark``) and the autouse fixtures that establish the fleet are async
     on it; the body awaits nothing.
+
+    Residual, named rather than hidden: it reads the REPO's ``src/`` while every
+    proxy runs the INSTALLED launcher. Identical under this repo's editable
+    install (a ``.pth`` that appends ``src`` to ``sys.path``), but a gate cell
+    that installed a built wheel would have this node pinning bytes the fleet
+    does not execute. The fleet-side half is covered by the stress nodes' own
+    log scans, which read what the running proxies actually wrote.
     """
     src = Path(__file__).resolve().parent.parent / "src" / "stealth_chrome_devtools_mcp"
     watchdog = (src / "embedded" / "backend_watchdog.py").read_text(encoding="utf-8")
@@ -197,10 +211,12 @@ async def test_lifecycle_incident_patterns_match_the_product_strings() -> None:
     }
     assert set(homes) == set(LIFECYCLE_INCIDENTS)
     for kind, text in homes.items():
-        assert LIFECYCLE_INCIDENTS[kind] in text, (
-            f"{kind}: the log line this module greps for is gone from its own "
-            f"module — re-derive it, do not delete the check"
-        )
+        for part in LIFECYCLE_INCIDENTS[kind]:
+            assert part in text, (
+                f"{kind}: {part!r}, part of the log line this module greps for, "
+                f"is gone from its own module — re-derive it, do not delete the "
+                f"check"
+            )
     assert STRIKE_MARKER in watchdog
 
 
@@ -230,6 +246,11 @@ def _idle_window_seconds() -> float:
 
 
 IDLE_WINDOW_SECONDS = _idle_window_seconds()
+# The most the idle node may SLEEP inside the module's 300s per-test ceiling and
+# still have room for its own assertions (~10s measured). A full-module run
+# reaches the node with 194-218s remaining; anything above this is a partial
+# selection, which the node turns into a legible skip rather than a timeout.
+IDLE_SLEEP_BUDGET_SECONDS = 250.0
 
 
 # ── Frame readers (same shapes test_wire_semantics uses) ─────────────────────
@@ -249,9 +270,34 @@ def _tool_payload(frame: dict):
     return json.loads(content[0]["text"]) if content else None
 
 
+def _response_frame_counts(wire: RawStdioWire) -> Counter:
+    """How many RESPONSE frames arrived per request id — THE one home for the
+    "exactly one outcome per call" rule this module documents.
+
+    Counted off ``wire.frames``, the raw stdout the client actually read, not off
+    the harness's ``_responses`` map, which keeps only the last frame for an id
+    and so cannot see a duplicate at all. A frame carrying ``method`` is a
+    server->client REQUEST (this server sends ``roots/list``) in the server's own
+    id space, which can collide with ours — excluding it is what keeps the count
+    honest, the same reason ``RawStdioWire.frames_for`` excludes it.
+    """
+    return Counter(
+        frame["id"]
+        for frame in wire.frames
+        if frame.get("id") is not None
+        and "method" not in frame
+        and ("result" in frame or "error" in frame)
+    )
+
+
 async def _call(wire: RawStdioWire, name: str, args: dict, timeout: float = CALL_BOUND):
     request_id = await wire.call_tool(name, args)
     frame = await wire.response(request_id, timeout)
+    seen = _response_frame_counts(wire)[request_id]
+    assert seen == 1, (
+        f"tool {name} (id {request_id}) got {seen} response frames, not exactly "
+        f"one — a client cannot tell which outcome is its answer"
+    )
     result = _tool_result(frame)
     assert result.get("isError") is not True, f"tool {name} failed: {result}"
     return frame
@@ -293,11 +339,16 @@ async def _cdp_round_trip(wire: RawStdioWire, instance_id: str) -> None:
 
 # ── Log-scan oracle ──────────────────────────────────────────────────────────
 def _log_files(space: dict) -> list[Path]:
+    # ``*.log*``, not ``*.log``: ``configure_logging`` installs a
+    # ``RotatingFileHandler`` (5 MiB x 3), so a rotation inside a stress window
+    # moves lines — an incident line among them — into ``<name>.log.1``. Unlikely
+    # at 5 MiB and free to cover; a silently-missed incident is the one failure
+    # this oracle may not have.
     dirs = [space["log_dir"], space["home_dir"] / ".stealth-mcp" / "logs"]
     files: list[Path] = []
     for directory in dirs:
         if directory.is_dir():
-            files.extend(sorted(directory.glob("*.log")))
+            files.extend(sorted(directory.glob("*.log*")))
     return files
 
 
@@ -330,11 +381,15 @@ def _lines_since(space: dict, offsets: dict[Path, int]) -> list[tuple[str, str]]
 
 
 def _incidents(lines: list[tuple[str, str]]) -> list[tuple[str, str, str]]:
-    """``(kind, file, line)`` for every lifecycle incident in ``lines``."""
+    """``(kind, file, line)`` for every lifecycle incident in ``lines``.
+
+    ALL of a kind's substrings must be in the same line — see
+    :data:`LIFECYCLE_INCIDENTS` for why one short phrase is not enough.
+    """
     found: list[tuple[str, str, str]] = []
     for name, line in lines:
-        for kind, marker in LIFECYCLE_INCIDENTS.items():
-            if marker in line:
+        for kind, parts in LIFECYCLE_INCIDENTS.items():
+            if all(part in line for part in parts):
                 found.append((kind, name, line))
     return found
 
@@ -393,14 +448,56 @@ def assert_browser_processes_alive(
 
 
 def assert_wire_healthy(wire: RawStdioWire, what: str) -> None:
-    """No EOF on the proxy's stdout — an EOF IS the client's CONNECTION_CLOSED."""
+    """Invariant 3, asserted over the whole session's stdout.
+
+    Three things: no EOF (an EOF IS the client's ``CONNECTION_CLOSED``), no
+    non-frame bytes, and EXACTLY ONE response frame per request id. The last is
+    the sweep half of the rule ``_call`` checks per call: a duplicate that
+    arrives AFTER its call returned is invisible there and visible here.
+
+    Issues no call of its own, so it is safe on the idle witness — reading
+    ``wire.frames`` does not reset an idle clock.
+    """
     assert not wire.stdout_eof, f"{what}: the proxy's stdout reached EOF"
     assert not wire.non_frame_stdout, (
         f"{what}: non-frame bytes on stdout: {wire.non_frame_stdout[:3]}"
     )
+    duplicated = {rid: n for rid, n in _response_frame_counts(wire).items() if n != 1}
+    assert not duplicated, (
+        f"{what}: request id(s) with a response-frame count other than one: "
+        f"{duplicated}"
+    )
 
 
-# ── Fixtures ─────────────────────────────────────────────────────────────────
+# ── Fixtures ─────────────────────────────────────────────────────────────
+# Ports this module must never bind: the product's default singleton port and
+# the two other live ports the brief names. The harness's ``_pick_free_port``
+# already refuses the default port and every port the developer's REAL
+# ``server.json`` records (which is where 52554 lives when it is live); this
+# set is the brief's literal, asserted AFTER the pick as a belt-and-braces
+# check, never a second picker.
+RESERVED_PORTS = frozenset({19222, 52554, 7169})
+
+
+@contextlib.contextmanager
+def _isolated_workspace(work_dir, label: str):
+    """``gate_workspace`` (whose port pick refuses the reserved set) plus a
+    check of that pick against :data:`RESERVED_PORTS` and the leftover-children
+    assertion, for BOTH workspaces this module creates.
+
+    The assertion is inside the ``with`` rather than after it, and guarded by
+    having actually got a workspace: written after the ``finally`` it raises
+    ``NameError`` when ``gate_workspace`` fails BEFORE yielding, hiding the real
+    cause behind an unbound name.
+    """
+    with gate_workspace(work_dir) as workspace:
+        assert workspace["port"] not in RESERVED_PORTS, workspace["port"]
+        yield workspace
+    assert not workspace["leftover_children"], (
+        f"{label} left child processes behind: {workspace['leftover_children']}"
+    )
+
+
 @pytest.fixture(scope="module")
 def launcher():
     return resolve_launcher()
@@ -412,23 +509,20 @@ def space(tmp_path_factory):
     own log dir, own ``--singleton-port``.
 
     Nothing here can touch the developer's live ``~/.stealth-mcp``, their
-    browser-session root, or ports 19222 / 52554 / 7169 — the port is
-    OS-assigned and the HOME redirect is what makes ``server.json`` and
-    ``browser_pids.json`` private to this run. The block also owns teardown:
-    the recorded backend is terminated and any child left behind is named.
+    browser-session root, or ports 19222 / 52554 / 7169 — the port is checked
+    against :data:`RESERVED_PORTS` and the HOME redirect is what makes
+    ``server.json`` and ``browser_pids.json`` private to this run. The block also
+    owns teardown: the recorded backend is terminated and any child left behind
+    is named.
     """
     fallback = tmp_path_factory.mktemp("life")
     work_dir = gate_work_dir(fallback)
     try:
-        with gate_workspace(work_dir) as workspace:
+        with _isolated_workspace(work_dir, "the lifecycle module") as workspace:
             yield workspace
     finally:
         if work_dir != fallback:
             shutil.rmtree(work_dir, ignore_errors=True)
-    assert not workspace["leftover_children"], (
-        f"lifecycle module left child processes behind: "
-        f"{workspace['leftover_children']}"
-    )
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module", autouse=True)
@@ -500,6 +594,25 @@ async def _proxy(launcher, space, *, handshake: bool = True):
         await wire.aclose()
 
 
+@contextlib.asynccontextmanager
+async def _owned_instance(wire: RawStdioWire, profile: str):
+    """One named-profile browser whose close is a FINALIZER, not trailing code.
+
+    A node that fails mid-body used to leave its Chrome running until the module
+    teardown terminated the backend — three of them, on a developer machine that
+    may already be near Chrome's process ceiling (F-811). The close is
+    best-effort and suppressed: a node's verdict is its assertions, never its
+    cleanup, and a browser the stress genuinely killed must not turn a real
+    failure into a confusing one.
+    """
+    instance_id = await _spawn(wire, profile)
+    try:
+        yield instance_id
+    finally:
+        with contextlib.suppress(Exception):
+            await _call(wire, "close_instance", {"instance_id": instance_id})
+
+
 @pytest_asyncio.fixture(scope="module", loop_scope="module", autouse=True)
 async def idle_witness(launcher, space, primed):
     """A proxy + browser established once, then left STRICTLY alone.
@@ -563,9 +676,11 @@ async def test_s0_baseline_soak_three_proxies_sixty_seconds(
     calls = {"issued": 0}
 
     async def one_proxy(index: int) -> None:
-        async with _proxy(launcher, space) as wire:
+        async with (
+            _proxy(launcher, space) as wire,
+            _owned_instance(wire, f"life-soak-{index}") as instance_id,
+        ):
             wires.append(wire)
-            instance_id = await _spawn(wire, f"life-soak-{index}")
             instances.append(instance_id)
             await _call(
                 wire,
@@ -603,18 +718,23 @@ async def test_s0_baseline_soak_three_proxies_sixty_seconds(
                 await _cdp_round_trip(wire, instance_id)
                 calls["issued"] += 6
             # Still healthy at the end, on the SAME wire that ran the whole soak,
-            # and the browser still tracked and running — invariant 2 asserted
-            # here rather than after the gather, because this is the last moment
-            # before the instance is deliberately closed.
+            # and the browser still tracked, running and CDP-responsive —
+            # invariant 2 asserted here, the last moment before
+            # ``_owned_instance`` closes it.
             assert_wire_healthy(wire, "S0 soak")
             assert_browser_processes_alive(space, [instance_id], "S0 soak")
-            await _call(wire, "close_instance", {"instance_id": instance_id})
+            await _cdp_round_trip(wire, instance_id)
 
     started = time.monotonic()
     await asyncio.gather(*(one_proxy(i) for i in range(SOAK_PROXIES)))
     elapsed = time.monotonic() - started
 
-    assert calls["issued"] >= SOAK_PROXIES * 6, calls
+    # A THROUGHPUT floor as well as a survival one. Measured 624-768 calls
+    # across three runs; 60 per proxy is ~4x below the slowest of those, so a
+    # product that got several times slower fails here instead of passing with
+    # 18 calls (the old floor, 35x below the measurement — a number that could
+    # not have failed).
+    assert calls["issued"] >= SOAK_PROXIES * 60, calls
     assert_backend_unchanged(space, backend_pid, "S0 soak")
     strikes = assert_no_lifecycle_incident(space, offsets, "S0 soak")
     print(f"\nS0: {elapsed:.1f}s, {calls['issued']} tool calls, {strikes} strikes")
@@ -689,19 +809,26 @@ async def test_s1_cpu_saturation_does_not_condemn_a_live_backend(
     one non-error response.
 
     WHAT WAS MEASURED, stated honestly because it bounds what this node proves:
-    on a 32-core Windows box, 64 normal-priority busy loops over a 21.2s window
-    produced **76 answered calls and ZERO strikes** — the load did not make a
-    single probe miss. The node therefore proves the whole path survives
-    saturation, but on THAT machine it did not reach the confirmation phase, so
-    it is not by itself evidence that the confirmation phase is correct (the
-    hermetic ``test_watchdog_busy_vs_dead`` and
-    ``test_singleton_starvation_patience`` own that). The strike count is
-    printed on every run precisely so a cell where the load DOES bite is
-    visible: a 2-core CI runner at the same 2x oversubscription, with Chrome
-    beside it, is the likelier place to see one. Deliberately not tuned upward
-    to force strikes — the window is capped at 25s by house rule, the developer
-    machine runs other agents, and a node that must starve a shared machine to
-    mean anything is a node that will flake.
+    on a 32-core Windows box, 64 normal-priority busy loops over a ~21s window
+    produced 28-80 answered calls, and the strike count VARIED across runs —
+    **0** in the first five (mine and an independent reviewer's) and **6** in the
+    latest, which also answered only 28 calls rather than 76-80, i.e. the load
+    bit that time. In neither case did anything condemn. S0, which applies no
+    load at all, logged **2 strikes** in one of the reviewer's runs, so strikes
+    are not a clean function of the stress on this box.
+
+    The node therefore proves the whole path survives saturation — probes may
+    miss, strikes may accumulate, calls keep being answered and nothing is
+    condemned. It does NOT prove F-820's confirmation phase is correct: a strike
+    COUNT cannot say whether three ever landed consecutively on one proxy, and
+    the hermetic ``test_watchdog_busy_vs_dead`` and
+    ``test_singleton_starvation_patience`` own that claim. The count is printed
+    on every run precisely so a cell where the load bites harder stays visible:
+    a 2-core CI runner at the same 2x oversubscription, with Chrome beside it,
+    is the likelier place. Deliberately not tuned upward to force strikes — the
+    window is capped at 25s by house rule, the developer machine runs other
+    agents, and a node that must starve a shared machine to mean anything is a
+    node that will flake.
     """
     page = f"{fixture_app_server}/life/lifecycle.html"
     offsets = _log_offsets(space)
@@ -709,16 +836,16 @@ async def test_s1_cpu_saturation_does_not_condemn_a_live_backend(
     async with (
         _proxy(launcher, space) as wire_a,
         _proxy(launcher, space) as wire_b,
+        _owned_instance(wire_a, "life-cpu-0") as instance_a,
+        _owned_instance(wire_b, "life-cpu-1") as instance_b,
     ):
-        pairs = []
-        for index, wire in ((0, wire_a), (1, wire_b)):
-            instance_id = await _spawn(wire, f"life-cpu-{index}")
+        pairs = [(wire_a, instance_a), (wire_b, instance_b)]
+        for wire, instance_id in pairs:
             await _call(
                 wire,
                 "navigate",
                 {"instance_id": instance_id, "url": page, "timeout": NAV_TIMEOUT_MS},
             )
-            pairs.append((wire, instance_id))
 
         answered = {"n": 0}
 
@@ -755,9 +882,6 @@ async def test_s1_cpu_saturation_does_not_condemn_a_live_backend(
         )
         strikes = assert_no_lifecycle_incident(space, offsets, "S1 cpu saturation")
 
-        for wire, instance_id in pairs:
-            await _call(wire, "close_instance", {"instance_id": instance_id})
-
     print(
         f"\nS1: {elapsed:.1f}s, {load} busy loops on {os.cpu_count()} cpus, "
         f"{answered['n']} calls answered, {strikes} watchdog strikes"
@@ -786,9 +910,18 @@ async def test_s2_hard_killing_one_proxy_leaves_the_fleet_untouched(
     and a tree kill would be asking a question about parentage rather than about
     policy.
 
-    MEASURED (local Windows, 2.1.8): 19.7s for the node, 15.1s of it the settle
-    window after the kill. Both browsers alive, both listed, B still answering,
-    backend pid unchanged, 0 strikes and 0 incidents.
+    Both browsers get a CDP round trip, A's through the SURVIVING proxy — see
+    the comment at the assertion for why pid liveness alone cannot decide this.
+
+    MEASURED (local Windows, 2.1.8): 19.7-25.7s for the node, 15.1s of it the
+    settle window after the kill. Both browsers alive AND CDP-responsive, both
+    listed, B still answering, backend pid unchanged, 0 strikes and 0 incidents.
+
+    One residual, named: on Windows the kill lands on the console-script
+    trampoline, which spawns the real ``python.exe`` proxy. An independent probe
+    measured the propagation (the proxy child died; only the DETACHED backend
+    survived, which is F-867 working), so the stress is real today — but that
+    propagation is a uv/OS property this node observes rather than asserts.
     """
     page = f"{fixture_app_server}/life/lifecycle.html"
     offsets = _log_offsets(space)
@@ -816,72 +949,111 @@ async def test_s2_hard_killing_one_proxy_leaves_the_fleet_untouched(
             browsers_before = _browser_pids(space)
             assert instance_a in browsers_before and instance_b in browsers_before
 
-            # The stress: A dies with no warning and no chance to clean up. The
-            # handle is taken BEFORE the kill — on Windows the pid is gone from
-            # the table by the time ``kill()`` returns, so re-constructing a
-            # ``psutil.Process`` on it afterwards raises rather than reporting
-            # the death. Death is confirmed by reaping the child we own.
-            proxy_a = psutil.Process(proxy_a_pid)
-            started = time.monotonic()
-            proxy_a.kill()
-            assert await wire_a.wait_exit(30.0) is not None, "proxy A did not die"
-
-            # Give every reaper that COULD react a real chance to: the watchdog
-            # ticks at 2s with 3 strikes, so a window several times that is the
-            # honest bound for "nothing decided to act on this".
-            await asyncio.sleep(15.0)
-
-            assert_backend_unchanged(space, backend_pid, "S2 sibling death")
-            assert_wire_healthy(wire_b, "S2 sibling death")
-            await _cdp_round_trip(wire_b, instance_b)
-            assert_browser_processes_alive(
-                space, [instance_a, instance_b], "S2 sibling death"
-            )
-
-            # B's view of the fleet still names A's orphaned instance: the
-            # backend kept it, which is what makes it recoverable rather than
-            # silently gone.
-            listing = _tool_payload(await _call(wire_b, "list_instances", {}))
-            listed = {entry["instance_id"] for entry in listing}
-            assert {instance_a, instance_b} <= listed, listing
-
-            strikes = assert_no_lifecycle_incident(space, offsets, "S2 sibling death")
-            elapsed = time.monotonic() - started
-
-            # Cleanup: both instances, through the surviving proxy.
-            for instance_id in (instance_a, instance_b):
-                with contextlib.suppress(Exception):
-                    await _call(wire_b, "close_instance", {"instance_id": instance_id})
+            try:
+                elapsed, strikes = await _s2_kill_and_assert(
+                    space=space,
+                    offsets=offsets,
+                    backend_pid=backend_pid,
+                    wire_a=wire_a,
+                    wire_b=wire_b,
+                    proxy_a_pid=proxy_a_pid,
+                    instance_a=instance_a,
+                    instance_b=instance_b,
+                )
+            finally:
+                # A FINALIZER, not trailing code: an assertion that fires inside
+                # the stress must not also leave two Chromes running for the
+                # rest of the module.
+                for instance_id in (instance_a, instance_b):
+                    with contextlib.suppress(Exception):
+                        await _call(
+                            wire_b, "close_instance", {"instance_id": instance_id}
+                        )
     finally:
         await wire_a.aclose()
 
     print(f"\nS2: {elapsed:.1f}s after the kill, {strikes} strikes")
 
 
+async def _s2_kill_and_assert(  # noqa: PLR0913  PERMANENT(one call site, named args)
+    *, space, offsets, backend_pid, wire_a, wire_b, proxy_a_pid, instance_a, instance_b
+) -> tuple[float, int]:
+    """S2's stress and its four invariants. Split out of the node ONLY so the
+    node's cleanup can be a ``finally`` without burying the assertions three
+    indents deep; it has exactly one caller and no policy of its own."""
+    # The stress: A dies with no warning and no chance to clean up. The handle
+    # is taken BEFORE the kill — on Windows the pid is gone from the table by
+    # the time ``kill()`` returns, so re-constructing a ``psutil.Process`` on it
+    # afterwards raises rather than reporting the death. Death is confirmed by
+    # reaping the child we own.
+    proxy_a = psutil.Process(proxy_a_pid)
+    started = time.monotonic()
+    proxy_a.kill()
+    assert await wire_a.wait_exit(30.0) is not None, "proxy A did not die"
+
+    # Give every reaper that COULD react a real chance to: the watchdog ticks at
+    # 2s with 3 strikes, so a window several times that is the honest bound for
+    # "nothing decided to act on this".
+    await asyncio.sleep(15.0)
+
+    assert_backend_unchanged(space, backend_pid, "S2 sibling death")
+    assert_wire_healthy(wire_b, "S2 sibling death")
+    assert_browser_processes_alive(space, [instance_a, instance_b], "S2 sibling death")
+
+    # B's view of the fleet still names A's orphaned instance: the backend kept
+    # it, which is what makes it recoverable rather than silently gone.
+    listing = _tool_payload(await _call(wire_b, "list_instances", {}))
+    listed = {entry["instance_id"] for entry in listing}
+    assert {instance_a, instance_b} <= listed, listing
+
+    # BOTH browsers get the CDP witness, and A's — the orphan, the whole subject
+    # of this node — gets it through the SURVIVING proxy. Pid liveness alone
+    # would not do: ``_pid_running`` is ``psutil.Process(pid).is_running()``,
+    # which returns True for a ZOMBIE, and in this node the backend is
+    # deliberately still alive, so a Chrome killed by a hypothetical
+    # proxy-death reaper would sit unreaped on Linux/macOS and read as a pass.
+    # A round trip cannot be answered by a zombie.
+    for instance_id in (instance_b, instance_a):
+        await _cdp_round_trip(wire_b, instance_id)
+
+    strikes = assert_no_lifecycle_incident(space, offsets, "S2 sibling death")
+    return time.monotonic() - started, strikes
+
+
 # ── S3 — liveness-probe churn ────────────────────────────────────────────────
-async def test_s3_session_churn_does_not_reap_a_live_proxys_session(
-    launcher, space, backend_pid
+async def test_s3_session_churn_keeps_the_backend_serving_old_and_new_sessions(
+    launcher, space, backend_pid, idle_witness
 ):
     """S3: 30 rapid ``initialize``+DELETE sessions and 5 clean proxy
-    connect/disconnect cycles — no live session is reaped, the backend is
-    unchanged.
+    connect/disconnect cycles — the backend keeps serving, its pid does not
+    move, and a session that predates the churn by minutes is untouched.
 
     The churn is generated by the product's OWN probe,
     ``singleton._backend_http_ready``, rather than by a hand-rolled HTTP client:
     it is the exact shape every proxy's watchdog sends every ~2s, so 30 of them
-    back to back is a compressed fleet rather than a synthetic one. F-862's
-    hygiene sweep is what could get this wrong — it terminates a session with no
-    standing GET event stream — and the claim being checked is that a live
-    proxy, which always holds one, is never mistaken for an abandoned probe
-    session.
+    back to back is a compressed fleet rather than a synthetic one.
 
-    The two live proxies are opened BEFORE the churn and asserted after it, so
-    "was a live session reaped" is answered on the same sessions that were open
-    throughout.
+    WHAT THIS NODE DOES NOT CLAIM, stated because its first name claimed it.
+    It cannot observe F-862's hygiene sweep reaping anything: the sweep sleeps
+    ``SWEEP_INTERVAL_SECONDS`` (30s) between passes and reaps only sessions with
+    no GET stream that have been silent for ``ABANDONED_AFTER_SECONDS`` (300s),
+    so inside a ~10s node it cannot fire once, and the probe DELETEs its own
+    session on every success, so the churn leaves no abandoned session for it to
+    find. "A live proxy is never reaped" is S4's claim — the node that actually
+    out-waits the window.
 
-    MEASURED (local Windows, 2.1.8): 7.5s for the node, 5.1s of churn — 30/30
-    probe sessions answered, 5/5 transient proxies handshook and exited cleanly,
-    both live proxies still served, backend pid unchanged, 0 strikes.
+    What S3 DOES ask, and the reason the idle witness is asserted here, is the
+    dangerous combination no other node covers: a burst of brand-new sessions
+    arriving while an OLD session sits silent. The witness was opened at module
+    setup, has been idle through S0-S2, and is checked after the churn WITHOUT
+    issuing a call on it — ``assert_wire_healthy`` reads its stdout buffer and
+    the pid check reads the registry — so its idle clock is not reset and S4 is
+    unaffected.
+
+    MEASURED (local Windows, 2.1.8): 5-14s for the node — 30/30 probe sessions
+    answered, 5/5 transient proxies handshook and exited cleanly, both live
+    proxies still served, the idle witness's stdout intact and its browser
+    running, backend pid unchanged, 0 strikes.
     """
     from stealth_chrome_devtools_mcp.embedded import singleton
 
@@ -915,6 +1087,12 @@ async def test_s3_session_churn_does_not_reap_a_live_proxys_session(
         for name, wire in (("A", live_a), ("B", live_b)):
             assert_wire_healthy(wire, f"S3 live proxy {name}")
             await _call(wire, "list_instances", {})
+        # The old session, untouched: no call on it (that would reset the idle
+        # clock S4 measures), only reads of what it already has.
+        assert_wire_healthy(idle_witness["wire"], "S3 idle witness after churn")
+        assert_browser_processes_alive(
+            space, [idle_witness["instance_id"]], "S3 idle witness after churn"
+        )
         assert_backend_unchanged(space, backend_pid, "S3 session churn")
         strikes = assert_no_lifecycle_incident(space, offsets, "S3 session churn")
 
@@ -960,6 +1138,19 @@ async def test_s4_a_session_idle_past_every_reaper_still_answers(
     offsets = _log_offsets(space)
     idle_for = time.monotonic() - idle_witness["quiet_since"]
     remaining = IDLE_WINDOW_SECONDS - idle_for
+    if remaining > IDLE_SLEEP_BUDGET_SECONDS:
+        # This node's window is PAID by the nodes above it. Selected on its own
+        # (`-k s4`, `--lf` after a flake, a bisect) it would have to sleep the
+        # whole 335s and would die at the 300s ceiling as `Timeout >300.0s`
+        # with no diagnosis. A legible skip is the honest answer; a full-module
+        # run never takes this branch (measured remaining: 194-218s).
+        pytest.skip(
+            f"the idle witness has been idle {idle_for:.0f}s of the "
+            f"{IDLE_WINDOW_SECONDS:.0f}s window and {remaining:.0f}s remain, more "
+            f"than this node may sleep inside the 300s ceiling "
+            f"({IDLE_SLEEP_BUDGET_SECONDS:.0f}s); its window is spent by the nodes "
+            f"above it — run the whole module"
+        )
     if remaining > 0:
         await asyncio.sleep(remaining)
     total_idle = time.monotonic() - idle_witness["quiet_since"]
@@ -968,15 +1159,20 @@ async def test_s4_a_session_idle_past_every_reaper_still_answers(
     wire: RawStdioWire = idle_witness["wire"]
     instance_id: str = idle_witness["instance_id"]
 
-    assert_wire_healthy(wire, "S4 idle")
-    await _call(wire, "list_instances", {})
-    await _cdp_round_trip(wire, instance_id)
-    assert_backend_unchanged(space, backend_pid, "S4 idle")
-    assert_browser_processes_alive(space, [instance_id], "S4 idle")
-    strikes = assert_no_lifecycle_incident(space, offsets, "S4 idle")
-
-    with contextlib.suppress(Exception):
-        await _call(wire, "close_instance", {"instance_id": instance_id})
+    try:
+        assert_wire_healthy(wire, "S4 idle")
+        await _call(wire, "list_instances", {})
+        await _cdp_round_trip(wire, instance_id)
+        assert_backend_unchanged(space, backend_pid, "S4 idle")
+        assert_browser_processes_alive(space, [instance_id], "S4 idle")
+        strikes = assert_no_lifecycle_incident(space, offsets, "S4 idle")
+    finally:
+        # The witness's browser is closed here rather than in its fixture: the
+        # fixture must never CALL the wire (that resets the clock), and this is
+        # the one node allowed to. A finalizer so a failed assertion above does
+        # not also leave it running.
+        with contextlib.suppress(Exception):
+            await _call(wire, "close_instance", {"instance_id": instance_id})
 
     print(
         f"\nS4: idle {total_idle:.1f}s (window {IDLE_WINDOW_SECONDS:.0f}s, "
@@ -1011,6 +1207,31 @@ def _variant_package(work_dir: Path) -> Path:
     with marker.open("a", encoding="utf-8") as handle:
         handle.write("#\n")  # the one byte (plus its newline) that moves the digest
     return root
+
+
+def _fingerprint_of(package_dir: Path) -> str | None:
+    """The product's OWN digest of ``package_dir`` — ``singleton._source_fingerprint``
+    over a repointed ``SOURCE_ROOT`` — so "the two sides differ" is proven by the
+    rule the eviction gate actually applies, not by the byte this module wrote.
+    """
+    from stealth_chrome_devtools_mcp.embedded import singleton
+
+    original = singleton.SOURCE_ROOT
+    singleton.SOURCE_ROOT = package_dir
+    try:
+        return singleton._source_fingerprint()
+    finally:
+        singleton.SOURCE_ROOT = original
+
+
+def _process_alive(pid: int) -> bool:
+    """Running AND not a zombie: an evicted backend on POSIX stays a zombie
+    until the proxy that spawned it reaps it, and ``is_running`` says True of a
+    zombie."""
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return False
 
 
 async def _mixed_version_waves(launcher, space, variant_root: Path) -> dict:
@@ -1099,6 +1320,10 @@ async def _mixed_version_waves(launcher, space, variant_root: Path) -> dict:
         "backend_pid_timeline": timeline,
         "backend_pids": pids,
         "waves": max(len(pids) - 1, 0),
+        # Which recorded backends are still processes at the end of the window,
+        # read BEFORE the workspace tears its own backend down: convergence
+        # means exactly one of them is.
+        "backends_alive": {pid: _process_alive(pid) for pid in pids},
         "instances": instances,
         # Every browser this node spawned, by the pid it had AT SPAWN — so a
         # browser killed with its evicted backend is reported as dead rather
@@ -1121,12 +1346,35 @@ async def mixed_fleet(launcher, tmp_path_factory):
     fallback = tmp_path_factory.mktemp("life-mixed")
     work_dir = gate_work_dir(fallback)
     try:
-        with gate_workspace(work_dir) as mixed_space:
+        with _isolated_workspace(
+            work_dir, "the mixed-fingerprint fleet"
+        ) as mixed_space:
             variant_root = _variant_package(Path(work_dir))
+            # The premise, proven by the product's own rule before a second
+            # of fleet time is spent: the two roots the two proxies will import
+            # carry DIFFERENT fingerprints. Without this, a copy that failed
+            # to move the digest would run a same-source fleet and report
+            # "no eviction, browsers alive" — a pass about nothing.
+            fingerprints = {
+                "same": _fingerprint_of(
+                    Path(__file__).resolve().parent.parent
+                    / "src"
+                    / "stealth_chrome_devtools_mcp"
+                ),
+                "variant": _fingerprint_of(
+                    variant_root / "stealth_chrome_devtools_mcp"
+                ),
+            }
+            assert None not in fingerprints.values(), fingerprints
+            assert fingerprints["same"] != fingerprints["variant"], (
+                f"the variant package did not move the source fingerprint: "
+                f"{fingerprints}"
+            )
             offsets = _log_offsets(mixed_space)
             started = time.monotonic()
             report = await _mixed_version_waves(launcher, mixed_space, variant_root)
             report["elapsed"] = time.monotonic() - started
+            report["fingerprints"] = fingerprints
             report["incidents"] = _incidents(_lines_since(mixed_space, offsets))
             report["proxy_warnings"] = workspace_proxy_warnings(mixed_space)[-4000:]
     finally:
@@ -1136,8 +1384,10 @@ async def mixed_fleet(launcher, tmp_path_factory):
     print(
         f"\nS5: {report['elapsed']:.1f}s  waves={report['waves']}  "
         f"timeline={report['backend_pid_timeline']}  "
+        f"backends_alive={report['backends_alive']}  "
         f"served_at_end={report['served_at_end']}  "
-        f"browsers_alive={report['browsers_alive']}"
+        f"browsers_alive={report['browsers_alive']}  "
+        f"fingerprints={ {k: v[:12] for k, v in report['fingerprints'].items()} }"
     )
     for kind, name, line in report["incidents"]:
         print(f"S5 incident [{kind}] {name}: {line}")
@@ -1195,13 +1445,30 @@ async def test_s5_mixed_source_fingerprints_converge(mixed_fleet):
     client evict; an older or equal-but-different client adopts the running
     backend, or exits naming both digests and the upgrade that reconciles them.
     Product code is deliberately NOT touched on this branch.
+
+    WHAT THIS NODE MEANS UNDER EITHER RULE. Its assertions are the ones that
+    hold today (one wave) AND under an adopt rule (zero waves): the fingerprints
+    the two sides run really differ (proven by the product's own digest in the
+    fixture), at most one wave, and the fleet ENDS on exactly one live recorded
+    backend — every earlier recorded pid gone, the last one running. The
+    stronger property "a newer install must take effect over an older running
+    backend" is deliberately NOT here: it is the identity gate's own contract
+    (``test_singleton_version_aware``) and the fix agent's to pin alongside the
+    rule it chooses, because this fleet has no "newer" side — only a
+    different one.
     """
     report = mixed_fleet
+    assert report["fingerprints"]["same"] != report["fingerprints"]["variant"]
     assert report["waves"] <= 1, (
         f"the fleet did not converge: {report['waves']} eviction wave(s) in "
         f"{MIXED_VERSION_SECONDS:.0f}s (timeline "
         f"{report['backend_pid_timeline']}); each wave killed a backend's "
         f"browsers, which is the operator's 'all my browsers closed' report"
+    )
+    alive = [pid for pid, running in report["backends_alive"].items() if running]
+    assert alive == report["backend_pids"][-1:], (
+        f"the fleet must end on exactly ONE live recorded backend, the last one "
+        f"recorded; alive={alive} timeline={report['backend_pid_timeline']}"
     )
     # The fleet shape itself, so a run where one side never got a browser up
     # turns THIS node red rather than quietly weakening its sibling.
@@ -1236,16 +1503,19 @@ async def test_s5_mixed_source_fingerprints_converge(mixed_fleet):
         "replacement's orphan recovery reaping it as unowned "
         "(browser_pid_registry stamps the BACKEND as owner). "
         "The other session never asked for that and is never told: its proxy "
-        "log carries no condemnation, no heal and no teardown — only one or two "
-        "transient strikes ('probe failed 1/3', once also '2/3') that reset "
-        "themselves. Both of the proxy's "
-        "death witnesses are PORT-scoped and the replacement binds the SAME "
-        "port: backend_watchdog.watch_liveness probes the port and gets an "
-        "answer, so the three strikes needed to open a confirmation never "
-        "accumulate, and the streamable-HTTP bridge is per-request, so nothing "
-        "'breaks' for _confirm_bridge_verdict. What actually died is the MCP "
-        "SESSION, and nothing watches that — so proxy_selfheal's entire "
-        "recovery is unreachable on the most common way a backend goes away. "
+        "log carries no condemnation, no heal and no teardown — only transient "
+        "strikes that reset themselves (usually one 'probe failed 1/3'; once "
+        "'2/3'). The proxy's FAST death witness is PORT-only and the "
+        "replacement binds the SAME port: backend_watchdog.watch_liveness "
+        "probes with singleton._backend_http_ready, which asks the port and "
+        "not the identity, so the replacement answers it, the three strikes "
+        "needed to open the confirmation phase never accumulate, and the "
+        "confirmation that IS identity-scoped (_same_identity_backend_ready) "
+        "is never reached; the streamable-HTTP bridge is per-request, so "
+        "nothing 'breaks' for _confirm_bridge_verdict either. What actually "
+        "died is the MCP SESSION, and nothing watches that — so "
+        "proxy_selfheal's entire recovery is unreachable on the most common "
+        "way a backend goes away. "
         "The client-visible half varies (5 of 6 runs: every later call answers "
         "{'code': 32600, 'message': 'Session terminated'}; 1 of 6: the session "
         "kept answering normally over a backend that no longer had its "

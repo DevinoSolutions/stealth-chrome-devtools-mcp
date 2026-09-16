@@ -367,11 +367,54 @@ def _this_executable() -> str:
 # ---------------------------------------------------------------------------
 # Isolation helpers.
 # ---------------------------------------------------------------------------
-def _pick_free_port() -> int:
-    """An OS-assigned free loopback port, used as a distinct singleton port."""
+# The product's own default singleton port (``singleton.DEFAULT_PORT``), restated
+# as a literal for the same reason ``REGISTRY_TOOL_COUNT`` is: this harness
+# drives the installed artifact as a black box.
+DEFAULT_SINGLETON_PORT = 19222
+_PORT_PICK_ATTEMPTS = 32
+
+
+def _os_assigned_port() -> int:
+    """One OS-assigned free loopback port. The single seam ``_pick_free_port``
+    retries through; a test can replace it to hand back a chosen sequence."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _reserved_ports(real_home: Path | None = None) -> frozenset[int]:
+    """Ports an isolated workspace must never bind: the product's default
+    singleton port plus every port the DEVELOPER'S real ``server.json`` records.
+
+    An isolated backend on one of these could not evict a live real backend
+    (bind fails on a port in use) — but with the real backend DOWN it would
+    squat its recorded port, the developer's next real proxy would adopt the
+    throwaway backend through ``adoption_candidates``, and that backend dies at
+    workspace teardown: the exact ``CONNECTION_CLOSED`` the lifecycle suite
+    exists to eliminate, handed to the developer by the suite itself. The
+    Windows dynamic range measured here is 1025-65534 (``netsh int ipv4 show
+    dynamicport tcp``: start 1025, 64510 ports), so an OS pick CAN land there.
+    """
+    home = Path.home() if real_home is None else real_home
+    return frozenset({DEFAULT_SINGLETON_PORT, *_recorded_ports(home)})
+
+
+def _pick_free_port(*, real_home: Path | None = None) -> int:
+    """An OS-assigned free loopback port that is NOT one of
+    :func:`_reserved_ports`, used as a distinct singleton port.
+
+    Retries the OS pick rather than adjusting it: a port this harness cannot
+    prove is safe is not one it may hand out, so exhaustion raises.
+    """
+    reserved = _reserved_ports(real_home)
+    for _ in range(_PORT_PICK_ATTEMPTS):
+        port = _os_assigned_port()
+        if port not in reserved:
+            return port
+    raise RuntimeError(
+        f"no free loopback port outside the reserved set {sorted(reserved)} in "
+        f"{_PORT_PICK_ATTEMPTS} attempts"
+    )
 
 
 def _isolated_env(
@@ -541,28 +584,46 @@ def _proxy_warnings(*dirs: Path) -> str:
     return "\n".join(out)
 
 
-def _backend_pid_from_state(home_dir: Path) -> int | None:
-    """Read the isolated backend's recorded pid from its ``server.json``.
+def _backend_entries(home_dir: Path) -> list[dict[str, object]]:
+    """Every backend entry ``<home_dir>/.stealth-mcp/server.json`` records.
 
-    Parses BOTH record schemas — the flat v1 shape and F-808's v2
+    THE one parse of the record in this harness. Reads BOTH schemas — the flat
+    v1 shape (one entry, the record itself) and F-808's v2
     ``{"schema": 2, "backends": {ctx: entry}}`` — because this harness drives
     the INSTALLED artifact as a black box and restates the contract rather than
     importing the package under test (the same reason ``REGISTRY_TOOL_COUNT``
-    is a literal here). The isolated HOME holds exactly one backend, so "some
-    recorded entry" and "the one we spawned" are the same thing.
+    is a literal here). A missing, unreadable or malformed record is an empty
+    list, never an error: for the developer's REAL home that means "nothing to
+    avoid", for an isolated home "nothing recorded yet".
     """
     state_file = home_dir / ".stealth-mcp" / "server.json"
     try:
         state = json.loads(state_file.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return None
+        return []
     if not isinstance(state, dict):
-        return None
+        return []
     if isinstance(state.get("backends"), dict):
-        entries = [e for e in state["backends"].values() if isinstance(e, dict)]
-        state = entries[0] if entries else {}
-    pid = state.get("pid")
+        return [e for e in state["backends"].values() if isinstance(e, dict)]
+    return [state]
+
+
+def _backend_pid_from_state(home_dir: Path) -> int | None:
+    """The isolated backend's recorded pid. The isolated HOME holds exactly
+    one backend, so "some recorded entry" and "the one we spawned" are the
+    same thing."""
+    entries = _backend_entries(home_dir)
+    pid = entries[0].get("pid") if entries else None
     return pid if isinstance(pid, int) else None
+
+
+def _recorded_ports(home_dir: Path) -> frozenset[int]:
+    """Every port ``home_dir``'s record names, across every display context."""
+    return frozenset(
+        port
+        for entry in _backend_entries(home_dir)
+        if isinstance(port := entry.get("port"), int)
+    )
 
 
 def _pid_running(pid: int) -> bool:
