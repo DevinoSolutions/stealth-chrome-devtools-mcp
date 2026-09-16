@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Fixed — F-885: proxy/backend-death tests touched the developer's live `~/.stealth-mcp` record
+
+`tests/test_proxy_backend_death.py::TestProxyExitsOnBackendDeath` ran an
+IN-PROCESS proxy with the real state paths unpatched — only
+`STEALTH_MCP_BROWSER_SESSION_ROOT` was overridden — so its death-confirmation
+step (`_same_identity_backend_ready`, wired in as `confirm_alive`) read
+`singleton.SERVER_STATE_FILE` directly, and its subprocess-spawned backend
+wrote real boot/backend logs into `~/.stealth-mcp/logs` (measured: a
+`backend-<pid>.log` and `backend-<pid>-fault.log` pair landed there from a
+single run). Isolated the in-process proxy state the same way
+`test_singleton_version_aware.py`'s `isolated_state` fixture does
+(`singleton.STATE_DIR`/`PORT_FILE`/`SERVER_STATE_FILE` monkeypatched to a
+`tmp_path`), and the subprocess env the same way
+`release_gate_harness.gate_workspace` does (`_isolated_env`: HOME/USERPROFILE/
+LOCALAPPDATA/APPDATA/log dir/session root/clone dir all redirected into a
+throwaway workspace, since a monkeypatch in the test process never reaches a
+separate child process).
+
+The sweep this finding called for turned up a substantially worse instance of
+the same shape: `tests/test_singleton_fast_handshake.py::
+TestEntrypointExitsOnDisconnect::test_stdio_entrypoint_exits_when_stdin_closes`
+spawned the REAL stdio entrypoint (`python -m stealth_chrome_devtools_mcp
+--singleton-port <port>`, no `--transport` flag) with HOME unredirected. That
+entrypoint runs `ensure_server_running()` for real; when the recorded backend's
+source fingerprint does not match the checkout under test,
+`_select_backend_port()` prefers the port already recorded for this machine's
+display context — not the port the test passed — and
+`_start_backend_holding_lock()` evicts (kills) whatever backend is listening
+there before cold-starting a replacement. On a developer machine with a live
+backend other sessions are using, running this test unpatched could kill it
+and close every browser it was serving. Two siblings in the same file
+(`TestFastHandshakeEndToEnd`, `TestProxyExitsOnClientDisconnect`) share the
+same log-writing hazard as the original finding, at the same (lower) severity.
+All three were fixed with the same `_isolated_env`-based redirect.
+
+Full before/after measurement, the eviction trace, and the rest of the sweep
+are in `audit/stage2/finding_F885_proxy_death_test_touches_real_state.md`.
+
 ### Fixed — F-883: `execute_script` never awaited, so a Promise was `{}` and `await` was a SyntaxError
 
 Measured through the shipped MCP on 2.1.8 (Chrome 152, nodriver 0.47):
