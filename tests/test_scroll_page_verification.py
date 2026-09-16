@@ -18,6 +18,7 @@ pinned is the product's reading of a moving value, not a canned answer.
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -479,24 +480,48 @@ async def test_the_scrollend_listener_is_armed_on_the_element_that_scrolls():
     about a scroll that finished in a second. Nothing raises; it is exactly the
     silent class this pair of findings exists to close.
 
-    The binding is asserted rather than the behaviour because the behaviour is
-    the browser's; ``ScrollingTab`` latches only when the armed target matches
-    the container that moved, so the behavioural half is held by every other
-    pin in this file.
+    The pin therefore reads BOTH names out of every generated script — the
+    ``var T=…`` the listener is armed on and the receiver of the ``.scrollTo`` /
+    ``.scrollBy`` call — and requires them to be the same expression, for all
+    six directions and both ``smooth`` values, on a nested scroller and on a
+    plain page alike. The binding is asserted rather than the behaviour because
+    the behaviour is the browser's; ``ScrollingTab`` latches only when the armed
+    target matches the container that moved, so the behavioural half is held by
+    every other pin in this file.
     """
-    shell = _app_shell()
-    await DOMHandler.scroll_page(shell, direction="bottom", smooth=True)
-    nested_scrolls = [e for e in shell.evaluate_calls if ".scrollTo(" in e]
-    assert nested_scrolls, shell.evaluate_calls
-    assert all("var T=_el([1, 0]);" in e for e in nested_scrolls), nested_scrolls
-    assert all("var T=window;" not in e for e in nested_scrolls), nested_scrolls
+    from stealth_chrome_devtools_mcp.embedded import scroll_position
 
-    plain = ScrollingTab(doc_height=DOC_HEIGHT, viewport_height=VIEWPORT_HEIGHT)
-    await DOMHandler.scroll_page(plain, direction="bottom", smooth=True)
-    doc_scrolls = [e for e in plain.evaluate_calls if ".scrollTo(" in e]
-    assert doc_scrolls, plain.evaluate_calls
-    assert all("var T=window;" in e for e in doc_scrolls), doc_scrolls
-    assert all("_el(" not in e for e in doc_scrolls), doc_scrolls
+    armed = re.compile(r"var T=([^;]+);")
+    receiver = re.compile(r"(?<![\w.])(window|_el\([^)]*\))\.scroll(?:To|By)\(\{")
+
+    def scroll_script(tab: ScrollingTab) -> str:
+        scripts = [
+            e for e in tab.evaluate_calls if ".scrollTo(" in e or ".scrollBy(" in e
+        ]
+        assert len(scripts) == 1, tab.evaluate_calls
+        return scripts[0]
+
+    for direction in sorted(scroll_position.DIRECTIONS):
+        for smooth in (True, False):
+            shell = _app_shell()
+            await DOMHandler.scroll_page(shell, direction=direction, smooth=smooth)
+            plain = ScrollingTab(doc_height=DOC_HEIGHT, viewport_height=VIEWPORT_HEIGHT)
+            await DOMHandler.scroll_page(plain, direction=direction, smooth=smooth)
+
+            for script in (scroll_script(shell), scroll_script(plain)):
+                target = armed.search(script)
+                call = receiver.search(script)
+                assert target and call, (direction, smooth, script)
+                assert target.group(1) == call.group(1), (direction, smooth, script)
+
+            # And the kind is right. The plain page always arms `window`. The
+            # shell arms its div on the axis the div can move; on the horizontal
+            # axis nothing on that page can move, so rule 3 hands the pick back
+            # to the document, and the assertion above holds the receiver to
+            # the same `window` the listener went on.
+            assert "var T=window;" in scroll_script(plain), (direction, smooth)
+            if scroll_position._DIRECTIONS[direction].axis == "y":
+                assert "var T=_el([1, 0]);" in scroll_script(shell), (direction, smooth)
 
 
 async def test_a_stalled_nested_scroll_is_not_a_finished_one():
