@@ -923,19 +923,22 @@ class DOMHandler:
         Args:
             tab (Tab): The browser tab object.
             direction (str): 'down', 'up', 'right', 'left', 'top' or 'bottom'.
-            amount (int): Pixels to scroll (ignored for 'top' and 'bottom').
+            amount (int): Pixels to scroll (ignored for 'top' and 'bottom'); a
+                distance, never negative.
             smooth (bool): Use smooth scrolling.
 
         Returns:
-            Dict[str, object]: ``scrolled`` (the position CHANGED), ``at_edge``,
-            ``settled`` (it stopped moving within the budget),
-            ``settle_seconds``, the requested ``direction``/``amount``/
-            ``smooth``, and the six offsets — see the tool's own docstring.
+            Dict[str, object]: ``scrolled`` (the scroll OFFSET changed, never
+            the extent), ``at_edge``, ``settled`` (the offset stopped moving
+            within the budget), ``settle_seconds``, the requested
+            ``direction``/``amount``/``smooth``, and the six offsets — see the
+            tool's own docstring.
 
         Raises:
-            ToolError: an invalid direction, or an operational failure of the
-            evaluate itself. A page with nothing to scroll is NOT one of these:
-            a one-viewport document is a legitimate page, and it is reported.
+            ToolError: an invalid direction or a negative amount (both decided
+            before any round trip), or an operational failure of the evaluate
+            itself. A page with nothing to scroll is NOT one of these: a
+            one-viewport document is a legitimate page, and it is reported.
         """
         try:
             # Built first: an unknown direction must cost no round trip.
@@ -952,7 +955,11 @@ class DOMHandler:
             )
             after = settled.position
             return {
-                "scrolled": after != before,
+                # OFFSETS only. A lazy-loading page grows its extent while
+                # standing perfectly still, and comparing whole ``Position``
+                # values would report that growth as "it scrolled" with
+                # identical before/after offsets in the same record.
+                "scrolled": after.offset != before.offset,
                 "at_edge": after.at_edge(direction),
                 "settled": settled.settled,
                 "settle_seconds": round(settled.seconds, 3),
@@ -967,5 +974,11 @@ class DOMHandler:
                 "max_scroll_y": after.max_y,
             }
 
+        except ToolError:
+            # ``scroll_position.script``/``read`` already speak the error
+            # convention and already name what went wrong. Re-wrapping them
+            # doubled the message ("Failed to scroll page: Invalid scroll
+            # direction: …") and dropped the cause.
+            raise
         except Exception as e:
-            raise ToolError(f"Failed to scroll page: {e!s}")
+            raise ToolError(f"Failed to scroll page: {e!s}") from e

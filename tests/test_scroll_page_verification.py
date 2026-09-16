@@ -84,6 +84,52 @@ async def test_smooth_scroll_is_waited_out_not_napped_through():
     assert len(tab.position_reads) > 2
 
 
+async def test_a_page_that_only_grew_is_not_a_page_that_scrolled():
+    """Extent up, offset unmoved: ``scrolled`` is about the VIEWPORT.
+
+    A lazy-loading page appends content while standing perfectly still. The
+    record compares offsets for exactly this reason — comparing whole readings
+    answered ``scrolled: true`` with ``scroll_y_before == scroll_y_after`` in
+    the same record, which is the class of untruth this finding closes.
+    """
+    tab = ScrollingTab(
+        doc_height=DOC_HEIGHT, viewport_height=VIEWPORT_HEIGHT, growing_content=1000
+    )
+
+    record = await DOMHandler.scroll_page(tab, direction="top", smooth=True)
+
+    assert record["scrolled"] is False
+    assert record["scroll_y_before"] == record["scroll_y_after"] == 0
+    assert record["scroll_x_before"] == record["scroll_x_after"] == 0
+    # ...and the extent really did move under it, so this is not a no-op page.
+    assert record["max_scroll_y"] > DOC_HEIGHT - VIEWPORT_HEIGHT
+    # The extent reported is the FINAL read's — the freshest one there is.
+    assert record["max_scroll_y"] == tab.max_scroll_y
+
+
+async def test_a_growing_page_that_stopped_moving_settles_at_once():
+    """The settle agrees on OFFSETS, so a still-loading page is not a hang.
+
+    An infinite-scroll page grows for as long as it is allowed to. Settling on
+    the whole reading meant such a page never agreed with itself: every scroll
+    spent the entire 10 s budget and then reported ``settled: false`` about a
+    viewport that had stopped moving in the first 100 ms.
+    """
+    tab = ScrollingTab(
+        doc_height=DOC_HEIGHT, viewport_height=VIEWPORT_HEIGHT, growing_content=500
+    )
+
+    record = await DOMHandler.scroll_page(
+        tab, direction="down", amount=500, smooth=False
+    )
+
+    assert record["settled"] is True
+    assert record["scrolled"] is True
+    assert record["scroll_y_after"] == 500
+    assert record["settle_seconds"] < 1.0, record
+    assert record["max_scroll_y"] == tab.max_scroll_y
+
+
 async def test_a_scroll_that_never_settles_says_so_within_budget(monkeypatch):
     """A page whose content keeps arriving exhausts the budget — and reports it.
 
@@ -203,7 +249,47 @@ async def test_an_unreadable_position_raises_tool_error():
         await DOMHandler.scroll_page(_MuteTab(), direction="down")
 
     assert type(caught.value) is ToolError
-    assert "Failed to scroll page" in str(caught.value)
+    # The leaf's own message, NOT re-wrapped: "Failed to scroll page: <it>"
+    # doubled the sentence and dropped the cause.
+    assert str(caught.value).startswith("Could not read the page's scroll position")
+    assert "Failed to scroll page" not in str(caught.value)
+
+
+async def test_a_negative_amount_is_rejected_not_silently_inverted():
+    """The direction carries the sign; the amount is a distance.
+
+    Before F-875 a negative amount had two wrong readings — ``down`` with
+    ``-500`` silently scrolled UP, and ``up`` with ``-500`` interpolated
+    ``top: --500`` and died as a JS syntax error. Treating it as a magnitude
+    would only move the silence (the record would say ``direction: "up"`` about
+    a page that went down), so it is refused, before any round trip.
+    """
+    tab = ScrollingTab(doc_height=DOC_HEIGHT, viewport_height=VIEWPORT_HEIGHT)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.scroll_page(tab, direction="up", amount=-500)
+
+    assert type(caught.value) is ToolError
+    assert "Invalid scroll amount: -500" in str(caught.value)
+    assert tab.evaluate_calls == []
+
+
+async def test_at_edge_tolerates_the_one_pixel_the_two_roundings_can_differ_by():
+    """``Math.round(scrollY)`` and an integer extent can disagree by one.
+
+    Under fractional zoom the offset can round down while the extent rounds up,
+    so a page resting at its true bottom reads one pixel short of it. Reporting
+    ``at_edge: false`` for a page that cannot go further would be a new small
+    lie, so the far edge carries exactly one pixel of slack — and the near edge
+    carries none, because ``scrollY`` is never below zero.
+    """
+    from stealth_chrome_devtools_mcp.embedded.scroll_position import Position
+
+    assert Position(0, 7038, 0, 7039).at_edge("bottom") is True
+    assert Position(0, 7037, 0, 7039).at_edge("bottom") is False
+    assert Position(7038, 0, 7039, 0).at_edge("right") is True
+    assert Position(0, 1, 0, 7039).at_edge("top") is False
+    assert Position(0, 0, 0, 7039).at_edge("top") is True
 
 
 async def test_every_documented_direction_has_one_script_and_one_edge():
@@ -238,5 +324,5 @@ async def test_an_invalid_direction_costs_no_round_trip():
     with pytest.raises(ToolError) as caught:
         await DOMHandler.scroll_page(tab, direction="sideways")
 
-    assert "Invalid scroll direction: sideways" in str(caught.value)
+    assert str(caught.value) == "Invalid scroll direction: sideways"
     assert tab.evaluate_calls == []

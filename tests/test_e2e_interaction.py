@@ -221,7 +221,12 @@ async def test_text_input_scroll_and_wait(fixture_app_server):
         assert scrolled["scrolled"] is True
         assert scrolled["at_edge"] is True
         assert scrolled["scroll_y_after"] > 0
-        assert await eval_js(iid, "window.scrollY") == scrolled["scroll_y_after"]
+        # Rounded on both sides: the record's offsets are ``Math.round``ed, so a
+        # raw ``window.scrollY`` would pin the runner's device pixel ratio.
+        assert (
+            await eval_js(iid, "Math.round(window.scrollY)")
+            == scrolled["scroll_y_after"]
+        )
 
         # Bounded reveal: click -> 200ms setTimeout -> #delayed-el visible. The
         # 5s tool timeout dwarfs the 200ms delay so scheduling jitter can't flake.

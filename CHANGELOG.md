@@ -66,17 +66,28 @@ lazy-loading case `direction="bottom"` exists for.
 The nap is a **settle** now and the bool is a **record**. `scroll_page` reads
 the page's scroll offsets and extent before the scroll, evaluates it, then polls
 until two consecutive reads agree — bounded, not slept through — and answers
-with `scrolled` (the position CHANGED), `at_edge` (the page is as far as
-`direction` goes), `settled` (it stopped moving inside the budget),
+with `scrolled` (the scroll OFFSET changed), `at_edge` (the page is as far as
+`direction` goes), `settled` (the offset stopped moving inside the budget),
 `settle_seconds`, the requested `direction`/`amount`/`smooth`, and
 `scroll_x_before`/`scroll_y_before`/`scroll_x_after`/`scroll_y_after`/
 `max_scroll_x`/`max_scroll_y`. Both axes, because `direction="right"` moves X
-and a Y-only record would call a working horizontal scroll a no-op. A page with
-nothing to scroll is **reported**, never raised — `max_scroll_y: 0`,
+and a Y-only record would call a working horizontal scroll a no-op.
+
+Offsets and extent are never compared together — a lazy-loading page grows its
+document while standing perfectly still, so comparing whole readings would call
+that growth a scroll (with identical `scroll_y_before`/`scroll_y_after` in the
+same record) and would stop a still-loading page from ever settling. The extent
+reported is the final read's.
+
+A page with nothing to scroll is **reported**, never raised — `max_scroll_y: 0`,
 `scrolled: false`, `at_edge: true` — because a one-viewport document is a
-legitimate page; `ToolError` is still raised only for operational failure (an
-invalid direction, rejected before any round trip, and an evaluate that did not
-answer with the JSON the read asks for).
+legitimate page. `ToolError` is still raised only for operational failure, and
+only once (the leaf's own message is no longer re-wrapped): an invalid
+direction, a **negative `amount`** (both rejected before any round trip —
+`amount` is a distance and `direction` is the only thing that carries a sign, so
+the old `down, -500` that silently scrolled up and the old `up, -500` that died
+as a JS syntax error are now one clear refusal), and an evaluate that did not
+answer with the JSON the read asks for.
 
 The read and the settle live in the new leaf `embedded/scroll_position.py`,
 which also holds the one table for what a direction means (its axis, its edge

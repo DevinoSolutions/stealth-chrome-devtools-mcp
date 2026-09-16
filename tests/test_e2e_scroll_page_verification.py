@@ -66,8 +66,13 @@ async def test_a_smooth_scroll_is_reported_where_it_landed(tmp_empty_root):
 
         record = await scroll_page(instance_id=iid, direction="bottom", smooth=True)
 
-        # The tool's read and the page's own answer, independently.
-        assert record["scroll_y_after"] == await eval_js(iid, "window.scrollY")
+        # The tool's read and the page's own answer, independently. Rounded on
+        # both sides: the record's offsets are ``Math.round``ed (a fractional
+        # zoom or a non-integer device pixel ratio makes ``window.scrollY``
+        # fractional), so a raw comparison would pin the runner's DPR.
+        assert record["scroll_y_after"] == await eval_js(
+            iid, "Math.round(window.scrollY)"
+        )
         # Chrome's own extent, read the way CSSOM View defines the scroller.
         assert record["max_scroll_y"] == await eval_js(
             iid,
@@ -87,7 +92,7 @@ async def test_a_smooth_scroll_is_reported_where_it_landed(tmp_empty_root):
         assert back["scroll_y_after"] == 0
         assert back["scrolled"] is True
         assert back["at_edge"] is True
-        assert await eval_js(iid, "window.scrollY") == 0
+        assert await eval_js(iid, "Math.round(window.scrollY)") == 0
     finally:
         await close(instance_id=iid)
 
@@ -110,7 +115,7 @@ async def test_a_page_one_viewport_tall_reports_nothing_to_scroll(tmp_empty_root
         assert record["scrolled"] is False
         assert record["at_edge"] is True
         assert record["settled"] is True
-        assert await eval_js(iid, "window.scrollY") == 0
+        assert await eval_js(iid, "Math.round(window.scrollY)") == 0
 
         # An instant scroll on the same page is the fast path: no animation can
         # start, so the settle must not spend its budget waiting for one.

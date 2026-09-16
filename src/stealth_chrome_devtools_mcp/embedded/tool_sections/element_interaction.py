@@ -309,13 +309,15 @@ async def scroll_page(
     Args:
         instance_id (str): Browser instance ID.
         direction (str): 'down', 'up', 'left', 'right', 'top', or 'bottom'.
-        amount (int): Pixels to scroll (ignored for 'top' and 'bottom').
+        amount (int): Pixels to scroll (ignored for 'top' and 'bottom'). A
+            distance, never negative — the direction carries the sign.
         smooth (bool): Use smooth scrolling.
 
     Returns:
-        Dict[str, object]: ``scrolled`` (the position CHANGED), ``at_edge`` (the
-        page is as far as ``direction`` goes — true for a page with nothing to
-        scroll, whose ``max_scroll_y`` is 0), ``settled`` (the position stopped
+        Dict[str, object]: ``scrolled`` (the scroll OFFSET changed — a page that
+        merely grew while standing still is not scrolled), ``at_edge`` (the page
+        is as far as ``direction`` goes — true for a page with nothing to
+        scroll, whose ``max_scroll_y`` is 0), ``settled`` (the offset stopped
         changing within the budget; false means it was still moving),
         ``settle_seconds``, the requested ``direction``/``amount``/``smooth``,
         and ``scroll_x_before``/``scroll_y_before``/``scroll_x_after``/

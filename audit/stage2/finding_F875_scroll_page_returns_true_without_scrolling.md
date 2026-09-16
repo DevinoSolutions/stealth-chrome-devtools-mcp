@@ -200,9 +200,9 @@ timing seam (the `scheduling_lag` pattern). It never decides whether a scroll
 
 | field | means |
 |---|---|
-| `scrolled` | the position CHANGED between before and after |
+| `scrolled` | the scroll OFFSET changed between before and after |
 | `at_edge` | the page is as far as `direction` goes (true for `max_scroll_y == 0`) |
-| `settled` | the position stopped changing inside the budget |
+| `settled` | the OFFSET stopped changing inside the budget |
 | `settle_seconds` | what the settle actually cost |
 | `direction` / `amount` / `smooth` | what the caller ASKED for (`amount` is ignored by `top`/`bottom`, and is echoed as the request, not as a distance travelled) |
 | `scroll_x_before` / `scroll_y_before` | where the page was |
@@ -214,13 +214,44 @@ would call a working horizontal scroll a no-op. The record deliberately does
 **not** use §4's bare `max_scroll`: next to `max_scroll_x` that name would read
 as ambiguous, so the pair is symmetric.
 
+**Offsets and extent are never compared together.** `scrolled` compares
+`Position.offset` — `(x, y)` — and so does the settle's "two consecutive reads
+agree". A lazy-loading page grows its document while standing perfectly still,
+so comparing whole readings is wrong in both directions at once: content
+appended below a stationary viewport reads as "it scrolled" (with identical
+`scroll_y_before` and `scroll_y_after` in the same record), and a page that
+stopped moving but is still filling in never agrees with itself, spends the
+whole 10 s budget on every scroll and then reports `settled: false` about a
+viewport that has not moved since the first 100 ms. The EXTENT the caller gets
+is the final read's, which is the freshest one there is.
+
 `max_scroll_y == 0` is an answer, never a raise — §4/§5's explicit requirement.
-`ToolError` is still raised only for operational failure: an invalid direction
-(rejected before any round trip, so `tests/test_error_typing.py`'s pin is
-unchanged) and an evaluate that did not answer with the JSON the read asks for
-(reporting `scroll_y: 0` for a read that did not happen would be this same class
-of untruth). Messages report shape and count only — a type name, a character
-count, a field count.
+`ToolError` is still raised only for operational failure, and it is raised
+ONCE: `scroll_position.script`/`read` already speak the error convention, so
+`scroll_page` re-raises a `ToolError` unchanged and keeps its blanket handler
+(now `raise ... from e`) for everything else. Re-wrapping doubled the sentence
+("Failed to scroll page: Invalid scroll direction: …") and dropped the cause.
+The two rejections both happen before any round trip:
+
+* **an invalid direction**, and
+* **a negative `amount`** — `amount` is a distance and `direction` is the only
+  thing that carries a sign. Before this fix a negative amount had two readings
+  and both were wrong: `down` with `-500` silently scrolled UP, and `up` with
+  `-500` interpolated `top: --500` and died as a JS syntax error. Interpolating
+  a pre-negated value (which is how the `--500` syntax error was closed) would
+  have turned the loud half into the silent half — `direction: "up"` in a record
+  about a page that went down — so it is refused instead.
+
+An evaluate that did not answer with the JSON the read asks for is the third
+operational failure; reporting `scroll_y: 0` for a read that did not happen is
+this same class of untruth. Messages report shape and count only — a type name,
+a character count, a field count.
+
+**`at_edge` carries one pixel of slack on the FAR edge**
+(`EDGE_TOLERANCE_PX`). `Math.round(window.scrollY)` and an already-integer
+`scrollHeight - clientHeight` round independently, so under fractional zoom or a
+non-integer device pixel ratio a page resting at its true bottom can read one
+pixel short of it. The near edge needs none: `scrollY` is never below zero.
 
 ### 7.3 Measured with the fix
 
@@ -242,12 +273,17 @@ and after reads) for an answer that is true.
 
 ### 7.4 Tests and goldens
 
-* `tests/test_scroll_page_verification.py` — 11 hermetic pins, driven through
+* `tests/test_scroll_page_verification.py` — 15 hermetic pins, driven through
   `fakes.ScrollingTab`, a new double that models the document's own scroll
-  geometry: clamped `scrollTo`/`scrollBy`, a **JSON-string** read answer, and a
-  smooth animation advanced one step per POSITION READ, so the mid-flight case
-  is deterministic without a clock. Nothing in the double is copied from the
-  defect.
+  geometry: clamped `scrollTo`/`scrollBy`, a **JSON-string** read answer, a
+  smooth animation advanced one step per POSITION READ (so the mid-flight case
+  is deterministic without a clock), and a `growing_content` mode that appends
+  document without moving the viewport — the one shape that tells an offset
+  comparison from a whole-reading one. Nothing in the double is copied from the
+  defect. Measured against that double, the whole-reading comparison answers
+  `scrolled: True` with `Position(y=0, max_y=8039)` before and
+  `Position(y=0, max_y=10039)` after, and the offset comparison answers
+  `False`; the settle returns in 0.065 s instead of spending the budget.
 * `tests/test_e2e_scroll_page_verification.py` — 2 real-Chrome pins on `data:`
   pages under `tmp_empty_root`, cross-checking the record against the page's own
   `window.scrollY` and against Chrome's own `document.scrollingElement` extent.

@@ -398,7 +398,9 @@ class ScrollingTab(FakeTab):
     #: ``window.scrollBy({top: N, left: M, …})`` — the two deltas, signed.
     _BY = re.compile(r"window\.scrollBy\(\{top:\s*(-?\d+),\s*left:\s*(-?\d+)")
     #: ``window.scrollTo({top: <expr>, left: N, …})`` — the vertical target as
-    #: written; ``document.body.scrollHeight`` means "the bottom".
+    #: written; any ``…scrollHeight`` in it means "the bottom" (the product
+    #: targets ``document.scrollingElement``, so the expression is not a fixed
+    #: string and only the property it ends in is matched on).
     _TO = re.compile(r"window\.scrollTo\(\{top:\s*([^,]+),\s*left:\s*(-?\d+)")
 
     def __init__(
@@ -412,6 +414,7 @@ class ScrollingTab(FakeTab):
         scroll_x: int = 0,
         smooth_steps: int = 4,
         never_settles: bool = False,
+        growing_content: int = 0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -425,6 +428,11 @@ class ScrollingTab(FakeTab):
         #: A page whose content keeps arriving never stops moving — the
         #: budget-exhaustion case. One pixel per read is enough to model it.
         self.never_settles = never_settles
+        #: Pixels of content appended per read WITHOUT the viewport moving: the
+        #: lazy-loading page that has stopped scrolling but is still filling in.
+        #: Its offset is stable and its EXTENT is not, which is the one shape
+        #: that tells an offset comparison from a whole-``Position`` one.
+        self.growing_content = growing_content
         self._flight: tuple[int, int] | None = None
         #: Every position read, in order — so a test can count round trips.
         self.position_reads: list[str] = []
@@ -459,6 +467,8 @@ class ScrollingTab(FakeTab):
 
     def _advance(self) -> None:
         """One animation frame's worth of movement, charged per read."""
+        if self.growing_content:
+            self.doc_height += self.growing_content
         if self.never_settles:
             self.scroll_y = min(self.scroll_y + 1, self.max_scroll_y)
             self.doc_height += 1  # the content that keeps arriving

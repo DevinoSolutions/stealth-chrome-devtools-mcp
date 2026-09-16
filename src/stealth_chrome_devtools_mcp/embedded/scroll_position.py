@@ -107,6 +107,11 @@ POLL_INTERVAL_SECONDS = 0.05
 #: begun" while staying an order of magnitude under the budget.
 START_GRACE_SECONDS = 0.3
 
+#: Slack on the FAR edge in :meth:`Position.at_edge` (see its docstring): the
+#: offset and the extent are rounded independently, so one pixel of disagreement
+#: is reachable under fractional zoom without the page being able to move.
+EDGE_TOLERANCE_PX = 1
+
 #: The four keys :data:`READ_JS` promises. Named so a malformed answer is
 #: reported by SHAPE rather than by echoing whatever the page sent.
 _KEYS = ("x", "y", "max_x", "max_y")
@@ -166,13 +171,30 @@ DIRECTIONS = frozenset(_DIRECTIONS)
 def script(direction: str, amount: int, smooth: bool) -> str:
     """The JS that scrolls *amount* pixels *direction*, smoothly or not.
 
+    *amount* is a distance, and *direction* is the only thing that carries a
+    sign. A negative *amount* is therefore REJECTED rather than interpreted:
+    there is exactly one way to scroll up and it is ``direction="up"``. Before
+    F-875 the two readings of a negative amount were both wrong and differently
+    wrong — ``down`` with ``-500`` silently scrolled UP, while ``up`` with
+    ``-500`` interpolated ``top: --500`` and died as a JS syntax error. Making
+    it a magnitude instead would keep the silence and only move it (the record
+    would say ``direction: "up"`` about a page that went down), which is the
+    class of untruth this whole finding is about.
+
     Raises:
-        ToolError: *direction* is not one of :data:`DIRECTIONS`. Built before
-            the page is asked anything, so a bad request costs no round trip.
+        ToolError: *direction* is not one of :data:`DIRECTIONS`, or *amount* is
+            negative. Both are decided before the page is asked anything, so a
+            bad request costs no round trip.
     """
     known = _DIRECTIONS.get(direction)
     if known is None:
         raise ToolError(f"Invalid scroll direction: {direction}")
+    if amount < 0:
+        raise ToolError(
+            f"Invalid scroll amount: {amount}. It is a distance in pixels and "
+            "cannot be negative — the direction carries the sign, so scroll the "
+            "other way with direction='up' / 'left' instead."
+        )
     return known.script.format(
         amount=amount,
         negative=-amount,
@@ -195,12 +217,25 @@ class Position(NamedTuple):
 
     ``max_x``/``max_y`` are ``0`` for a document that fits its viewport — the
     honest description of a page with nothing to scroll, not an error.
+
+    The two halves mean different things and must never be compared together.
+    :attr:`offset` is WHERE THE PAGE IS; ``max_x``/``max_y`` describe the
+    DOCUMENT, which a lazy-loading page grows while standing perfectly still.
+    Comparing whole ``Position`` values conflates them, and both ways round are
+    lies this module exists to prevent: content appended below a stationary
+    viewport would read as "it scrolled", and a page that had stopped moving but
+    was still loading would never settle.
     """
 
     x: int
     y: int
     max_x: int
     max_y: int
+
+    @property
+    def offset(self) -> tuple[int, int]:
+        """Where the page is scrolled — the ONLY part that means "moved"."""
+        return (self.x, self.y)
 
     def at_edge(self, direction: str) -> bool:
         """Is the page already as far as *direction* can take it?
@@ -209,6 +244,14 @@ class Position(NamedTuple):
         and its settle's fast path cannot come to disagree about it. A page with
         nothing to scroll (``max_y == 0``) is at BOTH vertical edges, which is
         the literal truth about it.
+
+        The far edge carries :data:`EDGE_TOLERANCE_PX` of slack. The offset and
+        the extent are rounded independently (``Math.round(window.scrollY)``
+        against an already-integer ``scrollHeight - clientHeight``), so under
+        fractional zoom or a non-integer device pixel ratio a page resting at
+        its true bottom can read one pixel short of it. One pixel of tolerance
+        is cheaper than reporting ``at_edge: false`` for a page that cannot go
+        further; the near edge needs none, because ``scrollY`` is never below 0.
         """
         known = _DIRECTIONS.get(direction)
         if known is None:
@@ -216,7 +259,9 @@ class Position(NamedTuple):
         offset, limit = (
             (self.y, self.max_y) if known.axis == "y" else (self.x, self.max_x)
         )
-        return offset >= limit if known.towards_max else offset <= 0
+        if known.towards_max:
+            return offset >= limit - EDGE_TOLERANCE_PX
+        return offset <= 0
 
 
 class Settled(NamedTuple):
@@ -290,7 +335,7 @@ async def settle(
     limit = SETTLE_BUDGET_SECONDS if budget is None else budget
     grace = START_GRACE_SECONDS if start_grace is None else start_grace
     started = _now()
-    previous: Position | None = None
+    previous: tuple[int, int] | None = None
     while True:
         # Read FIRST and sleep between reads, not before the first one: an
         # instant scroll is already applied when its evaluate returns, so the
@@ -299,9 +344,17 @@ async def settle(
         # and the grace still holds it.
         current = await read(tab)
         elapsed = _now() - started
-        if current == previous and (current != origin or elapsed >= grace):
+        # OFFSETS only. What "has it stopped" asks about is the viewport, not
+        # the document: an infinite-scroll page appends content for as long as
+        # you let it, so a whole-``Position`` comparison would spend the entire
+        # budget on a page that stopped moving in the first 100 ms and then
+        # report ``settled: false`` about a stationary viewport. The EXTENT the
+        # caller gets is the final read's, which is the freshest one there is.
+        if current.offset == previous and (
+            current.offset != origin.offset or elapsed >= grace
+        ):
             return Settled(current, True, elapsed)
         if elapsed >= limit:
             return Settled(current, False, elapsed)
-        previous = current
+        previous = current.offset
         await _sleep(POLL_INTERVAL_SECONDS)
