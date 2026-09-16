@@ -403,8 +403,10 @@ class TestFallbacks:
     def test_a_command_past_the_tr_cap_falls_back(self, windows, monkeypatch, caplog):
         # schtasks STORES only the first 253 characters of /TR and still exits 0;
         # a truncated command starts nothing at all, so the cap is a rung
-        # boundary, not a warning.
-        monkeypatch.setattr(backend_launch, "TR_MAX_CHARS", 10)
+        # boundary, not a warning. Patched on ``desktop_launch``, which owns the
+        # schtasks seam and therefore the one measured number (F-879) — this
+        # asserting anything at all is the proof that no second cap lives here.
+        monkeypatch.setattr(desktop_launch, "TR_MAX_CHARS", 10)
         schtasks = FakeSchtasks()
         with caplog.at_level(logging.WARNING, logger="stealth.proxy"):
             launched, _ = self._run(monkeypatch, schtasks, windows)
@@ -449,7 +451,7 @@ def _launch_dir_for(command_length: int) -> Path:
     interpreter = Path(_PYTHONW)
     for pad in range(1, 400):
         candidate = Path("C:/" + "d" * pad)
-        token = "a" * backend_launch.TOKEN_CHARS
+        token = "a" * desktop_launch.TOKEN_CHARS
         if len(f'"{interpreter}" "{candidate / token}.py"') == command_length:
             return candidate
     raise AssertionError(f"no launch dir gives a {command_length}-char command")
@@ -465,15 +467,15 @@ class TestTheStoredCommandLengthCap:
         monkeypatch.setattr(
             backend_launch,
             "_launch_dir",
-            lambda: _launch_dir_for(backend_launch.TR_MAX_CHARS),
+            lambda: _launch_dir_for(desktop_launch.TR_MAX_CHARS),
         )
         plan = backend_launch._scheduler_plan(_PYTHONW)
 
         assert plan is not None
-        assert len(plan.command) == backend_launch.TR_MAX_CHARS
+        assert len(plan.command) == desktop_launch.TR_MAX_CHARS
 
     def test_one_character_more_is_refused(self, windows, monkeypatch, caplog):
-        over = backend_launch.TR_MAX_CHARS + 1
+        over = desktop_launch.TR_MAX_CHARS + 1
         monkeypatch.setattr(
             backend_launch, "_launch_dir", lambda: _launch_dir_for(over)
         )
@@ -481,7 +483,7 @@ class TestTheStoredCommandLengthCap:
             assert backend_launch._scheduler_plan(_PYTHONW) is None
 
         assert str(over) in caplog.text
-        assert str(backend_launch.TR_MAX_CHARS) in caplog.text
+        assert str(desktop_launch.TR_MAX_CHARS) in caplog.text
 
     def test_the_real_state_dir_leaves_room(self, windows, monkeypatch):
         # The shipped layout, not a constructed one: ~/.stealth-mcp with a
@@ -490,7 +492,7 @@ class TestTheStoredCommandLengthCap:
         plan = backend_launch._scheduler_plan(_PYTHONW)
 
         assert plan is not None
-        assert len(plan.command) <= backend_launch.TR_MAX_CHARS
+        assert len(plan.command) <= desktop_launch.TR_MAX_CHARS
 
 
 class TestOrphanTaskSweep:
