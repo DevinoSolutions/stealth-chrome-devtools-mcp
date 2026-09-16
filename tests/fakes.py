@@ -38,6 +38,8 @@ from types import GeneratorType, SimpleNamespace
 from typing import Any
 
 import nodriver.cdp.dom as cdp_dom
+import nodriver.cdp.network as cdp_network
+import nodriver.cdp.page as cdp_page
 import nodriver.cdp.runtime as cdp_runtime
 import nodriver.cdp.target as cdp_target
 
@@ -203,6 +205,36 @@ class FakeTab:
             JS expression wins over ``evaluate_result``.
         cdp_responses: {command_name: value_or_callable}; a callable is invoked
             with the command name and returns the response.
+        lifecycle: WHEN a navigation's ``Page.lifecycleEvent``s reach the
+            handlers, relative to the ``Page.navigate`` response — see
+            :meth:`_navigate` (F-881).
+        title_at_load: a page whose ``document.title`` is ``""`` until its
+            ``load`` has been delivered, then this value (F-881).
+        title_at_dcl: the same for ``DOMContentLoaded`` — what a ``<title>`` in
+            the markup gives, since the parser sets it before DCL.
+
+    **The navigation model (F-881).** ``send(cdp.page.navigate(url))`` answers
+    the way Chrome does — ``(frameId, loaderId, errorText)`` — and delivers the
+    new document's ``init`` / ``DOMContentLoaded`` / ``load`` lifecycle events
+    to every handler registered for ``cdp.page.LifecycleEvent``. Measured on
+    Chrome 152 (the finding's §2d): those events are NOT ordered against the
+    response — ``DOMContentLoaded`` arrived 0.3 ms before it and ``load`` 0.3 ms
+    after — so the fake can deliver them either side of it:
+
+    * ``lifecycle="before"`` (default): synchronously, before the response
+      returns — a wait armed after the response would never see them;
+    * ``lifecycle="after"``: on the running loop, after the response — a wait
+      that read the page at the response reads it before ``load``;
+    * ``lifecycle="never"``: nothing is delivered (a transfer that never ends).
+
+    A URL that differs only by fragment from the current one is a same-document
+    navigation: ``loaderId`` is ``None`` and no lifecycle event fires (measured).
+    ``stale_load_for`` names a loader id whose ``load`` is ALSO delivered (after
+    the response), modelling an older document still finishing when the new
+    navigation was sent — a wait not keyed on the response's loader id would
+    take it. ``last_milestone`` is the last event the new document ever reaches
+    (``"init"`` for a transfer that commits and hangs, F-787's route;
+    ``"DOMContentLoaded"`` for a page whose subresources never finish).
     """
 
     def __init__(
@@ -213,6 +245,11 @@ class FakeTab:
         cdp_responses: dict[str, Any] | None = None,
         select_result: Any = None,
         target_id: str = "T-faketab",
+        lifecycle: str = "before",
+        title_at_load: str | None = None,
+        title_at_dcl: str | None = None,
+        stale_load_for: str | None = None,
+        last_milestone: str = "load",
     ) -> None:
         self.url = url
         # ``fake_target`` (defined below) — a Tab's ``.target`` is a real
@@ -234,15 +271,108 @@ class FakeTab:
         self.select_calls: list[str] = []
         self.cdp_frames: list[dict[str, Any]] = []
         self.handlers: list[tuple[Any, Any]] = []
+        self._lifecycle = lifecycle
+        self._title_at_load = title_at_load
+        self._title_at_dcl = title_at_dcl
+        self._stale_load_for = stale_load_for
+        self._last_milestone = last_milestone
+        self.navigations = 0
+        # The milestones the CURRENT document has reached. A tab that exists is
+        # showing a loaded document until it is navigated.
+        self._reached: set[str] = {"init", "DOMContentLoaded", "load"}
+
+    # -- the navigation model (F-881) ---------------------------------------
+
+    def _deliver(self, event: Any) -> None:
+        """Hand *event* to every handler registered for its type, the way
+        nodriver's listener does: ``callback(event, connection)`` first, then
+        ``callback(event)`` for a handler that takes only the event."""
+        for event_type, handler in list(self.handlers):
+            if event_type is not type(event):
+                continue
+            try:
+                handler(event, self)
+            except TypeError:
+                handler(event)
+
+    def _lifecycle_event(self, loader_id: str, name: str) -> Any:
+        return cdp_page.LifecycleEvent(
+            frame_id=cdp_page.FrameId("F-main"),
+            loader_id=cdp_network.LoaderId(loader_id),
+            name=name,
+            timestamp=cdp_network.MonotonicTime(0.0),
+        )
+
+    def _reach(self, milestones: list[tuple[str, str]]) -> None:
+        """Deliver the first of *milestones* now and the rest one loop iteration
+        each — Chrome sends them as separate frames, and nodriver's ``Tab.wait``
+        returns on the FIRST one, which is how a reader that trusted it came to
+        read the page at ``init`` rather than at ``load``."""
+        if not milestones:
+            return
+        loader_id, name = milestones[0]
+        if name != "load" or loader_id != self._stale_load_for:
+            self._reached.add(name)
+        self._deliver(self._lifecycle_event(loader_id, name))
+        rest = milestones[1:]
+        if rest:
+            if self._lifecycle == "before":
+                self._reach(rest)
+            else:
+                asyncio.get_running_loop().call_soon(self._reach, rest)
+
+    def _navigate(self, url: str) -> tuple[Any, Any, None]:
+        """``Page.navigate``'s answer, and the new document's lifecycle."""
+        same_document = "#" in url and url.split("#", 1)[0] == self.url.split("#", 1)[0]
+        self.url = url
+        self.target.url = url
+        if same_document:
+            return (cdp_page.FrameId("F-main"), None, None)
+        self.navigations += 1
+        loader_id = f"L{self.navigations}"
+        self._reached = set()
+        milestones: list[tuple[str, str]] = []
+        if self._stale_load_for is not None:
+            milestones.append((self._stale_load_for, "load"))
+        if self._lifecycle != "never":
+            order = ["init", "DOMContentLoaded", "load"]
+            reached = order[: order.index(self._last_milestone) + 1]
+            milestones.extend((loader_id, name) for name in reached)
+        if self._lifecycle == "before":
+            self._reach(milestones)
+        elif milestones:
+            asyncio.get_running_loop().call_soon(self._reach, milestones)
+        return (cdp_page.FrameId("F-main"), cdp_network.LoaderId(loader_id), None)
+
+    def _title_now(self) -> str | None:
+        """What ``document.title`` reads for the modelled page, or ``None`` when
+        no page is modelled (the canned answers apply)."""
+        if self._title_at_load is None and self._title_at_dcl is None:
+            return None
+        if self._title_at_load is not None and "load" in self._reached:
+            return self._title_at_load
+        if self._title_at_dcl is not None and "DOMContentLoaded" in self._reached:
+            return self._title_at_dcl
+        return ""
+
+    async def wait(self, t: Any = None) -> None:
+        """nodriver 0.47's ``Tab.wait(t)``, as it IS (F-881).
+
+        *t* is a DURATION. Its body is ``if not t: t = 0.5; await asyncio.wait(
+        [first-of-five-navigation-events, sleep(t)])`` — so a truthy argument of
+        any kind (``tab.wait(cdp.page.LoadEventFired)``, an event CLASS) skips
+        the wait outright, which is how ``navigate``'s ``load`` wait came to
+        cost 0.02 ms. Modelled exactly: nothing for a truthy *t*, one loop
+        iteration for none — when :meth:`_navigate`'s first event lands.
+        """
+        self.awaited += 1
+        if not t:
+            await asyncio.sleep(0)
 
     def __await__(self) -> Any:
         """nodriver's ``Tab.__await__`` (→ ``Tab.wait()``). Only ``Tab`` defines
         it — see :class:`FakeDiscoveredTarget`, which deliberately does not."""
-
-        async def _wait() -> None:
-            self.awaited += 1
-
-        return _wait().__await__()
+        return self.wait().__await__()
 
     def _answer_for_js(self, expression: str) -> Any:
         """The canned answer for a JS expression — ONE home for it.
@@ -252,9 +382,18 @@ class FakeTab:
         uses since F-832). A test says "this JS answers with X" once, whichever
         seam the code under test happens to take.
         """
+        if expression.strip() == "document.title" and self._title_now() is not None:
+            return self._title_now()
         for needle, resp in self._evaluate_map.items():
             if needle in expression:
                 return resp
+        if self._evaluate_result is None and expression.strip() in (
+            "window.location.href",
+            "location.href",
+        ):
+            # Where the modelled page IS — ``.url`` moves with every navigation
+            # the fake answers (F-881); an explicit map entry above still wins.
+            return self.url
         return self._evaluate_result
 
     async def evaluate(self, expression: str, *args: Any, **kwargs: Any) -> Any:
@@ -262,14 +401,18 @@ class FakeTab:
         return self._answer_for_js(expression)
 
     async def get(self, url: str, *args: Any, **kwargs: Any) -> FakeTab:
-        """nodriver's ``Tab.get`` — the navigation seam.
+        """nodriver's ``Tab.get``, as weak as the real one (F-881).
 
-        Updates ``.url`` the way a real navigation does, so a caller that reads
-        the tab back after navigating sees where it went. Returns ``self``, as
-        ``Tab.get`` returns the tab it navigated.
+        The real one is ``send(Page.navigate)`` then ``Tab.wait()``, which
+        returns on the FIRST navigation event (or after 0.5 s when the ``Page``
+        domain was never enabled — the shipped product's case), so the tab it
+        hands back is committed but not loaded. Modelled as the same send plus
+        ONE loop iteration, which is exactly when :meth:`_navigate`'s ``init``
+        lands. Returns ``self``, as ``Tab.get`` returns the tab it navigated.
         """
         self.get_calls.append(url)
-        self.url = url
+        await self.send(cdp_page.navigate(url))
+        await self
         return self
 
     async def back(self) -> None:
@@ -323,6 +466,17 @@ class FakeTab:
         handlers a code path registered, not just that it sent a command.
         """
         self.handlers.append((event_type, handler))
+
+    def remove_handler(self, event_type: Any, handler: Any = None) -> None:
+        """nodriver's ``Connection.remove_handler``, with its real semantics
+        (F-824, F-881): the *handler* argument is ignored (the library's
+        ``cb == self`` comparison never matches) and EVERY handler for the event
+        type is dropped — ``del self.handlers[evt]`` — so a type with no handler
+        left raises ``KeyError`` carrying the event class, which is exactly what
+        an overlapping ``Tab.wait()`` hands the other waiter."""
+        if not any(evt is event_type for evt, _ in self.handlers):
+            raise KeyError(event_type)
+        self.handlers = [(evt, h) for evt, h in self.handlers if evt is not event_type]
 
     async def send(self, cdp_obj: Any, *args: Any, **kwargs: Any) -> Any:
         name = cdp_command_name(cdp_obj)
@@ -380,6 +534,9 @@ class FakeTab:
             if answer is None or isinstance(answer, tuple):
                 return answer
             return js_result(answer)
+        if name == "navigate" and name not in self._cdp_responses and frame:
+            # ``Page.navigate`` — the navigation model (F-881, class docstring).
+            return self._navigate(frame["params"]["url"])
         resp = self._cdp_responses.get(name, None)
         return resp(name) if callable(resp) else resp
 

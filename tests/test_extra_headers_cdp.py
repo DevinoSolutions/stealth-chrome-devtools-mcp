@@ -200,7 +200,9 @@ async def test_navigate_without_a_referrer_sends_no_header_command(
 
     await navigating_manager.navigate(instance_id="iid-1", url="https://fake.test/t")
 
-    assert [f["method"] for f in tab.cdp_frames] == []
+    # The navigation itself is a CDP frame (``Page.navigate`` — the fake models
+    # it since F-881); what must be absent is the header command.
+    assert SET_EXTRA not in [f["method"] for f in tab.cdp_frames]
 
 
 # ---------------------------------------------------------------------------
