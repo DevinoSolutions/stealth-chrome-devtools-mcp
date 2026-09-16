@@ -58,21 +58,37 @@ Measured at three concurrent ``wait_for_element`` calls on one tab: every round
 raised it, and at five concurrent, three of five did.
 
 So the fix is not a wider marker list -- it is to stop generating the race.
-``_document_lock`` gives each tab one ``asyncio.Lock``, held across each
-resolution ATTEMPT (never across the settle sleep between attempts), so
-``DOM.getDocument`` and the query that uses its node id are atomic per tab.
-The lock's scope is the tab OBJECT because the state it guards is, and it is
-taken by every function here, so no selector-resolving path can opt out.
+``_document_lock`` gives each tab one ``asyncio.Lock``, held around exactly
+ONE thing: nodriver's single-shot ``getDocument`` + query pair
+(``Tab.query_selector`` / ``query_selector_all`` / ``find_element_by_text`` /
+``find_elements_by_text``). The lock's scope is the tab OBJECT because the
+state it guards is, and it is taken by every function here, so no
+selector-resolving path can opt out.
 
-What that costs, and what it does not:
+The WAIT is this module's, and it happens outside the lock
+-----------------------------------------------------------
+nodriver's ``select``/``find``/``select_all``/``xpath`` bundle a poll loop into
+the same call as the query. The first cut of this fix held the lock around
+those, and the review measured what that costs through the real handlers: a
+``wait_for_element`` with a ONE-second caller timeout held the tab's lock for
+10.5 s (nodriver's default wait), a sibling ``query_elements`` that answered in
+0.25 s answered in 10.56 s, and a waiter for ``#late`` starved the concurrent
+click that would have CREATED ``#late`` -- ``True @ 1.08 s`` became
+``False @ 10.71 s``, a wrong answer rather than a slow one. Four concurrent
+absent-selector resolutions blew the tool's own 30 s ``_with_cdp_timeout``.
 
-* a resolution that WAITS blocks siblings on the same tab for as long as it
-  waits, because nodriver's ``select``/``find``/``select_all`` bundle the wait
-  into the same call as the query. On a selector that is present this is
-  invisible and in fact faster than the racing version it replaces (the races
-  it removes each cost a settle sleep); on one that is absent, concurrent
-  waiters serialise. That is the deliberate trade: a late answer over a
-  -32000;
+So the polling is done here, in ``_wait_for``: one locked single-shot query,
+then -- with the lock released -- a ``_POLL_SECONDS`` sleep, bounded by the
+caller's own deadline, and again. A concurrent action lands between polls; a
+waiter never holds the tab hostage; a caller's ``timeout`` means what it says.
+The defaults and the interval are nodriver's own, so a caller that passed no
+timeout waits exactly as long as it did before. ``timeout=0`` is one query.
+
+What that still costs, and what it does not:
+
+* the lock is held for one CDP round trip pair at a time, so concurrent
+  resolutions interleave at that granularity; a genuinely slow single query
+  (a huge document) still delays a sibling by its own duration;
 * it does NOT make a node id safe to hold across calls. ``query_selector_all``
   hands back raw ids and its caller owns them once the lock is released -- the
   cloner engine holds one across five further CDP calls, and a sibling
