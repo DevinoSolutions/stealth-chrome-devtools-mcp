@@ -40,6 +40,10 @@ import nodriver.cdp.dom as cdp_dom
 import nodriver.cdp.runtime as cdp_runtime
 import nodriver.cdp.target as cdp_target
 
+#: "this double was not told to answer anything unusual" — distinct from every
+#: value a test might legitimately want it to answer with, ``None`` included.
+_UNSET = object()
+
 # ---------------------------------------------------------------------------
 # Module signature guards (shared by the on-disk record modules)
 # ---------------------------------------------------------------------------
@@ -344,6 +348,15 @@ class FakeTab:
             except StopIteration:
                 pass
             cdp_obj.close()  # never leave the generator un-iterated
+        if name == "insert_text" and frame:
+            # Chrome's own routing for ``Input.insertText``: the text is inserted
+            # at the caret of the FOCUSED element, and a control that refuses
+            # typed characters refuses an insert too (F-876 measured all five —
+            # readonly, range, date, color, a non-editable div — taking the
+            # insert and moving nothing). Same seam, same field, per COMMAND.
+            field = self._select_result
+            if isinstance(field, FakeTextField) and field.focused:
+                field.insert(frame["params"].get("text", ""))
         if name == "dispatch_key_event" and frame:
             # Chrome's own routing: a key event carrying ``text`` is inserted at
             # the caret of the FOCUSED element (F-873). Modelled per EVENT, not
@@ -582,11 +595,140 @@ class FakeTextField:
         text = params.get("text")
         if not text or params.get("type") == "keyUp":
             return
-        if not self.accepts:
+        self.insert(text)
+
+    def insert(self, text: str) -> None:
+        """Commit *text* at the caret — the ONE place this double changes value.
+
+        Both entry seams land here: a key event carrying ``text``
+        (``Input.dispatchKeyEvent``) and ``paste_text``'s single
+        ``Input.insertText`` (F-876). One home, because the whole point of the
+        double is that a control which refuses one refuses the other, which is
+        what the F-876 matrix measured on Chrome 152.
+        """
+        if not text or not self.accepts:
             return
         if text in ("\r", "\n") and not (self.multiline or self.content_editable):
             return
         self.value += "\n" if text == "\r" else text
+
+
+class FakeClickTarget:
+    """A nodriver ``Element`` double for a CLICK target, PAGE-BACKED (F-876).
+
+    ``FakeTextField``'s sibling, one interaction over. It models the two things
+    the click path depends on and nothing else:
+
+    * **where the click goes** — ``Element.mouse_click`` clicks
+      ``Position(quads[0]).center``, i.e. the centre of the element's FIRST box.
+      This double is given that box (``rect``) and computes the point from it,
+      so no test can state a point the geometry does not produce. An element
+      with ``rendered=False`` has no box at all (``display:none``): nodriver's
+      ``get_position`` raises there and the product falls back to the synthetic
+      ``Element.click``, which is what ``mouse_click_error`` expresses.
+    * **what is under that point** — ``document.elementFromPoint``. Measured on
+      Chrome 152 (F-876 §2c): it names an overlay for a covered target, ``BODY``
+      for a ``pointer-events:none`` / zero-size / ``visibility:hidden`` target,
+      and the target itself for a ``disabled`` one (whose click Chrome still
+      suppresses — which is why ``disabled`` is a separate fact and not a
+      hit-test outcome).
+
+    The aim answer is a JSON **string** COMPUTED from this object's own state —
+    never supplied by a test — for the same reason ``FakeTextField``'s read-back
+    is: a fixture that hands over the answer can quietly encode the bug.
+
+    ``text`` exists only so a pin can assert it never reaches the record: an
+    overlay is frequently a consent banner or a modal and its words are the
+    page's, not the tool's to echo.
+    """
+
+    def __init__(  # noqa: PLR0913  PERMANENT(one field per measured DOM fact)
+        self,
+        tag: str = "button",
+        element_id: str = "target",
+        classes: tuple[str, ...] = (),
+        rect: tuple[float, float, float, float] = (10.0, 20.0, 40.0, 20.0),
+        hit: tuple[str, str, tuple[str, ...]] | None = None,
+        disabled: bool = False,
+        pointer_events: str = "auto",
+        visibility: str = "visible",
+        rendered: bool = True,
+        text: str = "SECRET-BUTTON-LABEL",
+        mouse_click_error: Exception | None = None,
+        aim_answer: Any = _UNSET,
+    ) -> None:
+        self.tag = tag
+        self.element_id = element_id
+        self.classes = tuple(classes)
+        self.rect = rect
+        self.hit = hit
+        self.disabled = disabled
+        self.pointer_events = pointer_events
+        self.visibility = visibility
+        self.rendered = rendered
+        self.text = text
+        self.mouse_click_error = mouse_click_error
+        self._aim_answer = aim_answer
+        self.calls: list[str] = []
+        self.apply_calls: list[str] = []
+
+    # -- the shape vocabulary, the only thing said about any element ---------
+    def _self_shape(self) -> dict[str, Any]:
+        return {"tag": self.tag, "id": self.element_id, "classes": list(self.classes)}
+
+    def _hit_shape(self) -> dict[str, Any] | None:
+        if not self.rendered:
+            return None
+        if self.hit is None:
+            return self._self_shape()
+        tag, element_id, classes = self.hit
+        return {"tag": tag, "id": element_id, "classes": list(classes)}
+
+    def _aim(self) -> str:
+        left, top, width, height = self.rect if self.rendered else (0.0, 0.0, 0.0, 0.0)
+        return json.dumps(
+            {
+                "rendered": self.rendered,
+                "rect": {
+                    "left": left,
+                    "top": top,
+                    "width": width,
+                    "height": height,
+                },
+                "point": (
+                    {"x": left + width / 2, "y": top + height / 2}
+                    if self.rendered
+                    else None
+                ),
+                "target": self._self_shape(),
+                "hit": self._hit_shape(),
+                "hit_is_target": self.rendered and self.hit is None,
+                "disabled": self.disabled,
+                "pointer_events": self.pointer_events,
+                "visibility": self.visibility,
+            }
+        )
+
+    # -- the nodriver Element surface the click path touches -----------------
+    async def scroll_into_view(self) -> None:
+        self.calls.append("scroll_into_view")
+
+    async def mouse_click(self) -> None:
+        self.calls.append("mouse_click")
+        if self.mouse_click_error is not None:
+            raise self.mouse_click_error
+
+    async def click(self) -> None:
+        self.calls.append("click")
+
+    async def apply(self, js_function: str, *args: Any, **kwargs: Any) -> Any:
+        self.apply_calls.append(js_function)
+        if "elementFromPoint" in js_function:
+            self.calls.append("aim")
+            if self._aim_answer is not _UNSET:
+                return self._aim_answer
+            return self._aim()
+        return None
 
 
 class FakeDiscoveredTarget:

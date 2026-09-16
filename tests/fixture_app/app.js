@@ -266,6 +266,24 @@
         window.logAction("click", "offscreen-btn");
       });
 
+      // F-876: each of these logs its own click with isTrusted, so "the target
+      // never received it" and "it received a SYNTHETIC one" are distinguishable
+      // from the action log alone.
+      ["pe-none-btn", "zero-size-btn", "display-none-btn", "vis-hidden-btn"].forEach(
+        function (id) {
+          on(id, "click", function (e) {
+            window.logAction(
+              "click",
+              id,
+              e.isTrusted ? "trusted" : "untrusted"
+            );
+          });
+        }
+      );
+      on("editable-div", "input", function () {
+        window.logAction("input", "editable-div");
+      });
+
       // Disabled button must never log a click; the label toggles its checkbox.
       on("disabled-btn", "click", function () {
         window.logAction("click", "disabled-btn");

@@ -44,6 +44,28 @@
         min-height: 30px;
         border: 1px dashed rgb(150, 150, 150);
       }
+
+      /* F-876 click-verification targets. Each is a shape MEASURED (Chrome 152)
+         to take a real coordinate click and deliver it to something other than
+         the target -- or to nobody -- while click_element answered True. None of
+         them is clicked by any other test, so they add no actions to the log. */
+      #pe-none-btn {
+        pointer-events: none;
+      }
+      #zero-size-btn {
+        width: 0;
+        height: 0;
+        overflow: hidden;
+        padding: 0;
+        border: 0;
+        margin: 0;
+      }
+      #display-none-btn {
+        display: none;
+      }
+      #vis-hidden-btn {
+        visibility: hidden;
+      }
     </style>
   </head>
   <body>
@@ -143,6 +165,19 @@
     <!-- Offscreen target below a tall spacer: proves click auto-scrolls. -->
     <div id="scroll-spacer"></div>
     <button id="offscreen-btn">Offscreen</button>
+
+    <!-- F-876: targets a real coordinate click reaches but the TARGET does not
+         receive (pointer-events:none / zero-size / visibility:hidden all send
+         the click to <body>; display:none has no box at all, so
+         Element.mouse_click raises and the tool falls back to the synthetic,
+         untrusted el.click()). Plus the two non-input paste targets: a plain
+         <div>, which takes nothing, and a contenteditable one, which does. -->
+    <button id="pe-none-btn">PE none</button>
+    <button id="zero-size-btn">Z</button>
+    <button id="display-none-btn">Display none</button>
+    <button id="vis-hidden-btn">Visibility hidden</button>
+    <div id="plain-div">PLAIN-DIV-TEXT</div>
+    <div id="editable-div" contenteditable="true"></div>
 
     <!-- Anchor destination, far down the page. -->
     <div id="anchor-target">ANCHOR-TARGET-TEXT</div>
