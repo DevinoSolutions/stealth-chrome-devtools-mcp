@@ -107,12 +107,17 @@ async def test_a_retry_that_fails_reports_the_scripts_own_error_not_ours():
 @pytest.mark.asyncio
 async def test_the_args_path_is_untouched():
     """A script WITH args was already wrapped in a function before this fix, so
-    its top-level return was always legal — it must not gain a second eval."""
+    its top-level return was always legal — it must not gain a second eval.
+
+    F-883 made that wrapper ``async`` (deliberately, same PR: otherwise ``await``
+    would be legal on one of the tool's two call shapes and not the other). What
+    this node protects is unchanged — the args path wraps ONCE and never retries.
+    """
     tab = FakeTab(evaluate_result=js_result("ok", type_="string"))
 
     assert await DOMHandler.execute_script(tab, "return 1;", args=[7]) == "ok"
     assert len(tab.cdp_frames) == 1
-    assert _expressions(tab)[0] == "(function() { return 1; })(7)"
+    assert _expressions(tab)[0] == "(async function() { return 1; })(7)"
 
 
 @pytest.mark.asyncio

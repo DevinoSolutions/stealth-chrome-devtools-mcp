@@ -2388,6 +2388,63 @@ def _r_nav_download(handler, query: str) -> None:
     )
 
 
+# ── F-883 (``es_*``): the page ``execute_script``'s async contract is proved on ─
+#
+# Appended at the END, per the F-883 task's rule for new routes. The page is
+# deliberately inert — no timers of its own, no fetches, nothing that races the
+# script under test. What it provides is the two things a Promise assertion
+# needs and a literal cannot fake: a delayed resolution the PAGE owns
+# (``esDelayed``), so a value that arrives is proof the tool waited for it, and
+# a rejection carrying a known reason (``esRejects``), so the error the tool
+# raises can be matched against text nothing else on the page holds. ``esNever``
+# is the un-settling Promise the ``timeout_ms`` bound is measured against, and
+# ``esSettled`` records what ``esDelayed`` last resolved — the observable the
+# late-settlement node (F-883 B1) polls instead of sleeping.
+ES_SENTINEL = "fixture-es-async-page"
+ES_REJECT_REASON = "es-rejected-on-purpose"
+ES_VALUE_TOKEN = "es-fetched-value"
+ES_JSON_PAYLOAD = {"k": ES_VALUE_TOKEN, "n": 9}
+
+
+def es_async_page() -> str:
+    """The exact page ``/es_async.html`` serves."""
+    script = """
+(function () {
+  window.esSettled = null;
+  window.esDelayed = function (ms, value) {
+    return new Promise(function (ok) {
+      setTimeout(function () { window.esSettled = value; ok(value); }, ms);
+    });
+  };
+  window.esRejects = function (reason) {
+    return new Promise(function (_ok, fail) {
+      setTimeout(function () { fail(new Error(reason)); }, 10);
+    });
+  };
+  window.esNever = function () { return new Promise(function () {}); };
+  window.esNested = function () {
+    return { user: { id: 7, tags: ['a', 'b'] },
+             rows: [{ k: 1 }, { k: [3, { deep: true }] }],
+             flags: { zero: 0, empty: '', no: false, nil: null } };
+  };
+})();
+"""
+    return _page(
+        "es-async",
+        ES_SENTINEL,
+        f"<p id='es-reason'>{ES_REJECT_REASON}</p>",
+        head=f"<script>{script}</script>",
+    )
+
+
+def _r_es_async(handler, query: str) -> None:
+    _send_html(handler, es_async_page())
+
+
+def _r_es_value(handler, query: str) -> None:
+    _send_json(handler, ES_JSON_PAYLOAD)
+
+
 ROUTES: dict[tuple[str, str], Route] = {
     # MQ-114
     ("GET", "/spa_history.html"): _r_spa,
@@ -2467,6 +2524,9 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/dynamic_probe.html"): _r_dynamic_probe,
     ("GET", "/e2e/reset"): _r_reset,
     ("GET", "/e2e/ledger"): _r_ledger,
+    # F-883 — appended at the END (``es_*``).
+    ("GET", "/es_async.html"): _r_es_async,
+    ("GET", "/es_value"): _r_es_value,
 }
 
 # Every page this module serves, and the sentinel each carries. The hermetic
@@ -2499,6 +2559,8 @@ DYNAMIC_PAGES: dict[str, str] = {
     "/nav/slow-doc": NAV_SLOW_DOC_SENTINEL,
     "/nav/preempt": NAV_PREEMPT_SENTINEL,
     "/nav/iframe-host": NAV_IFRAME_HOST_SENTINEL,
+    # F-883 — appended at the END (``es_*``).
+    "/es_async.html": ES_SENTINEL,
 }
 
 

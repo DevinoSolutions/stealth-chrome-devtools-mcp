@@ -491,7 +491,7 @@ class CDPFunctionExecutor:
         self, tab: Tab, function_path: str, args: list[Any]
     ) -> dict[str, Any]:
         """
-        Calls a discovered JavaScript function with arguments.
+        Calls a discovered JS function — wrapper async, func.apply awaited (F-883).
 
         Args:
             tab (Tab): The browser tab.
@@ -505,7 +505,7 @@ class CDPFunctionExecutor:
             await self.enable_runtime(tab)
             js_args = json.dumps(args) if args else "[]"
             call_script = f"""
-            (function() {{
+            (async function() {{
                 try {{
                     const pathParts = '{function_path}'.split('.');
                     let context = window;
@@ -525,7 +525,7 @@ class CDPFunctionExecutor:
                     }}
 
                     const args = {js_args};
-                    const result = func.apply(context, args);
+                    const result = await func.apply(context, args);
                     return {{
                         success: true,
                         result: result,
@@ -636,7 +636,7 @@ class CDPFunctionExecutor:
         context_id: str | None = None,  # noqa: ARG002  PERMANENT(interface stability)
     ) -> dict[str, Any]:
         """
-        Injects and executes custom JavaScript code.
+        Injects and executes custom JS — wrappers async, inner call awaited (F-883).
 
         Args:
             tab (Tab): The browser tab.
@@ -649,9 +649,9 @@ class CDPFunctionExecutor:
         try:
             await self.enable_runtime(tab)
             wrapped_script = f"""
-            (function() {{
+            (async function() {{
                 try {{
-                    const result = (function() {{
+                    const result = await (async function() {{
                         {script_code}
                     }})();
                     return {{

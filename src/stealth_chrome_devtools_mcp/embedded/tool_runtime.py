@@ -36,6 +36,7 @@ import asyncio
 import re
 
 from stealth_chrome_devtools_mcp.embedded import (
+    cdp_transport,
     clone_storage,
     display_context,
     session_hygiene,
@@ -76,6 +77,7 @@ __all__ = [
     "browser_manager",
     "cdp_element_cloner",
     "cdp_function_executor",
+    "cdp_transport",
     "clone_storage",
     "debug_logger",
     "display_context",
@@ -160,12 +162,25 @@ def _clamp_timeout(timeout_ms: int, default: int = 30_000) -> int:
 
 
 async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
-    """Wrap a CDP coroutine with asyncio.wait_for to prevent infinite hangs.
+    """Bound a CDP coroutine so a stale connection cannot hang the caller.
 
-    When a Chrome DevTools Protocol connection is stale or dead, awaiting a
-    CDP operation blocks forever.  This wrapper raises a clear error after
-    *timeout* seconds so the caller (and the MCP client) gets a response
-    instead of hanging indefinitely.
+    When a Chrome DevTools Protocol connection is stale or dead, awaiting a CDP
+    operation blocks forever. This wrapper raises a clear error after *timeout*
+    seconds so the caller (and the MCP client) gets a response instead.
+
+    It **cancels the operation** on expiry, and that is deliberate: the caller
+    has given up, so the rest of a multi-step body must stop — a timed-out
+    ``type_text`` must stop typing, and a cancelled ``navigate`` must not
+    navigate anyway. That contract is pinned on the wire, over real frames
+    (``tests/test_wire_semantics.py``), which is what caught the first attempt
+    at F-883 B1: shielding HERE protects the send by detaching the whole
+    operation, and an operation nobody is waiting for finished the navigation
+    anyway.
+
+    Cancelling this coroutine used to ALSO cancel ``nodriver``'s ``Transaction``
+    for whichever send was in flight, which ended the connection's listener task
+    and wedged the instance (F-788 / F-794 / F-883 B1). That is fixed one layer
+    down, around the SEND, by ``cdp_transport`` — never here.
     """
     t = timeout or CDP_OPERATION_TIMEOUT
     try:
@@ -184,6 +199,14 @@ async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
 # load share ONE of each instead of holding three (plan_SERVERSPLIT §7 R4);
 # ``BrowserManager.start_idle_reaper``/``stop_idle_reaper`` are already idempotent,
 # which is the axis that change is felt on.
+# THE one call site for F-883 B1's transport protection. It sits with the
+# singletons because it has their shape — once per process, before any tool body
+# can run — and because THIS module is loaded once where ``server.py`` is
+# executed three times under runpy. Every CDP send in the tree goes through the
+# class it patches, ours and nodriver's own alike; ``cdp_transport``'s docstring
+# argues why that class is the only possible home for it.
+cdp_transport.install()
+
 browser_manager = BrowserManager()
 network_interceptor = NetworkInterceptor()
 dom_handler = DOMHandler()

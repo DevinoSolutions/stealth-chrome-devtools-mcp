@@ -38,9 +38,11 @@ lane on all three W2 runners. The stdio wire path is W1's separate claim
 returns one awaitable per call, "exactly one terminal outcome" is asserted at
 the call boundary, not over JSON-RPC request ids — MQ-127 says so in words.
 
-What the faults actually found. Two of the four recover cleanly and two do
-not, and W10's job is to say which is which rather than to pick assertions that
-pass:
+What the faults actually found. W10's job is to say which recover and which do
+not, rather than to pick assertions that pass. As W10 measured it, two of the
+four recovered cleanly and two did not; one of those two, F-788, has since been
+FIXED (`embedded/cdp_transport.py`, F-883 B1) and its characterization pin is
+now an assertion of recovery, so three of the four recover today:
 
 * **MQ-127** (a tab vanishes) and **MQ-129** (the connection drops mid-body)
   hold the full contract, including recovery, and are `satisfied`.
@@ -49,22 +51,27 @@ pass:
   ``False`` for a browser that is provably gone (F-789). Everything else — no
   orphan, removable profile, working fresh spawn — does hold.
 * **MQ-128** (navigation deadlines) times out exactly as specified, on the
-  product's own deadline, with the M6-pinned message. But a timed-out
-  navigation leaves the instance's CDP connection permanently wedged (F-788),
-  so the "then prove a normal navigation succeeds" half cannot be claimed.
+  product's own deadline, with the M6-pinned message. Its recovery half —
+  "then prove a normal navigation succeeds" — could not be claimed while a
+  timed-out navigation left the instance's CDP connection permanently wedged
+  (F-788). **F-788 is fixed** (``embedded/cdp_transport.py``: a cancelled await
+  no longer cancels nodriver's ``Transaction``, so the connection's listener
+  survives Chrome's late answer), the pin that carried it is now an assertion
+  of recovery, and the step is satisfied and bound.
 
-Both are pinned as characterizations and routed, never fixed: `src/` edits are
-a plan_RELEASE non-goal (§1.2), and a characterization can never satisfy an MQ
-(§0.2). MQ-126 and MQ-128 are therefore `planned` in the parity manifest and
-are NOT bound to any ``--mq`` id.
+MQ-126 stays pinned as a characterization and routed, never fixed here: `src/`
+edits are a plan_RELEASE non-goal (§1.2), and a characterization can never
+satisfy an MQ (§0.2). It is `planned` in the parity manifest and bound to no
+``--mq`` id. MQ-128 was in that position until F-788 closed, and moved out of it
+in the same change.
 
-MQ binding. Four faults, eight nodes; only the two whose contract holds are
-bound:
+MQ binding. Four faults, eight nodes; the three whose contract holds are bound:
 
 ===========  ================================================================
 MQ           node
 ===========  ================================================================
 ``MQ-127``   ``test_tab_closed_under_a_running_tool_has_one_terminal_outcome``
+``MQ-128``   ``test_a_navigation_timeout_leaves_the_instance_usable``
 ``MQ-129``   ``test_route_abort_mid_navigation_is_bounded_and_recoverable``
 ===========  ================================================================
 
@@ -74,15 +81,17 @@ The ids are bound to runtime evidence by the ``--mq`` flags on the
 what W8 resolves against; this table exists so the two cannot silently
 disagree.
 
-The other six nodes are current support, not acceptance:
+The other five nodes are current support, not acceptance:
 ``test_slow_success_control_completes_when_released`` and the two
-``..._times_out_with_the_pinned_message`` nodes are real assertions that MQ-128
-will rest on once F-788 closes;
-``test_crash_recovery_after_the_owned_chrome_is_killed`` (F-789),
-``test_a_navigation_timeout_wedges_the_instance_connection`` (F-788) and
+``..._times_out_with_the_pinned_message`` nodes are the rest of MQ-128 — its
+timeout half and its sensitivity control — carried by the bound node above;
+``test_crash_recovery_after_the_owned_chrome_is_killed`` (F-789) and
 ``test_networkidle_returns_before_the_transfer_completes`` (F-787) are
 characterization pins. Each pin asserts in the direction that makes a FIX go
-red, so closing any of these findings forces a deliberate test update.
+red, so closing either finding forces a deliberate test update — which is
+exactly what happened to F-788's pin: it went red carrying its own message, "a
+normal navigation succeeded after a timeout", and was inverted into the bound
+MQ-128 node above in the change that fixed it.
 """
 
 from __future__ import annotations
@@ -286,10 +295,17 @@ async def _assert_recovered(iid: str, base: str) -> None:
 async def _reap(iid: str) -> None:
     """Close *iid* best-effort, then make sure no Chrome from it survives.
 
-    Used by the nodes that deliberately leave the instance wedged (F-788): the
-    product cannot be relied on to tear it down, and a resilience suite that
-    leaked a Chrome tree per node would be its own worst finding. The final
-    assertion is unconditional, so a leak still fails the node.
+    Used by the nodes that assert a FAILURE and deliberately do not go on to
+    assert recovery — recovery has one owner, the node below them — so a
+    resilience suite cannot leak a Chrome tree per node. The final assertion is
+    unconditional, so a leak still fails the node.
+
+    It was written for the nodes that left the instance wedged (F-788), when the
+    product could not be relied on to tear one down. F-788 is fixed
+    (`embedded/cdp_transport.py`), so the close now normally succeeds; the
+    best-effort shape is KEPT, because a helper whose job is "leave nothing
+    running whatever happened" must not start failing the node it is cleaning up
+    after.
     """
     close = get_fn("close_instance")
     tree = _tree_pids(_tracked(iid).get("pid"))
@@ -599,10 +615,11 @@ async def test_load_wait_against_a_hang_times_out_with_the_pinned_message(
     fails on the product's own deadline, inside the outer bound, with the
     M6-pinned message byte-for-byte.
 
-    Recovery is NOT asserted here: a timed-out navigation wedges the instance's
-    CDP connection (F-788), which
-    ``test_a_navigation_timeout_wedges_the_instance_connection`` pins. That is
-    why MQ-128 is `planned` rather than satisfied at HEAD.
+    Recovery is NOT asserted here — it has one owner,
+    ``test_a_navigation_timeout_leaves_the_instance_usable``, which asserts the
+    full invariant. That node used to pin the opposite (F-788: a timed-out
+    navigation wedged the instance's CDP connection); F-788 is fixed, and
+    MQ-128 is satisfied by this node together with that one.
     """
     base = fixture_app_server
     await _assert_hang_times_out(instance, base, "load")
@@ -624,43 +641,36 @@ async def test_networkidle_wait_against_a_hang_times_out_with_the_pinned_message
     await _reap(instance)
 
 
-@pytest.mark.characterization
-async def test_a_navigation_timeout_wedges_the_instance_connection(
+async def test_a_navigation_timeout_leaves_the_instance_usable(
     instance, fixture_app_server
 ):
-    """PINS CURRENT BEHAVIOR incl. known quirk F-788; update deliberately when
-    it lands. After a navigation times out at a route that never answered, the
-    instance is permanently unusable: the NEXT navigation does not succeed, it
-    fails with the generic CDP-operation-timeout message after the full
-    ``_with_cdp_timeout`` budget.
+    """F-788 CLOSED. Inverted from the characterization pin that stood here,
+    deliberately, in the change that fixed it.
 
-    Cause (recorded, not fixed): the navigation deadline cancels ``tab.get``
-    mid-transaction; when Chrome later answers, nodriver's single connection
-    listener dies resolving the cancelled transaction, after which no CDP
-    future on that connection is ever resolved again. The product's own timeout
-    wrapper is the only reason callers stay bounded instead of hanging.
+    It used to read: after a navigation times out at a route that never
+    answered, the instance is permanently unusable — the NEXT navigation fails
+    with the generic CDP-operation-timeout message after the full
+    ``_with_cdp_timeout`` budget. The cause was never the deadline: cancelling
+    the navigation cancelled nodriver's ``Transaction`` while it was still
+    registered in ``Connection.mapper``, so when Chrome finally answered, the
+    single connection listener died resolving a cancelled future and no CDP
+    call on that connection was ever resolved again.
 
-    This is the fault that "leaves the server wedged", so it is the finding —
-    and it is exactly why MQ-128's recovery half cannot be claimed at HEAD.
+    ``embedded/cdp_transport.py`` (F-883 B1) moves the cancellation off the
+    Transaction and onto a shield, one layer below every deadline in the tree —
+    including ``browser_manager.navigate``'s own inner ``wait_for``, which is a
+    different scope from ``_with_cdp_timeout`` and is why this node is measured
+    rather than inferred from the ``execute_script`` case.
+
+    So the recovery invariant this suite asserts after every OTHER fault now
+    holds for this one too, and that is what is asserted: the instance is
+    driveable, closes clean, and a fresh spawn works.
     """
     base = fixture_app_server
-    navigate = get_fn("navigate")
 
     await _assert_hang_times_out(instance, base, "load")
 
-    outcome, value, elapsed = await _terminal(
-        navigate(instance_id=instance, url=f"{base}/index.html"),
-        "the navigation AFTER a timed-out navigation",
-    )
-    assert outcome == "raised", (
-        "a normal navigation succeeded after a timeout — F-788 is fixed and "
-        "MQ-128 can be promoted from planned to satisfied"
-    )
-    assert str(value).startswith("CDP operation timed out after "), str(value)
-    assert f"(instance {instance})" in str(value), str(value)
-    assert elapsed < OUTER_BOUND
-
-    await _reap(instance)
+    await _assert_recovered(instance, base)
 
 
 @pytest.mark.characterization
@@ -764,10 +774,13 @@ async def test_route_abort_mid_navigation_is_bounded_and_recoverable(
 # The CDP `Network.emulateNetworkConditions(offline=True)` variant the plan
 # offers as the ALTERNATIVE injection path is deliberately not a node here.
 # Issued against a tab that is parked in an in-flight `Page.navigate`, it never
-# returns: nodriver's single connection listener dies with `InvalidStateError`
+# returned: nodriver's single connection listener died with `InvalidStateError`
 # while resolving an earlier command's generator, after which no future on that
-# connection is ever resolved again (F-788). That wedges the *injection*, so it
-# cannot measure the product — and the harness bound correctly reported it
-# rather than letting it hang. The route-abort node above is the plan's other
+# connection was ever resolved again (F-788). That wedged the *injection*, so it
+# could not measure the product — and the harness bound correctly reported it
+# rather than letting it hang. F-788 is fixed now
+# (`embedded/cdp_transport.py`), so that reason no longer holds as written; the
+# exclusion STANDS because it has not been re-measured, and no offline-emulation
+# coverage may be inferred either way until it is. The route-abort node above is the plan's other
 # named mechanism and is what MQ-129 rests on; the exclusion is stated in the
 # MQ step so a reader cannot infer offline-emulation coverage that is absent.

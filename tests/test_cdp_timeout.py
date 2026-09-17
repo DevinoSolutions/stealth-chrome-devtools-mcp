@@ -130,23 +130,45 @@ class TestWithCdpTimeoutMechanism:
         assert results == ["done-0.1", "done-0.2", "done-0.3"]
 
     @pytest.mark.asyncio
-    async def test_timeout_cancels_inner_coroutine(self):
-        """After timeout, the inner coroutine should be cancelled."""
+    async def test_timeout_cancels_the_whole_operation(self):
+        """The caller gave up, so the rest of the body must stop (F-883 B1).
+
+        This pin was briefly inverted, and the inversion was wrong: shielding
+        the operation kept the connection alive by letting an operation nobody
+        was waiting for run to completion, so a cancelled ``navigate``
+        navigated anyway and ``tests/test_wire_semantics.py`` caught it over
+        real frames. The listener-safety half lives one layer down, around the
+        SEND (``cdp_transport``), where a cancelled caller no longer cancels
+        nodriver's ``Transaction``. Cancellation at THIS layer is the contract.
+        """
         cancelled = False
+        finished = False
 
         async def trackable():
-            nonlocal cancelled
+            nonlocal cancelled, finished
             try:
-                await asyncio.sleep(9999)
+                await asyncio.sleep(1.5)
             except asyncio.CancelledError:
                 cancelled = True
                 raise
+            finished = True
 
-        with pytest.raises(Exception, match="timed out"):
-            await _with_cdp_timeout(trackable(), timeout=1)
+        with pytest.raises(ToolError, match="timed out"):
+            await _with_cdp_timeout(trackable(), timeout=0.5)
 
-        await asyncio.sleep(0.1)  # Let cancellation propagate
-        assert cancelled, "Inner coroutine should have been cancelled"
+        await asyncio.sleep(0.2)
+        assert cancelled, "a caller that gave up must not leave the body running"
+        assert not finished, "the abandoned operation must not finish its work"
+
+    @pytest.mark.asyncio
+    async def test_a_result_that_arrives_in_time_is_still_returned(self):
+        """The happy path is untouched by either layer's decision."""
+
+        async def quick():
+            await asyncio.sleep(0.05)
+            return {"ok": True}
+
+        assert await _with_cdp_timeout(quick(), timeout=5) == {"ok": True}
 
 
 # ---------------------------------------------------------------------------
