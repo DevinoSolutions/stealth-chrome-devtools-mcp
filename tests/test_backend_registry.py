@@ -302,7 +302,10 @@ class TestPerContextRecords:
         )
         assert [e["port"] for e in reg.window_capable_first(p)] == [2, 1]
 
-    def test_forget_removes_only_the_named_context(self, tmp_path):
+    def test_forget_removes_only_the_named_entry(self, tmp_path):
+        """F-886: `forget_backend` (drop a whole display context) is DELETED;
+        `forget_entries` is the one way an entry leaves the record, and it
+        drops exactly the entries named."""
         p = tmp_path / "server.json"
         reg.record_backend(
             p,
@@ -320,11 +323,12 @@ class TestPerContextRecords:
             source_fingerprint="fp",
             display_context="win-session-1",
         )
-        reg.forget_backend(p, "headless")
+        [headless] = [e for e in reg.read_backends(p) if e["port"] == 1]
+        assert reg.forget_entries(p, [headless]) == ["headless"]
         assert [e["display_context"] for e in reg.read_backends(p)] == ["win-session-1"]
 
-    def test_forgetting_the_only_context_leaves_a_readable_empty_record(self, tmp_path):
-        """forget writes a valid empty v2 file rather than unlinking: only
+    def test_forgetting_the_only_entry_leaves_a_readable_empty_record(self, tmp_path):
+        """forget writes a valid empty file rather than unlinking: only
         clear_record (the `stop` verb) removes the file itself."""
         p = tmp_path / "server.json"
         reg.record_backend(
@@ -335,11 +339,11 @@ class TestPerContextRecords:
             source_fingerprint="fp",
             display_context="headless",
         )
-        reg.forget_backend(p, "headless")
+        reg.forget_entries(p, reg.read_backends(p))
         assert reg.read_backends(p) == []
         assert p.exists()
 
-    def test_forgetting_an_absent_context_is_a_no_op(self, tmp_path):
+    def test_forgetting_an_absent_entry_is_a_no_op(self, tmp_path):
         p = tmp_path / "server.json"
         reg.record_backend(
             p,
@@ -349,8 +353,114 @@ class TestPerContextRecords:
             source_fingerprint="fp",
             display_context="headless",
         )
-        reg.forget_backend(p, "win-session-9")
+        absent = {"display_context": "win-session-9", "port": 9, "pid": 99}
+        assert reg.forget_entries(p, [absent]) == []
         assert [e["port"] for e in reg.read_backends(p)] == [1]
+
+    def test_forget_backend_is_gone(self):
+        """A second way to drop entries would be a defect; the name must not
+        quietly return."""
+        assert not hasattr(reg, "forget_backend")
+
+
+class TestTwoIdentitiesOneContext:
+    """F-886's schema change: one display context can hold TWO clients'
+    backends — two identities, two ports — and recording one no longer erases
+    the other. What still supersedes is our OWN identity's previous entry, so
+    a respawn does not accumulate."""
+
+    @staticmethod
+    def _record(p, *, port, pid, version="2.1.8", fp="digest-a"):
+        reg.record_backend(
+            p,
+            port=port,
+            version=version,
+            pid=pid,
+            source_fingerprint=fp,
+            display_context="win-session-1",
+        )
+
+    def test_a_foreign_identity_on_the_same_context_is_kept(self, tmp_path):
+        """The S5 fleet: same version, one byte of source apart, one desktop.
+        Before F-886 the second record erased the first, and the first's proxy
+        could no longer confirm its own backend."""
+        p = tmp_path / "server.json"
+        self._record(p, port=1, pid=10, fp="digest-a")
+        self._record(p, port=2, pid=11, fp="digest-b")
+        got = {e["port"]: e["pid"] for e in reg.read_backends(p)}
+        assert got == {1: 10, 2: 11}
+
+    def test_a_different_version_on_the_same_context_is_kept(self, tmp_path):
+        p = tmp_path / "server.json"
+        self._record(p, port=1, pid=10, version="2.1.8")
+        self._record(p, port=2, pid=11, version="2.1.9")
+        assert {e["port"] for e in reg.read_backends(p)} == {1, 2}
+
+    def test_our_own_identity_respawned_on_a_new_port_supersedes(self, tmp_path):
+        """Same version, same digest, new port: that is THIS client's previous
+        cold start, and keeping it would leave a dead entry per respawn."""
+        p = tmp_path / "server.json"
+        self._record(p, port=1, pid=10)
+        self._record(p, port=2, pid=11)
+        assert [(e["port"], e["pid"]) for e in reg.read_backends(p)] == [(2, 11)]
+
+    def test_same_port_still_supersedes_whatever_the_identity(self, tmp_path):
+        """The by-port rule is unchanged: one listener per port."""
+        p = tmp_path / "server.json"
+        self._record(p, port=1, pid=10, fp="digest-a")
+        self._record(p, port=1, pid=11, fp="digest-b")
+        assert [(e["port"], e["pid"]) for e in reg.read_backends(p)] == [(1, 11)]
+
+    def test_an_unreadable_digest_supersedes_like_our_own(self, tmp_path):
+        """F-829's three-state reading holds for supersede too: an entry
+        recorded while the source could not be hashed is not thereby a
+        stranger to be preserved."""
+        p = tmp_path / "server.json"
+        self._record(p, port=1, pid=10, fp=None)
+        self._record(p, port=2, pid=11, fp="digest-a")
+        assert [(e["port"], e["pid"]) for e in reg.read_backends(p)] == [(2, 11)]
+
+    def test_the_file_is_written_as_a_v3_list(self, tmp_path):
+        p = tmp_path / "server.json"
+        self._record(p, port=1, pid=10)
+        raw = json.loads(p.read_text())
+        assert raw["schema"] == reg.SCHEMA_VERSION == 3
+        assert isinstance(raw["backends"], list)
+        assert raw["backends"][0]["display_context"] == "win-session-1"
+
+    def test_a_v2_keyed_record_still_reads_with_the_key_authoritative(self, tmp_path):
+        """Every 2.0.4-2.1.8 record is v2; dropping it would evict a healthy
+        backend on upgrade. The KEY still names the context, as it always did."""
+        p = tmp_path / "server.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "schema": 2,
+                    "backends": {
+                        "headless": {"port": 5, "version": "v", "pid": 50},
+                        "win-session-1": {
+                            "port": 6,
+                            "version": "v",
+                            "pid": 60,
+                            "display_context": "lies",
+                        },
+                    },
+                }
+            )
+        )
+        got = {e["display_context"]: e["port"] for e in reg.read_backends(p)}
+        assert got == {"headless": 5, "win-session-1": 6}
+
+    def test_a_v3_entry_without_a_context_reads_as_unverified(self, tmp_path):
+        p = tmp_path / "server.json"
+        p.write_text(json.dumps({"schema": 3, "backends": [{"port": 5, "pid": 1}]}))
+        [entry] = reg.read_backends(p)
+        assert entry["display_context"] == UNVERIFIED
+
+    def test_a_v3_record_whose_backends_is_not_a_list_is_no_backends(self, tmp_path):
+        p = tmp_path / "server.json"
+        p.write_text(json.dumps({"schema": 3, "backends": {"x": {"port": 5}}}))
+        assert reg.read_backends(p) == []
 
 
 class TestSingleRecordNormalizers:
@@ -410,7 +520,7 @@ class TestSingleRecordNormalizers:
 
 class TestAtomicWrite:
     def test_a_write_leaves_no_temp_file_behind(self, tmp_path):
-        """The v2 writer stages into a sibling temp file and os.replace()s it.
+        """The writer stages into a sibling temp file and os.replace()s it.
         A leftover temp would mean a partial write survived."""
         p = tmp_path / "server.json"
         reg.record_backend(
@@ -421,7 +531,7 @@ class TestAtomicWrite:
             source_fingerprint="fp",
             display_context="headless",
         )
-        reg.forget_backend(p, "headless")
+        reg.forget_entries(p, reg.read_backends(p))
         assert sorted(f.name for f in tmp_path.iterdir()) == ["server.json"]
 
     def test_a_failed_write_leaves_the_previous_record_intact(
@@ -557,19 +667,35 @@ class TestClearRecord:
         assert reg.read_backends(p) == []
 
 
-def _record(path, port, ctx, version="v"):
+def _record(path, port, ctx, version="v", digest="fp"):
     """One recorded backend. The F-808 adoption and conflict rules read only
     the port and the display context, so the identity fields are fixed noise
-    here — `version` is exposed only for the one pin that needs two identities.
+    here — `version` and `digest` are exposed only for the pins that need two
+    identities under one context (F-886).
     """
     reg.record_backend(
         path,
         port=port,
         version=version,
         pid=port,
-        source_fingerprint="fp",
+        source_fingerprint=digest,
         display_context=ctx,
     )
+
+
+def _nothing_is_ours(entry):
+    """The identity predicate for a machine with only ONE build on it, where
+    "ours on this context" and "this context's first entry" name the same port.
+    Every pin that predates F-886's two-identity record uses this, so those pins
+    keep asserting exactly what they always asserted.
+    """
+    return False
+
+
+def _ours_is(digest):
+    """The identity predicate `singleton._identity_matches` plays in production,
+    reduced to the one field these pins vary."""
+    return lambda entry: entry.get("source_fingerprint") == digest
 
 
 class TestAdoptionCandidates:
@@ -673,13 +799,17 @@ class TestPortForContext:
         _record(p, 1111, HEADLESS)
         _record(p, 2222, "win-session-1")
 
-        assert reg.port_for_context(p, "win-session-1") == 2222
+        assert (
+            reg.port_for_context(p, "win-session-1", matches=_nothing_is_ours) == 2222
+        )
 
     def test_an_unrecorded_context_has_no_port(self, tmp_path):
         p = tmp_path / "server.json"
         _record(p, 1111, HEADLESS)
 
-        assert reg.port_for_context(p, "win-session-1") is None
+        assert (
+            reg.port_for_context(p, "win-session-1", matches=_nothing_is_ours) is None
+        )
 
     def test_a_record_naming_no_usable_port_has_no_port(self, tmp_path):
         """Hand-edited or truncated records must read as "no port", never as a
@@ -687,7 +817,34 @@ class TestPortForContext:
         p = tmp_path / "server.json"
         p.write_text(json.dumps({"schema": 2, "backends": {"ctx": {"port": "nope"}}}))
 
-        assert reg.port_for_context(p, "ctx") is None
+        assert reg.port_for_context(p, "ctx", matches=_nothing_is_ours) is None
+
+    def test_our_own_entry_wins_over_a_stranger_recorded_first(self, tmp_path):
+        """F-886's blocker, at the level of the function that caused it.
+
+        On the desktop the protection creates, the stranger's entry is FIRST —
+        it was there before we stepped aside from it. Answering with it made
+        ``restart`` terminate a port that was not ours.
+        """
+        p = tmp_path / "server.json"
+        _record(p, 1111, "win-session-1", digest="theirs")
+        _record(p, 2222, "win-session-1", digest="ours")
+
+        assert (
+            reg.port_for_context(p, "win-session-1", matches=_ours_is("ours")) == 2222
+        )
+
+    def test_falls_back_to_the_first_entry_when_none_is_ours(self, tmp_path):
+        """The seed behaviour selection still depends on: with no entry of ours
+        the answer is where a backend on this desktop last ran, and selection
+        then tests it — a protected occupant still forces a fresh port."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, "win-session-1", digest="theirs")
+        _record(p, 2222, "win-session-1", digest="also-theirs")
+
+        assert (
+            reg.port_for_context(p, "win-session-1", matches=_ours_is("ours")) == 1111
+        )
 
 
 class TestPortConflict:
@@ -768,7 +925,9 @@ class TestOwnOrFirstPort:
         _record(p, 1111, HEADLESS)
         _record(p, 2222, "win-session-1")
 
-        assert reg.own_or_first_port(p, "win-session-1") == 2222
+        assert (
+            reg.own_or_first_port(p, "win-session-1", matches=_nothing_is_ours) == 2222
+        )
 
     def test_falls_back_to_the_first_backend_when_our_context_is_absent(self, tmp_path):
         """Keeps the single-backend and pre-v2 cases behaving exactly as they
@@ -776,10 +935,28 @@ class TestOwnOrFirstPort:
         p = tmp_path / "server.json"
         _record(p, 1111, HEADLESS)
 
-        assert reg.own_or_first_port(p, "win-session-1") == 1111
+        assert (
+            reg.own_or_first_port(p, "win-session-1", matches=_nothing_is_ours) == 1111
+        )
+
+    def test_our_own_identity_wins_inside_our_own_context(self, tmp_path):
+        """The seed has to ask the SAME question selection does, or restart
+        terminates a port selection did not choose (F-886 review, F1)."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, "win-session-1", digest="theirs")
+        _record(p, 2222, "win-session-1", digest="ours")
+
+        assert (
+            reg.own_or_first_port(p, "win-session-1", matches=_ours_is("ours")) == 2222
+        )
 
     def test_an_absent_record_has_no_port(self, tmp_path):
-        assert reg.own_or_first_port(tmp_path / "server.json", HEADLESS) is None
+        assert (
+            reg.own_or_first_port(
+                tmp_path / "server.json", HEADLESS, matches=_nothing_is_ours
+            )
+            is None
+        )
 
 
 class TestRecordedInt:
