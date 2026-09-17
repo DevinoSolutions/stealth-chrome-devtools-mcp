@@ -39,10 +39,12 @@ not, and each of them was found by asking a question only a wire lane can ask:
 
 * **Cancellation works, and works promptly** — a confirmed in-flight navigation
   answers within milliseconds of ``notifications/cancelled``, exactly once, and
-  the SERVER stays usable. Two things are wrong with it: the answer is a
-  JSON-RPC error with ``code: 0`` (F-791), which no client can classify by code;
-  and the cancelled INSTANCE is left wedged (F-794) — its next call burns the
-  full CDP budget and reports that the browser may have crashed.
+  the SERVER stays usable. One thing is still wrong with it: the answer is a
+  JSON-RPC error with ``code: 0`` (F-791), which no client can classify by code.
+  The other — the cancelled INSTANCE was left wedged (F-794), its next call
+  burning the full CDP budget to report that the browser may have crashed — is
+  FIXED, at the transport layer (``embedded/cdp_transport.py``, F-883 B1), and
+  the node below now pins the recovery instead of the wedge.
 * **Malformed input is answered with silence** (F-792). A non-JSON line and a
   method-less request both vanish: no ``-32700``, no ``-32600``, no frame at
   all. The session survives — which is the half that matters most — but a client
@@ -947,15 +949,21 @@ async def test_cancelling_a_confirmed_in_flight_request_ends_it_with_code_zero(
       ``0``. Zero is neither a reserved JSON-RPC code nor a documented product
       code, so a client can only recognise a cancellation by matching the
       message string.
-    * **F-794** — the cancelled instance is left **wedged**. The next navigation
-      on it does not work; it burns its full CDP budget and returns the
-      "browser may have crashed" timeout. Recovery means a NEW instance, not the
-      cancelled one, which is the same shape F-788 records for a navigation
-      timeout.
+    * **F-794 — CLOSED, and this node is what closes it.** The cancelled
+      instance used to be left **wedged**: the next navigation on it burned its
+      full CDP budget and returned the "browser may have crashed" timeout, so
+      recovery meant a NEW instance. Cancelling our await cancelled nodriver's
+      ``Transaction`` while it was still registered in ``Connection.mapper``,
+      and the late answer's ``set_result`` killed the connection's listener
+      task (the same mechanism F-788 records for a navigation timeout). Fixed
+      at the transport layer by ``embedded/cdp_transport.py`` (F-883 B1), and
+      the assertion below is inverted to match: it now pins RECOVERY, so a
+      regression is what turns it red.
 
-    Both are pinned in the direction that makes a fix red: a typed code, or an
-    instance that survives its own cancellation, turns this node red and forces
-    MQ-141 to be promoted deliberately.
+    F-791 is still pinned as-is, in the direction that makes a fix red: a typed
+    code turns this node red and forces MQ-141's classification half to be
+    promoted deliberately. That is why the node keeps its
+    ``characterization`` mark and its name.
     """
     token = _token("cancel")
     await _arm(fixture_app_server, token)
@@ -1000,10 +1008,17 @@ async def test_cancelling_a_confirmed_in_flight_request_ends_it_with_code_zero(
         f"a cancelled id received {len(wire.frames_for(request_id))} frames"
     )
 
-    # F-794: the cancelled INSTANCE does not recover. The next navigation on it
-    # burns its whole CDP budget and returns the crash-or-dropped-connection
-    # timeout. Pinned as-is; an instance that survives cancellation makes it red.
-    wedged_id = await wire.call_tool(
+    # F-794 CLOSED: the cancelled INSTANCE recovers. Cancelling the wait no
+    # longer cancels the in-flight ``Transaction``, so the connection's listener
+    # survives Chrome's late answer and the SAME instance takes the next
+    # navigation. Inverted deliberately, in the change that fixed it
+    # (``embedded/cdp_transport.py``); a wedge here now reads as the regression
+    # it would be. The instance has to do real work, not merely answer: the
+    # navigation is asserted to SUCCEED and the page's own sentinel is read
+    # back, because "no error frame" alone would also describe a tool that
+    # never reached Chrome.
+    recovered = await _call(
+        wire,
         "navigate",
         {
             "instance_id": named_instance,
@@ -1011,17 +1026,18 @@ async def test_cancelling_a_confirmed_in_flight_request_ends_it_with_code_zero(
             "timeout": NAV_TIMEOUT_MS,
         },
     )
-    wedged = _tool_result(await wire.response(wedged_id, OUTER_BOUND))
-    assert wedged.get("isError") is True, (
-        "the cancelled instance navigated again — F-794 is closed and MQ-141's "
-        "recovery half can be claimed"
+    assert _tool_payload(recovered)["success"] is True, (
+        "the cancelled instance is wedged — F-794 has regressed"
     )
-    text = wedged["content"][0]["text"]
-    # M6-pinned bytes (F-783's timeout message), verbatim.
-    assert text.startswith(
-        "Error calling tool 'navigate': CDP operation timed out after "
+    echoed = await _call(
+        wire,
+        "execute_script",
+        {
+            "instance_id": named_instance,
+            "script": _echo("after-cancellation"),
+        },
     )
-    assert text.endswith(CDP_TIMEOUT_TAIL)
+    assert _tool_payload(echoed)["result"] == "after-cancellation"
 
     # Recovery is at the SERVER level, not the instance level: a fresh instance
     # navigates and closes cleanly, so a cancellation costs one browser, not the

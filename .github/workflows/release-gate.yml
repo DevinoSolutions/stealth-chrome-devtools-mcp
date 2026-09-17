@@ -408,21 +408,32 @@ jobs:
         #   MQ-120 test_sse_and_websocket_lifecycle
         #   MQ-121 test_custom_elements_slots_and_popup_lifecycle
         #
-        # W10 (tests/test_resilience.py). Four faults, eight nodes — but only
-        # TWO ids are bound, because only two of the four contracts hold:
+        # W10 (tests/test_resilience.py). Four faults, eight nodes — THREE ids
+        # are bound, because three of the four contracts hold:
         #   MQ-127 test_tab_closed_under_a_running_tool_has_one_terminal_outcome
+        #   MQ-128 test_a_navigation_timeout_leaves_the_instance_usable
+        #          (+ the two ..._times_out_with_the_pinned_message nodes and
+        #           test_slow_success_control_completes_when_released)
         #   MQ-129 test_route_abort_mid_navigation_is_bounded_and_recoverable
         #
-        # MQ-126 and MQ-128 are deliberately NOT emitted. Their faults found
-        # real defects — close_instance returns False for a browser that is
-        # already gone (F-789), and a navigation timeout permanently wedges the
-        # instance's CDP connection (F-788) — so their recovery halves are
-        # false at HEAD. Both are characterization-pinned and routed, and the
-        # steps are `planned` in tests/MANUAL_QA_PROTOCOL.md. Emitting their ids
-        # here would bind a passing pin to a step it does not satisfy, which is
+        # MQ-128 joined them here, in the SAME commit that closed F-788 — which
+        # is what the note this replaces asked for. A navigation timeout used to
+        # leave the instance's CDP connection permanently wedged; the cause was
+        # never the deadline but a cancelled await taking nodriver's Transaction
+        # down with it, and it is fixed in embedded/cdp_transport.py. The
+        # characterization pin that carried the defect is now
+        # test_a_navigation_timeout_leaves_the_instance_usable and asserts the
+        # full recovery invariant, so the step's second half is real evidence
+        # rather than a pin bound to a step it does not satisfy.
+        #
+        # MQ-126 is still deliberately NOT emitted: close_instance returns False
+        # for a browser that is already gone (F-789), so its recovery half stays
+        # false at HEAD, it remains characterization-pinned and routed, and the
+        # step is `planned` in tests/MANUAL_QA_PROTOCOL.md. Emitting it here
+        # would bind a passing pin to a step it does not satisfy, which is
         # exactly the "count declarations as behavior" cheat plan_RELEASE §8.1
-        # refuses. Add them in the SAME commit that closes F-788/F-789 and
-        # promotes the steps.
+        # refuses. Add it in the SAME commit that closes F-789 and promotes the
+        # step.
         #
         # W16 (tests/test_stateful_i18n.py). Eight shapes, eleven nodes; seven
         # ids are bound:
@@ -474,6 +485,7 @@ jobs:
           --mq "MQ-120"
           --mq "MQ-121"
           --mq "MQ-127"
+          --mq "MQ-128"
           --mq "MQ-129"
           --mq "MQ-155"
           --mq "MQ-156"
