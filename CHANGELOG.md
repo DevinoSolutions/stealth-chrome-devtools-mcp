@@ -2,42 +2,6 @@
 
 ## Unreleased
 
-### Fixed — F-882b: a slow fixture document recorded itself into the NEXT test's ledger
-
-`tests/fixture_routes.py`'s `/nav/slow-doc` route slept first and appended to
-the server-side `nav_paths` ledger afterwards, where every other `/nav/*` route
-records on arrival. The one caller of that route pre-empts the navigation, so
-the browser abandons the request while the handler thread goes on sleeping for
-the full 2.5 s; by the time it records, the next test has already called
-`/e2e/reset` and the entry lands in a ledger that belongs to a different
-navigation. Measured: CI run 35150887345 (release-gate integration, Windows/
-X64, PR #123) failed the subframe node of
-`tests/test_e2e_navigation_truthfulness.py`, whose ledger must be exactly three
-paths, with the previous node's `/nav/slow-doc?ms=2500` at its head. The route
-records before it sleeps now, and a hermetic pin in
-`tests/test_fixture_dynamic_routes.py` holds the request open at the delay and
-reads the ledger while the response is still withheld — no browser and no
-wall-clock budget.
-
-### Fixed — F-882c: two navigation nodes asserted a fetch their milestone does not cover
-
-The sibling of F-882b, in the same ledger oracle and also not a product defect.
-`tests/test_e2e_navigation_truthfulness.py`'s meta-refresh and self-reload nodes
-asserted an exact fetch sequence at the instant `navigate` returned, for a
-second document their own page schedules AT `load` — the very milestone the
-tool returns on. Both nodes accept an answer about the FIRST document, and in
-that arm the server legitimately has not been asked for the second yet, so the
-oracle was racing the page it was meant to witness. Measured: CI run
-35157444236 (release-gate integration, macOS/ARM64, PR #126) failed the
-meta-refresh node with `['/nav/meta-refresh']` against an expected two paths.
-
-Both now wait through `_await_fetched`, a bounded poll of the ledger (5 s
-deadline, 50 ms interval) that returns whatever it has at the deadline; the
-exact-sequence assertions are unchanged, so a wrong order and a short ledger
-fail exactly as before. The other six ledger assertions in the file still read
-once, deliberately — each asserts on a fetch the tool's own answer proves
-already happened, and that classification is argued in the helper's docstring.
-
 ### Fixed — F-885: proxy/backend-death tests touched the developer's live `~/.stealth-mcp` record
 
 `tests/test_proxy_backend_death.py::TestProxyExitsOnBackendDeath` ran an
@@ -254,6 +218,42 @@ Everything else is byte-identical: a plain sync return, a nested object/array
 (including falsy leaves), `0`/`""`/`false`/`null`/`undefined`, `Infinity`, `args`,
 a synchronous throw, a non-serialisable value and a cycle all answer exactly as
 they did on 2.1.8 — measured, `audit/stage2/finding_F883_execute_script_never_awaits.md` §2d.
+
+### Fixed — F-882b: a slow fixture document recorded itself into the NEXT test's ledger
+
+`tests/fixture_routes.py`'s `/nav/slow-doc` route slept first and appended to
+the server-side `nav_paths` ledger afterwards, where every other `/nav/*` route
+records on arrival. The one caller of that route pre-empts the navigation, so
+the browser abandons the request while the handler thread goes on sleeping for
+the full 2.5 s; by the time it records, the next test has already called
+`/e2e/reset` and the entry lands in a ledger that belongs to a different
+navigation. Measured: CI run 35150887345 (release-gate integration, Windows/
+X64, PR #123) failed the subframe node of
+`tests/test_e2e_navigation_truthfulness.py`, whose ledger must be exactly three
+paths, with the previous node's `/nav/slow-doc?ms=2500` at its head. The route
+records before it sleeps now, and a hermetic pin in
+`tests/test_fixture_dynamic_routes.py` holds the request open at the delay and
+reads the ledger while the response is still withheld — no browser and no
+wall-clock budget.
+
+### Fixed — F-882c: two navigation nodes asserted a fetch their milestone does not cover
+
+The sibling of F-882b, in the same ledger oracle and also not a product defect.
+`tests/test_e2e_navigation_truthfulness.py`'s meta-refresh and self-reload nodes
+asserted an exact fetch sequence at the instant `navigate` returned, for a
+second document their own page schedules AT `load` — the very milestone the
+tool returns on. Both nodes accept an answer about the FIRST document, and in
+that arm the server legitimately has not been asked for the second yet, so the
+oracle was racing the page it was meant to witness. Measured: CI run
+35157444236 (release-gate integration, macOS/ARM64, PR #126) failed the
+meta-refresh node with `['/nav/meta-refresh']` against an expected two paths.
+
+Both now wait through `_await_fetched`, a bounded poll of the ledger (5 s
+deadline, 50 ms interval) that returns whatever it has at the deadline; the
+exact-sequence assertions are unchanged, so a wrong order and a short ledger
+fail exactly as before. The other six ledger assertions in the file still read
+once, deliberately — each asserts on a fetch the tool's own answer proves
+already happened, and that classification is argued in the helper's docstring.
 
 ## 2.1.8
 
