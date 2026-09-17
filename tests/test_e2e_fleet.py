@@ -195,12 +195,14 @@ def _spawn_lanes(followers: int) -> int:
     profile contention: Chrome had started and had not opened its port inside
     those 2.75 s. Windows and Linux passed the same commit.
 
-    Deliberately NOT paired with a test-side retry. The product's own hint says
-    "retry this one once the others have settled" and its tool body already has
-    a three-attempt loop; that loop skipped this failure only because
-    ``_fallback_profile_selection`` answers ``None`` for every non-clone role
-    (F-834 stage 1, measured, OPEN). A retry here would hide exactly that gap,
-    so this node stays one attempt per member.
+    Deliberately NOT paired with a test-side retry. Retrying is the PRODUCT's
+    job and it now does it: the loop in ``spawn_browser`` skipped this failure
+    only because ``_fallback_profile_selection`` answered ``None`` for every
+    non-clone role, and F-834 stage 1 closed that — an ``explicit`` loser now
+    retries onto the same directory the F-860 reap just freed. A retry here
+    would be a second way to do what the product does, and it would have hidden
+    the gap that got it fixed. One attempt per member, and a loss here is a
+    report about the cell.
     """
     return max(2, min(followers, os.cpu_count() or 2))
 
@@ -341,21 +343,27 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     # which `_dir_unavailable`'s own docstring calls "a LIVENESS check, NOT a
     # reservation … every concurrent spawn is pre-launch when it asks". The clone
     # path was given a reservation for exactly that reason (`_protect_clone_dir`,
-    # F-834 Layer 1); master deliberately was not — F-834 §"Not fixed here"
-    # records the decision. And the loser has no way back: measured,
-    # `_fallback_profile_selection` returns None for every non-`clone` role, on
-    # both attempts, so a master-role spawn that fails to connect raises instead
-    # of retrying. Windows and Linux passed the same commit because the window
-    # is timing-dependent; a two-core runner opens it.
+    # F-834 Layer 1); master deliberately was not, and still is not — F-834
+    # §"Stage 1 shipped" records that the release problem a reservation would
+    # bring still stands. Windows and Linux passed the same commit because the
+    # window is timing-dependent; a two-core runner opens it.
+    #
+    # What HAS changed since this paragraph was written is the loser's fate.
+    # F-834 stage 1 shipped: `_fallback_profile_selection` now answers every
+    # role, so a master-role spawn that loses retries — onto the same directory
+    # when nobody holds it, onto a reserved clone when a sibling does. The
+    # collision is therefore survivable, not fatal, and this serialization is no
+    # longer what stands between the node and a red. It stays because provoking
+    # a collision the product then has to recover from is not free: each loser
+    # burns a Chrome launch plus nodriver's whole ≈2.75 s connect deadline
+    # before the fallback is even asked (F-834 §Residuals 1), on the cell least
+    # able to spare it. Cheaper not to start the race.
     #
     # So the fleet spawns its first unnamed member on its own, lets that Chrome
-    # take master, and only then launches the other five AT ONCE. That is the
-    # manual fleet's real shape (one master, the rest clones) and it keeps every
-    # concurrency the product does promise: two unnamed CLONE spawns and three
-    # named ones, all in one `gather`. What it gives up is a guarantee that was
-    # never offered — and the residual is recorded in the F-834 finding rather
-    # than hidden here, so a later branch can reserve master and delete this
-    # paragraph.
+    # take master, and only then launches the other five. That is the manual
+    # fleet's real shape (one master, the rest clones) and it keeps every
+    # concurrency the product promises: unnamed CLONE spawns beside named ones,
+    # in one `gather`.
     #
     # `return_exceptions=True` on that second wave is load-bearing, not
     # defensive style. Without it `gather` re-raises the FIRST failure while the

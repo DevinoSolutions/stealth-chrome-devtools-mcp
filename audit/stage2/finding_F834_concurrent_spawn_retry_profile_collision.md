@@ -2,10 +2,10 @@
 
 **Severity: HIGH** (agent-fleet workloads — the primary local usage pattern)
 **Found:** 2026-08-30, live stress test of v2.0.7 (3 Opus agents spawning concurrently + 8-proxy herd)
-**Status:** FIXED — see "Fix shipped" below (branch `fix/F834-per-attempt-clone-dirs`).
-The F-835/F-836/F-837 sections embedded further down remain OPEN and are not
-covered by that fix. **Stage 1 (concurrent spawns all selecting the free master)
-is also still OPEN, and was measured on 2026-09-16 — see that section below.**
+**Status:** FIXED, both stages — stage 2 in "Fix shipped" below (branch
+`fix/F834-per-attempt-clone-dirs`), stage 1 in "Stage 1 shipped" (branch
+`fix/F834-stage1-master-fallback`). The F-835/F-836/F-837 sections embedded
+further down remain OPEN and are not covered by either fix.
 
 ## Symptom (as a client sees it)
 
@@ -204,73 +204,215 @@ entry at FIRE time; the sweep-start snapshot was the defer-time answer.
 
 ### Layer 3 — honest error text (`spawn_contention.py`, new leaf)
 
-`contention_hint(in_flight)` renders a paragraph naming the count, the cause,
-and — explicitly — that nodriver's root/`no_sandbox` advice does **not** apply
-here. It is appended at the one composition site in `browser_manager`, right
+`contention_hint(in_flight)` renders a paragraph naming the count, the two
+candidate causes, and — explicitly — that nodriver's root/`no_sandbox` advice
+does **not** apply here. (It named ONE cause as *the* cause until the stage-1
+work below; see "The hint names the count, never the mechanism".) It is
+appended at the one composition site in `browser_manager`, right
 beside F-811's `exhaustion_hint`, each carrying its own `"\n\n"` so the site
 stays a bare concatenation. `BrowserManager` tracks `_spawns_in_flight` and the
 per-burst `_spawn_peak_in_flight`; the hint reads the **peak**, because one
 race's losers fail in sequence and by the last of them the live count is 1
 again — the last loser is exactly the caller most likely to be reading.
 
-### Not fixed here (deliberate)
+### Not fixed here (deliberate) — CLOSED by "Stage 1 shipped" below
 
 Stage 1 of the two-stage race — N concurrent spawns all finding the **master**
-profile free and all opening it — is unchanged. Reserving master would need a
-matching release on the close path in `server.py` (at its LOC cap), and a leaked
-master reservation would silently force every later spawn to clone. Layer 1
-makes the *losers* of that race land in distinct directories, which is what
+profile free and all opening it — was left unchanged. Reserving master would
+need a matching release on the close path in `server.py` (at its LOC cap), and a
+leaked master reservation would silently force every later spawn to clone. Layer
+1 makes the *losers* of that race land in distinct directories, which is what
 turns the incident from a mutual kill into an ordinary retry.
 
-## Stage 1 measured, and the consolation above does not reach its losers (2026-09-16)
+**That last sentence was true of stage 2 only.** A stage-1 loser did not land in
+a distinct directory; it landed nowhere. See below.
 
-**Status: OPEN. A product change, not a test one — the E2E branch works around
-it and points here.**
+## Stage 1 shipped — a master loser retries onto a clone
 
-The CI gate for PR #123 (run 35146195943) failed on **macOS/ARM64 only**,
-1 of 216 integration nodes, with the product's own Layer-3 paragraph attached:
+**Status: FIXED** (branch `fix/F834-stage1-master-fallback`).
 
-```
-tests/test_e2e_fleet.py::test_a_fleet_of_six_browsers_answers_truthfully_about_every_page
-ToolError: Failed to spawn browser: Failed to connect to browser
-Spawn diagnostics: 6 spawn_browser calls were in flight in this backend when this one failed.
-```
+### What was still broken (the master half)
 
-The node spawned three UNNAMED members concurrently. Windows and Linux passed
-the same commit; a two-core runner opens the window the other cells close.
+`_fallback_profile_selection` returned `None` for every `profile_role` that was
+not `clone`, so `tool_sections/browser_management.py::spawn_browser`'s
+`for spawn_attempt in range(3)` re-raised on the FIRST failure whenever the
+attempt had selected `master`. Three concurrent unnamed spawns therefore
+produced one winner and two hard failures, each reading `Failed to connect to
+browser` plus nodriver's root/`no_sandbox` advice — the very advice layer 3's
+`contention_hint` exists to disclaim. The attempt count was never the problem:
+the retry budget was there, the loser just had nowhere to spend it.
 
-Two measurements were taken afterwards, both with the product's own functions
-against an isolated session root:
+Measured 2026-09-16 against the product's own functions (reproduced by the
+macOS/ARM64 gate cell, run 35146195943): three concurrent
+`clone_storage.resolve_profile_selection(None)` against a free master return
+`['master', 'master', 'master']`. That reading is **correct by design** and is
+now pinned as characterization — the master branch asks
+`_profile_has_running_browser`, which `_dir_unavailable`'s own docstring calls
+"a LIVENESS check, NOT a reservation — every concurrent spawn is pre-launch when
+it asks".
 
-1. **Stage 1 is not a narrow race — at the selection layer it is a certainty.**
-   Three concurrent `resolve_profile_selection(None)` calls against a free
-   master, with no Chrome running at all, return the SAME directory: `roles
-   ['master', 'master', 'master']`, `distinct 1 of 3`. The master branch asks
-   `_profile_has_running_browser(master)`, which is precisely what
-   `_dir_unavailable`'s docstring — written by THIS fix — calls "a LIVENESS
-   check, NOT a reservation … every concurrent spawn is pre-launch when it
-   asks". The clone path got `_protect_clone_dir` for that reason; master did
-   not. Whether the losers survive is then decided by how much of Chrome's
-   startup happens between two resolutions, which is why it reproduces on a
-   slow cell and not a fast one.
-2. **A stage-1 loser gets no retry at all**, so "an ordinary retry" above is
-   true of stage 2 only. `_fallback_profile_selection` returns `None` for every
-   role that is not `clone`, on both attempts — measured `role=master
-   attempt=0 -> None`, `attempt=1 -> None`, against `role=clone -> clone` for
-   both. The tool body's `for spawn_attempt in range(3)` then re-raises on the
-   first failure. So the loser of the master race does not land "in a distinct
-   directory"; it does not land anywhere.
+### The second datum: a NAMED follower, alone on its own directory
 
-Either half would close the gate failure: a master reservation (the fix this
-section declined, with its release problem still real), or letting a failed
-master-role selection fall back to a clone, which needs no release and is
-strictly a widening of an existing path.
+macOS/ARM64 coverage cell, run 35150887345 attempt 2, job log line 658. The
+fleet test had **already serialised** its one master-taking lead spawn. One of
+the five NAMED followers (`fleet-tabswitch`) still failed, with
+`ConnectionRefusedError: [Errno 61]` — alone on its own un-walked directory,
+with no sibling anywhere near it.
 
-Until then the promise is what it always was — **one master-eligible spawn at a
-time** — and `tests/test_e2e_fleet.py` now respects it: its first unnamed member
-spawns alone and takes master, and the other five (two unnamed clones, three
-named) spawn in one `gather`. The workaround is commented at that call and
-names this section.
+Chrome had **started**: F-860's reaper found pid 7447 running on that directory
+and killed it. What it had not done was open its DevTools port inside nodriver
+0.47's connect deadline — `nodriver/core/browser.py:413-425`, 0.25 s plus five
+0.5 s naps, ≈ 2.75 s, **a constant that does not scale with load** — on a 3-vCPU
+runner taking five launches at once. That is a race with a stopwatch, not with a
+sibling for a directory.
+
+The hole is the same one as the master case, entered from the other side:
+`_fallback_profile_selection` returned `None` for every non-`clone` role, so the
+`explicit` attempt re-raised on its first failure too. And the product's own
+`contention_hint` was telling the user to *"retry this one once the others have
+settled"* — advice the product could take itself, since the reap had just freed
+the very directory the retry needed.
+
+### The fix
+
+One rule, single-homed in the ONE fallback, covering all three roles:
+
+| previous role | what the next attempt drives | why |
+|---|---|---|
+| `clone` | a fresh clone (unchanged) | per-ATTEMPT unique, reserved |
+| `explicit` | **the same directory** | the caller named that profile; a clone is a different identity and so is `<name>-2` |
+| `master`, nobody holds it | **the same directory** | the reap just freed it and master is still the best profile here |
+| `master`, a sibling holds it | a reserved clone | retrying a directory another Chrome owns fails the same way again |
+
+No reservation was added on master (the release problem above stands), the
+attempt count is untouched, and a named profile is never walked or swapped — the
+one place that walk may happen is `resolve_profile_selection`, where F-871
+reports it.
+
+**No wait before the retry**, and that is measured rather than assumed.
+`BrowserManager._spawns_in_flight` is incremented inside `spawn_browser` and
+decremented in its `finally`, so a spawn sitting in the tool body's `except`
+handler — exactly where a "wait until the wave settles" gate would go — is NOT
+counted. Pinned in
+`test_a_spawn_deciding_its_retry_is_not_counted_in_flight`: the count reads `0`
+at every retry decision. Every member of a failing wave would therefore read a
+number that excludes every other waiter, reach the same verdict at the same
+instant and be released together — the gate cannot see the herd it exists to
+break up. It would buy nothing and cost every failing spawn its own latency. The
+retry budget is the bound, and the failed attempt has already spent nodriver's
+whole ≈ 2.75 s deadline before the fallback is even asked.
+
+The two `snapshot.exists()` arms collapsed into one call site and the
+`kind`/`suffix` pair folded into the call, which is what paid for the new
+comment: `clone_storage.py` sits at its grandfathered 1055-LOC cap with zero
+headroom, and the file is still 1055 lines — a ratchet was neither needed nor
+taken, twice.
+
+### Measurement (hermetic, no Chrome)
+
+Both shapes through the real `spawn_browser` tool body against a temp session
+root. Chrome is modelled only where Chrome's own behaviour IS the mechanism, and
+its process singleton is modelled ONCE — the launcher bounces off it and
+`profile_lock` reads it, as a real lock on disk serves both.
+
+**Shape A — the master race.** Three concurrent unnamed spawns; the first launch
+to reach a user-data-dir wins it and every later launch against that same
+directory fails, as a second Chrome does when it hands its command line to the
+incumbent and exits.
+
+**Shape B — the macOS cell.** One serialised lead on master, then five NAMED
+followers whose first launch each starts Chrome and misses the connect deadline;
+the failed attempt's reap frees the directory again.
+
+| | before | after |
+|---|---|---|
+| A: live instances | 1 / 3 | 3 / 3 |
+| A: distinct profile dirs | 1 | 3 |
+| A: launch attempts | 3 | 5 |
+| B: live followers | 0 / 5 | 5 / 5 |
+| B: followers on the directory they ASKED for | no | yes, 5 / 5, none walked |
+| B: launch attempts (lead + 5) | 6 | 12 |
+
+Shape B before is the incident entire: the lead and all five followers raise,
+six of six. After, the lead retries master (nothing took it) and each follower
+retries its own named directory, every one reporting its swallowed first failure
+in `spawn_retries` and none carrying a `walked_to`.
+
+Pins: `tests/test_concurrent_spawn_collision.py` (stage-1 section).
+
+### The hint names the count, never the mechanism
+
+`contention_hint` said: *"Concurrent spawns contend for the same Chrome profile
+— only one process may hold a user-data-dir — and that is a known cause of this
+exact connect failure."* The module has exactly one fact: an integer. Whether
+the spawns shared a directory is not knowable at that site, and after both
+stages of F-834 it is frequently FALSE — concurrent spawns are handed distinct,
+reserved clone directories (stage 2 per ATTEMPT, stage 1 for the loser of the
+master race).
+
+Measured on the coverage gate's macOS/ARM64 cell, run 35150887345 attempt 2: the
+fleet test had **already serialised** its one master-taking lead spawn, so the
+five followers each resolved to their own protected clone directory — and one of
+them still failed with `ConnectionRefusedError: [Errno 61]` carrying this hint.
+For that failure the sentence was simply untrue, and a two-core runner under five
+simultaneous Chrome launches is the likelier cause.
+
+The paragraph now states what is measured (the count), offers both causes without
+picking one, and keeps the one remedy that serves either — serialize, or retry
+once the others settle. The `no_sandbox` disclaimer and the self-separating
+`"\n\n"` are unchanged, and F-834 is still mentioned exactly once, which is what
+`tests/test_concurrent_spawn_collision.py` pins the disclaimer's position
+against.
+
+### The last-attempt leak, fixed here too
+
+On the LAST attempt the tool body computed a fallback it could never use —
+`_SPAWN_ATTEMPTS` is exhausted, the loop's `else:` raises — so a fully failed
+spawn copied one extra profile tree and left that clone directory
+`_protect_clone_dir`-ed for the life of the process. Nothing releases it: the
+two release paths are the per-attempt failure handler, which has already run for
+that directory, and `close_instance`, which never will.
+
+The defect predates stage 1 and the `clone` role always reached it. What stage 1
+changed is the exposure: **a master-role spawn that fails every attempt now
+routes through this path, and before stage 1 it made zero clones and leaked
+nothing** — it re-raised on the first failure. So the widening is what turns a
+pre-existing `clone`-only leak into one a plain unnamed spawn can hit.
+
+Fixed by not asking for a re-selection after the last attempt. The handler
+`continue`s instead, so the loop's `else:` stays THE one exhaustion raise and
+the caller still sees the joined set of all three errors, byte-identical. The
+retry budget is a named constant (`_SPAWN_ATTEMPTS`) now, because the last
+attempt is a decision rather than just another iteration. Pinned by
+`test_a_spawn_that_fails_every_attempt_leaks_no_protected_clone`, which asserts
+both halves: nothing left in `_PROTECTED_CLONE_DIRS`, and exactly two profile
+trees on disk for the two clone attempts that actually launched.
+
+### Residuals (measured, NOT fixed)
+
+**1. The two same-directory roles spend the whole budget on one directory.**
+`explicit` and an untaken `master` drive the same path on all three attempts and
+the loop has no overall deadline, so a permanently unusable profile — corrupt,
+permission-denied, a path that will never work — costs three launch attempts
+where it used to cost one. The floor is nodriver's own connect deadline, read
+from `nodriver/core/browser.py:413-425`: `await asyncio.sleep(0.25)` then
+`for _ in range(5)` with `await self.sleep(0.5)` on each failure, so ≈ 2.75 s of
+sleeping per attempt before any HTTP time. Worst case is therefore ≈ 8.25 s of
+nodriver naps plus three Chrome starts, up from ≈ 2.75 s plus one. That is the
+accepted cost of the fix: the same budget the `clone` role always spent, and
+cutting the non-clone roles to a single retry would be a change to the attempt
+count with no evidence that a third attempt never helps (a saturated runner can
+clear between two of them). A caller whose own deadline sits under ~10 s would
+see a timeout where it used to see a fast error.
+
+**2. Shape B proves the plumbing, not that a retry beats the deadline.**
+`_FailsOnceManager` succeeds on its second attempt *by construction*. The
+measurement therefore establishes that the retry happens, that it drives the
+same directory, that the directory is not walked and that the first failure is
+reported — it does NOT establish that a real retry wins the race against
+nodriver's connect deadline on a saturated runner. Nothing hermetic can
+establish that; the evidence for it is the incident itself, where the reap
+freed the directory and the only thing missing was a second attempt.
 
 ## Related
 

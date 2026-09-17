@@ -129,21 +129,15 @@ class TestFallbackProfileSelection:
     """``test_profile_resolution.py`` pins ``_resolve_profile_selection`` but not
     the fallback's retry guard — pin it here (no overlap)."""
 
-    async def test_non_clone_selection_never_retries(self):
-        # profile_role != "clone" short-circuits to None before any dir I/O (pure).
-        assert (
-            await clone_storage._fallback_profile_selection(
-                {"profile_role": "explicit"}, 0
-            )
-            is None
-        )
-        assert await clone_storage._fallback_profile_selection({}, 0) is None
-        assert (
-            await clone_storage._fallback_profile_selection(
-                {"profile_role": "explicit"}, 5
-            )
-            is None
-        )
+    async def test_an_unknown_role_never_retries(self):
+        # An absent or unrecognised role short-circuits to None before any dir
+        # I/O (pure). Every role the resolver actually issues DOES retry since
+        # F-834 stage 1 — clone onto a fresh clone, explicit and an untaken
+        # master onto the same directory — and all three are pinned in
+        # tests/test_concurrent_spawn_collision.py, not duplicated here.
+        for previous in ({}, {"profile_role": "nonsense"}):
+            assert await clone_storage._fallback_profile_selection(previous, 0) is None
+            assert await clone_storage._fallback_profile_selection(previous, 5) is None
 
     async def test_clone_with_no_snapshot_returns_none(self, tmp_empty_root):
         # A clone selection retries from the master snapshot; with no snapshot on

@@ -219,6 +219,123 @@ Everything else is byte-identical: a plain sync return, a nested object/array
 a synchronous throw, a non-serialisable value and a cycle all answer exactly as
 they did on 2.1.8 — measured, `audit/stage2/finding_F883_execute_script_never_awaits.md` §2d.
 
+### Fixed — F-882b: a slow fixture document recorded itself into the NEXT test's ledger
+
+`tests/fixture_routes.py`'s `/nav/slow-doc` route slept first and appended to
+the server-side `nav_paths` ledger afterwards, where every other `/nav/*` route
+records on arrival. The one caller of that route pre-empts the navigation, so
+the browser abandons the request while the handler thread goes on sleeping for
+the full 2.5 s; by the time it records, the next test has already called
+`/e2e/reset` and the entry lands in a ledger that belongs to a different
+navigation. Measured: CI run 35150887345 (release-gate integration, Windows/
+X64, PR #123) failed the subframe node of
+`tests/test_e2e_navigation_truthfulness.py`, whose ledger must be exactly three
+paths, with the previous node's `/nav/slow-doc?ms=2500` at its head. The route
+records before it sleeps now, and a hermetic pin in
+`tests/test_fixture_dynamic_routes.py` holds the request open at the delay and
+reads the ledger while the response is still withheld — no browser and no
+wall-clock budget.
+
+### Fixed — F-882c: two navigation nodes asserted a fetch their milestone does not cover
+
+The sibling of F-882b, in the same ledger oracle and also not a product defect.
+`tests/test_e2e_navigation_truthfulness.py`'s meta-refresh and self-reload nodes
+asserted an exact fetch sequence at the instant `navigate` returned, for a
+second document their own page schedules AT `load` — the very milestone the
+tool returns on. Both nodes accept an answer about the FIRST document, and in
+that arm the server legitimately has not been asked for the second yet, so the
+oracle was racing the page it was meant to witness. Measured: CI run
+35157444236 (release-gate integration, macOS/ARM64, PR #126) failed the
+meta-refresh node with `['/nav/meta-refresh']` against an expected two paths.
+
+Both now wait through `_await_fetched`, a bounded poll of the ledger (5 s
+deadline, 50 ms interval) that returns whatever it has at the deadline; the
+exact-sequence assertions are unchanged, so a wrong order and a short ledger
+fail exactly as before. The other six ledger assertions in the file still read
+once, deliberately — each asserts on a fetch the tool's own answer proves
+already happened, and that classification is argued in the helper's docstring.
+
+### Fixed — F-834 stage 1: a `spawn_browser` whose first attempt failed got no second attempt unless it was already on a clone
+
+Two measured shapes, one hole. A NAMED follower on the coverage gate's
+macOS/ARM64 cell (run 35150887345, attempt 2) failed with
+`ConnectionRefusedError` while alone on its own un-walked directory: Chrome had
+STARTED there — the F-860 reaper found its pid running and killed it — and had
+simply not opened its DevTools port inside nodriver 0.47's connect deadline,
+0.25 s plus five 0.5 s naps, a constant that does not scale with load, on a
+3-vCPU runner taking five launches at once. And three concurrent unnamed spawns
+all select the master profile, so two of them lose Chrome's own process
+singleton. In both shapes `_fallback_profile_selection` answered `None` for
+every role that was not `clone`, so the three-attempt loop re-raised on the
+first failure. The retry budget was always there; the spawn had nowhere to spend
+it. Meanwhile the product's own contention hint was advising the caller to
+"retry this one once the others have settled".
+
+The fallback now covers all three roles, and only a `clone` re-clones. A named
+profile retries **the same directory** — never a clone and never `<name>-2`,
+because the caller asked for that profile's cookies and logins, and the one
+place that walk may happen is the resolver, which reports it (F-871). A master
+retries the same directory too when nothing holds it, and falls through to a
+reserved clone when a sibling took it, since retrying a directory another Chrome
+owns fails the same way again. What frees the directory in time is the failed
+attempt's own F-860 reap.
+
+Master itself is still never reserved: the release would have to live on the
+close path, and a leaked reservation would silently force every later spawn to
+clone forever. The attempt count is unchanged, and the retry does not wait for
+the sibling wave — `_spawns_in_flight` is decremented in the `finally` around
+one attempt, so a spawn deciding its retry is not counted in it (measured: the
+count reads 0 at every retry decision), and every member of a failing wave would
+read a number excluding all the waiters and be released together.
+
+Measured hermetically through the real tool body, with Chrome's process
+singleton modelled once and read from both sides:
+
+| | before | after |
+|---|---|---|
+| three concurrent unnamed spawns | 1 of 3 live, 1 directory | 3 of 3 live, 3 directories |
+| serialised lead + five named followers | 0 of 6 live | 6 of 6 live, every follower on the directory it asked for |
+
+A pre-existing leak is closed in the same pass, because the widening is what
+exposes it to an ordinary unnamed spawn: the last attempt asked for a
+re-selection that nothing could ever drive, so a fully failed spawn copied one
+extra profile tree and left that directory protected from the storage sweep for
+the life of the process. Before this fix a master-role spawn that failed every
+attempt made zero clones and leaked nothing; the `clone` role always reached it.
+The handler now skips the re-selection once the budget is spent, so the loop's
+`else` stays the one exhaustion raise and the caller's joined error text is
+unchanged.
+
+Two residuals are named rather than hidden. An `explicit` or untaken `master`
+selection drives the same directory on all three attempts with no overall
+deadline, so a permanently unusable profile costs about 8.25 s of nodriver's own
+connect naps instead of 2.75 s — the same budget the clone role always spent.
+And the hermetic measurement establishes that the retry happens on the right
+directory, not that a real retry wins the race against that deadline on a
+saturated runner; nothing hermetic can establish the latter.
+
+`clone_storage.py` is still 1055 lines, its grandfathered cap.
+
+That three concurrent selections all still answer `master` is unchanged and is
+now pinned as characterization: the master branch of
+`clone_storage.resolve_profile_selection` asks `_profile_has_running_browser`,
+which is a LIVENESS check and never a reservation, and every concurrent spawn is
+pre-launch when it asks. That reading is the design; what was broken was what
+happened to the callers who then lost.
+
+### Changed — F-834: the contention hint names the count it measured, not a mechanism it did not
+
+The paragraph appended to a failed concurrent spawn said those spawns "contend
+for the same Chrome profile". The only fact that module has is an integer, and
+after both F-834 layers concurrent spawns are handed distinct reserved clone
+directories — so the sentence was frequently false, and measurably false for the
+macOS follower above, which was alone on its own directory. The paragraph now
+says which part of it is measured, offers both causes without picking one —
+Chrome's profile singleton, and what N simultaneous launches cost a small runner,
+including a browser that starts and still misses nodriver's fixed connect
+deadline — and keeps the one remedy that serves either. The `no_sandbox`
+disclaimer is unchanged.
+
 ### Tests — real-Chrome E2E coverage for F-873…F-881
 
 Every defect in the 2.1.7/2.1.8 set was found by driving the shipped release against
@@ -232,19 +349,19 @@ that would have been red first. No `src/` change.
   page's own state in JavaScript. Half the fleet is UNNAMED, which is the advertised
   path and the manual run's own shape — one run covers all three profile roles
   (`master`, `clone`, `explicit`). The lead spawns alone because nothing reserves the
-  master profile: measured, three concurrent `resolve_profile_selection(None)` calls
-  against a free master all return the SAME directory, and a master-role spawn that
-  then fails to connect gets no fallback (`_fallback_profile_selection` answers `None`
-  for every non-clone role), which is how the macOS/ARM64 gate cell failed this node.
-  That residual is recorded in the F-834 finding as still open; the test works around
-  it rather than asserting a concurrency the product documents it does not offer. The
-  five that follow the lead spawn in as many lanes as the cell has cores (minimum two,
-  printed in the node's own diagnostic line): nodriver 0.47 gives a launching Chrome a
+  master profile — measured, three concurrent `resolve_profile_selection(None)` calls
+  against a free master all return the SAME directory, which is how the macOS/ARM64
+  gate cell first failed this node. F-834 stage 1 has since made that survivable
+  (the loser retries instead of raising), so the serialization is now about cost
+  rather than survival: each loser burns a Chrome launch plus nodriver's whole
+  ≈2.75 s connect deadline before the fallback is asked. The five that follow the
+  lead spawn in as many lanes as the cell has cores (minimum two, printed in the
+  node's own diagnostic line): nodriver 0.47 gives a launching Chrome a
   fixed ≈2.75 s to answer `/json/version`, and five simultaneous cold starts on a
   3-vCPU runner lost one — a named directory nothing else wanted, whose Chrome was
   alive when the reaper found it, so capacity rather than contention. No test-side
-  retry: retrying is the product's job, and its own three-attempt loop skips this case
-  only because of the F-834 stage-1 gap above. Two members move
+  retry: retrying is the product's job and F-834 stage 1 is where it now happens.
+  Two members move
   their page WITHOUT the `navigate` tool (a click that retitles, and a `switch_tab`),
   which is what makes the `list_instances` block red against F-874 rather than
   decorative. Asserts six live titles with `partial: false`; that of the six profile
