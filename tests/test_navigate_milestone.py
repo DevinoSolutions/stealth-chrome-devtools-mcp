@@ -619,7 +619,13 @@ async def test_a_commit_after_the_milestone_answers_a_committed_untitled_page():
 
     Driven through ``navigation_milestone``'s own two calls in the order the
     race produces, with the replacement HELD so the gap is the test's and not
-    the host scheduler's. CI hit this for real on 2026-09-16 — run 35175574635
+    the host scheduler's. One difference from Chrome to keep in mind before
+    building another pin on this: the fake ties a title to the ``load`` it has
+    been given, while Chrome's is set by the PARSER — so a real document has a
+    title well before ``load`` and in general by ``DOMContentLoaded``. What is
+    modelled here is only the window this state needs, committed-and-untitled;
+    a pin about ``domcontentloaded`` would need the fake to grow a parser-time
+    title rather than reading this one as evidence about DCL. CI hit this for real on 2026-09-16 — run 35175574635
     (release-gate integration, Linux/X64) failed the E2E node with
     ``assert (False, '') in ((True, ''), (False, 'Nav Landing'))`` — while the
     product was right; what was wrong was a set of accepted states with two

@@ -199,8 +199,15 @@ async def _await_live(iid: str, url: str, title: str) -> tuple[str, str]:
 
 
 async def _live_pair(iid: str) -> tuple[str, str]:
-    answer = await eval_js(iid, "JSON.stringify([location.href, document.title])")
-    url, page_title = json.loads(answer)
+    raw = await eval_js(iid, "JSON.stringify([location.href, document.title])")
+    try:
+        url, page_title = json.loads(raw)
+    except (TypeError, ValueError) as exc:  # not the JSON it was asked for
+        raise AssertionError(
+            "the page did not answer the live read with the JSON it was asked "
+            f"for (got {type(raw).__name__}, "
+            f"{len(raw) if isinstance(raw, str) else 0} chars)"
+        ) from exc
     return str(url), str(page_title)
 
 
@@ -249,8 +256,16 @@ def _meta_refresh_states(origin: str) -> tuple[tuple[str, str], ...]:
        failed CI (run 35175574635, Linux/X64) while the product was right;
     3. the landing, parsed.
 
-    What is NOT here is the pairing F-882 closed: the first document's url with
-    the landing's title, or any other mix of two documents. Exported as a table
+    What is NOT here is the pairing F-882 actually caught: the FIRST document's
+    url with the landing's title. The set excludes that and every other pair
+    naming the first document's url with a title it never had. It cannot
+    exclude a "landing url + first document's title" mix on this fixture, and
+    says so rather than claiming otherwise — the meta-refresh document is
+    untitled, so that mix IS state 2 and no oracle built on these two pages can
+    tell them apart. What state 2 costs, named rather than hidden: this node no
+    longer rejects a title read that is always empty. Nodes (a), (d), (e), (g)
+    and (h) each assert an exact NON-empty title, so that coverage lives there
+    and is not weakened by anything here. Exported as a table
     rather than written into the assertion because ``tests/test_navigate_
     milestone.py`` drives the product into state 2 hermetically and checks the
     answer against this set — a state the product can reach and this oracle does

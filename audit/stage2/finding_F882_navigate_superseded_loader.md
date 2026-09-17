@@ -356,7 +356,15 @@ the window is real but far too narrow to catch by repetition — which is why th
 pin is built on the fake and not on Chrome.
 
 The E2E node now reads its accepted pairs from `_meta_refresh_states`, which
-names all three and excludes every mix of two documents, and the hermetic pin
+names all three and excludes the mix this finding actually caught — the FIRST
+document's url with the landing's title — along with every other pair naming
+that url with a title it never had. It does **not** exclude a "landing url +
+first document's title" mix, and the docstring says so instead of claiming a
+guarantee it cannot give: the meta-refresh fixture document is untitled, so
+that mix IS state 2 and these two pages cannot distinguish them. The cost of
+naming state 2 is also named: this node no longer rejects a title read that is
+always empty, and that coverage lives in nodes (a), (d), (e), (g) and (h),
+each of which asserts an exact non-empty title. The hermetic pin
 asserts the product's answer is IN that set — so a state the product can reach
 and the oracle does not name fails on every lane rather than once in a while on
 one cell. Naming the third state does not weaken the node: it still proves the
