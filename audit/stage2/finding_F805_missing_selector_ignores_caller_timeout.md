@@ -14,7 +14,9 @@ caller asked for. Any "probe for this element, move on if it isn't there"
 pattern — the normal way to branch on optional page content — pays ~10.5s per
 probe instead of the ~2s it requested. **The probe pattern is the half F-884
 fixed**: `wait_for_element(timeout=2000)` now costs ~2.03 s. What is left is
-every tool that has no `timeout` parameter to honour in the first place.
+ONE branch that still ignores a timeout its caller declared —
+`click_element(text_match=...)` — plus the six tools that expose no `timeout`
+at all and so inherit the 10 s default.
 
 ---
 
@@ -55,22 +57,40 @@ nodriver and into `element_resolution._wait_for`. Two consequences land here:
   the caller's budget is the only deadline on the path. Re-measured by the F-884
   review: a 2000 ms request costs **2.03 s**, down from 10.5 s. The "no timeout
   passed" snippet quoted under *Root cause* below is gone.
-* **The interaction half is not.** `resolve_element`'s `timeout=None` no longer
-  means "nodriver's `tab.select` default"; it means `_DEFAULT_WAIT_SECONDS`,
-  which is deliberately set to nodriver's own 10 s so that a caller who passed
-  nothing waits exactly as long as it always did. The number, the path and the
-  symptom are therefore unchanged for every call site that passes no timeout:
-  `click_element`, `type_text`, `paste_text`, `select_option`, `upload_file`,
-  `get_page_content`'s iframe walk and `cdp_element_cloner`. One of those —
-  `click_element` — is the second row of the table above, still ~10.5 s.
+* **The interaction half is not**, and it splits in two. `resolve_element`'s
+  `timeout=None` no longer means "nodriver's `tab.select` default"; it means
+  `_DEFAULT_WAIT_SECONDS`, which is deliberately set to nodriver's own 10 s so
+  that a caller who passed nothing waits exactly as long as it always did. The
+  number, the path and the symptom are unchanged for every call site that
+  passes no timeout.
 
-So the remaining defect is narrower and better stated than when this was
-opened: **it is no longer "a declared `timeout` is ignored"** (no tool ignores
-one now) **but "a tool with no `timeout` parameter inherits a 10 s floor for a
-selector that will never resolve."** The fix is to give the interaction path an
-explicit, documented budget rather than the default, and/or to expose the
-parameter the tools do not have. It is one edit in one home either way, because
-F-884 made `element_resolution` the only place a wait is spent.
+### Which tools are which, read off the tree (`dom_handler`, AST)
+
+| tool | has `timeout`? | forwards it? |
+|---|---|---|
+| `wait_for_element` | yes | yes (`timeout=0`; its own loop is the wait) |
+| `upload_file` | yes | yes |
+| `click_element`, selector branch | yes | yes |
+| **`click_element`, `text_match` branch** | **yes** | **NO — `resolve_by_text` is called with no timeout** |
+| `query_elements`, `type_text`, `paste_text`, `select_option`, `get_element_state`, `get_page_content` | no | n/a — they inherit the 10 s default |
+
+Measured by the F-884 review against a never-resolving selector:
+`click_element(selector, timeout=2000)` **2.03 s**; `click_element(selector)`
+(default 10000 ms) **10.18 s**; `click_element(selector, text_match=...,
+timeout=2000)` **10.19 s**.
+
+So the soak's second row — `click_element(selector)` at 10.608 s — is the
+10000 ms DEFAULT being honoured, not a parameter being ignored. **The one place
+a DECLARED timeout is still ignored is `click_element`'s `text_match` branch**,
+and that is the sharpest remaining F-805 example: it is the original complaint,
+unchanged, in the one branch F-884 did not touch. Fixing it is one argument on
+one call (`resolve_by_text(tab, text_match, best_match=True, timeout=...)`),
+and the parameter already exists on that resolver.
+
+The six tools with no `timeout` at all are a smaller and different complaint:
+nothing is ignored, there is simply no way to ask for less than 10 s. Whether
+to expose the parameter is a surface decision, not a bug fix, and it should not
+be folded into this finding's close.
 
 ---
 
@@ -114,10 +134,14 @@ tool-level guard above it (`_with_cdp_timeout(..., timeout=max(timeout / 1000 +
 5, CDP_OPERATION_TIMEOUT))`) is a backstop against a true hang, not a bound on
 this path, and it did not fire either.
 
-`click_element` reaches the same `resolve_element(tab, selector)` call with no
-timeout, which is why it costs the same 10.6 s before reporting the element
-missing. **That sentence is still true at HEAD** — only the 10 s now comes from
-`element_resolution._DEFAULT_WAIT_SECONDS` rather than from `tab.select`.
+`click_element` reached the same `resolve_element(tab, selector)` call with no
+timeout, which is why it cost the same 10.6 s before reporting the element
+missing. **That is no longer how it reads at HEAD**: `click_element` declares
+`timeout: int = 10000` and its selector branch forwards `timeout / 1000`, so
+the soak's 10.6 s is that DEFAULT being spent, and a caller passing
+`timeout=2000` is answered in 2.03 s. The branch that still matches the
+sentence is `text_match`, which reaches `resolve_by_text` with no timeout at
+all — see the table above.
 
 ---
 
@@ -134,11 +158,14 @@ element = await resolve_element(tab, selector, timeout=max(remaining, 0.1))
 `timeout=0` and owns the deadline itself, so there is no remaining-budget
 arithmetic to get wrong and no nested wait to out-wait.
 
-The other half is unchanged: give the interaction path (`click_element` and its
-siblings) an explicit, documented per-resolve timeout instead of inheriting the
-default. It is inside the one selector-resolution home, so no second resolution
-path is introduced — more so since F-884, which made that home the only place
-any wait is spent and gave `resolve_elements` the same `timeout` parameter its
+What is left is smaller than "the interaction path" and should be done as two
+separate things. **The defect** is one argument: forward `click_element`'s
+declared `timeout` into the `text_match` branch's `resolve_by_text` call, which
+already accepts one. **The surface question** — whether the six tools that
+expose no `timeout` should grow one — is a separate decision and not a bug fix.
+Both are inside the one selector-resolution home, so no second resolution path
+is introduced; more so since F-884, which made that home the only place any
+wait is spent and gave `resolve_elements` the same `timeout` parameter its
 three siblings have.
 
 This branch deliberately does not apply it: the 2.0.1 soak mandate allows a src

@@ -292,10 +292,13 @@ bundled into the query.
 **F-805 is half fixed as a side effect**, and its finding and strict-xfail node now say
 which half. `wait_for_element(timeout=2000)` against a selector that never resolves cost
 ~10.5 s and now costs ~2.03 s, because the tool's own loop is the wait and it asks
-`element_resolution` for exactly one query. The other half is untouched and the xfail does
-not flip: `click_element` and its siblings have no `timeout` parameter to honour, so they
-resolve with the default — still nodriver's 10 s, deliberately, so that a caller who
-passed nothing waits as it always did.
+`element_resolution` for exactly one query. The xfail does not flip, because its other row
+calls `click_element` with no timeout and so spends that tool's own 10000 ms default —
+honoured, not ignored (measured: `timeout=2000` answers in 2.03 s). The one branch that
+still ignores a timeout its caller declared is `click_element(text_match=...)`, which
+reaches `resolve_by_text` with none, so a declared 2000 ms costs 10.19 s; that is now
+named in the finding as what remains open. Separately, six tools expose no `timeout` at
+all and inherit the 10 s default — a surface question, not a defect.
 
 ## 2.1.8
 

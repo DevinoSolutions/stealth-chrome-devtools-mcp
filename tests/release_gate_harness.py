@@ -1364,8 +1364,10 @@ async def _soak_cycle(
     #
     # Cycle 1 only, deliberately. See F-805, now HALF fixed: the wait honours
     # its own 2000ms budget since F-884 (~2.03s), while the click still costs
-    # ~10.5s because it has no timeout parameter to honour and resolves with
-    # element_resolution's default. Repeating them every cycle would triple the
+    # ~10.5s because THIS call passes no timeout and so spends click_element's
+    # own 10000ms default (it does honour one when given: timeout=2000 -> 2.03s).
+    # The branch that genuinely ignores a declared timeout is text_match, which
+    # this journey does not exercise. Repeating them every cycle would triple the
     # soak's runtime to buy a repetition of a fact one measurement already
     # establishes, and would push the node past the integration lane's budget.
     if cycle == 1:
