@@ -40,15 +40,48 @@ The master — and anything else — is never this test's to delete. The MQ-126
 contract loses nothing: "the crashed instance's profile is removable" was
 always a claim about the disposable clone the spawn created.
 
-## Structural fix (open, follow-up)
+## Structural fix (LANDED — `test/e2e-coverage-F873-F881`)
 
-The whole e2e tier spawns against the operator's real
-`STEALTH_MCP_BROWSER_SESSION_ROOT`. The right fix is a fixture that points the
-session root at `tmp_path` for every real-Chrome test, so no test can touch
-real profiles at all (and lane behavior stops depending on whether the
-operator's browsers happen to be running). Costs: per-run master seeding, and
-a decision about what stealth state the seeded master should carry. File with
-the next test-infrastructure batch.
+The whole e2e tier used to spawn against the operator's real
+`STEALTH_MCP_BROWSER_SESSION_ROOT`. It no longer does — unless the operator's
+own environment names it: `tests/conftest.py` redirects that variable at
+**module import time** (before collection, before any fixture) to a fixed
+directory under the system temp dir, alongside the
+`STEALTH_MCP_CLONE_OUTPUT_DIR` line that already used the idiom, using
+`setdefault` so the release gate's `runner.temp` value still wins. The cost of
+`setdefault` is exactly that: a shell that exports
+`STEALTH_MCP_BROWSER_SESSION_ROOT=C:\stealth-mcp-browser-sessions` gets the old
+behaviour back, deliberately, because overriding an explicit environment would
+also override the gate's.
+
+A second residual comes from the path being FIXED: the root is shared across
+worktrees and concurrent runs. Named collisions walk correctly and nothing
+deletes another process's live profile, but `master` carries no reservation and
+a disk assertion must be scoped to what the test itself was given. The argument
+is written out beside the `setdefault` line.
+
+Two things were learned building it, and they are why the fix is not the
+fixture this section originally proposed:
+
+* **A per-test fixture cannot do it.** `get_settings()` is `@lru_cache`d and
+  `conftest._reset_settings_cache` clears it at each test's SETUP, so the root
+  the product reads is whatever `os.environ` said at that moment. Every E2E
+  module declares an autouse `_warmup` that spawns a browser, and pytest orders
+  it BEFORE a function-scoped root fixture — so `tmp_empty_root`'s `patch.dict`
+  arrives after the root has already been resolved from the real environment.
+  Measured: a six-browser fleet node that declared `tmp_empty_root` wrote six
+  108 MB named profiles into `C:\stealth-mcp-browser-sessions\sessions`, and a
+  control run with the variable set in the PARENT environment put them in the
+  probe root instead. `tmp_empty_root` on an E2E node is therefore decorative;
+  the nodes added with this fix do not declare it, and say so.
+* **A fixed temp path beats a fresh one per session.** The costs this section
+  worried about — "per-run master seeding" — are paid once per machine rather
+  than once per run, and a seeded master that persists is also what keeps a
+  six-browser fleet's spawn phase at 2.6 s instead of 9.3 s.
+
+What remains open is only the second half of the original note: nothing decides
+what stealth state the seeded master should carry. Today it is whatever the
+first spawn creates.
 
 ## Related
 

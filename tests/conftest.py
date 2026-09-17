@@ -28,6 +28,59 @@ os.environ.setdefault(
     "STEALTH_MCP_CLONE_OUTPUT_DIR",
     str(Path(tempfile.gettempdir()) / "stealth-mcp-test-clone-output"),
 )
+# The same redirect, for the OTHER root a test can write to: the browser-session
+# root that holds the master profile and every clone. This closes the structural
+# gap named in
+# ``audit/stage2/finding_F841_resilience_test_deletes_real_master_profile.md``
+# ("the whole e2e tier spawns against the operator's real
+# STEALTH_MCP_BROWSER_SESSION_ROOT") and it has to be HERE, at conftest import
+# time, rather than in a fixture. Two reasons, both measured:
+#
+# * ``get_settings()`` is ``@lru_cache``d. ``_reset_settings_cache`` below clears
+#   it at each test's SETUP, so whatever ``os.environ`` says at that moment is
+#   what the product reads for the rest of the test. A per-test fixture that
+#   patches the env cannot win that race against an autouse fixture ordered
+#   ahead of it — and the E2E modules' ``_warmup`` is exactly such a fixture: it
+#   spawns a browser, and therefore resolves the root, BEFORE ``tmp_empty_root``
+#   is set up. Measured: a six-browser fleet node declaring ``tmp_empty_root``
+#   wrote six 108 MB named profiles into the developer's real
+#   ``C:\stealth-mcp-browser-sessions\sessions``.
+# * Only the session root needs setting. ``master_profile_dir`` /
+#   ``clone_root_dir`` / ``master_snapshot_dir`` all derive from it when their
+#   own vars are unset, which is the same single knob the release gate sets.
+#
+# ``setdefault``, so the gate's ``runner.temp`` value still wins, and a FIXED
+# path rather than a fresh temp dir per session so the master profile is cloned
+# once on this machine instead of once per run. Nothing here is the operator's
+# root, which is the whole point.
+#
+# What a FIXED path costs, stated so no test assumes otherwise: this root is
+# SHARED — across git worktrees, across concurrent pytest processes, and with
+# any other agent on this machine running this suite. Three consequences:
+#
+# * a NAMED profile collision is handled by the product (a held ``fleet-type``
+#   walks to ``fleet-type-2``), so a test must read the directory it got from
+#   ``spawn_diagnostics["profile_selection"]["user_data_dir"]`` and never
+#   assume the name it asked for;
+# * ``master`` has NO reservation — ``resolve_profile_selection`` protects a
+#   clone directory (``_protect_clone_dir``) but not master — so two processes,
+#   or two concurrent unnamed spawns in one process, can both read it as free;
+# * therefore **a disk assertion must be scoped to directories the test itself
+#   was given.** A bare "what appeared in this root since we started" diff is
+#   not a fact about the test that makes it; a sibling process creating one
+#   directory mid-run would fail it. No path was found by which one process
+#   deletes another's LIVE profile — the cap sweeps skip protected and in-use
+#   directories — so the residual is noisy assertions, not lost work.
+#
+# The ``-test-`` infix in the directory name is LOAD-BEARING: the doc lane
+# (``tests/test_doc_examples.py``) asserts that the substring
+# ``stealth-mcp-browser-sessions`` never appears in CLI output, and this name
+# avoids it only because of that infix. Renaming this without renaming that
+# pin turns the doc lane red.
+os.environ.setdefault(
+    "STEALTH_MCP_BROWSER_SESSION_ROOT",
+    str(Path(tempfile.gettempdir()) / "stealth-mcp-test-browser-sessions"),
+)
 os.environ.setdefault("STEALTH_MCP_NO_AUTO_RECOVERY", "1")
 # Test runs must not ship their deliberately-injected failures to the real
 # Sentry project: sentry_init() is on by default, LoggingIntegration forwards

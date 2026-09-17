@@ -218,3 +218,40 @@ async def test_a_control_that_accepts_the_text_still_succeeds(
         assert await eval_js(iid, f"document.querySelector({selector!r}).value") == text
     finally:
         await close(instance_id=iid)
+
+
+async def test_a_control_that_rewrites_what_it_receives_still_succeeds(
+    fixture_app_server, tmp_empty_root
+):
+    """The check is "did anything change", NEVER "does it contain what I typed".
+
+    Every other node in this file uses a control whose value ends up equal to
+    the text, so all of them would still pass if the verification were the
+    stricter `value == text`. This one cannot: ``#masked`` rewrites each input
+    event into ``dd-dd`` groups, so typing ``1234`` leaves ``12-34`` behind —
+    a control that DID receive every character and whose value is not the
+    string that was sent. F-873 §6 names exactly this class (a mask, an
+    autocomplete that rewrites, a ``number`` field that normalises) as the
+    reason the check is a change test, and a stricter test is called out there
+    as the same defect with the opposite sign. This node is what holds that
+    open: it goes red the day someone "tightens" the read-back.
+    """
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    type_text = get_fn("type_text")
+    close = get_fn("close_instance")
+
+    iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+    try:
+        await navigate_and_settle(iid, f"{base}/cov/form.html")
+
+        assert await type_text(instance_id=iid, selector="#masked", text="1234")
+
+        landed = await eval_js(iid, "document.getElementById('masked').value")
+        assert landed == "12-34", landed
+        assert landed != "1234", (
+            "the page did not rewrite the value, so this node is no longer "
+            "exercising the rewriting case it exists for"
+        )
+    finally:
+        await close(instance_id=iid)
