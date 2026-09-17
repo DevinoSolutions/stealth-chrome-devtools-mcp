@@ -207,6 +207,18 @@ async def read_actions(iid: str) -> list[str]:
     return json.loads(raw) if raw else []
 
 
+def instance_entry(listing: list[dict], instance_id: str) -> dict:
+    """THE one ``list_instances`` row lookup for this tier.
+
+    Unpacking a one-element list rather than ``next(...)`` on purpose: two rows
+    for one instance is a defect in its own right, and this fails on it instead
+    of silently reporting the first. It was written out by hand in three places
+    before it lived here.
+    """
+    [entry] = [row for row in listing if row["instance_id"] == instance_id]
+    return entry
+
+
 async def await_visible_window(root_pid: int, timeout: float = 15.0) -> int | None:
     """First pid in ``root_pid``'s process tree owning a visible, non-zero-area
     top-level window — or ``None`` at the deadline (F-808's integration twin).

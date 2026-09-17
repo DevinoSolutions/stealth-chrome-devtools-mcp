@@ -336,6 +336,85 @@ including a browser that starts and still misses nodriver's fixed connect
 deadline — and keeps the one remedy that serves either. The `no_sandbox`
 disclaimer is unchanged.
 
+### Tests — real-Chrome E2E coverage for F-873…F-881
+
+Every defect in the 2.1.7/2.1.8 set was found by driving the shipped release against
+real sites with several browsers at once, after CI was green. This adds the coverage
+that would have been red first. No `src/` change.
+
+- **`tests/test_e2e_fleet.py` (new)** — six headless browsers: one lead, then five
+  spawned at once, then six navigations and six tool calls in one `asyncio.gather`
+  each, over a mix of page shapes (plain, a page whose `load` is held open, an app
+  shell whose document cannot scroll, a form), with every answer checked against the
+  page's own state in JavaScript. Half the fleet is UNNAMED, which is the advertised
+  path and the manual run's own shape — one run covers all three profile roles
+  (`master`, `clone`, `explicit`). The lead spawns alone because nothing reserves the
+  master profile — measured, three concurrent `resolve_profile_selection(None)` calls
+  against a free master all return the SAME directory, which is how the macOS/ARM64
+  gate cell first failed this node. F-834 stage 1 has since made that survivable
+  (the loser retries instead of raising), so the serialization is now about cost
+  rather than survival: each loser burns a Chrome launch plus nodriver's whole
+  ≈2.75 s connect deadline before the fallback is asked. The five that follow the
+  lead spawn in as many lanes as the cell has cores (minimum two, printed in the
+  node's own diagnostic line): nodriver 0.47 gives a launching Chrome a
+  fixed ≈2.75 s to answer `/json/version`, and five simultaneous cold starts on a
+  3-vCPU runner lost one — a named directory nothing else wanted, whose Chrome was
+  alive when the reaper found it, so capacity rather than contention. No test-side
+  retry: retrying is the product's job and F-834 stage 1 is where it now happens.
+  Two members move
+  their page WITHOUT the `navigate` tool (a click that retitles, and a `switch_tab`),
+  which is what makes the `list_instances` block red against F-874 rather than
+  decorative. Asserts six live titles with `partial: false`; that of the six profile
+  directories the product said it used, exactly the named ones survive the close
+  (both halves of `spawn_browser`'s documented promise — every disposable auto-clone
+  reclaimed, driven through `cleanup_deferred_profiles` rather than waited for; every
+  claim scoped to what this fleet was given, because the temp root is shared across
+  worktrees); and that the backend logged nothing at WARNING while the fleet was
+  DRIVEN beyond the one named, lane-structural clone-seed fallback. A six-way
+  concurrent close on Windows may add exactly three named teardown warnings (a Chrome
+  kill over `settings.close_kill_timeout` and its worker's `did not die after force
+  kill` — two ends of one slow kill — plus a profile a dying Chrome still holds open;
+  all measured), tolerated only because the node has already proved their
+  consequence repaired: the same poll that reclaims the clone directories also waits
+  for all six instances to leave the product's tracked-pid record, which is the
+  product itself vouching that every Chrome is dead — `close_instance` answers True
+  on the timeout path by design, so it cannot. The spawn `gather` collects exceptions
+  so a partial spawn failure closes whatever did start. Measured `spawn 5.2s,
+  navigate 1.3s, actions 2.3s, total 9.0s`.
+- **`tests/test_e2e_load_milestone.py` (new)** — F-881 made red by construction: a
+  page that commits at once and holds its `load` on a slow `<img>` for 1.8 s, whose
+  title and `readyState` flip only at `load`. Plus the `domcontentloaded` control that
+  keeps the three milestones told apart.
+- **`tests/test_cli_backend_records_e2e.py` (new)** — F-880 through the REAL
+  `stealth-chrome-devtools` console script as a subprocess, against a hand-written
+  `server.json` in an isolated HOME: `doctor` names the `(dead record)` and the
+  `no port recorded` entry and writes nothing; `cleanup --apply` forgets exactly the
+  dead one and keeps the other. Both nodes assert the developer's real
+  `~/.stealth-mcp` was not touched.
+- **`tests/test_e2e_scroll_page_verification.py`** — the whole F-878 twelve-fixture
+  matrix is now asserted against the finding's own "right answer" column, not only the
+  four fixtures a candidate heuristic gets wrong. Re-measured 12/12.
+- **`tests/test_browser_integration.py`** — F-874's third record shape (`partial: true`
+  + `detail_error`, and NO `current_url`/`title` key) against a real instance.
+- **`tests/test_e2e_type_text_verification.py`** — a control that REWRITES what it
+  receives (a `dd-dd` mask) still succeeds, holding open F-873 §6's rule that the
+  check is "did anything change" and never "does it contain what I typed".
+- **`tests/test_wire_semantics.py`** — a self-calibrating overlap probe on the real
+  stdio wire: three `tools/call` in flight add ONE server-side hold, not three
+  (measured baseline 0.15 s, held 2.18 s over a 2.0 s hold). The backend does not
+  serialize concurrent calls.
+- **`tests/fixture_routes.py`** — six `cov_*` routes appended at EOF for the above, and
+  the module docstring's determinism rule now names them as its second deliberate
+  exception (they sleep on a `?ms=`, capped, never as a synchronization point).
+- **`tests/conftest.py`** — `STEALTH_MCP_BROWSER_SESSION_ROOT` is redirected to a temp
+  directory at conftest IMPORT time, beside the `STEALTH_MCP_CLONE_OUTPUT_DIR` line that
+  already used the idiom, so no test can reach the operator's real browser-session root.
+  A per-test fixture provably cannot do this — `get_settings()` is `lru_cache`d and every
+  E2E module's autouse `_warmup` spawns a browser before any function-scoped root fixture
+  is set up, which is how a fleet node declaring `tmp_empty_root` still wrote six 108 MB
+  profiles into the real root. Closes the structural gap F-841 left open; that finding is
+  updated with the measurement.
+
 ## 2.1.8
 
 ### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)
