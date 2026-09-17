@@ -297,6 +297,35 @@ FAILED test_a_pending_navigation_the_page_pre_empted_answers_about_the_winner 8.
 the fix: `8 passed in 35.70s`, slowest node body 1.78 s (the deliberate 1.6 s
 slow-subresource wait), every other body ≤ 1.28 s.
 
+#### Two races in this tier's own oracle, found by CI and fixed (F-882b, F-882c)
+
+Neither was a defect in the product. Both were the ledger oracle above being
+read at an instant that did not mean what the node assumed, and both are
+recorded here because §4 is what vouches for this tier.
+
+**F-882b — a fixture route recorded a request into the NEXT node's ledger.**
+Run **35150887345** (release-gate integration, Windows/X64, PR #123), attempts 1
+and 2: the subframe node failed with the pre-empt node's
+`/nav/slow-doc?ms=2500` at the head of its own freshly reset `nav_paths`.
+`fixture_routes._r_nav_slow_doc` slept BEFORE it recorded, alone among the
+`/nav/*` routes, so a request the browser abandoned at pre-emption was recorded
+2.5 s later, after the next node had called `/e2e/reset`. The route records on
+arrival now, and `tests/test_fixture_dynamic_routes.py` pins it hermetically by
+holding a request open at the delay and reading the ledger while the response
+is still withheld.
+
+**F-882c — two nodes asserted a fetch the milestone does not cover.**
+Run **35157444236** (release-gate integration, macOS/ARM64, PR #126): the
+meta-refresh node failed with `['/nav/meta-refresh']` against an expected two.
+That node and the self-reload node both schedule their SECOND document at
+`load` — the milestone `navigate` returns on — and both accept an answer about
+the FIRST, so at that instant the server legitimately has not been asked for
+the second yet. Both now wait for the sequence through `_await_fetched`
+(bounded poll, exact-sequence assertion unchanged). The other six ledger
+assertions still read once, because each asserts on a fetch the tool's own
+answer proves already happened; the classification is argued in that helper's
+docstring.
+
 ---
 
 ## 5. Blast radius (what a caller saw)
