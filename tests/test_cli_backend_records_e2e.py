@@ -52,6 +52,34 @@ from pathlib import Path
 import pytest
 
 from release_gate_harness import _isolated_env, resolve_launcher
+from stealth_chrome_devtools_mcp.embedded import backend_registry
+
+
+def _contexts(record: Path) -> set[str]:
+    """The display contexts the record still holds, read through the ONE reader.
+
+    Never the raw `["backends"]` shape. That shape is schema-dependent — a dict
+    keyed by context in v2, a LIST of entries since v3 (F-886) — and this file
+    writes v2 while `cleanup --apply` rewrites through the current writer, so a
+    raw read asserts on v2 before the apply and v3 after it. `read_backends`
+    normalizes both and is what every production reader uses, which is also the
+    thing worth pinning: what survives a forget is an ENTRY, not a key.
+    """
+    return {
+        str(e.get("display_context")) for e in backend_registry.read_backends(record)
+    }
+
+
+def _entry(record: Path, context: str) -> dict:
+    """The one entry recorded for `context`, through the same reader."""
+    entries = [
+        e
+        for e in backend_registry.read_backends(record)
+        if e.get("display_context") == context
+    ]
+    assert len(entries) == 1, entries
+    return entries[0]
+
 
 # Deliberately UNMARKED, like ``tests/test_doc_examples.py``, which drives the
 # same console script the same way. ``integration`` means "spawns real
@@ -245,25 +273,24 @@ def test_cleanup_apply_forgets_the_dead_entry_and_keeps_the_other(
     assert DEAD_CONTEXT in preview.stdout, preview.stdout
     assert "--apply to forget" in preview.stdout, preview.stdout
     # The preview changed nothing.
-    assert set(json.loads(record.read_text())["backends"]) == {
-        DEAD_CONTEXT,
-        NO_PORT_CONTEXT,
-    }
+    assert _contexts(record) == {DEAD_CONTEXT, NO_PORT_CONTEXT}
 
     applied = _run(env, tmp_path, "cleanup", "--apply")
     assert applied.returncode == 0, applied.stdout + applied.stderr
     assert f"forgot 1 dead ({DEAD_CONTEXT})" in applied.stdout, applied.stdout
 
-    remaining = json.loads(record.read_text())["backends"]
-    assert set(remaining) == {NO_PORT_CONTEXT}, remaining
-    # The survivor is kept whole, not rewritten.
-    assert remaining[NO_PORT_CONTEXT]["port"] == "not-a-port", remaining
+    assert _contexts(record) == {NO_PORT_CONTEXT}
+    # The survivor is kept whole, not rewritten: the field that makes it the
+    # NO_PORT case is still the unusable value this file wrote. The apply
+    # rewrites the FILE through the current schema (v2 in, v3 out), so this is
+    # a claim about the ENTRY surviving intact, never about the file's shape.
+    assert _entry(record, NO_PORT_CONTEXT)["port"] == "not-a-port"
 
     # A second apply has nothing left to do and says so — the rule is stable,
     # not a one-shot that eats an entry per run.
     again = _run(env, tmp_path, "cleanup", "--apply")
     assert "1 recorded, 0 dead" in again.stdout, again.stdout
-    assert set(json.loads(record.read_text())["backends"]) == {NO_PORT_CONTEXT}
+    assert _contexts(record) == {NO_PORT_CONTEXT}
 
     assert _real_state_bytes() == real_before, (
         f"the real {_real_state_file()} changed during an isolated CLI run"

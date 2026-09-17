@@ -711,3 +711,53 @@ class TestCliStatusReportsTheBackendThisClientWouldUse:
         out = capsys.readouterr().out
 
         assert "others      :" not in out
+
+    def test_a_sibling_under_our_own_display_context_is_still_an_other(
+        self, fake_server, recorded_backends, capsys, monkeypatch, tmp_path
+    ):
+        """F-886 review, F5. Two backends under ONE context is the machine the
+        eviction fix deliberately creates — we spawn beside a stranger's
+        backend rather than killing it. Comparing on display context alone made
+        neither entry an "other", so the summary went back to claiming it was
+        all there is while a second backend served the same desktop.
+
+        The port is in the label for the same reason: both entries carry the
+        same token, so the operator has nothing to act on without it.
+        """
+        recorded_backends(
+            {
+                "schema": 3,
+                "backends": [
+                    {
+                        "port": 52554,
+                        "pid": 53836,
+                        "version": "2.1.5",
+                        "source_fingerprint": "ours",
+                        "display_context": "win-session-1",
+                    },
+                    {
+                        "port": 40123,
+                        "pid": 99999,
+                        "version": "2.1.5",
+                        "source_fingerprint": "theirs",
+                        "display_context": "win-session-1",
+                    },
+                ],
+            }
+        )
+        pretend_display_context(monkeypatch, "win-session-1")
+        with (
+            patch.object(cli, "_clone_storage", return_value=fake_server),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.logging_setup.resolve_log_dir",
+                return_value=tmp_path,
+            ),
+            _live_only_on(52554),
+        ):
+            cli._cmd_status(None)
+        out = capsys.readouterr().out
+
+        assert "others      : 1 backends recorded" in out
+        assert "win-session-1:40123" in out
+        # ...and the one being reported on is NOT listed as an other.
+        assert "win-session-1:52554" not in out

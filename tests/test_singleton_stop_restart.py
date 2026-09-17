@@ -606,8 +606,15 @@ class TestRestartPortSelection:
         squatter = _bind_and_listen()
         try:
             squatted_port = squatter.getsockname()[1]
+            # A real digest on BOTH writes (below too): production never records
+            # "" — that is `fingerprint_mismatch`'s fail-closed "no digest",
+            # which reads as a DIFFERENT identity even against itself — and
+            # under F-886's supersede rule only our own identity's previous
+            # entry is replaced. The claim here is about port selection, so
+            # the two writes must describe the same identity as they do in
+            # production: restart respawns the identity it terminated.
             singleton._write_server_state(
-                port=squatted_port, version="1.2.1", pid=1111, source_fingerprint=""
+                port=squatted_port, version="1.2.1", pid=1111, source_fingerprint="fp"
             )
 
             monkeypatch.setattr(
@@ -625,7 +632,7 @@ class TestRestartPortSelection:
             def _fake_spawn(port):
                 spawned_on["port"] = port
                 singleton._write_server_state(
-                    port=port, version="1.2.1", pid=4242, source_fingerprint=""
+                    port=port, version="1.2.1", pid=4242, source_fingerprint="fp"
                 )
 
             monkeypatch.setattr(singleton, "_start_server_process", _fake_spawn)

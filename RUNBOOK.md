@@ -56,11 +56,14 @@ browser-session cap : 20.0 GB  [STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB]
 - **Which backend is it about?** The one *this shell* would be served by — the same
   adoption order discovery uses (F-868), not whichever entry `server.json` lists first.
   `pid` and `log` name that same backend, so the four lines can never describe different
-  processes. `server.json` can hold one entry per display context, and dead ones are
-  never pruned, so an `others` line appears when there are others:
+  processes. `server.json` can hold one entry per display context **and identity** — so
+  two backends may share a desktop (see "Two backends on one desktop" below) — and dead
+  ones are never pruned, so an `others` line appears when there are others. Each is
+  named `context:port`, because two entries on one desktop are otherwise
+  indistinguishable:
 
   ```
-  others      : 2 backends recorded (win-session-2, headless) — run `doctor` for each one's state
+  others      : 2 backends recorded (win-session-2:7169, headless:19222) — run `doctor` for each one's state
   ```
 
   `doctor`'s `contexts :` block probes every recorded backend on its own port; that is
@@ -105,7 +108,7 @@ the whole directory while no backend runs costs you nothing but a cold start.
 
 | Entry | What |
 |---|---|
-| `server.json` | the **backend registry**: one entry per display context, naming that backend's port, pid, version, and source fingerprint. This is what discovery reads to decide which backend to talk to |
+| `server.json` | the **backend registry**: one entry per display context *and identity* (schema v3, a list — F-886), naming that backend's port, pid, version, and source fingerprint. This is what discovery reads to decide which backend to talk to. A v2 or pre-2.0.4 record still reads; a 2.1.8-or-older client reading a v3 one sees no backends at all |
 | `server.port` | legacy, write-only — kept for a reader that no longer exists (see the `DESIGN.md` §10 ledger) |
 | `singleton.lock` | the cold-start mutex; an empty file that persists between runs |
 | `browser_pids.json` | the **browser-pid registry**: which browser processes are tracked, and which backend owns each one (`owner_pid`, `owner_create_time`) |
@@ -212,9 +215,12 @@ until the backend answers a real MCP `initialize`, **not** merely until its sock
 binds, and any lock-holder gives a **same-identity** backend (version *and* source
 fingerprint both match) up to 60 s of retried probes before it is allowed to evict —
 so a backend that is simply busy absorbing the herd is never terminated out from under
-the sessions using it. A version- or source-stale record gets no such grace and evicts
-immediately (an upgrade or code edit still takes effect now), and a dead record (no
-socket, no live process) skips the wait, so crash-recovery cold starts stay fast.
+the sessions using it. A version- or source-stale record gets no such grace — it is
+evicted at once **unless that backend still owns a live browser**, in which case it is
+spared and the new backend comes up beside it on its own port (F-886). Either way the
+upgrade or code edit takes effect now, because the arriving session always gets a
+fresh backend. A dead record (no socket, no live process) skips the wait, so
+crash-recovery cold starts stay fast.
 `tests/test_startup_herd.py` is the gate: 50 concurrent sessions, one logical backend,
 all usable inside 30 s.
 
@@ -275,9 +281,34 @@ a read-only verb.
 
 ### Code edit didn't take effect
 There is no live reload. A source edit changes the **source fingerprint**, so the next
-client connection evicts the stale backend and spawns a fresh one automatically. If you
-want it now: `restart`. (`hot_reload`/`reload_status` were removed — a fresh backend is
-the one code path.)
+client connection gets a fresh backend automatically. If you want it now: `restart`.
+(`hot_reload`/`reload_status` were removed — a fresh backend is the one code path.)
+
+There are now two outcomes, and `status` tells them apart. If the stale backend was
+idle it is evicted and the fresh one takes its port, as before. If it still owns a
+live browser it is **spared**, and the fresh backend comes up on a different port
+beside it — you will see an `others` line naming the one left behind. That is not a
+failure: your edit is running. The old backend goes away when the session holding its
+browsers closes them, or on an explicit `stop`. See "Two backends on one desktop".
+
+### Two backends on one desktop
+`status` shows an `others` entry with the **same display context** as the one being
+reported. Expected since 2.1.9, and it means exactly one thing: two clients on this
+desktop are running different source bytes, so neither will adopt the other's backend
+and neither is allowed to kill it while it is serving browsers (F-886). Common causes
+are a `uvx @latest` session beside a `uv tool` install, or an editable checkout beside
+either.
+
+Nothing needs doing — both sessions work, each on its own backend. To collapse them
+back to one, make every client on the machine run the same install, then `stop` and
+let the next session cold-start. `doctor` probes every entry and will tell you which
+is which; `cleanup --apply` reclaims entries whose backend is genuinely dead.
+
+**Caveat for a mixed fleet.** The protection lives in the *arriving* client. An
+install older than 2.1.9 does not have it and will still terminate a backend that is
+serving, so the guarantee only holds once every install on the machine is 2.1.9 or
+newer. If browsers are still closing unexpectedly, check that nothing old is left:
+`uv tool list` and any pinned `uvx` version in your MCP client config.
 
 ### Headed spawn fails: "cannot display a window"
 
@@ -300,7 +331,8 @@ whether that context can show a window. Two outcomes:
 - **A window-capable backend is listed.** Your session should already be using it —
   discovery prefers a window-capable backend, and a client that cannot prove it has
   a desktop adopts any of them. If it is not, the entry is version- or
-  source-stale; `restart` or let the next cold start evict it.
+  source-stale; `restart`, or let the next cold start deal with it — which evicts it
+  if it is idle and spawns beside it if it is still serving browsers (F-886).
 - **No backend can display a window.** `doctor` says so explicitly. Start one from
   a desktop session — open a Claude Code window on the physical desktop and let it
   cold-start a backend, or run `stealth-chrome-devtools serve --http` there. Every

@@ -71,6 +71,15 @@ Entries = dict[str, Entry]
 OWNER_PID = "owner_pid"
 OWNER_CREATE_TIME = "owner_create_time"
 
+# The record's FILE NAME, and only the name: every public function still takes
+# the whole path, so nothing here binds a state dir at import time and the
+# tests' path redirection still reaches every read and write (see the module
+# docstring). The name is here because two modules now join it to a state dir —
+# `process_cleanup`, which owns the reaping policy, and `backend_eviction`,
+# which asks this record whether a backend is still serving (F-886) — and a
+# string literal spelled in both is a second place to rename it from.
+RECORD_NAME = "browser_pids.json"
+
 # Bounded non-blocking acquire, then raise (F-607): never yield as if the lock
 # were held. Both callers already log and degrade, so raising turns a silent
 # cross-process race into a logged skipped write.

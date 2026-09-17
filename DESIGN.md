@@ -86,8 +86,17 @@ winner of the startup lock holds it until the backend answers a real `initialize
 not merely until its socket binds — and any lock-holder gives a **same-identity**
 backend (version AND source fingerprint both match) up to `REUSE_PATIENCE_SECONDS`
 (60 s) of retried probes before it may evict. Identity gates the grace on purpose: a
-stale record still evicts immediately so an upgrade takes effect now, and a dead one
+stale record gets no such patience, so an upgrade takes effect now, and a dead one
 (no socket, no live process) fails the first probe so crash recovery stays fast.
+
+**But identity is not a licence to kill either (F-886).** Since 2.1.9 a stale
+backend is evicted *unless it is still serving*: one of ours, running, of an
+identity we would not adopt, and owning at least one live browser. Such a backend
+is **protected** — never terminated and never bound over — and the arriving client
+spawns beside it instead, so both sessions keep their browsers. "Immediately" is
+therefore true of an *idle* stale backend and of nothing else; the fresh code
+reaches the machine at once either way, because the newcomer always gets its own
+backend. See §2.3a.
 Discovery's hot path stays single-shot (`patience=0`) and the watchdog's 2 s
 `LIVENESS_PROBE_TIMEOUT` is untouched; `tests/test_startup_herd.py` proves the result
 at scale — 50 simultaneous real stdio sessions, exactly one logical backend.
@@ -99,37 +108,54 @@ at scale — 50 simultaneous real stdio sessions, exactly one logical backend.
 is free or held by our own backend, and only when a **foreign** process occupies the
 target does it fall back to an OS-assigned free port (`_free_port`, from
 `proxy_forwarder`). The chosen port, plus the version, pid, and source fingerprint,
-are handed off through `~/.stealth-mcp/server.json`, which records one backend
-per **display context** (F-808) so a headless and a desktop backend can coexist:
+are handed off through `~/.stealth-mcp/server.json`, which records one backend per
+**display context and identity** (F-808, F-886) so a headless and a desktop backend
+can coexist — and so can two clients on ONE desktop running different source bytes:
 
 ```json
 {
-  "schema": 2,
-  "backends": {
-    "win-session-1": {
+  "schema": 3,
+  "backends": [
+    {
       "port": 19222, "version": "...", "pid": 12345,
       "source_fingerprint": "...", "display_context": "win-session-1"
     }
-  }
+  ]
 }
 ```
 
-The flat `{port, version, pid, source_fingerprint}` record every release up to
-2.0.3 wrote still reads, as one backend classified `unverified`. Read entries out
-of the record through `backend_registry`'s accessors — nothing outside that module
-branches on `schema`.
+Schema v3 is a **list**, and that is what makes "spawn beside it" expressible at
+all: v2 keyed entries by display context, one slot each, so recording either of two
+same-desktop backends erased the other and the erased one's proxy could no longer
+confirm its own backend. Both older shapes still READ — v2's keyed object, with the
+key still authoritative for the context, and the flat
+`{port, version, pid, source_fingerprint}` record every release up to 2.0.3 wrote,
+as one backend classified `unverified`. Read entries out of the record through
+`backend_registry`'s accessors — nothing outside that module branches on `schema`.
 
-Recording a backend also **supersedes by port**: any other entry claiming that port
-is dropped, because only one process can hold a loopback listener, so a second entry
+The reverse is **not** true: a 2.1.8 or older client reads a v3 record as *no
+backends at all*, and its eviction path resolves the victim from the socket rather
+than from the record, so it terminates a v3 backend on its port exactly as it would
+have terminated a v2 one. The protection above only holds once **every** install on
+the machine carries it.
+
+Recording a backend **supersedes by port**: any other entry claiming that port is
+dropped, because only one process can hold a loopback listener, so a second entry
 naming it is by construction a leftover (a v1 record, or a context token that changed
 under a backend that did not — a Windows session id is reassigned across an RDP
-reconnect). Entries on other ports, `unverified` included, survive.
+reconnect). It also supersedes by **(display context, identity)**, so our own respawn
+on a new port still replaces our own entry and nothing accumulates — while a FOREIGN
+identity's entry in the same context is KEPT, which is the whole point of v3. Entries
+on other ports, `unverified` included, survive.
 
-Discovery and reuse **read the recorded port**; they never assume `19222`. `stop`
-forgets the stopped backend's own display-context entry and clears `server.json` only
-once nothing else is recorded, so the next start falls back to `DEFAULT_PORT` when it
-was the last backend on the machine. **Never re-hardcode `19222`** anywhere in the
-path — the port is data, not a constant.
+Discovery and reuse **read the recorded port**; they never assume `19222`. Selection
+reads the port recorded for **our own identity** on this desktop, falling back to the
+context's first entry when we have none: on a two-identity desktop the first entry is
+the stranger's, and targeting it made `restart` walk away from its own backend
+instead of replacing it. `stop` forgets exactly the one entry it stopped and clears
+`server.json` only once nothing else is recorded, so the next start falls back to
+`DEFAULT_PORT` when it was the last backend on the machine. **Never re-hardcode
+`19222`** anywhere in the path — the port is data, not a constant.
 
 ### 2.3 Source-fingerprint reuse, and an always-fresh dev backend
 
@@ -147,13 +173,56 @@ with** the fingerprint at the gate — it is *not* folded into the digest (the d
 pure source). Consequences that must not regress:
 
 - An **in-place source edit changes the fingerprint**, so the old backend no longer
-  matches and is evicted + respawned. *The one way new code reaches the backend is a
-  fresh backend* — which is exactly why `hot_reload` / `reload_status` were **deleted**
+  matches and the edit gets a fresh backend. Whether the old one is *evicted* or
+  merely *left behind* depends on §2.3a: idle, it is evicted and respawned on the
+  same port; still serving browsers, it is spared and the fresh backend comes up
+  beside it. Either way *the one way new code reaches the backend is a fresh
+  backend* — which is exactly why `hot_reload` / `reload_status` were **deleted**
   (M2). Do not reintroduce a live-reload path; it would be a second, weaker way to do
   what a fresh spawn already does correctly.
-- An **empty fingerprint never matches** (fail-closed): a read error yields `""`, and
-  `""` short-circuits the reuse gate to a miss → respawn. Never make an empty or
-  missing fingerprint compare equal.
+- An **unreadable fingerprint is not a mismatch** (F-829). A read error yields
+  `None`, which is a third state meaning UNKNOWN, and unknown is never evidence of a
+  source change — reading it as one is what let a single OneDrive sync lock evict the
+  healthy backend every session on the machine was sharing. The one reader is
+  `backend_registry.fingerprint_mismatch`, which answers True only when both sides
+  are known and differ; `""` keeps its older fail-closed meaning and still counts as
+  a mismatch. Never make an empty or missing fingerprint compare *equal*.
+
+### 2.3a A backend that is still serving is never evicted (F-886)
+
+Identity answers "would I adopt this backend". It does **not** answer "is anyone
+using it", and for most of this tool's life the eviction path asked only the first
+question. That is the single cause behind both symptoms operators reported — *"my
+browsers randomly closed"* and *"the MCP server disconnected mid-session"*. Two
+clients on one desktop running the same released version off different source bytes
+(a `uvx @latest` session beside a `uv tool` install, an editable checkout beside
+either) each read the other as stale, and whichever started second killed the one
+already working.
+
+The rule, single-homed in `embedded/backend_eviction.py`, is four conditions in
+cheapest-first order. A backend is **protected** when it is:
+
+1. **ours** — recorded, and the recorded pid is a backend this tool started;
+2. **running**;
+3. of an identity we would **not** adopt (a stranger's, not our own); and
+4. still the owner of at least one **live browser**, read through
+   `browser_pid_registry`'s owner stamp.
+
+A protected backend is never terminated and never bound over: the arriving client
+takes an OS-assigned port and spawns *beside* it. Deliberately **not** "is it
+answering `initialize`" — a wedged foreign backend still holds its user's tabs, and
+whether a backend is *usable* is `backend_liveness`'s question. Deliberately "owns a
+live browser" and not "is alive" — protecting every live backend would accumulate one
+per source edit forever, and browsers are the only state reconnecting cannot rebuild.
+An unreadable browser record means no browsers, which resolves toward evicting,
+because refusing on one would brick every cold start.
+
+Our own identity is never protected, so `restart` still replaces our own backend and
+a wedged one of ours stays evictable. The measurement that settled where the fix
+belongs is in `audit/stage2/finding_F886_eviction_kills_sibling_browsers.md`: the
+loser's browser outlived its backend by 4.43 s and was then reaped by the
+**replacement's** orphan recovery, so the defect was in the eviction, not in the
+reaper.
 
 ### 2.4 Teardown is offloaded so one wedged close can't freeze the fleet
 

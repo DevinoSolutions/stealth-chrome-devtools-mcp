@@ -2128,6 +2128,36 @@ def _r_state_store(handler, query: str) -> None:
     _send_html(handler, state_store_page())
 
 
+# ── Lifecycle-resilience page (tests/test_e2e_lifecycle_resilience.py) ───────
+# ONE page that answers every tool that module's soak issues — navigate, scroll,
+# type, screenshot — so a lifecycle node never has to reach for a page another
+# plan owns and change its meaning. Deliberately static after load: no timer, no
+# fetch, no worker. A lifecycle stress asks whether the SESSION survived, and a
+# page that kept doing work of its own would put a second, noisier explanation
+# under every failure.
+LIFE_SENTINEL = "fixture-life-lifecycle-page"
+LIFE_ROWS = 400  # ~12000px of document: taller than any CI viewport, so it scrolls
+
+
+def life_lifecycle_page() -> str:
+    rows = "".join(
+        f"<div class='row' id='row-{i}'>row {i}</div>" for i in range(LIFE_ROWS)
+    )
+    return _page(
+        "fixture-life-lifecycle",
+        LIFE_SENTINEL,
+        (
+            "<input id='life-input' type='text' value=''>"
+            "<div id='life-rows'>" + rows + "</div>"
+        ),
+        head="<style>.row{height:30px}</style>",
+    )
+
+
+def _r_life_lifecycle(handler, query: str) -> None:
+    _send_html(handler, life_lifecycle_page())
+
+
 # ── F-882 navigation-supersession pages and routes ──────────────────────────
 def nav_document(
     sentinel: str, title: str | None, head: str = "", body: str = ""
@@ -2538,6 +2568,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/dynamic_probe.html"): _r_dynamic_probe,
     ("GET", "/e2e/reset"): _r_reset,
     ("GET", "/e2e/ledger"): _r_ledger,
+    # Lifecycle resilience (test_e2e_lifecycle_resilience.py)
+    ("GET", "/life/lifecycle.html"): _r_life_lifecycle,
     # F-883 — appended at the END (``es_*``).
     ("GET", "/es_async.html"): _r_es_async,
     ("GET", "/es_value"): _r_es_value,
@@ -2564,6 +2596,7 @@ DYNAMIC_PAGES: dict[str, str] = {
     "/state/store.html": "fixture-w16-state-store",
     "/i18n/text.html": "fixture-w16-i18n-text",
     "/i18n/composition.html": "fixture-w16-i18n-composition",
+    "/life/lifecycle.html": LIFE_SENTINEL,
     "/nav/landing": NAV_LANDING_SENTINEL,
     "/nav/head-replace": NAV_HEAD_REPLACE_SENTINEL,
     "/nav/meta-refresh": NAV_META_REFRESH_SENTINEL,

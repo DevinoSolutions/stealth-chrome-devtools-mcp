@@ -38,6 +38,12 @@ def _instant_backoff(monkeypatch):
     # Zero the recovery backoff so the unit lane stays fast while the real
     # sleep(0) code path still runs. Mirrors tests/test_element_resolution.py.
     monkeypatch.setattr(element_resolution, "_SETTLE_SECONDS", 0.0)
+    # And F-884's wait, for the same reason: nodriver used to poll for a
+    # zero-match INSIDE one call, so a pin could assert one call and still be
+    # describing a 10 s wait. The loop is this module's now and visible, so zero
+    # its budget here — the production wait is unchanged either way.
+    monkeypatch.setattr(element_resolution, "_DEFAULT_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(element_resolution, "_POLL_SECONDS", 0.0)
 
 
 def _stale():
@@ -116,15 +122,19 @@ class _FakeTab:
         self.select_all_calls = []
         self.sent = []
 
-    async def xpath(self, expression, timeout=None):
+    # The SINGLE-SHOT surfaces only (F-884): ``find_elements_by_text`` is what
+    # ``Tab.xpath`` is built on (``DOM.performSearch`` takes an XPath), and it
+    # is what the XPath path calls now that the waiting is
+    # ``element_resolution``'s rather than nodriver's.
+    async def find_elements_by_text(self, expression):
         self.xpath_calls.append(expression)
         return _pop(self._xpath)
 
-    async def select(self, selector, timeout=None):
+    async def query_selector(self, selector):
         self.select_calls.append(selector)
         return _pop(self._select)
 
-    async def select_all(self, selector):
+    async def query_selector_all(self, selector):
         self.select_all_calls.append(selector)
         return _pop(self._select_all)
 

@@ -194,12 +194,20 @@ def test_real_transport_soak_one_instance_stays_up(soak_record, capsys):
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "F-805: wait_for_element and click_element ignore the caller's timeout for "
-        "a selector that never resolves — both spend nodriver's DEFAULT 10s "
-        "tab.select wait, because element_resolution.resolve_element is called "
-        "with timeout=None. Bounded, so not a hang, but a 2000ms request costs "
-        "~10.5s. See audit/stage2/finding_F805_missing_selector_ignores_caller_"
-        "timeout.md — this node turns RED (XPASS) the moment it is fixed."
+        "F-805, HALF FIXED by F-884 — this node asserts BOTH halves, so it stays "
+        "xfail until both are honest. FIXED: wait_for_element honours its "
+        "timeout now (it passes resolve_element timeout=0 and its own 0.5s loop "
+        "is the wait), so a 2000ms request costs ~2.03s, down from ~10.5s. "
+        "REMAINING: this node calls click_element with NO timeout, so its ~10.5s "
+        "is the tool's own 10000ms default being honoured — click_element does "
+        "have a timeout and its selector branch forwards it (measured: "
+        "timeout=2000 -> 2.03s, default -> 10.18s). The sharpest case left is "
+        "the branch this node does not exercise: click_element(text_match=...) "
+        "reaches resolve_by_text with no timeout, so a DECLARED 2000ms costs "
+        "10.19s. Bounded, so not a hang. See audit/stage2/finding_F805_missing_"
+        "selector_ignores_caller_timeout.md — this node turns RED (XPASS) once "
+        "the click row is under the honest bound, which today means passing a "
+        "timeout here or lowering the default."
     ),
 )
 def test_missing_selector_calls_honour_the_caller_timeout(soak_record):
@@ -209,6 +217,13 @@ def test_missing_selector_calls_honour_the_caller_timeout(soak_record):
     "nothing hangs", which this behaviour does not violate — ~10.5s is slow, not
     unbounded. Pinning the honest bound separately keeps the stability claim
     green and truthful while the defect stays visible and dated.
+
+    Both assertions are kept after F-884 fixed the first one. The wait bound is
+    no longer a prediction, it is a REGRESSION guard: it is the only node in the
+    suite that measures, over real stdio and real Chrome, that
+    ``wait_for_element`` spends the caller's budget rather than nodriver's
+    default. Dropping it because it passes would delete the proof of the half
+    that works, and the node as a whole would still be xfail for the other half.
     """
     missing = soak_record["journey"]["missing_selector"]
     assert missing["requested_wait_seconds"] == SOAK_MISSING_SELECTOR_WAIT_MS / 1000

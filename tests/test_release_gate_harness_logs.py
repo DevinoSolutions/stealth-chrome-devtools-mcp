@@ -17,12 +17,14 @@ DEBUG probe noise, and the lines that decide "one connection dropped" from
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 
 from release_gate_harness import (
     _PROXY_DIGEST_LINES,
     _backend_logs,
+    _isolated_env,
     _proxy_warnings,
     workspace_backend_logs,
     workspace_proxy_warnings,
@@ -126,3 +128,53 @@ def test_an_empty_workspace_says_so_instead_of_returning_nothing(tmp_path):
     space["log_dir"].mkdir()
     assert workspace_backend_logs(space) == "(no backend log files found)"
     assert workspace_proxy_warnings(space) == "(no proxy warnings)"
+
+
+class TestTheWorkspaceDeclaresItsOwnLogLevel:
+    """``_isolated_env`` pins ``STEALTH_MCP_LOG_LEVEL``, so the developer's
+    exported level cannot decide what a gate workspace records.
+
+    The env starts as ``dict(os.environ)``, and every node here reads a
+    workspace's logs as evidence — for ``test_e2e_lifecycle_resilience`` as an
+    ORACLE. ``backend_watchdog`` logs its ``was busy, not dead`` verdict at INFO
+    while its strikes are WARNING, so an exported ``WARNING`` would deliver
+    strikes with no verdict: a run where F-820 behaved perfectly, arriving as a
+    RED about the product and caused by the harness. The level is declared
+    beside the log DIRECTORY because it is the same decision — what this
+    workspace records, and where.
+    """
+
+    def _env(self, tmp_path):
+        return _isolated_env(
+            home_dir=tmp_path / "home",
+            session_root=tmp_path / "sessions",
+            log_dir=tmp_path / "logs",
+            clone_dir=tmp_path / "clones",
+        )
+
+    def test_an_exported_level_does_not_reach_the_workspace(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("STEALTH_MCP_LOG_LEVEL", "WARNING")
+        assert self._env(tmp_path)["STEALTH_MCP_LOG_LEVEL"] == "INFO"
+
+    def test_the_level_is_pinned_even_when_nothing_was_exported(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("STEALTH_MCP_LOG_LEVEL", raising=False)
+        assert self._env(tmp_path)["STEALTH_MCP_LOG_LEVEL"] == "INFO"
+
+    def test_the_real_environment_is_never_mutated(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_LOG_LEVEL", "ERROR")
+        self._env(tmp_path)
+        assert os.environ["STEALTH_MCP_LOG_LEVEL"] == "ERROR"
+
+    def test_the_pinned_level_is_one_the_product_accepts(self, tmp_path):
+        """Not a free-form string: the value is read back through the product's
+        own ``Settings`` field, which degrades an unrecognised level to INFO
+        silently — so a typo here would pin nothing and say nothing."""
+        from stealth_chrome_devtools_mcp.settings import Settings
+
+        level = self._env(tmp_path)["STEALTH_MCP_LOG_LEVEL"]
+        assert getattr(logging, level, None) == logging.INFO
+        assert Settings(log_level=level).log_level == level

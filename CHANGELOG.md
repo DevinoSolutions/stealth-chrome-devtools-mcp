@@ -415,6 +415,244 @@ that would have been red first. No `src/` change.
   profiles into the real root. Closes the structural gap F-841 left open; that finding is
   updated with the measurement.
 
+### Tests — lifecycle resilience E2E (disconnects, browsers closing)
+
+`tests/test_e2e_lifecycle_resilience.py` — eight nodes that drive a REAL fleet (the
+installed console launcher over stdio JSON-RPC, a detached backend on an isolated
+`HOME` and an OS-assigned port, real headless Chrome) and assert, after each stress:
+the recorded backend pid is unchanged; every browser spawned before the stress is
+still alive AND answers a CDP round trip; every `tools/call` on a surviving proxy got
+exactly one response frame, not an error, and no proxy's stdout reached EOF; and ZERO
+lifecycle incidents were written to the proxy/backend logs. The mixed-fingerprint
+fleet is the one deliberate exception to that set: it churns a backend by
+construction, so it runs in its own workspace, asserts browsers on the pid captured
+at spawn only (the winner rewrites `browser_pids.json`, so the registry cannot be its
+oracle) and is exempt from the zero-incident rule — the eviction line IS its
+measurement. The incident vocabulary is the
+product's own log lines (`confirmed unusable`, `confirmed gone after a lost
+connection`, `backend healed: re-bridging`, `backend unhealable after`, `times in a
+row`, `backend stale (source changed), evicting`) — read from the logs rather than
+from `capture_lifecycle`, which is a no-op under the suite's
+`STEALTH_MCP_NO_ERROR_REPORTING=1` — and one hermetic node asserts each of those
+substrings still occurs in the module that emits it, so a reworded line turns the
+vocabulary red instead of making every stress node vacuous. A watchdog STRIKE is
+deliberately not an incident (F-820) and is counted and printed instead.
+
+Stresses, one node each, with the measured wall time and the numbers asserted on:
+CPU saturation (20 s, `os.cpu_count()*2` normal-priority busy loops, two proxies
+calling every ~1 s. The strike count varied across runs on a 32-core box (0 in
+five, 6 in one where answered calls also fell from 76-80 to 28; the *unstressed*
+60 s soak logged 2 in another), so no node asserts a count or a floor — every
+node asserts the IMPLICATION instead: if a full strike run is ever reached on a
+port, THAT proxy's confirmation phase must have answered `was busy, not dead`
+— never silence, never `confirmed unusable`. Keyed on `(log file, port)` because
+every proxy here shares one backend, so a port-only key would let a sibling's
+verdict close another proxy's run; and a full run that is the last watchdog line
+its proxy wrote counts as pending, because the confirmation may legitimately run
+for `REUSE_PATIENCE_SECONDS` without logging. Vacuous when the load does not
+bite, an end-to-end F-820 oracle when it does; the longest consecutive run is
+printed so which of the two happened is readable. It has not fired on any real
+run yet — seven runs, the limit never reached — so both paths are exercised
+hermetically on synthetic log lines instead); a hard-killed sibling proxy; 30 `initialize`+DELETE liveness
+sessions plus five clean proxy connect/disconnect cycles; a session idle past
+`session_hygiene.ABANDONED_AFTER_SECONDS + SWEEP_INTERVAL_SECONDS` (the longest
+periodic reaper in the tree, derived from those constants rather than typed); a
+three-proxy 60 s soak of navigate/scroll/type/screenshot against the new
+`/life/lifecycle.html` fixture route; and two proxies whose package source
+fingerprints differ, sharing one state dir.
+
+**One finding, pinned as `xfail(strict=True)` and not fixed here: a
+source-fingerprint eviction CLOSES ANOTHER SESSION'S BROWSER, silently.** Measured
+six times with no exception. The evicting proxy's cold-start lock calls
+`singleton._clear_stale_backend` → `_terminate_backend` on the running backend, and
+afterwards the browser that backend owned is gone (measured on the pid captured at
+spawn; which of the two candidate mechanisms kills it — dying with the terminated
+backend, or being reaped as unowned by the replacement's orphan recovery, since
+`browser_pid_registry` stamps the BACKEND as owner — was not isolated). The
+other session never asked for that and is never told: its proxy log carries no
+condemnation, no heal and no teardown — only transient strikes that reset themselves
+(usually one `probe failed 1/3`; once `2/3`). The proxy's FAST death witness is
+port-only: `backend_watchdog.watch_liveness` probes with
+`singleton._backend_http_ready`, which asks the port and not the identity, and the
+replacement binds the SAME port and answers it — so the three strikes that would open
+the confirmation phase never accumulate and the confirmation that IS identity-scoped
+(`_same_identity_backend_ready`) is never reached; the streamable-HTTP bridge is
+per-request, so nothing "breaks" for `_confirm_bridge_verdict` either. What actually
+died is the MCP SESSION, which nothing watches, leaving `proxy_selfheal`'s entire
+recovery unreachable on the most common way a backend goes away. The client-visible
+half varies (5 of 6 runs: every later call answers
+`{"code": 32600, "message": "Session terminated"}`; 1 of 6: the session kept answering
+over a backend that no longer had its browser), so the node asserts the half that did
+not vary. The eviction itself converges — exactly one wave in all six runs, and the
+fleet ends on exactly one live recorded backend, asserted by a sibling node whose
+fixture first proves with the product's own `_source_fingerprint` that the two sides
+really differ — but only because the loser never notices, not because any rule makes
+a ping-pong impossible. Two proposed universal rules are in `CONTRIBUTING.md`.
+
+`tests/release_gate_harness.py`'s `_pick_free_port` no longer hands an isolated
+workspace whatever loopback port the OS assigned: it refuses the product's default
+singleton port and every port the developer's REAL `~/.stealth-mcp/server.json`
+records, and retries (raising after 32 picks rather than guessing). The ephemeral
+range covers both, and a throwaway backend squatting a live backend's recorded port
+while that backend is down would be adopted by the developer's next real proxy and
+die at workspace teardown — the suite handing out the very `CONNECTION_CLOSED` it
+exists to eliminate. The record parse is now ONE helper (`_backend_entries`) shared
+with `_backend_pid_from_state`, and `tests/test_release_gate_harness_ports.py` pins
+the pick hermetically.
+
+### Fixed — concurrent selector resolution on one tab crashed with `-32000` (F-884)
+
+Three concurrent `wait_for_element` calls against ONE tab raised
+`ProtocolException: DOM agent hasn't been enabled [code: -32000]`. Deterministic, not
+flaky: at three concurrent resolutions 5 of 15 failed on every round, at five 15 of 25,
+and through the real tools a mixed batch of fifteen CSS/XPath/wait calls lost **14**.
+
+Three links. `DOM.getDocument` does not merely read the document — it resets this CDP
+session's node-id bindings (measured on Chrome 152: a session's own re-fetch kills the
+ids it just handed out, while a *second* connection to the same target leaves them
+alone, so the table is per session, which is per `Tab`). Every resolution is
+`getDocument` followed by a query using the id it returned, so two overlapping ones
+always lose. nodriver then answers that `ProtocolException` by sending `DOM.disable()`
+*before* re-raising, and that send fails with `"DOM agent hasn't been enabled"` once a
+sibling already disabled the agent — **replacing** the stale-node text. And
+`element_resolution`'s bounded retry, which would have absorbed the first link on its
+own, classifies on that text and so never ran.
+
+The fix is not a wider marker list — the wording is Chrome's and not a closed set (the
+XPath path raises `"DOM agent is not enabled"` from the same cause). It is to stop
+generating the race: `element_resolution` now gives each tab one `asyncio.Lock`, held
+across each resolution ATTEMPT, so `getDocument` and the query that uses its node id are
+atomic per tab. Scope is the tab object because the state it guards is; the key is
+`id(tab)` with a `weakref.finalize`, because nodriver's `Connection` defines `__eq__`
+without `__hash__` and a `Tab` is therefore unhashable.
+
+A fourth site had to move for the fix to hold: `Element.update()` is a `DOM.getDocument`
+too, and `dom_handler.query_elements` called it once per returned element — one listing
+of twenty elements reset the table twenty times while a sibling was mid-query. Both
+`update()` call sites now go through `element_resolution.refresh_element`, the one home,
+under the same lock. A lock inside `element_resolution` alone was measured and still
+lost 1 of 15.
+
+**The waiting moved out of the lock**, and that half matters as much as the lock. nodriver
+bundles a poll loop into `select`/`find`/`select_all`/`xpath`, so holding the lock across
+one froze every other DOM call on that tab for its 10 s default no matter what the caller
+asked — measured: a `wait_for_element` given a **one second** timeout held the tab 10.5 s,
+a sibling `query_elements` went 0.25 s → 10.56 s, four concurrent absent resolutions blew
+the tool's own 30 s budget, and a waiter answered `False` about an element a concurrent
+click *would have created*, because it starved that click. So `element_resolution` now
+owns the wait: one locked single-shot query, then a poll with the lock released, bounded
+by the caller's own deadline. `wait_for_element` passes `timeout=0` inward because its own
+loop is the wait — it used to nest nodriver's 10 s default inside a 1 s budget.
+
+The result beats the pre-fix baseline on every axis measured: three concurrent resolutions
+of a present selector 0.122 s → 0.005 s with failures 5/15 → 0/15; the starved waiter
+`False @ 10.71 s` → `True @ 1.02 s`; the sibling query 0.25 s → 0.01 s; four concurrent
+absent resolutions from 2 answers + 2 crashes to 4 answers at ~10.2 s each. Two costs are
+named rather than hidden: one locked round-trip pair at a time still delays a sibling by a
+slow query's own duration, and a genuinely absent **XPath** now waits 10 s rather than
+nodriver's 2.5 s, because CSS and XPath were given one budget. Full argument, matrices and
+residuals in `audit/stage2/finding_F884_concurrent_dom_queries.md`.
+
+One swallow had to be re-made rather than inherited. Resolving XPath through
+`find_elements_by_text` instead of `Tab.xpath` sheds that method's `dom.enable()`
+prologue, **not** its `dom.disable()` — traced on Chrome 152, the XPath path's commands
+are `getDocument, performSearch, getSearchResults, discardSearchResults, disable`, and
+that disable is nodriver's own last statement, sent bare, with the answer already built.
+`Tab.xpath` wraps exactly that call in `try/except ProtocolException: pass` and comments
+that it "sometimes raises"; calling `find_elements_by_text` directly lost the guard, so a
+failing disable would have discarded a resolution that SUCCEEDED — the same masking shape
+this finding removes. `_xpath_matches` now catches it, named and bounded to ONE repeat of
+the search (the answer went with the exception, and the search is an idempotent read whose
+own `getDocument` re-enables the agent). It is deliberately not a `_STALE_NODE_MARKERS`
+entry and not a `recoverable_race`: that error is the mask, it says nothing about whether
+the query raced, and treating it as one would restore the old behaviour by the other door.
+Also on this pass, `resolve_elements` gained the same `timeout` its three sibling
+resolvers have — it could not offer one before, because the wait was `select_all`'s and
+bundled into the query.
+
+**F-805 is half fixed as a side effect**, and its finding and strict-xfail node now say
+which half. `wait_for_element(timeout=2000)` against a selector that never resolves cost
+~10.5 s and now costs ~2.03 s, because the tool's own loop is the wait and it asks
+`element_resolution` for exactly one query. The xfail does not flip, because its other row
+calls `click_element` with no timeout and so spends that tool's own 10000 ms default —
+honoured, not ignored (measured: `timeout=2000` answers in 2.03 s). The one branch that
+still ignores a timeout its caller declared is `click_element(text_match=...)`, which
+reaches `resolve_by_text` with none, so a declared 2000 ms costs 10.19 s; that is now
+named in the finding as what remains open. Separately, six tools expose no `timeout` at
+all and inherit the 10 s default — a surface question, not a defect.
+
+### Fixed — a cold start no longer closes another session's browsers (F-886)
+
+**The two symptoms operators report — "my browsers randomly closed" and "the MCP
+server disconnected mid-session" — were one cause.** A stdio proxy starting up
+next to a backend it would not adopt terminated it, and the decision consulted
+only IDENTITY: `backend_registry.fingerprint_mismatch` answers "these two source
+digests differ", never "that one is busy". Two clients running the same released
+version off different source bytes — a `uvx @latest` session beside a `uv tool`
+install, an editable checkout beside either — each read the other as stale, and
+whichever started second killed the one already working.
+
+The browser did NOT die with its backend. Measured at 0.25 s resolution: the
+incumbent backend was terminated at t+9.11 s and its browser was still running
+4.43 s later, until the REPLACEMENT's orphan recovery reaped it
+(`process_cleanup.recovery: Killed 1 orphaned browser processes`) — an owner we
+had just killed ourselves is indistinguishable from one that crashed last week.
+Meanwhile the surviving proxy never learned: both of its death witnesses are
+PORT-scoped and the replacement binds the same port, so the watchdog's strikes
+never reached three and the per-request bridge never broke. Its later calls
+answered `{"code": 32600, "message": "Session terminated"}` with no condemnation,
+no heal and no teardown in its log.
+
+**The rule, new module `embedded/backend_eviction.py`:** a backend that is one of
+ours, running, of an identity we would not adopt, and still owning at least one
+live browser is PROTECTED — never terminated, never bound over. The arriving
+client spawns its own on a fresh port and both sessions keep their browsers.
+`singleton` asks it at the bind site (`_select_backend_port`) and again at the
+kill site (`_clear_stale_backend`). An IDLE stale backend is evicted exactly as
+before, so the edit-source-get-a-fresh-backend flow (issue #14) is unchanged in
+the case it actually happens in; `stop` and `restart` are deliberately ungated,
+and our own wedged backend is still replaceable.
+
+`server.json` is now **schema v3** — `backends` is a LIST, so one display context
+can hold one backend per identity. v2 (every 2.0.4-2.1.8 record, key still
+authoritative for the display context) and v1 still read, so an upgrade adopts
+the running backend rather than evicting it. `record_backend` supersedes by port
+and by (display context, identity), so our own respawn still replaces our own
+entry and nothing accumulates. `forget_backend` is deleted — `forget_entries` was
+already the entry-precise sibling, and `stop_backend` now forgets the one entry
+it stopped, so a sibling identity survives a `stop`.
+
+Port selection picks the backend recorded for **our own identity** on this
+desktop, falling back to that context's first entry only when we have none.
+Ours-first is load-bearing rather than tidy: on a two-identity desktop the first
+entry is the stranger's by construction, and targeting it made `restart` step
+aside from the stranger, spawn a third backend on an OS-assigned port and leave
+your own wedged backend running — with its record entry then superseded away, so
+`status`, `doctor` and `cleanup` could not see it either.
+
+`status`'s `others` line now compares entries on (display context, port) rather
+than display context alone, so the second backend on your own desktop is named
+rather than silently omitted, and each is labelled `context:port`.
+
+The proxy-lifecycle report for a source-change eviction is sent after the
+decision, not before it, so a refusal to evict no longer reaches the log and
+Sentry as an eviction that never happened.
+
+**Upgrading a machine, not just a session.** The protection lives in the
+*arriving* client, so a 2.1.8-or-older install on the same machine still
+terminates a backend that is serving — and it reads the new `server.json` as no
+backends at all, which routes it straight to that eviction. Until every install
+on a machine is 2.1.9 or newer you will still see browsers close. Check with
+`uv tool list` and any pinned `uvx` version in your MCP client configuration; the
+symptom and the check are in `RUNBOOK.md` under "Two backends on one desktop".
+
+Measured on the real fleet (`tests/test_e2e_lifecycle_resilience.py`, `S5`):
+before, 7 of 7 runs evicted a backend, killed the loser's browser and left it
+answering `Session terminated`; after, zero eviction waves, zero lifecycle
+incidents, both browsers alive and both sessions served. The `xfail(strict)` on
+`S5b` is removed. Full write-up:
+`audit/stage2/finding_F886_eviction_kills_sibling_browsers.md`.
+
 ## 2.1.8
 
 ### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)

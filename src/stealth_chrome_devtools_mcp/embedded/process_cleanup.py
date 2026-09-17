@@ -52,7 +52,7 @@ class ProcessCleanup:
 
     def __init__(self):
         """Initialize process cleanup state (side-effect-free)."""
-        self.pid_file = STATE_DIR / "browser_pids.json"
+        self.pid_file = STATE_DIR / browser_pid_registry.RECORD_NAME
         self.tracked_pids: set[int] = set()
         self.browser_processes: dict[str, dict[str, Any]] = {}
         self.orphan_profile_max_age_seconds = (

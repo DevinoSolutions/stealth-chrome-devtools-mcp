@@ -367,11 +367,54 @@ def _this_executable() -> str:
 # ---------------------------------------------------------------------------
 # Isolation helpers.
 # ---------------------------------------------------------------------------
-def _pick_free_port() -> int:
-    """An OS-assigned free loopback port, used as a distinct singleton port."""
+# The product's own default singleton port (``singleton.DEFAULT_PORT``), restated
+# as a literal for the same reason ``REGISTRY_TOOL_COUNT`` is: this harness
+# drives the installed artifact as a black box.
+DEFAULT_SINGLETON_PORT = 19222
+_PORT_PICK_ATTEMPTS = 32
+
+
+def _os_assigned_port() -> int:
+    """One OS-assigned free loopback port. The single seam ``_pick_free_port``
+    retries through; a test can replace it to hand back a chosen sequence."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _reserved_ports(real_home: Path | None = None) -> frozenset[int]:
+    """Ports an isolated workspace must never bind: the product's default
+    singleton port plus every port the DEVELOPER'S real ``server.json`` records.
+
+    An isolated backend on one of these could not evict a live real backend
+    (bind fails on a port in use) — but with the real backend DOWN it would
+    squat its recorded port, the developer's next real proxy would adopt the
+    throwaway backend through ``adoption_candidates``, and that backend dies at
+    workspace teardown: the exact ``CONNECTION_CLOSED`` the lifecycle suite
+    exists to eliminate, handed to the developer by the suite itself. The
+    Windows dynamic range measured here is 1025-65534 (``netsh int ipv4 show
+    dynamicport tcp``: start 1025, 64510 ports), so an OS pick CAN land there.
+    """
+    home = Path.home() if real_home is None else real_home
+    return frozenset({DEFAULT_SINGLETON_PORT, *_recorded_ports(home)})
+
+
+def _pick_free_port(*, real_home: Path | None = None) -> int:
+    """An OS-assigned free loopback port that is NOT one of
+    :func:`_reserved_ports`, used as a distinct singleton port.
+
+    Retries the OS pick rather than adjusting it: a port this harness cannot
+    prove is safe is not one it may hand out, so exhaustion raises.
+    """
+    reserved = _reserved_ports(real_home)
+    for _ in range(_PORT_PICK_ATTEMPTS):
+        port = _os_assigned_port()
+        if port not in reserved:
+            return port
+    raise RuntimeError(
+        f"no free loopback port outside the reserved set {sorted(reserved)} in "
+        f"{_PORT_PICK_ATTEMPTS} attempts"
+    )
 
 
 def _isolated_env(
@@ -408,6 +451,17 @@ def _isolated_env(
     env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(session_root)
     env["STEALTH_MCP_CLONE_OUTPUT_DIR"] = str(clone_dir)
     env["STEALTH_MCP_LOG_DIR"] = str(log_dir)
+    # The workspace's logs are EVIDENCE — a failing node's whole post-mortem,
+    # and for the lifecycle suite an oracle. `env = dict(os.environ)` above
+    # inherits the developer's exported settings, so a `STEALTH_MCP_LOG_LEVEL`
+    # of WARNING (a perfectly reasonable thing to export) would silently drop
+    # every INFO line these workspaces read: `backend_watchdog`'s
+    # `was busy, not dead` verdict is INFO while its strikes are WARNING, so a
+    # run where F-820 did exactly the right thing would arrive as strikes with
+    # no verdict — a false RED about the product, caused by the harness. The
+    # level is therefore DECLARED here beside the directory, not inherited: the
+    # harness chooses what the workspace records, as it already chooses where.
+    env["STEALTH_MCP_LOG_LEVEL"] = "INFO"
     return env
 
 
@@ -541,28 +595,72 @@ def _proxy_warnings(*dirs: Path) -> str:
     return "\n".join(out)
 
 
-def _backend_pid_from_state(home_dir: Path) -> int | None:
-    """Read the isolated backend's recorded pid from its ``server.json``.
+def _backend_entries(home_dir: Path) -> list[dict[str, object]]:
+    """Every backend entry ``<home_dir>/.stealth-mcp/server.json`` records.
 
-    Parses BOTH record schemas — the flat v1 shape and F-808's v2
-    ``{"schema": 2, "backends": {ctx: entry}}`` — because this harness drives
+    THE one parse of the record in this harness. Reads ALL THREE schemas — the
+    flat v1 shape (one entry, the record itself), F-808's v2
+    ``{"schema": 2, "backends": {ctx: entry}}`` and F-886's v3
+    ``{"schema": 3, "backends": [entry, ...]}`` — because this harness drives
     the INSTALLED artifact as a black box and restates the contract rather than
     importing the package under test (the same reason ``REGISTRY_TOOL_COUNT``
-    is a literal here). The isolated HOME holds exactly one backend, so "some
-    recorded entry" and "the one we spawned" are the same thing.
+    is a literal here). A missing, unreadable or malformed record is an empty
+    list, never an error: for the developer's REAL home that means "nothing to
+    avoid", for an isolated home "nothing recorded yet".
     """
     state_file = home_dir / ".stealth-mcp" / "server.json"
     try:
         state = json.loads(state_file.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return None
+        return []
     if not isinstance(state, dict):
-        return None
-    if isinstance(state.get("backends"), dict):
-        entries = [e for e in state["backends"].values() if isinstance(e, dict)]
-        state = entries[0] if entries else {}
-    pid = state.get("pid")
+        return []
+    backends = state.get("backends")
+    # v2 keys the entries by display context; v3 (F-886) is a list, so one
+    # context can hold one backend per source IDENTITY. Both normalize to the
+    # same list of entries here, and v1 is the record itself.
+    if isinstance(backends, dict):
+        backends = list(backends.values())
+    if not isinstance(backends, list):
+        return [state]
+    return [e for e in backends if isinstance(e, dict)]
+
+
+def _backend_pid_from_state(home_dir: Path) -> int | None:
+    """The isolated backend's recorded pid — the FIRST entry's.
+
+    An isolated HOME holds one backend per IDENTITY; every gate node runs one
+    identity, so "some recorded entry" and "the one we spawned" are the same
+    thing. The one node that runs two (``test_e2e_lifecycle_resilience``'s S5)
+    reads the first as the incumbent it spawned first, which is exactly the pid
+    that must not change."""
+    entries = _backend_entries(home_dir)
+    pid = entries[0].get("pid") if entries else None
     return pid if isinstance(pid, int) else None
+
+
+def _backend_pids_from_state(home_dir: Path) -> list[int]:
+    """EVERY backend pid the record names, in recorded order — what teardown
+    consults (F-886).
+
+    A workspace that ran two source identities has two detached backends, and
+    terminating only the first would leak the second past the block that owns
+    it. The singular reader above stays, because every ASSERTION in the suite
+    is about THE backend a node ran on, which is the first."""
+    return [
+        pid
+        for entry in _backend_entries(home_dir)
+        if isinstance(pid := entry.get("pid"), int)
+    ]
+
+
+def _recorded_ports(home_dir: Path) -> frozenset[int]:
+    """Every port ``home_dir``'s record names, across every display context."""
+    return frozenset(
+        port
+        for entry in _backend_entries(home_dir)
+        if isinstance(port := entry.get("port"), int)
+    )
 
 
 def _pid_running(pid: int) -> bool:
@@ -1362,9 +1460,12 @@ async def _soak_cycle(
     # measures whether the product's own bound actually fires inside ours) and an
     # interaction with a selector that resolves to nothing.
     #
-    # Cycle 1 only, deliberately. Each of these currently costs ~10.5s — see
-    # F-805: both spend nodriver's DEFAULT 10s `tab.select` wait regardless of
-    # what the caller asked for. Repeating them every cycle would triple the
+    # Cycle 1 only, deliberately. See F-805, now HALF fixed: the wait honours
+    # its own 2000ms budget since F-884 (~2.03s), while the click still costs
+    # ~10.5s because THIS call passes no timeout and so spends click_element's
+    # own 10000ms default (it does honour one when given: timeout=2000 -> 2.03s).
+    # The branch that genuinely ignores a declared timeout is text_match, which
+    # this journey does not exercise. Repeating them every cycle would triple the
     # soak's runtime to buy a repetition of a fact one measurement already
     # establishes, and would push the node past the integration lane's budget.
     if cycle == 1:
@@ -1712,9 +1813,12 @@ async def run_release_gate_journey(
         # The detached backend usually dies with the proxy (keep_alive=False);
         # terminate is the bounded backstop. The release claim is "no backend
         # process remains", not "we were the ones to kill it".
-        backend_pid = _backend_pid_from_state(home_dir)
-        if backend_pid is not None and _pid_running(backend_pid):
-            _terminate_process_tree(backend_pid, TERMINATE_TIMEOUT)
+        # EVERY recorded backend, not just the first (F-886): a workspace that
+        # ran two source identities has two detached backends, and this block
+        # promised to own all of them.
+        for backend_pid in _backend_pids_from_state(home_dir):
+            if _pid_running(backend_pid):
+                _terminate_process_tree(backend_pid, TERMINATE_TIMEOUT)
         # Ownership is decided by cmdline, not by descent: the integration cell
         # spawns Chrome in-process, so a foreign renderer or crashpad helper is
         # also a new descendant of this pytest process and must not be killed
@@ -1829,9 +1933,12 @@ def gate_workspace(
     try:
         yield space
     finally:
-        backend_pid = _backend_pid_from_state(home_dir)
-        if backend_pid is not None and _pid_running(backend_pid):
-            _terminate_process_tree(backend_pid, TERMINATE_TIMEOUT)
+        # EVERY recorded backend, not just the first (F-886): a workspace that
+        # ran two source identities has two detached backends, and this block
+        # promised to own all of them.
+        for backend_pid in _backend_pids_from_state(home_dir):
+            if _pid_running(backend_pid):
+                _terminate_process_tree(backend_pid, TERMINATE_TIMEOUT)
         # Ownership is decided by cmdline, not by descent: the integration cell
         # spawns Chrome in-process, so a foreign renderer or crashpad helper is
         # also a new descendant of this pytest process and must not be killed
