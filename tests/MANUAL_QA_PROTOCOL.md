@@ -1222,12 +1222,16 @@ route that simply never works.
 These landed while `MQ-114..125` (W7, W9) are still reserved, so the contiguity
 check stays `MQ-1..113` plus the landed blocks until those workstreams land.
 
-**Two of these four steps are `planned`, and deliberately so.** The faults were
+**One of these four steps is `planned`, and deliberately so.** The faults were
 injected, the measurements were taken, and two of them found real defects:
 `close_instance` reports failure for a browser that is already gone (F-789), and
-a navigation timeout leaves the instance's CDP connection permanently wedged
-(F-788). Both are characterization-pinned and routed, never fixed — `src/` edits
-are a plan_RELEASE non-goal — and a characterization can never satisfy a step.
+a navigation timeout left the instance's CDP connection permanently wedged
+(F-788). Both were characterization-pinned and routed rather than fixed —
+`src/` edits are a plan_RELEASE non-goal — and a characterization can never
+satisfy a step. **F-788 has since been fixed** outside this workstream
+(`embedded/cdp_transport.py`, F-883 B1), its pin inverted to an assertion of
+recovery, and MQ-128 promoted to `satisfied` in that same change; F-789 stands,
+so MQ-126 stays `planned`.
 Read the `Current support (non-acceptance)` lines literally: they record real,
 passing, useful assertions that are nevertheless not acceptance.
 
@@ -1278,12 +1282,21 @@ on the operator's patience — with the exact documented timeout message, and th
 a normal navigation works immediately afterwards. Then release the same route
 inside the deadline and confirm the navigation completes and serves its exact
 body.
-**Evidence**: planned — planned-pytest:
-`tests/test_resilience.py::test_navigation_deadlines_time_out_and_recover`.
-The timeout half is already proved (below); the recovery half cannot be claimed
-while F-788 stands — a timed-out navigation leaves the instance's CDP connection
-permanently wedged, so "a normal navigation works immediately afterwards" is
-false at HEAD.
+**Evidence**: satisfied — pytest:
+`tests/test_resilience.py::test_load_wait_against_a_hang_times_out_with_the_pinned_message`,
+`tests/test_resilience.py::test_networkidle_wait_against_a_hang_times_out_with_the_pinned_message`,
+`tests/test_resilience.py::test_a_navigation_timeout_leaves_the_instance_usable`,
+`tests/test_resilience.py::test_slow_success_control_completes_when_released`.
+The timeout half was always proved (below). The recovery half was blocked by
+F-788 — a timed-out navigation left the instance's CDP connection permanently
+wedged, so "a normal navigation works immediately afterwards" was false — and
+**F-788 is now fixed** (`embedded/cdp_transport.py`, F-883 B1). The
+characterization pin that carried it is inverted in the same change and asserts
+the full recovery invariant: the same instance is driveable, closes clean, and a
+fresh spawn works. What this step still makes NO claim about is content: a
+`navigate` whose deadline expires has already handed `Page.navigate` to Chrome,
+and the page may land afterwards — the instance survives, the navigation is not
+recalled.
 This step will qualify `networkidle` **only** as a wait condition that honours
 the navigation deadline. It makes NO claim that `networkidle` waits for network
 idleness — it does not, and F-787 records that.
@@ -1297,10 +1310,8 @@ product deadline so an unrelated early error cannot pass as a timeout, and the
 first is the sensitivity control — the same route, released in time, must
 complete and serve its exact body — without which "it timed out" would prove
 nothing. They are support only because the step also requires recovery.
-Two characterization pins carry the defects:
-`tests/test_resilience.py::test_a_navigation_timeout_wedges_the_instance_connection`
-(F-788) asserts the NEXT navigation fails with the generic CDP-operation-timeout
-message, and
+One characterization pin still carries a defect here (F-788's is gone — it is an
+assertion of recovery now):
 `tests/test_resilience.py::test_networkidle_returns_before_the_transfer_completes`
 (F-787) pins that against a route whose body is still mid-transfer,
 `networkidle` returns success in about two seconds while the release-only tail
@@ -1324,9 +1335,13 @@ The route-abort mechanism is one of the two plan_RELEASE §2.10 names for this
 fault; the CDP `Network.emulateNetworkConditions(offline=True)` alternative is
 **not** used and no offline-emulation coverage should be inferred. Issued
 against a tab parked in an in-flight `Page.navigate`, that command never
-returns — nodriver's connection listener dies while resolving an earlier
-transaction and no future on that connection resolves again (the same F-788
-mechanism), so it wedges the injection rather than measuring the product.
+returned — nodriver's connection listener died while resolving an earlier
+transaction and no future on that connection resolved again (the same F-788
+mechanism), so it wedged the injection rather than measuring the product. F-788
+is fixed now (`embedded/cdp_transport.py`), so that reason no longer holds as
+written; whether offline emulation is usable as an injection here has NOT been
+re-measured, and nothing about offline-emulation coverage may be inferred either
+way until it is.
 No claim is made that a dropped transfer is *reported* as a distinct error
 class — only that it is bounded, recoverable, and never credited with content
 it did not receive.
@@ -1512,9 +1527,10 @@ those workstreams land.
 
 **Two of these seven steps are `planned`, and deliberately so.** The
 measurements were taken and each found a real defect in the half the step names:
-a cancelled request is answered with JSON-RPC `code: 0` and leaves its instance
-wedged (F-791, F-794), and malformed input is answered with nothing at all
-(F-792). All are characterization-pinned and routed, never fixed — `src/` edits
+a cancelled request is answered with JSON-RPC `code: 0` (F-791) and used to
+leave its instance wedged (F-794, since **fixed** in
+`embedded/cdp_transport.py` — MQ-141 is `planned` behind F-791 alone now), and
+malformed input is answered with nothing at all (F-792). All are characterization-pinned and routed, never fixed — `src/` edits
 are a plan_RELEASE non-goal — and a characterization can never satisfy a step.
 Three further findings own no step of their own and instead narrow the steps
 they were found under: F-790 (the auto-clone spawn waited forever on an
@@ -1640,21 +1656,23 @@ response, and that the session still works.
 **Evidence**: planned — planned-pytest:
 `tests/test_wire_semantics.py::test_cancelling_a_confirmed_in_flight_request_ends_it_with_code_zero`.
 Cancellation is genuinely supported — the wait ends in milliseconds and exactly
-once — but two halves of the step are false at HEAD. The terminal outcome is a
-JSON-RPC error whose `code` is `0` (F-791); zero is neither a reserved JSON-RPC
-code nor a documented product code, so a client can only recognise a
-cancellation by matching the English message. And the cancelled **instance** is
-left wedged (F-794): its next navigation burns the full CDP budget and returns
-the "browser may have crashed" timeout, so "the session still works" is true of
-the server and false of the instance the caller was using.
+once. **One half of the step is still false at HEAD, and it is now the only
+one.** The terminal outcome is a JSON-RPC error whose `code` is `0` (F-791);
+zero is neither a reserved JSON-RPC code nor a documented product code, so a
+client can only recognise a cancellation by matching the English message. The
+other half — the cancelled **instance** left wedged (F-794), its next navigation
+burning the full CDP budget to report that the browser may have crashed — is
+**fixed** (`embedded/cdp_transport.py`, F-883 B1), and the node's assertion is
+inverted in that same change: the cancelled instance must now navigate again and
+answer a script round trip. So "the session still works" is true of the server
+AND of the instance, and this step is `planned` behind F-791 alone.
 **Current support (non-acceptance)**: the node above is a characterization pin
-for both findings. It asserts the halves that DO hold — the wait ends well
-inside the navigation deadline, exactly one frame is emitted for the id,
-releasing the still-parked route afterwards produces no second frame, the server
-lists instances normally, and a FRESH instance navigates and closes cleanly —
-and pins `error["code"] == 0` plus the exact CDP-timeout bytes of the wedged
-instance, so either a typed code or an instance that survives its own
-cancellation turns it red.
+for F-791 only. It asserts the halves that DO hold — the wait ends well inside
+the navigation deadline, exactly one frame is emitted for the id, releasing the
+still-parked route afterwards produces no second frame, the server lists
+instances normally, a FRESH instance navigates and closes cleanly, and (since
+F-794's fix) the CANCELLED instance navigates again and answers a script — and
+pins `error["code"] == 0`, so a typed code turns it red.
 `tests/test_wire_semantics.py::test_cancellation_control_the_same_route_completes_when_released`
 is its sensitivity control: the SAME held route, released instead of cancelled,
 completes successfully — without it, "the cancelled call stopped waiting" would
@@ -1973,16 +1991,18 @@ The remaining ownership reservations are:
 - W9: `MQ-122..125` — performance/resource budgets.
 - ~~W10: `MQ-126..129` — resilience/fault injection.~~ **Landed** above as
   current steps; no longer a reservation. `MQ-127` and `MQ-129` are satisfied;
-  `MQ-126` and `MQ-128` are `planned` behind F-789 and F-788, with their
-  characterization pins recorded as current support.
+  `MQ-128` is satisfied (F-788 fixed in `embedded/cdp_transport.py`, its pin
+  inverted to an assertion of recovery); `MQ-126` is `planned` behind F-789,
+  with its characterization pin recorded as current support.
 - ~~W11: `MQ-130` — documentation examples and claims sync.~~ **Landed** above as
   a current step with its acceptance test; no longer a reservation.
 - ~~W12: `MQ-131..137`~~ — **landed**; the steps are headings above.
 - ~~W13: `MQ-138..144` — concurrency, cancellation, framing, and independent
   protocol interoperability.~~ **Landed** above as current steps; no longer a
   reservation. `MQ-138`, `MQ-139`, `MQ-140`, `MQ-142` and `MQ-144` are
-  satisfied; `MQ-141` and `MQ-143` are `planned` behind F-791/F-794 and F-792,
-  with their characterization pins recorded as current support. F-790 (the
+  satisfied; `MQ-141` and `MQ-143` are `planned` behind F-791 and F-792, with
+  their characterization pins recorded as current support (F-794, MQ-141's other
+  blocker, is fixed in `embedded/cdp_transport.py`). F-790 (the
   auto-clone spawn path waited forever on an unanswered `roots/list`; RESOLVED
   in 2.0.1), F-793 (one instance serializes its calls) and F-795
   (`execute_script` reported success for a script that threw — fixed in 2.0.1)
