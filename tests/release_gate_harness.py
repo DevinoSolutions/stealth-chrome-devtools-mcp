@@ -451,6 +451,17 @@ def _isolated_env(
     env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(session_root)
     env["STEALTH_MCP_CLONE_OUTPUT_DIR"] = str(clone_dir)
     env["STEALTH_MCP_LOG_DIR"] = str(log_dir)
+    # The workspace's logs are EVIDENCE — a failing node's whole post-mortem,
+    # and for the lifecycle suite an oracle. `env = dict(os.environ)` above
+    # inherits the developer's exported settings, so a `STEALTH_MCP_LOG_LEVEL`
+    # of WARNING (a perfectly reasonable thing to export) would silently drop
+    # every INFO line these workspaces read: `backend_watchdog`'s
+    # `was busy, not dead` verdict is INFO while its strikes are WARNING, so a
+    # run where F-820 did exactly the right thing would arrive as strikes with
+    # no verdict — a false RED about the product, caused by the harness. The
+    # level is therefore DECLARED here beside the directory, not inherited: the
+    # harness chooses what the workspace records, as it already chooses where.
+    env["STEALTH_MCP_LOG_LEVEL"] = "INFO"
     return env
 
 
