@@ -667,19 +667,35 @@ class TestClearRecord:
         assert reg.read_backends(p) == []
 
 
-def _record(path, port, ctx, version="v"):
+def _record(path, port, ctx, version="v", digest="fp"):
     """One recorded backend. The F-808 adoption and conflict rules read only
     the port and the display context, so the identity fields are fixed noise
-    here — `version` is exposed only for the one pin that needs two identities.
+    here — `version` and `digest` are exposed only for the pins that need two
+    identities under one context (F-886).
     """
     reg.record_backend(
         path,
         port=port,
         version=version,
         pid=port,
-        source_fingerprint="fp",
+        source_fingerprint=digest,
         display_context=ctx,
     )
+
+
+def _nothing_is_ours(entry):
+    """The identity predicate for a machine with only ONE build on it, where
+    "ours on this context" and "this context's first entry" name the same port.
+    Every pin that predates F-886's two-identity record uses this, so those pins
+    keep asserting exactly what they always asserted.
+    """
+    return False
+
+
+def _ours_is(digest):
+    """The identity predicate `singleton._identity_matches` plays in production,
+    reduced to the one field these pins vary."""
+    return lambda entry: entry.get("source_fingerprint") == digest
 
 
 class TestAdoptionCandidates:
@@ -783,13 +799,17 @@ class TestPortForContext:
         _record(p, 1111, HEADLESS)
         _record(p, 2222, "win-session-1")
 
-        assert reg.port_for_context(p, "win-session-1") == 2222
+        assert (
+            reg.port_for_context(p, "win-session-1", matches=_nothing_is_ours) == 2222
+        )
 
     def test_an_unrecorded_context_has_no_port(self, tmp_path):
         p = tmp_path / "server.json"
         _record(p, 1111, HEADLESS)
 
-        assert reg.port_for_context(p, "win-session-1") is None
+        assert (
+            reg.port_for_context(p, "win-session-1", matches=_nothing_is_ours) is None
+        )
 
     def test_a_record_naming_no_usable_port_has_no_port(self, tmp_path):
         """Hand-edited or truncated records must read as "no port", never as a
@@ -797,7 +817,34 @@ class TestPortForContext:
         p = tmp_path / "server.json"
         p.write_text(json.dumps({"schema": 2, "backends": {"ctx": {"port": "nope"}}}))
 
-        assert reg.port_for_context(p, "ctx") is None
+        assert reg.port_for_context(p, "ctx", matches=_nothing_is_ours) is None
+
+    def test_our_own_entry_wins_over_a_stranger_recorded_first(self, tmp_path):
+        """F-886's blocker, at the level of the function that caused it.
+
+        On the desktop the protection creates, the stranger's entry is FIRST —
+        it was there before we stepped aside from it. Answering with it made
+        ``restart`` terminate a port that was not ours.
+        """
+        p = tmp_path / "server.json"
+        _record(p, 1111, "win-session-1", digest="theirs")
+        _record(p, 2222, "win-session-1", digest="ours")
+
+        assert (
+            reg.port_for_context(p, "win-session-1", matches=_ours_is("ours")) == 2222
+        )
+
+    def test_falls_back_to_the_first_entry_when_none_is_ours(self, tmp_path):
+        """The seed behaviour selection still depends on: with no entry of ours
+        the answer is where a backend on this desktop last ran, and selection
+        then tests it — a protected occupant still forces a fresh port."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, "win-session-1", digest="theirs")
+        _record(p, 2222, "win-session-1", digest="also-theirs")
+
+        assert (
+            reg.port_for_context(p, "win-session-1", matches=_ours_is("ours")) == 1111
+        )
 
 
 class TestPortConflict:
@@ -878,7 +925,9 @@ class TestOwnOrFirstPort:
         _record(p, 1111, HEADLESS)
         _record(p, 2222, "win-session-1")
 
-        assert reg.own_or_first_port(p, "win-session-1") == 2222
+        assert (
+            reg.own_or_first_port(p, "win-session-1", matches=_nothing_is_ours) == 2222
+        )
 
     def test_falls_back_to_the_first_backend_when_our_context_is_absent(self, tmp_path):
         """Keeps the single-backend and pre-v2 cases behaving exactly as they
@@ -886,10 +935,28 @@ class TestOwnOrFirstPort:
         p = tmp_path / "server.json"
         _record(p, 1111, HEADLESS)
 
-        assert reg.own_or_first_port(p, "win-session-1") == 1111
+        assert (
+            reg.own_or_first_port(p, "win-session-1", matches=_nothing_is_ours) == 1111
+        )
+
+    def test_our_own_identity_wins_inside_our_own_context(self, tmp_path):
+        """The seed has to ask the SAME question selection does, or restart
+        terminates a port selection did not choose (F-886 review, F1)."""
+        p = tmp_path / "server.json"
+        _record(p, 1111, "win-session-1", digest="theirs")
+        _record(p, 2222, "win-session-1", digest="ours")
+
+        assert (
+            reg.own_or_first_port(p, "win-session-1", matches=_ours_is("ours")) == 2222
+        )
 
     def test_an_absent_record_has_no_port(self, tmp_path):
-        assert reg.own_or_first_port(tmp_path / "server.json", HEADLESS) is None
+        assert (
+            reg.own_or_first_port(
+                tmp_path / "server.json", HEADLESS, matches=_nothing_is_ours
+            )
+            is None
+        )
 
 
 class TestRecordedInt:

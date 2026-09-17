@@ -64,8 +64,12 @@ import os
 import time
 from contextlib import suppress
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from stealth_chrome_devtools_mcp.embedded.display_context import HEADLESS, UNVERIFIED
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # One recorded backend, and equally the raw record that holds them: both are
 # str-keyed JSON objects whose values are deliberately heterogeneous. `object`
@@ -232,27 +236,41 @@ def adoption_candidates(path: Path, own_context: str) -> list[BackendEntry]:
     ]
 
 
-def port_for_context(path: Path, display_context: str) -> int | None:
-    """The FIRST port recorded for ONE context, or None when that context has
-    no entry (or its entry names nothing usable as a port).
+def port_for_context(
+    path: Path, display_context: str, *, matches: Callable[[BackendEntry], bool]
+) -> int | None:
+    """The port recorded for ONE context that WE would act on: OUR OWN entry if
+    that context holds one, else its first entry; None when it holds none (or
+    the chosen entry names nothing usable as a port).
 
-    "First" and not "ours" deliberately, now that a context can hold two
-    clients' backends (F-886). Its one caller, ``singleton._select_backend_port``,
-    uses the answer as a SEED — where a backend on this desktop last ran — and
-    then tests the seed itself: a port whose occupant we would not adopt, or may
-    not evict, forces an OS-assigned fallback. So naming a sibling's port here
-    costs one extra test, never a collision.
+    ``matches`` decides "ours" and is handed down rather than defined here —
+    ``singleton._identity_matches``, the same predicate the protection rule is
+    given, so the two can never disagree about which backend is this build's.
+    It is REQUIRED, not defaulted: a caller picking the one backend to act on
+    has to say whose it is, and a default would quietly reinstate the bug below.
 
-    ``singleton._select_backend_port`` asks with its own context: a spawn
-    should land back on the port ITS desktop last used. "Whichever entry comes
-    first" is the wrong answer once the record holds one per context — first
-    can easily be a sibling backend that is still alive on that port.
+    Ours-first, not first-recorded, and that is F-886's second half. Since v3 a
+    context can hold TWO clients' backends, and on the machine this fix creates
+    the first entry is the STRANGER's by construction — it was there first,
+    which is precisely why we stepped aside from it. ``restart_backend`` seeds
+    selection with this answer and then terminates exactly the port selection
+    returns, so answering the stranger's port made ``restart`` step aside from
+    the stranger, spawn a THIRD backend on an OS-assigned port and leave our own
+    wedged backend running; :func:`record_backend`'s supersede-by-identity rule
+    then dropped that backend's entry, so ``doctor``, ``status`` and ``cleanup``
+    could no longer see it either. Nothing was left that reached it.
+
+    The fallback keeps the other half working. With no entry of ours the answer
+    is the first entry, which is the SEED it always was: selection tests it, and
+    a port whose occupant we would not adopt — or may not evict — still forces
+    an OS-assigned fallback. So naming a sibling's port costs one extra test,
+    never a collision.
     """
-    entry = next(
-        (e for e in read_backends(path) if e.get("display_context") == display_context),
-        None,
-    )
-    return recorded_int(entry, "port")
+    here = [
+        e for e in read_backends(path) if e.get("display_context") == display_context
+    ]
+    ours = next((e for e in here if matches(e)), None)
+    return recorded_int(ours if ours is not None else next(iter(here), None), "port")
 
 
 def recorded_int(entry: BackendEntry | None, key: str) -> int | None:
@@ -289,17 +307,22 @@ def fingerprint_mismatch(entry: BackendEntry | None, current: str | None) -> boo
     return not current or recorded != current
 
 
-def own_or_first_port(path: Path, own_context: str) -> int | None:
+def own_or_first_port(
+    path: Path, own_context: str, *, matches: Callable[[BackendEntry], bool]
+) -> int | None:
     """The port to act on when a caller must pick exactly ONE recorded backend:
-    our own context's, else whatever single backend is recorded, else None.
+    ours on our own context, else that context's first entry, else whatever
+    single backend is recorded, else None.
 
     ``singleton.restart_backend`` is the one caller, and it uses the answer only
-    to SEED ``_select_backend_port``. So the own-context half is now
-    production-inert: selection re-reads :func:`port_for_context` itself and
-    discards the seed whenever our own context has an entry. The half that still
-    decides anything is the ``first_backend`` fallback — the seed selection
-    actually uses, when our context has no entry — which keeps the
-    single-backend and pre-v2 cases landing exactly where they did.
+    to SEED ``_select_backend_port``. The own-context half is production-inert
+    for that reason — selection re-reads :func:`port_for_context` with the same
+    ``matches`` and discards the seed whenever our context has an entry — so
+    both must ASK THE SAME QUESTION or restart lands somewhere selection did not
+    choose. That is why ``matches`` is threaded through here rather than being
+    a thing only selection knows; the half that still decides anything on its
+    own is the ``first_backend`` fallback, which keeps the single-backend and
+    pre-v2 cases landing exactly where they did.
 
     The own-context branch stays because it is the honest statement of this
     function's contract, not because restart depends on it; it was load-bearing
@@ -312,7 +335,7 @@ def own_or_first_port(path: Path, own_context: str) -> int | None:
     for truthiness reaches its fallback for a recorded ``0`` as well; that is
     harmless (0 names no listener) but it is not what the signature says.
     """
-    own = port_for_context(path, own_context)
+    own = port_for_context(path, own_context, matches=matches)
     if own is not None:
         return own
     return recorded_int(first_backend(read_record(path)), "port")

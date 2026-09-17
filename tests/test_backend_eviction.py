@@ -464,3 +464,192 @@ class TestStopForgetsOneEntry:
         assert [
             (e["port"], e["pid"]) for e in backend_registry.read_backends(record)
         ] == [(PORT + 1, 2)]
+
+
+OUR_PORT = 40200
+OUR_PID = 4343
+
+
+def _record_ours(tmp_path):
+    """OUR backend, recorded SECOND under the SAME display context.
+
+    Second is the point: ``read_backends`` preserves insertion order, so on this
+    machine "the first entry for this context" is the stranger's by construction
+    — we stepped aside from it, which is why it was there first.
+    """
+    backend_registry.record_backend(
+        tmp_path / "server.json",
+        port=OUR_PORT,
+        version=OUR_VERSION,
+        pid=OUR_PID,
+        source_fingerprint=OUR_DIGEST,
+        display_context="win-session-1",
+    )
+
+
+def _is_ours_either(pid):
+    """Both recorded backends are processes of OURS in the ``_is_our_backend``
+    sense — that predicate asks "did this tool start it", not "is it my build".
+    """
+    return pid in (STRANGER_PID, OUR_PID)
+
+
+class TestRestartOnATwoIdentityDesktop:
+    """The desktop F-886 deliberately creates: a stranger's backend we stepped
+    aside from, and ours beside it, under ONE display context.
+
+    ``restart`` has to keep reaching OUR backend there. It selects the port it
+    will terminate, so a selection that answers the stranger's port makes the
+    verb terminate nothing of ours and spawn a THIRD backend on an OS-assigned
+    one — and ``record_backend``'s supersede-by-(context, identity) rule then
+    drops our wedged backend's entry, so ``doctor``/``status``/``cleanup`` stop
+    seeing it too. Nothing would be left that reaches it.
+
+    The stranger is given a live browser in every case here, because that is
+    what makes it protected and is therefore the state that used to divert
+    selection away from us.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _probes(self, monkeypatch):
+        monkeypatch.setattr(singleton, "_is_our_backend", _is_ours_either)
+        monkeypatch.setattr(singleton.psutil, "pid_exists", lambda pid: True)
+        monkeypatch.setattr(singleton, "_port_is_foreign_held", lambda port: False)
+
+    def test_selection_prefers_our_own_entry_over_the_strangers_first_one(
+        self, isolated_state, monkeypatch
+    ):
+        _record_stranger(isolated_state)
+        _record_ours(isolated_state)
+        _write_browsers(isolated_state)
+        picked = {}
+        monkeypatch.setattr(
+            "stealth_chrome_devtools_mcp.embedded.proxy_forwarder.bindable_port",
+            lambda target, force_new: (
+                picked.update(target=target, force_new=force_new) or target
+            ),
+        )
+        assert singleton._select_backend_port(PORT) == OUR_PORT
+        assert picked == {"target": OUR_PORT, "force_new": False}
+
+    def test_restart_replaces_our_backend_and_leaves_the_stranger_alone(
+        self, isolated_state, monkeypatch
+    ):
+        @contextmanager
+        def fake_lock():
+            yield True
+
+        _record_stranger(isolated_state)
+        _record_ours(isolated_state)
+        _write_browsers(isolated_state)
+        calls = []
+        monkeypatch.setattr(singleton, "_exclusive_lock", fake_lock)
+        monkeypatch.setattr(
+            "stealth_chrome_devtools_mcp.embedded.proxy_forwarder.bindable_port",
+            lambda target, force_new: target + 1 if force_new else target,
+        )
+        monkeypatch.setattr(
+            singleton, "_terminate_backend", lambda port: calls.append(("kill", port))
+        )
+        monkeypatch.setattr(
+            singleton,
+            "_start_server_process",
+            lambda port: calls.append(("start", port)),
+        )
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: True)
+        monkeypatch.setattr(singleton, "_probe_port", lambda port: "responsive")
+
+        status, _pid = singleton.restart_backend()
+
+        assert calls == [("kill", OUR_PORT), ("start", OUR_PORT)]
+        assert status == "responsive"
+
+    def test_a_context_holding_only_a_stranger_still_steps_aside(
+        self, isolated_state, monkeypatch
+    ):
+        """The half that must NOT change: with no entry of ours to prefer, the
+        seed falls back to the first entry and the protection still diverts us.
+        """
+        _record_stranger(isolated_state)
+        _write_browsers(isolated_state)
+        picked = {}
+        monkeypatch.setattr(
+            "stealth_chrome_devtools_mcp.embedded.proxy_forwarder.bindable_port",
+            lambda target, force_new: (
+                picked.update(target=target, force_new=force_new) or target + 1
+            ),
+        )
+        assert singleton._select_backend_port(PORT) == PORT + 1
+        assert picked == {"target": PORT, "force_new": True}
+
+
+class TestTheReportNamesTheDecisionTaken:
+    """F-886 review, F4: the F-827 eviction report used to be shipped BEFORE
+    ``_clear_stale_backend`` decided, so the refusal path — the one the whole
+    fix exists for — told the durable log and Sentry that a backend still
+    running had been evicted.
+
+    Both cases here are a SOURCE CHANGE (same version, different digest), which
+    is the only condition that reports at all; what differs between them is
+    whether the stranger owns a live browser.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _probes(self, monkeypatch):
+        monkeypatch.setattr(singleton, "_is_our_backend", _is_ours)
+        monkeypatch.setattr(singleton.psutil, "pid_exists", lambda pid: True)
+        monkeypatch.setattr(
+            singleton, "_same_identity_backend_ready", lambda port, **kw: False
+        )
+        monkeypatch.setattr(singleton, "_find_running_server", lambda: None)
+        monkeypatch.setattr(singleton, "_terminate_backend", lambda port: True)
+        monkeypatch.setattr(singleton, "_start_server_process", lambda port: None)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: True)
+
+    @staticmethod
+    @contextmanager
+    def _lock():
+        yield True
+
+    def _run(self, monkeypatch):
+        shipped = []
+        monkeypatch.setattr(singleton, "_exclusive_lock", self._lock)
+        monkeypatch.setattr(
+            singleton,
+            "capture_lifecycle",
+            lambda message, **fields: shipped.append((message, fields)) or True,
+        )
+        singleton._start_backend_holding_lock(PORT)
+        return shipped
+
+    def test_a_refusal_is_never_reported_as_an_eviction(
+        self, isolated_state, monkeypatch, caplog
+    ):
+        _record_stranger(isolated_state)
+        _write_browsers(isolated_state)
+        with caplog.at_level(logging.INFO, logger="stealth.proxy"):
+            shipped = self._run(monkeypatch)
+
+        assert shipped == [
+            (
+                "proxy: backend eviction refused (still serving)",
+                {"port": PORT, "browsers": 1},
+            )
+        ]
+        # The vocabulary the lifecycle E2E greps for must not appear either:
+        # a durable log line saying "evicting" about a backend that was spared
+        # is the same lie in the other stream.
+        assert not any("evicting" in r.getMessage() for r in caplog.records)
+
+    def test_a_real_eviction_still_reports_exactly_what_it_always_did(
+        self, isolated_state, monkeypatch, caplog
+    ):
+        _record_stranger(isolated_state)  # no browsers recorded -> evictable
+        with caplog.at_level(logging.INFO, logger="stealth.proxy"):
+            shipped = self._run(monkeypatch)
+
+        assert shipped == [("proxy: backend evicted (source changed)", {"port": PORT})]
+        assert any(
+            "backend stale (source changed), evicting" in r.getMessage()
+            for r in caplog.records
+        )

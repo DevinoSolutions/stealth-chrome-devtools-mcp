@@ -165,31 +165,41 @@ def _recorded_backend_pid(port: int | None) -> int | None:
 
 
 def _other_records_note(port: int | None) -> str:
-    """The display contexts recorded BESIDE the one reported, or "" when the
-    reported backend is the only entry there is (F-868).
+    """The backends recorded BESIDE the one reported, or "" when the reported
+    backend is the only entry there is (F-868).
 
-    The status block is one summary line over a record that can hold an entry
-    per display context, and a summary that silently drops the rest reads as
-    "this is all there is". It never re-decides which backend to report — it
-    only names what the reported one is not, and points at the verb that probes
-    them all.
+    The status block is one summary line over a record that can hold several
+    backends, and a summary that silently drops the rest reads as "this is all
+    there is".
 
-    "Other" is decided on DISPLAY CONTEXT, not on the port: `backends_in`
-    stamps a context on every entry (the v2 key, or `UNVERIFIED` for a v1
-    record), so the comparison is always against a real value, whereas a
-    hand-edited entry whose `port` is a string reads as `None` and would have
-    matched a `None` reported port — silently hiding itself in exactly the
-    "nothing is running" case where the operator most needs to see it. With
-    nothing reported at all, every recorded entry is correctly an "other"."""
+    "Other" is decided on the (DISPLAY CONTEXT, PORT) PAIR, and needs both.
+    Context alone was the rule until F-886 made a context able to hold one
+    backend per IDENTITY: a stranger's backend and ours then share a token, so
+    on exactly the machine that fix creates neither entry was ever an "other"
+    and the summary went back to reading "this is all there is" while a second
+    backend served the same desktop. Port alone is the trap the old docstring
+    named: a hand-edited entry whose `port` is a string reads as `None` and
+    would match a `None` reported port, hiding itself in the "nothing is
+    running" case where the operator most needs to see it. The pair has neither
+    failure — that entry differs from the reported one on port, and when
+    nothing is reported at all `mine` is `None`, which no pair equals, so every
+    recorded entry is correctly an "other".
+
+    Each is named with its port for the same reason: two entries under one
+    context are indistinguishable by token, and "2 backends recorded
+    (win-session-1, win-session-1)" tells an operator nothing to act on.
+
+    It never re-decides which backend to report — it only names what the
+    reported one is not, and points at the verb that probes them all."""
     from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
     state = singleton._read_server_state()
     reported = backend_registry.backend_on_port(state, port)
-    mine = reported.get("display_context") if reported else None
+    mine = (reported.get("display_context"), reported.get("port")) if reported else None
     others = [
-        str(entry.get("display_context"))
+        f"{entry.get('display_context')}:{entry.get('port')}"
         for entry in backend_registry.backends_in(state)
-        if entry.get("display_context") != mine
+        if (entry.get("display_context"), entry.get("port")) != mine
     ]
     if not others:
         return ""

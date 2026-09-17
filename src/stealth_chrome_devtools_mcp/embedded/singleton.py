@@ -29,6 +29,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     backend_liveness,
     backend_registry,
     backend_watchdog,
+    build_identity,
     display_context,
     scheduling_lag,
 )
@@ -58,8 +59,6 @@ DEFAULT_PORT = 19222
 # mismatch (F-206/F-120/F-504): on this editable install the package version is
 # frozen at 1.2.0, so the version key alone can never see an in-place source edit.
 SOURCE_ROOT = Path(__file__).resolve().parent.parent
-_FINGERPRINT_ATTEMPTS = 3  # F-829: outlast a transient read failure
-_FINGERPRINT_RETRY_SECONDS = 0.05
 STARTUP_TIMEOUT = 30
 SERVER_NAME = "stealth-chrome-devtools-mcp"
 # How long the stdio proxy will wait for the backend before later requests
@@ -163,10 +162,10 @@ def _probe_port(port: int) -> str:
     """OUR binding of `backend_liveness.probe_port` — the ladder, with THIS
     module's two probes handed in. The reasoning lives with the leaf.
 
-    A wrapper on purpose, not a hop to delete: both probe names are resolved
-    HERE at call time, so `monkeypatch.setattr(singleton, "_server_is_healthy",
-    …)` still reaches the ladder. A caller importing the leaf's names directly
-    would bind them at import time and stop seeing such a patch.
+    A wrapper on purpose — THE statement of the convention every binding here
+    follows: collaborators resolve HERE at call time, so a `monkeypatch.setattr`
+    on this module still reaches the leaf, where importing the leaf's names
+    directly would bind them at import time and never see the patch.
     """
     return backend_liveness.probe_port(
         port, is_healthy=_server_is_healthy, http_ready=_backend_http_ready
@@ -178,9 +177,8 @@ def _probe_backend_status() -> tuple[str, int | None]:
     path, this process's display context, and `_probe_port` above as the
     per-port probe (so a test that patches THAT still drives the walk).
 
-    `stop_backend` and the CLI's status/doctor/kill-orphans verbs all call it
-    through this name; the adoption-order policy is the leaf's, and the order
-    itself is `backend_registry`'s.
+    Every verb that must pick ONE recorded backend calls it through this name,
+    so selection is fixed in one place; the order itself is the registry's.
     """
     return backend_liveness.probe_recorded(
         SERVER_STATE_FILE, display_context.display_context(), probe=_probe_port
@@ -193,9 +191,8 @@ def _identity_matches(entry: backend_registry.BackendEntry | None) -> bool:
 
     Extracted (F-886) because a second reader appeared — the eviction guard,
     which must know whether the backend it is about to terminate is a
-    STRANGER's. Re-spelling it there would be a second answer to the question
-    :func:`_same_identity_backend_ready` opens with, and #14's version rule and
-    F-829's three-state digest rule could then drift apart.
+    STRANGER's — and a third since, port SELECTION. Re-spelling it would let
+    #14's version rule and F-829's three-state digest rule drift apart.
     """
     return (entry or {}).get("version") == _server_version() and (
         not backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
@@ -286,8 +283,7 @@ def _is_our_backend(pid) -> bool:
 # The rule ("a backend still serving live browsers is never evicted", F-886) and
 # the act both live in that leaf, with the measurement and the argument. What
 # stays here is the wiring that knows which record, which state dir and which
-# probes are OURS — as four WRAPPERS, never re-exported names: the suite patches
-# these on THIS module, and a wrapper resolves its collaborators at CALL time.
+# probes are OURS — four more wrappers, for `_probe_port`'s reason.
 def _backend_pid_on_port(port: int) -> int | None:
     """The pid of OUR backend listening on ``port``, or None."""
     return backend_eviction.pid_on_port(port, is_ours=_is_our_backend)
@@ -492,42 +488,34 @@ def _backend_http_ready(port: int, *, timeout: float = LIVENESS_PROBE_TIMEOUT) -
         return False
 
 
+# The two build-identity bindings. Wrappers for the reason every binding in
+# this file is one (see `_probe_port`), and here doubly so: SERVER_NAME and
+# SOURCE_ROOT are patched too, so both must resolve at CALL time.
 def _server_version() -> str:
-    try:
-        from importlib.metadata import version
-
-        return version(SERVER_NAME)
-    except Exception:
-        _logger.debug("could not resolve installed package version", exc_info=True)
-        return "0.0.0"
+    return build_identity.version(SERVER_NAME)
 
 
 def _source_fingerprint() -> str | None:
-    """SHA-256 over the package's ``*.py`` source, so a backend built from
-    now-stale source is not reused. COMPLETE (every module the backend can
-    import), STABLE (identical bytes -> identical digest, immune to mtime/git
-    quirks), CHEAP (~1 MB read+hash per cold-start discovery). Never raises: a
-    read that keeps failing across ``_FINGERPRINT_ATTEMPTS`` yields ``None`` —
-    UNREADABLE, which ``backend_registry.fingerprint_mismatch`` reads as
-    unknown, never as "source changed" (F-829: this returned ``""``, which the
-    gate could not tell from a real mismatch, so one OneDrive sync lock evicted
-    the healthy backend every session was sharing).
-    """
-    import hashlib
+    return build_identity.source_fingerprint(SOURCE_ROOT)
 
-    for _ in range(_FINGERPRINT_ATTEMPTS):
-        h = hashlib.sha256()
-        try:
-            for p in sorted(SOURCE_ROOT.rglob("*.py")):
-                if "__pycache__" not in p.parts:
-                    h.update(p.relative_to(SOURCE_ROOT).as_posix().encode())
-                    h.update(b"\0" + p.read_bytes() + b"\0")
-            return h.hexdigest()
-        except OSError as e:
-            err = e
-            time.sleep(_FINGERPRINT_RETRY_SECONDS)
-    _logger.warning("source fingerprint unreadable: %s", err)
-    return None
+
+def _report_eviction_decision(port: int, spared: list[int]) -> None:
+    """Ship the source-change decision that was actually TAKEN (F-886 review,
+    F4); it used to be shipped before the kill site decided, so a refusal
+    reached Sentry and the durable log as an eviction. Wire only on the refusal
+    path — ``backend_eviction.clear_stale`` already writes that WARNING with the
+    same count. The evicted wording is byte-unchanged because
+    ``tests/test_e2e_lifecycle_resilience.py`` greps the log for it.
+    """
+    if spared:
+        capture_lifecycle(
+            "proxy: backend eviction refused (still serving)",
+            port=port,
+            browsers=len(spared),
+        )
+        return
+    _logger.info("backend stale (source changed), evicting")
+    capture_lifecycle("proxy: backend evicted (source changed)", port=port)
 
 
 def _start_backend_holding_lock(port: int) -> None:
@@ -546,17 +534,15 @@ def _start_backend_holding_lock(port: int) -> None:
                 return  # already up (same version) ON THE PORT WE WERE HANDED
             if _same_identity_backend_ready(port):
                 return  # ours, merely busy or mid-boot — never evict it (F-807)
-            # M2-3: surface WHY a fresh backend is about to spawn when the cause is a
-            # source change (version matches, digests differ) — it is otherwise silent,
-            # in the log and now (F-827) on the wire. Once per spawn HERE, not in the
-            # thrice-called _find_running_server; the state+digest re-read is a cheap
-            # unconditional diagnostic probe, deliberately NOT a second reuse gate.
-            # Source-only: not a version change (#14), not an unreadable digest (F-829).
+            # M2-3: read WHY this port's backend is about to be taken away when
+            # the cause is a source change (version matches, digests differ) —
+            # otherwise silent, in the log and (F-827) on the wire. Read HERE,
+            # once per spawn, not in the thrice-called _find_running_server; a
+            # cheap unconditional diagnostic probe, deliberately NOT a second
+            # reuse gate. What it is USED for is decided below, once the kill
+            # site has answered.
             entry = backend_registry.backend_on_port(_read_server_state(), port) or {}
             edited = backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
-            if edited and entry.get("version") == _server_version():
-                _logger.info("backend stale (source changed), evicting")
-                capture_lifecycle("proxy: backend evicted (source changed)", port=port)
             # A stale/legacy backend (different or unknown version) may still be
             # holding the port; evict it under the lock so our fresh, correctly
             # versioned backend can bind — otherwise the proxy would fall back to
@@ -566,7 +552,16 @@ def _start_backend_holding_lock(port: int) -> None:
             # free port in that case; if the record changed under us since, the
             # honest answer is to spawn nothing rather than kill it, and the
             # next proxy start re-selects.
-            if _clear_stale_backend(port):
+            spared = _clear_stale_backend(port)
+            # AFTER the decision, never before it (F-886 review, F4): this used
+            # to sit above the call, so the refusal path — the one the comment
+            # above exists for — shipped "backend evicted" to the durable log
+            # and to Sentry about a backend still running. Source-only, as it
+            # always was: not a version change (#14), not an unreadable digest
+            # (F-829).
+            if edited and entry.get("version") == _server_version():
+                _report_eviction_decision(port, spared)
+            if spared:
                 return
             _start_server_process(port)
             _wait_for_server(port)
@@ -632,14 +627,13 @@ def restart_backend() -> tuple[str, int | None]:
     backend also ends up running, not merely evicted. The spawn port is chosen
     FIRST — `_select_backend_port()` (F-509 A1) — and terminate then targets
     exactly it, so both halves agree BY CONSTRUCTION (F-808), not via two reads
-    that can diverge onto a sibling desktop's backend. Selection means a
-    squatter on the dead backend's port forces a fresh `_free_port()` pick
-    instead of a repeat 120s outage — the fallback port stays recorded (SSA1.5);
-    `stop` clears `server.json`, the reset path to `DEFAULT_PORT`. Lock
-    contention reports "busy" so the operator retries instead of racing. The
-    post-restart state is `_probe_port`'s verdict for THE PORT WE SPAWNED ON
-    (binding ruling: ONE liveness vocabulary) — a restart that comes back
-    wedged or down must be visible, not assumed "responsive".
+    that can diverge onto a sibling desktop's backend; a squatter on the dead
+    backend's port therefore forces a fresh pick instead of a repeat 120s
+    outage, and the fallback port stays recorded (SSA1.5). Lock contention
+    reports "busy" so the operator retries instead of racing. The post-restart
+    state is `_probe_port`'s verdict for THE PORT WE SPAWNED ON (binding ruling:
+    ONE liveness vocabulary) — a restart that comes back wedged or down must be
+    visible, not assumed "responsive".
 
     That port, never `_probe_backend_status()`'s (F-868): the adoption walk
     answers "is there a backend for ME", so on a multi-context record a
@@ -649,9 +643,13 @@ def restart_backend() -> tuple[str, int | None]:
     Returns ``(status, pid)``: `_probe_port`'s verdict or "busy"; ``pid`` is the
     freshly recorded pid once the lock is acquired, else None.
     """
-    # A PREFERENCE only: selection re-derives our own context's port itself.
+    # A PREFERENCE only: selection re-derives our own context's port itself,
+    # asking the SAME identity question, so the seed and the choice agree.
     own = display_context.display_context()
-    port = backend_registry.own_or_first_port(SERVER_STATE_FILE, own) or DEFAULT_PORT
+    seed = backend_registry.own_or_first_port(
+        SERVER_STATE_FILE, own, matches=_identity_matches
+    )
+    port = seed or DEFAULT_PORT
 
     with _exclusive_lock() as got:
         if not got:
@@ -691,15 +689,20 @@ def _select_backend_port(preferred: int = DEFAULT_PORT) -> int:
     F-886 adds one more such target: a port held by a STRANGER's backend that
     still owns live browsers, which may never be evicted. The clause is
     identity-gated by construction, because ``_protecting_browsers`` is — a
-    backend of our OWN identity is never protected, so ``restart_backend``,
-    which seeds selection and then terminates exactly the port it gets back,
-    still lands on and replaces its own backend instead of walking away.
+    backend of our OWN identity is never protected.
+
+    That gate alone is not enough to keep ``restart_backend`` working, because
+    the target must be CHOSEN on identity and not merely tested on it — hence
+    ``matches=_identity_matches`` below. The measurement is in
+    :func:`backend_registry.port_for_context`, which owns that rule.
     """
     # lazy; no module-top cycle
     from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import bindable_port
 
     own = display_context.display_context()
-    recorded = backend_registry.port_for_context(SERVER_STATE_FILE, own)
+    recorded = backend_registry.port_for_context(
+        SERVER_STATE_FILE, own, matches=_identity_matches
+    )
     target = preferred if recorded is None else recorded
     taken = backend_registry.port_conflict(SERVER_STATE_FILE, target, own)
     return bindable_port(
