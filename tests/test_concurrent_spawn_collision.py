@@ -34,11 +34,15 @@ because this test process is the only process guaranteed to be alive).
 import asyncio
 import os
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from fakes import FakeBrowserManager
 from stealth_chrome_devtools_mcp.embedded import (
     clone_storage,
+    profile_lock,
     spawn_contention,
     spawn_exhaustion,
 )
@@ -296,6 +300,32 @@ def test_contention_hint_carries_its_own_separator_and_never_raises():
     assert "3" in hint
 
 
+def test_the_hint_names_the_count_and_never_asserts_a_shared_directory():
+    """The paragraph may claim only what this module can know: an integer.
+
+    F-834's own layers hand concurrent spawns DISTINCT reserved directories —
+    stage 2 per ATTEMPT, stage 1 for the loser of the master race — so a hint
+    that states they "contend for the same Chrome profile" asserts a mechanism
+    it never measured, and one that is frequently false. Measured false on the
+    coverage gate's macOS/ARM64 cell (run 35150887345, attempt 2): a fleet that
+    had already serialised its one master-taking lead spawn still lost a
+    FOLLOWER to `ConnectionRefusedError` with every follower on its own
+    directory, where the likelier cause was a two-core runner.
+    """
+    hint = spawn_contention.contention_hint(5)
+
+    assert "5 spawn_browser calls were in flight" in hint
+    assert "same Chrome profile" not in hint, "the hint asserted the mechanism"
+    assert "measured" in hint, "the hint must say which part of it IS known"
+    # Both causes offered, neither asserted as the answer.
+    assert "user-data-dir" in hint and "CPU" in hint
+    # The one remedy that serves both causes survives.
+    assert "Serialize the spawns" in hint
+    # F-834 stays a single occurrence: the no_sandbox disclaimer is pinned above
+    # as the text AFTER it, and a second mention would split that assertion.
+    assert hint.count("F-834") == 1
+
+
 def test_in_flight_counters_return_to_zero_after_a_burst(doomed_manager):
     """A leaked count or a leaked PEAK would decorate every later solo failure
     with a stale contention paragraph — pin the finally and the burst reset."""
@@ -313,3 +343,368 @@ def test_in_flight_counters_return_to_zero_after_a_burst(doomed_manager):
     assert doomed_manager._spawn_peak_in_flight == 0, (
         "a stale peak would tell the next solo failure it was contended"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: the master race — the loser must land somewhere, not nowhere
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_unnamed_selections_all_still_pick_master(tmp_session_root):
+    """Characterization, NOT the defect: the master branch is a LIVENESS check.
+
+    ``_dir_unavailable``'s own docstring says ``_profile_has_running_browser`` is
+    a liveness check and never a reservation, and every concurrent spawn is
+    pre-launch when it asks — so three-of-three ``master`` is the reading the
+    code is designed to give. Reserving master is deliberately NOT the fix
+    (F-834 "Not fixed here"): the reservation would need a matching release on
+    the close path, and a leaked one would silently force every later spawn to
+    clone. What has to change is what happens to the two callers that then lose
+    Chrome's own profile singleton.
+    """
+    selections = await asyncio.gather(
+        *(clone_storage.resolve_profile_selection(None) for _ in range(3))
+    )
+    assert [s["profile_role"] for s in selections] == ["master"] * 3
+    assert {s["user_data_dir"] for s in selections} == {
+        str(clone_storage.master_profile_dir())
+    }
+
+
+@pytest.fixture
+def master_race(monkeypatch):
+    """Chrome's process singleton, modelled: master is FREE until someone takes
+    it, and held by a live process from then on.
+
+    The two states have to be separable, because the race runs through both: at
+    selection time master is free for every concurrent caller (that is stage 1),
+    and it is only during the launch that the winner takes it. Patching this
+    two-line adapter rather than writing a `SingletonLock` keeps the test true on
+    Windows, where Chrome writes no `Singleton*` at all and `profile_lock` has
+    only the process-table witness (F-871).
+    """
+    master = clone_storage.master_profile_dir()
+    real = clone_storage._profile_hold
+    taken: list[bool] = []
+
+    def _hold(profile_dir):
+        if taken and Path(profile_dir) == master:
+            return profile_lock.Hold(os.getpid(), "test: the race winner holds it")
+        return real(profile_dir)
+
+    monkeypatch.setattr(clone_storage, "_profile_hold", _hold)
+    return SimpleNamespace(dir=master, take=lambda: taken.append(True))
+
+
+@pytest.fixture
+def master_taken(master_race):
+    """The race already lost: a sibling holds master before this caller asks."""
+    master_race.take()
+    return master_race.dir
+
+
+def _master_selection():
+    return {
+        "user_data_dir": str(clone_storage.master_profile_dir()),
+        "profile_role": "master",
+    }
+
+
+async def test_a_master_loser_retries_onto_a_reserved_clone(
+    tmp_session_root, master_taken
+):
+    """THE stage-1 defect: the fallback answered ``None`` for every non-clone
+    role, so the loser of the master race got no second attempt at all — the
+    caller saw ``Failed to connect to browser`` plus nodriver's root/no_sandbox
+    advice, which F-834's own hint already disclaims.
+
+    A sibling HOLDS master here, which is what makes a clone the right answer:
+    retrying a directory another Chrome owns would fail the same way again.
+    """
+    fallback = await clone_storage._fallback_profile_selection(_master_selection(), 0)
+
+    assert fallback is not None, "a master-role loser got no retry at all (F-834)"
+    assert fallback["profile_role"] == "clone"
+    clone = Path(fallback["user_data_dir"])
+    assert clone != master_taken
+    assert clone_storage._is_relative_to(clone, clone_storage.clone_root_dir())
+    assert clone_storage._clone_dir_is_protected(clone), (
+        "the retry clone must be RESERVED — being reserved is the whole reason a "
+        "clone is a safe place for a master loser to land"
+    )
+
+
+async def test_a_master_attempt_retries_master_when_no_sibling_took_it(
+    tmp_session_root,
+):
+    """The other half of the master rule: nobody else holds it, so master is
+    still the best profile here and a clone would be a needless copy of it.
+
+    This is the shape the macOS/ARM64 cell measured (run 35150887345 attempt 2):
+    Chrome had STARTED and was killed by the failed attempt's F-860 reap, so the
+    directory is free again by the time this is asked.
+    """
+    fallback = await clone_storage._fallback_profile_selection(_master_selection(), 0)
+
+    assert fallback == _master_selection(), (
+        "a master nobody took must be retried, not cloned away from"
+    )
+
+
+async def test_the_master_hold_is_asked_about_the_directory_the_attempt_drove(
+    tmp_session_root, monkeypatch
+):
+    """The hold is read off the SELECTION, never re-derived from config.
+
+    The two agree for every selection the resolver issues, so this costs
+    nothing; asking the selection is what keeps the answer about the directory
+    this attempt actually drove rather than the one config says master is now.
+    """
+    asked: list[Path] = []
+    monkeypatch.setattr(
+        clone_storage, "_profile_hold", lambda d: asked.append(Path(d)) and None
+    )
+    drove = clone_storage.clone_root_dir() / "somewhere-else"
+
+    await clone_storage._fallback_profile_selection(
+        {"user_data_dir": str(drove), "profile_role": "master"}, 0
+    )
+
+    assert asked == [drove]
+
+
+async def test_two_master_losers_land_in_distinct_dirs(tmp_session_root, master_taken):
+    """Both losers of one master race retry at once; layer 1's per-attempt token
+    has to hold for this new entry point too."""
+    first = await clone_storage._fallback_profile_selection(_master_selection(), 0)
+    second = await clone_storage._fallback_profile_selection(_master_selection(), 0)
+
+    assert first["user_data_dir"] != second["user_data_dir"]
+
+
+async def test_a_named_profile_retries_itself_and_is_never_walked_or_cloned(
+    tmp_session_root,
+):
+    """A NAMED profile retries the SAME directory, whatever holds it.
+
+    The caller asked for THAT profile's cookies and logins. Swapping it for a
+    clone is an identity change and so is walking it to `<name>-2`; the only
+    place either may happen is `resolve_profile_selection`, where F-871 reports
+    it. A role the resolver never issues still gets no retry.
+    """
+    named = {
+        "user_data_dir": str(clone_storage.clone_root_dir() / "fleet-tabswitch"),
+        "profile_role": "explicit",
+        "clone_source": None,
+    }
+    for attempt in (0, 2):
+        again = await clone_storage._fallback_profile_selection(named, attempt)
+        assert again == named, f"attempt {attempt} moved a named profile"
+
+    for role in ({}, {"profile_role": "nonsense"}):
+        assert await clone_storage._fallback_profile_selection(role, 0) is None
+        assert await clone_storage._fallback_profile_selection(role, 2) is None
+
+
+class _MasterRefusingManager(FakeBrowserManager):
+    """Chrome's profile singleton, modelled: a launch against the MASTER
+    directory fails, every other directory works.
+
+    That is the stage-1 race as the losing caller experiences it — a second
+    Chrome against a user-data-dir another Chrome already holds hands its
+    command line to the incumbent and exits, which nodriver reports as
+    ``Failed to connect to browser``.
+    """
+
+    def __init__(self, race, spawn_instance):
+        super().__init__(spawn_instance=spawn_instance, spawn_diagnostics={})
+        self._race = race
+        self.dirs: list[str] = []
+
+    async def spawn_browser(self, options):
+        self.dirs.append(options.user_data_dir)
+        if options.user_data_dir == str(self._race.dir):
+            # The winner has it from this moment on — which is exactly what makes
+            # a clone, not master again, the right retry for this caller.
+            self._race.take()
+            raise RuntimeError(INNER_FAILURE)
+        return await super().spawn_browser(options)
+
+
+async def test_a_spawn_deciding_its_retry_is_not_counted_in_flight(
+    tmp_session_root, doomed_manager, patched_server, call_tool, monkeypatch
+):
+    """Why the retry does not wait for the sibling wave, measured not assumed.
+
+    `_spawns_in_flight` is incremented inside `BrowserManager.spawn_browser` and
+    decremented in its `finally`, so a spawn sitting in the tool body's except
+    handler — exactly where a "wait until the others settle" gate would go — is
+    NOT counted. Every member of a failing wave would therefore read a number
+    that excludes every other waiter, reach the same verdict at the same moment,
+    and be released together: the gate cannot see the herd it exists to break
+    up. It would buy nothing and cost every failing spawn its own latency, which
+    is why the fallback returns immediately and the retry budget is the bound.
+    """
+    seen: list[int] = []
+    real = clone_storage._fallback_profile_selection
+
+    async def _sampling(previous, attempt):
+        seen.append(doomed_manager._spawns_in_flight)
+        return await real(previous, attempt)
+
+    monkeypatch.setattr(clone_storage, "_fallback_profile_selection", _sampling)
+    srv = patched_server(browser_manager=doomed_manager)
+
+    with pytest.raises(Exception):
+        await call_tool(srv, "spawn_browser", headless=True, sandbox=False)
+
+    assert seen, "the spawn never reached a retry decision at all"
+    assert set(seen) == {0}, (
+        f"in-flight counts at retry-decision time were {seen}; a wait gated on "
+        "this counter cannot see its own waiters"
+    )
+
+
+class _AlwaysFailsManager(FakeBrowserManager):
+    """Every attempt fails, so the loop runs its full budget and then raises."""
+
+    def __init__(self, race):
+        super().__init__(spawn_instance=None, spawn_diagnostics={})
+        self._race = race
+        self.dirs: list[str] = []
+
+    async def spawn_browser(self, options):
+        self.dirs.append(options.user_data_dir)
+        if options.user_data_dir == str(self._race.dir):
+            self._race.take()
+        raise RuntimeError(INNER_FAILURE)
+
+
+async def test_a_spawn_that_fails_every_attempt_leaks_no_protected_clone(
+    tmp_session_root, call_tool, patched_server, master_race
+):
+    """The LAST attempt must not ask for a fallback it can never use.
+
+    The retry budget is exhausted by then and the loop's `else` raises, so that
+    selection is never driven. Asking for it anyway costs a whole profile-tree
+    copy and leaves the directory `_protect_clone_dir`-ed for the life of the
+    process: the two release paths are this attempt's own failure handler, which
+    has already run, and `close_instance`, which never will. Stage 1 is what
+    routes a MASTER failure down this path at all — before it, a master-role
+    spawn that failed made zero clones and leaked nothing.
+    """
+    manager = _AlwaysFailsManager(master_race)
+    srv = patched_server(browser_manager=manager)
+    clone_root = clone_storage.clone_root_dir()
+    assert not clone_storage._PROTECTED_CLONE_DIRS, "the fixture starts clean"
+
+    with pytest.raises(Exception):
+        await call_tool(srv, "spawn_browser", headless=True, sandbox=False)
+
+    assert len(manager.dirs) == 3, f"attempted dirs: {manager.dirs}"
+    assert manager.dirs[0] == str(master_race.dir)
+    assert not clone_storage._PROTECTED_CLONE_DIRS, (
+        "a clone dir stayed protected for a launch that never happened — nothing "
+        "will ever release it"
+    )
+    on_disk = [d for d in clone_root.iterdir() if d.is_dir() and d.name != ".trash"]
+    assert len(on_disk) == 2, (
+        f"{len(on_disk)} profile trees copied for 2 clone attempts: {on_disk}"
+    )
+
+
+class _FailsOnceManager(FakeBrowserManager):
+    """nodriver's connect failure, once, whatever directory it is given.
+
+    The macOS/ARM64 shape (run 35150887345 attempt 2): Chrome STARTED on the
+    requested directory but had not opened its DevTools port inside nodriver
+    0.47's fixed connect deadline — 0.25 s plus five 0.5 s naps, a constant that
+    does not scale with load — so on a 3-vCPU runner under five concurrent
+    launches the first attempt loses a race with a stopwatch, not with a sibling
+    for a directory. The failed attempt's F-860 reap then kills that Chrome, so
+    the very same directory is free for the retry.
+    """
+
+    def __init__(self, spawn_instance):
+        super().__init__(spawn_instance=spawn_instance, spawn_diagnostics={})
+        self.dirs: list[str] = []
+
+    async def spawn_browser(self, options):
+        self.dirs.append(options.user_data_dir)
+        if len(self.dirs) == 1:
+            raise RuntimeError(INNER_FAILURE)
+        return await super().spawn_browser(options)
+
+
+async def test_a_named_profile_spawn_retries_the_very_same_directory(
+    tmp_session_root, call_tool, patched_server
+):
+    """The named half, end to end: the retry drives the SAME directory.
+
+    Never `<name>-2` and never a clone — the caller named `fleet-tabswitch`
+    because they want that profile's cookies, and a spawn that quietly hands
+    back a different one has answered a different question.
+    """
+    manager = _FailsOnceManager(
+        SimpleNamespace(
+            instance_id="i1",
+            state="active",
+            headless=True,
+            viewport={"width": 1920, "height": 1080},
+        )
+    )
+    srv = patched_server(browser_manager=manager)
+
+    result = await call_tool(
+        srv,
+        "spawn_browser",
+        headless=True,
+        sandbox=False,
+        user_data_dir="fleet-tabswitch",
+    )
+
+    assert result["state"] == "active"
+    assert len(manager.dirs) == 2, f"attempted dirs: {manager.dirs}"
+    assert manager.dirs[0] == manager.dirs[1], "the retry moved to another directory"
+    assert Path(manager.dirs[0]).name == "fleet-tabswitch"
+    selection = result["spawn_diagnostics"]["profile_selection"]
+    assert selection["profile_role"] == "explicit"
+    assert "walked_to" not in selection, "a named profile must never be walked here"
+    assert selection["spawn_retries"], "the swallowed first failure must be reported"
+
+
+async def test_a_spawn_that_loses_master_succeeds_on_its_second_attempt(
+    tmp_session_root, call_tool, patched_server, master_race
+):
+    """End to end through the tool body: the loser gets a SECOND attempt, on a
+    distinct reserved clone, and the spawn succeeds instead of raising.
+
+    Master is free when this caller selects it — that is stage 1 — and held by
+    the time the fallback is asked, which is why the answer is a clone here and
+    master itself in `test_a_master_attempt_retries_master_when_no_sibling_took_it`.
+    """
+    master = master_race.dir
+    manager = _MasterRefusingManager(
+        master_race,
+        SimpleNamespace(
+            instance_id="i1",
+            state="active",
+            headless=True,
+            viewport={"width": 1920, "height": 1080},
+        ),
+    )
+    srv = patched_server(browser_manager=manager)
+
+    result = await call_tool(srv, "spawn_browser", headless=True, sandbox=False)
+
+    assert result["state"] == "active"
+    assert len(manager.dirs) == 2, f"attempted dirs: {manager.dirs}"
+    assert manager.dirs[0] == str(master)
+    clone = Path(manager.dirs[1])
+    assert clone != master
+    assert clone_storage._is_relative_to(clone, clone_storage.clone_root_dir())
+    assert clone_storage._clone_dir_is_protected(clone)
+    selection = result["spawn_diagnostics"]["profile_selection"]
+    assert selection["profile_role"] == "clone"
+    assert selection["user_data_dir"] == str(clone)
+    assert selection["spawn_retries"], "the swallowed first failure must be reported"

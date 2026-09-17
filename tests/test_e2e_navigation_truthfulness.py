@@ -18,7 +18,9 @@ process. A tool that silently did nothing cannot agree with either.
 
 Every node passes a small ``timeout`` (8 s), so a regression costs eight seconds
 and names itself rather than costing the default thirty. Nothing here sleeps as
-an oracle: the only durations asserted on are the fixture's own declared delays.
+an oracle: the only durations asserted on are the fixture's own declared delays,
+and the two nodes that must wait for a fetch the tool's milestone does not cover
+poll the ledger for it rather than sleeping a fixed amount (``_await_fetched``).
 
 ===========================  ==============================================
 shape                        node
@@ -36,6 +38,7 @@ shape                        node
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 
@@ -69,6 +72,11 @@ SLOW_ASSET_MS = 1600
 #: wins a property of the shape rather than of the runner's load.
 SLOW_DOC_MS = 2500
 PREEMPT_MS = 1000
+#: How long a fetch the tool's milestone does not cover may still be in flight
+#: (see ``_await_fetched``). Generous on purpose: it is spent only when the
+#: ledger does not match yet, and a node that spends it all fails anyway.
+LEDGER_SETTLE_SECONDS = 5.0
+LEDGER_POLL_SECONDS = 0.05
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +123,50 @@ async def _live(iid: str) -> tuple[str, str, str]:
 def _fetched(ledger: dict) -> list[str]:
     """The document paths the BROWSER asked the server for, in order."""
     return [entry for entry in ledger["nav_paths"] if not entry.startswith("cookie=")]
+
+
+async def _await_fetched(origin: str, expected: list[str]) -> list[str]:
+    """The fetch ledger once it MATCHES ``expected``, or as it stands at the
+    deadline — for the two nodes whose last fetch the tool's own milestone does
+    NOT guarantee.
+
+    (b) and (c) both schedule their second document AT ``load``, which is the
+    very milestone ``navigate`` returns on, so both accept an answer about the
+    FIRST document — and at that instant the server legitimately has not been
+    asked for the second yet. Reading the ledger once then asserts that the
+    refresh happened within one round trip of the answer, which is not what the
+    node claims and not something either page promises. Measured: CI run
+    35157444236 (macOS/ARM64 integration, PR #126) failed (b) with
+    ``Right contains one more item: '/nav/landing?from=meta-refresh'``.
+
+    Two of the three things the read-once assertion caught still hold, and one
+    does not. A ledger in the WRONG order never equals ``expected`` and fails at
+    the deadline; one still SHORT at the deadline fails the same way; and a
+    surplus fetch that arrives BEFORE the sequence completes also fails, because
+    equality can no longer be reached. What is given up is a surplus fetch that
+    arrives AFTER the match — this returns at the first poll that equals
+    ``expected``, so a third self-reload or a third document is normally not
+    seen. Waiting longer to find out would mean waiting a FIXED extra interval
+    on every run to confirm the ledger had settled, which is the sleep-as-oracle
+    this file rules out; the exact-sequence assertion is the guard against a
+    surplus fetch that is part of the shape, and this is not it. The poll
+    interval is a poll interval and not an oracle — nothing asserts on it, and a
+    sequence already complete costs one HTTP round trip.
+
+    The other five ledger assertions read ONCE, deliberately. (a), (d), (e) and
+    (g) each assert that the tool answered ABOUT the final document, which it
+    cannot have done without that document being served first; (f)'s abort needs
+    the response headers Chrome read to decide it was a download; (h)'s subframe
+    blocks its parent's ``load``. In each the single read is itself a claim
+    about the product — the milestone covered those fetches — and a poll would
+    quietly give that claim away.
+    """
+    deadline = time.monotonic() + LEDGER_SETTLE_SECONDS
+    while True:
+        fetched = _fetched(await fixture_ledger(origin))
+        if fetched == expected or time.monotonic() >= deadline:
+            return fetched
+        await asyncio.sleep(LEDGER_POLL_SECONDS)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -172,10 +224,11 @@ async def test_a_meta_refresh_answers_about_a_real_document_either_side_of_it(
         (True, ""),
         (False, fr.NAV_LANDING_TITLE),
     ), result
-    assert _fetched(await fixture_ledger(origin_a)) == [
-        "/nav/meta-refresh",
-        "/nav/landing?from=meta-refresh",
-    ]
+    # The refresh really happened. Awaited, not read once: the arm above that
+    # answers about the FIRST document is truthful at an instant when the
+    # landing has not been asked for yet (``_await_fetched``).
+    expected = ["/nav/meta-refresh", "/nav/landing?from=meta-refresh"]
+    assert await _await_fetched(origin_a, expected) == expected
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -202,8 +255,10 @@ async def test_a_page_that_reloads_itself_once_is_answered_about_honestly(
     assert result["url"] == url
     assert result["title"] in ("", fr.NAV_RELOADED_TITLE), result
     # The reload really happened: the server served the same document twice.
-    fetched = _fetched(await fixture_ledger(origin_a))
-    assert fetched == [f"/nav/self-reload?token={token}"] * 2, fetched
+    # Awaited for (b)'s reason — this page schedules its reload at `load`, so
+    # the `title == ""` arm above answers before the second request is sent.
+    expected = [f"/nav/self-reload?token={token}"] * 2
+    assert await _await_fetched(origin_a, expected) == expected
 
 
 # ═══════════════════════════════════════════════════════════════════════════

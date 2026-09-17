@@ -1028,28 +1028,28 @@ async def _fallback_profile_selection(
     previous_selection: dict[str, Any],
     attempt: int,
 ) -> dict[str, Any] | None:
-    if previous_selection.get("profile_role") != "clone":
+    # What the NEXT attempt drives (F-834 stage 1). A ``clone`` re-clones below;
+    # the two non-clone roles retry the SAME directory, which this attempt's
+    # F-860 reap has just freed — a NAMED profile is the identity the caller
+    # asked for and is never walked or swapped, and a master no sibling took is
+    # still the best profile here, while one a sibling DID take falls through.
+    # The hold is asked about the directory this attempt DROVE, off the
+    # selection, never config. No wait, no master reservation: CLAUDE.md's row.
+    role = previous_selection.get("profile_role")
+    same = previous_selection.get("user_data_dir")
+    if role == "explicit" or (role == "master" and _profile_hold(Path(same)) is None):
+        return dict(previous_selection)
+    if role not in ("clone", "master"):
         return None
 
     snapshot = master_snapshot_dir()
-    if attempt == 0:
-        if snapshot.exists():
-            return await resolve_profile_selection(
-                None,
-                force_clone=True,
-                source_override=snapshot,
-                source_kind="master-snapshot-retry",
-                clone_suffix="retry",
-            )
+    if not snapshot.exists():
         return None
-
-    if snapshot.exists():
-        return await resolve_profile_selection(
-            None,
-            force_clone=True,
-            source_override=snapshot,
-            source_kind="master-snapshot-final",
-            clone_suffix="snapshot",
-        )
-
-    return None
+    final = attempt > 0
+    return await resolve_profile_selection(
+        None,
+        force_clone=True,
+        source_override=snapshot,
+        source_kind="master-snapshot-final" if final else "master-snapshot-retry",
+        clone_suffix="snapshot" if final else "retry",
+    )
