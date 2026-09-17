@@ -313,6 +313,11 @@ IDLE_WINDOW_SECONDS = _idle_window_seconds()
 # (3) the wall time the nodes BEFORE it spend, since the witness's idleness is
 # overlapped with their work rather than added to it.
 IDLE_SLEEP_BUDGET_SECONDS = 250.0
+# The floor on each re-check of the idle deadline. The wait is a LOOP, not one
+# sleep, because `asyncio.sleep(d)` may return at the deadline rather than after
+# it and the residual then rounds to zero or below; this keeps the loop from
+# spinning while it crosses those last microseconds.
+IDLE_RECHECK_SECONDS = 0.05
 
 
 # ── Frame readers (same shapes test_wire_semantics uses) ─────────────────────
@@ -1424,8 +1429,18 @@ async def test_s4_a_session_idle_past_every_reaper_still_answers(
     )
 
     offsets = _log_offsets(space)
+    # ONE deadline on ONE clock, and the node waits until it is CROSSED.
+    # Sleeping `IDLE_WINDOW_SECONDS - idle_for` and then asserting
+    # `time.monotonic() - quiet_since >= IDLE_WINDOW_SECONDS` compares two
+    # floats that came from different arithmetic, and a sleep that returns
+    # exactly at its deadline reads a hair short: gate run 35172179524
+    # (transport, Windows/X64) failed this node on
+    # `assert 334.99999999999994 >= 335.0` — 6e-14 s of float, not a session
+    # that was reaped. The window itself is derived from the product's
+    # constants and does not get slack; the WAIT is what is made exact.
+    deadline = idle_witness["quiet_since"] + IDLE_WINDOW_SECONDS
     idle_for = time.monotonic() - idle_witness["quiet_since"]
-    remaining = IDLE_WINDOW_SECONDS - idle_for
+    remaining = deadline - time.monotonic()
     if remaining > IDLE_SLEEP_BUDGET_SECONDS:
         # This node's window is PAID by the nodes above it. Selected on its own
         # (`-k s4`, `--lf` after a flake, a bisect) it would have to sleep the
@@ -1439,10 +1454,15 @@ async def test_s4_a_session_idle_past_every_reaper_still_answers(
             f"({IDLE_SLEEP_BUDGET_SECONDS:.0f}s); its window is spent by the nodes "
             f"above it — run the whole module"
         )
-    if remaining > 0:
-        await asyncio.sleep(remaining)
+    slept_from = time.monotonic()
+    while time.monotonic() < deadline:
+        await asyncio.sleep(max(deadline - time.monotonic(), IDLE_RECHECK_SECONDS))
+    slept_here = time.monotonic() - slept_from
     total_idle = time.monotonic() - idle_witness["quiet_since"]
-    assert total_idle >= IDLE_WINDOW_SECONDS
+    # The loop above cannot exit before this is true; asserted anyway so a
+    # future edit that replaces it with a single sleep fails HERE, loudly,
+    # rather than by measuring a session that was never idle long enough.
+    assert time.monotonic() >= deadline
 
     wire: RawStdioWire = idle_witness["wire"]
     instance_id: str = idle_witness["instance_id"]
@@ -1464,7 +1484,7 @@ async def test_s4_a_session_idle_past_every_reaper_still_answers(
 
     print(
         f"\nS4: idle {total_idle:.1f}s (window {IDLE_WINDOW_SECONDS:.0f}s, "
-        f"{remaining:.1f}s of it slept here), {strikes} strikes"
+        f"{slept_here:.1f}s of it slept here), {strikes} strikes"
     )
 
 

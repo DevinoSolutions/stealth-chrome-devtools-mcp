@@ -71,18 +71,27 @@ def empty_ring():
 def failing_spawn(monkeypatch, patched_server):
     """The reported outage, hermetically: every ``spawn_browser`` attempt fails.
 
-    ``profile_role`` is ``master`` so no clone dir is created, released, or
-    fallen back to — ``_fallback_profile_selection`` returns ``None`` for a
-    non-clone role, which is what makes the first failure final.
+    ``profile_role`` is ``master`` so no clone dir is created or released, and
+    the retry is stubbed OFF so the first failure is final: this file's subject
+    is what reaches the debug ring, and a three-attempt message would be about
+    the retry protocol instead. Since F-834 stage 1 every role the resolver
+    issues retries, so leaning on a role that happens not to — which is what
+    this fixture used to do — would pin an unrelated rule from the wrong file.
+    The retry protocol itself is pinned in
+    ``tests/test_concurrent_spawn_collision.py``.
     """
 
     async def fake_resolve(user_data_dir, **kwargs):
         return {"user_data_dir": "/fake/dir", "profile_role": "master"}
 
+    async def no_retry(previous_selection, attempt):
+        return None
+
     async def doomed_spawn(options):
         raise RuntimeError(SPAWN_FAILURE)
 
     monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+    monkeypatch.setattr(clone_storage, "_fallback_profile_selection", no_retry)
     monkeypatch.setattr(desktop_launch, "available", lambda: False)
     fbm = FakeBrowserManager()
     monkeypatch.setattr(fbm, "spawn_browser", doomed_spawn)
