@@ -229,9 +229,19 @@ async def test_execute_script_transport_failure_raises_tool_error():
 
 @pytest.mark.asyncio
 async def test_function_body_retry_transport_failure_raises_tool_error():
-    """The F-812 wrapped retry reports its failure with the same type."""
+    """The F-812 wrapped retry reports its failure with the same type.
+
+    The seam moved to ``script_evaluation`` in F-883 (``dom_handler`` was at 997
+    of its 1000-LOC budget), so the retry is addressed at its new home; what is
+    asserted — an operational failure of the WRAPPED attempt is still a
+    ``ToolError`` and still says "Failed to execute script" — is unchanged.
+    """
+    from stealth_chrome_devtools_mcp.embedded import script_evaluation
+
     with pytest.raises(ToolError) as caught:
-        await DOMHandler._evaluate_as_function_body(_RaisingTab(), "return 1")
+        await script_evaluation.as_async_function_body(
+            _RaisingTab(), "return 1", "top-level 'return'"
+        )
 
     assert type(caught.value) is ToolError
     assert str(caught.value).startswith("Failed to execute script: ")

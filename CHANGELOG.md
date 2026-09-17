@@ -129,6 +129,96 @@ A repo-wide re-sweep of `tests/` for the same shape (any spawn of product code
 with an env that does not redirect HOME/USERPROFILE or `STEALTH_MCP_LOG_DIR`)
 found no further instances. See §6 of the finding doc for the full writeup.
 
+### Fixed — F-883: `execute_script` never awaited, so a Promise was `{}` and `await` was a SyntaxError
+
+Measured through the shipped MCP on 2.1.8 (Chrome 152, nodriver 0.47):
+`return fetch(u).then(r => r.text())` answered `{"success": true, "result": {}}`,
+`return Promise.reject(new Error('boom'))` answered the **same** `{}` — a failure
+reported as a success — and `const v = await …` died with `SyntaxError: await is
+only valid in async functions`. The tool's own docstring forbade every blocking
+wait and told callers to use `await fetch(url)`, which is the one thing it refused
+to run.
+
+The one `Runtime.evaluate` was sent without `awaitPromise`, so Chrome answered
+with the Promise **object** and `returnByValue` serialized it by its own
+enumerable properties — a `Promise` has none, hence `{}`, indistinguishable from
+a script that genuinely returned an empty object. And F-812's retry wrapper was an
+ordinary arrow function, so a top-level `await` was never even a case it
+recognised.
+
+Three changes, at a new leaf `embedded/script_evaluation.py` — THE one home for
+"run a caller's JS in the page and read its answer" (`dom_handler.py` was at 997
+of its 1000-LOC budget; it is 853 now, and `DOMHandler.execute_script` is a
+one-line delegation): `await_promise=True` on THE one send, so a returned Promise
+answers with the value it resolves to and a rejection becomes the
+`exceptionDetails` F-795's reader already refuses; an **async** wrapper on both
+wrap paths (the retry's and the `args` path's), so `await` is legal on both call
+shapes; and a retry keyed on **two** compile complaints — Chrome's illegal-`return`
+and its top-level-`await` — each paired with the phrase the error message uses to
+name it, so a caller whose `await` was the trigger is not told about a `return`
+they did not write. A script that fails for any other reason still keeps its error
+and is still evaluated exactly once, and a top-level `var`/`function` still lands
+on the page unwrapped, because the source is always evaluated as written first.
+
+A rejection reason is page-authored and unbounded, so `tool_errors._require_js_value`
+— THE one place a thrown script becomes the error convention — now clamps the
+detail to 200 characters with a visible `…`, the same bound
+`js_aspect_answer.MAX_ERROR_CHARS` and `page_storage.BLOCKED_REASON_CHARS` carry.
+
+The same defect through the other door: `inject_and_execute_script` and
+`call_javascript_function` / `execute_function_sequence` already sent
+`await_promise=True`, but the **wrappers** their caller's code runs inside were
+synchronous, so an async page function's Promise landed in `result` as `{}` with
+`success: true`. Both wrappers are `async` now and their inner calls awaited, in
+their own home — no second evaluate path.
+
+One behaviour is deliberately slower: a Promise that never settles used to answer
+`{}` instantly and is now killed at `timeout_ms` (`_clamp_timeout` +
+`_with_cdp_timeout`, the one home for that clamp — no second deadline inside the
+eval seam), reported as a timeout. The tab is usable immediately afterwards.
+
+**And every CDP reply is now shielded from its caller's cancellation, which
+closes TWO open HIGH findings — F-788 and F-794 — as well as the crash the
+review made reachable.** Cancelling an await — ours on a timeout, or the
+client's `notifications/cancelled` — cancelled nodriver's `Transaction` while it
+was still registered in `Connection.mapper`; when Chrome answered LATE, the
+connection's listener task `set_result`-ed a cancelled future, died of the
+`InvalidStateError`, and every later call on that tab timed out with the generic
+"the browser may have crashed" — about a browser that was fine. That is
+**F-788** (a navigation timeout wedges the instance, HIGH, open since W10) and
+**F-794** (a cancelled call wedges the instance, HIGH, open since W13), and
+F-883's `awaitPromise` simply made `execute_script` a third way to reach it.
+
+The fix is one line at the transport layer: the new
+`embedded/cdp_transport.py` wraps `Transaction.__await__` in `asyncio.shield`,
+so the cancellation lands on a throwaway future and the registered one stays
+pending for the listener to resolve. It is installed once from `tool_runtime`
+and covers every CDP send in the tree — ours and nodriver's own — including the
+deadlines inside `browser_manager.navigate`, which is untouched. `_with_cdp_timeout`
+still CANCELS the operation it bounds: a cancelled request must stop the rest of
+the body, and an earlier attempt that shielded there instead made a cancelled
+`navigate` navigate anyway (caught by the wire lane, reverted).
+
+Measured on Chrome 152: a Promise settling after `timeout_ms`, a `navigate` that
+times out while Chrome commits late (F-882's reported shape), and a client
+cancellation of a confirmed in-flight request — all three now leave the instance
+usable. Both characterization pins that recorded the wedge are inverted in this
+change (`tests/test_resilience.py`, `tests/test_wire_semantics.py`), MQ-128 is
+promoted to satisfied and MQ-141 now waits on F-791 alone. What is NOT recalled:
+a timed-out `navigate` has already handed `Page.navigate` to Chrome, so the page
+may still land — the instance survives, the navigation is not undone.
+
+The F-812 retry is keyed on the raw `exceptionDetails` now, not on the message:
+class `SyntaxError` AND no stack frame in the description (measured: a compile
+complaint's description is bare; every thrown Error's carries `\n    at`). So
+`throw new Error("Illegal return statement")` — page-authored — no longer re-runs a
+side-effecting script twice. A page that also overwrites `.stack` still can, and
+the finding says so.
+Everything else is byte-identical: a plain sync return, a nested object/array
+(including falsy leaves), `0`/`""`/`false`/`null`/`undefined`, `Infinity`, `args`,
+a synchronous throw, a non-serialisable value and a cycle all answer exactly as
+they did on 2.1.8 — measured, `audit/stage2/finding_F883_execute_script_never_awaits.md` §2d.
+
 ## 2.1.8
 
 ### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)
