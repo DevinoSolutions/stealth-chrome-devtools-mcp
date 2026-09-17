@@ -31,11 +31,16 @@ calling every ~1 s. The strike count varied across runs on a 32-core box (0 in
 five, 6 in one where answered calls also fell from 76-80 to 28; the *unstressed*
 60 s soak logged 2 in another), so no node asserts a count or a floor — every
 node asserts the IMPLICATION instead: if a full strike run is ever reached on a
-port, `backend_watchdog`'s confirmation phase must have run for that port and
-answered `was busy, not dead`, never silence and never `confirmed unusable`.
-Vacuous when the load does not bite, an end-to-end F-820 oracle over the real
-transport when it does; the longest consecutive run is printed so which of the
-two happened is readable); a hard-killed sibling proxy; 30 `initialize`+DELETE liveness
+port, THAT proxy's confirmation phase must have answered `was busy, not dead`
+— never silence, never `confirmed unusable`. Keyed on `(log file, port)` because
+every proxy here shares one backend, so a port-only key would let a sibling's
+verdict close another proxy's run; and a full run that is the last watchdog line
+its proxy wrote counts as pending, because the confirmation may legitimately run
+for `REUSE_PATIENCE_SECONDS` without logging. Vacuous when the load does not
+bite, an end-to-end F-820 oracle when it does; the longest consecutive run is
+printed so which of the two happened is readable. It has not fired on any real
+run yet — seven runs, the limit never reached — so both paths are exercised
+hermetically on synthetic log lines instead); a hard-killed sibling proxy; 30 `initialize`+DELETE liveness
 sessions plus five clean proxy connect/disconnect cycles; a session idle past
 `session_hygiene.ABANDONED_AFTER_SECONDS + SWEEP_INTERVAL_SECONDS` (the longest
 periodic reaper in the tree, derived from those constants rather than typed); a
