@@ -630,10 +630,18 @@ class FakeTab:
         if self.opened_by is not None and self in self.opened_by.tabs:
             self.opened_by.tabs.remove(self)
 
-    async def select(self, selector: str, *args: Any, **kwargs: Any) -> Any:
+    async def query_selector(self, selector: str, *args: Any, **kwargs: Any) -> Any:
         """The nodriver element-resolution seam used by the CDP styles path and
         ``clone_element_complete``. Returns the configured ``select_result``
         (e.g. a ``node_id``-carrying element), or ``None`` for the not-found path.
+
+        This is ``query_selector`` and deliberately NOT ``select``: since F-884
+        ``element_resolution`` calls only nodriver's SINGLE-SHOT surfaces,
+        because ``select``/``find``/``select_all``/``xpath`` each bundle a poll
+        loop into the query and holding the per-tab document lock across one
+        froze every other DOM call on that tab for nodriver's whole 10 s
+        default. Offering ``select`` here would let that regression back in
+        unnoticed; an ``AttributeError`` is the point.
         """
         self.select_calls.append(selector)
         return self._select_result

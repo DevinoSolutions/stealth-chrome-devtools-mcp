@@ -46,6 +46,47 @@ def _mock_tab(tab_id: str) -> MagicMock:
     return tab
 
 
+# nodriver's BUNDLED-WAIT surfaces: each one folds a poll loop into the query.
+# `element_resolution` calls none of them since F-884 — holding its document
+# lock across one froze every other DOM call on the tab for nodriver's 10 s
+# default — so a tab double in this file must not answer them either.
+_BUNDLED_WAIT_NAMES = ("select", "find", "select_all", "xpath")
+
+
+def _single_shot_tab() -> MagicMock:
+    """A tab double that answers only the four SINGLE-SHOT nodriver names.
+
+    `tests/fakes.py`'s `FakeTab` gets this for free: it defines the four
+    single-shot methods and nothing else, so a production path that reaches a
+    bundled name dies with a legible `AttributeError`. A bare `MagicMock`
+    cannot fail that way — it auto-creates every attribute — so stubbing a name
+    production no longer calls leaves the REAL name answering a non-awaitable
+    `MagicMock`, and the node dies at the `await` with "object MagicMock can't
+    be used in 'await' expression" raised INSIDE the very `except` block it was
+    pinning. It reads as the fallback firing on a surprising error rather than
+    as a stale harness, which is exactly how the four nodes below survived the
+    F-884 rename unnoticed until the pre-push lane ran them.
+
+    So the bundled names raise here, by name. The next rename is a sentence.
+    """
+    tab = MagicMock()
+    for bundled in _BUNDLED_WAIT_NAMES:
+        setattr(
+            tab,
+            bundled,
+            AsyncMock(
+                side_effect=AssertionError(
+                    f"tab.{bundled} is a BUNDLED-WAIT surface and production "
+                    "never calls it (F-884). element_resolution calls only "
+                    "query_selector / query_selector_all / "
+                    "find_element_by_text / find_elements_by_text — stub one "
+                    "of those instead."
+                )
+            ),
+        )
+    return tab
+
+
 # ---------------------------------------------------------------------------
 # 7a: browser_manager.py interaction hot path (WARNING - real degraded ops)
 # ---------------------------------------------------------------------------
@@ -130,8 +171,8 @@ class TestDomHandlerSilentExcepts:
                 }
             )
         )
-        tab = MagicMock()
-        tab.select = AsyncMock(return_value=element)
+        tab = _single_shot_tab()
+        tab.query_selector = AsyncMock(return_value=element)
 
         result = await DOMHandler.click_element(tab, "#btn")
 
@@ -151,8 +192,8 @@ class TestDomHandlerSilentExcepts:
         element = MagicMock()
         element.focus = AsyncMock()
         element.apply = AsyncMock(side_effect=RuntimeError("clear-fail"))
-        tab = MagicMock()
-        tab.select = AsyncMock(return_value=element)
+        tab = _single_shot_tab()
+        tab.query_selector = AsyncMock(return_value=element)
         # F-873: the keyboard clear is now the ONE CDP select-all+Delete
         # (text_entry.clear_via_keyboard), shared with paste_text, instead of
         # two WebDriver private-use codepoints down element.send_keys that CDP
@@ -186,8 +227,8 @@ class TestDomHandlerSilentExcepts:
             return json.dumps({"editable": False, "text": next(reads)})
 
         element.apply = _apply
-        tab = MagicMock()
-        tab.select = AsyncMock(return_value=element)
+        tab = _single_shot_tab()
+        tab.query_selector = AsyncMock(return_value=element)
         tab.send = AsyncMock()
 
         result = await DOMHandler.paste_text(tab, "#input", "hello")
@@ -214,8 +255,8 @@ class TestDomHandlerSilentExcepts:
         bad_iframe = MagicMock()
         bad_iframe.attrs = _BadAttrs()
 
-        tab = MagicMock()
-        tab.select_all = AsyncMock(return_value=[good_iframe, bad_iframe])
+        tab = _single_shot_tab()
+        tab.query_selector_all = AsyncMock(return_value=[good_iframe, bad_iframe])
         tab.get_content = AsyncMock(return_value="<html></html>")
         tab.evaluate = AsyncMock(return_value="")
 

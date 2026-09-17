@@ -26,6 +26,12 @@ def _instant_backoff(monkeypatch):
     # Zero the recovery backoff so the unit lane stays fast while the real
     # sleep(0) code path still runs. Mirrors tests/test_element_resolution.py.
     monkeypatch.setattr(element_resolution, "_SETTLE_SECONDS", 0.0)
+    # And F-884's wait, for the same reason: nodriver used to poll for a
+    # zero-match INSIDE one call, so a pin could assert one call and still be
+    # describing a 10 s wait. The loop is this module's now and visible, so zero
+    # its budget here — the production wait is unchanged either way.
+    monkeypatch.setattr(element_resolution, "_DEFAULT_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(element_resolution, "_POLL_SECONDS", 0.0)
 
 
 def _stale():
@@ -58,7 +64,7 @@ class _FakeTab:
         self._effects = list(select_all_effects)
         self.select_all_calls = 0
 
-    async def select_all(self, selector, *args, **kwargs):
+    async def query_selector_all(self, selector, *args, **kwargs):
         self.select_all_calls += 1
         effect = self._effects.pop(0)
         if isinstance(effect, Exception):
