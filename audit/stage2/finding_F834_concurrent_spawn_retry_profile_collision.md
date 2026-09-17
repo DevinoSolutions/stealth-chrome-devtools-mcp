@@ -364,17 +364,55 @@ once the others settle. The `no_sandbox` disclaimer and the self-separating
 `tests/test_concurrent_spawn_collision.py` pins the disclaimer's position
 against.
 
-### Residual (NOT fixed here)
+### The last-attempt leak, fixed here too
 
-On the LAST attempt of a losing spawn the tool body still computes a fallback it
-can never use — `range(3)` is exhausted, the `else:` raises — so a fully failed
-spawn copies one extra profile and leaves that clone dir `_protect_clone_dir`-ed
-for the life of the process (nothing releases it: the release paths are the
-per-attempt failure handler, which already ran, and `close_instance`, which never
-will). This predates stage 1 and applies to the `clone` role exactly as much;
-fixing it means not asking for a fallback on the final attempt, which changes
-which error the caller sees (the last one, rather than the joined set), so it is
-left for its own change.
+On the LAST attempt the tool body computed a fallback it could never use —
+`_SPAWN_ATTEMPTS` is exhausted, the loop's `else:` raises — so a fully failed
+spawn copied one extra profile tree and left that clone directory
+`_protect_clone_dir`-ed for the life of the process. Nothing releases it: the
+two release paths are the per-attempt failure handler, which has already run for
+that directory, and `close_instance`, which never will.
+
+The defect predates stage 1 and the `clone` role always reached it. What stage 1
+changed is the exposure: **a master-role spawn that fails every attempt now
+routes through this path, and before stage 1 it made zero clones and leaked
+nothing** — it re-raised on the first failure. So the widening is what turns a
+pre-existing `clone`-only leak into one a plain unnamed spawn can hit.
+
+Fixed by not asking for a re-selection after the last attempt. The handler
+`continue`s instead, so the loop's `else:` stays THE one exhaustion raise and
+the caller still sees the joined set of all three errors, byte-identical. The
+retry budget is a named constant (`_SPAWN_ATTEMPTS`) now, because the last
+attempt is a decision rather than just another iteration. Pinned by
+`test_a_spawn_that_fails_every_attempt_leaks_no_protected_clone`, which asserts
+both halves: nothing left in `_PROTECTED_CLONE_DIRS`, and exactly two profile
+trees on disk for the two clone attempts that actually launched.
+
+### Residuals (measured, NOT fixed)
+
+**1. The two same-directory roles spend the whole budget on one directory.**
+`explicit` and an untaken `master` drive the same path on all three attempts and
+the loop has no overall deadline, so a permanently unusable profile — corrupt,
+permission-denied, a path that will never work — costs three launch attempts
+where it used to cost one. The floor is nodriver's own connect deadline, read
+from `nodriver/core/browser.py:413-425`: `await asyncio.sleep(0.25)` then
+`for _ in range(5)` with `await self.sleep(0.5)` on each failure, so ≈ 2.75 s of
+sleeping per attempt before any HTTP time. Worst case is therefore ≈ 8.25 s of
+nodriver naps plus three Chrome starts, up from ≈ 2.75 s plus one. That is the
+accepted cost of the fix: the same budget the `clone` role always spent, and
+cutting the non-clone roles to a single retry would be a change to the attempt
+count with no evidence that a third attempt never helps (a saturated runner can
+clear between two of them). A caller whose own deadline sits under ~10 s would
+see a timeout where it used to see a fast error.
+
+**2. Shape B proves the plumbing, not that a retry beats the deadline.**
+`_FailsOnceManager` succeeds on its second attempt *by construction*. The
+measurement therefore establishes that the retry happens, that it drives the
+same directory, that the directory is not walked and that the first failure is
+reported — it does NOT establish that a real retry wins the race against
+nodriver's connect deadline on a saturated runner. Nothing hermetic can
+establish that; the evidence for it is the incident itself, where the reap
+freed the directory and the only thing missing was a second attempt.
 
 ## Related
 

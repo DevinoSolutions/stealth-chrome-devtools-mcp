@@ -43,6 +43,24 @@ singleton modelled once and read from both sides:
 | three concurrent unnamed spawns | 1 of 3 live, 1 directory | 3 of 3 live, 3 directories |
 | serialised lead + five named followers | 0 of 6 live | 6 of 6 live, every follower on the directory it asked for |
 
+A pre-existing leak is closed in the same pass, because the widening is what
+exposes it to an ordinary unnamed spawn: the last attempt asked for a
+re-selection that nothing could ever drive, so a fully failed spawn copied one
+extra profile tree and left that directory protected from the storage sweep for
+the life of the process. Before this fix a master-role spawn that failed every
+attempt made zero clones and leaked nothing; the `clone` role always reached it.
+The handler now skips the re-selection once the budget is spent, so the loop's
+`else` stays the one exhaustion raise and the caller's joined error text is
+unchanged.
+
+Two residuals are named rather than hidden. An `explicit` or untaken `master`
+selection drives the same directory on all three attempts with no overall
+deadline, so a permanently unusable profile costs about 8.25 s of nodriver's own
+connect naps instead of 2.75 s — the same budget the clone role always spent.
+And the hermetic measurement establishes that the retry happens on the right
+directory, not that a real retry wins the race against that deadline on a
+saturated runner; nothing hermetic can establish the latter.
+
 `clone_storage.py` is still 1055 lines, its grandfathered cap.
 
 That three concurrent selections all still answer `master` is unchanged and is

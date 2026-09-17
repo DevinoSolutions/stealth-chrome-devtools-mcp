@@ -451,6 +451,28 @@ async def test_a_master_attempt_retries_master_when_no_sibling_took_it(
     )
 
 
+async def test_the_master_hold_is_asked_about_the_directory_the_attempt_drove(
+    tmp_session_root, monkeypatch
+):
+    """The hold is read off the SELECTION, never re-derived from config.
+
+    The two agree for every selection the resolver issues, so this costs
+    nothing; asking the selection is what keeps the answer about the directory
+    this attempt actually drove rather than the one config says master is now.
+    """
+    asked: list[Path] = []
+    monkeypatch.setattr(
+        clone_storage, "_profile_hold", lambda d: asked.append(Path(d)) and None
+    )
+    drove = clone_storage.clone_root_dir() / "somewhere-else"
+
+    await clone_storage._fallback_profile_selection(
+        {"user_data_dir": str(drove), "profile_role": "master"}, 0
+    )
+
+    assert asked == [drove]
+
+
 async def test_two_master_losers_land_in_distinct_dirs(tmp_session_root, master_taken):
     """Both losers of one master race retry at once; layer 1's per-attempt token
     has to hold for this new entry point too."""
@@ -540,6 +562,54 @@ async def test_a_spawn_deciding_its_retry_is_not_counted_in_flight(
     assert set(seen) == {0}, (
         f"in-flight counts at retry-decision time were {seen}; a wait gated on "
         "this counter cannot see its own waiters"
+    )
+
+
+class _AlwaysFailsManager(FakeBrowserManager):
+    """Every attempt fails, so the loop runs its full budget and then raises."""
+
+    def __init__(self, race):
+        super().__init__(spawn_instance=None, spawn_diagnostics={})
+        self._race = race
+        self.dirs: list[str] = []
+
+    async def spawn_browser(self, options):
+        self.dirs.append(options.user_data_dir)
+        if options.user_data_dir == str(self._race.dir):
+            self._race.take()
+        raise RuntimeError(INNER_FAILURE)
+
+
+async def test_a_spawn_that_fails_every_attempt_leaks_no_protected_clone(
+    tmp_session_root, call_tool, patched_server, master_race
+):
+    """The LAST attempt must not ask for a fallback it can never use.
+
+    The retry budget is exhausted by then and the loop's `else` raises, so that
+    selection is never driven. Asking for it anyway costs a whole profile-tree
+    copy and leaves the directory `_protect_clone_dir`-ed for the life of the
+    process: the two release paths are this attempt's own failure handler, which
+    has already run, and `close_instance`, which never will. Stage 1 is what
+    routes a MASTER failure down this path at all — before it, a master-role
+    spawn that failed made zero clones and leaked nothing.
+    """
+    manager = _AlwaysFailsManager(master_race)
+    srv = patched_server(browser_manager=manager)
+    clone_root = clone_storage.clone_root_dir()
+    assert not clone_storage._PROTECTED_CLONE_DIRS, "the fixture starts clean"
+
+    with pytest.raises(Exception):
+        await call_tool(srv, "spawn_browser", headless=True, sandbox=False)
+
+    assert len(manager.dirs) == 3, f"attempted dirs: {manager.dirs}"
+    assert manager.dirs[0] == str(master_race.dir)
+    assert not clone_storage._PROTECTED_CLONE_DIRS, (
+        "a clone dir stayed protected for a launch that never happened — nothing "
+        "will ever release it"
+    )
+    on_disk = [d for d in clone_root.iterdir() if d.is_dir() and d.name != ".trash"]
+    assert len(on_disk) == 2, (
+        f"{len(on_disk)} profile trees copied for 2 clone attempts: {on_disk}"
     )
 
 

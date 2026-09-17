@@ -60,6 +60,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 SECTION = "browser-management"
 
+# How many times a spawn drives a profile selection before giving up. Named
+# rather than inline because the LAST attempt is now a decision: it must not ask
+# for a re-selection, since nothing will ever drive one (F-834 stage 1).
+_SPAWN_ATTEMPTS = 3
+
 
 async def spawn_browser(
     headless: bool = False,
@@ -143,7 +148,7 @@ async def spawn_browser(
         )
         spawn_errors = []
 
-        for spawn_attempt in range(3):
+        for spawn_attempt in range(_SPAWN_ATTEMPTS):
             selected_user_data_dir = profile_selection["user_data_dir"]
             options = BrowserOptions(
                 headless=headless,
@@ -171,6 +176,14 @@ async def spawn_browser(
                 # unreclaimable) for the rest of the process.
                 if profile_selection.get("profile_role") == "clone":
                     rt.clone_storage._release_clone_dir(selected_user_data_dir)
+                if spawn_attempt == _SPAWN_ATTEMPTS - 1:
+                    # The budget is spent and the loop's `else` raises below, so
+                    # a re-selection here is one nothing will ever drive: for a
+                    # role that clones it copies a whole profile tree and then
+                    # leaves it `_protect_clone_dir`-ed for the life of the
+                    # process — this handler has already run for it and
+                    # `close_instance`, the only other release, never will.
+                    continue
                 fallback_selection = await rt.clone_storage._fallback_profile_selection(
                     profile_selection, spawn_attempt
                 )

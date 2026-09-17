@@ -1031,13 +1031,13 @@ async def _fallback_profile_selection(
     # What the NEXT attempt drives (F-834 stage 1). A ``clone`` re-clones below;
     # the two non-clone roles retry the SAME directory, which this attempt's
     # F-860 reap has just freed — a NAMED profile is the identity the caller
-    # asked for and is never walked or swapped for a clone, and a master no
-    # sibling took is still the best profile here, while one a sibling DID take
-    # falls through. No wait first, and no reservation on master: CLAUDE.md's row.
+    # asked for and is never walked or swapped, and a master no sibling took is
+    # still the best profile here, while one a sibling DID take falls through.
+    # The hold is asked about the directory this attempt DROVE, off the
+    # selection, never config. No wait, no master reservation: CLAUDE.md's row.
     role = previous_selection.get("profile_role")
-    if role == "explicit" or (
-        role == "master" and _profile_hold(master_profile_dir()) is None
-    ):
+    same = previous_selection.get("user_data_dir")
+    if role == "explicit" or (role == "master" and _profile_hold(Path(same)) is None):
         return dict(previous_selection)
     if role not in ("clone", "master"):
         return None
