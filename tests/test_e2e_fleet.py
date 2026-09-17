@@ -21,8 +21,10 @@ run did which no committed node did are what this module reproduces:
   F-873, F-875, F-876 and F-877 each shipped.
 
 It is one node on purpose. The fleet is the unit: one lead browser and then
-five more spawned in ONE ``gather``, all six navigated in ONE ``gather``,
-driven in ONE ``gather``, and only then asked — collectively — whether
+five more spawned in ONE ``gather`` — through as many lanes as the machine has
+cores, so five at once on a developer box, three on the 3-vCPU macOS gate cell
+and two on the 2-vCPU Linux and Windows ones — all six navigated in ONE
+``gather``, driven in ONE ``gather``, and only then asked — collectively — whether
 ``list_instances`` can still name what each one is showing. Split into six
 nodes it would cost six fleets and stop being the shape that found the defects.
 
@@ -171,7 +173,19 @@ def _spawn_lanes(followers: int) -> int:
     is ``asyncio.sleep(0.25)`` then five tries ``0.5`` s apart
     (``nodriver/core/browser.py:413-425``; its ``sleep`` is ``wait`` is
     ``asyncio.sleep``), i.e. ≈2.75 s for Chrome to answer ``/json/version``,
-    and it does not stretch under load while Chrome's cold start does.
+    and it does not stretch under load while Chrome's cold start does. Nor do
+    the probes stretch each other: each one is
+    ``urlopen(request, timeout=10)`` handed to the default thread pool
+    (``:930-932``), so N launches probe in parallel rather than queueing, and
+    those 2.75 s are real wall-clock spent competing with Chrome's cold start
+    for the same cores.
+
+    **Two is the floor because two is already proven.** The gate's
+    ``ubuntu-latest`` and ``windows-latest`` cells are 2-vCPU runners and both
+    passed the UNBOUNDED five-at-once wave on this commit, so two lanes there
+    is below a bar those cells have already cleared. It is also the smallest
+    number that leaves this a fleet: at one lane the spawn phase would be
+    serial and the node would stop covering concurrent spawning at all.
 
     Measured: gate run 35150887345, macOS/ARM64 (3 vCPU), five concurrent
     launches — one lost. It was ``sessions/fleet-tabswitch``, a NAMED directory
@@ -565,7 +579,7 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
         print(
             f"\nfleet of {FLEET_SIZE}: spawn {spawn_seconds:.1f}s "
             f"(1 lead + {len(plan) - 1} in {lane_count} lanes on "
-            f"{os.cpu_count()} cpus), navigate {nav_seconds:.1f}s, "
+            f"{os.cpu_count() or 'unknown'} cpus), navigate {nav_seconds:.1f}s, "
             f"actions {act_seconds:.1f}s, "
             f"total {time.monotonic() - started:.1f}s "
             f"(roles {sorted(set(roles.values()))})"
