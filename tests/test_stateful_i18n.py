@@ -22,9 +22,11 @@ assertion could not see any of it.
 *Offline is proved by absence, not by a flag.* The cached read is credited only
 when the fixture ledger shows the network was never touched, and the offline
 read is taken after the fixture server has actually been shut down — not after
-an emulated-offline toggle. W10 already established that
-``Network.emulateNetworkConditions`` wedges the connection it is issued on
-(F-788); nothing here re-tries it.
+an emulated-offline toggle. W10 established that
+``Network.emulateNetworkConditions`` wedged the connection it was issued on
+(F-788, since fixed in ``embedded/cdp_transport.py``); nothing here re-tries it,
+because shutting the server down is the stronger witness either way — absence of
+traffic, not a flag we asked Chrome to believe.
 
 *Text is compared as code points.* Never as rendered pixels, never as a locale
 decision, and never with normalization applied on the way in or out: the NFC
