@@ -2,91 +2,6 @@
 
 ## Unreleased
 
-### Tests — lifecycle resilience E2E (disconnects, browsers closing)
-
-`tests/test_e2e_lifecycle_resilience.py` — eight nodes that drive a REAL fleet (the
-installed console launcher over stdio JSON-RPC, a detached backend on an isolated
-`HOME` and an OS-assigned port, real headless Chrome) and assert, after each stress:
-the recorded backend pid is unchanged; every browser spawned before the stress is
-still alive AND answers a CDP round trip; every `tools/call` on a surviving proxy got
-exactly one response frame, not an error, and no proxy's stdout reached EOF; and ZERO
-lifecycle incidents were written to the proxy/backend logs. The mixed-fingerprint
-fleet is the one deliberate exception to that set: it churns a backend by
-construction, so it runs in its own workspace, asserts browsers on the pid captured
-at spawn only (the winner rewrites `browser_pids.json`, so the registry cannot be its
-oracle) and is exempt from the zero-incident rule — the eviction line IS its
-measurement. The incident vocabulary is the
-product's own log lines (`confirmed unusable`, `confirmed gone after a lost
-connection`, `backend healed: re-bridging`, `backend unhealable after`, `times in a
-row`, `backend stale (source changed), evicting`) — read from the logs rather than
-from `capture_lifecycle`, which is a no-op under the suite's
-`STEALTH_MCP_NO_ERROR_REPORTING=1` — and one hermetic node asserts each of those
-substrings still occurs in the module that emits it, so a reworded line turns the
-vocabulary red instead of making every stress node vacuous. A watchdog STRIKE is
-deliberately not an incident (F-820) and is counted and printed instead.
-
-Stresses, one node each, with the measured wall time and the numbers asserted on:
-CPU saturation (20 s, `os.cpu_count()*2` normal-priority busy loops, two proxies
-calling every ~1 s. The strike count varied across runs on a 32-core box (0 in
-five, 6 in one where answered calls also fell from 76-80 to 28; the *unstressed*
-60 s soak logged 2 in another), so no node asserts a count or a floor — every
-node asserts the IMPLICATION instead: if a full strike run is ever reached on a
-port, THAT proxy's confirmation phase must have answered `was busy, not dead`
-— never silence, never `confirmed unusable`. Keyed on `(log file, port)` because
-every proxy here shares one backend, so a port-only key would let a sibling's
-verdict close another proxy's run; and a full run that is the last watchdog line
-its proxy wrote counts as pending, because the confirmation may legitimately run
-for `REUSE_PATIENCE_SECONDS` without logging. Vacuous when the load does not
-bite, an end-to-end F-820 oracle when it does; the longest consecutive run is
-printed so which of the two happened is readable. It has not fired on any real
-run yet — seven runs, the limit never reached — so both paths are exercised
-hermetically on synthetic log lines instead); a hard-killed sibling proxy; 30 `initialize`+DELETE liveness
-sessions plus five clean proxy connect/disconnect cycles; a session idle past
-`session_hygiene.ABANDONED_AFTER_SECONDS + SWEEP_INTERVAL_SECONDS` (the longest
-periodic reaper in the tree, derived from those constants rather than typed); a
-three-proxy 60 s soak of navigate/scroll/type/screenshot against the new
-`/life/lifecycle.html` fixture route; and two proxies whose package source
-fingerprints differ, sharing one state dir.
-
-**One finding, pinned as `xfail(strict=True)` and not fixed here: a
-source-fingerprint eviction CLOSES ANOTHER SESSION'S BROWSER, silently.** Measured
-six times with no exception. The evicting proxy's cold-start lock calls
-`singleton._clear_stale_backend` → `_terminate_backend` on the running backend, and
-afterwards the browser that backend owned is gone (measured on the pid captured at
-spawn; which of the two candidate mechanisms kills it — dying with the terminated
-backend, or being reaped as unowned by the replacement's orphan recovery, since
-`browser_pid_registry` stamps the BACKEND as owner — was not isolated). The
-other session never asked for that and is never told: its proxy log carries no
-condemnation, no heal and no teardown — only transient strikes that reset themselves
-(usually one `probe failed 1/3`; once `2/3`). The proxy's FAST death witness is
-port-only: `backend_watchdog.watch_liveness` probes with
-`singleton._backend_http_ready`, which asks the port and not the identity, and the
-replacement binds the SAME port and answers it — so the three strikes that would open
-the confirmation phase never accumulate and the confirmation that IS identity-scoped
-(`_same_identity_backend_ready`) is never reached; the streamable-HTTP bridge is
-per-request, so nothing "breaks" for `_confirm_bridge_verdict` either. What actually
-died is the MCP SESSION, which nothing watches, leaving `proxy_selfheal`'s entire
-recovery unreachable on the most common way a backend goes away. The client-visible
-half varies (5 of 6 runs: every later call answers
-`{"code": 32600, "message": "Session terminated"}`; 1 of 6: the session kept answering
-over a backend that no longer had its browser), so the node asserts the half that did
-not vary. The eviction itself converges — exactly one wave in all six runs, and the
-fleet ends on exactly one live recorded backend, asserted by a sibling node whose
-fixture first proves with the product's own `_source_fingerprint` that the two sides
-really differ — but only because the loser never notices, not because any rule makes
-a ping-pong impossible. Two proposed universal rules are in `CONTRIBUTING.md`.
-
-`tests/release_gate_harness.py`'s `_pick_free_port` no longer hands an isolated
-workspace whatever loopback port the OS assigned: it refuses the product's default
-singleton port and every port the developer's REAL `~/.stealth-mcp/server.json`
-records, and retries (raising after 32 picks rather than guessing). The ephemeral
-range covers both, and a throwaway backend squatting a live backend's recorded port
-while that backend is down would be adopted by the developer's next real proxy and
-die at workspace teardown — the suite handing out the very `CONNECTION_CLOSED` it
-exists to eliminate. The record parse is now ONE helper (`_backend_entries`) shared
-with `_backend_pid_from_state`, and `tests/test_release_gate_harness_ports.py` pins
-the pick hermetically.
-
 ### Fixed — F-885: proxy/backend-death tests touched the developer's live `~/.stealth-mcp` record
 
 `tests/test_proxy_backend_death.py::TestProxyExitsOnBackendDeath` ran an
@@ -339,6 +254,91 @@ exact-sequence assertions are unchanged, so a wrong order and a short ledger
 fail exactly as before. The other six ledger assertions in the file still read
 once, deliberately — each asserts on a fetch the tool's own answer proves
 already happened, and that classification is argued in the helper's docstring.
+
+### Tests — lifecycle resilience E2E (disconnects, browsers closing)
+
+`tests/test_e2e_lifecycle_resilience.py` — eight nodes that drive a REAL fleet (the
+installed console launcher over stdio JSON-RPC, a detached backend on an isolated
+`HOME` and an OS-assigned port, real headless Chrome) and assert, after each stress:
+the recorded backend pid is unchanged; every browser spawned before the stress is
+still alive AND answers a CDP round trip; every `tools/call` on a surviving proxy got
+exactly one response frame, not an error, and no proxy's stdout reached EOF; and ZERO
+lifecycle incidents were written to the proxy/backend logs. The mixed-fingerprint
+fleet is the one deliberate exception to that set: it churns a backend by
+construction, so it runs in its own workspace, asserts browsers on the pid captured
+at spawn only (the winner rewrites `browser_pids.json`, so the registry cannot be its
+oracle) and is exempt from the zero-incident rule — the eviction line IS its
+measurement. The incident vocabulary is the
+product's own log lines (`confirmed unusable`, `confirmed gone after a lost
+connection`, `backend healed: re-bridging`, `backend unhealable after`, `times in a
+row`, `backend stale (source changed), evicting`) — read from the logs rather than
+from `capture_lifecycle`, which is a no-op under the suite's
+`STEALTH_MCP_NO_ERROR_REPORTING=1` — and one hermetic node asserts each of those
+substrings still occurs in the module that emits it, so a reworded line turns the
+vocabulary red instead of making every stress node vacuous. A watchdog STRIKE is
+deliberately not an incident (F-820) and is counted and printed instead.
+
+Stresses, one node each, with the measured wall time and the numbers asserted on:
+CPU saturation (20 s, `os.cpu_count()*2` normal-priority busy loops, two proxies
+calling every ~1 s. The strike count varied across runs on a 32-core box (0 in
+five, 6 in one where answered calls also fell from 76-80 to 28; the *unstressed*
+60 s soak logged 2 in another), so no node asserts a count or a floor — every
+node asserts the IMPLICATION instead: if a full strike run is ever reached on a
+port, THAT proxy's confirmation phase must have answered `was busy, not dead`
+— never silence, never `confirmed unusable`. Keyed on `(log file, port)` because
+every proxy here shares one backend, so a port-only key would let a sibling's
+verdict close another proxy's run; and a full run that is the last watchdog line
+its proxy wrote counts as pending, because the confirmation may legitimately run
+for `REUSE_PATIENCE_SECONDS` without logging. Vacuous when the load does not
+bite, an end-to-end F-820 oracle when it does; the longest consecutive run is
+printed so which of the two happened is readable. It has not fired on any real
+run yet — seven runs, the limit never reached — so both paths are exercised
+hermetically on synthetic log lines instead); a hard-killed sibling proxy; 30 `initialize`+DELETE liveness
+sessions plus five clean proxy connect/disconnect cycles; a session idle past
+`session_hygiene.ABANDONED_AFTER_SECONDS + SWEEP_INTERVAL_SECONDS` (the longest
+periodic reaper in the tree, derived from those constants rather than typed); a
+three-proxy 60 s soak of navigate/scroll/type/screenshot against the new
+`/life/lifecycle.html` fixture route; and two proxies whose package source
+fingerprints differ, sharing one state dir.
+
+**One finding, pinned as `xfail(strict=True)` and not fixed here: a
+source-fingerprint eviction CLOSES ANOTHER SESSION'S BROWSER, silently.** Measured
+six times with no exception. The evicting proxy's cold-start lock calls
+`singleton._clear_stale_backend` → `_terminate_backend` on the running backend, and
+afterwards the browser that backend owned is gone (measured on the pid captured at
+spawn; which of the two candidate mechanisms kills it — dying with the terminated
+backend, or being reaped as unowned by the replacement's orphan recovery, since
+`browser_pid_registry` stamps the BACKEND as owner — was not isolated). The
+other session never asked for that and is never told: its proxy log carries no
+condemnation, no heal and no teardown — only transient strikes that reset themselves
+(usually one `probe failed 1/3`; once `2/3`). The proxy's FAST death witness is
+port-only: `backend_watchdog.watch_liveness` probes with
+`singleton._backend_http_ready`, which asks the port and not the identity, and the
+replacement binds the SAME port and answers it — so the three strikes that would open
+the confirmation phase never accumulate and the confirmation that IS identity-scoped
+(`_same_identity_backend_ready`) is never reached; the streamable-HTTP bridge is
+per-request, so nothing "breaks" for `_confirm_bridge_verdict` either. What actually
+died is the MCP SESSION, which nothing watches, leaving `proxy_selfheal`'s entire
+recovery unreachable on the most common way a backend goes away. The client-visible
+half varies (5 of 6 runs: every later call answers
+`{"code": 32600, "message": "Session terminated"}`; 1 of 6: the session kept answering
+over a backend that no longer had its browser), so the node asserts the half that did
+not vary. The eviction itself converges — exactly one wave in all six runs, and the
+fleet ends on exactly one live recorded backend, asserted by a sibling node whose
+fixture first proves with the product's own `_source_fingerprint` that the two sides
+really differ — but only because the loser never notices, not because any rule makes
+a ping-pong impossible. Two proposed universal rules are in `CONTRIBUTING.md`.
+
+`tests/release_gate_harness.py`'s `_pick_free_port` no longer hands an isolated
+workspace whatever loopback port the OS assigned: it refuses the product's default
+singleton port and every port the developer's REAL `~/.stealth-mcp/server.json`
+records, and retries (raising after 32 picks rather than guessing). The ephemeral
+range covers both, and a throwaway backend squatting a live backend's recorded port
+while that backend is down would be adopted by the developer's next real proxy and
+die at workspace teardown — the suite handing out the very `CONNECTION_CLOSED` it
+exists to eliminate. The record parse is now ONE helper (`_backend_entries`) shared
+with `_backend_pid_from_state`, and `tests/test_release_gate_harness_ports.py` pins
+the pick hermetically.
 
 ## 2.1.8
 
