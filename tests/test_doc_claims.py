@@ -182,6 +182,13 @@ class TestLoadBearingSymbols:
                 "SERVER_STATE_FILE",
                 "PORT_FILE",
             ],
+            "embedded.build_identity": [
+                "version",
+                "source_fingerprint",
+                "ATTEMPTS",
+                "RETRY_SECONDS",
+                "UNKNOWN_VERSION",
+            ],
             "embedded.display_context": [
                 "display_context",
                 "can_show_windows",

@@ -344,6 +344,30 @@ entry and nothing accumulates. `forget_backend` is deleted — `forget_entries` 
 already the entry-precise sibling, and `stop_backend` now forgets the one entry
 it stopped, so a sibling identity survives a `stop`.
 
+Port selection picks the backend recorded for **our own identity** on this
+desktop, falling back to that context's first entry only when we have none.
+Ours-first is load-bearing rather than tidy: on a two-identity desktop the first
+entry is the stranger's by construction, and targeting it made `restart` step
+aside from the stranger, spawn a third backend on an OS-assigned port and leave
+your own wedged backend running — with its record entry then superseded away, so
+`status`, `doctor` and `cleanup` could not see it either.
+
+`status`'s `others` line now compares entries on (display context, port) rather
+than display context alone, so the second backend on your own desktop is named
+rather than silently omitted, and each is labelled `context:port`.
+
+The proxy-lifecycle report for a source-change eviction is sent after the
+decision, not before it, so a refusal to evict no longer reaches the log and
+Sentry as an eviction that never happened.
+
+**Upgrading a machine, not just a session.** The protection lives in the
+*arriving* client, so a 2.1.8-or-older install on the same machine still
+terminates a backend that is serving — and it reads the new `server.json` as no
+backends at all, which routes it straight to that eviction. Until every install
+on a machine is 2.1.9 or newer you will still see browsers close. Check with
+`uv tool list` and any pinned `uvx` version in your MCP client configuration; the
+symptom and the check are in `RUNBOOK.md` under "Two backends on one desktop".
+
 Measured on the real fleet (`tests/test_e2e_lifecycle_resilience.py`, `S5`):
 before, 7 of 7 runs evicted a backend, killed the loser's browser and left it
 answering `Session terminated`; after, zero eviction waves, zero lifecycle

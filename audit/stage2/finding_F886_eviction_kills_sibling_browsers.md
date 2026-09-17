@@ -211,9 +211,41 @@ Let only a strictly-newer client evict. Rejected:
   live. Logged at INFO, once, naming the port and the browser count.
 * `server.json` is written as schema v3. v2 and v1 still READ, with v2's key
   still authoritative for the display context, so an upgrading user's existing
-  record is adopted rather than evicted. A DOWNGRADE to ≤2.1.8 reads a v3 record
-  as no backends and cold-starts once — the same cost as any first run, not a
-  kill.
+  record is adopted rather than evicted.
+* **A DOWNGRADE to ≤2.1.8 DOES kill.** An earlier draft of this section claimed
+  it "cold-starts once — the same cost as any first run, not a kill". That is
+  false, and the review measured it against `origin/main`'s own
+  `backend_registry` loaded beside this branch's:
+
+  ```
+  v3 on disk:  {"schema": 3, "backends": [{"port": 19222, ...}]}
+  OLD backends_in:      []
+  OLD port_for_context: None
+  OLD first_backend:    None
+  OLD backend_on_port:  None
+  ```
+
+  An empty record is not a harmless cold start. 2.1.8's `_clear_stale_backend`
+  asks `_same_identity_backend_ready(port)`, which reads `backend_on_port` →
+  `None` → not reusable → `_terminate_backend(port)`, and that resolves its
+  victim from the **socket** (`_backend_pid_on_port`), never from the record. So
+  an un-upgraded proxy terminates the v3 backend on its port, and being
+  un-upgraded it carries no protection rule.
+
+  In fairness the same kill would have happened under v2 — the versions differ,
+  so the identity gate fails either way — so this is an accuracy correction, not
+  a new kill class. It matters for the release all the same: this machine runs a
+  `uv tool` install beside `uvx @latest` sessions, so until **every** install on
+  a machine is ≥ 2.1.9 the old side wins every race while the new side politely
+  steps aside, and the operator sees the fix "not working". Said in the CHANGELOG
+  and in RUNBOOK's "Two backends on one desktop".
+
+  Not taken: the reviewer's cheap option of also emitting the v1 flat keys beside
+  `schema: 3` so an old reader sees one entry. It would make a ≤2.1.8 client
+  apply its own identity gate instead of reading an empty record, but it writes a
+  second representation of the same fact into one file — the defect this codebase
+  calls "a second way" — and it buys nothing for the case that actually hurts,
+  where the old client's identity gate fails anyway.
 * `record_backend` supersedes by port (unchanged) and by (display context,
   identity) instead of by display context alone. Our own respawn on a new port
   still replaces our own entry, so nothing accumulates.
@@ -228,24 +260,60 @@ Let only a strictly-newer client evict. Rejected:
   of its own: the operator asking is the authority the rule otherwise supplies,
   and `stop`'s docstring has always said terminating every live browser session
   is the verb's purpose. `restart` in particular still lands on and replaces its
-  own backend, because the protection is identity-gated and our own identity is
-  never protected.
+  own backend — **but that did not follow from the protection being
+  identity-gated, and the first version of this fix broke it.** The review
+  measured `restart` on the very desktop this fix creates:
+
+  ```
+  port_for_context      -> 40123        (the stranger's)
+  own_or_first_port     -> 40123
+  bindable_port called  -> {'target': 40123, 'force_new': True}
+  restart_backend()     -> ('responsive', None)
+  calls                 -> [('kill', 99999), ('start', 99999)]
+  OUR backend on 40200 terminated? False
+  ```
+
+  `port_for_context` answered the context's FIRST entry, which on a two-identity
+  desktop is the stranger's by construction — it was recorded first, which is
+  exactly why we stepped aside from it. Selection then stepped aside from it
+  again and `restart` spawned a THIRD backend on an OS-assigned port, leaving our
+  own (possibly wedged) backend running; supersede-by-identity then dropped its
+  record entry, so `doctor`, `status` and `cleanup` stopped seeing it too and no
+  verb reached it at all.
+
+  The gate was never enough: selection has to CHOOSE on identity, not merely test
+  on it. `port_for_context` and `own_or_first_port` now take a required `matches`
+  predicate and answer OUR entry on that context when one exists, falling back to
+  the first entry otherwise; both callers hand down
+  `singleton._identity_matches`, the same predicate the protection rule is given,
+  so the restart seed and the port selection cannot ask different questions.
+  Pinned by `TestRestartOnATwoIdentityDesktop`, whose third node is the control:
+  a context holding only a stranger must still step aside.
 * A WEDGED backend of our own is still evicted. Protecting it would turn a wedge
   into a permanent one.
 * The F-820 strike policy, the F-843 bridge witness, `proxy_selfheal`'s single
   heal path and `backend_liveness`'s deadness rule are untouched.
 
-**LOC.** `singleton.py` 985 → 998 against a hard 1000 cap. The eviction cluster
-(`_backend_pid_on_port`, `_terminate_backend`, `_clear_stale_backend`) moved to
-the new leaf and four thin bindings stayed, because the suite patches those
-names and a binding resolves its collaborators at call time. No cap was raised;
-`backend_eviction.py` is 269 LOC under the 1000 default.
+**LOC.** `singleton.py` 985 → 999 against a hard 1000 cap, across two rounds and
+with no cap raised in either. First the eviction cluster (`_backend_pid_on_port`,
+`_terminate_backend`, `_clear_stale_backend`) moved into `backend_eviction.py`,
+leaving four thin bindings because the suite patches those names and a binding
+resolves its collaborators at call time. Then the review's F1 and F4 fixes put it
+over again, so the build-identity pair (`_server_version`, `_source_fingerprint`)
+moved into `build_identity.py` — deliberately paired with
+`backend_registry.fingerprint_mismatch`, their one reader, so the producer and the
+reader of a source digest sit one import apart. The remainder was paid back by
+collapsing prose that restated what is written elsewhere: the
+"wrapper, not a re-export" argument appeared four times in this one file and is
+now stated once, at `_probe_port`, with pointers from the other three.
+`backend_eviction.py` is 321 LOC and `build_identity.py` 99, both far under the
+1000 default.
 
 ---
 
 ## 5. Tests
 
-**Hermetic — `tests/test_backend_eviction.py` (26 nodes, 1.1 s).** Every probe
+**Hermetic — `tests/test_backend_eviction.py` (31 nodes, 1.2 s).** Every probe
 injected; nothing touches the process table, a socket or the real state dir.
 
 * `TestOwnedBrowsers` — only this owner's still-running browsers; a non-int
@@ -262,13 +330,30 @@ injected; nothing touches the process table, a socket or the real state dir.
   spawns nothing; an idle stranger keeps the port and is evicted; our own
   serving backend keeps the port so `restart` can replace it.
 * `TestStopForgetsOneEntry` — a sibling identity survives a `stop`.
+* `TestRestartOnATwoIdentityDesktop` (review F1) — on a context holding the
+  stranger FIRST and ours second, selection targets ours and `restart`
+  terminates and respawns on ours, not on a third OS-assigned port. Its third
+  node is the control: a context holding only a stranger must still step aside,
+  and it was green before and after the fix.
+* `TestTheReportNamesTheDecisionTaken` (review F4) — a refusal reports
+  "eviction refused (still serving)" with the spared count and writes no
+  "evicting" line anywhere; a real eviction still reports byte-identically to
+  what F-827 always shipped.
 
 **Record — `tests/test_backend_registry.py::TestTwoIdentitiesOneContext` (9
 nodes).** A foreign identity or a different version on the same context is kept;
 our own identity respawned on a new port supersedes; same-port supersede is
 unchanged; F-829's unreadable digest supersedes like our own; the file is a v3
 list; a v2 keyed record still reads with the key authoritative; a v3 entry with
-no context reads UNVERIFIED. Plus `test_forget_backend_is_gone`.
+no context reads UNVERIFIED. Plus `test_forget_backend_is_gone`, and in
+`TestPortForContext` / `TestOwnOrFirstPort` the identity preference and its
+first-entry fallback (review F1) — every pre-existing pin there now passes
+`matches=_nothing_is_ours`, the single-build machine, so it still asserts exactly
+what it always asserted.
+
+**Status — `tests/test_cli_status_wedged.py` (review F5).** A sibling under our
+OWN display context is still an "other", named `context:port`, and the entry
+being reported on is not listed as one.
 
 **Real fleet — `tests/test_e2e_lifecycle_resilience.py`.** `S5a` flipped from
 "converges to at most one wave" to **zero waves, zero lifecycle incidents, at
@@ -341,13 +426,30 @@ workspace that ran two identities terminates both.
    through if the extra backend ever matters.
 
 4. **`record_backend` under an unreadable digest may supersede a stranger's
-   entry.** The supersede comparison goes through `fingerprint_mismatch`, so
-   F-829's "unknown is not a contradiction" applies: if OUR digest is unreadable
-   at record time, an entry we would otherwise treat as a stranger's is dropped.
-   The backend itself is untouched and keeps serving — only its discoverability
-   is lost until it re-records. Chosen over the alternative (never supersede
-   under an unknown digest), which would accumulate an entry per respawn on
-   exactly the OneDrive-sync machine F-829 was written for.
+   entry — and that costs the PROTECTION, not just discoverability.** The
+   supersede comparison goes through `fingerprint_mismatch`, so F-829's "unknown
+   is not a contradiction" applies: if OUR digest is unreadable at record time,
+   an entry we would otherwise treat as a stranger's is dropped. Measured by the
+   review:
+
+   ```
+   before: [{"port": 1, "source_fingerprint": "AAA"}]
+   after recording port 2 with a None digest:
+           [{"port": 2, "source_fingerprint": null}]
+   ```
+
+   An earlier draft of this residual said only *discoverability* is lost. That
+   understates it. `backend_eviction.protected` opens with
+   `if entry is None ... return []`, so an erased entry removes that backend's
+   protection **entirely** — the record IS the protection, and the next cold
+   start on its port is free to kill it. The backend keeps serving until then,
+   and re-records itself on its next write, so the window is real but narrow.
+
+   Still chosen over the alternative (never supersede under an unknown digest),
+   which would accumulate an entry per respawn on exactly the OneDrive-sync
+   machine F-829 was written for. The reachable trigger is the same transient
+   read failure that finding documents, which is why the retry in
+   `build_identity.source_fingerprint` exists at all.
 
 5. **Not measured on POSIX.** Every number here is Windows. The POSIX kill path
    additionally runs the terminated backend's own `atexit` teardown, so before
@@ -357,8 +459,21 @@ workspace that ran two identities terminates both.
 
 6. **Two identities on one desktop now means two backends, permanently, while
    both have browsers.** That is the intended trade and it is not free: twice
-   the Chrome-supervision memory, two entries in `doctor`, and a `status`
-   summary that names only the first. `cli`'s `others` line already reports
-   sibling display contexts; it compares on display context, so two entries
-   under ONE context are not called out there. Worth a follow-up if operators
-   find the status output confusing.
+   the Chrome-supervision memory and two entries in `doctor`. The `status`
+   summary half of this is FIXED rather than deferred (review F5): `cli`'s
+   `others` line compared entries on display context alone, so on exactly this
+   machine neither entry was ever an "other" and the summary read "this is all
+   there is". It compares on the (context, port) pair now and labels each other
+   `context:port`, because two entries under one context are otherwise
+   indistinguishable. What remains is the memory, which is the trade itself.
+
+7. **The second route into the same kill is mitigated, not closed.**
+   `_select_backend_port` still reads `target = preferred if recorded is None
+   else recorded`, so a process that names a port on its command line still
+   resolves to the recorded one, and a developer's live backend **with no
+   browser open** is still evictable by any test run that reaches the real
+   `HOME`. The protection narrows the blast radius; it does not remove the
+   route. What actually contains it today is F-885's `HOME` isolation and the
+   harness port deny-list in `tests/release_gate_harness.py`, neither of which
+   is this branch's work. Recorded here so the brief's "fixed and pinned" is not
+   read as satisfied.
