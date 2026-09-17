@@ -392,6 +392,33 @@ to patch the module seam rather than `asyncio.sleep` — it passed either way,
 which is exactly the problem: it could not tell whether the declared seam was
 real.
 
+### The four doubles the rename orphaned
+
+The pre-push lane (`-m "not integration"`) caught four nodes in
+`tests/test_silent_excepts_log.py::TestDomHandlerSilentExcepts` that this
+finding had left stale since the `select`/`select_all` → `query_selector`/
+`query_selector_all` rename: `click_element`, `type_text`, `paste_text` and
+`get_page_content`'s iframe walk. Each builds a bare `MagicMock` tab and stubs
+a BUNDLED name, so production reached the real single-shot name, got a
+non-awaitable `MagicMock` back and died with "object MagicMock can't be used in
+'await' expression" — raised *inside* the `except` block the node was pinning,
+so it read as the fallback firing on a surprising error rather than as a stale
+harness. None of the four ever reached the swallow it claims to test.
+
+The doubles moved to the single-shot names; the fakes were NOT widened back
+(that is the regression this finding's guard exists to catch). The guard itself
+was the gap: `tests/fakes.py` and every per-file `_FakeTab` define the four
+single-shot methods and nothing else, so a bundled name there is a legible
+`AttributeError` — but a `MagicMock` auto-creates every attribute and cannot
+fail that way. `_single_shot_tab()` closes it for this file by making the four
+bundled names raise an `AssertionError` that names them.
+
+The four were red from `6bad883`, not from the F1/F5 pass: `b604875` does not
+touch `dom_handler.py` at all, and `element_resolution`'s call shape is
+identical at both commits. They were simply never run — this work was told to
+select by explicit path and to skip the full hermetic lane, and no path it was
+given reaches this file.
+
 ---
 
 ## 6. Residuals
