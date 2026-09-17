@@ -35,7 +35,7 @@ import re
 import socket
 from pathlib import Path
 from types import GeneratorType, SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import nodriver.cdp.dom as cdp_dom
 import nodriver.cdp.network as cdp_network
@@ -711,6 +711,13 @@ class FakeTab:
             # that is already such a pair (``js_result``/``js_threw``) passes
             # through untouched.
             answer = self._answer_for_js(frame["params"]["expression"])
+            if isinstance(answer, JsPromise):
+                # F-883: the SAME script answers two different ways, and which
+                # one it gets is the flag under test. Read off the frame, never
+                # off a constructor argument — a double that answered the
+                # settlement regardless would be green for the defect.
+                awaited = bool(frame["params"].get("awaitPromise"))
+                return answer.settled if awaited else JsPromise.UNAWAITED
             if answer is None or isinstance(answer, tuple):
                 return answer
             return js_result(answer)
@@ -1268,6 +1275,53 @@ def js_result(
             description=description,
         ),
         None,
+    )
+
+
+class JsPromise:
+    """A script whose value is a **Promise**, as Chrome answers it (F-883).
+
+    Not a canned answer but a canned *settlement*: what
+    ``Runtime.evaluate(returnByValue=true)`` hands back depends on whether the
+    caller asked for ``awaitPromise``, and the whole of F-883 is that the two
+    are different answers for the same script.
+
+    * ``awaitPromise: false`` — Chrome does not look at the settlement. It
+      serializes the Promise OBJECT by value, and a ``Promise`` has no own
+      enumerable properties, so the answer is ``{}`` (measured, Chrome 152).
+      That is why a lost value and a REJECTION and a genuine ``return {}`` were
+      the same three bytes on the wire.
+    * ``awaitPromise: true`` — Chrome waits and answers with the settlement:
+      *settled* for a resolution, or ``exceptionDetails`` for a rejection.
+
+    *settled* is the ``(result, exceptionDetails)`` pair the resolution or the
+    rejection produces, i.e. a ``js_result``/``js_threw`` — so a test states the
+    settlement once and the DOUBLE decides which of the two answers the code
+    under test earned.
+    """
+
+    def __init__(self, settled: tuple[cdp_runtime.RemoteObject, object | None]) -> None:
+        self.settled = settled
+
+    #: What Chrome sends for an un-awaited Promise under ``returnByValue``.
+    UNAWAITED: ClassVar[tuple[cdp_runtime.RemoteObject, None]] = (
+        cdp_runtime.RemoteObject(
+            type_="object",
+            subtype="promise",
+            class_name="Promise",
+            value={},
+            description="Promise",
+        ),
+        None,
+    )
+
+
+def js_promise(
+    value: Any = None, type_: str = "object", rejects: str | None = None
+) -> JsPromise:
+    """A :class:`JsPromise` resolving to *value*, or rejecting with *rejects*."""
+    return JsPromise(
+        js_threw(rejects) if rejects is not None else js_result(value, type_)
     )
 
 
