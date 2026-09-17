@@ -380,9 +380,22 @@ async def execute_script(
     (specific execution context), `call_javascript_function`/`execute_function_sequence`
     (invoke defined functions), `execute_python_in_browser` (Python), `execute_cdp_command` (raw CDP).
 
-    ⚠️ Async, non-blocking code only. The script runs on the page's main thread,
-    so anything that blocks it freezes the whole tab and makes every later call
-    time out. Specifically:
+    ASYNC IS SUPPORTED (F-883). Top-level `await` works, and a Promise the script
+    returns is awaited for you and answered with the value it resolves to:
+    `return fetch(u).then(r => r.text())` and
+    `const d = await (await fetch(u)).json(); return d.id;` both give you the data.
+    A Promise that REJECTS raises with its reason — it is never reported as a
+    success. A script that never settles is killed at `timeout_ms`, exactly like a
+    blocking one; a Promise that settles AFTER `timeout_ms` is discarded and the
+    instance stays usable. Note the flip side: a TRAILING expression that is a
+    Promise is now awaited too — `fetch('/slow')` as the last statement blocks up
+    to `timeout_ms` where it used to answer `{}` at once; write `void fetch(...)`
+    for fire-and-forget. (Before this fix a returned Promise came back as `{}`
+    and a rejection as `{}` with `success: true`.)
+
+    ⚠️ Non-blocking code only. The script runs on the page's main thread, so
+    anything that blocks it freezes the whole tab and makes every later call time
+    out. Specifically:
       • NEVER use synchronous XHR — `xhr.open(url, false)`. Use `await fetch(url)`.
       • NEVER use infinite/blocking loops — `while(true)`, `for(;;)`, busy-waits.
       • NEVER call `alert()` / `confirm()` / `prompt()` — they block automation.
@@ -390,12 +403,19 @@ async def execute_script(
         base64/DataTransfer here (mixed-content/CORS limits and can freeze the page).
       • Keep scripts small (< ~100KB); don't inline large payloads.
 
+    A top-level `var` / `function` declaration still lands on the page: the source
+    is evaluated as written first, and only Chrome's own "illegal return" /
+    "await is only valid in async functions" complaint sends it round again inside
+    an async wrapper.
+
     Args:
         instance_id (str): Browser instance ID.
-        script (str): JavaScript to execute; non-blocking. Top-level 'return' OK.
+        script (str): JavaScript to execute; non-blocking. Top-level 'return' and
+            top-level 'await' are both OK.
         args (Optional[List[Any]]): Arguments passed to the script body.
         timeout_ms (Optional[int]): Max run time in ms (default 10000, max 60000).
-            A blocking script is killed at this limit instead of hanging the tab.
+            A blocking script — or a Promise that never settles — is killed at
+            this limit instead of hanging the tab.
 
     Returns:
         Dict[str, Any]: {"success": bool, "result": Any, "error": Optional[str]}.

@@ -259,6 +259,20 @@ async def test_lifecycle_incident_patterns_match_the_product_strings() -> None:
         f"{rendered!r} -> {_strike_run(rendered)}"
     )
     assert _port_in(rendered) == 19222
+    # And the verdict must still be logged at a level the workspace RECORDS.
+    # Its strikes are WARNING and the verdict is INFO, so the two halves of the
+    # implication do not travel together: `release_gate_harness._isolated_env`
+    # pins STEALTH_MCP_LOG_LEVEL=INFO so an exported level cannot drop the
+    # verdict (pinned there, where the env is built), and this asserts the other
+    # direction — that the product has not moved the verdict BELOW what that
+    # pin records. Either alone leaves a decided run reading as a silence.
+    verdict_call = watchdog[: watchdog.index(CONFIRMED_BUSY_PARTS[1])]
+    level = verdict_call.rsplit("_logger.", 1)[-1].split("(", 1)[0]
+    assert level in {"info", "warning", "error", "critical"}, (
+        f"the 'busy, not dead' verdict is logged at {level!r}, which the "
+        f"gate workspace's pinned INFO level does not record — a decided "
+        f"strike run would read as a silence"
+    )
 
 
 # ── The idle window, computed from the product's own constants ───────────────

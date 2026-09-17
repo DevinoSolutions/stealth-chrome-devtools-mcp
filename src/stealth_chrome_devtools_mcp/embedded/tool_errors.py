@@ -79,6 +79,31 @@ async def _require_browser(
 #: with an HTTP error status (404/500) does NOT — it keeps its own URL.
 CHROME_ERROR_SCHEME = "chrome-error://"
 
+#: How much of a thrown script's text a message may carry. The words are
+#: Chrome's, but their LENGTH is the PAGE's — ``throw new Error(<anything>)``
+#: plus a stack trace is unbounded, and under F-883's ``awaitPromise`` a
+#: ``Promise.reject(<anything>)`` reaches here too, so the reason a page authors
+#: is clamped to a diagnostic rather than a transcript. The number matches
+#: ``js_aspect_answer.MAX_ERROR_CHARS`` and ``page_storage.BLOCKED_REASON_CHARS``
+#: and is deliberately a THIRD copy rather than an import: this module states
+#: three times over that it imports nothing from ``embedded`` (it is why
+#: ``_require_landing_ok`` takes its timeout as a parameter), and the three
+#: bounds answer three different questions at three different homes.
+JS_ERROR_CHARS = 200
+
+#: Appended when the clamp actually cut something, so a reader can tell a
+#: truncated message from one that simply ended there — a silent cut reads as
+#: Chrome's complete words and is not.
+JS_ERROR_TRUNCATION = "…"
+
+
+def _clamped(detail: object) -> str:
+    """*detail* as a message fragment, bounded by :data:`JS_ERROR_CHARS`."""
+    text = str(detail)
+    if len(text) <= JS_ERROR_CHARS:
+        return text
+    return text[:JS_ERROR_CHARS] + JS_ERROR_TRUNCATION
+
 
 def _require_js_value(value: object) -> object:
     """Return an evaluated script's value, or raise if the page threw (F-795).
@@ -93,12 +118,16 @@ def _require_js_value(value: object) -> object:
     Duck-typed on ``exception_id`` + ``text`` (the two fields every
     ``ExceptionDetails`` carries and no ordinary JS value does) so this module
     keeps importing nothing.
+
+    Since F-883 a REJECTED promise arrives here too — ``awaitPromise`` reports a
+    rejection as the exception it is — which is why the detail is clamped
+    (:data:`JS_ERROR_CHARS`): the reason is authored by the page.
     """
     if not (hasattr(value, "exception_id") and hasattr(value, "text")):
         return value
     exception = getattr(value, "exception", None)
     detail = getattr(exception, "description", None) or getattr(value, "text", None)
-    raise ToolError(f"Script raised an exception: {detail}")
+    raise ToolError(f"Script raised an exception: {_clamped(detail)}")
 
 
 def _require_navigation_ok(target: str, result: object) -> object:

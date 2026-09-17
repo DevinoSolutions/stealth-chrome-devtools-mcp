@@ -1,6 +1,30 @@
 # F-794 — a cancelled call leaves its instance permanently wedged
 
-**Status:** OPEN — characterized by plan_RELEASE W13, not fixed (W13 is zero-`src/`).
+**Status:** **FIXED** (unreleased, on `fix/F883-execute-script-awaits`) —
+characterized by plan_RELEASE W13, which is zero-`src/`; fixed from the other
+end by F-883's B1 review, which found the same mechanism reachable through
+`execute_script`'s new `awaitPromise`.
+
+**Surface was never `browser_manager.py`.** Cancelling the awaiting task
+cancelled nodriver's `Transaction` while it was still registered in
+`Connection.mapper`; Chrome's late answer then `set_result`-ed a cancelled
+future inside `Connection._listener`, and the `InvalidStateError` ended the one
+task that resolves every future and dispatches every event on that connection.
+Fixed in ``src/stealth_chrome_devtools_mcp/embedded/cdp_transport.py``, which
+wraps `Transaction.__await__` in `asyncio.shield`: the cancellation lands on a
+throwaway outer future, the registered one stays pending, and the listener
+delivers the answer to it normally. The caller is still cancelled AT that await,
+so the rest of the tool body still stops — that half is the contract
+`tests/test_wire_semantics.py` pins, and shielding the whole operation instead
+(reverted commit `529cec0`) is what broke it.
+
+**Measured closed** by the node that characterized it:
+`tests/test_wire_semantics.py::test_cancelling_a_confirmed_in_flight_request_ends_it_with_code_zero`,
+whose F-794 assertion is inverted in this same change — the cancelled instance
+now has to navigate again AND answer an `execute_script` round trip, because "no
+error frame" alone would also describe a tool that never reached Chrome. F-791
+(the `code: 0`) is untouched and still pinned, so MQ-141 stays `planned` behind
+it alone.
 **Severity:** HIGH. Cancelling is the documented way to stop a call, and doing
 it costs the caller the whole browser.
 **Surface:** `src/stealth_chrome_devtools_mcp/embedded/browser_manager.py` —
