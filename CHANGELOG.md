@@ -19,6 +19,25 @@ records before it sleeps now, and a hermetic pin in
 reads the ledger while the response is still withheld — no browser and no
 wall-clock budget.
 
+### Fixed — F-882c: two navigation nodes asserted a fetch their milestone does not cover
+
+The sibling of F-882b, in the same ledger oracle and also not a product defect.
+`tests/test_e2e_navigation_truthfulness.py`'s meta-refresh and self-reload nodes
+asserted an exact fetch sequence at the instant `navigate` returned, for a
+second document their own page schedules AT `load` — the very milestone the
+tool returns on. Both nodes accept an answer about the FIRST document, and in
+that arm the server legitimately has not been asked for the second yet, so the
+oracle was racing the page it was meant to witness. Measured: CI run
+35157444236 (release-gate integration, macOS/ARM64, PR #126) failed the
+meta-refresh node with `['/nav/meta-refresh']` against an expected two paths.
+
+Both now wait through `_await_fetched`, a bounded poll of the ledger (5 s
+deadline, 50 ms interval) that returns whatever it has at the deadline; the
+exact-sequence assertions are unchanged, so a wrong order and a short ledger
+fail exactly as before. The other six ledger assertions in the file still read
+once, deliberately — each asserts on a fetch the tool's own answer proves
+already happened, and that classification is argued in the helper's docstring.
+
 ### Fixed — F-885: proxy/backend-death tests touched the developer's live `~/.stealth-mcp` record
 
 `tests/test_proxy_backend_death.py::TestProxyExitsOnBackendDeath` ran an

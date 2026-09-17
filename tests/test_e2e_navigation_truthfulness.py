@@ -139,12 +139,19 @@ async def _await_fetched(origin: str, expected: list[str]) -> list[str]:
     35157444236 (macOS/ARM64 integration, PR #126) failed (b) with
     ``Right contains one more item: '/nav/landing?from=meta-refresh'``.
 
-    It cannot mask a wrong answer. The sequence is returned and asserted on
-    unchanged, so a ledger that is the WRONG order, is short at the deadline, or
-    grows a FURTHER entry fails exactly as before; the only thing that changes
-    is how long we are willing to wait for a fetch that is still in flight. The
-    poll interval is a poll interval and not an oracle — nothing here asserts on
-    it, and a match on the first read costs one HTTP round trip.
+    Two of the three things the read-once assertion caught still hold, and one
+    does not. A ledger in the WRONG order never equals ``expected`` and fails at
+    the deadline; one still SHORT at the deadline fails the same way; and a
+    surplus fetch that arrives BEFORE the sequence completes also fails, because
+    equality can no longer be reached. What is given up is a surplus fetch that
+    arrives AFTER the match — this returns at the first poll that equals
+    ``expected``, so a third self-reload or a third document is normally not
+    seen. Waiting longer to find out would mean waiting a FIXED extra interval
+    on every run to confirm the ledger had settled, which is the sleep-as-oracle
+    this file rules out; the exact-sequence assertion is the guard against a
+    surplus fetch that is part of the shape, and this is not it. The poll
+    interval is a poll interval and not an oracle — nothing asserts on it, and a
+    sequence already complete costs one HTTP round trip.
 
     The other five ledger assertions read ONCE, deliberately. (a), (d), (e) and
     (g) each assert that the tool answered ABOUT the final document, which it

@@ -2345,6 +2345,14 @@ def _r_nav_slow_doc(handler, query: str) -> None:
     when the delay ENDS — and this route exists to be pre-empted, so the client
     abandons the request while this thread sleeps on and the entry lands in the
     next test's freshly reset ledger. Measured: CI run 35150887345.
+
+    ``nav_paths`` therefore has ONE meaning — arrival — for every ``/nav/*``
+    route. A witness for the other end, "the answer reached the client", must
+    be a SEPARATE signal under its own ledger key, recorded after a successful
+    flush; it can never be this one. Recording here late does not make one
+    either: this line runs before ``_send_html``, the only thing that writes a
+    header, so it fired identically whether the answer went out or the peer had
+    already gone.
     """
     _nav_record(handler)
     time.sleep(_nav_delay_seconds(query))
