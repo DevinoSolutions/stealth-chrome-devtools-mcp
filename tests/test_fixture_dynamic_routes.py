@@ -694,3 +694,59 @@ def test_the_indexed_db_and_cache_oracles_are_computed_not_read_back():
         {"id": 6, "name": "foxtrot", "group": "g3", "payload": "payload-foxtrot"}
     ]
     assert fr.W16_IDB_ABORT_ID not in {record[0] for record in fr.W16_IDB_RECORDS}
+
+
+# ── F-882b: the nav ledger records a request when it ARRIVES ────────────────
+def test_the_slow_document_is_in_the_ledger_before_it_is_answered(origins, monkeypatch):
+    """``/nav/slow-doc`` records like every other ``/nav/*`` route: on arrival,
+    never after its delay.
+
+    ``nav_paths`` is a record of what the BROWSER fetched, and the browser
+    fetches at arrival. A route that records after its delay instead attributes
+    the request to whichever ledger is current when the delay ENDS — and the
+    one caller of this route pre-empts the navigation, so the client abandons
+    the request while the handler goes on sleeping and the ledger it lands in
+    belongs to whatever ran next. Measured: CI run 35150887345 failed the
+    subframe node of ``tests/test_e2e_navigation_truthfulness.py`` with the
+    PREVIOUS test's ``/nav/slow-doc?ms=2500`` at the head of that node's
+    freshly reset ``nav_paths``.
+
+    The delay computation is the gate: the route computes it and then sleeps on
+    it, so holding the computation open holds the handler at exactly the point
+    the real sleep holds it — the pin needs no wall-clock budget and so cannot
+    become the second timing-dependent thing here.
+    """
+    origin_a, _ = origins
+    requests.get(f"{origin_a}/e2e/reset", timeout=TIMEOUT)
+
+    arrived = threading.Event()
+    release = threading.Event()
+
+    def _gated_delay(query: str) -> float:
+        arrived.set()
+        release.wait(TIMEOUT)
+        return 0.0
+
+    monkeypatch.setattr(fr, "_nav_delay_seconds", _gated_delay)
+
+    path = "/nav/slow-doc?ms=2500"
+    captured: list = []
+    worker = threading.Thread(
+        target=lambda: captured.append(
+            requests.get(f"{origin_a}{path}", timeout=TIMEOUT)
+        ),
+        daemon=True,
+    )
+    worker.start()
+    assert arrived.wait(TIMEOUT), "the slow-document route never ran"
+
+    held = requests.get(f"{origin_a}/e2e/ledger", timeout=TIMEOUT).json()
+    assert captured == [], "the slow document answered before the gate released"
+    assert held["nav_paths"] == [path]
+
+    release.set()
+    worker.join(timeout=TIMEOUT)
+    assert not worker.is_alive()
+    assert fr.NAV_SLOW_DOC_SENTINEL in captured[0].text
+    answered = requests.get(f"{origin_a}/e2e/ledger", timeout=TIMEOUT).json()
+    assert answered["nav_paths"] == [path], "the request was recorded twice"
