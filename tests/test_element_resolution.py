@@ -437,10 +437,36 @@ async def test_the_settle_sleep_between_attempts_does_not_hold_the_lock():
 
     tab = _FakeTab(select=[_stale(), _RESOLVED])
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(element_resolution.asyncio, "sleep", _observe)
+        # The MODULE seam, not ``asyncio.sleep``: this module declares one
+        # timing seam (``_now``/``_sleep``) and the backoff goes through it like
+        # every other wait here, so a pin that patched ``asyncio`` would pass
+        # whether or not that stayed true.
+        patch.setattr(element_resolution, "_sleep", _observe)
+        patch.setattr(element_resolution, "_SETTLE_SECONDS", 0.01)
         assert await resolve_element(tab, "#btn") is _RESOLVED
 
     assert held_during_sleep is False
+
+
+@pytest.mark.asyncio
+async def test_the_backoff_goes_through_this_modules_one_timing_seam():
+    """Patching ``_sleep`` must be enough to stop the module from sleeping.
+
+    The companion to the pin above, stated positively: the declared seam is the
+    ONLY way this module waits, so a caller that replaces it sees every wait.
+    """
+    slept = []
+
+    async def _record(seconds):
+        slept.append(seconds)
+
+    tab = _FakeTab(select=[_stale(), _RESOLVED])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(element_resolution, "_sleep", _record)
+        patch.setattr(element_resolution, "_SETTLE_SECONDS", 0.25)
+        assert await resolve_element(tab, "#btn") is _RESOLVED
+
+    assert slept == [0.25], slept
 
 
 @pytest.mark.asyncio
@@ -539,3 +565,81 @@ async def test_refresh_element_tolerates_a_node_that_cannot_be_updated():
     tab = _FakeTab()
     await refresh_element(tab, None)
     await refresh_element(tab, object())
+
+
+def _disabled_agent():
+    # What Chrome answers a ``DOM.disable`` on a session whose DOM agent is not
+    # enabled — measured on Chrome 152. nodriver sends that call as the LAST
+    # statement of ``find_elements_by_text``, after the answer is built.
+    return ProtocolException(
+        {"message": "DOM agent hasn't been enabled", "code": -32000}
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_trailing_disable_does_not_discard_a_finished_xpath_search():
+    """F-884 F1: the XPath path still sends ``dom.disable`` and it can raise.
+
+    ``Tab.xpath`` swallows that exact call in a ``finally``, commenting that it
+    "sometimes raises"; resolving through ``find_elements_by_text`` directly
+    loses the swallow, and there the call is nodriver's last statement — so an
+    uncaught failure would replace a search that had ALREADY SUCCEEDED with a
+    bare -32000, the masking shape this finding exists to remove. One repeat
+    recovers it, because the search is an idempotent read whose own
+    ``getDocument`` re-enables the agent.
+    """
+    found = object()
+    tab = _FakeTab(select_all=[_disabled_agent(), [found]])
+
+    assert await resolve_elements(tab, "//div") == [found]
+    assert tab.select_all_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_the_trailing_disable_tolerance_is_bounded_to_one_repeat():
+    """A second failure is not a race any more, so it reaches the caller."""
+    tab = _FakeTab(select_all=[_disabled_agent(), _disabled_agent()])
+
+    with pytest.raises(ProtocolException, match="DOM agent"):
+        await resolve_elements(tab, "//div")
+    assert tab.select_all_calls == 2
+
+
+def test_a_disabled_agent_error_is_never_a_recoverable_race():
+    """The tolerance is ``_xpath_matches``', never ``_STALE_NODE_MARKERS``'.
+
+    Widening the marker list is what this finding rejected: the disabled-agent
+    error is the MASK, and it says nothing about whether the query raced, so
+    re-resolving on it would restore the pre-fix behaviour by the other door.
+    """
+    assert element_resolution.recoverable_race(_disabled_agent()) is None
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_agent_error_on_the_css_path_still_propagates():
+    """The tolerance is scoped to the one call that can emit it, not the module."""
+    tab = _FakeTab(select=[_disabled_agent()])
+
+    with pytest.raises(ProtocolException, match="DOM agent"):
+        await resolve_element(tab, "#btn")
+    assert tab.select_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_elements_spends_the_callers_timeout_like_its_siblings():
+    """F-884 F5: the multi-element path honours a deadline too, in the one home.
+
+    It could not before: the wait was ``select_all``'s, bundled into the query.
+    Now it is :func:`_wait_for`'s, so the same value means the same thing here
+    as on ``resolve_element`` — ``0`` is exactly one query, and a budget polls.
+    """
+    tab = _FakeTab(select_all=[[], []])
+    assert await resolve_elements(tab, ".row", timeout=0) == []
+    assert tab.select_all_calls == 1
+
+    found = object()
+    tab = _FakeTab(select_all=[[], [found]])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(element_resolution, "_DEFAULT_WAIT_SECONDS", 0.0)
+        assert await resolve_elements(tab, ".row", timeout=30.0) == [found]
+    assert tab.select_all_calls == 2

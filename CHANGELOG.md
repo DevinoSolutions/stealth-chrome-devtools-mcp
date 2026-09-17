@@ -272,6 +272,31 @@ slow query's own duration, and a genuinely absent **XPath** now waits 10 s rathe
 nodriver's 2.5 s, because CSS and XPath were given one budget. Full argument, matrices and
 residuals in `audit/stage2/finding_F884_concurrent_dom_queries.md`.
 
+One swallow had to be re-made rather than inherited. Resolving XPath through
+`find_elements_by_text` instead of `Tab.xpath` sheds that method's `dom.enable()`
+prologue, **not** its `dom.disable()` — traced on Chrome 152, the XPath path's commands
+are `getDocument, performSearch, getSearchResults, discardSearchResults, disable`, and
+that disable is nodriver's own last statement, sent bare, with the answer already built.
+`Tab.xpath` wraps exactly that call in `try/except ProtocolException: pass` and comments
+that it "sometimes raises"; calling `find_elements_by_text` directly lost the guard, so a
+failing disable would have discarded a resolution that SUCCEEDED — the same masking shape
+this finding removes. `_xpath_matches` now catches it, named and bounded to ONE repeat of
+the search (the answer went with the exception, and the search is an idempotent read whose
+own `getDocument` re-enables the agent). It is deliberately not a `_STALE_NODE_MARKERS`
+entry and not a `recoverable_race`: that error is the mask, it says nothing about whether
+the query raced, and treating it as one would restore the old behaviour by the other door.
+Also on this pass, `resolve_elements` gained the same `timeout` its three sibling
+resolvers have — it could not offer one before, because the wait was `select_all`'s and
+bundled into the query.
+
+**F-805 is half fixed as a side effect**, and its finding and strict-xfail node now say
+which half. `wait_for_element(timeout=2000)` against a selector that never resolves cost
+~10.5 s and now costs ~2.03 s, because the tool's own loop is the wait and it asks
+`element_resolution` for exactly one query. The other half is untouched and the xfail does
+not flip: `click_element` and its siblings have no `timeout` parameter to honour, so they
+resolve with the default — still nodriver's 10 s, deliberately, so that a caller who
+passed nothing waits as it always did.
+
 ## 2.1.8
 
 ### Fixed — `navigate(wait_until="load")` returned before the page had loaded (F-881)

@@ -282,6 +282,18 @@ this repo's fourth convention names.
 
 ---
 
+### Adopted on the F1/F5 pass: `resolve_elements` takes a `timeout`
+
+The review asked for it "only if it is genuinely one home and one contract",
+and it is both. The parameter's meaning, units, `None` and `0` are
+`_wait_for`'s, not this function's; the value is threaded to the same call its
+three siblings thread it to; and the reason it was absent is gone — before this
+finding the wait was `select_all`'s, bundled into the query, so there was no
+budget to hand anywhere. Leaving it off would have been the second contract:
+three resolvers that honour a deadline and one that cannot.
+
+---
+
 ## 4. Blast radius
 
 Every selector-driven tool inherits the lock, since all of them route through
@@ -364,6 +376,24 @@ marker, real Chrome), five tests:
 
 ---
 
+### Added on the F1/F5 pass (all in `tests/test_element_resolution.py`)
+
+| node | what it pins |
+|---|---|
+| `test_a_failed_trailing_disable_does_not_discard_a_finished_xpath_search` | the F1 tolerance: a disabled-agent error on a COMPLETED search costs one repeat, not the answer |
+| `test_the_trailing_disable_tolerance_is_bounded_to_one_repeat` | a second failure reaches the caller |
+| `test_a_disabled_agent_error_is_never_a_recoverable_race` | it is not in `_STALE_NODE_MARKERS` and `recoverable_race` returns `None` for it |
+| `test_a_disabled_agent_error_on_the_css_path_still_propagates` | the tolerance is scoped to the one call that can emit it |
+| `test_resolve_elements_spends_the_callers_timeout_like_its_siblings` | F5: `timeout=0` is one query, a budget polls |
+| `test_the_backoff_goes_through_this_modules_one_timing_seam` | F4: patching `_sleep` is enough to stop every wait here |
+
+`test_the_settle_sleep_between_attempts_does_not_hold_the_lock` was rewritten
+to patch the module seam rather than `asyncio.sleep` — it passed either way,
+which is exactly the problem: it could not tell whether the declared seam was
+real.
+
+---
+
 ## 6. Residuals
 
 1. **The default Claude Code client serialises requests, so this is latent for
@@ -402,9 +432,11 @@ marker, real Chrome), five tests:
 
 4. **The two wordings are Chrome's.** `"DOM agent hasn't been enabled"` and
    `"DOM agent is not enabled"` both appear, from `DOM.disable` and
-   `DOM.performSearch` respectively. Nothing in the fix depends on either
-   string — which is the point — but a future reader grepping for one will miss
-   the other.
+   `DOM.performSearch` respectively. The classifier still depends on neither
+   — which is the point — and the one place that must recognise the family
+   (`_is_disabled_agent_error`, residual 7) matches on `"DOM agent"` alone for
+   exactly this reason. A future reader grepping for one full phrase will still
+   miss the other.
 
 5. **`_DOCUMENT_LOCKS` growth is bounded by live tabs only**, via
    `weakref.finalize`. If a caller ever holds a `Tab` forever, its lock leaks
@@ -413,4 +445,80 @@ marker, real Chrome), five tests:
 6. **nodriver's `disable`-before-re-raise is still there.** The lock stops us
    generating the race that triggers it, but any future code path that reaches
    `Tab.query_selector` outside this module re-opens it. The convention already
-   forbids that; nothing mechanically enforces it.
+   forbids that; nothing mechanically enforces it — see residual 8 for the pin
+   that would, and why it is not in this change.
+
+7. **The XPath path's trailing `dom.disable` — the swallow this fix lost, and
+   re-made.** Raised as F1 in the review of `6bad883` and verified here with a
+   CDP trace of my own rather than taken on report. The traffic for one
+   resolution, Chrome 152:
+
+   | path | commands, in order |
+   |---|---|
+   | xpath | `getDocument, performSearch, getSearchResults, discardSearchResults, disable` |
+   | css | `getDocument, querySelector` |
+   | xpath (list) | `getDocument, performSearch, getSearchResults, discardSearchResults, disable` |
+
+   So the reviewer is right and two docstrings plus the CLAUDE.md row were
+   wrong: dropping `Tab.xpath` sheds its `dom.enable()` prologue, **not** the
+   disable. The disable is `find_elements_by_text`'s own LAST statement, sent
+   bare, after `items` is built — so a failure there throws away a resolution
+   that SUCCEEDED, which is the masking shape this whole finding exists to
+   remove. Separately measured: `DOM.disable` against a session whose agent is
+   not enabled does raise, `ProtocolException: DOM agent hasn't been enabled
+   [code: -32000]`.
+
+   `Tab.xpath` swallows that call in a `finally` and comments that it
+   "sometimes raises". Its own reason is a double-disable: `find_all` reaches
+   `find_elements_by_text`, which disables the agent, and the `finally` then
+   disables it a second time. Calling `find_elements_by_text` directly makes
+   exactly ONE disable, immediately after its own `getDocument` enabled the
+   agent, and under the document lock nothing can disable it in between — so
+   this is believed unreachable on our paths, and the trace (consecutive
+   xpath/css/xpath resolutions) never produced it.
+
+   It is caught anyway, because "believed unreachable" is not a reason to let a
+   finished answer be discarded. `_xpath_matches` catches a `ProtocolException`
+   whose message names the DOM agent and RE-RUNS the search once: a `pass` is
+   not available (the answer left with the exception) and the search is an
+   idempotent read whose own `getDocument` re-enables the agent. Bounded to one
+   repeat; every other `ProtocolException` reaches `_resolve_with_recovery`
+   unchanged. **`_is_disabled_agent_error` is deliberately not a
+   `_STALE_NODE_MARKERS` entry and not a `recoverable_race`** — this error is
+   the MASK, it says nothing about whether the query raced, and classifying it
+   as a race would restore the pre-fix behaviour by the other door. The cost is
+   one extra search round trip in a case that should never occur, and the
+   residual is that it is reasoned, not measured: no test drives real Chrome
+   into it, and the three pins that cover it are hermetic.
+
+   Not taken: reimplementing `find_elements_by_text`'s ~80 lines of node →
+   `Element` construction so the disable is never sent. That is a second way to
+   do something already done, which convention 4 calls a defect, and it would
+   have to be re-derived against every nodriver bump.
+
+8. **Nothing mechanically forbids `tab.select`/`find`/`select_all`/`xpath` in
+   `src/`** — a named follow-up, not done here. Every fake in the suite offers
+   only the four single-shot names, so a regression inside a tested path is an
+   `AttributeError`; an untested path would still ship. The pin would be an AST
+   scan over `src/stealth_chrome_devtools_mcp/` for those four attribute names,
+   in `tests/source_scan.py`'s existing style. The review of `6bad883`
+   explicitly did not require it.
+
+9. **F-883's `cdp_transport` does not interact with the lock scope** — checked
+   because both changes touch the same CDP path, and the answer is no in both
+   directions. `install()` wraps `Transaction.__await__` in `asyncio.shield`,
+   which changes only what happens to a cancelled *await on a reply*: the
+   registered future stays pending for nodriver's `_listener` instead of being
+   cancelled under it. It touches no document state, no node-id table and no
+   DOM agent enable bit, so it cannot make a resolution race. In the other
+   direction, cancelling a resolution still unwinds `async with
+   _document_lock(tab)` normally — the `CancelledError` is re-raised AT the
+   await, which is the property `cdp_transport` deliberately preserves — so the
+   lock is released exactly as the previous review measured. What the shield
+   does keep alive is the abandoned COMMAND: a cancelled resolution's
+   `DOM.getDocument` may still be executed by Chrome after this coroutine has
+   released the lock, so a sibling that acquires it next can have its node ids
+   reset by a caller that is already gone. That window predates F-883
+   (cancelling never un-sent a command) and the outcome is the ordinary
+   stale-node error `_resolve_with_recovery` re-resolves on, not the masked
+   -32000. It is reasoned from the two implementations, not measured.

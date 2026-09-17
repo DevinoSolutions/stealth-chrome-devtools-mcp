@@ -1362,9 +1362,10 @@ async def _soak_cycle(
     # measures whether the product's own bound actually fires inside ours) and an
     # interaction with a selector that resolves to nothing.
     #
-    # Cycle 1 only, deliberately. Each of these currently costs ~10.5s — see
-    # F-805: both spend nodriver's DEFAULT 10s `tab.select` wait regardless of
-    # what the caller asked for. Repeating them every cycle would triple the
+    # Cycle 1 only, deliberately. See F-805, now HALF fixed: the wait honours
+    # its own 2000ms budget since F-884 (~2.03s), while the click still costs
+    # ~10.5s because it has no timeout parameter to honour and resolves with
+    # element_resolution's default. Repeating them every cycle would triple the
     # soak's runtime to buy a repetition of a fact one measurement already
     # establishes, and would push the node past the integration lane's budget.
     if cycle == 1:

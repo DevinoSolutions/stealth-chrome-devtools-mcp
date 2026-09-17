@@ -65,6 +65,14 @@ ONE thing: nodriver's single-shot ``getDocument`` + query pair
 state it guards is, and it is taken by every function here, so no
 selector-resolving path can opt out.
 
+The disable itself is not gone from the tree, and this module does not pretend
+it is. ``find_elements_by_text`` -- the XPath path -- ends by sending
+``dom.disable()`` bare, AFTER its answer is built, so a failure there discards a
+resolution that SUCCEEDED. ``Tab.xpath`` swallows exactly that call and says so
+in a comment; calling ``find_elements_by_text`` directly loses the swallow, so
+:func:`_xpath_matches` re-makes it, named and bounded to one repeat. That is the
+only tolerance for this error in the module: it is never a ``recoverable_race``.
+
 The WAIT is this module's, and it happens outside the lock
 -----------------------------------------------------------
 nodriver's ``select``/``find``/``select_all``/``xpath`` bundle a poll loop into
@@ -123,9 +131,11 @@ purely syntactic (it never inspects the page) and therefore deterministic:
   ``.`` stays CSS -- ``.foo`` is a class selector far more often than a relative
   XPath, which is what the explicit prefix exists for.
 
-XPath resolves through nodriver's ``Tab.xpath`` (``Element`` results) or CDP's
-``DOM.performSearch``/``getSearchResults`` (raw node ids), both inside the very
-same ``_resolve_with_recovery`` the CSS paths use -- one retry loop, one
+Both XPath paths are ``DOM.performSearch``/``getSearchResults`` --
+``find_elements_by_text`` for ``Element`` results (F-884; never ``Tab.xpath``,
+whose bundled poll loop is the thing ``_wait_for`` owns) and the raw pair in
+``_xpath_node_ids`` for node ids -- and both run inside the very same
+``_resolve_with_recovery`` the CSS paths use: one lock, one retry loop, one
 classifier, both languages.
 """
 
@@ -248,6 +258,22 @@ def _is_stale_node_error(exc: ProtocolException) -> bool:
     return any(marker in message for marker in _STALE_NODE_MARKERS)
 
 
+def _is_disabled_agent_error(exc: ProtocolException) -> bool:
+    """Whether ``exc`` is Chrome refusing a command because DOM is not enabled.
+
+    Deliberately NOT a member of ``_STALE_NODE_MARKERS`` and deliberately not
+    consulted by :func:`recoverable_race`: this is the MASKING error F-884
+    removed the cause of, and classifying it as a recoverable race would put
+    the pre-fix behaviour back by the other door — a re-resolve driven by an
+    error that says nothing about whether the query itself raced. Its one
+    reader is :func:`_xpath_matches`, at the one call in this module that can
+    still emit it. Both wordings Chrome uses are matched (``hasn't been
+    enabled`` from ``DOM.disable``, ``is not enabled`` from the search path);
+    the phrasing is Chrome's and not closed, so the subject is the stable half.
+    """
+    return "DOM agent" in str(exc)
+
+
 def _raced_cdp_event(exc: KeyError) -> str | None:
     """Name of the CDP event class in a nodriver handler-cleanup ``KeyError``.
 
@@ -325,8 +351,10 @@ async def _resolve_with_recovery(
                 context={"what": what, "attempt": attempt},
             )
             # Let the documentUpdated burst (or the handler-table churn) settle
-            # before re-resolving.
-            await asyncio.sleep(_SETTLE_SECONDS * attempt)
+            # before re-resolving. Through the seam below like every other wait
+            # here, so "one timing seam" is true of this module and a test can
+            # zero it without patching ``asyncio`` itself.
+            await _sleep(_SETTLE_SECONDS * attempt)
 
 
 async def _wait_for(
@@ -366,20 +394,56 @@ async def _wait_for(
 
 
 async def _xpath_matches(tab: Tab, expression: str) -> list[Element]:
-    """ONE ``DOM.performSearch`` XPath query — no waiting, no ``dom.disable``.
+    """ONE ``DOM.performSearch`` XPath query — no waiting, one ``dom.disable``.
 
     ``Tab.xpath`` is not used: it wraps ``find_all`` in its own poll loop (the
-    thing :func:`_wait_for` now owns) and brackets the whole thing in
-    ``dom.enable()``/``dom.disable()``, so under the lock it would still burn a
-    caller's budget in one indivisible call. The pair below is what
-    ``Tab.xpath`` is built on anyway, and :func:`_xpath_node_ids` has always
-    used it directly.
+    thing :func:`_wait_for` now owns), so under the lock it would still burn a
+    caller's budget in one indivisible call. ``find_elements_by_text`` is what
+    ``Tab.xpath`` is built on anyway (``DOM.performSearch`` takes an XPath), and
+    :func:`_xpath_node_ids` has always used the same pair directly.
+
+    What dropping ``Tab.xpath`` does NOT shed is the ``dom.disable()``. Measured
+    on Chrome 152, this path's CDP traffic is ``getDocument, performSearch,
+    getSearchResults, discardSearchResults, disable`` — the disable is
+    nodriver's own LAST statement, sent bare, with the finished ``items`` list
+    already built. Only the ``dom.enable()`` prologue is shed, and with it the
+    ``try/except ProtocolException: pass`` that ``Tab.xpath`` wraps its
+    ``finally``-disable in, commenting that the call "sometimes raises" that dom
+    is not enabled. (It raises for ``Tab.xpath`` because ``find_all`` reaches
+    ``find_elements_by_text``, which disables the agent, and the ``finally``
+    then disables it a SECOND time.) Uncaught here, a failing disable would
+    replace a resolution that had already SUCCEEDED with a bare -32000 — the
+    exact shape of error-masking F-884 exists to remove.
+
+    So the swallow is re-made here, narrowly and named, and it is a re-run
+    rather than a ``pass``: the answer nodriver was about to return is gone with
+    the exception, and the search is an idempotent read whose own
+    ``getDocument`` re-enables the agent, so one repeat recovers it. Bounded to
+    ONE repeat — a second failure is not a race any more — and keyed to the
+    disabled-agent wording alone, so every other ``ProtocolException`` (the
+    stale-node marker included) still reaches :func:`_resolve_with_recovery`
+    unchanged. Under the document lock this is believed unreachable on our own
+    paths: nothing between the ``getDocument`` that enables the agent and the
+    disable can disable it. It is caught because "believed unreachable" is not a
+    reason to let a finished answer be discarded, not because it was measured.
 
     ``Tab.xpath`` is typed ``List[Optional[Element]]``; no caller of this module
     should have to defend against a ``None`` inside a match list, so the
     placeholders nodriver leaves for nodes it could not build are dropped here.
     """
-    matches = await tab.find_elements_by_text(expression)
+    try:
+        matches = await tab.find_elements_by_text(expression)
+    except ProtocolException as exc:
+        if not _is_disabled_agent_error(exc):
+            raise
+        debug_logger.log_warning(
+            "element_resolution",
+            "_xpath_matches",
+            "nodriver's trailing dom.disable() failed on a completed XPath "
+            "search; repeating the search once",
+            context={"expression": expression},
+        )
+        matches = await tab.find_elements_by_text(expression)
     return [match for match in matches if match is not None]
 
 
@@ -479,7 +543,11 @@ async def resolve_by_text(
     return await _wait_for(tab, f"find {text!r}", _do, timeout)
 
 
-async def resolve_elements(tab: Tab, selector: str) -> list[Element]:
+async def resolve_elements(
+    tab: Tab,
+    selector: str,
+    timeout: float | None = None,  # noqa: ASYNC109  plan_M4ph1
+) -> list[Element]:
     """Every element matching ``selector``, waiting for the first to appear.
 
     The multi-``Element`` counterpart to :func:`resolve_element`: returns the
@@ -494,6 +562,14 @@ async def resolve_elements(tab: Tab, selector: str) -> list[Element]:
     path: ``select_all`` reached nodriver's handler-cleanup ``KeyError`` only
     because it awaited the tab between its own tries, and it no longer does.
     An XPath ``selector`` resolves through ``DOM.performSearch``.
+
+    ``timeout`` means exactly what it means on :func:`resolve_element` and
+    :func:`resolve_by_text` -- same units, same ``None``, same ``0`` -- because
+    it is the same value handed to the same :func:`_wait_for`. It could not be
+    offered before F-884: the wait was ``select_all``'s, bundled into the query,
+    and this module had no budget to spend. There is no second contract to keep
+    in step and no second place a caller's deadline is honoured, so the
+    parameter is the one home's, not a parallel path.
     """
     expression = xpath_expression(selector)
     if expression is not None:
@@ -501,14 +577,14 @@ async def resolve_elements(tab: Tab, selector: str) -> list[Element]:
         async def _do_xpath() -> list[Element]:
             return await _xpath_matches(tab, expression)
 
-        return await _wait_for(tab, f"xpath {expression!r}", _do_xpath, None)
+        return await _wait_for(tab, f"xpath {expression!r}", _do_xpath, timeout)
 
     async def _do() -> list[Element]:
         # nodriver answers a missing content_document with a bare ``return``,
         # so ``None`` is possible where the annotation says list.
         return await tab.query_selector_all(selector) or []
 
-    return await _wait_for(tab, f"select_all {selector!r}", _do, None)
+    return await _wait_for(tab, f"select_all {selector!r}", _do, timeout)
 
 
 async def query_selector_all(tab: Tab, selector: str) -> list[NodeId]:
