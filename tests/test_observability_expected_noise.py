@@ -22,12 +22,16 @@ the validation message, and the two teardown races are a library's own.
 
 This file pins BOTH directions for each class, because a filter that only proves
 it drops things is a filter nobody can trust with a crash. The negatives are the
-point of the exercise: a ``ToolError`` over an ``AttributeError``, a bare
-``TimeoutError``, a bare ``CancelledError``, nodriver's ``ProtocolException``,
-F-883's ``InvalidStateError`` (fixed in 2.1.9 — if it comes back we WANT to see
-it), a ``ConnectionResetError`` from anywhere but the proactor callback, the
-``Received exception from stream:`` sibling that carries a real tail, and
-``capture_lifecycle``'s proxy messages.
+point of the exercise: a ``ToolError`` over an ``AttributeError``; an
+UNCONVERTED outermost ``TimeoutError`` that merely has a ``ToolError`` behind it;
+a bare ``TimeoutError``; a bare ``CancelledError``; nodriver's
+``ProtocolException``; F-883's ``InvalidStateError`` (fixed in 2.1.9 — if it
+comes back we WANT to see it); a ``ConnectionResetError`` from anywhere but the
+proactor callback; the ``Received exception from stream:`` sibling that carries a
+real tail; ``capture_lifecycle``'s proxy messages; and — the one this file was
+extended for — **our OWN pydantic ``ValidationError``**, which FastMCP logs with
+the same call, on the same logger, with the same message and the same chain as a
+caller's bad kwarg, so only the frames tell them apart.
 
 Events are built by the SDK itself — ``event_from_exception`` for the exception
 shape and the real ``LoggingIntegration`` handler driven against a live
@@ -59,10 +63,13 @@ TOOL_MANAGER_LOGGER = "FastMCP.fastmcp.tools.tool_manager"
 ASYNCIO_LOGGER = "asyncio"
 
 #: `mcp/server/lowlevel/server.py:707` (mcp 1.27.1):
-#: ``logger.error(f"Received exception from stream: {message}")``. A
-#: ``ClientDisconnect`` formats to the empty string, so the tail is empty —
-#: which is the WHOLE match, never a prefix: the sibling issue whose tail reads
-#: "Received response with an unknown request ID" is a real protocol fault.
+#: ``logger.error(f"Received exception from stream: {message}")``, a
+#: ``case Exception():`` catch-all with no ``exc_info``. The empty tail means
+#: ``str(exc) == ""`` and NOT "it was a ``ClientDisconnect``" — that class is
+#: what fills it 6 500 times a week, but a bare ``RuntimeError()`` produces a
+#: byte-identical event and is dropped with it (pinned below). The match is the
+#: WHOLE message, never a prefix: the sibling issue whose tail reads "Received
+#: response with an unknown request ID" is a real protocol fault.
 STREAM_GONE = "Received exception from stream: "
 STREAM_FAULT = (
     "Received exception from stream: Received response with an unknown "
@@ -248,23 +255,111 @@ def client_disconnect():
     return pytest.importorskip("starlette.requests").ClientDisconnect
 
 
-def validation_error_info():
-    """The exc_info FastMCP's ``type_adapter.validate_python`` raises for
-    ``spawn_browser(window_width='1440')`` — the real pydantic class."""
-    pydantic = pytest.importorskip("pydantic")
+def _through_tool_run(body, arguments):
+    """Run ``body`` the way ``tool_manager`` does and hand back its exc_info.
 
-    class Spawn(pydantic.BaseModel):
-        viewport_width: int = 1280
-        viewport_height: int = 720
+    `fastmcp/tools/tool_manager.py`:220-229 wraps `await tool.run(arguments)` —
+    and `tool.py`:295's `type_adapter.validate_python(arguments)` is INSIDE that
+    `run` — in ONE `try`, logging both with the same call on the same logger. So
+    a caller's bad kwarg and a `ValidationError` our own body raised are
+    indistinguishable by logger, message and chain, and only the FRAMES tell
+    them apart. This helper is the real `Tool.run`, so the frames are real.
+    """
+    import asyncio
 
-        model_config = pydantic.ConfigDict(extra="forbid")
+    Tool = pytest.importorskip("fastmcp.tools").Tool
+
+    async def run():
+        tool = Tool.from_function(body)
+        try:
+            await tool.run(arguments)
+        except BaseException:  # noqa: BLE001  PERMANENT(the fixture catches whatever the tool raised)
+            return sys.exc_info()
+        return None
+
+    info = asyncio.run(run())
+    assert info is not None, "expected the tool call to raise"
+    return info
+
+
+def fastmcp_validation_info():
+    """FastMCP validating a CALLER's arguments — the 466-event shape.
+
+    `spawn_browser(window_width=…)` at a tool whose parameters are
+    `viewport_*`. Frames end `fastmcp.tools.tool run` ->
+    `pydantic.type_adapter validate_python` (measured).
+    """
+
+    async def spawn_browser(viewport_width: int = 1280, viewport_height: int = 720):
+        return "ok"
+
+    return _through_tool_run(spawn_browser, {"window_width": "1440"})
+
+
+def our_settings_crash_info():
+    """OUR OWN crash: an unknown ``STEALTH_MCP_*`` key makes ``Settings()`` raise.
+
+    Reached from `spawn_browser` today — `get_settings()` is called at runtime
+    from `clone_storage` and `logging_setup`, both on the spawn path — and it
+    fails EVERY spawn, so it is the last event that may be dropped.
+    """
+    from stealth_chrome_devtools_mcp.settings import Settings
+
+    async def spawn_browser():
+        Settings(stealth_mcp_typo_knob="1")
+        return "ok"
+
+    return _through_tool_run(spawn_browser, {})
+
+
+def our_model_crash_info():
+    """OUR OWN crash: `browser_manager.py`:429's ``BrowserInstance(...)`` shape.
+
+    A wrong field type inside `spawn_browser` is our bug, under an event whose
+    own text is `Error calling tool 'spawn_browser'`.
+    """
+    from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance
+
+    async def spawn_browser():
+        BrowserInstance(instance_id=None, headless="not-a-bool")
+        return "ok"
+
+    return _through_tool_run(spawn_browser, {})
+
+
+def bare_validation_info():
+    """A pydantic error with no FastMCP frame anywhere — our code, called
+    directly. Nothing in the payload says "a caller did this"."""
+    from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance
 
     try:
-        Spawn.model_validate({"window_width": "1440", "window_height": "900"})
-    except Exception:
+        BrowserInstance(instance_id=None, headless="not-a-bool")
+    except BaseException:  # noqa: BLE001  PERMANENT(the fixture catches what it raised)
         return sys.exc_info()
     pytest.fail("expected a pydantic ValidationError")
     return None
+
+
+def main_module_timeout():
+    """A class NAMED ``TimeoutError`` that is not the builtin, from ``__main__``.
+
+    `embedded/server.py` runs as `__main__` under runpy, so a class defined
+    there really does carry `__module__ == "__main__"` — and the SDK's
+    `get_type_module` does NOT drop that name (measured: it drops only `None`,
+    `builtins` and `__builtins__`), so the live and serialized paths must read
+    it the same way.
+    """
+
+    class TimeoutError(Exception):  # noqa: A001  PERMANENT(shadowing the builtin NAME is the fixture)
+        pass
+
+    # Both, because the SDK serializes `__qualname__ or __name__` for `type` and
+    # `__module__` for `module` — a locally-declared class would otherwise be
+    # named `main_module_timeout.<locals>.TimeoutError` and prove nothing about
+    # a class that really sits at a module's top level.
+    TimeoutError.__module__ = "__main__"
+    TimeoutError.__qualname__ = "TimeoutError"
+    return TimeoutError
 
 
 def dropped(pair) -> bool:
@@ -355,6 +450,76 @@ class TestTheBudgetIsTheProductAnswering:
         assert not dropped(tool_manager_event(chain()))
         assert not dropped(payload_only(tool_manager_event(chain())))
 
+    def test_an_unconverted_outermost_timeout_still_ships(self):
+        """A budget link may sit BESIDE ours; it may not be the exception itself.
+
+        A tool body whose cleanup timed out without conversion while handling a
+        `ToolError` is precisely the missing-convention case — and Sentry would
+        title the issue with the `TimeoutError`. Set membership alone licensed
+        it, so the rule reads the OUTERMOST link.
+        """
+
+        def chain():
+            try:
+                try:
+                    raise ToolError(  # noqa: TRY301  PERMANENT(the real chain IS the fixture; see _raise)
+                        "Element not found: #nope"
+                    )
+                except ToolError:
+                    raise TimeoutError  # noqa: TRY301,B904  PERMANENT(the MISSING `from` is the finding: an unconverted timeout in a cleanup path, which is exactly what a `from` would have made legible)
+            except BaseException:  # noqa: BLE001  PERMANENT(the fixture catches what it raised)
+                return sys.exc_info()
+
+        info = chain()
+        pair = tool_manager_event(info)
+
+        # The TimeoutError really is the reported one, on both spellings.
+        assert pair[0]["exception"]["values"][-1]["type"] == "TimeoutError"
+        assert type(info[1]).__name__ == "TimeoutError"
+
+        assert not dropped(pair)
+
+    def test_the_unconverted_timeout_still_ships_from_the_payload_alone(self):
+        def chain():
+            try:
+                try:
+                    raise ToolError(  # noqa: TRY301  PERMANENT(the real chain IS the fixture; see _raise)
+                        "Element not found: #nope"
+                    )
+                except ToolError:
+                    raise TimeoutError  # noqa: TRY301,B904  PERMANENT(the MISSING `from` is the finding; see the sibling above)
+            except BaseException:  # noqa: BLE001  PERMANENT(the fixture catches what it raised)
+                return sys.exc_info()
+
+        assert not dropped(payload_only(tool_manager_event(chain())))
+
+    def test_a_main_module_class_named_timeouterror_ships_on_both_paths(self):
+        """The two paths must read `__module__` the same way.
+
+        `sentry_sdk.utils.get_type_module` drops `None`, `builtins` and
+        `__builtins__` — and NOT `__main__`. A normalization that dropped
+        `__main__` too made the live path accept this chain as a budget chain
+        while the serialized path refused it.
+        """
+        fake_timeout = main_module_timeout()
+
+        def chain():
+            try:
+                try:
+                    raise fake_timeout("not the builtin")  # noqa: TRY301  PERMANENT(the real chain IS the fixture)
+                except fake_timeout as cause:
+                    raise ToolError("wrapped") from cause
+            except ToolError:
+                return sys.exc_info()
+
+        pair = tool_manager_event(chain())
+        values = pair[0]["exception"]["values"]
+        assert [v["type"] for v in values] == ["TimeoutError", "ToolError"]
+        assert values[0]["module"] == "__main__"
+
+        assert not dropped(pair)
+        assert not dropped(payload_only(pair))
+
     def test_a_failed_spawn_over_a_plain_exception_still_ships(self):
         """``ToolError: Failed to spawn browser: ...`` <- nodriver's plain
         ``Exception("Failed to connect to browser")``. Not a budget link, so
@@ -397,6 +562,27 @@ class TestTheClientWentAway:
         """No exception values at all: the SDK formatted ``ClientDisconnect()``
         into the f-string and it is empty. Logger + exact message is all there is."""
         assert dropped(logged(LOWLEVEL_LOGGER, STREAM_GONE))
+
+    @pytest.mark.parametrize(
+        "exc",
+        [TimeoutError(), RuntimeError(), ValueError()],
+        ids=["timeout", "runtime", "value"],
+    )
+    def test_any_exception_with_no_text_at_that_logger_is_dropped_too(self, exc):
+        """The accepted over-drop, pinned so it is a decision and not a surprise.
+
+        Line 707 is a ``case Exception():`` catch-all formatting ``str(exc)``, so
+        the rule matches "an exception with no text at this logger" — a bare
+        ``RuntimeError()`` from our own session handling is dropped with the
+        6 500 ``ClientDisconnect``s. It cannot be narrower: that event carries no
+        exception values, no frames and no extra, so there is nothing else in it
+        to read. Named in the leaf's docstring and in the finding's §6.
+        """
+        assert str(exc) == ""  # otherwise this test is about something else
+
+        pair = logged(LOWLEVEL_LOGGER, f"Received exception from stream: {exc}")
+
+        assert dropped(pair)
 
     def test_the_same_message_with_a_real_tail_still_ships(self):
         """THE reason the match is equality and not a prefix."""
@@ -525,17 +711,48 @@ class TestNodriversOrphanedRefresh:
 # (e) caller-input: the caller sent a parameter the tool does not have
 # ===========================================================================
 class TestCallerInput:
-    def test_a_validation_error_from_the_tool_manager_is_dropped(self):
-        pair = tool_manager_event(validation_error_info(), tool="spawn_browser")
+    def test_fastmcps_own_argument_validation_is_dropped(self):
+        """The real `Tool.run` validating a caller's kwargs. FastMCP has already
+        answered the caller with this message."""
+        pair = tool_manager_event(fastmcp_validation_info(), tool="spawn_browser")
 
         assert dropped(pair)
         assert dropped(payload_only(pair))
 
-    def test_a_validation_error_from_anywhere_else_still_ships(self):
-        """Our own code validating its own model is not a caller's typo."""
-        pair = tool_manager_event(validation_error_info(), "stealth.backend")
+    def test_our_own_settings_crash_under_the_same_logger_still_ships(self):
+        """THE over-drop this rule must not have.
+
+        An unknown `STEALTH_MCP_*` key makes `Settings()` raise a pydantic
+        `ValidationError`, and `get_settings()` is on the spawn path — so every
+        spawn fails. Logger, message and chain are byte-identical to a caller's
+        typo (`tool_manager` wraps `tool.run`, which is where the argument
+        validation happens, in ONE `try`); only the frames differ.
+        """
+        pair = tool_manager_event(our_settings_crash_info(), tool="spawn_browser")
 
         assert not dropped(pair)
+        assert not dropped(payload_only(pair))
+
+    def test_our_own_model_crash_under_the_same_logger_still_ships(self):
+        """`browser_manager.py`:429's `BrowserInstance(...)` with a wrong type."""
+        pair = tool_manager_event(our_model_crash_info(), tool="spawn_browser")
+
+        assert not dropped(pair)
+        assert not dropped(payload_only(pair))
+
+    def test_a_pydantic_error_with_no_fastmcp_frame_at_all_still_ships(self):
+        """Nothing in this payload says a caller did it, so nothing may assume so."""
+        pair = tool_manager_event(bare_validation_info(), tool="spawn_browser")
+
+        assert not dropped(pair)
+        assert not dropped(payload_only(pair))
+
+    def test_a_validation_error_from_anywhere_else_still_ships(self):
+        """The logger is part of the rule too, not only the frames."""
+        pair = tool_manager_event(fastmcp_validation_info(), "stealth.backend")
+
+        assert not dropped(pair)
+        assert not dropped(payload_only(pair))
 
     def test_a_validation_error_wrapping_a_real_bug_still_ships(self):
         def chain():
@@ -667,13 +884,81 @@ class TestTheClassesAreNamed:
                 expected_events.NODRIVER_DEAD_BROWSER,
             ),
             (
-                tool_manager_event(validation_error_info(), tool="spawn_browser"),
+                tool_manager_event(fastmcp_validation_info(), tool="spawn_browser"),
                 expected_events.CALLER_INPUT,
             ),
         ]
         for pair, expected in cases:
             assert self._classify(pair) == expected, expected
             assert self._classify(payload_only(pair)) == expected, expected
+
+    def test_the_two_paths_are_normalized_to_one_order(self):
+        """The one trap a positional rule has to survive.
+
+        The live chain walks OUTERMOST first (`exc`, then its cause); Sentry's
+        serialized `values` list the ROOT cause first and the reported exception
+        LAST. `_links` must hand both to the rules in one order, or a rule that
+        reads `links[0]` means opposite things on the two paths.
+        """
+        from stealth_chrome_devtools_mcp import expected_events
+
+        event, hint = tool_manager_event(cdp_budget_chain())
+        assert [v["type"] for v in event["exception"]["values"]] == [
+            "CancelledError",
+            "TimeoutError",
+            "ToolError",
+        ]
+        chain = observability._exception_chain(observability._hint_exception(hint))
+        assert [type(e).__name__ for e in chain] == [
+            "ToolError",
+            "TimeoutError",
+            "CancelledError",
+        ]
+
+        live = expected_events._links(event, chain)
+        serialized = expected_events._links(event, None)
+
+        assert [link.type_name for link in live] == [
+            "ToolError",
+            "TimeoutError",
+            "CancelledError",
+        ]
+        assert [link.type_name for link in serialized] == [
+            link.type_name for link in live
+        ]
+
+    def test_a_nested_class_is_named_the_way_the_sdk_names_it(self):
+        """``get_type_name`` is ``__qualname__ or __name__`` (sdk 2.64.0 :426).
+
+        So a class declared inside a function serializes as
+        ``outer.<locals>.Name``. Reading ``__name__`` on the live path let such a
+        class match a ``Kind`` the serialized path could never match — the same
+        divergence as the ``__main__`` module one, by the other field.
+        """
+        from stealth_chrome_devtools_mcp import expected_events
+
+        class NestedError(Exception):
+            pass
+
+        info = _raise(NestedError("boom"))
+        event, hint = tool_manager_event(info)
+        serialized = event["exception"]["values"][-1]["type"]
+        assert "<locals>" in serialized
+
+        chain = observability._exception_chain(observability._hint_exception(hint))
+        live = expected_events._links(event, chain)
+
+        assert live[0].type_name == serialized
+
+    def test_a_drop_is_recorded_with_the_name_of_the_rule(self, caplog):
+        """Attributable in a RUNNING process, not only in this file."""
+        caplog.set_level(logging.DEBUG, logger=observability._log.name)
+
+        assert dropped(logged(LOWLEVEL_LOGGER, STREAM_GONE))
+
+        assert any(
+            "client-disconnect" in record.getMessage() for record in caplog.records
+        ), [r.getMessage() for r in caplog.records]
 
     def test_a_real_crash_is_named_by_nothing(self):
         assert (

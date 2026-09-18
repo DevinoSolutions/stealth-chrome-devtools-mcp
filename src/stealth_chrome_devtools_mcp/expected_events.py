@@ -43,25 +43,35 @@ Each is a NAME and ONE rule, and the rule is applied to both of the shapes an
 event can arrive in (see "one rule, two paths" below):
 
 ``error-convention``
-    At least one link in the chain is our ``ToolError`` (subclasses included),
-    and every OTHER link is a *budget* link — ``TimeoutError`` or
+    The OUTERMOST link is our ``ToolError`` (subclasses included), and every
+    other link is either ours or a *budget* link — ``TimeoutError`` or
     ``asyncio.CancelledError``. Nothing else in the chain is tolerated. Those
     two are what a bounded operation is made of: ``tool_runtime`` and
     ``browser_manager`` both bound work with ``asyncio.wait_for``, which raises
     ``TimeoutError`` *from* the ``CancelledError`` it used to stop the coroutine,
-    and both convert it to a ``ToolError`` the caller receives. A budget link
-    never stands alone: a ``TimeoutError`` nobody converted is a place the error
-    convention is MISSING, which is a finding and not noise.
+    and both convert it to a ``ToolError`` the caller receives — the conversion
+    is always the LAST raise, which is why "outermost" is the right test and
+    mere set membership is not. A body whose cleanup timed out UNCONVERTED while
+    handling a ``ToolError`` has that ``ToolError`` in its chain and is still
+    the missing-convention case: Sentry titles that issue with the
+    ``TimeoutError``, and it must keep shipping.
 
 ``client-disconnect``
     Either the chain is entirely ``starlette.requests.ClientDisconnect``, or the
-    event is the message-only form the session loop logs:
-    ``mcp/server/lowlevel/server.py``:707 (mcp 1.27.1) is
-    ``logger.error(f"Received exception from stream: {message}")`` and
-    ``str(ClientDisconnect())`` is ``""`` (measured), so the tail is empty. The
-    match on that message is EQUALITY, never a prefix: the same line with a real
-    tail — "Received response with an unknown request ID: … Method not found" —
-    is a protocol fault and must keep shipping.
+    event is the message-only form the session loop logs. **That second arm
+    matches "an exception with NO TEXT at ``mcp.server.lowlevel.server``", not
+    "a ``ClientDisconnect``"** — and it cannot be narrower.
+    ``mcp/server/lowlevel/server.py``:707 (mcp 1.27.1) is a ``case Exception():``
+    catch-all doing ``logger.error(f"Received exception from stream: {message}")``
+    with no ``exc_info``, so the event carries no exception values, no frames and
+    no extra: the empty tail is ``str(exc) == ""`` and there is genuinely nothing
+    else in the event to read. A ``ClientDisconnect`` is what fills it 6 500
+    times a week (its ``str()`` is empty, measured), but a bare
+    ``RuntimeError()`` from our own session handling produces a byte-identical
+    event and is dropped with it. That is the trade, taken deliberately and
+    named again in the finding's §6. The match is EQUALITY, never a prefix: the
+    same line with a real tail — "Received response with an unknown request ID:
+    … Method not found" — is a protocol fault and keeps shipping.
 
 ``proactor-teardown``
     Logger ``asyncio``, message beginning ``Exception in callback
@@ -85,25 +95,58 @@ event can arrive in (see "one rule, two paths" below):
 
 ``caller-input``
     Logger ``FastMCP.fastmcp.tools.tool_manager``, chain entirely a pydantic
-    ``ValidationError`` (module under ``pydantic``). FastMCP raises it from
-    ``tool.py``'s ``type_adapter.validate_python`` and answers the caller with
-    its message, so the caller already knows. Our own code validating its own
-    model is not a caller's typo, which is why the logger is part of the rule.
+    ``ValidationError``, **and** the outermost link's frames carry
+    :data:`ARG_VALIDATION_FRAMES` adjacently. That third condition is not
+    decoration and it is the whole rule: the logger does NOT tell a caller's
+    typo from a ``ValidationError`` our own code raised.
+    ``fastmcp/tools/tool_manager.py``:220-229 wraps ``await tool.run(arguments)``
+    in ONE ``try`` and logs everything out of it with the same
+    ``logger.exception(f"Error calling tool {key!r}")`` — and
+    ``fastmcp/tools/tool.py``:295's ``type_adapter.validate_python(arguments)``
+    is INSIDE that ``run``. So logger, message and chain are byte-identical for
+    the two, and dropping on them dropped our own bugs: measured, an unknown
+    ``STEALTH_MCP_*`` key (which makes ``Settings()`` raise and fails EVERY
+    spawn, since ``get_settings()`` is on the spawn path) and
+    ``browser_manager.py``:429's ``BrowserInstance(...)`` with a wrong field type
+    both vanished under the label "the caller already knows". The FRAMES do tell
+    them apart, identically on both paths (measured): FastMCP's own validation
+    always has ``fastmcp.tools.tool`` ``run`` immediately above
+    ``pydantic.type_adapter`` ``validate_python``, and ours never does — a body
+    of ours sits between them.
 
 One rule, two paths
 -------------------
 ``before_send`` may or may not be handed the live exception: the logging
 integration fills ``hint["exc_info"]`` today, but a replayed or hand-built event
 carries only the serialized payload. Both paths must judge the same set, so
-every link is reduced to a :class:`Link` first — a type NAME plus a MODULE,
-spelled the way the SDK spells them — and every class is a :class:`Kind` test
-over those two fields.
+every link is reduced to a :class:`Link` first — a type NAME, a MODULE and the
+FRAMES, each spelled the way the SDK spells them — and every class is a
+:class:`Kind` test over the first two plus, for ``caller-input``, an adjacency
+test over the third.
 
-That means builtins modules are normalized: ``sentry_sdk.utils.get_type_module``
-omits ``builtins``, so a serialized ``TimeoutError`` carries ``module: None``
-while the live class says ``"builtins"`` (both measured, sdk 2.64.0).
-:data:`_UNWRITTEN_MODULES` is that normalization and it is the only reason one
-rule can read both shapes.
+"The way the SDK spells them" is a rule read out of ``sentry_sdk/utils.py`` and
+not guessed, because all three differ from the obvious Python answer:
+
+* ``get_type_name`` (:426) is ``__qualname__ or __name__``, so a class declared
+  inside a function serializes as ``outer.<locals>.Name``. :func:`_type_name_of`
+  mirrors it; reading ``__name__`` on the live path made a nested class match a
+  :class:`Kind` that the serialized path could never match.
+* ``get_type_module`` (:430) drops ``None``, ``builtins`` and ``__builtins__``
+  — and **not** ``__main__``. So a serialized ``TimeoutError`` carries
+  ``module: None`` while the live class says ``"builtins"``, which
+  :data:`_UNWRITTEN_MODULES` normalizes; but a class from ``__main__`` keeps its
+  module on BOTH paths, and ``embedded/server.py`` really does run as
+  ``__main__`` under runpy.
+* ``serialize_frame`` writes ``module`` as ``frame.f_globals["__name__"]``, which
+  is what :func:`_live_frames` reads, and it lists frames oldest-first — caller
+  first, the raising frame last — which is also the traceback's own order
+  (measured identical, both paths).
+
+The two paths do NOT agree on ORDER, and that is normalized here rather than in
+each rule: the live chain walks outermost-first (``exc``, then its cause), while
+Sentry's ``values`` list the ROOT cause first and the reported exception LAST.
+:func:`_links` hands every rule one order — **outermost first** — so
+``links[0]`` is the exception Sentry titles the issue with on either path.
 
 There is exactly ONE exception to name-and-module matching, and it is the one
 that was already there: our own error base is matched with ``isinstance`` when
@@ -111,7 +154,8 @@ the live exception is available, because CLAUDE.md convention 2 is about a CLASS
 and a subclass declared anywhere must be covered. Every other kind matches by
 name and module on both paths deliberately — ``isinstance`` on the live path
 would accept subclasses that the serialized path, which sees only the subclass's
-own name, could never accept, and the two paths would quietly disagree.
+own qualified name, could never accept, and the two paths would quietly
+disagree.
 
 Never decides "expected" from nothing. An event with no readable links is
 recognised by exactly one arm — ``client-disconnect``'s message-only form, which
@@ -136,7 +180,9 @@ if TYPE_CHECKING:  # the SDK is imported lazily by our caller; these are types
 # ---------------------------------------------------------------------------
 # The class names. Returned rather than a bare bool so a drop is attributable:
 # a surprise in the Sentry volume traces to ONE rule instead of to "the filter".
-# Reported, never branched on — there is one drop.
+# ``observability._is_expected_tool_failure`` logs the name it got at DEBUG, so
+# that is true of a running process and not only of the suite. Reported, never
+# branched on — there is one drop.
 # ---------------------------------------------------------------------------
 ERROR_CONVENTION = "error-convention"
 CLIENT_DISCONNECT = "client-disconnect"
@@ -145,10 +191,31 @@ NODRIVER_DEAD_BROWSER = "nodriver-dead-browser"
 CALLER_INPUT = "caller-input"
 
 #: What the SDK writes for a class that lives in ``builtins``: nothing at all.
-#: Mirrors ``sentry_sdk.utils.get_type_module``, which is what makes a live
-#: ``TimeoutError`` (``__module__ == "builtins"``) and a serialized one
-#: (``module: None``) the same :class:`Link`.
-_UNWRITTEN_MODULES = frozenset({None, "builtins", "__builtins__", "__main__"})
+#: Mirrors ``sentry_sdk.utils.get_type_module`` EXACTLY — three names, and
+#: ``"__main__"`` is deliberately NOT among them, because the SDK does not drop
+#: it either. Dropping it here made a ``__main__``-defined class read as a
+#: builtin on the live path and as itself on the serialized one, which is the
+#: one thing this reduction exists to prevent.
+_UNWRITTEN_MODULES = frozenset({None, "builtins", "__builtins__"})
+
+#: How far into a traceback the frame read goes. A traceback cannot cycle, so
+#: this is a cost bound and not a terminator. Truncating a caller-first list can
+#: only REMOVE an adjacency, never invent one, so the cap can only cost a drop —
+#: i.e. it resolves toward sending, like every other uncertainty here.
+_MAX_FRAMES = 128
+
+
+@dataclass(frozen=True)
+class Frame:
+    """One stack frame, as both paths describe it: a module and a function name.
+
+    ``module`` is ``frame.f_globals["__name__"]`` — what
+    ``sentry_sdk.utils.serialize_frame`` writes — so the live walk and the
+    serialized list are directly comparable.
+    """
+
+    module: "str | None"
+    function: "str | None"
 
 
 @dataclass(frozen=True)
@@ -157,12 +224,13 @@ class Link:
 
     ``live`` is the exception object when ``before_send`` was handed one, and it
     is read by exactly one rule — our own error base, the single ``isinstance``
-    match. Everything else reads ``type_name`` and ``module``, which the
-    serialized payload has too.
+    match. Everything else reads ``type_name``, ``module`` and ``frames``, all
+    of which the serialized payload has too.
     """
 
     type_name: str
     module: "str | None"
+    frames: "tuple[Frame, ...]" = ()
     live: "BaseException | None" = None
 
 
@@ -176,23 +244,30 @@ _UNREADABLE = Link("", None)
 class Kind:
     """One exception class, spelled the way an event carries it.
 
-    ``module`` is a PREFIX when it is set, because the SDK reports the defining
-    submodule: pydantic's ``ValidationError`` arrives as
-    ``pydantic_core._pydantic_core`` and our own errors as
-    ``stealth_chrome_devtools_mcp.embedded.tool_errors``. ``None`` means
-    "builtins", where the SDK writes no module at all, and it is matched exactly
-    so that a third-party class sharing a builtin's NAME cannot pass.
+    ``modules`` is a set of module ROOTS, matched exactly or on a dotted
+    boundary, because the SDK reports the defining submodule: pydantic's
+    ``ValidationError`` arrives as ``pydantic_core._pydantic_core`` and our own
+    errors as ``stealth_chrome_devtools_mcp.embedded.tool_errors``. The boundary
+    is what keeps a package merely SPELLED like one of ours (``pydanticfoo``,
+    ``stealth_chrome_devtools_mcp_extra``) out. ``None`` means "builtins", where
+    the SDK writes no module at all, and it is matched exactly so that a
+    third-party class sharing a builtin's NAME cannot pass.
     """
 
     names: "frozenset[str]"
-    module: "str | None"
+    modules: "frozenset[str] | None"
 
     def matches(self, link: Link) -> bool:
         if link.type_name not in self.names:
             return False
-        if self.module is None:
+        if self.modules is None:
             return link.module is None
-        return link.module is not None and link.module.startswith(self.module)
+        if link.module is None:
+            return False
+        return any(
+            link.module == root or link.module.startswith(f"{root}.")
+            for root in self.modules
+        )
 
 
 #: Our error convention. The one kind that also matches SUBCLASSES — see
@@ -202,31 +277,45 @@ class Kind:
 #: class with the same name and is what wraps a genuine crash on its way out of
 #: ``tool_manager``.
 OURS = Kind(
-    frozenset({"ToolError", "InstanceNotFoundError"}), "stealth_chrome_devtools_mcp"
+    frozenset({"ToolError", "InstanceNotFoundError"}),
+    frozenset({"stealth_chrome_devtools_mcp"}),
 )
 
 #: What a bounded operation is made of: ``asyncio.wait_for`` cancels the
 #: coroutine it gave up on and raises ``TimeoutError`` from that
-#: ``CancelledError``. Tolerated only BESIDE :data:`OURS`, never alone.
+#: ``CancelledError``. Tolerated only BEHIND :data:`OURS` in the chain — see
+#: ``error-convention`` above for why the outermost link is the test.
 BUDGET_KINDS = (
     Kind(frozenset({"TimeoutError"}), None),
-    Kind(frozenset({"CancelledError"}), "asyncio.exceptions"),
+    Kind(frozenset({"CancelledError"}), frozenset({"asyncio.exceptions"})),
 )
 
-CLIENT_GONE = Kind(frozenset({"ClientDisconnect"}), "starlette.requests")
+CLIENT_GONE = Kind(frozenset({"ClientDisconnect"}), frozenset({"starlette.requests"}))
 CONNECTION_RESET = Kind(frozenset({"ConnectionResetError"}), None)
 CONNECTION_REFUSED = Kind(frozenset({"ConnectionRefusedError"}), None)
-CALLER_VALIDATION = Kind(frozenset({"ValidationError"}), "pydantic")
+CALLER_VALIDATION = Kind(
+    frozenset({"ValidationError"}), frozenset({"pydantic", "pydantic_core"})
+)
+
+#: The two frames FastMCP's OWN argument validation always puts adjacent, and
+#: the only thing that tells a caller's bad kwarg from a ``ValidationError`` our
+#: code raised under the same logger with the same message and the same chain.
+#: ``tool.run`` calls ``validate_python`` directly (``fastmcp/tools/tool.py``
+#: :295); a body of ours always sits between them. Measured on both paths,
+#: fastmcp 2.11.2 / pydantic 2.11.7.
+ARG_VALIDATION_FRAMES = (
+    Frame("fastmcp.tools.tool", "run"),
+    Frame("pydantic.type_adapter", "validate_python"),
+)
 
 #: The loggers the four logger-gated classes name, verbatim.
 ASYNCIO_LOGGER = "asyncio"
 MCP_SESSION_LOGGER = "mcp.server.lowlevel.server"
 TOOL_MANAGER_LOGGER = "FastMCP.fastmcp.tools.tool_manager"
 
-#: ``mcp/server/lowlevel/server.py``:707's whole message when the thing it
-#: formatted was a ``ClientDisconnect``, whose ``str()`` is empty. Compared with
-#: ``==`` on purpose: a prefix match would also swallow the protocol faults that
-#: line reports, which are real.
+#: ``mcp/server/lowlevel/server.py``:707's whole message when the exception it
+#: formatted had no text. Compared with ``==`` on purpose: a prefix match would
+#: also swallow the protocol faults that line reports, which are real.
 STREAM_EXCEPTION_MESSAGE = "Received exception from stream: "
 
 #: CPython's Windows pipe-transport teardown, and the loop complaint that names
@@ -243,12 +332,14 @@ NODRIVER_MARK = "nodriver"
 
 
 @dataclass(frozen=True)
-class Facts:
+class EventFacts:
     """Everything a rule may ask about an event, read exactly once.
 
     Reading the event up front is what keeps the rules total functions of it:
     a rule cannot reach past these four fields, so adding one is a visible
-    change to this class rather than a new way to interrogate an event.
+    change to this class rather than a new way to interrogate an event. Named
+    ``EventFacts`` and not ``Facts`` because ``animation_facts.Facts`` already
+    means "what the collector sent" — one meaning per term.
     """
 
     links: "tuple[Link, ...]"
@@ -265,16 +356,17 @@ def classify(
     """Which named class of expected noise is this event, or ``None``.
 
     ``chain`` is the live exception chain when ``before_send`` was handed one
-    (``observability._exception_chain``), and ``None`` or empty when only the
-    serialized payload is available — in which case the links are read out of
-    ``event["exception"]["values"]`` instead. ``error_base`` is our own
-    ``ToolError``, or ``None`` when it could not be imported, which degrades the
-    one ``isinstance`` match to name-and-module like every other kind.
+    (``observability._exception_chain``, outermost first), and ``None`` or empty
+    when only the serialized payload is available — in which case the links are
+    read out of ``event["exception"]["values"]`` and reversed into that same
+    order. ``error_base`` is our own ``ToolError``, or ``None`` when it could not
+    be imported, which degrades the one ``isinstance`` match to
+    name-and-module like every other kind.
 
     Does not catch: the never-raises contract lives at the one call site, so a
     bug here is visible to the suite rather than silently turning into "ship it".
     """
-    facts = Facts(
+    facts = EventFacts(
         links=_links(event, chain),
         logger=_logger(event),
         message=_message(event),
@@ -289,20 +381,16 @@ def classify(
 # ---------------------------------------------------------------------------
 # The five rules
 # ---------------------------------------------------------------------------
-def _error_convention(facts: Facts) -> bool:
-    """Ours, over nothing but the budget links it was raised on."""
-    if not facts.links:
+def _error_convention(facts: EventFacts) -> bool:
+    """Ours as the REPORTED exception, over nothing but ours and budget links."""
+    if not facts.links or not _is_ours(facts.links[0], facts.error_base):
         return False
-    seen_ours = False
-    for link in facts.links:
-        if _is_ours(link, facts.error_base):
-            seen_ours = True
-        elif not any(kind.matches(link) for kind in BUDGET_KINDS):
-            return False
-    return seen_ours
+    return all(
+        _is_ours(link, facts.error_base) or _is_budget(link) for link in facts.links[1:]
+    )
 
 
-def _client_disconnect(facts: Facts) -> bool:
+def _client_disconnect(facts: EventFacts) -> bool:
     """The client went away mid-request — from the POST, or from the session loop."""
     if _all_are(facts.links, CLIENT_GONE):
         return True
@@ -313,7 +401,7 @@ def _client_disconnect(facts: Facts) -> bool:
     )
 
 
-def _proactor_teardown(facts: Facts) -> bool:
+def _proactor_teardown(facts: EventFacts) -> bool:
     """CPython's own ``shutdown()`` on a socket the peer already reset."""
     return (
         facts.logger == ASYNCIO_LOGGER
@@ -322,7 +410,7 @@ def _proactor_teardown(facts: Facts) -> bool:
     )
 
 
-def _nodriver_dead_browser(facts: Facts) -> bool:
+def _nodriver_dead_browser(facts: EventFacts) -> bool:
     """nodriver's unawaited target refresh, after its Chrome had gone."""
     return (
         facts.logger == ASYNCIO_LOGGER
@@ -332,10 +420,16 @@ def _nodriver_dead_browser(facts: Facts) -> bool:
     )
 
 
-def _caller_input(facts: Facts) -> bool:
-    """A caller sent a parameter the tool does not have; FastMCP already said so."""
-    return facts.logger == TOOL_MANAGER_LOGGER and _all_are(
-        facts.links, CALLER_VALIDATION
+def _caller_input(facts: EventFacts) -> bool:
+    """FastMCP validating a CALLER's arguments — never our own model failing.
+
+    The frame pair is the discriminator; the logger alone is not. See
+    ``caller-input`` in the module docstring for the measurement.
+    """
+    return (
+        facts.logger == TOOL_MANAGER_LOGGER
+        and _all_are(facts.links, CALLER_VALIDATION)
+        and _has_adjacent(facts.links[0].frames, ARG_VALIDATION_FRAMES)
     )
 
 
@@ -343,7 +437,7 @@ def _caller_input(facts: Facts) -> bool:
 #: rules are disjoint by construction (each names either a different exception
 #: kind or a different logger) — but a table is what makes them ENUMERABLE, so
 #: a sixth class is one row and cannot be a sixth branch somewhere else.
-RULES: "tuple[tuple[str, Callable[[Facts], bool]], ...]" = (
+RULES: "tuple[tuple[str, Callable[[EventFacts], bool]], ...]" = (
     (ERROR_CONVENTION, _error_convention),
     (CLIENT_DISCONNECT, _client_disconnect),
     (PROACTOR_TEARDOWN, _proactor_teardown),
@@ -368,29 +462,74 @@ def _is_ours(link: Link, error_base: "type[BaseException] | None") -> bool:
     return OURS.matches(link)
 
 
+def _is_budget(link: Link) -> bool:
+    """A ``TimeoutError`` or an ``asyncio.CancelledError`` — never alone."""
+    return any(kind.matches(link) for kind in BUDGET_KINDS)
+
+
 def _all_are(links: "tuple[Link, ...]", kind: Kind) -> bool:
     """Every link is that kind, and there is at least one link to say it about."""
     return bool(links) and all(kind.matches(link) for link in links)
 
 
+def _has_adjacent(frames: "tuple[Frame, ...]", pair: "tuple[Frame, Frame]") -> bool:
+    """Do these two frames appear next to each other, in this order?
+
+    Adjacency and not mere presence: ``fastmcp.tools.tool`` ``run`` is in the
+    traceback of EVERY tool failure, our own bugs included. It is only directly
+    above ``pydantic.type_adapter`` ``validate_python`` when FastMCP itself was
+    the thing validating.
+    """
+    first, second = pair
+    return any(
+        frames[index] == first and frames[index + 1] == second
+        for index in range(len(frames) - 1)
+    )
+
+
 def _links(event: "Event", chain: "list[BaseException] | None") -> "tuple[Link, ...]":
-    """The chain to judge: the live objects when we have them, the payload else."""
+    """The chain to judge, OUTERMOST FIRST on both paths.
+
+    The live chain already arrives that way. Sentry's ``values`` are the other
+    way round — root cause first — so they are reversed here, once, rather than
+    in each rule that reads a position.
+    """
     if chain:
-        return tuple(
-            Link(type(exc).__name__, _module_of(type(exc)), exc) for exc in chain
-        )
+        return tuple(_live_link(exc) for exc in chain)
     return _payload_links(event)
 
 
+def _live_link(exc: BaseException) -> Link:
+    """One live exception, spelled the way the SDK would have serialized it."""
+    cls = type(exc)
+    return Link(
+        type_name=_type_name_of(cls),
+        module=_module_of(cls),
+        frames=_live_frames(exc),
+        live=exc,
+    )
+
+
+def _live_frames(exc: BaseException) -> "tuple[Frame, ...]":
+    """``exc``'s traceback, caller first — the order the SDK serializes."""
+    frames: list[Frame] = []
+    traceback = exc.__traceback__
+    while traceback is not None and len(frames) < _MAX_FRAMES:
+        frame = traceback.tb_frame
+        frames.append(Frame(frame.f_globals.get("__name__"), frame.f_code.co_name))
+        traceback = traceback.tb_next
+    return tuple(frames)
+
+
 def _payload_links(event: "Event") -> "tuple[Link, ...]":
-    """``event["exception"]["values"]``, in the order Sentry reports them."""
+    """``event["exception"]["values"]``, reversed into outermost-first order."""
     if not isinstance(event, dict):
         return ()
     exception = event.get("exception")
     values = exception.get("values") if isinstance(exception, dict) else None
     if not isinstance(values, list):
         return ()
-    return tuple(_payload_link(value) for value in values)
+    return tuple(_payload_link(value) for value in reversed(values))
 
 
 def _payload_link(value: object) -> Link:
@@ -398,15 +537,50 @@ def _payload_link(value: object) -> Link:
     if not isinstance(value, dict):
         return _UNREADABLE
     name = value.get("type")
-    module = value.get("module")
     if not isinstance(name, str):
         return _UNREADABLE
-    return Link(name, module if isinstance(module, str) else None)
+    module = value.get("module")
+    return Link(
+        type_name=name,
+        module=module if isinstance(module, str) else None,
+        frames=_payload_frames(value.get("stacktrace")),
+    )
+
+
+def _payload_frames(stacktrace: object) -> "tuple[Frame, ...]":
+    """One serialized value's frames, in the order the SDK wrote them."""
+    if not isinstance(stacktrace, dict):
+        return ()
+    frames = stacktrace.get("frames")
+    if not isinstance(frames, list):
+        return ()
+    return tuple(
+        Frame(_text(frame.get("module")), _text(frame.get("function")))
+        if isinstance(frame, dict)
+        else Frame(None, None)
+        for frame in frames[:_MAX_FRAMES]
+    )
+
+
+def _text(value: object) -> "str | None":
+    """A payload field that is supposed to be a string, or nothing."""
+    return value if isinstance(value, str) else None
+
+
+def _type_name_of(cls: "type[BaseException]") -> str:
+    """A class's name, spelled the way the SDK spells it in a payload.
+
+    ``sentry_sdk.utils.get_type_name`` is ``__qualname__ or __name__``, so a
+    class declared inside a function serializes as ``outer.<locals>.Name``.
+    Reading ``__name__`` here let a nested class match a :class:`Kind` the
+    serialized path could never match.
+    """
+    return getattr(cls, "__qualname__", None) or cls.__name__
 
 
 def _module_of(cls: "type[BaseException]") -> "str | None":
     """A class's module, spelled the way the SDK spells it in a payload."""
-    module = cls.__module__
+    module = getattr(cls, "__module__", None)
     return None if module in _UNWRITTEN_MODULES else module
 
 
@@ -414,8 +588,7 @@ def _logger(event: "Event") -> "str | None":
     """``event["logger"]`` — what ``LoggingIntegration`` puts the record name in."""
     if not isinstance(event, dict):
         return None
-    name = event.get("logger")
-    return name if isinstance(name, str) else None
+    return _text(event.get("logger"))
 
 
 def _message(event: "Event") -> str:
@@ -431,8 +604,7 @@ def _message(event: "Event") -> str:
     entry = event.get("logentry")
     if isinstance(entry, dict):
         for key in ("formatted", "message"):
-            text = entry.get(key)
-            if isinstance(text, str):
+            text = _text(entry.get(key))
+            if text is not None:
                 return text
-    text = event.get("message")
-    return text if isinstance(text, str) else ""
+    return _text(event.get("message")) or ""

@@ -413,9 +413,22 @@ def _is_expected_tool_failure(
     this project actually shipped arrived through
     ``FastMCP.fastmcp.tools.tool_manager``, the very logger the noise arrives on,
     so ``ignore_logger`` on it would have hidden a real bug. Where a rule DOES
-    name a logger it names an exception kind beside it, never the logger alone.
+    name a logger it names an exception kind beside it, never the logger alone —
+    and ``caller-input``, whose logger carries our own bugs as well as callers'
+    typos, names the FRAME PAIR that separates them.
+
+    The class that recognised the event is logged at DEBUG, which is what makes
+    "a drop is attributable" true of a running process rather than only of the
+    suite: an unexpected fall in Sentry volume traces to one rule. DEBUG for the
+    same reason the failure paths in :func:`_scrub_event` are — the logging
+    integration turns INFO into breadcrumbs and ERROR into events, and an event
+    raised while deciding about an event is how a reporting loop starts.
     """
-    return _expected_event_class(event, hint) is not None
+    expected = _expected_event_class(event, hint)
+    if expected is None:
+        return False
+    _log.debug("Sentry event dropped as expected noise: %s", expected)
+    return True
 
 
 def _scrub_event(
