@@ -39,6 +39,7 @@ shape                        node
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 
@@ -72,11 +73,12 @@ SLOW_ASSET_MS = 1600
 #: wins a property of the shape rather than of the runner's load.
 SLOW_DOC_MS = 2500
 PREEMPT_MS = 1000
-#: How long a fetch the tool's milestone does not cover may still be in flight
-#: (see ``_await_fetched``). Generous on purpose: it is spent only when the
-#: ledger does not match yet, and a node that spends it all fails anyway.
-LEDGER_SETTLE_SECONDS = 5.0
-LEDGER_POLL_SECONDS = 0.05
+#: How long anything the tool's milestone does not cover may still be in flight
+#: — a fetch that has not reached the server, a document still parsing its
+#: ``<title>`` (see ``_until``). Generous on purpose: it is spent only while the
+#: oracle disagrees, and a node that spends it all fails anyway.
+ORACLE_SETTLE_SECONDS = 5.0
+ORACLE_POLL_SECONDS = 0.05
 
 
 @pytest.fixture(autouse=True)
@@ -161,12 +163,52 @@ async def _await_fetched(origin: str, expected: list[str]) -> list[str]:
     about the product — the milestone covered those fetches — and a poll would
     quietly give that claim away.
     """
-    deadline = time.monotonic() + LEDGER_SETTLE_SECONDS
+    return await _until(lambda: _read_fetched(origin), expected)
+
+
+async def _read_fetched(origin: str) -> list[str]:
+    return _fetched(await fixture_ledger(origin))
+
+
+async def _until(read, expected):
+    """THE one wait for an oracle the tool's milestone does not cover: the first
+    reading that EQUALS *expected*, or the reading as it stands at the deadline.
+
+    Both oracles here need it and neither may sleep a fixed amount instead. The
+    ledger is one (``_await_fetched``); the LIVE page is the other
+    (``_await_live``), because a document that has committed is not a document
+    that has parsed its ``<title>``.
+    """
+    deadline = time.monotonic() + ORACLE_SETTLE_SECONDS
     while True:
-        fetched = _fetched(await fixture_ledger(origin))
-        if fetched == expected or time.monotonic() >= deadline:
-            return fetched
-        await asyncio.sleep(LEDGER_POLL_SECONDS)
+        got = await read()
+        if got == expected or time.monotonic() >= deadline:
+            return got
+        await asyncio.sleep(ORACLE_POLL_SECONDS)
+
+
+async def _await_live(iid: str, url: str, title: str) -> tuple[str, str]:
+    """The page's own ``(url, title)`` once it settles on *url* / *title*.
+
+    ONE round trip per reading, for the reason the product's own landing read is
+    one (F-882): two ``execute_script`` calls can straddle a navigation and
+    report a pair no document ever had, and an oracle may not have that defect
+    while asserting the tool does not.
+    """
+    return await _until(lambda: _live_pair(iid), (url, title))
+
+
+async def _live_pair(iid: str) -> tuple[str, str]:
+    raw = await eval_js(iid, "JSON.stringify([location.href, document.title])")
+    try:
+        url, page_title = json.loads(raw)
+    except (TypeError, ValueError) as exc:  # not the JSON it was asked for
+        raise AssertionError(
+            "the page did not answer the live read with the JSON it was asked "
+            f"for (got {type(raw).__name__}, "
+            f"{len(raw) if isinstance(raw, str) else 0} chars)"
+        ) from exc
+    return str(url), str(page_title)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -201,18 +243,58 @@ async def test_a_document_replaced_before_load_answers_about_the_replacement(
 # ═══════════════════════════════════════════════════════════════════════════
 # (b) `<meta http-equiv="refresh" content="0;url=…">`
 # ═══════════════════════════════════════════════════════════════════════════
+def _meta_refresh_states(origin: str) -> tuple[tuple[str, str], ...]:
+    """Every ``(url, title)`` a truthful tool may answer with on this shape.
+
+    THREE, because the refresh is scheduled at the first document's ``load`` —
+    the milestone ``navigate`` returns on — so the tool's one atomic read can
+    land on any of them and each is a whole document at one instant:
+
+    1. the meta-refresh document, which has no ``<title>`` of its own;
+    2. the landing COMMITTED but still parsing, so ``location.href`` has moved
+       and ``document.title`` is not filled in yet — F-882d, and the state that
+       failed CI (run 35175574635, Linux/X64) while the product was right;
+    3. the landing, parsed.
+
+    What is NOT here is the pairing F-882 actually caught: the FIRST document's
+    url with the landing's title. The set excludes that and every other pair
+    naming the first document's url with a title it never had. It cannot
+    exclude a "landing url + first document's title" mix on this fixture, and
+    says so rather than claiming otherwise — the meta-refresh document is
+    untitled, so that mix IS state 2 and no oracle built on these two pages can
+    tell them apart. What state 2 costs, named rather than hidden: this node no
+    longer rejects a title read that is always empty. Nodes (a), (d), (e), (g)
+    and (h) each assert an exact NON-empty title, so that coverage lives there
+    and is not weakened by anything here. Exported as a table
+    rather than written into the assertion because ``tests/test_navigate_
+    milestone.py`` drives the product into state 2 hermetically and checks the
+    answer against this set — a state the product can reach and this oracle does
+    not name is the defect that keeps recurring here.
+    """
+    first = f"{origin}/nav/meta-refresh"
+    landing = f"{origin}/nav/landing?from=meta-refresh"
+    return ((first, ""), (landing, ""), (landing, fr.NAV_LANDING_TITLE))
+
+
 async def test_a_meta_refresh_answers_about_a_real_document_either_side_of_it(
     instance, fixture_origin_pair
 ):
     """Measured: a ``meta refresh`` document DOES reach ``load`` (22.8 ms) and
-    only then schedules its replacement (23.5 ms), so which of the two documents
-    is current when the wait ends is a genuine race on a loaded runner. Both
-    answers are truthful; a MIXED answer — one document's url with the other's
-    title — is not, and is exactly what this node caught: two ``tab.evaluate``
+    only then schedules its replacement (23.5 ms), so WHERE the page is when the
+    wait ends is a genuine race on a loaded runner — and it has three sides, not
+    two (F-882d). A MIXED answer — one document's url with the other's title —
+    is not among them, and is exactly what this node caught: two ``tab.evaluate``
     round trips straddled the refresh and reported
     ``{'url': '…/nav/meta-refresh', 'title': 'Nav Landing'}``, a record no
-    document ever had. The landing is ONE round trip now. The server-side ledger
-    proves the refresh really happened either way."""
+    document ever had. The landing is ONE round trip now, so every answer the
+    tool can give is a snapshot of ONE document — see ``_meta_refresh_states``.
+
+    Naming the third side is not the same as accepting it: a bare
+    ``(landing, "")`` would also be what a BROKEN title read answers. So the two
+    independent oracles run either way — the server saw both documents fetched,
+    and the page itself, read through a different tool, ends on the landing WITH
+    its title. The tool answering mid-transition is then a fact about when it
+    looked, not a fact about a document that never existed."""
     origin_a, _ = fixture_origin_pair
     await reset_fixture_ledger(origin_a)
 
@@ -220,15 +302,18 @@ async def test_a_meta_refresh_answers_about_a_real_document_either_side_of_it(
 
     assert result["success"] is True
     assert spent < PROMPT_SECONDS
-    assert (result["url"].endswith("/nav/meta-refresh"), result["title"]) in (
-        (True, ""),
-        (False, fr.NAV_LANDING_TITLE),
-    ), result
-    # The refresh really happened. Awaited, not read once: the arm above that
-    # answers about the FIRST document is truthful at an instant when the
-    # landing has not been asked for yet (``_await_fetched``).
+    assert (result["url"], result["title"]) in _meta_refresh_states(origin_a), result
+    # Oracle 1: the refresh really happened. Awaited, not read once — the arm
+    # that answers about the FIRST document is truthful at an instant when the
+    # landing has not been asked for yet (``_until``).
     expected = ["/nav/meta-refresh", "/nav/landing?from=meta-refresh"]
     assert await _await_fetched(origin_a, expected) == expected
+    # Oracle 2: whichever side it answered on, the page really does end on the
+    # landing carrying its title. This is what makes the mid-transition state
+    # acceptable rather than indistinguishable from a title read that is broken.
+    landing = f"{origin_a}/nav/landing?from=meta-refresh"
+    settled = await _await_live(instance, landing, fr.NAV_LANDING_TITLE)
+    assert settled == (landing, fr.NAV_LANDING_TITLE)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

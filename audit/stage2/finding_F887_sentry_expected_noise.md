@@ -467,10 +467,13 @@ touch), `vulture`, `check_suppression_owners.py`, `check_file_budgets.py`,
    `Tool.run`, moves it, or wraps it in a decorator that inserts a frame, the
    adjacency breaks and the 466 events come back. That resolves toward SHIPPING,
    which is the right direction and is the only reason this is a residual rather
-   than a defect — but nothing announces it, and the alternative discriminator
-   ("no frame from our package") was rejected because it drops any third-party
-   `ValidationError` under that logger instead. There is no version pin on the
-   frame names.
+   than a defect. The alternative discriminator ("no frame from our package")
+   was rejected because it drops any third-party `ValidationError` under that
+   logger instead. Two things bound the exposure: `pyproject.toml` pins fastmcp
+   and pydantic EXACTLY, so the frame names cannot move under a lockfile-faithful
+   install; and the argument-validation test drives the real `Tool.run`, so the
+   commit that bumps either dependency turns it red — the break is announced,
+   not silent (re-review of aa81073).
 4. **`client-disconnect`'s message-only arm is wider than its name**, and the
    width is real: ANY text-free exception at `mcp.server.lowlevel.server` is
    dropped, a bare `RuntimeError()` from our own session handling included (§3,

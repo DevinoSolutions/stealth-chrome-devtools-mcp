@@ -603,3 +603,59 @@ async def test_networkidle_still_keys_to_the_first_commit(monkeypatch, manager):
     # code made rather than a shape that never arose.
     tab.deliver_supersession()
     assert tab.url == LANDING
+
+
+# ── F-882d: the state between the milestone and the landing read ────────────
+async def test_a_commit_after_the_milestone_answers_a_committed_untitled_page():
+    """The meta-refresh shape has a THIRD truthful answer, and the E2E oracle
+    must name it (F-882d).
+
+    The refresh is scheduled at the first document's ``load`` — the milestone
+    the wait returns on — so the replacement can commit in the gap between the
+    wait ending and the landing read. ``location.href`` has moved; the new
+    document has not parsed its ``<title>`` yet. That pair is ONE document at
+    ONE instant, which is all the product ever promised: the read is a single
+    round trip (F-882), so it cannot be mixing two.
+
+    Driven through ``navigation_milestone``'s own two calls in the order the
+    race produces, with the replacement HELD so the gap is the test's and not
+    the host scheduler's. One difference from Chrome to keep in mind before
+    building another pin on this: the fake ties a title to the ``load`` it has
+    been given, while Chrome's is set by the PARSER — so a real document has a
+    title well before ``load`` and in general by ``DOMContentLoaded``. What is
+    modelled here is only the window this state needs, committed-and-untitled;
+    a pin about ``domcontentloaded`` would need the fake to grow a parser-time
+    title rather than reading this one as evidence about DCL. CI hit this for real on 2026-09-16 — run 35175574635
+    (release-gate integration, Linux/X64) failed the E2E node with
+    ``assert (False, '') in ((True, ''), (False, 'Nav Landing'))`` — while the
+    product was right; what was wrong was a set of accepted states with two
+    members. The last assertion is why this pin lives here rather than in a
+    table of its own: it reads the E2E node's OWN set, so a state the product
+    can reach and that oracle does not name fails hermetically, on every lane,
+    instead of once in a while on one cell.
+    """
+    # The E2E node's urls, so its table can be asked about this exact answer.
+    # Imported in the body: that module is integration-marked and nothing here
+    # should pull its helpers at collection time.
+    import test_e2e_navigation_truthfulness as e2e_nav
+
+    origin = "https://fake.test"
+    first = f"{origin}/nav/meta-refresh"
+    landing = f"{origin}/nav/landing?from=meta-refresh"
+    tab = FakeTab(
+        url=first,
+        lifecycle="after",
+        supersede_after="load",
+        supersede_held=True,
+        supersede_last_milestone="init",  # it COMMITS and gets no further
+        supersede_url=landing,
+        title_after_supersede="Nav Landing",
+        title_at_load="",
+    )
+
+    await navigation_milestone.navigate(tab, first, "load", budget_seconds=5.0)
+    tab.deliver_supersession()  # the landing commits, still parsing
+    answered = await navigation_milestone.landing(tab)
+
+    assert answered == (landing, "")
+    assert answered in e2e_nav._meta_refresh_states(origin), answered

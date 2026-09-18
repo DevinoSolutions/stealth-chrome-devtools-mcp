@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Fixed — F-882d: the meta-refresh node named two of that shape's three truthful states
+
+The third sibling of F-882b and F-882c, in the same node, and again not a
+product defect. A `meta refresh` is scheduled at the first document's `load`,
+which is the milestone `navigate` returns on, so the replacement can commit in
+the gap between the wait ending and the post-navigation read: `location.href`
+has moved to the landing while the landing has not parsed its `<title>` yet.
+That pair is one document at one instant — the read has been a single round trip
+since F-882 — and the node rejected it. Measured: CI run 35175574635 job
+105056426121 (release-gate integration, Linux/X64) failed with
+`assert (False, '') in ((True, ''), (False, 'Nav Landing'))`.
+
+The accepted pairs come from `_meta_refresh_states` now, which names all three
+and still excludes every mix of two documents. Naming the third state does not
+weaken the node: it proves the refresh was fetched, and that the page ENDS on
+the landing carrying its title, read through `execute_script` in one round trip,
+so a mid-transition answer cannot be confused with a broken title read. A
+hermetic pin in `tests/test_navigate_milestone.py` drives the product into that
+state deterministically with a held supersession and asserts its answer is in
+the E2E node's own set — so an unnamed state fails on every lane instead of once
+in a while on one cell. No `src/` change.
+
 ### Fixed — F-887: Sentry drowned by expected events (client disconnects, CDP/navigation budgets, caller input, proactor and nodriver teardown noise)
 
 Triaged live on 2026-09-18 against release 2.1.8, the project's Sentry for the
