@@ -1,5 +1,65 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — F-887: Sentry drowned by expected events (client disconnects, CDP/navigation budgets, caller input, proactor and nodriver teardown noise)
+
+Triaged live on 2026-09-18 against release 2.1.8, the project's Sentry for the
+previous seven days was almost entirely this product working as designed. Six
+shapes, ~13 700 events:
+
+| events | shape |
+|---|---|
+| 6 500 | the bare message `Received exception from stream: ` on `mcp.server.lowlevel.server`, with no exception values at all |
+| 6 200 | `starlette.requests.ClientDisconnect`, raised inside `request.body()` under `streamable_http._handle_post_request` |
+| 466 | pydantic `ValidationError` for `call[spawn_browser]` — callers sending `window_width=` at a tool whose parameters are `viewport_width`/`viewport_height` |
+| 231 | `ConnectionResetError` `[WinError 10054]` from CPython's own `_ProactorBasePipeTransport._call_connection_lost` |
+| 151 | `ConnectionRefusedError` out of nodriver's unawaited `Browser.update_targets()`, after its Chrome had already gone |
+| 140+ | `ToolError: CDP operation timed out` and `ToolError: Navigation to … timed out`, spread over ~20 separate issues because the instance uuid is in the message |
+
+Every one of them had already been ANSWERED before it was logged: the
+disconnected client is gone, the bounded operation's `ToolError` reached the
+caller, FastMCP replied to the caller with the validation message, and the two
+teardown races belong to CPython and to nodriver. What they cost is the only
+thing Sentry is for — an issue list a maintainer can read. Step 0 of the one
+`before_send` was written for exactly this and could not see them: its rule was
+"drop only when EVERY exception in the chain is our `ToolError`", and a chain
+the product produces is `ToolError` <- `TimeoutError` <- `CancelledError`
+(`asyncio.wait_for` cancels the coroutine it gave up on and raises from that
+cancellation), which is three links and only one of them ours.
+
+The taxonomy is now a module of its own, `expected_events.py`, with five named
+classes and one consumer (`observability._expected_event_class`, step 0). Each
+class is ONE rule, and every rule is read through a `Link` — a type NAME plus a
+MODULE, spelled the way the SDK spells them — so the live path (`hint`) and the
+serialized-payload path cannot drift apart. `error-convention` needs at least
+one link of ours and tolerates `TimeoutError`/`asyncio.CancelledError` beside it,
+never alone: a `TimeoutError` nobody converted is a place the error convention is
+missing, which is a finding and not noise.
+
+What still ships, and why each was made a test: a `ToolError` raised while
+handling an `AttributeError` (the historical `navigate` bug, which arrived on the
+very logger the noise arrives on); `ToolError: Failed to spawn browser` over
+nodriver's plain `Exception`; a bare `TimeoutError` or `CancelledError` with no
+`ToolError` over it; F-883's `InvalidStateError` from nodriver's listener, fixed
+in 2.1.9 and wanted loudly if it returns; nodriver's `ProtocolException`; a
+`ConnectionResetError` from anywhere but that one CPython callback; an unawaited
+task of OURS with the same exception type nodriver's has (the rule requires
+`nodriver` in the message); a `ValidationError` from any logger but FastMCP's
+tool manager; F-827's `capture_lifecycle` proxy messages; and the sibling of the
+6 500 — `Received exception from stream: Received response with an unknown
+request ID: … Method not found`, 2 events, which is why that message is matched
+by EQUALITY and never as a prefix (a `ClientDisconnect` formats to the empty
+string, measured, so the noisy form's tail is empty).
+
+`observability.py` keeps the two event shapes and the never-raises contract and
+loses the taxonomy: 614 -> 515 LOC. The new leaf is 361 LOC, stdlib only, and
+takes the exception chain and the error base as arguments, so the lazy
+`tool_errors` import stays single-homed. The measurement trail — how sdk 2.64.0
+serialises each class, why `builtins` arrives as `module: None`, and the CPython
+and mcp-SDK source lines the two message rules cite — is in
+`audit/stage2/finding_F887_sentry_expected_noise.md`.
+
 ## 2.1.9
 
 ### Fixed — F-885: proxy/backend-death tests touched the developer's live `~/.stealth-mcp` record
