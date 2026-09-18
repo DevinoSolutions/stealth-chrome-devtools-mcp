@@ -326,6 +326,53 @@ assertions still read once, because each asserts on a fetch the tool's own
 answer proves already happened; the classification is argued in that helper's
 docstring.
 
+**F-882d — the same node named two of the shape's three truthful states.**
+Run **35175574635** job **105056426121** (release-gate integration, Linux/X64;
+it also failed once on macOS/ARM64 on the lifecycle branch the same day and
+passed on rerun, so it is a race and not a platform):
+
+```
+E   AssertionError: {'success': True, 'title': '', 'url': 'http://127.0.0.1:46849/nav/landing?from=meta-refresh'}
+E   assert (False, '') in ((True, ''), (False, 'Nav Landing'))
+```
+
+The refresh is scheduled at the FIRST document's `load`, which is the milestone
+the wait returns on, so the replacement can commit in the gap between the wait
+ending and `landing()`. `location.href` has moved to the landing; the landing
+has not parsed its `<title>` yet. **This is not §2f's mixed pair coming back**:
+that was two `tab.evaluate` round trips straddling the refresh, and `landing()`
+has been ONE round trip since §3 — the pair is one document at one instant, and
+the product is right. The oracle named two states where the shape has three.
+
+Reproduced hermetically and deterministically rather than by waiting for CI
+again: `tests/test_navigate_milestone.py` drives `navigation_milestone.navigate`
+then `landing` against a `FakeTab` whose replacement is HELD
+(`supersede_held=True`, `supersede_last_milestone="init"`: it commits and gets
+no further) and delivers it between the two calls. Put to main's oracle
+expression verbatim, the product's own answer fails it with the CI text exactly:
+`assert (False, '') in ((True, ''), (False, 'Nav Landing'))`. Thirty live
+navigations of the same shape on a warm Windows box answered `landed` 30/30, so
+the window is real but far too narrow to catch by repetition — which is why the
+pin is built on the fake and not on Chrome.
+
+The E2E node now reads its accepted pairs from `_meta_refresh_states`, which
+names all three and excludes the mix this finding actually caught — the FIRST
+document's url with the landing's title — along with every other pair naming
+that url with a title it never had. It does **not** exclude a "landing url +
+first document's title" mix, and the docstring says so instead of claiming a
+guarantee it cannot give: the meta-refresh fixture document is untitled, so
+that mix IS state 2 and these two pages cannot distinguish them. The cost of
+naming state 2 is also named: this node no longer rejects a title read that is
+always empty, and that coverage lives in nodes (a), (d), (e), (g) and (h),
+each of which asserts an exact non-empty title. The hermetic pin
+asserts the product's answer is IN that set — so a state the product can reach
+and the oracle does not name fails on every lane rather than once in a while on
+one cell. Naming the third state does not weaken the node: it still proves the
+refresh was fetched (`_await_fetched`) and that the page ENDS on the landing
+carrying its title, read through `execute_script` in one round trip
+(`_await_live`), so a mid-transition answer is a fact about when the tool looked
+and not indistinguishable from a broken title read.
+
 ---
 
 ## 5. Blast radius (what a caller saw)
