@@ -124,6 +124,7 @@ class TestNavMapModules:
         "server",
         "settings",
         "observability",
+        "expected_events",
         "__main__",
     ]
     # Tombstones: the docs say these are GONE; if one comes back the tombstone lies.

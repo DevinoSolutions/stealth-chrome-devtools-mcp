@@ -24,6 +24,102 @@ state deterministically with a held supersession and asserts its answer is in
 the E2E node's own set — so an unnamed state fails on every lane instead of once
 in a while on one cell. No `src/` change.
 
+### Fixed — F-887: Sentry drowned by expected events (client disconnects, CDP/navigation budgets, caller input, proactor and nodriver teardown noise)
+
+Triaged live on 2026-09-18 against release 2.1.8, the project's Sentry for the
+previous seven days was almost entirely this product working as designed. Six
+shapes, ~13 700 events:
+
+| events | shape |
+|---|---|
+| 6 500 | the bare message `Received exception from stream: ` on `mcp.server.lowlevel.server`, with no exception values at all |
+| 6 200 | `starlette.requests.ClientDisconnect`, raised inside `request.body()` under `streamable_http._handle_post_request` |
+| 466 | pydantic `ValidationError` for `call[spawn_browser]` — callers sending `window_width=` at a tool whose parameters are `viewport_width`/`viewport_height` |
+| 231 | `ConnectionResetError` `[WinError 10054]` from CPython's own `_ProactorBasePipeTransport._call_connection_lost` |
+| 151 | `ConnectionRefusedError` out of nodriver's unawaited `Browser.update_targets()`, after its Chrome had already gone |
+| 140+ | `ToolError: CDP operation timed out` and `ToolError: Navigation to … timed out`, spread over ~20 separate issues because the instance uuid is in the message |
+
+Every one of them had already been ANSWERED before it was logged: the
+disconnected client is gone, the bounded operation's `ToolError` reached the
+caller, FastMCP replied to the caller with the validation message, and the two
+teardown races belong to CPython and to nodriver. What they cost is the only
+thing Sentry is for — an issue list a maintainer can read. Step 0 of the one
+`before_send` was written for exactly this and could not see them: its rule was
+"drop only when EVERY exception in the chain is our `ToolError`", and a chain
+the product produces is `ToolError` <- `TimeoutError` <- `CancelledError`
+(`asyncio.wait_for` cancels the coroutine it gave up on and raises from that
+cancellation), which is three links and only one of them ours.
+
+The taxonomy is now a module of its own, `expected_events.py`, with five named
+classes and one consumer (`observability._expected_event_class`, step 0). Each
+class is ONE rule, and every rule is read through a `Link` — a type NAME, a
+MODULE and the FRAMES, each spelled the way the SDK spells them — so the live
+path (`hint`) and the serialized-payload path cannot drift apart. Three of those
+spellings are read out of `sentry_sdk/utils.py` rather than guessed, because all
+three differ from the obvious Python answer: `type` is `__qualname__` (so a
+class declared inside a function serializes as `outer.<locals>.Name`), `module`
+omits `builtins` but **not** `__main__` (and `embedded/server.py` runs as
+`__main__` under runpy), and the serialized chain lists the ROOT cause first
+where a live `__cause__` walk starts from the reported exception. `Link` is
+normalized to outermost-first so a positional rule means one thing on both paths.
+
+Two rules are narrower than the shape they describe, and both narrowings are the
+whole point. `error-convention` requires the OUTERMOST link to be ours: the
+conversion is always the last raise in a real budget chain, so a `TimeoutError`
+that is itself the reported exception is a cleanup path that timed out
+unconverted — the missing-convention case — even when a `ToolError` sits behind
+it. And `caller-input` requires the outermost link's frames to carry
+`fastmcp.tools.tool` `run` directly above `pydantic.type_adapter`
+`validate_python`. The logger alone cannot serve there:
+`fastmcp/tools/tool_manager.py` wraps `await tool.run(arguments)` in ONE `try`
+and `tool.py`'s `type_adapter.validate_python` is INSIDE that `run`, so a
+caller's bad kwarg and a `ValidationError` our own code raised produce a
+byte-identical logger, message and chain. Measured, a logger-only rule dropped
+both of these: the crash from an unknown `STEALTH_MCP_*` key (which makes
+`Settings()` raise and fails EVERY spawn, since `get_settings()` is on the spawn
+path) and `browser_manager.py`'s `BrowserInstance(...)` with a wrong field type.
+The frames do separate them, identically on both paths — a body of ours always
+sits between those two.
+
+One rule is deliberately WIDER than its name, and now says so. The message-only
+`client-disconnect` arm matches "an exception with no text at
+`mcp.server.lowlevel.server`", not "a `ClientDisconnect`": mcp's line 707 is a
+`case Exception():` catch-all formatting `str(exc)` with no `exc_info`, so a bare
+`RuntimeError()` from our own session handling produces the same event and is
+dropped with the 6 500. That event carries no exception values, no frames and no
+extra, so there is nothing else in it to read; the trade is taken deliberately
+and pinned.
+
+What still ships, and why each was made a test: a `ToolError` raised while
+handling an `AttributeError` (the historical `navigate` bug, which arrived on the
+very logger the noise arrives on); an unconverted outermost `TimeoutError`;
+`ToolError: Failed to spawn browser` over nodriver's plain `Exception`; a bare
+`TimeoutError` or `CancelledError`; a `__main__`-defined class merely NAMED
+`TimeoutError`; F-883's `InvalidStateError` from nodriver's listener, fixed in
+2.1.9 and wanted loudly if it returns; nodriver's `ProtocolException`; a
+`ConnectionResetError` from anywhere but that one CPython callback; an unawaited
+task of OURS with the same exception type nodriver's has (the rule requires
+`nodriver` in the message); our own pydantic `ValidationError` under FastMCP's
+own logger, in three shapes; F-827's `capture_lifecycle` proxy messages; and the
+sibling of the 6 500 — `Received exception from stream: Received response with an
+unknown request ID: … Method not found`, 2 events, which is why that message is
+matched by EQUALITY and never as a prefix.
+
+Every drop is now recorded: `_is_expected_tool_failure` logs the class that
+recognised the event at DEBUG, so an unexpected fall in Sentry volume traces to
+one rule rather than to "the filter".
+
+`observability.py` keeps the two event shapes and the never-raises contract and
+loses the taxonomy, but its docstrings grew by more than the taxonomy weighed:
+613 → 616 physical lines (521 → 527 non-blank). The new leaf is 610 physical
+(507 non-blank), stdlib only, and takes the exception chain and the error base as
+arguments, so the lazy `tool_errors` import stays single-homed. Both are under
+the 1000-line budget and neither is grandfathered. The measurement trail — how
+sdk 2.64.0 serialises each class, the three spelling rules above, and the CPython
+and mcp-SDK source lines the message rules cite — is in
+`audit/stage2/finding_F887_sentry_expected_noise.md`.
+
+
 ### Added — F-888: persistent named profiles and CDP re-attach after a backend restart
 
 A backend that died took its browsers' logins with it. On 2026-09-18 a backend
