@@ -36,10 +36,14 @@ scheme, host and path — is deliberately left intact. The redaction is TARGETED
 for that reason: a message replaced wholesale is an issue nobody can act on,
 which is a slower way of turning reporting off.
 
-The same hook is also the one place that decides an event is not worth sending:
-a failure raised through the project's own error CONVENTION
-(``embedded/tool_errors.py``) is the product working as designed, not a crash.
-See :func:`_is_expected_tool_failure`.
+The same hook is also the one place that decides an event is not worth sending
+— see :func:`_is_expected_tool_failure`. WHICH events those are is not decided
+here: the taxonomy lives in :mod:`stealth_chrome_devtools_mcp.expected_events`
+(F-887), whose five named classes cover the error convention doing its job, a
+client that went away mid-request, a caller's own bad parameter, and the two
+teardown races CPython and nodriver log on our behalf. This module owns the two
+shapes an event can arrive in — the live exception behind a ``hint`` and the
+serialized payload — and hands both to that one rule set.
 """
 
 import importlib.metadata
@@ -48,6 +52,7 @@ import re
 from functools import cache
 from typing import TYPE_CHECKING, cast
 
+from stealth_chrome_devtools_mcp import expected_events
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 if TYPE_CHECKING:  # the SDK is imported lazily at runtime; this is a type only
@@ -270,18 +275,6 @@ def _anonymize(value: object, depth: int = 0) -> object:
     return value
 
 
-#: The tool-surface classes that mean "expected failure", by NAME. Used only by
-#: the payload fallback below; the live-object path uses ``isinstance`` instead.
-#: Deliberately an explicit allowlist rather than "anything from our package":
-#: this decides what is never seen again, so it names what it drops.
-_EXPECTED_ERROR_NAMES = frozenset({"ToolError", "InstanceNotFoundError"})
-
-#: A name alone is not enough. ``fastmcp.exceptions.ToolError`` is a DIFFERENT
-#: class with the same name, and it is what wraps a genuine crash on its way out
-#: of ``tool_manager`` (``raise ToolError(...) from e``) — matching on the bare
-#: name would drop exactly the real bugs this filter exists to preserve.
-_EXPECTED_ERROR_MODULE_PREFIX = "stealth_chrome_devtools_mcp"
-
 #: ``sys.exc_info()``'s shape — ``(type, value, traceback)``.
 _EXC_INFO_LENGTH = 3
 
@@ -360,76 +353,82 @@ def _hint_exception(hint: "dict[str, object] | None") -> "BaseException | None":
     return None
 
 
-def _is_expected_tool_failure(
+def _expected_event_class(
     event: "Event", hint: "dict[str, object] | None" = None
-) -> bool:
-    """Is this event nothing but the error convention doing its job?
+) -> "str | None":
+    """Which of :mod:`expected_events`' named classes this event is, if any.
 
-    Tools report an expected failure by RAISING ``tool_errors.ToolError`` (a bad
-    script, a missing instance, an unknown selector) — CLAUDE.md convention 2.
-    FastMCP logs every raising tool through ``logger.exception``, so the logging
-    integration turns each of those into a Sentry ERROR event with
-    ``handled: yes``. The top issues in the project's Sentry were all of them:
-    205 events of an agent passing an illegal script to ``execute_script``. That
-    is the product answering correctly, and it drowns the events that are not.
+    THE binding between this module's two event shapes and that one rule set
+    (F-887). It reads the live exception the SDK may have attached, walks it into
+    a chain, and hands chain + event to :func:`expected_events.classify`; when
+    there is no live exception the classifier reads the serialized payload
+    instead, and both paths are judged by the same rules.
 
-    Two paths to the same decision, and the SAME rule:
+    ``_expected_error_base()`` is resolved ONLY when there is a live chain to use
+    it on. That laziness is the point of the cache: ``cli.py`` imports this
+    module at startup and importing ``embedded.tool_errors`` fires the
+    ``embedded`` package's ``sys.path`` shim, which an ops-CLI process that never
+    ships an event should not pay for — and a message-only event has no live
+    exception for an ``isinstance`` to be about.
 
-    * ``hint`` carries the live exception → ``isinstance``, which is exact and
-      picks up subclasses raised anywhere;
-    * only the serialized payload is available → the exception ``type`` name must
-      be in :data:`_EXPECTED_ERROR_NAMES` *and* its ``module`` must be ours.
-
-    **Drops only when EVERY exception in the chain is one of ours.** A
-    ``ToolError`` raised while handling an ``AttributeError`` keeps the event:
-    the real bug is in there, and this filter must never be the reason nobody
-    saw it. That is also why a broken logger name is not the test — the
-    ``AttributeError`` in ``navigate`` that this project actually shipped
-    arrived through ``FastMCP.fastmcp.tools.tool_manager``, the very logger the
-    noise arrives on, so ``ignore_logger`` on it would have hidden a real bug.
-
-    Never raises: an event it cannot classify is an event it sends.
+    Never raises: an event it cannot classify is an event it sends, so a failure
+    here answers ``None``.
     """
     try:
         exception = _hint_exception(hint)
-        if exception is not None:
-            base = _expected_error_base()
-            if base is not None:
-                return all(
-                    isinstance(link, base) for link in _exception_chain(exception)
-                )
-        return _payload_is_expected_tool_failure(event)
+        chain = _exception_chain(exception) if exception is not None else None
+        return expected_events.classify(
+            event,
+            chain=chain,
+            error_base=_expected_error_base() if chain else None,
+        )
     except Exception:  # noqa: BLE001  PERMANENT(never-raises contract, #55)
-        _log.debug("Sentry expected-failure check failed; shipping", exc_info=True)
-        return False
+        _log.debug("Sentry expected-event check failed; shipping", exc_info=True)
+        return None
 
 
-def _payload_is_expected_tool_failure(event: "Event") -> bool:
-    """The name-and-module rule, applied to a serialized event's exception values.
+def _is_expected_tool_failure(
+    event: "Event", hint: "dict[str, object] | None" = None
+) -> bool:
+    """Is this event nothing but this product working as designed?
 
-    Every value must match, and an event with no exception values at all does
-    not match: "nothing to classify" is not "expected", or a message-only event
-    would be silently dropped.
+    Step 0's predicate, and the one thing :func:`_scrub_event` asks. It started
+    as "every exception in the chain is our ``tool_errors.ToolError``" — the
+    error convention doing its job (CLAUDE.md convention 2), which FastMCP logs
+    through ``logger.exception`` so the logging integration turns each one into
+    an ERROR event with ``handled: yes``. The top issue in the project's Sentry
+    was 205 events of an agent passing an illegal script to ``execute_script``.
+
+    F-887 widened it to the five classes :mod:`expected_events` names, because
+    that first rule missed the chains this product actually produces — 6.5k
+    client disconnects, 466 caller-parameter validation errors, a bounded
+    operation's own ``TimeoutError`` under its ``ToolError``. The name is the one
+    the existing pins call this by; the taxonomy it now asks is
+    ``expected_events``'.
+
+    **Nothing is dropped on a partial match.** A ``ToolError`` raised while
+    handling an ``AttributeError`` keeps the event: the real bug is in there, and
+    this filter must never be the reason nobody saw it. That is also why a logger
+    name alone is never the test — the ``AttributeError`` in ``navigate`` that
+    this project actually shipped arrived through
+    ``FastMCP.fastmcp.tools.tool_manager``, the very logger the noise arrives on,
+    so ``ignore_logger`` on it would have hidden a real bug. Where a rule DOES
+    name a logger it names an exception kind beside it, never the logger alone —
+    and ``caller-input``, whose logger carries our own bugs as well as callers'
+    typos, names the FRAME PAIR that separates them.
+
+    The class that recognised the event is logged at DEBUG, which is what makes
+    "a drop is attributable" true of a running process rather than only of the
+    suite: an unexpected fall in Sentry volume traces to one rule. DEBUG for the
+    same reason the failure paths in :func:`_scrub_event` are — the logging
+    integration turns INFO into breadcrumbs and ERROR into events, and an event
+    raised while deciding about an event is how a reporting loop starts.
     """
-    if not isinstance(event, dict):
+    expected = _expected_event_class(event, hint)
+    if expected is None:
         return False
-    exception = event.get("exception")
-    values = exception.get("values") if isinstance(exception, dict) else None
-    if not isinstance(values, list) or not values:
-        return False
-    return all(_value_is_expected_tool_failure(value) for value in values)
-
-
-def _value_is_expected_tool_failure(value: object) -> bool:
-    """One serialized exception: ours by name AND by module, or it is not ours."""
-    if not isinstance(value, dict):
-        return False
-    module = value.get("module")
-    return (
-        value.get("type") in _EXPECTED_ERROR_NAMES
-        and isinstance(module, str)
-        and module.startswith(_EXPECTED_ERROR_MODULE_PREFIX)
-    )
+    _log.debug("Sentry event dropped as expected noise: %s", expected)
+    return True
 
 
 def _scrub_event(
@@ -440,8 +439,9 @@ def _scrub_event(
     THE one hook (there is no second ``before_send``; a second way to change an
     outgoing event is a defect). It does two things in order:
 
-    0. an event that is only the error convention working as designed is dropped
-       — see :func:`_is_expected_tool_failure`;
+    0. an event that is only this product working as designed is dropped — see
+       :func:`_is_expected_tool_failure` and the five named classes in
+       :mod:`expected_events`;
     1. everything that survives is scrubbed.
 
     Four removals, all universal — there is no maintainer-only path:
@@ -454,7 +454,10 @@ def _scrub_event(
     Step 0 runs FIRST and that ordering is load-bearing in both directions: an
     expected ``ToolError`` is dropped whole, page content and all, so the rules
     below never have to be the last line of defence for it — and equally, they
-    only ever run on the events that survived, so nothing is scrubbed twice.
+    only ever run on the events that survived, so nothing is scrubbed twice. It
+    is also why step 0 reads the message as the SDK logged it: two of
+    ``expected_events``' classes are decided from that text, and after step 1 a
+    path inside it would already have been rewritten.
 
     Never raises. The only event it drops is the one it positively recognised in
     step 0; an event we could not fully scrub, or could not classify, is still
