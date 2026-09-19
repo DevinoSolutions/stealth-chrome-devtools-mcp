@@ -44,6 +44,17 @@ class _ProtocolBrowserManager(FakeBrowserManager):
     async def close_all(self) -> None:
         """No-op: nothing to close on a fake manager."""
 
+    def _run_in_background(self, coro, name: str):
+        """What ``browser_reattach.start`` hands its fire-and-forget pass to.
+
+        The lifespan drives the F-888 adoption pass through this, so a fake that
+        lacks it fails the CLIENT CONNECT — the whole point of this node is that
+        the real transport boots. The coroutine is closed rather than scheduled:
+        the pass reads a record and opens CDP connections, neither of which a
+        protocol-surface test has any business doing.
+        """
+        coro.close()
+
 
 async def test_list_instances_via_protocol_matches_seam(patched_server):
     """Happy path through the protocol layer equals the known seam result.

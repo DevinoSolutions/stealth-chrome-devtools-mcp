@@ -105,6 +105,35 @@ async def spawn_browser(
             Only set this when the user has EXPLICITLY asked for a persistent/named profile:
             a named profile is NOT auto-cleaned and persists on disk indefinitely, so treat
             creating one as a deliberate, space-consuming action. Do not invent names.
+            THIS PARAMETER IS THE PERSISTENT-PROFILE OPTION — there is no separate
+            ``profile=``. A named profile (a bare name or an absolute path) is never
+            deleted by close_instance, by the clone GC, by `cleanup --apply` or by
+            `kill-orphans`, and since F-888 its BROWSER survives the backend too: a
+            backend that stops, restarts, heals or crashes leaves such a browser
+            RUNNING, and it is RE-ATTACHED to over CDP rather than replaced, so a
+            human's logged-in session is not lost. Two paths reach it and you need
+            neither by name: a new backend adopts the browsers it finds recorded
+            at its own startup (same instance_id as before), and spawning with a
+            user_data_dir a live browser still holds re-attaches to THAT browser
+            instead of walking to a sibling directory. Either way the answer
+            carries ``spawn_diagnostics["reattached"]: true`` plus the holder's
+            pid, and the page is the one that was already open — not a fresh tab
+            on the same cookies. So to recover a logged-in browser whose backend
+            died, just spawn with the same user_data_dir. On that path the
+            arguments that describe a LAUNCH cannot apply to a browser already
+            running: headless, user_agent, viewport, proxy, browser_args,
+            timezone_id and extra_headers are IGNORED rather than refused, and the
+            ones you passed are listed in
+            ``spawn_diagnostics["ignored_spawn_args"]`` — refusing over a viewport
+            would send the spawn to a different directory and lose the login.
+            ``block_resources`` IS applied. What the dead backend held and nobody
+            can read back off a running browser is named in
+            ``spawn_diagnostics["not_restored"]``. The one case that refuses is a
+            browser some OTHER LIVE backend still owns (two backends driving one
+            Chrome is a defect); you get a normal spawn plus
+            ``spawn_diagnostics["reattach_declined"]`` saying so, and the old
+            browser is left running and untouched — stop that backend first, see
+            RUNBOOK, "Recover a stranded login".
         sandbox (Optional[Any]): Enable browser sandbox. Accepts bool, string ('true'/'false'), int (1/0), or None for auto-detect.
 
     Network interception captures request/response metadata by default, but
@@ -135,13 +164,48 @@ async def spawn_browser(
             "launch it there instead (F-810). Start the backend from a desktop session "
             "or pass headless=True; `stealth-chrome-devtools doctor` lists the contexts."
         )
+    # Outside the try because the handler READS it: a spawn that fails onto a
+    # held directory owes the caller the reason the re-attach was not taken.
+    held = rt.browser_reattach.Held()
     try:
-        if sandbox is None:
-            sandbox = not (is_running_as_root() or is_running_in_container())
-        elif isinstance(sandbox, str):
-            sandbox = sandbox.lower() in ("true", "1", "yes", "on", "enabled")
-        elif isinstance(sandbox, int) or not isinstance(sandbox, bool):
-            sandbox = bool(sandbox)
+        # What the CALLER passed, captured before the resolution below turns an
+        # unset `sandbox` into a real bool. `ignored_spawn_args` reports the
+        # arguments a caller gave that a running browser cannot be given, and a
+        # field whose docstring says "the ones you passed" has to be true of the
+        # one argument this handler fills in for them — it named `sandbox` on
+        # every single re-attach, which devalues the field for the args that
+        # matter (F-888 re-review M-new-3).
+        requested_sandbox = sandbox
+        sandbox = _resolved_sandbox(sandbox)
+
+        # BEFORE profile selection, because selection is where F-871's walk to
+        # <name>-2 happens: a live browser already holding the requested profile
+        # is RE-ATTACHED to rather than walked away from (F-888). The browser
+        # this exists for has no registry entry at all — its owner backend died
+        # and the successor rewrote the record without it — so the directory the
+        # caller just named is the only thing that still finds it. Answers an
+        # empty `Held` for every other case, including a live sibling backend's
+        # browser, and never raises: an adoption that cannot happen costs this
+        # spawn nothing but the reason it reports.
+        if user_data_dir:
+            held = await rt.browser_reattach.adopt_held_profile(
+                rt.browser_manager,
+                rt.process_cleanup,
+                user_data_dir,
+                ignored_args=_launch_only_args(
+                    headless=headless,
+                    user_agent=user_agent,
+                    viewport_width=viewport_width,
+                    viewport_height=viewport_height,
+                    proxy=proxy,
+                    browser_args=browser_args,
+                    timezone_id=timezone_id,
+                    extra_headers=extra_headers,
+                    sandbox=requested_sandbox,
+                ),
+            )
+            if held.instance_id:
+                return await _adopted_instance_record(held.instance_id, block_resources)
 
         profile_selection = await rt.clone_storage.resolve_profile_selection(
             user_data_dir
@@ -205,6 +269,12 @@ async def spawn_browser(
             spawn_diagnostics["profile_selection"] = (
                 rt.clone_storage._public_profile_selection(profile_selection)
             )
+            if held.declined:
+                # A live browser held the directory and we spawned anyway: the
+                # caller is owed the reason, beside the walk it caused, because
+                # the browser they were reaching for is STILL RUNNING and this
+                # tool deliberately did not kill it (F-888).
+                spawn_diagnostics["reattach_declined"] = held.declined
             if spawn_errors:
                 spawn_diagnostics["profile_selection"]["spawn_retries"] = spawn_errors
             if profile_selection.get("profile_role") == "explicit":
@@ -237,7 +307,110 @@ async def spawn_browser(
             "spawn_diagnostics": spawn_diagnostics or {},
         }
     except Exception as e:
-        raise ToolError(f"Failed to spawn browser: {e!s}")
+        # A spawn that failed onto a directory a live browser HOLDS is the one
+        # failure where the remedy is not "try again": that browser is still
+        # running and still has the login, and why we did not take it over is the
+        # only useful thing to say (F-888). Without this the caller gets the bare
+        # launch failure and no hint that the thing they asked for exists.
+        raise ToolError(
+            f"Failed to spawn browser: {e!s}"
+            + (
+                f" The re-attach was not taken: {held.declined}."
+                if held.declined
+                else ""
+            )
+        )
+
+
+def _launch_only_args(**passed: Any) -> list[str]:
+    """The spawn arguments a RUNNING browser cannot be given (F-888).
+
+    Every one of these describes how Chrome is LAUNCHED — its command line, its
+    window, the proxy it dials through — and a browser that is already running
+    was launched without them. They are REPORTED, never refused: refusing a
+    re-attach because the caller also passed a viewport would send the spawn to
+    F-871's walk and lose the login the re-attach exists to save.
+
+    Only what differs from the tool's own default is named, because a caller who
+    passed nothing asked for nothing. ``block_resources`` is deliberately absent
+    — interception IS re-established on the adopted tab — and so are
+    ``user_data_dir`` (which is how we found the browser) and
+    ``idle_timeout_seconds`` (which the manager applies afterwards, not at
+    launch).
+    """
+    defaults: dict[str, Any] = {
+        "headless": False,
+        "user_agent": None,
+        "viewport_width": 1920,
+        "viewport_height": 1080,
+        "proxy": None,
+        "browser_args": None,
+        "timezone_id": None,
+        "extra_headers": None,
+        "sandbox": None,
+    }
+    # Compared against the DEFAULT, never tested for truthiness: `sandbox=False`
+    # is the one value of that argument a caller would bother to pass, and a
+    # truthiness guard dropped exactly it while reporting the resolved `True`
+    # nobody asked for. An empty list or dict is "passed nothing" and is the one
+    # falsy shape that still reads as unset.
+    return sorted(
+        name
+        for name, value in passed.items()
+        if value != defaults.get(name, object()) and value not in ([], {})
+    )
+
+
+def _resolved_sandbox(sandbox: Any | None) -> bool:
+    """The caller's ``sandbox`` as the bool the launch needs.
+
+    Unset means "decide for me", and the decision is the one Chrome forces:
+    running as root or inside a container, the sandbox cannot be had. Everything
+    else is a caller who said something — including the strings an MCP client
+    sends for a boolean — and is read literally. Extracted from ``spawn_browser``
+    only because the body is at its statement cap; the ladder is unchanged.
+    """
+    if sandbox is None:
+        return not (is_running_as_root() or is_running_in_container())
+    if isinstance(sandbox, str):
+        return sandbox.lower() in ("true", "1", "yes", "on", "enabled")
+    return bool(sandbox)
+
+
+async def _adopted_instance_record(
+    instance_id: str, block_resources: list[str] | None
+) -> dict[str, Any]:
+    """``spawn_browser``'s answer for a browser it re-attached to (F-888).
+
+    The SAME five keys a spawn returns, because from the caller's side nothing
+    else is different: they asked for a browser on that profile and they have
+    one. What tells them it was not launched now is
+    ``spawn_diagnostics["reattached"]``, set at the adoption site.
+
+    Interception is set up here for the same reason the spawn path does it: an
+    adopted tab has none of this backend's handlers on it, so a caller passing
+    ``block_resources`` to a spawn that adopted would otherwise be silently
+    ignored.
+    """
+    data = await rt.browser_manager.get_instance(instance_id)
+    if not data:
+        raise ToolError(
+            f"Re-attached instance {instance_id} vanished before it could be reported"
+        )
+    instance = data["instance"]
+    tab = await rt.browser_manager.get_tab(instance_id)
+    if tab:
+        await rt.network_interceptor.setup_interception(
+            tab, instance_id, block_resources
+        )
+    return {
+        "instance_id": instance_id,
+        "state": instance.state,
+        "headless": instance.headless,
+        "viewport": instance.viewport,
+        "spawn_diagnostics": await rt.browser_manager.get_spawn_diagnostics(instance_id)
+        or {},
+    }
 
 
 async def _live_instance_record(inst: "BrowserInstance") -> dict[str, Any]:

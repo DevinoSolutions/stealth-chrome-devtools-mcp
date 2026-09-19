@@ -647,9 +647,13 @@ def _cmd_kill_orphans(args) -> int:
     "backend gone, browsers orphaned" — a clean behavioral partition.
 
     `--force` overrides the guard, and is passed THROUGH to the reaper rather
-    than merely getting past the gate. Since plan_F808 Task 10 the reaper spares
-    entries a live backend still owns, which would otherwise have made
-    `--force` a no-op against exactly the wedged backend it exists for.
+    than merely getting past the gate. The reaper has THREE spares now and
+    `--force` skips all of them: the live-backend refusal above, the per-entry
+    ownership check (plan_F808 Task 10 — without the pass-through, `--force`
+    would be a no-op against exactly the wedged backend it exists for), and
+    F-888's persistent-profile spare. That last one is why `--force` is the only
+    verb left that can still end a human's logged-in browser: every other path
+    now re-attaches to it instead.
     """
     _server()
     from stealth_chrome_devtools_mcp.embedded import process_cleanup, singleton
