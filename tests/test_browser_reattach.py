@@ -25,6 +25,7 @@ pinned for SHAPE only, by reading the config nodriver would have been handed.
 
 import asyncio
 import json
+import socket
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -32,8 +33,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fakes import FakeBrowser, FakeTab
+from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
+    browser_reattach,
+    cdp_attach,
+    desktop_launch,
+)
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
-from stealth_chrome_devtools_mcp.embedded import browser_reattach, desktop_launch
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
@@ -236,10 +242,13 @@ class TestOnePersistencePredicate:
 class TestAdoptionRule:
     """Four conditions, and each one alone is enough to refuse."""
 
-    def _adoptable(self, entries):
+    def _classified(self, entries):
         return browser_reattach.adoptable(
             entries, owner_alive=_owner_alive, browser_alive=_browser_alive
         )
+
+    def _adoptable(self, entries):
+        return self._classified(entries).adoptable
 
     def test_a_dead_owners_persistent_running_browser_is_adoptable(self):
         found = self._adoptable({"i-1": _entry()})
@@ -266,7 +275,7 @@ class TestAdoptionRule:
         told to skip it — otherwise it can be neither adopted nor reaped and
         leaks forever."""
         entry = _entry(cdp_port=None, user_data_dir=str(tmp_path / "empty"))
-        with patch.object(browser_reattach, "_port_from_cmdline", return_value=None):
+        with patch.object(browser_cmdline, "debug_port", return_value=None):
             assert self._adoptable({"i-1": entry}) == {}
 
     def test_one_bad_entry_does_not_lose_the_others(self):
@@ -274,6 +283,30 @@ class TestAdoptionRule:
         other candidate is still found."""
         found = self._adoptable({"bad": {"pid": "not-an-int"}, "i-1": _entry()})
         assert set(found) == {"i-1"}
+
+    def test_an_unclassifiable_entry_is_spared_and_never_adopted(self):
+        """F-888 review M1. The two answers are separate on purpose: an entry the
+        rule could not reason about must not be reaped (it may be a human's
+        logged-in Chrome) AND must not be attached to (we understood nothing
+        about it). It used to be a bare ``contextlib.suppress``, which dropped it
+        out of the spared set entirely and let recovery kill it in silence.
+        """
+        boom = MagicMock()
+        boom.get.side_effect = RuntimeError("unreadable")
+        classified = self._classified({"boom": boom, "i-1": _entry()})
+        assert classified.unclassifiable == {"boom"}
+        assert set(classified.adoptable) == {"i-1"}
+        assert classified.spare == {"boom", "i-1"}
+
+    def test_a_recorded_browser_with_no_create_time_is_not_adopted(self):
+        """F-888 review M4. Reaping tolerates a missing create_time — skipping a
+        recycled pid only leaks — but ADOPTION would take over a stranger's
+        chrome.exe holding that pid, stamp our ownership on it and kill it at
+        close_instance. Both halves of the identity, or the holder path instead.
+        """
+        entry = _entry()
+        entry["create_time"] = None
+        assert self._adoptable({"i-1": entry}) == {}
 
 
 class TestEndpointLadder:
@@ -290,7 +323,7 @@ class TestEndpointLadder:
     def test_then_the_command_line(self, tmp_path):
         """Second rung: definitionally the live process's own port."""
         entry = _entry(user_data_dir=str(tmp_path / "gone"), cdp_port=None)
-        with patch.object(browser_reattach, "_port_from_cmdline", return_value=8123):
+        with patch.object(browser_cmdline, "debug_port", return_value=8123):
             assert browser_reattach.endpoint(entry) == 8123
 
     def test_the_command_line_outranks_chromes_file(self, tmp_path):
@@ -300,7 +333,7 @@ class TestEndpointLadder:
         profile.mkdir()
         (profile / browser_reattach.DEVTOOLS_PORT_FILE).write_text("9999\n/devtools/x")
         entry = _entry(user_data_dir=str(profile), cdp_port=None)
-        with patch.object(browser_reattach, "_port_from_cmdline", return_value=8123):
+        with patch.object(browser_cmdline, "debug_port", return_value=8123):
             assert browser_reattach.endpoint(entry) == 8123
 
     def test_a_legacy_entry_falls_back_to_chromes_own_file(self, tmp_path):
@@ -308,7 +341,7 @@ class TestEndpointLadder:
         ``--remote-debugging-port=0`` has a command line that names no usable
         port, and the file is where Chrome wrote the one it resolved that to.
 
-        ``_port_from_cmdline`` is patched rather than left to the real process
+        ``browser_cmdline.debug_port`` is patched rather than left to the real process
         table — the recorded pid is a literal, and on a busy machine it may name
         a real process whose command line would decide this assertion.
         """
@@ -318,7 +351,7 @@ class TestEndpointLadder:
             "9999\n/devtools/browser/abc\n"
         )
         entry = _entry(user_data_dir=str(profile), cdp_port=None)
-        with patch.object(browser_reattach, "_port_from_cmdline", return_value=None):
+        with patch.object(browser_cmdline, "debug_port", return_value=None):
             assert browser_reattach.endpoint(entry) == 9999
 
     @pytest.mark.parametrize("cmdline_port", ["0", "70000", "nonsense", ""])
@@ -329,7 +362,7 @@ class TestEndpointLadder:
         profile.mkdir()
         (profile / browser_reattach.DEVTOOLS_PORT_FILE).write_text(cmdline_port)
         entry = _entry(user_data_dir=str(profile), cdp_port=None)
-        with patch.object(browser_reattach, "_port_from_cmdline", return_value=None):
+        with patch.object(browser_cmdline, "debug_port", return_value=None):
             assert browser_reattach.endpoint(entry) is None
 
     def test_a_hand_edited_boolean_is_not_port_one(self):
@@ -344,11 +377,11 @@ class TestEndpointLadder:
             (["chrome", "--headless"], None),
         ):
             with patch.object(
-                browser_reattach.psutil,
+                browser_cmdline.psutil,
                 "Process",
                 return_value=SimpleNamespace(cmdline=lambda c=cmdline: c),
             ):
-                assert browser_reattach._port_from_cmdline(CHROME_PID) == expected
+                assert browser_cmdline.debug_port(CHROME_PID) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -464,21 +497,33 @@ def _adoptable_record(profile="C:/profiles/seller-central"):
     )
 
 
+def _classified(**adoptable):
+    """What ``adoptable_for`` answers: two sets, never a bare dict."""
+    return browser_reattach.Classified(adoptable=adoptable, unclassifiable=set())
+
+
 class TestManagerAdoption:
     @pytest.fixture
     def manager(self):
         return BrowserManager()
 
     @pytest.fixture
-    def cleanup(self):
+    def cleanup(self, tmp_path):
         """The ProcessCleanup the pass takes as an ARGUMENT.
 
         A double rather than the real thing, because every call the pass makes on
         it writes: ``track_browser_process`` re-stamps the record and
         ``_drop_recorded`` rewrites it. Passing it in is the whole point of the
         seam — nothing here can reach the developer's live ``~/.stealth-mcp``.
+
+        ``pid_file`` is a REAL tmp_path file, because the claim taken before the
+        door is a real locked read-merge-write and stubbing it out would leave
+        the one thing that makes adoption safe between processes unexercised.
         """
-        return MagicMock()
+        double = MagicMock()
+        double.pid_file = tmp_path / "browser_pids.json"
+        double._owner_backend_alive.return_value = False
+        return double
 
     @pytest.mark.asyncio
     async def test_the_client_keeps_its_instance_id_and_gets_the_live_page(
@@ -497,12 +542,12 @@ class TestManagerAdoption:
         candidate = _adoptable_record()
 
         with (
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(cdp_attach, "attach", return_value=browser),
             patch.object(
-                browser_reattach, "attach_config", return_value=SimpleNamespace()
-            ),
-            patch.object(browser_reattach, "attach", return_value=browser),
-            patch.object(
-                browser_reattach, "adoptable_for", return_value={"i-kept": candidate}
+                browser_reattach,
+                "adoptable_for",
+                return_value=_classified(**{"i-kept": candidate}),
             ),
         ):
             adopted = await browser_reattach.run(manager, cleanup)
@@ -526,14 +571,12 @@ class TestManagerAdoption:
         browser = FakeBrowser(alive=None, pid=CHROME_PID, main_tab=tab)
 
         with (
-            patch.object(
-                browser_reattach, "attach_config", return_value=SimpleNamespace()
-            ),
-            patch.object(browser_reattach, "attach", return_value=browser),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(cdp_attach, "attach", return_value=browser),
             patch.object(
                 browser_reattach,
                 "adoptable_for",
-                return_value={"i-kept": _adoptable_record()},
+                return_value=_classified(**{"i-kept": _adoptable_record()}),
             ),
         ):
             await browser_reattach.run(manager, cleanup)
@@ -551,16 +594,14 @@ class TestManagerAdoption:
         The reap is handed the two keys that spare the DIRECTORY, so the login is
         still on disk for the next spawn."""
         with (
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
             patch.object(
-                browser_reattach, "attach_config", return_value=SimpleNamespace()
-            ),
-            patch.object(
-                browser_reattach, "attach", side_effect=ConnectionRefusedError("no")
+                cdp_attach, "attach", side_effect=ConnectionRefusedError("no")
             ),
             patch.object(
                 browser_reattach,
                 "adoptable_for",
-                return_value={"i-kept": _adoptable_record()},
+                return_value=_classified(**{"i-kept": _adoptable_record()}),
             ),
             patch.object(browser_reattach, "reap_recorded") as reap,
         ):
@@ -576,18 +617,22 @@ class TestManagerAdoption:
     @pytest.mark.asyncio
     async def test_an_attached_browser_with_no_tab_is_refused(self, manager, cleanup):
         """Half an instance is worse than none: a tool body must never find an
-        instance whose tab is None."""
+        instance with no usable tab.
+
+        The refusal is on the shape nodriver ACTUALLY produces — ``main_tab`` is
+        ``sorted(self.targets, …)[0]``, so an attached browser with no targets
+        raises ``IndexError`` and never answers None (F-888 review L2, and the
+        fake raises to match).
+        """
         browser = FakeBrowser(alive=None, pid=CHROME_PID, main_tab=None)
 
         with (
-            patch.object(
-                browser_reattach, "attach_config", return_value=SimpleNamespace()
-            ),
-            patch.object(browser_reattach, "attach", return_value=browser),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(cdp_attach, "attach", return_value=browser),
             patch.object(
                 browser_reattach,
                 "adoptable_for",
-                return_value={"i-kept": _adoptable_record()},
+                return_value=_classified(**{"i-kept": _adoptable_record()}),
             ),
             patch.object(browser_reattach, "reap_recorded"),
         ):
@@ -604,11 +649,11 @@ class TestManagerAdoption:
         manager._instances["i-kept"] = {"browser": object(), "tab": object()}
 
         with (
-            patch.object(browser_reattach, "attach") as attach,
+            patch.object(cdp_attach, "attach") as attach,
             patch.object(
                 browser_reattach,
                 "adoptable_for",
-                return_value={"i-kept": _adoptable_record()},
+                return_value=_classified(**{"i-kept": _adoptable_record()}),
             ),
         ):
             adopted = await browser_reattach.run(manager, cleanup)
@@ -627,14 +672,12 @@ class TestManagerAdoption:
 
         with (
             patch.object(browser_reattach, "ATTACH_BUDGET_SECONDS", 0.05),
-            patch.object(
-                browser_reattach, "attach_config", return_value=SimpleNamespace()
-            ),
-            patch.object(browser_reattach, "attach", side_effect=_never),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(cdp_attach, "attach", side_effect=_never),
             patch.object(
                 browser_reattach,
                 "adoptable_for",
-                return_value={"i-kept": _adoptable_record()},
+                return_value=_classified(**{"i-kept": _adoptable_record()}),
             ),
             patch.object(browser_reattach, "reap_recorded") as reap,
         ):
@@ -676,8 +719,29 @@ class TestHeldProfileAdoption:
 
     HELD = r"C:\Users\x\AppData\Local\amazon-buy-bot\seller-central-profile"
 
-    def _held(self, *, entries=None, hold_pid=CHROME_PID, cmdline_port=9223):
-        """`held_by` with both witnesses injected and the process table faked."""
+    def _browser_argv(self):
+        return [
+            "chrome.exe",
+            f"--user-data-dir={self.HELD}",
+            "--remote-debugging-port=9223",
+        ]
+
+    def _child_argv(self, kind="renderer"):
+        """A CHILD of that browser: same profile, a ``--type``, and — measured on
+        Chrome 153 — the debugging port too for a renderer, which is why the
+        port cannot be the thing that identifies the browser."""
+        return [*self._browser_argv(), f"--type={kind}"]
+
+    def _held(
+        self, *, entries=None, hold_pid=CHROME_PID, cmdline_port=9223, table=None
+    ):
+        """`held_by` with every witness injected and the process table faked.
+
+        *table* is the live process tree on that profile, pid -> argv. The
+        default is one browser process, which is what the simple pins want; a
+        pin about WHICH member gets adopted supplies its own.
+        """
+        table = table if table is not None else {CHROME_PID: self._browser_argv()}
         hold = (
             SimpleNamespace(pid=hold_pid, reason="process")
             if hold_pid is not None
@@ -689,14 +753,16 @@ class TestHeldProfileAdoption:
                 return_value=hold,
             ),
             patch.object(
-                browser_reattach, "_port_from_cmdline", return_value=cmdline_port
+                browser_cmdline, "arguments", side_effect=lambda pid: table.get(pid, [])
             ),
+            patch.object(browser_cmdline, "debug_port", return_value=cmdline_port),
+            patch.object(browser_cmdline, "dead_local_proxy", return_value=None),
         ):
             return browser_reattach.held_by(
                 self.HELD,
                 read_entries=lambda: entries if entries is not None else {},
                 owner_alive=_owner_alive,
-                live_pids=None,
+                live_pids=lambda _dir: set(table),
                 new_instance_id="i-new",
             )
 
@@ -720,25 +786,55 @@ class TestHeldProfileAdoption:
                 return_value=SimpleNamespace(pid=CHROME_PID, reason="process"),
             ),
             patch.object(
-                browser_reattach.psutil,
+                browser_cmdline.psutil,
                 "Process",
-                return_value=SimpleNamespace(
-                    cmdline=lambda: [
-                        "chrome.exe",
-                        f"--user-data-dir={self.HELD}",
-                        "--remote-debugging-port=9223",
-                    ]
-                ),
+                return_value=SimpleNamespace(cmdline=self._browser_argv),
             ),
         ):
             found = browser_reattach.held_by(
                 self.HELD,
                 read_entries=dict,
                 owner_alive=_owner_alive,
-                live_pids=None,
+                live_pids=lambda _dir: {CHROME_PID},
                 new_instance_id="i-new",
             )
         assert found is not None and found.port == 9223
+
+    def test_the_browser_is_adopted_when_the_witness_names_a_child(self):
+        """MEASURED, on a real spawn: eleven processes on one profile — the
+        browser, six renderers, two utilities, a gpu-process and a
+        crashpad-handler — and ``profile_hold``'s witness is a SET, so the pid it
+        reports is whichever member iterated first.
+
+        Adopting that member would be wrong in two ways at once: a ``utility``
+        child carries no ``--remote-debugging-port`` at all (so the adoption
+        declined, and did it silently), and a ``renderer`` DOES carry one (so it
+        would have been adopted, stamped onto ``Browser._process_pid``, discarded
+        by the manager the moment that renderer recycled, and killed instead of
+        the browser by ``close_instance``). The browser is the process with no
+        ``--type``, and nothing else.
+        """
+        renderer, utility = 41001, 41002
+        found = self._held(
+            hold_pid=utility,
+            table={
+                utility: self._child_argv("utility"),
+                renderer: self._child_argv("renderer"),
+                CHROME_PID: self._browser_argv(),
+            },
+        )
+        assert found is not None
+        assert found.pid == CHROME_PID, (
+            "adoption must target the browser process, not whichever member of "
+            "its process tree the holding witness happened to name"
+        )
+
+    def test_a_tree_with_no_browser_process_refuses_with_a_reason(self):
+        """Every member has a ``--type``, so none of them is the browser. There
+        is nothing safe to attach to and the caller must be TOLD — this is a live
+        browser that was left alone, not an empty directory."""
+        with pytest.raises(browser_reattach.Refused, match="the browser itself"):
+            self._held(hold_pid=41002, table={41002: self._child_argv("gpu-process")})
 
     def test_a_dead_owners_entry_donates_its_instance_id(self):
         """When the record DOES still name it, the client's id is preserved
@@ -748,18 +844,212 @@ class TestHeldProfileAdoption:
 
     def test_a_live_backends_browser_is_never_taken(self):
         """F-886 from the other side. The refusal is `is_reapable`, the same one
-        `run` asks, so the two entry points cannot disagree."""
-        assert self._held(entries={"theirs": _entry(owner_pid=LIVE_OWNER)}) is None
+        `run` asks, so the two entry points cannot disagree.
+
+        It RAISES rather than answering None, and the distinction is what the
+        caller reports: every other None here means "an ordinary spawn, nothing
+        to say", while this one means "your browser is alive, we did not touch
+        it, and the remedy is to stop that backend".
+        """
+        with pytest.raises(browser_reattach.Refused, match="already owns the browser"):
+            self._held(entries={"theirs": _entry(owner_pid=LIVE_OWNER)})
 
     def test_nothing_holding_the_directory_is_not_adoptable(self):
         """The ordinary case by far: the caller gets a normal spawn."""
         assert self._held(hold_pid=None) is None
 
-    def test_a_holder_we_cannot_name_a_port_for_is_not_adoptable(self):
-        """Windows' bare ``lockfile`` witness yields no pid, and a holder with no
-        recoverable port has nothing to attach to. Either way: spawn instead."""
-        assert self._held(cmdline_port=None) is None
+    def test_a_holder_we_cannot_name_a_port_for_refuses_with_a_reason(self):
+        """A browser IS there and we cannot get in. The spawn still goes ahead —
+        this path never reaps — but "no endpoint" must not arrive at the caller
+        as the same silence "nothing holds this directory" produces: the whole
+        point of the decline is to tell an operator that the login they were
+        reaching for is still running."""
+        with pytest.raises(browser_reattach.Refused, match="no CDP endpoint"):
+            self._held(cmdline_port=None)
+
+    def test_a_witness_with_no_pid_at_all_is_not_adoptable(self):
+        """Windows' bare ``lockfile`` names nothing, so there is no process to
+        read and nothing to report beyond an ordinary spawn."""
         assert self._held(hold_pid=None, cmdline_port=9223) is None
+
+
+def _held_candidate(instance_id="i-held", profile="C:/p"):
+    return browser_reattach.Adoptable(
+        instance_id=instance_id, pid=CHROME_PID, user_data_dir=profile, port=9223
+    )
+
+
+def _spawn_cleanup(tmp_path, name="browser_pids.json"):
+    """A cleanup double whose record is real — the claim is not stubbed out."""
+    double = MagicMock()
+    double.pid_file = tmp_path / name
+    double._owner_backend_alive.return_value = False
+    return double
+
+
+class TestWhatTheCommandLineSays:
+    """The leaf that reads a live process's argv, which for a browser whose
+    backend is gone is the only description of it left."""
+
+    def _with_cmdline(self, *args):
+        return patch.object(
+            browser_cmdline.psutil,
+            "Process",
+            return_value=SimpleNamespace(cmdline=lambda: list(args)),
+        )
+
+    def test_headless_is_measured_not_assumed(self):
+        """F-888 review M2: an adopted instance used to report the model's
+        ``headless=False`` default about a browser this backend never launched."""
+        with self._with_cmdline("chrome", "--headless=new"):
+            assert browser_cmdline.is_headless(CHROME_PID) is True
+        with self._with_cmdline("chrome", "--headless"):
+            assert browser_cmdline.is_headless(CHROME_PID) is True
+        with self._with_cmdline("chrome", "--remote-debugging-port=1"):
+            assert browser_cmdline.is_headless(CHROME_PID) is False
+
+    def test_a_port_is_joined_to_the_profile_it_was_launched_on(self):
+        """F-888 review M4's other half: "a Chrome holds this pid" and "this pid
+        names a port" were independent, so a RECYCLED pid on a stranger's
+        chrome.exe would have donated that stranger's debugging port."""
+        with self._with_cmdline(
+            "chrome", r"--user-data-dir=C:\other", "--remote-debugging-port=9223"
+        ):
+            assert browser_cmdline.debug_port(CHROME_PID, r"C:\ours") is None
+            assert browser_cmdline.debug_port(CHROME_PID, r"c:\other\\") == 9223
+
+    def test_a_remote_proxy_is_never_judged(self):
+        """It was not tied to the dead backend's lifetime, and connect-probing a
+        stranger's host is not this tool's business."""
+        with self._with_cmdline("chrome", "--proxy-server=http://proxy.example:8080"):
+            assert browser_cmdline.dead_local_proxy(CHROME_PID) is None
+
+    def test_a_loopback_proxy_nothing_answers_on_is_reported(self):
+        """F-888 review M3. The authenticated forwarder lives INSIDE the backend,
+        so it dies with it while the launch arg lives on — an adopted browser can
+        come back with every navigation failing at a closed local port."""
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            dead_port = taken.getsockname()[1]
+        with self._with_cmdline("chrome", f"--proxy-server=127.0.0.1:{dead_port}"):
+            assert (
+                browser_cmdline.dead_local_proxy(CHROME_PID) == f"127.0.0.1:{dead_port}"
+            )
+
+    def test_a_loopback_proxy_that_is_still_up_is_not_reported(self):
+        """The test is a CONNECT, not the presence of the flag: a caller may run
+        their own local proxy, and warning about a working one would be a lie."""
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            live_port = listener.getsockname()[1]
+            with self._with_cmdline("chrome", f"--proxy-server=127.0.0.1:{live_port}"):
+                assert browser_cmdline.dead_local_proxy(CHROME_PID) is None
+
+
+class TestAnAdoptedInstanceTellsTheTruth:
+    """F-888 review M2. What ``_build_instance`` fills in from OPTIONS is a
+    request nobody made here — the process that launched this browser is gone."""
+
+    async def _adopt(self, tmp_path, tab, *, headless=False, dead_egress=None):
+        manager = BrowserManager()
+        browser = FakeBrowser(alive=None, pid=CHROME_PID, main_tab=tab)
+        # `dead_egress` rides on the CANDIDATE, because that is where the real
+        # `held_by` puts it and this pin patches `held_by` out.
+        candidate = browser_reattach.Adoptable(
+            instance_id="i-held",
+            pid=CHROME_PID,
+            user_data_dir="C:/p",
+            port=9223,
+            dead_egress=dead_egress,
+        )
+        with (
+            patch.object(browser_reattach, "held_by", return_value=candidate),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(cdp_attach, "attach", return_value=browser),
+            patch.object(browser_cmdline, "is_headless", return_value=headless),
+        ):
+            held = await browser_reattach.adopt_held_profile(
+                manager, _spawn_cleanup(tmp_path), "C:/p"
+            )
+        return manager, held
+
+    @pytest.mark.asyncio
+    async def test_headless_comes_off_the_holders_command_line(self, tmp_path):
+        manager, held = await self._adopt(tmp_path, FakeTab(), headless=True)
+        assert manager._instances[held.instance_id]["instance"].headless is True
+
+    @pytest.mark.asyncio
+    async def test_the_window_is_measured_and_never_resized(self, tmp_path):
+        """``apply_and_measure`` would SET the size first, which for a browser we
+        did not launch means resizing a human's open window to a default they
+        never asked for."""
+        tab = FakeTab()
+        with patch.object(
+            browser_reattach.window_sizing, "measure", return_value={"w": 1}
+        ) as measure:
+            manager, held = await self._adopt(tmp_path, tab)
+        assert measure.call_count == 1
+        assert manager._spawn_diagnostics[held.instance_id]["window_size"] == {
+            "actual": {"w": 1},
+            "measured": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_an_unmeasurable_window_says_so_instead_of_claiming_1920(
+        self, tmp_path
+    ):
+        tab = FakeTab()
+        with patch.object(browser_reattach.window_sizing, "measure", return_value=None):
+            manager, held = await self._adopt(tmp_path, tab)
+        assert (
+            manager._spawn_diagnostics[held.instance_id]["window_size"]["measured"]
+            is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_what_cannot_be_restored_is_named(self, tmp_path):
+        """Per-instance state that lived in the backend that died. Interception
+        and dynamic hooks are deliberately NOT in this list — both are
+        re-established on the adopted tab."""
+        manager, held = await self._adopt(tmp_path, FakeTab())
+        not_restored = manager._spawn_diagnostics[held.instance_id]["not_restored"]
+        assert set(not_restored) == {
+            "extra_headers",
+            "timezone_id",
+            "user_agent",
+            "proxy",
+        }
+        assert "block_resources" not in not_restored
+
+    @pytest.mark.asyncio
+    async def test_the_adopted_tab_gets_this_backends_hooks(self, tmp_path):
+        """Exactly what a spawn does: an adopted tab carries none of THIS
+        backend's handlers, so a hook created against it would be registered and
+        never fire."""
+        tab = FakeTab()
+        with patch.object(
+            BrowserManager, "_setup_dynamic_hooks", return_value=True
+        ) as hooks:
+            _manager, held = await self._adopt(tmp_path, tab)
+        assert hooks.call_count == 1
+        assert hooks.call_args.args[0] is tab
+        assert hooks.call_args.args[1] == held.instance_id
+
+    @pytest.mark.asyncio
+    async def test_a_dead_egress_proxy_is_adopted_but_stamped(self, tmp_path):
+        """F-888 review M3, decided: ADOPT and say so. Refusing would convert a
+        recoverable logged-in browser into a reap on the record path — this
+        finding's own harm — while a browser whose page loads fail at a closed
+        local port is at least still reachable, closable and re-spawnable."""
+        manager, held = await self._adopt(
+            tmp_path, FakeTab(), dead_egress="127.0.0.1:1"
+        )
+        assert held.instance_id is not None
+        assert (
+            manager._spawn_diagnostics[held.instance_id]["dead_egress_proxy"]
+            == "127.0.0.1:1"
+        )
 
 
 class TestHeldAdoptionNeverReaps:
@@ -767,27 +1057,22 @@ class TestHeldAdoptionNeverReaps:
     asked for this browser, so a failed attach must never kill it."""
 
     @pytest.mark.asyncio
-    async def test_a_failed_attach_spawns_instead_and_kills_nothing(self):
+    async def test_a_failed_attach_spawns_instead_and_kills_nothing(self, tmp_path):
         manager = BrowserManager()
-        cleanup = MagicMock()
-        candidate = browser_reattach.Adoptable(
-            instance_id="i-held", pid=CHROME_PID, user_data_dir="C:/p", port=9223
-        )
+        cleanup = _spawn_cleanup(tmp_path)
         with (
-            patch.object(browser_reattach, "held_by", return_value=candidate),
+            patch.object(browser_reattach, "held_by", return_value=_held_candidate()),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
             patch.object(
-                browser_reattach, "attach_config", return_value=SimpleNamespace()
-            ),
-            patch.object(
-                browser_reattach, "attach", side_effect=ConnectionRefusedError("no")
+                cdp_attach, "attach", side_effect=ConnectionRefusedError("no")
             ),
             patch.object(browser_reattach, "reap_recorded") as reap,
         ):
-            adopted = await browser_reattach.adopt_held_profile(
-                manager, cleanup, "C:/p"
-            )
+            held = await browser_reattach.adopt_held_profile(manager, cleanup, "C:/p")
 
-        assert adopted is None, "a failed adoption must fall through to the spawn"
+        assert held.instance_id is None, (
+            "a failed adoption must fall through to the spawn"
+        )
         assert reap.call_count == 0, (
             "the caller's own logged-in browser must never be reaped by the path "
             "that was trying to reach it"
@@ -795,27 +1080,175 @@ class TestHeldAdoptionNeverReaps:
         assert cleanup._drop_recorded.call_count == 0
 
     @pytest.mark.asyncio
-    async def test_a_successful_adoption_answers_with_the_instance_id(self):
-        manager = BrowserManager()
-        cleanup = MagicMock()
-        tab = FakeTab(url="https://sellercentral.amazon.com/home")
-        browser = FakeBrowser(alive=None, pid=CHROME_PID, main_tab=tab)
-        candidate = browser_reattach.Adoptable(
-            instance_id="i-held", pid=CHROME_PID, user_data_dir="C:/p", port=9223
-        )
+    async def test_a_failed_attach_says_why_rather_than_walking_silently(
+        self, tmp_path
+    ):
+        """F-888 team-lead shape (d). The spawn proceeds onto a different
+        directory, and the caller is owed the reason: the browser they were
+        reaching for is STILL RUNNING and this path deliberately did not kill it.
+        """
         with (
-            patch.object(browser_reattach, "held_by", return_value=candidate),
+            patch.object(browser_reattach, "held_by", return_value=_held_candidate()),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
             patch.object(
-                browser_reattach, "attach_config", return_value=SimpleNamespace()
+                cdp_attach, "attach", side_effect=ConnectionRefusedError("no")
             ),
-            patch.object(browser_reattach, "attach", return_value=browser),
         ):
-            adopted = await browser_reattach.adopt_held_profile(
-                manager, cleanup, "C:/p"
+            held = await browser_reattach.adopt_held_profile(
+                BrowserManager(), _spawn_cleanup(tmp_path), "C:/p"
             )
 
-        assert adopted == "i-held"
-        assert manager._spawn_diagnostics["i-held"]["reattached"] is True
+        assert held.instance_id is None
+        assert str(CHROME_PID) in held.declined
+        assert "9223" in held.declined
+        assert "left running and untouched" in held.declined
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_spawn_has_nothing_to_declare(self, tmp_path):
+        """Nothing holds the directory: no reason, no diagnostics noise, and the
+        F-871 walk keeps exactly the shape it has today."""
+        with patch.object(browser_reattach, "held_by", return_value=None):
+            held = await browser_reattach.adopt_held_profile(
+                BrowserManager(), _spawn_cleanup(tmp_path), "C:/p"
+            )
+        assert held.instance_id is None
+        assert held.declined is None
+
+    @pytest.mark.asyncio
+    async def test_a_successful_adoption_answers_with_the_instance_id(self, tmp_path):
+        manager = BrowserManager()
+        cleanup = _spawn_cleanup(tmp_path)
+        tab = FakeTab(url="https://sellercentral.amazon.com/home")
+        browser = FakeBrowser(alive=None, pid=CHROME_PID, main_tab=tab)
+        with (
+            patch.object(browser_reattach, "held_by", return_value=_held_candidate()),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(cdp_attach, "attach", return_value=browser),
+        ):
+            held = await browser_reattach.adopt_held_profile(
+                manager, cleanup, "C:/p", ignored_args=["headless", "proxy"]
+            )
+
+        assert held.instance_id == "i-held"
+        diagnostics = manager._spawn_diagnostics["i-held"]
+        assert diagnostics["reattached"] is True
+        assert diagnostics["reattached_pid"] == CHROME_PID
+        assert diagnostics["ignored_spawn_args"] == ["headless", "proxy"]
+
+
+class TestTheCrossProcessClaim:
+    """F-888 review HIGH. Adoption is safe between PROCESSES or it is not safe:
+    an asyncio lock cannot help, because the racers are backends."""
+
+    def _candidate(self):
+        return _held_candidate(instance_id="i-fresh")
+
+    def test_the_claim_stamps_us_as_the_owner_before_the_door(self, tmp_path):
+        cleanup = _spawn_cleanup(tmp_path)
+        claimed = browser_reattach.claim(cleanup, self._candidate())
+
+        assert claimed is not None
+        entry = _read(cleanup.pid_file)[claimed.instance_id]
+        assert entry["owner_pid"] == registry.owner_identity()[0]
+        assert entry["pid"] == CHROME_PID
+        assert entry["cdp_port"] == 9223
+
+    def test_a_live_owners_browser_is_refused_inside_the_lock(self, tmp_path):
+        """The refusal is keyed on the PID, not the instance id: the id is not
+        stable across the two entry points, so two backends racing for one Chrome
+        would mint two different ids and both 'win'."""
+        cleanup = _spawn_cleanup(tmp_path)
+        cleanup._owner_backend_alive.return_value = True
+        _seed(cleanup.pid_file, {"theirs": _entry(owner_pid=LIVE_OWNER)})
+
+        assert browser_reattach.claim(cleanup, self._candidate()) is None
+        assert _read(cleanup.pid_file)["theirs"]["owner_pid"] == LIVE_OWNER
+
+    def test_a_dead_owners_entry_donates_its_instance_id(self, tmp_path):
+        """Which is how a client holding an id from before the restart keeps
+        addressing the same browser."""
+        cleanup = _spawn_cleanup(tmp_path)
+        _seed(cleanup.pid_file, {"i-was": _entry(owner_pid=DEAD_OWNER)})
+
+        claimed = browser_reattach.claim(cleanup, self._candidate())
+
+        assert claimed is not None
+        assert claimed.instance_id == "i-was"
+        assert set(_read(cleanup.pid_file)) == {"i-was"}
+
+    def test_the_second_claimant_loses_because_the_first_is_now_the_owner(
+        self, tmp_path
+    ):
+        """The two-concurrent-spawns case, and the reason the claim is what
+        answers it: after the first claim lands, the record names a LIVE owner —
+        us — so the second reads a refusal rather than opening a second
+        connection and registering one Chrome as two instances."""
+        first = _spawn_cleanup(tmp_path)
+        assert browser_reattach.claim(first, self._candidate()) is not None
+
+        second = _spawn_cleanup(tmp_path)
+        second._owner_backend_alive.return_value = True  # the first backend lives
+        assert browser_reattach.claim(second, self._candidate()) is None
+
+    def test_a_failed_adoption_hands_the_claim_back(self, tmp_path):
+        """Otherwise the record names us as the owner of a browser we do not
+        hold, which is WORSE than what we found: the next backend reads a live
+        owner and refuses to adopt a browser nobody is driving."""
+        cleanup = _spawn_cleanup(tmp_path)
+        _seed(cleanup.pid_file, {"i-was": _entry(owner_pid=DEAD_OWNER)})
+        before = registry.read_entries(cleanup.pid_file)
+
+        claimed = browser_reattach.claim(cleanup, self._candidate())
+        assert _read(cleanup.pid_file)["i-was"]["owner_pid"] != DEAD_OWNER
+
+        registry.release_claim(cleanup.pid_file, claimed)
+        assert registry.read_entries(cleanup.pid_file) == before
+
+    def test_a_claim_with_no_prior_entry_is_released_by_removal(self, tmp_path):
+        cleanup = _spawn_cleanup(tmp_path)
+        claimed = browser_reattach.claim(cleanup, self._candidate())
+        registry.release_claim(cleanup.pid_file, claimed)
+        assert _read(cleanup.pid_file) == {}
+
+    @pytest.mark.asyncio
+    async def test_the_attach_is_never_reached_when_the_claim_is_refused(
+        self, tmp_path
+    ):
+        """The order is the whole point: the claim is taken BEFORE a single byte
+        reaches Chrome, so a browser a sibling backend owns is never connected
+        to at all."""
+        cleanup = _spawn_cleanup(tmp_path)
+        cleanup._owner_backend_alive.return_value = True
+        _seed(cleanup.pid_file, {"theirs": _entry(owner_pid=LIVE_OWNER)})
+
+        with (
+            patch.object(browser_reattach, "held_by", return_value=self._candidate()),
+            patch.object(cdp_attach, "attach") as attach,
+        ):
+            held = await browser_reattach.adopt_held_profile(
+                BrowserManager(), cleanup, "C:/p"
+            )
+
+        assert attach.call_count == 0
+        assert held.instance_id is None
+        assert "already owns the browser" in held.declined
+
+    @pytest.mark.asyncio
+    async def test_a_failed_attach_releases_the_claim_on_the_record(self, tmp_path):
+        cleanup = _spawn_cleanup(tmp_path)
+        _seed(cleanup.pid_file, {"i-was": _entry(owner_pid=DEAD_OWNER)})
+        before = registry.read_entries(cleanup.pid_file)
+
+        with (
+            patch.object(browser_reattach, "held_by", return_value=self._candidate()),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(
+                cdp_attach, "attach", side_effect=ConnectionRefusedError("no")
+            ),
+        ):
+            await browser_reattach.adopt_held_profile(BrowserManager(), cleanup, "C:/p")
+
+        assert registry.read_entries(cleanup.pid_file) == before
 
 
 class TestNamedSessionDirIsNeverReclaimed:
@@ -859,18 +1292,85 @@ class TestOneDoor:
         """Setting BOTH is nodriver's ``connect_existing`` gate; the profile dir
         rides along because ``browser.config.user_data_dir`` is what the spawn
         pipeline reads back to decide profile cleanup."""
-        config = browser_reattach.attach_config(r"C:\profiles\p", PORT)
-        assert config.host == browser_reattach.CDP_HOST
+        config = cdp_attach.config_for(r"C:\profiles\p", PORT)
+        assert config.host == cdp_attach.CDP_HOST
         assert config.port == PORT
         assert str(config.user_data_dir).endswith("p")
         assert config.uses_custom_data_dir is True
 
-    def test_desktop_launch_uses_that_one_door(self):
-        """F-810's delegated launch was standing in this door first; it is now
-        this module's second consumer rather than a second door, so the two
-        cannot drift on how a running browser is entered."""
-        source = Path(desktop_launch.__file__).read_text(encoding="utf-8")
-        assert "browser_reattach.attach_config(" in source
-        assert "browser_reattach.attach(" in source
-        assert "config.host =" not in source
-        assert "uc.start(" not in source
+    def test_both_consumers_use_that_one_door(self):
+        """F-810's delegated launch was standing in this door first and F-888's
+        adoption arrived at it from the other side; neither may spell the gate
+        itself, or the two drift on how a running browser is entered."""
+        for module in (desktop_launch, browser_reattach):
+            source = Path(module.__file__).read_text(encoding="utf-8")
+            assert "cdp_attach." in source, module.__name__
+            assert "config.host =" not in source, module.__name__
+            assert "uc.start(" not in source, module.__name__
+
+    @pytest.mark.asyncio
+    async def test_an_abandoned_attach_closes_the_connection_it_opened(self):
+        """F-888 review L3. Cancelling an await never un-opens a websocket, so a
+        plain ``wait_for`` around the door leaves a live connection and a live
+        listener task on a ``Browser`` nobody references any more."""
+        opened = asyncio.Event()
+        browser = FakeBrowser(alive=None, pid=CHROME_PID, main_tab=FakeTab())
+
+        async def _slow(*_args, **_kwargs):
+            opened.set()
+            await asyncio.sleep(0.05)
+            return browser
+
+        with patch.object(cdp_attach, "attach", side_effect=_slow):
+            task = asyncio.ensure_future(
+                cdp_attach.attach_reclaiming(SimpleNamespace(), CHROME_PID)
+            )
+            await opened.wait()
+            # `wait_for` CANCELS what it bounds, which is the shape the caller
+            # has: `_adopt_one` runs under one. A shield here would cancel the
+            # test's own wrapper instead and prove nothing.
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(task, timeout=0.01)
+            # The attach the caller gave up on still completes, and what it
+            # produced is closed rather than left holding a socket.
+            await asyncio.sleep(0.2)
+
+        assert browser.connection.disconnected is True, (
+            "an abandoned attach must not leave its CDP connection open"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_adoption_path_goes_through_the_reclaiming_attach(self, tmp_path):
+        """And the caller actually USES it. The budget that bounds an adoption is
+        the one that can fire mid-attach, so a plain `attach` there would put the
+        leak back with every pin above still green."""
+        browser = FakeBrowser(alive=None, pid=CHROME_PID, main_tab=FakeTab())
+
+        async def _slow(*_args, **_kwargs):
+            await asyncio.sleep(0.6)
+            return browser
+
+        # The budget has to outlast the CLAIM — a real locked file write on a
+        # worker thread — and expire inside the ATTACH, or this pin times out
+        # before the door is ever opened and proves nothing about it.
+        with (
+            patch.object(browser_reattach, "ATTACH_BUDGET_SECONDS", 0.25),
+            patch.object(browser_reattach, "held_by", return_value=_held_candidate()),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(cdp_attach, "attach", side_effect=_slow),
+        ):
+            held = await browser_reattach.adopt_held_profile(
+                BrowserManager(), _spawn_cleanup(tmp_path), "C:/p"
+            )
+            assert held.instance_id is None
+            # The abandoned attach finishes after the caller gave up, and the
+            # closer runs after IT. Wait for the fact, not for a guessed nap —
+            # the thing under test is that it happens at all.
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 5.0
+            while not browser.connection.disconnected and loop.time() < deadline:
+                await asyncio.sleep(0.02)
+
+        assert browser.connection.disconnected is True, (
+            "the adoption timed out mid-attach and left its connection open"
+        )

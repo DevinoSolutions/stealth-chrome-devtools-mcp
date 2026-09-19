@@ -7,17 +7,28 @@ CDP door: that a second `uc.start` against a port the first backend's Chrome is
 listening on **connects to that same renderer** instead of launching a new one,
 and that the page state a human built is still there afterwards.
 
-So this node uses no double at all. It spawns a real Chrome on a real named
+So these nodes use no double at all. Each spawns a real Chrome on a real named
 profile, writes a value into the live page, then simulates the backend dying the
 only way that is honest here — dropping the manager's handle on the browser
-WITHOUT killing the process, exactly as a `TerminateProcess`d backend leaves it —
-and hands a fresh `BrowserManager` the record. What it asserts is that the
-adopted instance keeps its id and that ``window.__f888`` is still set, which is a
-claim about the RENDERER and not about the profile directory: a re-spawn onto the
-same `user_data_dir` would pass a cookie check and fail this one.
+WITHOUT killing the process, exactly as a `TerminateProcess`d backend leaves it.
+Every assertion about the page is a claim about the RENDERER and not about the
+profile directory: a re-spawn onto the same `user_data_dir` would pass a cookie
+check and fail all three.
 
-The owner in the record is a pid that is not a backend of ours, which is what the
-adoption rule needs to see. It is this process's own pid answered through a
+The three are the three shapes this finding has:
+
+1. **The record path.** A recorded browser, adopted by a fresh manager at startup
+   under its ORIGINAL instance id.
+2. **The holder path with an EMPTY record** — the real stranded Chrome's shape,
+   where the port must come off the live process's own command line and a plain
+   ``spawn_browser(user_data_dir=…)`` has to reach it.
+3. **Two managers coexisting**, the second CONSTRUCTED BEFORE the first drops its
+   handle, which is what F-886 made the ordinary case: no restart happens at all,
+   and the take-over still has to work — including the cross-process claim, read
+   back out of the record, and its refusal of a second take-over.
+
+The owner in node 1's record is a pid that is not a backend of ours, which is what
+the adoption rule needs to see. It is this process's own pid answered through a
 patched witness rather than a fabricated dead pid, because a fabricated one can
 be RECYCLED onto a live process between the write and the read, and the flake
 that produces would look exactly like a real adoption refusal.
@@ -29,6 +40,7 @@ import json
 import os
 from unittest.mock import patch
 
+import psutil
 import pytest
 
 from e2e_helpers import (
@@ -40,7 +52,13 @@ from e2e_helpers import (
     sandbox_kwargs,
     warmup_once,
 )
-from stealth_chrome_devtools_mcp.embedded import browser_reattach, tool_runtime
+from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
+    browser_pid_registry,
+    browser_reattach,
+    tool_runtime,
+)
+from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 pytestmark = integration_pytestmark()
@@ -72,6 +90,38 @@ def _cleanup_on(pid_file) -> ProcessCleanup:
     cleanup.orphan_profile_max_age_seconds = 0
     cleanup._init_time = 0.0
     return cleanup
+
+
+def _browsers_on(profile) -> bool:
+    """Is any Chromium process still running on *profile*?"""
+    target = str(profile).lower()
+    for proc in psutil.process_iter(["name", "cmdline"]):
+        with contextlib.suppress(Exception):
+            if "chrome" not in (proc.info["name"] or "").lower():
+                continue
+            if any(target in (arg or "").lower() for arg in proc.info["cmdline"] or ()):
+                return True
+    return False
+
+
+async def _released(profile, *, budget: float = 30.0) -> None:
+    """Wait for a torn-down node's Chrome to actually EXIT before the next runs.
+
+    ``close_instance`` offloads its teardown, so it returns while the process
+    tree is still dying — and each node here deliberately leaves a browser
+    RUNNING mid-test, so without this barrier three real Chromes launch over the
+    top of three dying ones. That is how this file failed as a FILE on a loaded
+    machine while every node passed alone: nodriver's connect deadline is a fixed
+    ≈2.75 s and it loses that race, which surfaces as "Failed to connect to
+    browser" and a retry onto a DIFFERENT directory — i.e. as an adoption that
+    was never attempted. Bounded, and deliberately silent on expiry: a browser
+    that outlives the budget is the next node's capacity problem to report, not
+    a failure of the node that just passed.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    while loop.time() < deadline and _browsers_on(profile):
+        await asyncio.sleep(0.2)
 
 
 async def test_a_live_page_survives_its_backend_and_is_re_attached(
@@ -112,7 +162,12 @@ async def test_a_live_page_survives_its_backend_and_is_re_attached(
                     "browser_processes": {
                         iid: {
                             "pid": chrome_pid,
-                            "create_time": None,
+                            # The REAL start time, read here rather than left
+                            # None: adoption requires both halves of a pid's
+                            # identity (F-888 review M4), and a node built on the
+                            # weakest identity path would be evidence for a rule
+                            # the shipped one does not have.
+                            "create_time": psutil.Process(chrome_pid).create_time(),
                             "user_data_dir": str(profile),
                             "uses_custom_data_dir": True,
                             "auto_clone": False,
@@ -173,9 +228,8 @@ async def test_a_live_page_survives_its_backend_and_is_re_attached(
             # `close_instance` could not have reached it. Kill it by pid rather
             # than leaving a real browser behind on the runner.
             with contextlib.suppress(Exception):
-                import psutil
-
                 psutil.Process(chrome_pid).kill()
+        await _released(profile)
 
     # The profile directory outlives the browser, which is guarantee (a).
     assert profile.exists()
@@ -220,17 +274,48 @@ async def test_spawn_re_attaches_to_a_holder_with_no_record_entry(
         manager._instances.pop(first)
         manager._spawn_diagnostics.pop(first, None)
 
+        # The record is redirected to an ABSENT tmp file rather than stubbed
+        # empty at one read: the claim taken before the door reads AND WRITES it,
+        # so a stub over `_load_tracked_pids` alone would leave the claim reading
+        # the developer's live `~/.stealth-mcp` record — where this test's own
+        # first spawn is recorded under a LIVE owner, which is a correct refusal
+        # about the wrong record. Redirecting the path gives the incident's real
+        # shape, no entry at all, and keeps every write inside tmp_path.
         with patch.object(
-            tool_runtime.process_cleanup, "_load_tracked_pids", return_value={}
+            tool_runtime.process_cleanup,
+            "pid_file",
+            tmp_path / "browser_pids.json",
         ):
             result = await spawn(
                 headless=True, user_data_dir=str(profile), **sandbox_kwargs()
             )
         second = result["instance_id"]
 
-        assert result["spawn_diagnostics"].get("reattached") is True, (
-            f"expected a re-attach, got {result['spawn_diagnostics']!r}"
+        diagnostics = result["spawn_diagnostics"]
+        assert diagnostics.get("reattached") is True, (
+            f"expected a re-attach, got {diagnostics!r}"
         )
+        # The BROWSER process on that profile, so an operator can see which
+        # browser answered — the one with no `--type`, picked by
+        # `browser_cmdline.browser_process` out of the whole holding tree.
+        # `profile_lock` names an arbitrary member of that tree and this must not
+        # be it: a `utility` child has no debugging port (the adoption declines),
+        # and a `renderer` has one (the adoption succeeds onto a process the
+        # manager will discard the moment it recycles).
+        holder = diagnostics["reattached_pid"]
+        assert isinstance(holder, int)
+        assert "chrome" in psutil.Process(holder).name().lower()
+        assert (
+            browser_cmdline.flag_value(browser_cmdline.arguments(holder), "--type")
+            is None
+        ), "the adopted pid must be the browser process, not one of its children"
+        # Ignored rather than refused: this spawn passed headless=True, which a
+        # running browser cannot be given.
+        assert "headless" in diagnostics["ignored_spawn_args"]
+        assert "user_agent" in diagnostics["not_restored"]
+        # MEASURED, not the model's 1920x1080 default — this Chrome is headless
+        # and was never sized by us.
+        assert diagnostics["window_size"]["measured"] is True
         # Nothing recorded an id for it, so a fresh one is minted — but it names
         # the SAME renderer, which is the claim that matters.
         assert await eval_js(second, "window.__f888_held") == "seller-central"
@@ -241,6 +326,102 @@ async def test_spawn_re_attaches_to_a_holder_with_no_record_entry(
             await close(instance_id=second or first)
         if second is None and chrome_pid is not None:
             with contextlib.suppress(Exception):
-                import psutil
-
                 psutil.Process(chrome_pid).kill()
+        await _released(profile)
+
+
+async def test_a_second_manager_built_first_takes_over_the_live_browser(
+    fixture_app_server, tmp_empty_root, tmp_path
+):
+    """Two managers coexisting, which is the shape F-886 made ordinary.
+
+    Since two backends can run side by side, the failure this finding is about
+    does NOT usually look like a restart: backend B is already up and running
+    when backend A dies, so B never re-runs its startup pass and A's browser is
+    simply unreachable. So the second manager here is **constructed before the
+    first drops its handle** — no restart is simulated at all — and the take-over
+    happens through the decision a spawn makes, against a REAL Chrome.
+
+    It also proves the cross-process claim end to end: the record starts empty
+    and ends naming this process as the owner of that pid, which is what makes a
+    third backend refuse the same browser.
+    """
+    manager = tool_runtime.browser_manager
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+
+    profile = tmp_path / "coexisting"
+    first = (
+        await spawn(headless=True, user_data_dir=str(profile), **sandbox_kwargs())
+    )["instance_id"]
+
+    second_manager = BrowserManager()  # ALIVE while the first still holds it
+    record = tmp_path / "browser_pids.json"
+    cleanup = _cleanup_on(record)
+    adopted = None
+    chrome_pid = None
+    try:
+        await navigate_and_settle(first, f"{fixture_app_server}/interactions.html")
+        await eval_js(first, "window.__f888_coexist = 'held'")
+        chrome_pid = manager._instances[first]["browser"]._process_pid
+
+        # The first backend dies where it stands: the handle goes, the process
+        # does not, and nothing is written anywhere.
+        manager._instances.pop(first)
+        manager._spawn_diagnostics.pop(first, None)
+
+        held = await asyncio.wait_for(
+            browser_reattach.adopt_held_profile(
+                second_manager, cleanup, str(profile), ignored_args=["headless"]
+            ),
+            timeout=_ADOPT_DEADLINE,
+        )
+        assert held.instance_id is not None, f"declined: {held.declined}"
+        adopted = held.instance_id
+
+        # The SAME renderer, reached by the manager that was already running.
+        tab = await second_manager.get_tab(adopted)
+        assert await tab.evaluate("window.__f888_coexist") == "held", (
+            "the second manager attached to a different browser"
+        )
+
+        # The claim landed: the record now names THIS process as the owner of the
+        # BROWSER process on that profile, which is what a third backend reads
+        # and refuses — see the note in the node above for why it has to be that
+        # process and not whichever member of the tree the witness named.
+        entries = browser_pid_registry.read_entries(record)
+        assert len(entries) == 1
+        recorded = next(iter(entries.values()))
+        assert recorded["owner_pid"] == os.getpid()
+        assert (
+            recorded["pid"]
+            == (second_manager._spawn_diagnostics[adopted]["reattached_pid"])
+        )
+        assert "chrome" in psutil.Process(recorded["pid"]).name().lower()
+
+        # And a second take-over of the same live browser is refused — the
+        # two-concurrent-spawns answer, against the record the first one really
+        # wrote. ONE witness is injected and it has to be: "is this owner a live
+        # BACKEND of ours" is False for a pytest process by construction, so
+        # without it the claim would find its own stamp reapable and the refusal
+        # could never fire here. Everything else is real, including the entry.
+        third = _cleanup_on(record)
+        with patch.object(third, "_owner_backend_alive", return_value=True):
+            again = await asyncio.wait_for(
+                browser_reattach.adopt_held_profile(
+                    BrowserManager(), third, str(profile)
+                ),
+                timeout=_ADOPT_DEADLINE,
+            )
+        assert again.instance_id is None
+        assert "already owns the browser" in (again.declined or "")
+    finally:
+        with contextlib.suppress(Exception):
+            if adopted is not None:
+                await second_manager.close_instance(adopted)
+            else:
+                await close(instance_id=first)
+        if adopted is None and chrome_pid is not None:
+            with contextlib.suppress(Exception):
+                psutil.Process(chrome_pid).kill()
+        await _released(profile)

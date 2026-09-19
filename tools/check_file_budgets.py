@@ -135,17 +135,20 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # Args:/Returns: blocks that only restated their own signatures
     # (_extract_profile_dir_from_cmdline, untrack_browser_process) — the same
     # payment mechanism the plan_F809 row above already records. Cap == actual.
-    # F-888 holds at 1017, which is NOT luck: the hand-over needs three things
-    # here (the shutdown spare, the recovery skip, and the port on the way into
-    # the record) and they are three lines plus their argument. Everything else
-    # the finding needed — the adoption rule, the endpoint ladder, the reap a
-    # failed adoption falls back to, and the browser-side liveness witness — is
-    # in `browser_reattach`, which takes THIS object as an argument precisely so
-    # it cannot be imported back. The prose that came with those three lines was
-    # paid for by collapsing five Args:/Returns: blocks that only restated their
-    # own signatures (the plan_F856 mechanism). Cap == actual.
+    # F-888 RATCHETS DOWN 1017 -> 1009, which is NOT luck: the hand-over needs
+    # three things here (the shutdown spare, the recovery skip, and the port on
+    # the way into the record) and they are three lines plus their argument, and
+    # the owner stamp this file used to compose by hand went to
+    # `browser_pid_registry.owner_identity` the day a second writer needed it.
+    # Everything else the finding needed — the adoption rule, the endpoint
+    # ladder, the reap a failed adoption falls back to, and the browser-side
+    # liveness witness — is in `browser_reattach`, which takes THIS object as an
+    # argument precisely so it cannot be imported back. The prose that came with
+    # those three lines was paid for by collapsing five Args:/Returns: blocks
+    # that only restated their own signatures (the plan_F856 mechanism).
+    # Cap == actual.
     "embedded/process_cleanup.py": (
-        1017,
+        1009,
         "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809 + plan_F856 + F-888",
     ),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution

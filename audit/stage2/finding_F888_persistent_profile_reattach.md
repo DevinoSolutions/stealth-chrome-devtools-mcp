@@ -195,6 +195,37 @@ recovery, where an unreachable orphan has to end somewhere and the fallback is
 2.1.9's reap. Here a client asked for that browser, and killing it because we
 could not attach would be this finding's own harm committed by the fix.
 
+**Which process we enter is asked before any of that, and it is not the witness's
+answer.** `profile_lock.profile_hold` answers "is this directory held, and by
+whom", from `process_cleanup`'s cmdline scan — a SET — so the pid it reports is
+whichever member of the holding process TREE iterated first. Measured, one real
+Chrome 153 spawn, eleven processes on one profile:
+
+| `--type` | count | carries `--remote-debugging-port` |
+|---|---|---|
+| *(none — the browser)* | 1 | yes |
+| `renderer` | 6 | yes |
+| `utility` | 2 | no |
+| `gpu-process` | 1 | no |
+| `crashpad-handler` | 1 | no |
+
+So adopting the named member is a coin flip with two different wrong faces. When
+the witness named a `utility`, the endpoint ladder found no port and the adoption
+declined — and declined SILENTLY, because "no port" and "nothing holds this
+directory" were the same `None`. When it named a `renderer`, the port is there
+and the adoption would have SUCCEEDED onto the wrong process: that pid is stamped
+onto `Browser._process_pid`, so `BrowserManager._browser_process_is_alive`
+discards the instance the moment that renderer recycles, and `close_instance`
+kills a renderer while the browser keeps running. Both faces were observed in the
+real-Chrome nodes, as an intermittent failure that looked exactly like machine
+capacity and was not.
+
+The rule is `browser_cmdline.browser_process`: among the live processes on that
+directory, the browser is **the one with no `--type`**. Nothing else is
+consulted — not the parent pid (the browser's own parent is a trampoline that has
+already exited) and not the port (a renderer has it too). Where no member
+qualifies, the caller is told rather than left with silence.
+
 **The endpoint has three witnesses**, most trusted first
 (`browser_reattach.endpoint`):
 
@@ -224,9 +255,47 @@ is what makes `uc.start` connect instead of spawn (`browser.py:371-375`:
 `connect_existing = True`, and `create_subprocess_exec` is behind
 `if not connect_existing`). `desktop_launch.launch_and_attach` was already
 standing in that door for F-810. Rather than write a second one, the two lines
-moved to `browser_reattach.attach_config` / `attach` and `desktop_launch` became
-that module's second consumer. A pin reads its source and fails if `config.host =`
-or `uc.start(` comes back.
+moved to the new `cdp_attach` leaf and `desktop_launch` became its second
+consumer. A pin reads BOTH consumers' source and fails if `config.host =` or
+`uc.start(` comes back into either.
+
+### The claim: what makes any of this safe between PROCESSES
+
+The rule refuses a browser a live backend of ours owns. That refusal was, at
+first, a CLASSIFICATION followed much later by an ownership stamp — the
+`track_browser_process` write after a successful attach. Between those two moments
+the record still names the dead owner, so every other backend on the machine reads
+it, reaches the identical verdict, and attaches too. An `asyncio` lock cannot help:
+the racers are PROCESSES. Two backends driving one Chrome is exactly F-886's harm,
+reached from the other side and by a fix meant to prevent it.
+
+So the check and the stamp happen together, in ONE `update_entries` mutate, which
+holds the record's own file lock across its whole read-modify-write
+(`browser_pid_registry.claim_browser`). Both entry points take it, BEFORE a single
+byte reaches Chrome, which is also the answer to "two concurrent spawns onto one
+held directory": the first claim lands, the second reads a LIVE owner — us — and
+is `Refused`. A failed attach hands the claim back (`release_claim`), because a
+record naming us as the owner of a browser we do not hold is worse than the state
+we found: the next backend would read a live owner and refuse to adopt a browser
+nobody is driving.
+
+Two decisions inside it are deliberate, and both are the opposite of the obvious:
+
+* **Keyed on the PID, never on the instance id.** The id is not stable across the
+  two entry points — a browser with no record entry is proposed under a freshly
+  minted one — so two backends racing for one Chrome would claim two different ids
+  and both succeed. The pid is the browser.
+* **The decision made inside the mutate is RETURNED, not re-read afterwards.**
+  "Stamp, re-read, proceed only if the stamp that stuck is ours" is the intuitive
+  shape and it is strictly weaker: once the lock is released a third backend may
+  legitimately claim something ELSE and rewrite the file, and our own successful
+  claim would then read as a failure. The authoritative moment is inside the lock,
+  so that is the moment the answer comes from.
+
+In-process, a per-DIRECTORY `asyncio.Lock` keeps the common case cheap — two
+spawns naming one directory do not both walk the psutil scan and the door — but it
+is not what makes this safe, and it is per directory rather than module-wide so an
+unrelated spawn never waits out a wedged browser's whole `ATTACH_BUDGET_SECONDS`.
 
 ### Rejected — **a `--keep-browsers` flag on `stop` / `restart`**
 
@@ -285,9 +354,11 @@ the module docstring says must never drift. An entry without the key reads as
 
 ## 5. Tests
 
-`tests/test_browser_reattach.py`, 49 pins, hermetic — the record is a `tmp_path`
+`tests/test_browser_reattach.py`, 77 pins, hermetic — the record is a `tmp_path`
 file on every one, both liveness witnesses are injected, the `ProcessCleanup` the
-pass writes through is a double, and the CDP door is patched.
+pass writes through is a double, and the CDP door is patched. The one thing NOT
+stubbed out is the claim: it writes to that real `tmp_path` record, because a
+claim whose file lock is faked proves nothing about two processes.
 
 | Class | What it pins |
 |---|---|
@@ -298,15 +369,22 @@ pass writes through is a double, and the CDP door is patched.
 | `TestRecoverySparesAdoptable` | adoptable is neither killed nor forgotten; a plain orphan is still reaped; both verdicts in one pass; `force` takes everything |
 | `TestShutdownHandsOver` | a persistent browser survives shutdown WITH its entry; a clone does not |
 | `TestManagerAdoption` | the client keeps its instance id and gets the live page; ownership moves through the one write; a failed attach falls back to the reap with the directory spared; no tab is refused; an already-registered instance is left alone; a wedged attach is bounded; `app_lifespan` hands the pass BOTH collaborators |
-| `TestHeldProfileAdoption` | **a holder with NO entry at all is adoptable** (the incident's exact shape); the port comes from the holder's command line; a dead owner's entry donates its instance id; a live backend's browser is never taken; nothing holding the dir, and a holder with no recoverable port, both decline |
+| `TestHeldProfileAdoption` | **a holder with NO entry at all is adoptable** (the incident's exact shape); the port comes from the holder's command line; **the BROWSER is adopted when the witness names a child**; a dead owner's entry donates its instance id; a live backend's browser is never taken; nothing holding the dir is a silent None, while a tree with no browser process and a holder with no recoverable port each decline with a NAMED reason |
+| `TestTheCrossProcessClaim` | the claim is taken before the door and released on failure; keyed on the pid; a second backend reading a live owner is `Refused`; the decision is the one made inside the mutate |
+| `TestWhatTheCommandLineSays` | the port is joined to the profile; headless is measured; a dead loopback proxy is reported and a live one is not |
+| `TestAnAdoptedInstanceTellsTheTruth` | measured headless and window size, `not_restored`, `ignored_spawn_args`, hooks and interception on the adopted tab |
 | `TestHeldAdoptionNeverReaps` | a failed attach on the spawn path spawns instead and **kills nothing** — no reap, no record drop; a successful one answers with the instance id and stamps `reattached` |
 | `TestNamedSessionDirIsNeverReclaimed` | fact (b)/(c) for both shapes a named session dir has on disk: no marker, and the server's own `auto_clean: false` marker |
 | `TestOneDoor` | the config carries host, port and the profile; `desktop_launch` uses that one door |
 
 `tests/fakes.py` grows `FakeBrowser(main_tab=…)` — nodriver's `Browser.main_tab`,
-what an attach hands back.
+what an attach hands back. It is a PROPERTY that raises `IndexError` when
+unseeded, because nodriver's is `sorted(self.targets, …)[0]` and never returns
+None; a fake that answered None would pin a shape production cannot produce.
+`FakeTab` grows `disconnect()` and a `disconnected` flag, deliberately NOT named
+`aclose` — see §3.
 
-**And two real-Chrome nodes**, `tests/test_e2e_persistent_profile_reattach.py`
+**And three real-Chrome nodes**, `tests/test_e2e_persistent_profile_reattach.py`
 (marked `integration`), because every pin above patches the CDP door and so none
 of them can prove the one thing the incident was about: that a second `uc.start`
 against a port the first backend's Chrome is listening on CONNECTS to that
@@ -328,11 +406,26 @@ renderer rather than launching a new browser.
    It asserts `reattached: true`, that `window.__f888_held` is still readable
    (same renderer), and that **F-871's `<name>-2` sibling directory was never
    created** — i.e. the spawn reached the browser instead of walking away from
-   it.
+   it. It also asserts the adopted pid is the BROWSER process (no `--type`).
+3. **Two managers coexisting**, the second CONSTRUCTED BEFORE the first drops
+   its handle — what F-886 made the ordinary case, where no restart happens at
+   all and backend A simply dies while B is already up. It proves the
+   cross-process claim end to end: the record starts empty and ends naming this
+   process as the owner of that browser's pid, and a THIRD take-over of the same
+   browser is refused.
 
-**Measured, not asserted**: both nodes PASS on the development machine
-(Windows 11, Chrome 152, 2026-09-19), with the Chrome process count returning to
-its baseline afterwards. The owner in node 1's record is this process's own pid
+Each node waits for its own Chrome to actually EXIT before the next one launches
+(`_released`). Without that barrier the file raced itself — `close_instance`
+offloads its teardown, so three real Chromes launched over the top of three dying
+ones, and nodriver's fixed ≈2.75 s connect deadline lost. That failure presented
+as "Failed to connect to browser" plus a retry onto a different directory, i.e.
+as an adoption that was never attempted, and it is exactly the shape a genuinely
+overloaded machine produces — which is why the process table was probed rather
+than the diagnosis assumed.
+
+**Measured, not asserted**: all three nodes PASS on the development machine
+(Windows 11, Chrome 153, 2026-09-19), three consecutive whole-file runs, with the
+Chrome process count returning to its ~130 baseline afterwards. The owner in node 1's record is this process's own pid
 behind a patched `is_reapable` rather than a fabricated dead pid, because a
 fabricated one can be recycled onto a live process between the write and the read
 and the resulting flake would look exactly like a genuine adoption refusal.
@@ -364,14 +457,56 @@ must be INSTALLED before the stop for that platform to behave.
 persistent-profile option, and a second spelling of it would be a second way to
 say one thing. It is DOCUMENTED as that option instead.
 
-**The adoption pass is driven from `app_lifespan`, which is once per process
-(`_LIFESPAN_STARTED`), not once per heal.** A backend that adopts nothing at
-startup because the browsers' owner was still alive then will not re-check later.
-The window is narrow (the owner has to die after this backend started and before
-this backend is asked for anything) and the browsers are not lost — the NEXT
-backend adopts them — but a periodic re-check, or a check on the idle reaper's
-tick, would close it. Deliberately not added here: a second trigger is a second
-place the rule is asked from, and the incident does not need it.
+**The record pass is driven from `app_lifespan`, which is once per process
+(`_LIFESPAN_STARTED`), not once per heal — and the spawn path only half closes
+that.** A backend that adopts nothing at startup, because the browsers' owner was
+still alive then, never re-runs the record walk. Since the spawn-time entry point
+exists, a caller who NAMES the profile still reaches that browser; a caller who
+does not — one addressing it by the `instance_id` it held before the restart —
+does not, and gets `InstanceNotFoundError` until some later backend's startup pass
+picks it up. A periodic re-check would close it. Deliberately not added: the two
+triggers there are both answer a question a caller actually asked (a backend
+starting, a client naming a directory), and a timer asking on nobody's behalf
+would attach to browsers no session wants.
+
+**The spared population is unbounded, and the idle reaper is the place that could
+mirror this defect.** Nothing now reaps a persistent-profile browser whose backend
+is gone, so a machine that spawns named profiles and loses backends accumulates
+Chromes until `kill-orphans --force` or a human closes them. That is the intended
+trade — they are logins — but it is a real cost, and the same shape would return
+by the other door if `BrowserManager`'s idle timeout ever closed an ADOPTED
+instance: the close path deletes nothing for a named profile, so the login would
+survive on disk, but the live session would not. Not touched here; named so the
+next change to the reaper knows the question exists.
+
+**An adopted browser whose egress proxy died is adopted anyway, and stamped.**
+An authenticated `proxy=` spawn points Chrome at a forwarder living INSIDE the
+backend, so the forwarder dies with it while the launch arg lives on: every page
+load then fails at a closed loopback port. The alternative — refusing adoption —
+was rejected because on the record path a refusal routes to the reap, which turns
+a recoverable login into a kill, i.e. this finding's own harm reached by the fix.
+So `browser_cmdline.dead_local_proxy` connect-probes it and the diagnostics carry
+`dead_egress_proxy` plus a WARNING. The browser is reachable, closable and
+re-spawnable with the same `proxy=`; what it is not is usable as it stands.
+
+**Per-instance state that lived in the dead backend is not restored, and says
+so.** `extra_headers`, `timezone_id`, `user_agent` and `proxy` were applied at
+launch or over CDP by a process that has exited, and none can be read back off a
+running browser. They are listed in `spawn_diagnostics["not_restored"]` rather
+than silently re-asserted as the caller's spawn arguments, which is what the
+adopted instance's `headless`/`viewport` used to do — those two are now MEASURED
+(the holder's command line, and `window_sizing.measure`, which reads without
+resizing a human's window). `block_resources` and the dynamic-hook interception
+ARE re-established, exactly as a spawn does.
+
+**Adoption is asymmetric with backend adoption on display context.** A backend
+only adopts a recorded BACKEND whose display context it could use
+(`adoption_candidates`); a recorded BROWSER is adopted regardless of which desktop
+it was launched on. That is deliberate — a browser is reached over a loopback
+socket, not through a window server, and the incident's browser belongs to
+whichever backend is alive — but it means a headed browser on `win-session-2`
+can be driven by a backend on `win-session-1`, which can see its tabs and not its
+window. No verb here creates that situation; only a session change can.
 
 **`uses_custom_data_dir` is the load-bearing half of the persistence predicate
 and it comes from nodriver's config readback.** An entry written by 2.0.3 as a

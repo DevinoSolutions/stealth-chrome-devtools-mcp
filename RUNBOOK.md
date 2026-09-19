@@ -235,24 +235,35 @@ port. `stop` forgets the stopped backend's own display-context entry and clears
 backend undiscoverable.
 
 ### Orphaned browsers after a crash
-If the backend died and left Chrome processes behind, `kill-orphans` reaps them. It
-reaps only browsers whose **owner backend is dead**: every entry in
-`browser_pids.json` carries the identity of the backend that started it, and one
-belonging to a living owner is skipped. Entries it did reap are dropped from the
-record by id; every other backend's entries are left exactly as they were, and the
-record itself stays on disk (empty if nothing is left). Browsers tracked by 2.0.3 or
-earlier carry no owner stamp, so they are orphans by construction and get reclaimed
-on upgrade.
+If the backend died and left Chrome processes behind, `kill-orphans` reaps them.
+**Since F-888 it does not reap all of them.** Two gates decide, per entry, and a
+browser has to pass both:
+
+1. **Its owner backend must be dead.** Every entry in `browser_pids.json` carries
+   the identity of the backend that started it, and one belonging to a living owner
+   is skipped. Browsers tracked by 2.0.3 or earlier carry no owner stamp, so they
+   are orphans by construction and get reclaimed on upgrade.
+2. **It must not be on a persistent profile.** A browser a caller named with
+   `spawn_browser(user_data_dir=…)` is left RUNNING and left TRACKED, because that
+   is the login this tool exists not to lose — it is re-attached to instead, and
+   the next section is how. Disposable auto-clones are reaped exactly as before.
+
+Entries actually reaped are dropped from the record by id; every other backend's
+entries — and every spared one — are left exactly as they were, because the record
+is the only thing that still names a spared browser. The record itself stays on
+disk (empty if nothing is left).
 
 It **refuses** to run against a `responsive`/`wedged` backend (that would kill the
 live backend's own browsers) — use `restart` for "backend alive but bad",
 `kill-orphans` for "backend gone, browsers orphaned".
 
 `--force` is a bigger hammer than it looks: it passes through to the reaper, so it
-bypasses **both** gates — the live-backend refusal *and* the per-entry ownership
-check. Under `--force`, browsers a healthy backend is actively using are killed too.
-That reach is deliberate, because it is what makes `--force` work against the wedged
-backend it exists for, but it means `--force` is never the casual option.
+bypasses **all three** gates — the live-backend refusal, the per-entry ownership
+check, *and* the persistent-profile spare. Under `--force`, browsers a healthy
+backend is actively using are killed too, and so is a human's logged-in Chrome on a
+named profile. That reach is deliberate, because it is what makes `--force` work
+against the wedged backend it exists for, but it means `--force` is never the casual
+option — and it is now the one verb that can still lose a login.
 
 ### Recover a stranded login
 
@@ -283,7 +294,11 @@ Two cases still need a hand.
 **The owner backend is still ALIVE (wedged, or just unreachable because every
 proxy that could talk to it has died).** Adoption refuses a browser whose owner is
 a live backend of ours, and it must — two backends driving one Chrome is what
-F-886 exists to prevent. Stop that backend first, then start a session:
+F-886 exists to prevent. You will see the refusal rather than guess at it: the
+spawn succeeds onto a different directory and its answer carries
+`spawn_diagnostics.reattach_declined` naming the live owner, and the browser you
+were reaching for is left running and untouched. Stop that backend first, then
+start a session:
 
 ```console
 stealth-chrome-devtools status          # read the port off the summary
@@ -300,16 +315,31 @@ stop.)
 **The browser cannot be re-attached at all** (Chrome is wedged, or nothing in the
 ladder names a port). On the spawn path this never kills it — the spawn just
 proceeds normally and you get a *different* directory, reported in
-`spawn_diagnostics.profile_selection.walked_to`; if that happens, the old Chrome
-is still running and can be closed by hand. On the *startup recovery* path a
+`spawn_diagnostics.profile_selection.walked_to`, and
+`spawn_diagnostics.reattach_declined` says which of the three refusals it was, so
+"a browser is there and we could not get in" is never confused with "that
+directory was free". If that happens, the old Chrome is still running and can be
+closed by hand. On the *startup recovery* path a
 recorded browser that cannot be reached is reaped exactly as 2.1.9 reaped it, but
 the **profile directory is spared** either way, so the on-disk cookies survive for
 a fresh spawn — you may just have to log in again if the session cookies are gone.
 
 Things worth knowing:
 
+- **A re-attached browser is the one that was already running, so it carries the
+  state the dead backend gave it and not the arguments you just passed.**
+  `headless`, `user_agent`, viewport, `proxy`, `browser_args`, `timezone_id` and
+  `extra_headers` describe a LAUNCH and cannot be applied to a running browser;
+  the ones you passed come back in `spawn_diagnostics.ignored_spawn_args` rather
+  than failing the call. `block_resources` IS applied. `spawn_diagnostics.
+  not_restored` names what the dead backend held that nobody can read back.
+- **If that browser was spawned behind an authenticated `proxy=`, its egress is
+  dead** — the forwarder lived inside the backend that died. You get it back with
+  `spawn_diagnostics.dead_egress_proxy` set and a WARNING in the log; page loads
+  will fail at a closed local port. Read what you need off it, then close it and
+  spawn fresh with the same `proxy=` and `user_data_dir`.
 - `kill-orphans --force` takes persistent-profile browsers too; that is what
-  `--force` means.
+  `--force` means, and it is now the only verb that still can.
 - A profile directory under the session root is **never** reclaimed by the
   storage cap or `cleanup --apply`, whether or not it carries a clone marker —
   only disposable auto-clones are, and a named profile is never one. A named

@@ -46,7 +46,10 @@ import json
 import os
 import sys
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, TextIO
+
+import psutil
 
 if sys.platform == "win32":
     import msvcrt
@@ -135,9 +138,9 @@ def new_entry(  # noqa: PLR0913  PERMANENT(one parameter per recorded field; fol
     spawned, and nothing else on disk necessarily has it: it lives in
     ``browser.config.port``, in memory, in the process that dies. It defaults to
     None so a caller that cannot learn it records the absence rather than a lie —
-    ``browser_reattach.endpoint`` then falls back to Chrome's own
-    ``DevToolsActivePort`` and to the command line, which is also what serves
-    every entry written before this release.
+    ``browser_reattach.endpoint`` then falls back to the holder's command line
+    and, after that, to Chrome's own ``DevToolsActivePort``, which is also what
+    serves every entry written before this release.
 
     The owner is deliberately NOT set here. :func:`with_owner` stamps it at
     write time, which is the only moment that knows which process is writing.
@@ -231,6 +234,118 @@ def with_owner(entry: Entry, owner_pid: int, owner_create_time: float | None) ->
     drift from the process actually holding the browser.
     """
     return {**entry, OWNER_PID: owner_pid, OWNER_CREATE_TIME: owner_create_time}
+
+
+def owner_identity() -> tuple[int, float | None]:
+    """This process's ``(pid, create_time)`` — what :func:`with_owner` stamps.
+
+    Beside the stamp it feeds, because two writers now need it: every ordinary
+    record write (``process_cleanup._save_tracked_pids``) and the cross-process
+    claim below, which must stamp the same identity or a backend would refuse to
+    recognise its own browsers.
+
+    A module function, not instance state: the answer cannot change within a
+    process, and several tests build their writers through ``__new__``.
+    """
+    pid = os.getpid()
+    create_time = None
+    with contextlib.suppress(psutil.Error, OSError):
+        create_time = psutil.Process(pid).create_time()
+    return pid, create_time
+
+
+@dataclass(frozen=True)
+class Claimed:
+    """A browser this process now owns in the record, and how to give it back."""
+
+    instance_id: str
+    previous: Entry | None
+
+
+def claim_browser(  # noqa: PLR0913  PERMANENT(the record path, the browser's identity, the entry to write, the owner to stamp and the liveness witness are five independent facts; a struct would put the schema in a second place — see new_entry)
+    path: Path,
+    *,
+    pid: int,
+    entry: Entry,
+    instance_id: str,
+    owner_pid: int,
+    owner_create_time: float | None,
+    owner_alive: Callable[[int, float | None], bool],
+) -> Claimed | None:
+    """Take ownership of the browser running as *pid*, or None if refused (F-888).
+
+    THE cross-process claim, and the only thing that makes adoption safe when two
+    backends start at once. F-886's rule — never two backends driving one Chrome —
+    was enforced by a classification followed, much later, by an ownership stamp;
+    between those two moments every other backend reads the same record, sees the
+    same dead owner, and reaches the same verdict. An ``asyncio`` lock cannot help:
+    the racers are PROCESSES.
+
+    So the check and the stamp happen in ONE :func:`update_entries` mutate, which
+    holds the record's file lock across its whole read-modify-write. The decision
+    made inside that mutate is the authoritative one and is what this returns —
+    deliberately NOT a re-read afterwards, which would be strictly weaker: once
+    the lock is released a third backend may legitimately have claimed something
+    else, and a re-read could report our own successful claim as a failure.
+
+    Keyed on the PID, never on the instance id, because the id is not stable
+    across the two entry points: a browser with no record entry is adopted under a
+    freshly minted id, so two backends racing for one Chrome would mint two
+    different ids and both "win". The pid is the browser.
+
+    An entry already naming that pid decides the outcome: a LIVE owner refuses,
+    and a dead one is taken over — keeping ITS instance id, which is how a client
+    that held an id before the restart keeps addressing the same browser.
+    """
+    outcome: dict[str, object] = {}
+
+    def mutate(recorded: Entries) -> Entries:
+        for recorded_id, existing in recorded.items():
+            if existing.get("pid") != pid:
+                continue
+            if not is_reapable(existing, owner_alive):
+                outcome["refused"] = True
+                return recorded
+            outcome["id"] = recorded_id
+            outcome["previous"] = existing
+            break
+        else:
+            outcome["id"] = instance_id
+        taken = str(outcome["id"])
+        merged = {**(recorded.get(taken) or {}), **entry}
+        return {
+            **recorded,
+            taken: with_owner(merged, owner_pid, owner_create_time),
+        }
+
+    update_entries(path, mutate)
+    if outcome.get("refused"):
+        return None
+    previous = outcome.get("previous")
+    return Claimed(
+        instance_id=str(outcome["id"]),
+        previous=previous if isinstance(previous, dict) else None,
+    )
+
+
+def release_claim(path: Path, claim: Claimed) -> None:
+    """Undo :func:`claim_browser` — the entry as it was, or gone if we made it.
+
+    Called when the attach a claim was taken FOR then fails. Without it a failed
+    adoption leaves the record naming us as the owner of a browser we do not
+    hold, which is worse than the state we found: the next backend would read a
+    live owner and refuse to adopt a browser nobody is driving.
+    """
+
+    def mutate(recorded: Entries) -> Entries:
+        restored = dict(recorded)
+        if claim.previous is None:
+            restored.pop(claim.instance_id, None)
+        else:
+            restored[claim.instance_id] = claim.previous
+        return restored
+
+    update_entries(path, mutate)
 
 
 def is_reapable(entry: Entry, owner_alive: Callable[[int, float | None], bool]) -> bool:

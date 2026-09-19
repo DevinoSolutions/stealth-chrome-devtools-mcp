@@ -29,10 +29,10 @@ nodriver: ``uc.Config(host=..., port=...)`` makes ``Browser.start`` take the
 IGNORED — which is why they must ride on the launcher command line instead.
 
 The FIRST of those two is no longer spelled here. F-888 needed the same door to
-adopt a browser a dead backend left running, so ``browser_reattach.attach_config``
-/ ``attach`` is where the host-and-port pair lives now and this module is its
-second consumer. The second fact stays here, because it is about what the
-LAUNCHER must carry and only this module launches anything.
+adopt a browser a dead backend left running, so ``cdp_attach`` is where the
+host-and-port pair lives now and this module is one of its two consumers. The
+second fact stays here, because it is about what the LAUNCHER must carry and only
+this module launches anything.
 """
 
 from __future__ import annotations
@@ -489,7 +489,7 @@ async def launch_and_attach(
     script are always removed, success or failure, and a Chrome that started but
     could not be attached to is killed rather than left as an untracked orphan.
     """
-    from stealth_chrome_devtools_mcp.embedded import browser_reattach
+    from stealth_chrome_devtools_mcp.embedded import cdp_attach
 
     # The port is chosen here but bound by Chrome SECONDS later (task create,
     # task run, browser start) — a far wider race window than the normal path's
@@ -510,10 +510,10 @@ async def launch_and_attach(
     # ``browser_manager._resolve_launch_args`` after the stealth filter.)
     # THE one door into a running browser (F-888): setting host AND port is what
     # makes nodriver connect instead of spawn, and that pair is spelled once, in
-    # ``browser_reattach``. This file was where it lived; it is now that module's
-    # second consumer, so a backend adopting a browser after a restart and a
-    # delegated headed launch cannot drift apart on how they get in.
-    config = browser_reattach.attach_config(
+    # ``cdp_attach``. This file was where it lived; a backend adopting a browser
+    # after a restart is the other consumer, and the two cannot drift apart on
+    # how they get in.
+    config = cdp_attach.config_for(
         user_data_dir,
         port,
         browser_executable_path=browser_executable,
@@ -547,7 +547,7 @@ async def launch_and_attach(
         # user_data_dir, but ``browser.config.user_data_dir`` is what the spawn
         # pipeline reads back to decide profile cleanup, so it must be the dir
         # the browser actually launched with.
-        browser = await browser_reattach.attach(config, pid)
+        browser = await cdp_attach.attach(config, pid)
         attached = True
         return browser, pid
     finally:

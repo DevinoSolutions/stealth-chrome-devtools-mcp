@@ -2,7 +2,6 @@
 
 import atexit
 import contextlib
-import os
 import shutil
 import signal
 import sys
@@ -29,20 +28,6 @@ from stealth_chrome_devtools_mcp.settings import get_settings
 # What ``signal.signal`` returns: the disposition it displaced (a handler, or
 # one of the SIG_DFL / SIG_IGN ints, or None for one it cannot describe).
 SignalDisposition = Callable[[int, FrameType | None], object] | int | None
-
-
-def _owner_identity() -> tuple[int, float | None]:
-    """This process's (pid, create_time) — the owner stamped on the entries it
-    records (see :mod:`browser_pid_registry` for what the stamp is for).
-
-    A module function, not instance state: the answer cannot change within a
-    process, and several tests build ProcessCleanup through ``__new__``.
-    """
-    pid = os.getpid()
-    create_time = None
-    with contextlib.suppress(psutil.Error, OSError):
-        create_time = psutil.Process(pid).create_time()
-    return pid, create_time
 
 
 class ProcessCleanup:
@@ -185,7 +170,7 @@ class ProcessCleanup:
         on the way out — at write time, so the owner has one source and cannot
         drift from the process actually holding the browser.
         """
-        owner_pid, owner_create_time = _owner_identity()
+        owner_pid, owner_create_time = browser_pid_registry.owner_identity()
         mine = {
             instance_id: browser_pid_registry.with_owner(
                 metadata, owner_pid, owner_create_time
@@ -603,7 +588,14 @@ class ProcessCleanup:
         # conditions are `browser_reattach`'s, F-888). ``force`` skips it: an
         # operator asking IS the authority the rule otherwise supplies, exactly
         # as `backend_eviction` argues for its ungated act.
-        spare = {} if force else browser_reattach.adoptable_for(self, saved_processes)
+        # ``.spare``, not ``.adoptable``: an entry the classifier could not reason
+        # about at all is spared too, and conflating "do not reap this" with
+        # "attach to this" is how such an entry would be handed to the adopter.
+        spare = (
+            set()
+            if force
+            else browser_reattach.adoptable_for(self, saved_processes).spare
+        )
         if spare:
             browser_reattach.report(
                 "recovery",

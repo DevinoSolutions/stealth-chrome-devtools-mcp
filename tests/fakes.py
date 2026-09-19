@@ -327,6 +327,8 @@ class FakeTab:
         self._cdp_responses = cdp_responses or {}
         self._select_result = select_result
         self.closed = False
+        # OUR websocket, not the page: see :meth:`disconnect`.
+        self.disconnected = False
         # Set by :meth:`FakeBrowser.get` for a tab it opened, so ``close()`` can
         # drop it from that browser's listing the way a real close does.
         self.opened_by: Any = None
@@ -629,6 +631,20 @@ class FakeTab:
         self.closed = True
         if self.opened_by is not None and self in self.opened_by.tabs:
             self.opened_by.tabs.remove(self)
+
+    async def disconnect(self) -> None:
+        """nodriver's ``Connection.disconnect`` — every ``Tab`` IS a Connection.
+
+        A different verb from ``close`` above and modelled separately because the
+        product distinguishes them: ``Tab.close`` is ``Target.closeTarget`` (the
+        page goes away), while ``disconnect`` cancels the listener task and closes
+        OUR websocket, leaving the page and the browser exactly as they were. The
+        F-888 cleanup path may only ever do the second. Deliberately NOT named
+        ``aclose``: nodriver has no such method, and since ``Connection.__getattr__``
+        delegates unknown attributes to ``self.target``, a double that answered
+        one would hide production calling a method that does not exist.
+        """
+        self.disconnected = True
 
     async def query_selector(self, selector: str, *args: Any, **kwargs: Any) -> Any:
         """The nodriver element-resolution seam used by the CDP styles path and
