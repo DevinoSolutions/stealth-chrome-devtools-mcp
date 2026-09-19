@@ -46,8 +46,20 @@ def main() -> None:
     without ever reaching ``runpy``, and Ctrl+C is the only way to stop a
     foreground serve. One guard on the one entry point, so there is no second
     way out of ``main()`` (F-809).
+
+    It is also THE one place this process's own environment is scrubbed of the
+    third-party ``FASTMCP_*`` names (F-890 review M5), and the first statement
+    for the same reason the guard wraps everything: every path out of here — the
+    stdio proxy, the ``runpy`` fallthrough that becomes the backend, and
+    ``cli._cmd_serve``, which delegates to this function — goes through this
+    line first, and the fallthrough imports ``fastmcp`` IN THIS PROCESS. The rule
+    and the name table are ``backend_env``'s; this is the call.
     """
     try:
+        from stealth_chrome_devtools_mcp.embedded import backend_env
+
+        backend_env.scrub_process_env()
+
         from stealth_chrome_devtools_mcp.embedded.singleton import DEFAULT_PORT
 
         parser = argparse.ArgumentParser(add_help=False)
