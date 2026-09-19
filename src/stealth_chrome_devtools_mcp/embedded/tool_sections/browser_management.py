@@ -105,6 +105,20 @@ async def spawn_browser(
             Only set this when the user has EXPLICITLY asked for a persistent/named profile:
             a named profile is NOT auto-cleaned and persists on disk indefinitely, so treat
             creating one as a deliberate, space-consuming action. Do not invent names.
+            THIS PARAMETER IS THE PERSISTENT-PROFILE OPTION — there is no separate
+            ``profile=``. A named profile (a bare name or an absolute path) is never
+            deleted by close_instance, by the clone GC, by `cleanup --apply` or by
+            `kill-orphans`, and since F-888 its BROWSER survives the backend too: a
+            backend that stops, restarts, heals or crashes leaves such a browser
+            RUNNING, and the next backend re-attaches to it over CDP AT ITS OWN
+            STARTUP, under the original instance_id, so a human's logged-in session
+            is not lost. That means after a restart you do NOT spawn again: the
+            browser is already there — call list_instances and use the id it reports
+            (``spawn_diagnostics["reattached"]: true``). Spawning onto a
+            user_data_dir some OTHER live Chrome still holds does not adopt it; it
+            walks to a sibling directory (F-871, reported in
+            ``spawn_diagnostics["profile_selection"]["walked_to"]``), which is a
+            different profile and a different login.
         sandbox (Optional[Any]): Enable browser sandbox. Accepts bool, string ('true'/'false'), int (1/0), or None for auto-detect.
 
     Network interception captures request/response metadata by default, but

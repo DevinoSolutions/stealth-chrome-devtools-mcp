@@ -1950,6 +1950,10 @@ class FakeBrowser:
     ``get(url, new_tab=True)`` appends the tab it creates to ``tabs`` and records
     the call in ``get_calls``, so a test can assert that a code path opened NO
     extra tab (the F-775a leak).
+
+    ``main_tab`` is what an ATTACH hands back (F-888) — nodriver's
+    ``Browser.main_tab``, which the adoption path reads to decide whether a
+    re-attached browser is usable at all.
     """
 
     def __init__(
@@ -1959,6 +1963,7 @@ class FakeBrowser:
         tabs: list[Any] | None = None,
         opened_tab: Any = None,
         update_targets_stalls: bool = False,
+        main_tab: Any = None,
     ) -> None:
         if alive is None:
             self._process = None
@@ -1973,6 +1978,11 @@ class FakeBrowser:
         self.get_calls: list[tuple[str, bool]] = []
         self._opened_tab = opened_tab
         self._update_targets_stalls = update_targets_stalls
+        # nodriver's ``Browser.main_tab`` — the tab an ATTACH hands back (F-888).
+        # ``None`` unless a test seeds it, because a browser we connected to and
+        # that reports no tab is a real case the adoption path must refuse rather
+        # than register half an instance for.
+        self.main_tab = main_tab
 
     async def get(self, url: str, new_tab: bool = False) -> FakeTab:
         """nodriver's ``Browser.get``.

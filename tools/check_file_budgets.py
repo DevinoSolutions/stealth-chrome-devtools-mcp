@@ -92,10 +92,20 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # row had zero headroom, so the two lines the warning and the enriched
     # timeout message needed were paid for by folding `elapsed` into `remaining`
     # and the three-line `_replace_main_tab(...)` call into one. Cap == actual.
+    # F-888 RATCHETS DOWN 1493 -> 1492. Adopting a browser a dead backend left
+    # running is `browser_reattach`'s, together with the rule that decides WHICH
+    # browser and the nodriver door that gets in — the pass takes this manager as
+    # an ARGUMENT, on `spawn_leak.reap_launched_browsers`'s precedent. What this
+    # file gained is the one thing only it can do: record the CDP port
+    # `uc.start` assigned, which is the only moment that number exists outside
+    # this process's memory. The row had zero headroom, so the eight lines that
+    # cost were paid for by collapsing `_replace_main_tab`'s Args:/Returns: block
+    # that only restated its own signature (the plan_F856 mechanism). Cap ==
+    # actual.
     "embedded/browser_manager.py": (
-        1493,
+        1492,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
-        " + F-882",
+        " + F-882 + F-888",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
@@ -125,9 +135,18 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # Args:/Returns: blocks that only restated their own signatures
     # (_extract_profile_dir_from_cmdline, untrack_browser_process) — the same
     # payment mechanism the plan_F809 row above already records. Cap == actual.
+    # F-888 holds at 1017, which is NOT luck: the hand-over needs three things
+    # here (the shutdown spare, the recovery skip, and the port on the way into
+    # the record) and they are three lines plus their argument. Everything else
+    # the finding needed — the adoption rule, the endpoint ladder, the reap a
+    # failed adoption falls back to, and the browser-side liveness witness — is
+    # in `browser_reattach`, which takes THIS object as an argument precisely so
+    # it cannot be imported back. The prose that came with those three lines was
+    # paid for by collapsing five Args:/Returns: blocks that only restated their
+    # own signatures (the plan_F856 mechanism). Cap == actual.
     "embedded/process_cleanup.py": (
         1017,
-        "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809 + plan_F856",
+        "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809 + plan_F856 + F-888",
     ),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
     # + honest message + debug_logger.log_info on failure) + 1 (plan_M4ph1

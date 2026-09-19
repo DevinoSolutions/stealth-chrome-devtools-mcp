@@ -138,6 +138,11 @@ async def app_lifespan(server):
         )
         rt.process_cleanup.activate()
         await rt.browser_manager.start_idle_reaper()
+        # Adopt the browsers a previous backend of ours left running on
+        # persistent profiles, so a human login survives a restart (F-888).
+        # Fire-and-forget for the same reason the sweep below is: it reaches a
+        # browser over CDP and nothing about readiness depends on it.
+        rt.browser_reattach.start(rt.browser_manager, rt.process_cleanup)
         # Reclaim leaked auto-clones and trim oversized idle named profiles left
         # by a previous run. Fire-and-forget so a large first sweep never delays
         # server readiness.

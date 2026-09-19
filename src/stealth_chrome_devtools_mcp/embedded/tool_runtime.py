@@ -36,6 +36,7 @@ import asyncio
 import re
 
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_reattach,
     cdp_transport,
     clone_storage,
     display_context,
@@ -75,6 +76,7 @@ __all__ = [
     "_script_rejection_reason",
     "_with_cdp_timeout",
     "browser_manager",
+    "browser_reattach",
     "cdp_element_cloner",
     "cdp_function_executor",
     "cdp_transport",

@@ -571,6 +571,10 @@ class BrowserManager:
                 user_data_dir=actual_user_data_dir,
                 uses_custom_data_dir=uses_custom_data_dir,
                 auto_clone=options.auto_clone,
+                # Read AFTER uc.start (nodriver assigns it there), the only
+                # moment this port exists outside our memory — which is what
+                # lets a LATER backend reach this browser at all (F-888).
+                cdp_port=getattr(getattr(browser, "config", None), "port", None),
             )
         else:
             debug_logger.log_warning(
@@ -1025,16 +1029,11 @@ class BrowserManager:
         reason: str,
         close_existing: bool = True,
     ) -> Tab | None:
-        """
-        Replace the tracked main tab for an instance with a fresh about:blank tab.
+        """Replace an instance's tracked main tab with a fresh about:blank tab.
 
-        Args:
-            instance_id (str): Browser instance id.
-            reason (str): Diagnostic reason for replacement.
-            close_existing (bool): Whether to close the previously tracked tab.
-
-        Returns:
-            Optional[Tab]: The fresh tab, or None if the instance was missing.
+        ``reason`` is the diagnostic label for the replacement and
+        ``close_existing`` decides whether the previously tracked tab is closed.
+        The fresh tab, or None when the instance was missing.
         """
         data = await self.get_instance(instance_id)
         if not data:

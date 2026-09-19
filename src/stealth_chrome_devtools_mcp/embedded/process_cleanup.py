@@ -17,6 +17,7 @@ import psutil
 
 from stealth_chrome_devtools_mcp.embedded import (
     browser_pid_registry,
+    browser_reattach,
     serve_startup,
     singleton,
 )
@@ -230,12 +231,7 @@ class ProcessCleanup:
             )
 
     def _get_active_browser_profile_dirs(self) -> set[str]:
-        """
-        Collect browser profile directories used by currently running browser processes.
-
-        Returns:
-            Set[str]: Normalized active browser profile directories.
-        """
+        """The normalized profile directories currently-running browsers use."""
         active_profile_dirs: set[str] = set()
         # Enumerate only the cheap `name` field for every process; reading
         # `cmdline` for the whole process table is the dominant cost on Windows
@@ -262,15 +258,7 @@ class ProcessCleanup:
         return active_profile_dirs
 
     def _get_browser_pids_for_profile(self, user_data_dir: str | None) -> set[int]:
-        """
-        Collect all live browser PIDs currently using a specific profile directory.
-
-        Args:
-            user_data_dir (Optional[str]): Browser profile directory to match.
-
-        Returns:
-            Set[int]: Matching browser process ids.
-        """
+        """Every live browser pid currently using *user_data_dir*."""
         normalized_profile_dir = self._normalize_path(user_data_dir)
         if normalized_profile_dir is None:
             return set()
@@ -342,19 +330,12 @@ class ProcessCleanup:
         metadata: dict[str, Any],
         recovery: bool = False,
     ) -> bool:
-        """
-        Kill all browser processes associated with tracked metadata.
+        """Kill every browser process associated with *metadata*.
 
-        Args:
-            instance_id (str): Browser instance id.
-            metadata (Dict[str, Any]): Tracked process metadata.
-            recovery (bool): When True (startup orphan recovery), only kill processes
-                that pre-date this server session.  Processes created after
-                ``self._init_time`` belong to the current run and are never killed.
-
-        Returns:
-            bool: True if all associated browser processes were killed or
-                already absent.
+        ``recovery`` is startup orphan recovery: only processes that PRE-DATE
+        this server session are killed, because anything created after
+        ``self._init_time`` belongs to the current run. True when all of them
+        were killed or were already absent.
         """
         pids_to_kill = self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
         fallback_pid = metadata.get("pid")
@@ -521,9 +502,7 @@ class ProcessCleanup:
 
         Returns True if cleanup succeeded or nothing needed to be removed.
         """
-        if metadata.get("uses_custom_data_dir") is True and not metadata.get(
-            "auto_clone"
-        ):
+        if browser_pid_registry.on_persistent_profile(metadata):
             return False
 
         profile_dir = metadata.get("user_data_dir")
@@ -545,17 +524,12 @@ class ProcessCleanup:
             return True
         if not metadata.get("user_data_dir"):
             return True
-        return bool(
-            metadata.get("uses_custom_data_dir") is True
-            and not metadata.get("auto_clone")
-        )
+        return browser_pid_registry.on_persistent_profile(metadata)
 
     def _sweep_orphaned_temp_profiles(self) -> int:
-        """
-        Sweep stale nodriver temp profiles from the system temp directory on startup.
+        """Sweep stale nodriver temp profiles from the system temp dir on startup.
 
-        Returns:
-            int: Number of stale temp profile directories removed.
+        Returns how many stale temp profile directories were removed.
         """
         if self.orphan_profile_max_age_seconds == 0:
             return 0
@@ -624,6 +598,18 @@ class ProcessCleanup:
         saved_processes = self._load_tracked_pids()
         recovered_count = 0
         reaped: set[str] = set()
+        # ONE classification pass, before the loop, so the reaper and the adopter
+        # ask the identical question about every entry (the rule and its four
+        # conditions are `browser_reattach`'s, F-888). ``force`` skips it: an
+        # operator asking IS the authority the rule otherwise supplies, exactly
+        # as `backend_eviction` argues for its ungated act.
+        spare = {} if force else browser_reattach.adoptable_for(self, saved_processes)
+        if spare:
+            browser_reattach.report(
+                "recovery",
+                f"Sparing {len(spare)} browser(s) on persistent profiles for "
+                f"re-attach; they are left tracked and running",
+            )
 
         for instance_id, metadata in saved_processes.items():
             # The ownership check is INSIDE the try because it can raise: it
@@ -638,17 +624,20 @@ class ProcessCleanup:
                     metadata, self._owner_backend_alive
                 ):
                     continue
+                # Left RUNNING and left TRACKED: the record is the only thing
+                # that still names this instance, so dropping it here would
+                # leave a live Chrome nothing on disk can find. The adopter ends
+                # it either way — re-stamping the owner, or reaping and dropping
+                # when its attach fails (F-888).
+                if instance_id in spare:
+                    continue
                 # Recorded as reaped BEFORE the attempt, so a failed kill or a
                 # locked profile dir still drops the entry, as the previous
                 # unconditional wipe did. Retries: _sweep_orphaned_temp_profiles
-                # for gettempdir profiles, clone_storage.enforce_session_storage
-                # for session-root ones.
+                # (gettempdir) and clone_storage.enforce_session_storage.
                 reaped.add(instance_id)
-                if self._kill_processes_for_metadata(
-                    instance_id, metadata, recovery=True
-                ):
+                if browser_reattach.reap_recorded(self, instance_id, metadata):
                     recovered_count += 1
-                self._cleanup_profile_for_metadata(instance_id, metadata)
             except Exception as error:
                 debug_logger.log_warning(
                     "process_cleanup",
@@ -666,28 +655,27 @@ class ProcessCleanup:
         self._drop_recorded(reaped)
         self._sweep_orphaned_temp_profiles()
 
-    def track_browser_process(
+    def track_browser_process(  # noqa: PLR0913  PERMANENT(it writes one recorded field per parameter; see browser_pid_registry.new_entry)
         self,
         instance_id: str,
         browser_process,
         user_data_dir: str | None = None,
         uses_custom_data_dir: bool | None = None,
         auto_clone: bool = False,
+        cdp_port: int | None = None,
     ) -> bool:
-        """
-        Track a browser process and its profile metadata for future cleanup.
+        """Track a browser process and its profile metadata for future cleanup.
 
-        Args:
-            instance_id: Browser instance identifier.
-            browser_process: Browser process object with `.pid`.
-            user_data_dir: Browser profile directory.
-            uses_custom_data_dir: Whether the profile directory was explicitly
-                provided by the user.
-            auto_clone: Whether the profile is a disposable auto-clone of master
-                that should be deleted once its browser closes.
+        Also the ONE write an ADOPTION makes (F-888): re-tracking a browser this
+        backend just attached to re-stamps the entry's owner through the same
+        merge-write every other writer shares, so adoption needs no second
+        protocol and no second place that knows the record's schema.
 
-        Returns:
-            bool: True if tracking was successful.
+        ``uses_custom_data_dir`` + ``auto_clone`` are what
+        ``browser_pid_registry.on_persistent_profile`` reads to decide whether
+        the directory outlives its browser; ``cdp_port`` is the DevTools port a
+        LATER backend reaches this browser on, None when it could not be read —
+        an absence the endpoint ladder answers, never a guess. True on success.
         """
         try:
             if not hasattr(browser_process, "pid") or not browser_process.pid:
@@ -713,6 +701,7 @@ class ProcessCleanup:
                 user_data_dir=user_data_dir,
                 uses_custom_data_dir=uses_custom_data_dir,
                 auto_clone=auto_clone,
+                cdp_port=cdp_port,
             )
             self.browser_processes[instance_id] = metadata
             self.tracked_pids.add(pid)
@@ -761,15 +750,9 @@ class ProcessCleanup:
             return False
 
     def kill_browser_process(self, instance_id: str) -> bool:
-        """
-        Kill a specific tracked browser process and clean its temp profile
-        when appropriate.
+        """Kill one tracked browser and clean its temp profile when appropriate.
 
-        Args:
-            instance_id: Browser instance identifier.
-
-        Returns:
-            bool: True if the process was killed or already gone.
+        True when the process was killed or was already gone.
         """
         metadata = self.browser_processes.get(instance_id)
         if metadata is None:
@@ -858,15 +841,9 @@ class ProcessCleanup:
         return finalized_count
 
     def _kill_process_by_pid(self, pid: int, instance_id: str = "unknown") -> bool:  # noqa: PLR0911  plan_M11a
-        """
-        Kill a browser process by PID using escalating termination methods.
+        """Kill *pid* using escalating termination methods.
 
-        Args:
-            pid: Process ID to kill.
-            instance_id: Instance identifier for diagnostics.
-
-        Returns:
-            bool: True if the process was killed or already absent.
+        True when the process was killed or was already absent.
         """
         try:
             if not psutil.pid_exists(pid):
@@ -955,7 +932,18 @@ class ProcessCleanup:
             return False
 
     def _cleanup_all_tracked(self):
-        """Clean up every tracked browser process and temp profile for this run."""
+        """Clean up every tracked browser process and temp profile for this run,
+        EXCEPT the ones on a persistent profile.
+
+        A browser on a persistent profile is handed OVER, not killed (F-888) —
+        it stays running with its entry intact, its owner pid dies with us, and
+        the next backend's ``browser_reattach.run`` picks it up. That is what
+        makes ``stop`` and ``restart`` non-destructive for a human login, which
+        is the one piece of state reconnecting cannot rebuild. A disposable
+        auto-clone is still killed and still deleted; ``kill-orphans --force``
+        still takes everything; ``close_instance`` still closes what a client
+        asks for. This spare is about SHUTDOWN, never about a close.
+        """
         if not self.browser_processes:
             debug_logger.log_info(
                 "process_cleanup",
@@ -971,11 +959,23 @@ class ProcessCleanup:
         )
 
         cleaned_count = 0
+        handed_over = 0
         for instance_id in list(self.browser_processes.keys()):
+            metadata = self.browser_processes.get(instance_id) or {}
+            if browser_pid_registry.on_persistent_profile(metadata):
+                handed_over += 1
+                continue
             if self.kill_browser_process(instance_id) or self.finalize_browser_process(
                 instance_id
             ):
                 cleaned_count += 1
+
+        if handed_over:
+            browser_reattach.report(
+                "shutdown",
+                f"Left {handed_over} browser(s) on persistent profiles running for "
+                f"the next backend to re-attach",
+            )
 
         debug_logger.log_info(
             "process_cleanup",
