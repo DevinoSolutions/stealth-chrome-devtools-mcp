@@ -9,8 +9,11 @@ would keep passing the day nodriver changed them; the last node here reads those
 constants back out of the library source so the premise itself is pinned.
 
 Only the OS is faked: the subprocess, the endpoint, the websocket ``Connection``
-and the clock. No Chrome is launched, no socket is opened, and the two sleeps
-that would otherwise cost 2.75 s of wall time per node are virtual.
+and the clock. No Chrome is launched and no socket is opened. The 2.5 s of
+``Browser.sleep`` between nodriver's five attempts and the whole 30 s patience
+are virtual; nodriver's initial ``await asyncio.sleep(0.25)`` is NOT — it is
+reached before any seam of ours exists and costs each node a real quarter
+second.
 
 ``test_the_same_chrome_is_given_up_on_without_the_patience`` is the sensitivity
 control: the identical scenario through nodriver's unwrapped ``HTTPApi.get``,
@@ -49,12 +52,17 @@ class Clock:
 
     def __init__(self) -> None:
         self.t = 0.0
+        #: Called after every advance, so a node can make the world change at a
+        #: chosen instant (a launcher that dies mid-wait).
+        self.on_tick = None
 
     def now(self) -> float:
         return self.t
 
     async def sleep(self, seconds: float = 0.1) -> None:
         self.t += seconds
+        if self.on_tick is not None:
+            self.on_tick(self.t)
         await asyncio.sleep(0)
 
 
@@ -225,6 +233,84 @@ async def test_a_launcher_that_already_exited_is_not_waited_for(
     # patience was spent.
     assert clock.now() < browser_connect.CONNECT_PATIENCE_SECONDS
     assert endpoint["attempts"] == 5
+
+
+async def test_a_launcher_that_exits_mid_wait_ends_the_wait_there(
+    clock, endpoint, launcher
+):
+    """The shape production actually sees — Chrome starts, then dies while we
+    are still asking. The ``returncode`` is re-read every pass, so the wait ends
+    at the next refusal rather than at the ceiling."""
+    browser_connect.install()
+    endpoint["opens_at"] = float("inf")
+    process, config_factory = launcher
+    died_at = 1.0
+
+    def die_at(now: float) -> None:
+        if now >= died_at:
+            process.returncode = 1
+
+    clock.on_tick = die_at
+
+    with pytest.raises(Exception, match="Failed to connect to browser"):
+        await _start(config_factory)
+
+    # The patience stopped at the death, not at 30 s; what is left on the clock
+    # is nodriver's own four sleeps after it.
+    assert clock.now() < died_at + 2.5 + browser_connect.POLL_SECONDS
+
+
+async def test_an_attach_does_not_get_the_launch_ceiling(monkeypatch, clock, endpoint):
+    """`connect_existing` — F-810's delegated launch today, F-888's re-attach
+    next — reaches the same ``Browser.start``, and must NOT inherit a ceiling
+    sized for a process still starting. An attach targets an endpoint that is
+    already open (measured: 0.78 ms median for a live one), so a stale port has
+    to stay as cheap to reject as it was in 2.1.9."""
+    browser_connect.install()
+    endpoint["opens_at"] = float("inf")
+
+    async def _no_targets(self):
+        return None
+
+    monkeypatch.setattr(Browser, "update_targets", _no_targets)
+    config = uc.Config(headless=True, host="127.0.0.1", port=9222)
+    known = set(get_registered_instances())
+    try:
+        with pytest.raises(Exception, match="Failed to connect to browser"):
+            browser = Browser(config)
+            await browser.start()
+    finally:
+        for registered in tuple(get_registered_instances()):
+            if registered not in known:
+                get_registered_instances().discard(registered)
+
+    # nodriver's own five attempts and 2.5 s, not our 30 s: nothing was launched
+    # here, so there is no ``_process`` to be patient on behalf of.
+    assert endpoint["attempts"] == 5
+    assert clock.now() == pytest.approx(2.5)
+
+
+async def test_a_server_that_answered_is_not_an_endpoint_that_is_still_opening(
+    monkeypatch, clock, endpoint, launcher
+):
+    """A squatter on the port answering 500 is a fact, not a wait. Retrying it
+    to the ceiling would turn 2.1.9's fast failure into a 30 s one."""
+    browser_connect.install()
+    _process, config_factory = launcher
+
+    async def _answers_500(self, endpoint_name, method="get", data=None):
+        endpoint["attempts"] += 1
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1/json/version", 500, "no", {}, None
+        )
+
+    monkeypatch.setattr(HTTPApi, "_request", _answers_500)
+
+    with pytest.raises(Exception, match="Failed to connect to browser"):
+        await _start(config_factory)
+
+    assert endpoint["attempts"] == 5
+    assert clock.now() == pytest.approx(2.5)
 
 
 async def test_only_the_version_endpoint_is_given_the_patience(clock, endpoint):

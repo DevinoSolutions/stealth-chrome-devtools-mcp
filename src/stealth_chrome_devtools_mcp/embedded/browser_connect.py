@@ -20,10 +20,20 @@ spawns Chrome and then::
     if not self.info:
         raise Exception("Failed to connect to browser")
 
-0.25 s plus five refusals at 0.5 s apart is a 2.75 s window, it is a loop count
-in library source with no config field behind it, and Chrome routinely misses
-it. The F-870 cold-start probe runs on every gate cell before the suite, with
-the runner otherwise IDLE and launching exactly ONE Chrome, and reports
+0.25 s plus four 0.5 s sleeps is **2.75 s of WAITING**, it is a loop count in
+library source with no config field behind it, and Chrome routinely misses it.
+The wall-clock window is that plus what five refusals cost, which is the
+platform's: near-instant on POSIX (F-870 §1.3 measured the CI hits as
+"near-instant refusals, not timeouts"), so ≈2.75 s there — which is the macOS
+cell this finding is about — but **2023-2060 ms per refusal on Windows**
+(measured locally, six fetches, a never-bound port and nodriver's own
+reserved-then-closed idiom alike), i.e. ≈12.9 s, which is why the Windows cell's
+4250 ms cold start does not fail. A port that LISTENS but never answers costs
+``urlopen``'s own 10 s per attempt on every platform (measured), i.e. ≈52.5 s —
+a shape nothing here makes better or worse.
+
+The F-870 cold-start probe runs on every gate cell before the suite, with the
+runner otherwise IDLE and launching exactly ONE Chrome, and reports
 ``ms_to_json_version``:
 
 ===============  =============  ==============  =================
@@ -37,7 +47,7 @@ Linux/X64        35316298288         685.8            232.6
 ===============  =============  ==============  =================
 
 Two of the three cells have NEVER answered inside 2.75 s on a cold binary, and
-the warmest macOS reading (2138.7 ms) already spends 78 % of the window on one
+the warmest macOS reading (2138.7 ms) already spends 78 % of that budget on one
 launch with nothing else running. What that costs in production is one line in
 the log and one wasted Chrome: the attempt raises "Failed to connect", the
 ``Browser`` object is never handed back, ``spawn_leak.reap_launched_browsers``
@@ -74,17 +84,29 @@ Deliberately NOT, and each was tried against the source first:
 * A ``STEALTH_MCP_*`` knob. The number is a property of how long Chrome takes to
   open a socket, which is measured above, not of an operator's taste.
 
+**The ceiling is for LAUNCHES WE OWN, and the witness decides which those are.**
+``_launched_process`` resolves the owning browser once per ``HTTPApi`` and reads
+nodriver's own ``_process``; ``None`` means nobody here launched it — the
+``connect_existing`` branch, i.e. F-810's delegated launch and F-888's re-attach
+— and such a call gets nodriver's own window unchanged. That is not a caution,
+it is what the measurement says: an ATTACH targets an endpoint that is already
+open, and a `/json/version` fetch against a live one takes **0.78 ms median**
+(measured locally, ten fetches; min 0.51, max 170.8 on the first). nodriver's
+five attempts are already ~1000x the healthy cost there, so patience buys
+nothing and would only make a stale recorded port expensive on a user-facing
+call. There is no second constant for the attach door, deliberately: the
+cheapest honest answer was no change at all.
+
 The patience is charged ONCE per launch, not once per call: the deadline is
 stamped on the ``HTTPApi`` instance, which nodriver builds fresh in each
 ``start``. nodriver's four remaining attempts therefore see a spent deadline,
 fail immediately and add only their own 2 s of sleeps to the worst case.
 
-A launcher that has already EXITED short-circuits the wait (``_launcher_gone``),
-so the one case this could have made slower — Chrome dies at startup — is
-instead faster than before: today that still costs the full 2.75 s of polling a
-port nobody will ever open. The witness is nodriver's own handle, found through
-the instance registry ``start`` adds the browser to immediately before the loop;
-an attached browser (F-810) has no ``_process`` and simply waits out its budget.
+A launcher that has already EXITED short-circuits the wait, and so does one that
+exits mid-wait — the ``returncode`` is re-read every pass, not once — so the one
+case this could have made slower, Chrome dying at startup, is instead faster
+than before: today that still costs the full window of polling a port nobody
+will ever open.
 
 A leaf: ``nodriver`` and stdlib only. ``install()`` is called from
 ``browser_manager._launch_browser``, the one function in the tree that launches
@@ -96,7 +118,9 @@ import asyncio
 import http.client
 import json
 import time
+import urllib.error
 from collections.abc import Awaitable, Callable
+from typing import NamedTuple, Protocol
 
 from nodriver.core.browser import HTTPApi
 from nodriver.core.util import get_registered_instances
@@ -111,9 +135,13 @@ __all__ = ["CONNECT_PATIENCE_SECONDS", "install", "installed"]
 #: and not a wait: an endpoint that opens in 300 ms costs 300 ms.
 CONNECT_PATIENCE_SECONDS = 30.0
 
-#: How often the endpoint is asked again. nodriver's own cadence is 0.5 s; a
-#: refused connection on loopback costs microseconds, so the only thing a longer
-#: interval buys is up to half a second of a spawn spent after Chrome is ready.
+#: How often the endpoint is asked again once a refusal has come back. This is
+#: NOT the cadence — what a refusal itself costs dominates it and is the
+#: platform's, not ours: near-instant on POSIX (F-870 §1.3 measured the CI
+#: refusals that way) and 2023-2060 ms on Windows, measured locally over six
+#: refused fetches against both a never-bound port and nodriver's own
+#: reserved-then-closed idiom. So this only sets how promptly a POSIX wait
+#: notices an endpoint that has just opened.
 POLL_SECONDS = 0.1
 
 #: The one endpoint this patience applies to — nodriver's single ``get`` caller.
@@ -122,8 +150,13 @@ VERSION_ENDPOINT = "version"
 # What "the endpoint is not open yet" looks like out of ``urllib``: a refused or
 # reset connection and a read timeout are ``OSError`` (``URLError`` included), a
 # half-written answer is an ``HTTPException``, and a truncated body fails to
-# parse. Anything else propagates on the first try, exactly as it does today.
+# parse. ``HTTPError`` is deliberately EXCLUDED even though it is a ``URLError``
+# is an ``OSError``: a server that answered — a squatter on the port, a 500 — is
+# not a socket that is not open yet, and waiting out the ceiling on one would
+# turn a 2.75 s failure into a 30 s one. Anything else propagates on the first
+# try, exactly as it does today.
 _NOT_OPEN_YET = (OSError, http.client.HTTPException, json.JSONDecodeError)
+_ANSWERED = urllib.error.HTTPError
 
 # The marker lives on the wrapper, so "is the patience in place" is a question
 # about the function Python will actually call, and the original stays reachable
@@ -131,7 +164,24 @@ _NOT_OPEN_YET = (OSError, http.client.HTTPException, json.JSONDecodeError)
 _MARKER = "__stealth_browser_connect__"
 
 # Per-launch, because nodriver builds one ``HTTPApi`` per ``Browser.start``.
-_DEADLINE = "__stealth_connect_deadline__"
+_WAIT = "__stealth_connect_wait__"
+
+
+class _Launched(Protocol):
+    """The one thing this module asks of nodriver's process handle."""
+
+    returncode: int | None
+
+
+class _Wait(NamedTuple):
+    """This endpoint's standing answer, decided once per ``HTTPApi``.
+
+    ``process is None`` is "no launch of ours is behind this endpoint", which is
+    the ``connect_existing`` door and takes nodriver's own window.
+    """
+
+    process: _Launched | None
+    deadline: float
 
 
 def _now() -> float:
@@ -143,19 +193,19 @@ async def _sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
-def _launcher_gone(api: HTTPApi) -> bool:
-    """Has the Chrome whose endpoint we are waiting for already exited?
+def _launched_process(api: HTTPApi) -> _Launched | None:
+    """The process WE launched behind this endpoint, or ``None``.
 
-    ``Browser.start`` registers itself before it starts polling, so the browser
-    that owns this ``HTTPApi`` is findable while the wait is on. ``None`` for a
-    browser that was ATTACHED to rather than launched (F-810) — there is no
-    process handle to ask, and waiting out the budget is the right answer.
+    ``Browser.start`` sets ``_process`` before it builds the ``HTTPApi`` and
+    registers itself before it starts polling, so a launch is always findable
+    from here. ``None`` means the browser was ATTACHED to rather than launched —
+    ``connect_existing``, i.e. F-810's delegated launch and F-888's re-attach —
+    and that is the whole reason this lookup exists rather than a bare deadline.
     """
     for browser in tuple(get_registered_instances()):
         if getattr(browser, "_http", None) is api:
-            process = getattr(browser, "_process", None)
-            return process is not None and process.returncode is not None
-    return False
+            return getattr(browser, "_process", None)
+    return None
 
 
 _Get = Callable[[HTTPApi, str], Awaitable[object]]
@@ -166,15 +216,19 @@ def _patient(original: _Get) -> _Get:
         """Ask the DevTools endpoint, waiting out a Chrome still opening it."""
         if endpoint != VERSION_ENDPOINT:
             return await original(self, endpoint)
-        deadline = getattr(self, _DEADLINE, None)
-        if deadline is None:
-            deadline = _now() + CONNECT_PATIENCE_SECONDS
-            setattr(self, _DEADLINE, deadline)
+        wait: _Wait | None = getattr(self, _WAIT, None)
+        if wait is None:
+            wait = _Wait(_launched_process(self), _now() + CONNECT_PATIENCE_SECONDS)
+            setattr(self, _WAIT, wait)
+        if wait.process is None:
+            return await original(self, endpoint)
         while True:
             try:
                 return await original(self, endpoint)
+            except _ANSWERED:
+                raise
             except _NOT_OPEN_YET:
-                if _now() >= deadline or _launcher_gone(self):
+                if _now() >= wait.deadline or wait.process.returncode is not None:
                     raise
             await _sleep(POLL_SECONDS)
 

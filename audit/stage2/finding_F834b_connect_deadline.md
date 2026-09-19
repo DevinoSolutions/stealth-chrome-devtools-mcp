@@ -71,8 +71,22 @@ if not self.info:
     raise Exception("... Failed to connect to browser ...")
 ```
 
-`0.25 + 5 × 0.5 = 2.75 s`. There is no `Config` field behind it in 0.47
-(F-870 §6.1(a), re-verified against the installed package here).
+`0.25 s + 4 × 0.5 s` is **2.75 s of waiting**, and there is no `Config` field
+behind it in 0.47 (F-870 §6.1(a), re-verified against the installed package
+here). The wall-clock window is that plus what five refusals cost, which is the
+platform's, and the review's virtual clock hid the difference — so it is
+measured here:
+
+| shape | one refused `/json/version` | nodriver's whole window |
+|---|---|---|
+| POSIX loopback | near-instant (F-870 §1.3: "near-instant refusals, not timeouts") | ≈2.75 s |
+| Windows loopback | **2023–2060 ms** (measured locally, six fetches, a never-bound port and nodriver's own reserved-then-closed idiom alike) | ≈12.9 s |
+| a port that LISTENS and never answers | **10 019 ms** — `urlopen(…, timeout=10)`, nodriver's own | ≈52.5 s |
+
+Two consequences worth stating plainly. The macOS cell this finding is about is
+the first row, so 2.75 s is the right number there. The Windows cell's 4250 ms
+cold start does **not** fail, and the second row is why — not luck, and not
+anything the product does.
 
 What follows from the raise is all correct and all wasted: `_launch_browser`
 never returns a `Browser`, so `_teardown_failed_spawn` takes its no-handle
@@ -159,11 +173,35 @@ charged ONCE per launch (the deadline is stamped on the `HTTPApi` instance,
 which nodriver builds fresh in each `start`), so nodriver's four remaining
 attempts see it spent, fail immediately, and add only their own 2 s of sleeps.
 
-A launcher that has already EXITED short-circuits the wait (`_launcher_gone`,
-reading nodriver's own `_process.returncode` through the instance registry
-`start` adds the browser to immediately before the loop). So the one case this
-could have slowed down — Chrome dies at launch — is instead **faster** than
-2.1.9, which polls a port nobody will open for the full 2.75 s.
+A launcher that has already EXITED short-circuits the wait, and so does one that
+exits *mid-wait* — `returncode` is re-read every pass. So the one case this
+could have slowed down, Chrome dying at launch, is instead **faster** than
+2.1.9, which polls a port nobody will open for its whole window. (Review
+measured the mid-wait shape at 3.6 s; it is pinned here now, not only measured.)
+
+### 4.0.1 The ceiling is for LAUNCHES WE OWN (review M1)
+
+`_launched_process` resolves the owning browser **once** per `HTTPApi` and reads
+nodriver's own `_process`. `None` means nobody here launched it — the
+`connect_existing` branch, which today is F-810's delegated launch and next is
+F-888's `browser_reattach` — and such a call takes nodriver's window unchanged.
+
+Decided from measurement, not caution. An attach targets an endpoint that is
+**already open**, and a `/json/version` fetch against a live one costs **0.78 ms
+median** (measured locally, ten fetches; min 0.51 ms, max 170.8 ms on the
+first). nodriver's five attempts are already ~1000× the healthy cost there, so
+patience buys nothing — while a stale recorded port would have cost 32.5 s
+inside a user-facing `spawn_browser` call, where 2.1.9 cost 2.75 s. **There is
+no second constant for the attach door**: the cheapest honest answer was no
+change at all, and a number nothing measured would be the guess this repo
+refuses. Both shapes are pinned
+(`test_an_attach_does_not_get_the_launch_ceiling`, and the launch nodes beside
+it); mutating the witness so an attach looks like a launch fails that pin with
+305 attempts against 5.
+
+An HTTP **error** answer is also not a closed socket: `urllib.error.HTTPError`
+is excluded from the retry set, so a squatter answering 500 fails in nodriver's
+window rather than ours (review L1, which measured the old behaviour at 32.5 s).
 
 ### 4.1 How this clears F-870 §6.2's four blockers
 
@@ -193,28 +231,41 @@ retry loop inside `spawn_browser`; not a bigger `SPAWN_TIMEOUT`.
 
 ## 5. Tests
 
-`tests/test_browser_connect.py`, eight nodes. Every one drives nodriver's **real**
-`Browser.start` — its own 0.25 s lead, its own `range(5)`, its own 0.5 s between
-attempts and its own "Failed to connect to browser" — over a fake endpoint,
-because a hand-written double of that loop would be a copy of the very constants
-that are the defect and would keep passing the day nodriver changed them. Only
-the OS is faked: subprocess, endpoint, websocket `Connection`, clock. No Chrome
-is launched and the 2.75 s of sleeping is virtual.
+`tests/test_browser_connect.py`, eleven nodes. Every one drives nodriver's
+**real** `Browser.start` — its own 0.25 s lead, its own `range(5)`, its own 0.5 s
+between attempts and its own "Failed to connect to browser" — over a fake
+endpoint, because a hand-written double of that loop would be a copy of the very
+constants that are the defect and would keep passing the day nodriver changed
+them. Only the OS is faked: subprocess, endpoint, websocket `Connection`, clock.
+No Chrome is launched. The 2.5 s of `Browser.sleep` and the whole 30 s patience
+are virtual; nodriver's initial `await asyncio.sleep(0.25)` is **not** — it is
+reached before any seam of ours exists and costs each node a real quarter second
+(review L4; the module docstring said "2.75 s virtual" and was 0.25 s off).
 
 | node | claim |
 |---|---|
 | `…_answers_after_nodrivers_window_is_connected_to` | an endpoint opening at 4.0 s (past 2.75 s, inside 30 s) yields a live `Browser`, answered on nodriver's FIRST attempt |
 | `…_given_up_on_without_the_patience` | the sensitivity control: identical scenario through the unwrapped `HTTPApi.get` raises "Failed to connect", after 5 attempts and 2.5 s — the shape 2.1.9 ships |
 | `…_never_opens_costs_the_patience_and_no_more` | the ceiling is real and bounded at patience + nodriver's own remaining sleeps |
-| `…_launcher_that_already_exited_is_not_waited_for` | process death ends the wait; none of the patience is spent |
+| `…_launcher_that_already_exited_is_not_waited_for` | process death before the wait ends it; none of the patience is spent |
+| `…_launcher_that_exits_mid_wait_ends_the_wait_there` | the shape production sees — Chrome starts, then dies at t=1.0 s — ends there, not at the ceiling (review L2) |
+| `…_an_attach_does_not_get_the_launch_ceiling` | `connect_existing` takes nodriver's own window: 5 attempts, 2.5 s (review M1) |
+| `…_a_server_that_answered_is_not_an_endpoint_that_is_still_opening` | a 500 fails in nodriver's window, not ours (review L1) |
 | `…_only_the_version_endpoint…` | one attempt for any other endpoint |
 | `…_install_is_idempotent` | runpy executes `server.py` three times; the launch path calls it per spawn |
 | `…_the_launch_path_installs_the_patience_before_it_launches` | the wiring, ahead of the F-810 branch |
 | `…_the_window_this_extends_is_still_the_one_in_nodrivers_source` | the premise, pinned against library source: the 0.25, the `range(5)`, the 0.5, the message, and the single `_http.get(` caller |
 
-**Mutation check.** With `install()` neutered to a no-op and every `__pycache__`
-under `src/` and `tests/` deleted first, three nodes fail — including the core
-claim, on "Failed to connect to browser". Restored: 8 passed.
+**Mutation checks**, each with every `__pycache__` under `src/` and `tests/`
+deleted first:
+
+* `install()` neutered to a no-op → 3 nodes fail, including the core claim, on
+  "Failed to connect to browser".
+* `_launched_process` made to answer a live process for everything, i.e. an
+  attach that looks like a launch → `…_an_attach_does_not_get_the_launch_ceiling`
+  fails with **305 attempts against 5**.
+
+Restored: 11 passed.
 
 Suites re-run green by explicit path: `test_browser_connect` (8),
 `test_spawn_leak` / `test_concurrent_spawn_collision` /
@@ -236,12 +287,31 @@ Suites re-run green by explicit path: `test_browser_connect` (8),
    measures one launch on an idle machine. Nothing measures six on three cpus.
    If a cell is ever slower than 30 s to open an endpoint, this fails exactly as
    before, one line later.
-3. **A Chrome that starts and then hangs without ever listening now costs 30 s
-   per attempt, up to 90 s for the three.** `_launcher_gone` covers the process
-   that EXITS, which is the shape a broken binary or a fatal flag produces; it
-   cannot see a process that is alive and stuck. This is a real regression in
-   that one case, taken deliberately: it trades a rare hang's latency for a
-   common slow start's correctness.
+3. **A Chrome that starts and then hangs without ever listening costs the
+   ceiling per attempt, and `_SPAWN_ATTEMPTS` spends it three times** (review
+   M2, whose arithmetic corrects this section's first draft of "up to 90 s"):
+   **32.5 s per attempt and 97.6 s for three** on the instant-refusal shape the
+   review measured, which is the POSIX one; ≈42 s and ≈126 s on Windows, where a
+   refusal itself costs 2.03 s; and for a port that LISTENS and never answers,
+   the bound is `urlopen`'s own 10 s per attempt either way — ≈82 s for one and
+   ≈246 s for three, against ≈52.5 s and ≈157 s in 2.1.9, which was already the
+   worst shape there is. `_launched_process` covers the process that EXITS,
+   which is what a broken binary or a fatal flag produces; it cannot see one
+   that is alive and stuck. Nothing in the product bounds the three attempts —
+   `spawn_browser` carries no `_with_cdp_timeout` and no deadline — so the
+   client's transport timeout is the bound, and past it the operator loses the
+   joined spawn error and the F-811/F-834 hints with it.
+
+   **Clipping the later attempts was considered and DECLINED.** They are not a
+   repeat of the same experiment: F-834 stage 1 re-selects the profile between
+   them, so a `clone` gets a fresh directory and a held `master` falls through
+   to a reserved clone, and attempt 2 genuinely can succeed where attempt 1
+   could not. The smallest form of the clip — a module-level "a launch already
+   spent the whole ceiling" flag — is process-global state that outlives the
+   spawn, so an unrelated later spawn would inherit this one's verdict. The
+   honest bound is a spawn-WIDE deadline, which `spawn_browser` does not have at
+   all today and which changes the error the operator sees; it belongs in its
+   own change, not smuggled in here.
 4. **It patches a library class.** The precedent is `cdp_transport.install()`
    and the discipline is the same (idempotent, one seam, marker on the wrapper,
    original reachable), but it is still a patch, and
