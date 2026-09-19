@@ -216,15 +216,21 @@ class TestWatchBackendLiveness:
 
 @pytest.mark.integration
 class TestProxyExitsOnBackendDeath:
-    """End-to-end reproduction: the proxy MUST reach a bounded end (not hang)
-    when the backend dies mid-session. On the un-fixed code the proxy parks
-    forever on the dead backend and this times out — the exact unbounded hang.
+    """End-to-end reproduction: a CALL must reach a bounded end (not hang) when
+    the backend dies mid-session. On the un-fixed code the proxy parks forever
+    on the dead backend and this times out — the exact unbounded hang.
+
+    The class name is now a misnomer kept for continuity of history: since
+    F-889 (c) the proxy does NOT exit, because exiting is the client-visible
+    disconnect this whole file was trying to avoid by a different route. The
+    bounded end is the JSON-RPC error `PendingCalls` sends, not a process
+    ending.
 
     F-838: the bounded end is now "heal, else tear down", so this case pins the
     ELSE branch by stating its premise — no replacement is obtainable."""
 
     @pytest.mark.asyncio
-    async def test_proxy_returns_when_backend_dies_and_cannot_be_healed(
+    async def test_an_unhealable_death_answers_the_call_without_ending_the_session(
         self, tmp_path, monkeypatch
     ):
         import subprocess
@@ -313,17 +319,37 @@ class TestProxyExitsOnBackendDeath:
                     await p2c_rx.receive()  # local initialize answer
                     await p2c_rx.receive()  # tools/list from the real backend
 
+                # A call the dying backend will never answer, in flight at the
+                # moment it dies — which is what makes the ANSWER below the
+                # bounded end this file exists to pin.
+                await c2p_tx.send(_tools_list_msg(3))
+
                 # The backend dies mid-session.
                 backend.kill()
                 backend.wait(timeout=10)
 
-                # A request now can never be answered by the dead backend. The
-                # proxy must notice the backend is gone and return within a bounded
-                # time — on the old code it parks forever and this times out.
-                await c2p_tx.send(_tools_list_msg(3))
-
-                with anyio.fail_after(30):
-                    await proxy_returned.wait()
+                # SOFT golden, REVERSED deliberately by F-889 (c). This used to
+                # wait for the PROXY to return, calling that the bounded end. It
+                # is not: an exit here is Claude Code's "Connection closed", and
+                # on 2026-09-18 a RAM-starved machine took that door 114 times
+                # for a backend answering in 227 ms.
+                #
+                # The invariant this file actually protects is the one in its
+                # own first paragraph — "a tool call issued after the backend
+                # died never got a response ... the MCP client blocked with no
+                # timeout" — and that is unchanged: `PendingCalls` answers the
+                # in-flight call with a JSON-RPC error. What changed is that the
+                # session survives to be served by the next backend.
+                with anyio.fail_after(60):
+                    answer = await p2c_rx.receive()
+                inner = answer.message.root
+                assert inner.id == 3, "the in-flight call must be answered"
+                assert getattr(inner, "error", None) is not None, (
+                    "a call the dead backend was holding must FAIL, not hang"
+                )
+                assert not proxy_returned.is_set(), (
+                    "the proxy must NOT end the client's session (F-889 (c))"
+                )
 
                 tg.cancel_scope.cancel()
         finally:
