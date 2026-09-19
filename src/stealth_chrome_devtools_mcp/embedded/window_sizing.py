@@ -145,3 +145,29 @@ async def apply_and_measure(tab: Tab, options: BrowserOptions) -> WindowSizeMetr
         f"actual {actual}",
     )
     return metrics
+
+
+async def measure(tab: Tab) -> dict[str, int] | None:
+    """This window's outer size as it stands, or None if it cannot be read.
+
+    The RE-ATTACH read (F-888). ``apply_and_measure`` is a spawn's: it sizes the
+    window first, and calling it for a browser this backend did not launch would
+    resize a human's open window to a default they never asked for. Adoption has
+    NO request to compare against — so there is no ``requested``, no ``clamped``,
+    and the one honest answer is what the window measures now.
+
+    Guarded for ``apply_and_measure``'s reason and then some: an adoption must
+    not fail because a diagnostic probe did, and the caller reports the absence
+    (``measured: false``) rather than the model's 1920x1080 default.
+    """
+    try:
+        actual, _inner = await _measure(tab)
+    except Exception as error:  # noqa: BLE001  PERMANENT(a diagnostic probe must never cost the adoption; the caller reports the absence)
+        debug_logger.log_warning(
+            "window_sizing",
+            "measure",
+            f"window size could not be measured on a re-attached browser "
+            f"({type(error).__name__}: {error}); reporting it as unmeasured",
+        )
+        return None
+    return actual

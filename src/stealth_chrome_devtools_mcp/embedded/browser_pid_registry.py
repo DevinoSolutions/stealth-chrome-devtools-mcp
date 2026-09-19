@@ -46,7 +46,10 @@ import json
 import os
 import sys
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, TextIO
+
+import psutil
 
 if sys.platform == "win32":
     import msvcrt
@@ -113,13 +116,14 @@ def normalize_path(path: str | None) -> str | None:
     return os.path.normcase(os.path.normpath(str(path)))
 
 
-def new_entry(
+def new_entry(  # noqa: PLR0913  PERMANENT(one parameter per recorded field; folding them into a struct would put the schema in a second place)
     pid: int,
     *,
     create_time: float | None,
     user_data_dir: str | None,
     uses_custom_data_dir: bool | None,
     auto_clone: bool,
+    cdp_port: int | None = None,
 ) -> Entry:
     """One tracked browser as it is first recorded.
 
@@ -128,6 +132,15 @@ def new_entry(
     disagreement between them is silent: the normalizer drops every key it does
     not know, so a field added at a tracking site would survive one process
     lifetime and vanish on the next load with nothing red.
+
+    ``cdp_port`` is the browser's DevTools port (F-888). It is recorded because
+    it is the one thing a LATER backend needs to reach a browser this one
+    spawned, and nothing else on disk necessarily has it: it lives in
+    ``browser.config.port``, in memory, in the process that dies. It defaults to
+    None so a caller that cannot learn it records the absence rather than a lie —
+    ``browser_reattach.endpoint`` then falls back to the holder's command line
+    and, after that, to Chrome's own ``DevToolsActivePort``, which is also what
+    serves every entry written before this release.
 
     The owner is deliberately NOT set here. :func:`with_owner` stamps it at
     write time, which is the only moment that knows which process is writing.
@@ -138,6 +151,7 @@ def new_entry(
         "user_data_dir": normalize_path(user_data_dir),
         "uses_custom_data_dir": uses_custom_data_dir,
         "auto_clone": bool(auto_clone),
+        "cdp_port": cdp_port if isinstance(cdp_port, int) else None,
         "timestamp": time.time(),
     }
 
@@ -169,6 +183,7 @@ def normalize_entries(raw: object) -> Entries:
                 "user_data_dir": None,
                 "uses_custom_data_dir": None,
                 "auto_clone": False,
+                "cdp_port": None,
                 "timestamp": 0,
             }
         elif isinstance(value, dict):
@@ -179,6 +194,7 @@ def normalize_entries(raw: object) -> Entries:
             if not isinstance(pid, int):
                 continue
             recorded_dir = recorded.get("user_data_dir")
+            recorded_cdp_port = recorded.get("cdp_port")
             metadata = {
                 "pid": pid,
                 "create_time": recorded.get("create_time"),
@@ -187,6 +203,16 @@ def normalize_entries(raw: object) -> Entries:
                 ),
                 "uses_custom_data_dir": recorded.get("uses_custom_data_dir"),
                 "auto_clone": bool(recorded.get("auto_clone", False)),
+                # Narrowed on the way in, unlike the owner keys below: an absent
+                # port and an unusable one mean the same thing here — ask the
+                # other two witnesses — so there is nothing for a caller to tell
+                # apart and no reason to make every reader re-check a bool.
+                "cdp_port": (
+                    recorded_cdp_port
+                    if isinstance(recorded_cdp_port, int)
+                    and not isinstance(recorded_cdp_port, bool)
+                    else None
+                ),
                 "timestamp": recorded.get("timestamp", 0),
             }
             for key in (OWNER_PID, OWNER_CREATE_TIME):
@@ -210,6 +236,139 @@ def with_owner(entry: Entry, owner_pid: int, owner_create_time: float | None) ->
     return {**entry, OWNER_PID: owner_pid, OWNER_CREATE_TIME: owner_create_time}
 
 
+def owner_identity() -> tuple[int, float | None]:
+    """This process's ``(pid, create_time)`` — what :func:`with_owner` stamps.
+
+    Beside the stamp it feeds, because two writers now need it: every ordinary
+    record write (``process_cleanup._save_tracked_pids``) and the cross-process
+    claim below, which must stamp the same identity or a backend would refuse to
+    recognise its own browsers.
+
+    A module function, not instance state: the answer cannot change within a
+    process, and several tests build their writers through ``__new__``.
+    """
+    pid = os.getpid()
+    create_time = None
+    with contextlib.suppress(psutil.Error, OSError):
+        create_time = psutil.Process(pid).create_time()
+    return pid, create_time
+
+
+@dataclass(frozen=True)
+class Claimed:
+    """A browser this process now owns in the record, and how to give it back."""
+
+    instance_id: str
+    previous: Entry | None
+
+
+def _kept_disposability(previous: Entry) -> Entry:
+    """The two keys a claim may never REWRITE on an entry that already exists.
+
+    ``on_persistent_profile`` is read from ``uses_custom_data_dir`` and
+    ``auto_clone``, and a claim writes both as "persistent" — right for the
+    browser it was written for, which has no entry at all. But the held path is
+    deliberately not gated on that predicate (there is usually no record to read
+    it from), so a caller who names an AUTO-CLONE directory by hand would
+    otherwise flip a disposable profile into one nothing ever reclaims and a
+    browser nothing ever reaps. What the record already says about disposability
+    is a fact about how that profile was CREATED, and a claim is a statement
+    about ownership; it has no standing to change it.
+    """
+    return {
+        key: previous[key]
+        for key in ("uses_custom_data_dir", "auto_clone")
+        if key in previous
+    }
+
+
+def claim_browser(  # noqa: PLR0913  PERMANENT(the record path, the browser's identity, the entry to write, the owner to stamp and the liveness witness are five independent facts; a struct would put the schema in a second place — see new_entry)
+    path: Path,
+    *,
+    pid: int,
+    entry: Entry,
+    instance_id: str,
+    owner_pid: int,
+    owner_create_time: float | None,
+    owner_alive: Callable[[int, float | None], bool],
+) -> Claimed | None:
+    """Take ownership of the browser running as *pid*, or None if refused (F-888).
+
+    THE cross-process claim, and the only thing that makes adoption safe when two
+    backends start at once. F-886's rule — never two backends driving one Chrome —
+    was enforced by a classification followed, much later, by an ownership stamp;
+    between those two moments every other backend reads the same record, sees the
+    same dead owner, and reaches the same verdict. An ``asyncio`` lock cannot help:
+    the racers are PROCESSES.
+
+    So the check and the stamp happen in ONE :func:`update_entries` mutate, which
+    holds the record's file lock across its whole read-modify-write. The decision
+    made inside that mutate is the authoritative one and is what this returns —
+    deliberately NOT a re-read afterwards, which would be strictly weaker: once
+    the lock is released a third backend may legitimately have claimed something
+    else, and a re-read could report our own successful claim as a failure.
+
+    Keyed on the PID, never on the instance id, because the id is not stable
+    across the two entry points: a browser with no record entry is adopted under a
+    freshly minted id, so two backends racing for one Chrome would mint two
+    different ids and both "win". The pid is the browser.
+
+    An entry already naming that pid decides the outcome: a LIVE owner refuses,
+    and a dead one is taken over — keeping ITS instance id, which is how a client
+    that held an id before the restart keeps addressing the same browser.
+    """
+    outcome: dict[str, object] = {}
+
+    def mutate(recorded: Entries) -> Entries:
+        for recorded_id, existing in recorded.items():
+            if existing.get("pid") != pid:
+                continue
+            if not is_reapable(existing, owner_alive):
+                outcome["refused"] = True
+                return recorded
+            outcome["id"] = recorded_id
+            outcome["previous"] = existing
+            break
+        else:
+            outcome["id"] = instance_id
+        taken = str(outcome["id"])
+        previous_entry = recorded.get(taken) or {}
+        merged = {**previous_entry, **entry, **_kept_disposability(previous_entry)}
+        return {
+            **recorded,
+            taken: with_owner(merged, owner_pid, owner_create_time),
+        }
+
+    update_entries(path, mutate)
+    if outcome.get("refused"):
+        return None
+    previous = outcome.get("previous")
+    return Claimed(
+        instance_id=str(outcome["id"]),
+        previous=previous if isinstance(previous, dict) else None,
+    )
+
+
+def release_claim(path: Path, claim: Claimed) -> None:
+    """Undo :func:`claim_browser` — the entry as it was, or gone if we made it.
+
+    Called when the attach a claim was taken FOR then fails. Without it a failed
+    adoption leaves the record naming us as the owner of a browser we do not
+    hold, which is worse than the state we found: the next backend would read a
+    live owner and refuse to adopt a browser nobody is driving.
+    """
+
+    def mutate(recorded: Entries) -> Entries:
+        restored = dict(recorded)
+        if claim.previous is None:
+            restored.pop(claim.instance_id, None)
+        else:
+            restored[claim.instance_id] = claim.previous
+        return restored
+
+    update_entries(path, mutate)
+
+
 def is_reapable(entry: Entry, owner_alive: Callable[[int, float | None], bool]) -> bool:
     """True when no live owner holds *entry*, so startup recovery may take it.
 
@@ -227,6 +386,60 @@ def is_reapable(entry: Entry, owner_alive: Callable[[int, float | None], bool]) 
     if not isinstance(owner_pid, int):
         return True
     return not owner_alive(owner_pid, recorded_time(entry, OWNER_CREATE_TIME))
+
+
+def on_persistent_profile(entry: Entry) -> bool:
+    """True when *entry*'s profile directory OUTLIVES its browser.
+
+    THE one home for that question (F-888). It was written out by hand in three
+    places in ``process_cleanup`` — the delete guard, the untrack decision and,
+    since F-888, the shutdown spare — and the three have to agree: a directory
+    spared from deletion whose entry is dropped anyway is a browser nothing can
+    find again, and a browser spared at shutdown whose directory is then deleted
+    is the incident this finding is about with an extra step.
+
+    Two conditions and both are needed. ``uses_custom_data_dir`` alone is True
+    for every spawn since the resolver started handing back an explicit path, so
+    it separates nothing on its own; ``auto_clone`` is what marks the disposable
+    per-session clone that is MEANT to die with its browser. A legacy entry
+    carrying neither key reads as NOT persistent, which is 2.0.3's behaviour and
+    the safe direction here: the worst case is a temp profile reclaimed, where
+    the other way round is a named profile deleted.
+    """
+    return bool(
+        entry.get("uses_custom_data_dir") is True and not entry.get("auto_clone")
+    )
+
+
+# One past the highest TCP port. Chrome never binds 0 for DevTools — it resolves
+# an ``=0`` request to a real port before reporting it — so 0 is "not bound yet"
+# and is rejected with everything else out of range.
+_PORT_CEILING = 65536
+
+
+def valid_port(value: object) -> int | None:
+    """*value* as a usable TCP port, or None (F-888).
+
+    THE one home for that question, because three witnesses ask it about three
+    different shapes — this record's ``cdp_port``, a line of Chrome's
+    ``DevToolsActivePort`` and a ``--remote-debugging-port`` argument — and a
+    second copy of the range is a second place it can drift.
+
+    ``bool`` is excluded explicitly rather than incidentally: it is an ``int``
+    subclass, so a hand-edited ``true`` would otherwise read as port 1.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        port = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return port if 0 < port < _PORT_CEILING else None
+
+
+def recorded_port(entry: Entry) -> int | None:
+    """The DevTools port *entry* carries, or None when it names none (F-888)."""
+    return valid_port(entry.get("cdp_port"))
 
 
 def recorded_time(entry: Entry, key: str) -> float | None:

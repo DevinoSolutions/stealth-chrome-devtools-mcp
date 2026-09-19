@@ -87,8 +87,10 @@ Deliberately NOT, and each was tried against the source first:
 **The ceiling is for LAUNCHES WE OWN, and the witness decides which those are.**
 ``_launched_process`` resolves the owning browser once per ``HTTPApi`` and reads
 nodriver's own ``_process``; ``None`` means nobody here launched it — the
-``connect_existing`` branch, i.e. F-810's delegated launch and F-888's re-attach
-— and such a call gets nodriver's own window unchanged. That is not a caution,
+``connect_existing`` branch, which since F-888 has ONE home, ``cdp_attach``, and
+two consumers through it (``desktop_launch``'s delegated launch and
+``browser_reattach``'s adoption of a browser a dead backend left running) — and
+such a call gets nodriver's own window unchanged. That is not a caution,
 it is what the measurement says: an ATTACH targets an endpoint that is already
 open, and a `/json/version` fetch against a live one takes **0.78 ms median**
 (measured locally, ten fetches; min 0.51, max 170.8 on the first). nodriver's
@@ -199,8 +201,8 @@ def _launched_process(api: HTTPApi) -> _Launched | None:
     ``Browser.start`` sets ``_process`` before it builds the ``HTTPApi`` and
     registers itself before it starts polling, so a launch is always findable
     from here. ``None`` means the browser was ATTACHED to rather than launched —
-    ``connect_existing``, i.e. F-810's delegated launch and F-888's re-attach —
-    and that is the whole reason this lookup exists rather than a bare deadline.
+    ``connect_existing``, i.e. every caller of ``cdp_attach`` — and that is the
+    whole reason this lookup exists rather than a bare deadline.
     """
     for browser in tuple(get_registered_instances()):
         if getattr(browser, "_http", None) is api:

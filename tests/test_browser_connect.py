@@ -32,7 +32,7 @@ import pytest
 from nodriver.core.browser import Browser, HTTPApi
 from nodriver.core.util import get_registered_instances
 
-from stealth_chrome_devtools_mcp.embedded import browser_connect
+from stealth_chrome_devtools_mcp.embedded import browser_connect, cdp_attach
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
 pytestmark = pytest.mark.asyncio
@@ -260,25 +260,20 @@ async def test_a_launcher_that_exits_mid_wait_ends_the_wait_there(
     assert clock.now() < died_at + 2.5 + browser_connect.POLL_SECONDS
 
 
-async def test_an_attach_does_not_get_the_launch_ceiling(monkeypatch, clock, endpoint):
-    """`connect_existing` — F-810's delegated launch today, F-888's re-attach
-    next — reaches the same ``Browser.start``, and must NOT inherit a ceiling
-    sized for a process still starting. An attach targets an endpoint that is
-    already open (measured: 0.78 ms median for a live one), so a stale port has
-    to stay as cheap to reject as it was in 2.1.9."""
+async def test_an_attach_does_not_get_the_launch_ceiling(clock, endpoint, tmp_path):
+    """`connect_existing` must NOT inherit a ceiling sized for a process that is
+    still starting. Driven through `cdp_attach`, which is THE one home for that
+    door and F-888's `browser_reattach` door with it — so this follows the real
+    config rather than a hand-built one. An attach targets an endpoint that is
+    already open (measured: 0.78 ms median for a live one), so a stale recorded
+    port has to stay as cheap to reject as it was in 2.1.9."""
     browser_connect.install()
     endpoint["opens_at"] = float("inf")
-
-    async def _no_targets(self):
-        return None
-
-    monkeypatch.setattr(Browser, "update_targets", _no_targets)
-    config = uc.Config(headless=True, host="127.0.0.1", port=9222)
+    config = cdp_attach.config_for(str(tmp_path / "profile"), 9222, headless=True)
     known = set(get_registered_instances())
     try:
         with pytest.raises(Exception, match="Failed to connect to browser"):
-            browser = Browser(config)
-            await browser.start()
+            await cdp_attach.attach(config)
     finally:
         for registered in tuple(get_registered_instances()):
             if registered not in known:

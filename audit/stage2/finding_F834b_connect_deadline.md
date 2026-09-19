@@ -183,8 +183,12 @@ measured the mid-wait shape at 3.6 s; it is pinned here now, not only measured.)
 
 `_launched_process` resolves the owning browser **once** per `HTTPApi` and reads
 nodriver's own `_process`. `None` means nobody here launched it — the
-`connect_existing` branch, which today is F-810's delegated launch and next is
-F-888's `browser_reattach` — and such a call takes nodriver's window unchanged.
+`connect_existing` branch, which since F-888 merged has ONE home, `cdp_attach`,
+with two consumers through it (`desktop_launch`'s delegated launch and
+`browser_reattach`'s adoption of a browser a dead backend left running) — and
+such a call takes nodriver's window unchanged. The pin is driven through
+`cdp_attach.config_for` + `cdp_attach.attach` rather than a hand-built `Config`,
+so it follows that home if it moves; `browser_reattach`'s door is the same call.
 
 Decided from measurement, not caution. An attach targets an endpoint that is
 **already open**, and a `/json/version` fetch against a live one costs **0.78 ms

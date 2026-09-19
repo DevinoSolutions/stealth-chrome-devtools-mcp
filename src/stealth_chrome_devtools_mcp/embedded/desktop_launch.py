@@ -27,6 +27,12 @@ nodriver: ``uc.Config(host=..., port=...)`` makes ``Browser.start`` take the
 ``connect_existing`` path (no subprocess, ``_process``/``_process_pid`` stay
 ``None``), and on that path ``browser_args``/``user_data_dir`` in the config are
 IGNORED — which is why they must ride on the launcher command line instead.
+
+The FIRST of those two is no longer spelled here. F-888 needed the same door to
+adopt a browser a dead backend left running, so ``cdp_attach`` is where the
+host-and-port pair lives now and this module is one of its two consumers. The
+second fact stays here, because it is about what the LAUNCHER must carry and only
+this module launches anything.
 """
 
 from __future__ import annotations
@@ -483,7 +489,7 @@ async def launch_and_attach(
     script are always removed, success or failure, and a Chrome that started but
     could not be attached to is killed rather than left as an untracked orphan.
     """
-    import nodriver as uc
+    from stealth_chrome_devtools_mcp.embedded import cdp_attach
 
     # The port is chosen here but bound by Chrome SECONDS later (task create,
     # task run, browser start) — a far wider race window than the normal path's
@@ -502,14 +508,17 @@ async def launch_and_attach(
     # (``sandbox`` is not a parameter: ``--no-sandbox`` already rides in
     # ``launch_args`` when the spawn asked for it, added by
     # ``browser_manager._resolve_launch_args`` after the stealth filter.)
-    config = uc.Config(
-        user_data_dir=user_data_dir,
-        headless=False,
+    # THE one door into a running browser (F-888): setting host AND port is what
+    # makes nodriver connect instead of spawn, and that pair is spelled once, in
+    # ``cdp_attach``. This file was where it lived; a backend adopting a browser
+    # after a restart is the other consumer, and the two cannot drift apart on
+    # how they get in.
+    config = cdp_attach.config_for(
+        user_data_dir,
+        port,
         browser_executable_path=browser_executable,
         browser_args=launch_args,
     )
-    config.host = "127.0.0.1"
-    config.port = port
     args = config()
     token = uuid.uuid4().hex[:TOKEN_CHARS]
     task_name = f"{TASK_PREFIX}{token}"
@@ -538,8 +547,7 @@ async def launch_and_attach(
         # user_data_dir, but ``browser.config.user_data_dir`` is what the spawn
         # pipeline reads back to decide profile cleanup, so it must be the dir
         # the browser actually launched with.
-        browser = await uc.start(config=config)
-        browser._process_pid = pid
+        browser = await cdp_attach.attach(config, pid)
         attached = True
         return browser, pid
     finally:

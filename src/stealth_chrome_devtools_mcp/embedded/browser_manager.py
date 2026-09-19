@@ -576,6 +576,10 @@ class BrowserManager:
                 user_data_dir=actual_user_data_dir,
                 uses_custom_data_dir=uses_custom_data_dir,
                 auto_clone=options.auto_clone,
+                # Read AFTER uc.start (nodriver assigns it there), the only
+                # moment this port exists outside our memory — which is what
+                # lets a LATER backend reach this browser at all (F-888).
+                cdp_port=getattr(getattr(browser, "config", None), "port", None),
             )
         else:
             debug_logger.log_warning(
@@ -1078,17 +1082,8 @@ class BrowserManager:
         return new_tab
 
     async def get_navigation_tab(self, instance_id: str) -> Tab | None:
-        """
-        Get a healthy tab for navigation, recovering from stale tracked tabs
-        when needed.
-
-        Args:
-            instance_id (str): Browser instance id.
-
-        Returns:
-            Optional[Tab]: A valid navigation tab, or None if the instance
-            does not exist.
-        """
+        """A healthy tab for navigation, recovering from a stale tracked tab
+        when needed. ``None`` when the instance does not exist."""
         data = await self.get_instance(instance_id)
         if not data:
             return None
