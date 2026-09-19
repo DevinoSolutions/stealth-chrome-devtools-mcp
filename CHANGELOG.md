@@ -405,6 +405,68 @@ is a new leaf, `browser_cmdline`. `process_cleanup.py`'s cap ratchets down
 1017 -> 1009.
 
 
+### Fixed — F-834 stage 2: a Chrome still opening its DevTools endpoint was killed as a failed spawn
+
+nodriver 0.47 gives a Chrome it just launched `0.25 s + 4 × 0.5 s` = **2.75 s of
+waiting** to answer `/json/version` (`core/browser.py:411-435`) — a loop count
+with no `Config` field behind it. (Wall clock adds what five refusals cost,
+which is the platform's: near-instant on POSIX per F-870 §1.3, so ≈2.75 s there;
+2023-2060 ms each on Windows, measured locally, so ≈12.9 s — which is why the
+Windows cell's cold start does not fail.) Chrome routinely misses it on macOS.
+The F-870 cold-start probe, which runs on
+every gate cell before the suite with the runner idle and launching exactly ONE
+Chrome, measures `ms_to_json_version`:
+
+| cell | gate run | launch 1 (cold) | launch 2 (warm) |
+|---|---|---|---|
+| macOS/ARM64 | 35304880367 | 3943.6 ms | 581.6 ms |
+| macOS/ARM64 | 35316298288 | 4786.0 ms | 1289.7 ms |
+| macOS/ARM64 | 35454765486 | 5839.1 ms | 2138.7 ms |
+| Windows/X64 | 35316298288 | 4250.0 ms | 344.0 ms |
+| Linux/X64 | 35316298288 | 685.8 ms | 232.6 ms |
+
+Two of the three cells have never once answered inside the window on a cold
+binary, and the warmest macOS reading already spends 78 % of it on one launch
+with nothing else running. What followed was correct and wasted: the attempt
+raised "Failed to connect", no `Browser` was handed back, F-860's reap killed
+the Chrome that was coming up and logged a WARNING on the backend's durable
+channel, and F-834 stage 1 relaunched from cold onto the directory the reap had
+just freed. On the six-way fleet (`spawn 26.0s`, 1 lead + 5 in 3 lanes on 3
+cpus) a follower lost that race often enough to fail four of the last five
+macOS gate runs — `tests/test_e2e_fleet.py`, runs 35454765486 (attempts 1 and
+2), 35316298288 (attempt 3) and 35304880367 (attempt 1).
+
+The budget is ours now. `embedded/browser_connect.py` is THE one home for "how
+long does a freshly launched Chrome get to open its DevTools endpoint", and
+`browser_manager._launch_browser` installs it once ahead of the F-810 branch, so
+every launch in the tree is covered. `CONNECT_PATIENCE_SECONDS` is 30.0 — ~5×
+the worst measured cold launch — and it is a **ceiling, not a wait**: an
+endpoint that opens in 300 ms costs 300 ms, and a live one-Chrome run through
+the product measured a healthy headless spawn at 644.5 ms end to end. A launcher
+that exits, before the wait or during it, ends the wait at the next refusal, so
+the one case this could have slowed (Chrome dies at launch) is faster than
+2.1.9, which polls a dead port for its whole window.
+
+**The ceiling is for launches we own.** The `connect_existing` door — F-810's
+delegated launch, and F-888's re-attach next — takes nodriver's window
+unchanged, because an attach targets an endpoint that is already open and a live
+one answers in 0.78 ms median (measured, ten fetches); patience buys nothing
+there, while a stale recorded port would have cost 30 s inside a user-facing
+call. There is deliberately no second constant for that door. An HTTP *error*
+answer is likewise not a closed socket, so a squatter answering 500 still fails
+in nodriver's window. What this does cost is named rather than hidden: a Chrome
+that starts and then hangs without ever listening now spends the ceiling on each
+of `_SPAWN_ATTEMPTS`' three attempts — 32.5 s and 97.6 s measured on the
+instant-refusal shape — and the finding's §6.3 argues why clipping the later
+attempts was declined. The seam is `HTTPApi.get`, the only call that
+sits between "Chrome is spawned" and "the endpoint answers" and nodriver's
+single caller of it; this closes the fix F-870 §6 wrote down and declined to
+ship for want of exactly the number §7 has since measured. No new knob, no
+attach path, no weakened oracle — `spawn_leak`'s warning still fires for a spawn
+that genuinely leaves a Chrome behind. `browser_manager.py`'s LOC cap ratchets
+down 1493 → 1490. See
+`audit/stage2/finding_F834b_connect_deadline.md`.
+
 ## 2.1.9
 
 ### Fixed — F-885: proxy/backend-death tests touched the developer's live `~/.stealth-mcp` record
