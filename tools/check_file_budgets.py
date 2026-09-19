@@ -92,10 +92,18 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # row had zero headroom, so the two lines the warning and the enriched
     # timeout message needed were paid for by folding `elapsed` into `remaining`
     # and the three-line `_replace_main_tab(...)` call into one. Cap == actual.
+    # F-834 stage 2 RATCHETS DOWN 1493 -> 1490. "How long does a Chrome we just
+    # launched get to open its DevTools endpoint" is `browser_connect.py` now —
+    # nodriver's answer is a `range(5)` of 0.5 s sleeps, i.e. 2.75 s, and two of
+    # the three gate cells have never once answered inside it on a cold binary.
+    # What this file keeps is the launch itself and the one `install()` ahead of
+    # the F-810 branch that says whose budget decides. That line, its import and
+    # the sentence naming them were paid for by the signature-echo Args/Returns
+    # block of `_replace_main_tab` (the plan_F856 mechanism). Cap == actual.
     "embedded/browser_manager.py": (
-        1493,
+        1490,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
-        " + F-882",
+        " + F-882 + F-834b",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its

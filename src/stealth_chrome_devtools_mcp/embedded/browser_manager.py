@@ -15,6 +15,7 @@ import psutil
 from nodriver import Browser, Tab
 
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_connect,
     desktop_launch,
     navigation_milestone,
     page_storage,
@@ -530,7 +531,11 @@ class BrowserManager:
         the ``uc.Config`` here, but when this backend cannot show windows a headed
         launch is delegated to the user's desktop and attached to (F-810). Kept
         minimal — only the fallible starts live here — so the orchestrator captures
-        the handle immediately and can tear it down if a later phase raises."""
+        the handle immediately and can tear it down if a later phase raises. Both
+        starts below are nodriver's ``Browser.start``, so the seam goes in ahead
+        of the branch: its 2.75 s connect window is a loop count Chrome routinely
+        misses, and ours is the budget that decides (F-834 stage 2)."""
+        browser_connect.install()
         if desktop_launch.should_delegate(options.headless):
             browser, _pid = await desktop_launch.launch_and_attach(
                 browser_executable, launch_args, options.user_data_dir
@@ -1025,17 +1030,9 @@ class BrowserManager:
         reason: str,
         close_existing: bool = True,
     ) -> Tab | None:
-        """
-        Replace the tracked main tab for an instance with a fresh about:blank tab.
-
-        Args:
-            instance_id (str): Browser instance id.
-            reason (str): Diagnostic reason for replacement.
-            close_existing (bool): Whether to close the previously tracked tab.
-
-        Returns:
-            Optional[Tab]: The fresh tab, or None if the instance was missing.
-        """
+        """Replace the tracked main tab for an instance with a fresh about:blank
+        tab, closing the previous one unless told not to. ``None`` when the
+        instance was missing; *reason* is the diagnostic this logs under."""
         data = await self.get_instance(instance_id)
         if not data:
             return None
