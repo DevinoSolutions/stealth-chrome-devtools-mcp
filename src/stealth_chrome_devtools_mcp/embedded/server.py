@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 from contextlib import asynccontextmanager
 from typing import Any
@@ -118,6 +119,12 @@ DEBUG_LOGGING_ENABLED = get_settings().stealth_browser_debug or get_settings().d
 # an idle HTTP backend crossing back to zero sessions must NOT re-arm startup.
 _LIFESPAN_STARTED = False
 _SERVE_TRANSPORT = "stdio"
+# F-889 (b): the port this backend was told to serve on, stamped by ``__main__``
+# beside ``_SERVE_TRANSPORT`` and for the same reason — the lifespan runs long
+# after ``args`` is out of scope, and the heartbeat has to name the entry in
+# ``server.json`` it is a claim about. ``None`` until an http serve sets it, so
+# an imported-but-not-served module stamps nothing.
+_SERVE_PORT: int | None = None
 
 
 @asynccontextmanager
@@ -137,6 +144,17 @@ async def app_lifespan(server):
             "server", "startup", "Starting Browser Automation MCP Server..."
         )
         rt.process_cleanup.activate()
+        # F-889 (b): be our own liveness witness, so a proxy that is not being
+        # SCHEDULED cannot mistake its own timed-out probe for our death. Here
+        # rather than in the ``__main__`` block because this is the first code
+        # of ours that runs ON the serving event loop — which is the whole
+        # point: a stamp from anywhere else would keep ticking through the
+        # wedged-dispatch-loop failure the watchdog exists for. http only: a
+        # standalone stdio backend records nothing and has no proxy watching it.
+        if _SERVE_TRANSPORT == "http" and _SERVE_PORT is not None:
+            rt.backend_liveness.start_beating(
+                rt.backend_registry.SERVER_STATE_FILE, _SERVE_PORT, os.getpid()
+            )
         await rt.browser_manager.start_idle_reaper()
         # Adopt the browsers a previous backend of ours left running on
         # persistent profiles, so a human login survives a restart (F-888).
@@ -516,6 +534,7 @@ if __name__ == "__main__":
     # B1: bind app_lifespan's teardown policy to the serve transport. HTTP runs
     # the lifespan per MCP session, so session-exit teardown must be a no-op.
     _SERVE_TRANSPORT = args.transport
+    _SERVE_PORT = args.port  # F-889 (b): which server.json entry we may stamp
 
     if args.transport == "http":
         # F-862: the backend reaps MCP sessions their client abandoned (a

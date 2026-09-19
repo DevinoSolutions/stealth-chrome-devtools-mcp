@@ -963,6 +963,36 @@ class TestWhatTheCommandLineSays:
         ):
             assert browser_cmdline.debug_port(CHROME_PID, recorded) == 9223
 
+    def test_the_owner_witness_is_blind_to_which_build_the_owner_runs(self):
+        """A live backend of ours owns its browsers whatever version it is.
+
+        Two different questions now live one import apart and both are spelled
+        "is this one of ours": `singleton._adoptable_identity` (F-889) asks
+        whether a recorded BACKEND is one this client would REUSE, which is
+        version- and fingerprint-gated on purpose, and
+        `singleton._is_our_backend` asks whether a PID is our HTTP backend at
+        all, which must not be. Only the second reaches
+        `browser_pid_registry.is_reapable`, and if the two were ever folded
+        together a backend running a NEWER build would read as no owner —
+        so a cold start would adopt the browsers of a live sibling and F-886's
+        two-drivers harm would be back, reached from this side.
+
+        Pinned on the WITNESS rather than on a message, because that is the join
+        that could be "unified" by someone reading two identically-worded
+        docstrings: the cmdline of a backend says nothing about its build.
+        """
+        entry = {
+            **_entry(),
+            "owner_pid": LIVE_OWNER,
+            # A build this client would never adopt — the exact input
+            # `_adoptable_identity` answers False for.
+            "version": "99.0.0",
+            "source_fingerprint": "a-stranger-digest",
+        }
+        assert registry.is_reapable(entry, _owner_alive) is False, (
+            "a live backend of ours is a live owner whatever build it runs"
+        )
+
     def test_a_remote_proxy_is_never_judged(self):
         """It was not tied to the dead backend's lifetime, and connect-probing a
         stranger's host is not this tool's business."""

@@ -165,10 +165,13 @@ LIFECYCLE_INCIDENTS: dict[str, tuple[str, ...]] = {
     "condemned:connection_lost": ("confirmed gone after a lost connection",),
     # proxy_selfheal.heal_backend — the session survived, onto a NEW backend
     "healed": ("backend healed: re-bridging",),
-    # proxy_selfheal.heal_backend — every attempt failed (reason=unhealable)
-    "teardown:unhealable": ("backend unhealable after",),
-    # proxy_selfheal.drive — recoveries keep failing (reason=flapping)
-    "teardown:flapping": ("backend lost", "times in a row", "giving up"),
+    # proxy_selfheal.heal_backend — every attempt failed (reason=unhealable).
+    # F-889 (c) renamed the OUTCOME, not this line: the proxy now backs off and
+    # retries where it used to tear down, so the key says "unreachable".
+    "unreachable:unhealable": ("backend unhealable after",),
+    # proxy_selfheal.drive — recoveries keep failing (reason=flapping). The
+    # wording moved with the behaviour: "giving up" was the exit F-889 deleted.
+    "unreachable:flapping": ("backend lost", "times in a row", "backing off"),
     # singleton._start_backend_holding_lock — F-829's source-change eviction
     "eviction": ("backend stale (source changed), evicting",),
 }
@@ -235,8 +238,8 @@ async def test_lifecycle_incident_patterns_match_the_product_strings() -> None:
         "condemned:watchdog": watchdog,
         "condemned:connection_lost": selfheal,
         "healed": selfheal,
-        "teardown:unhealable": selfheal,
-        "teardown:flapping": selfheal,
+        "unreachable:unhealable": selfheal,
+        "unreachable:flapping": selfheal,
         "eviction": singleton,
     }
     assert set(homes) == set(LIFECYCLE_INCIDENTS)

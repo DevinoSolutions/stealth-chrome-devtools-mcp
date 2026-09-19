@@ -119,6 +119,140 @@ sdk 2.64.0 serialises each class, the three spelling rules above, and the CPytho
 and mcp-SDK source lines the message rules cite — is in
 `audit/stage2/finding_F887_sentry_expected_noise.md`.
 
+### Fixed — F-889: a starved proxy condemned a healthy backend, then exited
+
+Measured 2026-09-18, 13:30-14:00 UTC on 2.1.8. The machine had **2.4 GB free of
+125.7** and 114 stdio proxies whose working sets had been paged out to ~0 MB.
+Their 2 s liveness probes timed out on the CLIENT side, the watchdog condemned,
+the heals could not complete in the wall time they were given, and the proxies
+EXITED — Claude Code rendered that as **"Connection closed"** on every session at
+once. The backend they condemned (pid 173824, port 52554) answered an MCP
+`initialize` in **227 ms** throughout, with zero errors in its own log for the
+whole window. 829 condemnations in seven days. The asymmetry is the finding: the
+only process that reported a problem was the one that had no CPU.
+
+Four changes, each in the one home for its question.
+
+**(a) Strikes are earned in fairly scheduled seconds.** A strike run may not
+conclude until a `scheduling_lag.FairWindow` of
+`interval * (failures_before_teardown - 1)` has been spent. On an idle machine
+nothing moves: the per-tick charge is `interval * (1 + probe / nap_actual)`,
+which is `>= interval` always, so the remaining ticks always spend the window
+and the human-pinned ~12 s hard-down detection window is preserved. Under
+starvation it stretches and still terminates, because `MAX_STRETCH` bounds it at
+4x its patience in wall seconds. `FairWindow` is consumed, never modified.
+
+**(b) The backend is a witness to its own liveness.** It stamps a wall timestamp
+and its pid into a per-port sidecar, `~/.stealth-mcp/heartbeat-<port>.json`, every
+3 s **from its event loop**, and a proxy reads it with no HTTP, no socket and no
+thread. A fresh self-report against a failed client probe means "I am starved",
+not "it is dead", and resets the strike run; a stale one (10 missed stamps) or an
+absent one falls through to the confirmation phase exactly as before. The event
+loop is the whole design: the failure the watchdog exists for is a backend whose
+dispatch loop is dead while its socket stays open, and a heartbeat on a thread
+would keep stamping through it. A SIDECAR and not a field on the record, because
+`server.json` is written under the cold-start lock and a 3-second heartbeat must
+not take it: unlocked, a whole-record read-modify-write is a lost update by
+construction. One file per port has one writer, so there is no merge and no
+snapshot; the record itself is byte-for-byte what 2.1.9 reads and writes, so the
+schema version does not move and an older fleet is unaffected in both directions.
+The sidecar is deleted with its entry by both doors out of the record — forgetting
+it (`stop`, `cleanup --apply`) and superseding it (a cold start of ours moving to
+a new port) — and a stamp for a port the record no longer names is not evidence
+about anything, so it can never resurrect a forgotten entry.
+
+**The veto it buys is bounded.** A heartbeat proves the event LOOP is turning, not
+that the HTTP listener is reachable, so a fresh stamp may defer condemnation for
+at most `HEARTBEAT_VETOES` = 10 completed strike runs — each of which must spend
+its own `FairWindow` first, making the budget one of FAIR-time rounds. A starved
+proxy spends it slowly; a fairly scheduled one reaches the confirmation gate in
+about two minutes and heals from there.
+
+**(c) The proxy never exits because the backend is unreachable.** Where
+`proxy_selfheal.drive` used to return — a heal that gave up, three deaths back to
+back, or a generation that never became ready — it now backs off (2 s doubling to
+60 s, jittered ±25% so a fleet does not converge on one second) and keeps asking
+for as long as the client's stdio pipe is open. In-flight calls are still failed
+fast with the existing JSON-RPC error, so no call hangs silently, and the client
+keeps its MCP server: when a backend comes back, the very next tool call works.
+The one lifetime the proxy ever legitimately had is the client's. Stdin EOF is
+still the exit — and, because the same outage's cleanup found **116 stale proxy
+processes**, so is the client process itself going away: the new
+`embedded/client_presence.py` captures the launching process as a
+`(pid, create_time)` pair at start and ends the proxy once that exact process is
+gone. That is not a decision about the backend, it is noticing nobody is
+listening, and every uncertainty about it resolves to "still there" so it can
+never disconnect a live session. The process it names is not the direct parent:
+above a proxy sit a venv `python` trampoline with an identical command line and a
+waiting `uv`/`uvx`, both of which live exactly as long as the proxy does, so it
+walks past those (and past our own console-script redirector) to the first
+ancestor that is nobody's launcher — otherwise the check could never fire for the
+population it exists for. A walk that cannot settle answers "unknown", which
+reads as present.
+
+The `proxy: teardown after failed heal` report described a thing that no longer
+happens and is now `proxy: backend unreachable, retrying`, carrying the same
+`reason` values plus the first delay — shipped **once per outage, not once per
+retry** (the retry series is unbounded), and closed by exactly one
+`proxy: backend reachable again` carrying `attempts` and `outage_seconds`. Every
+individual attempt is still in the proxy's own log file.
+
+**(d) A newer backend of ours is adopted, never evicted.** Two identities on one
+desktop each read the other as stale — `fingerprint_mismatch` answers "these
+digests differ", never "mine is older" — so each evicted the other on every proxy
+start. F-886 stops that only when the loser owns live browsers, and a fleet
+mid-upgrade is exactly the population where neither does yet. A recorded version
+strictly newer than ours is now ADOPTABLE, through a predicate of its own
+(`_adoptable_identity`) read by the reuse gate and nothing else. "Is this entry
+mine" stays `_identity_matches` and stays exactly what it was, because the
+protection rule and the operator verbs ask it: adopting forward means **step
+aside**, never take the port, so a newer sibling that is not answering is still
+protected while it owns a live browser, and `restart`/`stop` still target our own
+identity's backend. Same version + different digest (issue #14's editable-install
+flow) is untouched, an older backend is still evicted when unprotected, and an
+unresolvable version on either side is never "newer", so every uncomparable case
+falls back to today's cold start.
+
+### Fixed — F-890: an inherited `FASTMCP_*` variable made every backend launch crash at import
+
+For sixty-six minutes on 2026-09-18 (04:26-05:33) every backend spawn died with
+a `pydantic.ValidationError` before one line of our code ran, and the only trace
+was `backend-boot.log`: the proxy hands the backend the MCP client's environment
+whole, and `fastmcp` 2.11.2 builds a `pydantic_settings.BaseSettings` AT IMPORT
+whose `env_prefixes` are `["FASTMCP_", "FASTMCP_SERVER_"]`. An inherited
+`FASTMCP_PORT=""` is therefore parsed into `port: int` before `--port` exists as
+a concept, and `int("")` does not validate. Measured on the installed stack;
+the bare `port`/`PORT` names have no effect at all, so a fix written against
+them would have shipped as a fix for a bug it did not touch.
+
+The child env is now scrubbed at THE one composition site
+(`singleton._start_server_process`) through the new `embedded/backend_env.py`,
+which drops the whole `FASTMCP_` family rather than overriding the field that
+crashed us — the backend's configuration comes from the argv we build, so every
+one of those names is a second input to a decision already made, and
+`FASTMCP_STATELESS_HTTP` would not even crash, it would silently give the bridge
+a transport it is not written against. The prefix is scrubbed rather than a
+field list derived from the library, because the stdio proxy must never import
+`fastmcp`; a test pins the constant against `fastmcp`'s own `model_config`, and
+a subprocess node proves the crash and its absence after the scrub. The module
+also absorbed M8-2's `STEALTH_MCP_NO_AUTO_RECOVERY` pop (same sentence, one
+home) — for the CHILD env, which is the only environment that rule was ever
+about. The removed NAMES are logged, never their values.
+
+The composer is not the only way this package imports `fastmcp`, so the third
+party's names are also dropped from our OWN environment, at the two doors that
+reach such an import: the first statement of `server.main()` (`--transport http`
+runs `embedded/server.py` in that very process through `runpy`, and
+`stealth-chrome-devtools serve --http` delegates to the same function) and
+`cli._server()`, which every ops verb but `profiles` goes through — so a stray
+`FASTMCP_PORT=""` in an operator's shell no longer kills `status` and `doctor`,
+the two commands they would run to find out why nothing starts. **Only the third
+party's names**: our own process keeps every `STEALTH_MCP_*` variable it was
+started with, including the `STEALTH_MCP_NO_AUTO_RECOVERY` flag that keeps the
+read-only verbs read-only. That removal belongs to the spawned backend's
+environment and nowhere else. What we drop from our own process is reported at
+WARNING rather than INFO, because this runs before logging is configured and
+Python's last-resort handler starts at WARNING.
 
 ### Added — F-888: persistent named profiles and CDP re-attach after a backend restart
 

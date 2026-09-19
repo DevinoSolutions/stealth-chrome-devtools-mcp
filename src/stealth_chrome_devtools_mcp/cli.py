@@ -38,10 +38,21 @@ def _server():
 
     Forces read-only import semantics: no orphan-process recovery, no atexit
     teardown handlers — so the CLI never disturbs a running backend.
+
+    This is the OTHER door onto an ``import fastmcp`` (F-889 review N3;
+    ``server.main()`` is the first), and every verb but ``profiles`` comes
+    through it — including the two an operator runs to find out why nothing
+    starts. So the F-890 scrub joins the environment write that was already
+    here, in front of the same import. It removes third-party names only: the
+    read-only guard set one line above is ours and survives it.
     """
     os.environ.setdefault(  # noqa: TID251  PERMANENT(env write before import)
         "STEALTH_MCP_NO_AUTO_RECOVERY", "1"
     )
+    from stealth_chrome_devtools_mcp.embedded import backend_env
+
+    backend_env.scrub_process_env()
+
     from stealth_chrome_devtools_mcp.embedded import server
 
     return server

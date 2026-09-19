@@ -354,7 +354,7 @@ the module docstring says must never drift. An entry without the key reads as
 
 ## 5. Tests
 
-`tests/test_browser_reattach.py`, 90 pins, hermetic — the record is a `tmp_path`
+`tests/test_browser_reattach.py`, 91 pins, hermetic — the record is a `tmp_path`
 file on every one, both liveness witnesses are injected, the `ProcessCleanup` the
 pass writes through is a double, and the CDP door is patched. The one thing NOT
 stubbed out is the claim: it writes to that real `tmp_path` record, because a
@@ -373,7 +373,7 @@ claim whose file lock is faked proves nothing about two processes.
 | `TestTheCrossProcessClaim` | the claim is taken before the door and released on failure; keyed on the pid; a second backend reading a live owner is `Refused`; the decision is the one made inside the mutate; a claim never flips a disposable entry to persistent; the budget expiring AFTER the claim and WHILE it is still landing both still release it |
 | `TestALostClaimIsNeverAReap` | two backends racing one dead-owner browser: exactly one adopts, the other SPARES and the entry survives with the winner's stamp; a record write that raises spares too; a browser-level failure still reaps; `Undecided` is one class with `Refused`, so one handler covers both |
 | `TestIgnoredArgsNamesOnlyWhatTheCallerPassed` | `ignored_spawn_args` reports only arguments whose value differs from the tool's own default — a `sandbox` the caller really passed IS named, the one this handler resolves for them is not |
-| `TestWhatTheCommandLineSays` | the port is joined to the profile; headless is measured; a dead loopback proxy is reported and a live one is not |
+| `TestWhatTheCommandLineSays` | the port is joined to the profile (the REFUSAL in both path flavors on every platform, the MATCH in the running platform's own); **the owner witness is blind to which BUILD the owner runs**, so F-889's `_adoptable_identity` can never be folded into `_is_our_backend` and make a newer live sibling's browsers adoptable; headless is measured; a dead loopback proxy is reported and a live one is not |
 | `TestAnAdoptedInstanceTellsTheTruth` | measured headless and window size, `not_restored`, `ignored_spawn_args`, hooks and interception on the adopted tab |
 | `TestHeldAdoptionNeverReaps` | a failed attach on the spawn path spawns instead and **kills nothing** — no reap, no record drop; a successful one answers with the instance id and stamps `reattached` |
 | `TestNamedSessionDirIsNeverReclaimed` | fact (b)/(c) for both shapes a named session dir has on disk: no marker, and the server's own `auto_clean: false` marker |
