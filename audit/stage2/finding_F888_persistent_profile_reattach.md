@@ -354,7 +354,7 @@ the module docstring says must never drift. An entry without the key reads as
 
 ## 5. Tests
 
-`tests/test_browser_reattach.py`, 88 pins, hermetic — the record is a `tmp_path`
+`tests/test_browser_reattach.py`, 90 pins, hermetic — the record is a `tmp_path`
 file on every one, both liveness witnesses are injected, the `ProcessCleanup` the
 pass writes through is a double, and the CDP door is patched. The one thing NOT
 stubbed out is the claim: it writes to that real `tmp_path` record, because a
@@ -435,6 +435,21 @@ and the resulting flake would look exactly like a genuine adoption refusal.
 ---
 
 ## 6. Residuals
+
+**Profile matching is case-SENSITIVE on macOS, and that is pre-existing.** Joining
+a port to a profile compares through `browser_pid_registry.normalize_path`, which
+is `os.path.normcase(os.path.normpath(...))` — the RUNNING platform's flavor,
+which is right, because both sides of every real comparison come from one machine:
+the record this backend wrote and the argv of a process running beside it. But
+`posixpath.normcase` is the identity, so on macOS — where APFS is case-insensitive
+by default — `/Users/x/Profile` and `/Users/x/profile` are one directory that this
+comparator calls two. Not introduced here (the function normalises the record on
+the way IN and predates F-888) and not fixed here for the same reason: changing it
+changes the stored shape of every entry on that platform. Making it flavor-aware
+by SHAPE was considered when PR #135's gate went red on all five POSIX cells and
+rejected outright — a backslash is a legal character in a POSIX filename and
+`C:foo` is a legal POSIX relative path, so sniffing would corrupt real entries to
+serve a cross-flavor case that cannot occur on one machine.
 
 **A persistent browser we cannot attach to is still killed.** The fallback for a
 failed adoption is `reap_recorded`, i.e. exactly what 2.1.9 did to that entry, so

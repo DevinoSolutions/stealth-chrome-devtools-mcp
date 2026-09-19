@@ -25,6 +25,7 @@ pinned for SHAPE only, by reading the config nodriver would have been handed.
 
 import asyncio
 import json
+import os
 import socket
 import time
 from pathlib import Path
@@ -910,15 +911,57 @@ class TestWhatTheCommandLineSays:
         with self._with_cmdline("chrome", "--remote-debugging-port=1"):
             assert browser_cmdline.is_headless(CHROME_PID) is False
 
-    def test_a_port_is_joined_to_the_profile_it_was_launched_on(self):
+    @pytest.mark.parametrize(
+        ("launched", "ours"),
+        [
+            pytest.param(r"C:\other", r"C:\ours", id="windows-paths"),
+            pytest.param("/var/other", "/var/ours", id="posix-paths"),
+        ],
+    )
+    def test_a_stranger_directory_never_donates_its_port(self, launched, ours):
         """F-888 review M4's other half: "a Chrome holds this pid" and "this pid
         names a port" were independent, so a RECYCLED pid on a stranger's
-        chrome.exe would have donated that stranger's debugging port."""
+        chrome.exe would have donated that stranger's debugging port.
+
+        Both flavors run on every platform because the REFUSAL is flavor-free:
+        two different directories stay different under anybody's normalisation.
+        The other half of the join — two spellings of ONE directory — is not,
+        and has its own pin below.
+        """
         with self._with_cmdline(
-            "chrome", r"--user-data-dir=C:\other", "--remote-debugging-port=9223"
+            "chrome", f"--user-data-dir={launched}", "--remote-debugging-port=9223"
         ):
-            assert browser_cmdline.debug_port(CHROME_PID, r"C:\ours") is None
-            assert browser_cmdline.debug_port(CHROME_PID, r"c:\other\\") == 9223
+            assert browser_cmdline.debug_port(CHROME_PID, ours) is None
+
+    def test_the_same_directory_spelled_differently_still_matches(self):
+        """The other half of the join, in the RUNNING platform's own flavor.
+
+        `browser_pid_registry.normalize_path` is `os.path` — deliberately the
+        platform's, because both sides of every real comparison come from ONE
+        machine: the record this backend wrote and the argv of a process running
+        beside it. So what counts as "the same directory spelled differently" is
+        a per-platform fact and has to be pinned as one. Windows folds case and
+        eats a trailing separator; POSIX does neither and normalises a `.`
+        component instead.
+
+        This pin was `c:\\other\\\\` against `--user-data-dir=C:\\other` on every
+        platform, which is a Windows normalisation asked of `posixpath` — green
+        on Windows, red on all five POSIX cells (PR #135, run 35457340072).
+        Making the comparator flavor-aware was considered and rejected: it is the
+        function that normalises the record on the way IN, a backslash is a legal
+        character in a POSIX filename and `C:foo` is a legal POSIX relative path,
+        so shape-sniffing would corrupt stored entries to serve a case that
+        cannot occur.
+        """
+        launched, recorded = (
+            (r"C:\other", "c:\\other\\\\")
+            if os.name == "nt"
+            else ("/var/other", "/var/./other/")
+        )
+        with self._with_cmdline(
+            "chrome", f"--user-data-dir={launched}", "--remote-debugging-port=9223"
+        ):
+            assert browser_cmdline.debug_port(CHROME_PID, recorded) == 9223
 
     def test_a_remote_proxy_is_never_judged(self):
         """It was not tied to the dead backend's lifetime, and connect-probing a
