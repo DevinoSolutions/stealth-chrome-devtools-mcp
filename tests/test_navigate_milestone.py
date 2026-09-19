@@ -22,17 +22,24 @@ stubbed, exactly as the F-824 pins do, so the wait under test is the product's.
 from __future__ import annotations
 
 import asyncio
+from typing import ClassVar
 
 import pytest
 from nodriver import cdp
+from nodriver.core.connection import ProtocolException
 
-from fakes import FakeTab
+from fakes import TARGET_SWAPPED_ERROR, FakeTab
 from stealth_chrome_devtools_mcp.embedded import navigation_milestone
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 URL = "https://fake.test/target"
+
+#: Chrome's swap wording, taken from the harness's copy of the CI traceback —
+#: never from ``navigation_milestone``, so a pin built on it measures the
+#: product's key against Chrome's text rather than against the product.
+SWAPPED_TEXT = str(TARGET_SWAPPED_ERROR["message"])
 
 
 @pytest.fixture
@@ -659,3 +666,162 @@ async def test_a_commit_after_the_milestone_answers_a_committed_untitled_page():
 
     assert answered == (landing, "")
     assert answered in e2e_nav._meta_refresh_states(origin), answered
+
+
+# ── F-882e: the document swapped WHILE the landing read was in flight ───────
+def _landing_reads(tab: FakeTab) -> list[str]:
+    """Every post-navigation read this tab was asked for — the one expression
+    that carries both halves, so a milestone-time read cannot be counted."""
+    return [
+        js
+        for js in tab.evaluate_calls
+        if "location.href" in js and "document.title" in js
+    ]
+
+
+def _meta_refresh_tab(first: str, landing: str, **extra) -> FakeTab:
+    """The meta-refresh shape: ours loads, the refresh commits its replacement,
+    and the replacement is HELD so WHEN it lands is the test's to decide."""
+    return FakeTab(
+        url=first,
+        lifecycle="after",
+        supersede_after="load",
+        supersede_held=True,
+        supersede_last_milestone="init",  # it COMMITS and gets no further
+        supersede_url=landing,
+        title_after_supersede="Nav Landing",
+        title_at_load="",
+        **extra,
+    )
+
+
+async def test_a_document_that_commits_under_the_landing_read_is_read_again():
+    """RED before F-882e: ``ProtocolException: Inspected target navigated or
+    closed [code: -32000]`` out of ``landing``.
+
+    The state one instant earlier than the F-882d pin above. There the
+    replacement had already committed when the read went out, so the read
+    answered about it; here it commits WHILE the read is in flight, and Chrome
+    answers the ``Runtime.evaluate`` with ``-32000`` instead of a value. Twice
+    measured on CI — release-gate runs 35316298288 attempt 1 (2026-09-18) and
+    35460514255 attempt 1 (2026-09-19), both ``integration (macOS/ARM64)``,
+    both raised from ``navigation_milestone.py`` ``landing`` with the navigation
+    itself ``[accepted, committed]``, so the tool failed about a page that was
+    fine.
+
+    The truthful answer is the document that TOOK ITS PLACE — the tab is showing
+    it, the read is one round trip, and the pair is still one document at one
+    instant. So the read is taken again, and what it lands on is F-882d's state
+    2, already named by the E2E oracle.
+    """
+    import test_e2e_navigation_truthfulness as e2e_nav
+
+    origin = "https://fake.test"
+    first = f"{origin}/nav/meta-refresh"
+    landing = f"{origin}/nav/landing?from=meta-refresh"
+    tab = _meta_refresh_tab(first, landing, landing_swaps=1)
+
+    await navigation_milestone.navigate(tab, first, "load", budget_seconds=5.0)
+    answered = await navigation_milestone.landing(tab)
+
+    assert answered == (landing, "")
+    assert len(_landing_reads(tab)) == 2  # the refused one, then the answer
+    assert answered in e2e_nav._meta_refresh_states(origin), answered
+
+
+async def test_the_tool_answers_success_when_the_read_raced_the_refresh(
+    monkeypatch, manager
+):
+    """The same race at the tool boundary — the shape CI failed on. RED before
+    F-882e: the ``ProtocolException`` reached the caller as a failed
+    ``navigate``. The answer names the landing, and the tab is never replaced:
+    Chrome accepted this navigation, so there is no stale tab to recover from
+    (F-881), and a second full budget on a fresh tab would throw away the page
+    the read is describing."""
+    origin = "https://fake.test"
+    first = f"{origin}/nav/meta-refresh"
+    landing = f"{origin}/nav/landing?from=meta-refresh"
+    tab = _meta_refresh_tab(first, landing, landing_swaps=1)
+    replacements = _with_tab(monkeypatch, tab)
+
+    result = await manager.navigate(instance_id="iid-1", url=first, timeout=5000)
+
+    assert result == {"url": landing, "title": "", "success": True}
+    assert _navigate_frames(tab) == [first]  # one navigation, not two
+    assert replacements == []
+
+
+async def test_a_page_that_swaps_under_every_read_raises_and_keeps_its_tab(
+    monkeypatch, manager
+):
+    """The bound. A page replacing itself faster than the read can answer must
+    still end — the re-read is a fixed small number, never a loop the page
+    controls — and the F-824 recovery still does not fire past it, because
+    ``Inspected target navigated or closed`` is the page's doing and not a stale
+    tab's (that half held before F-882e and is asserted so it keeps holding if
+    ``_is_recoverable_navigation_error``'s marker list is ever widened).
+
+    **What the exception type pins, and what it does not.** Chrome's own
+    `ProtocolException` reaching the caller is what happens TODAY for a CDP
+    error anywhere in this tree, and F-882e deliberately does not change it
+    here: wrapping it in a `ToolError` at this one call site would give CDP
+    failures a second shape depending on which read raised them, which is the
+    defect convention 4 names. So this asserts the type to pin that the retry
+    does not SWALLOW or REWORD what it failed to absorb — it is not a claim that
+    a raw library exception is the right operator-facing answer. Giving the
+    whole class one convention-2 shape is a separate change with a wider blast
+    radius than one navigation; finding §6 carries the argument."""
+    tab = FakeTab(lifecycle="after", landing_swaps=99)
+    replacements = _with_tab(monkeypatch, tab)
+
+    with pytest.raises(ProtocolException) as raised:
+        await manager.navigate(instance_id="iid-1", url=URL, timeout=5000)
+
+    assert "Inspected target navigated or closed" in str(raised.value)
+    assert len(_landing_reads(tab)) == navigation_milestone.LANDING_SWAP_RETRIES + 1
+    assert _navigate_frames(tab) == [URL]
+    assert replacements == []
+
+
+class _OtherProtocolErrorTab(FakeTab):
+    """A tab whose landing read fails with a protocol error the test chooses."""
+
+    landing_error: ClassVar[dict[str, object]] = {}
+
+    async def evaluate(self, expression, *args, **kwargs):
+        if "location.href" in expression and "document.title" in expression:
+            self.evaluate_calls.append(expression)
+            raise ProtocolException(self.landing_error)
+        return await super().evaluate(expression, *args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("error", "match"),
+    [
+        # The swap's CODE under another subject. Measured: this is F-884's
+        # masking error, and it is why `-32000` alone can never be the key —
+        # Chrome answers every server error it has with that code.
+        ({"code": -32000, "message": "DOM agent hasn't been enabled"}, "DOM agent"),
+        # The swap's MESSAGE under another code. No measurement says Chrome
+        # ever sends this pairing; what it pins is that the KEY needs both
+        # halves, which the docstring and CLAUDE.md both claim. Without it,
+        # deleting the code half from `document_swapped` left every pin green.
+        ({"code": -32602, "message": SWAPPED_TEXT}, "Inspected target"),
+    ],
+    ids=["swap-code-other-subject", "swap-message-other-code"],
+)
+async def test_another_protocol_error_from_the_landing_read_is_not_retried(
+    error, match
+):
+    """The key is narrow: only the swap earns a second read, and it takes BOTH
+    halves to be one. Anything else is raised from the FIRST read — a re-read
+    for an error that says nothing about the document having moved is a retry
+    loop nobody asked for, and it would hide a real fault behind three
+    identical failures."""
+    tab = _OtherProtocolErrorTab(lifecycle="after")
+    tab.landing_error = error
+
+    with pytest.raises(ProtocolException, match=match):
+        await navigation_milestone.landing(tab)
+
+    assert len(_landing_reads(tab)) == 1

@@ -116,6 +116,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from nodriver import cdp
+from nodriver.core.connection import ProtocolException
 
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -260,9 +261,42 @@ def require(wait_until: str) -> str:
 #: arrive as BiDi ``RemoteValue`` nodes.
 LANDING_JS = "JSON.stringify([location.href, document.title])"
 
+#: Chrome's answer to a command whose document was replaced while the command
+#: was in flight. The CODE alone is not a key: ``-32000`` is Chrome's generic
+#: server error and carries everything from ``DOM agent hasn't been enabled``
+#: upwards, so the message is half of it; the message alone is not a key either,
+#: because the pair is what the two CI failures carried (release-gate runs
+#: 35316298288 a1 and 35460514255 a1, ``integration (macOS/ARM64)``, F-882e).
+SWAPPED_CODE = -32000
+SWAPPED_MESSAGE = "Inspected target navigated or closed"
 
-async def landing(tab: Tab) -> tuple[str, str]:
-    """Where this navigation ended up: ``(url, title)`` of ONE document.
+#: How many EXTRA landing reads a document swap may cost. A fixed small number
+#: and never a loop the page controls: a page that replaces itself faster than
+#: one round trip must still end. Two, because one covers the shape measured
+#: (``meta refresh`` -> its landing) and the second covers a landing that is
+#: itself a redirect, while the third read's failure is reported rather than
+#: hidden behind a fourth.
+LANDING_SWAP_RETRIES = 2
+
+
+def document_swapped(error: BaseException) -> bool:
+    """Whether *error* is Chrome saying the document a command was running in
+    was replaced while the command was in flight (F-882e).
+
+    Keyed on the CODE **and** the MESSAGE, on ``element_resolution``'s
+    ``_is_disabled_agent_error`` precedent: a named, closed test for one
+    wording, never a widening of anything. Every other ``ProtocolException``
+    from the landing read — including every other ``-32000`` — is a fact about
+    the browser and is raised.
+    """
+    if not isinstance(error, ProtocolException):
+        return False
+    message = getattr(error, "message", None) or str(error)
+    return getattr(error, "code", None) == SWAPPED_CODE and SWAPPED_MESSAGE in message
+
+
+async def _read_landing(tab: Tab) -> tuple[str, str]:
+    """ONE post-navigation read: the round trip and the shape check on it.
 
     Raises rather than degrading: an unreadable landing would otherwise be
     reported as a page at ``""`` with no title, which is the shape F-802 closed.
@@ -279,6 +313,37 @@ async def landing(tab: Tab) -> tuple[str, str]:
         f"asked for (got {type(answer).__name__}, "
         f"{len(answer) if isinstance(answer, str) else 0} chars)."
     )
+
+
+async def landing(tab: Tab) -> tuple[str, str]:
+    """Where this navigation ended up: ``(url, title)`` of ONE document.
+
+    **A document may go away under this read, and that is not a failure**
+    (F-882e). The milestone and the read are two round trips, and a document
+    scheduled to replace itself AT the milestone — the ``meta refresh`` shape —
+    can commit in the gap: Chrome then answers the in-flight ``Runtime.evaluate``
+    with :data:`SWAPPED_MESSAGE`, which reached the caller as a failed
+    navigation about a page that was fine (twice on CI, both ``[accepted,
+    committed]``). The truthful answer is the document that TOOK ITS PLACE — it
+    is what the tab is showing, and one more round trip is still one document at
+    one instant — so the read is simply taken again, up to
+    :data:`LANDING_SWAP_RETRIES` times.
+
+    Deliberately NOT a second wait for the new head of the chain to reach the
+    milestone: the milestone belongs to the navigation and was reached, the
+    listener is gone by here, and re-arming one would put a second "when is a
+    document ready" home next to :func:`navigate`. A committed-but-still-parsing
+    landing is a truthful answer and is already named as one (F-882d).
+    """
+    for _ in range(LANDING_SWAP_RETRIES):
+        try:
+            return await _read_landing(tab)
+        except ProtocolException as error:
+            if not document_swapped(error):
+                raise
+    # The last read is outside the loop, so its failure — swap or not — is the
+    # one the caller sees, and there is no unreachable tail to guess about.
+    return await _read_landing(tab)
 
 
 def _aborted_error(url: str) -> ToolError:

@@ -404,7 +404,6 @@ connection it opened; and what a running browser's own command line says about i
 is a new leaf, `browser_cmdline`. `process_cleanup.py`'s cap ratchets down
 1017 -> 1009.
 
-
 ### Fixed — F-834 stage 2: a Chrome still opening its DevTools endpoint was killed as a failed spawn
 
 nodriver 0.47 gives a Chrome it just launched `0.25 s + 4 × 0.5 s` = **2.75 s of
@@ -466,6 +465,34 @@ attach path, no weakened oracle — `spawn_leak`'s warning still fires for a spa
 that genuinely leaves a Chrome behind. `browser_manager.py`'s LOC cap ratchets
 down 1493 → 1490. See
 `audit/stage2/finding_F834b_connect_deadline.md`.
+
+### Fixed — F-882e: `navigate` failed about a healthy page when the document moved under its landing read
+
+The fourth sibling of F-882b/c/d and the first that is a product defect. The
+milestone and the post-navigation read are two round trips, so a document
+scheduled to replace itself AT the milestone — the `meta refresh` shape, a
+`load`-time `location.replace`, a JS challenge — can commit in the gap. Chrome
+then answers the in-flight `Runtime.evaluate` with
+`ProtocolException: Inspected target navigated or closed [code: -32000]`, and
+that reached the caller as a failed `navigate` while the browser sat on a
+perfectly good page. Measured twice on `integration (macOS/ARM64)`, on two
+branches a day apart and neither of them related: release-gate runs 35316298288
+attempt 1 (2026-09-18) and 35460514255 attempt 1 (2026-09-19), both raised from
+`navigation_milestone.landing`, both with the navigation itself
+`[accepted, committed]` — which is why nothing retried it, correctly: a failure
+after Chrome accepted a navigation is the page's own (F-881).
+
+`landing` now RE-READS, because the document that took the old one's place is
+what the tab is showing and one more round trip is still one document at one
+instant. Bounded at `LANDING_SWAP_RETRIES` (2) extra reads and keyed narrowly by
+`document_swapped` on Chrome's code **and** its message — `-32000` alone is that
+browser's generic server error, so every other protocol failure is still raised
+from the first read, and the last read sits outside the loop so its error is the
+one the caller sees. Deliberately not a second wait for the replacement to reach
+the milestone: the milestone belongs to the navigation and was reached, and a
+committed-but-still-parsing landing is a truthful answer the oracle already
+names (F-882d). `browser_manager.py` is unchanged; the E2E node is unchanged and
+stays the real-Chrome witness.
 
 ## 2.1.9
 

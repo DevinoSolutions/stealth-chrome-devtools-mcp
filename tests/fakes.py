@@ -42,6 +42,7 @@ import nodriver.cdp.network as cdp_network
 import nodriver.cdp.page as cdp_page
 import nodriver.cdp.runtime as cdp_runtime
 import nodriver.cdp.target as cdp_target
+from nodriver.core.connection import ProtocolException
 
 #: "this double was not told to answer anything unusual" — distinct from every
 #: value a test might legitimately want it to answer with, ``None`` included.
@@ -61,6 +62,18 @@ ABORTED_NAVIGATION = "net::ERR_ABORTED"
 #: ``supersede_after`` for the abort that IS a supersession: no document of ours
 #: ever commits, and the one that aborted us takes its place.
 ABORTED_SUPERSESSION = "aborted"
+#: What Chrome answers a command whose document was replaced while the command
+#: was in flight (F-882e). Copied verbatim from the CI failures it reproduces —
+#: release-gate runs 35316298288 attempt 1 and 35460514255 attempt 1, both
+#: ``integration (macOS/ARM64)``, both raised out of the post-navigation read as
+#: ``ProtocolException: Inspected target navigated or closed [code: -32000]``.
+#: Deliberately NOT imported from ``navigation_milestone``: a fake that reads the
+#: product's own constants would compare the product to itself, and what a pin
+#: on this needs to measure is whether it recognises CHROME's wording.
+TARGET_SWAPPED_ERROR = {
+    "code": -32000,
+    "message": "Inspected target navigated or closed",
+}
 
 # ---------------------------------------------------------------------------
 # Module signature guards (shared by the on-disk record modules)
@@ -286,6 +299,16 @@ class FakeTab:
     the page cannot move until the test says so, and a rule that needed the
     replacement to finish simply times out, which is the RED those nodes want.
 
+    **The swap under the read (F-882e).** ``landing_swaps`` is how many times the
+    post-navigation read (the one expression carrying BOTH ``location.href`` and
+    ``document.title``) is answered with :data:`TARGET_SWAPPED_ERROR` before it
+    answers at all — Chrome's reply to a ``Runtime.evaluate`` whose document was
+    replaced while it was in flight. Each refusal DELIVERS whatever
+    ``supersede_held`` was holding first, so the replacement really is what took
+    the read's document away: a raise with a page that never moved would model
+    an error with no swap behind it, and a pin built on that could not tell a
+    re-read of the NEW document from a re-read of the old one.
+
     **The replay.** ``send(Page.setLifecycleEventsEnabled(true))`` delivers the
     CURRENT document's whole lifecycle again, under the name ``commit`` where a
     live navigation says ``init`` (measured, Chrome 152). It is modelled on
@@ -316,6 +339,7 @@ class FakeTab:
         navigate_error: str | None = None,
         replay_loader: str = "L-replay",
         supersede_held: bool = False,
+        landing_swaps: int = 0,
     ) -> None:
         self.url = url
         # ``fake_target`` (defined below) — a Tab's ``.target`` is a real
@@ -353,6 +377,7 @@ class FakeTab:
         self._navigate_error = navigate_error
         self._replay_loader = replay_loader
         self._supersede_held = supersede_held
+        self._landing_swaps = landing_swaps
         self._held: list[tuple[str, str, str]] = []
         self.navigations = 0
         # The milestones the CURRENT document has reached. A tab that exists is
@@ -559,6 +584,12 @@ class FakeTab:
         if "location.href" in expression and "document.title" in expression:
             # The post-navigation landing read (F-882): ONE round trip, so the
             # url and the title it answers with are always the same document's.
+            if self._landing_swaps > 0:
+                self._landing_swaps -= 1
+                # The replacement lands FIRST, then the read fails: that order
+                # is what makes the refusal evidence of a swap (F-882e).
+                self.deliver_supersession()
+                raise ProtocolException(TARGET_SWAPPED_ERROR)
             title = self._title_now()
             if title is None:
                 title = self._evaluate_map.get("document.title", "")

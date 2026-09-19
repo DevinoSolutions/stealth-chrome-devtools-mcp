@@ -252,6 +252,19 @@ class TestLoadBearingSymbols:
                 "protected",
                 "clear_stale",
             ],
+            "embedded.navigation_milestone": [
+                "MILESTONES",
+                "require",
+                "navigate",
+                "landing",
+                "Progress",
+                "LANDING_JS",
+                # F-882e: the swap key and its bound, both named in CLAUDE.md.
+                "document_swapped",
+                "SWAPPED_CODE",
+                "SWAPPED_MESSAGE",
+                "LANDING_SWAP_RETRIES",
+            ],
             "embedded.tool_registry": ["SECTION_TOOLS", "ToolRegistry"],
             "embedded.tool_errors": [
                 "ToolError",
