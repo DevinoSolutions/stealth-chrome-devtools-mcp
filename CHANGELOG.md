@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+### Fixed — F-889: a starved proxy condemned a healthy backend, then exited
+
+Measured 2026-09-18, 13:30-14:00 UTC on 2.1.8. The machine had **2.4 GB free of
+125.7** and 114 stdio proxies whose working sets had been paged out to ~0 MB.
+Their 2 s liveness probes timed out on the CLIENT side, the watchdog condemned,
+the heals could not complete in the wall time they were given, and the proxies
+EXITED — Claude Code rendered that as **"Connection closed"** on every session at
+once. The backend they condemned (pid 173824, port 52554) answered an MCP
+`initialize` in **227 ms** throughout, with zero errors in its own log for the
+whole window. 829 condemnations in seven days. The asymmetry is the finding: the
+only process that reported a problem was the one that had no CPU.
+
+Four changes, each in the one home for its question.
+
+**(a) Strikes are earned in fairly scheduled seconds.** A strike run may not
+conclude until a `scheduling_lag.FairWindow` of
+`interval * (failures_before_teardown - 1)` has been spent. On an idle machine
+nothing moves: the per-tick charge is `interval * (1 + probe / nap_actual)`,
+which is `>= interval` always, so the remaining ticks always spend the window
+and the human-pinned ~12 s hard-down detection window is preserved. Under
+starvation it stretches and still terminates, because `MAX_STRETCH` bounds it at
+4x its patience in wall seconds. `FairWindow` is consumed, never modified.
+
+**(b) The backend is a witness to its own liveness.** It stamps a wall timestamp
+and its pid into its own `server.json` entry every 3 s **from its event loop**,
+and a proxy reads it with no HTTP, no socket and no thread. A fresh self-report
+against a failed client probe means "I am starved", not "it is dead", and resets
+the strike run; a stale one (10 missed stamps) or an absent one falls through to
+the confirmation phase exactly as before. The event loop is the whole design: the
+failure the watchdog exists for is a backend whose dispatch loop is dead while
+its socket stays open, and a heartbeat on a thread would keep stamping through
+it. The two fields are **optional additions to the v3 entry**, so the schema
+version does not move and 2.1.9 is unaffected in both directions — an older
+reader ignores them, an older backend writes none and a newer reader reads
+"absent". A stamp writes nothing when no entry claims the port, so it can never
+resurrect an entry that was just forgotten.
+
+**(c) The proxy never exits because the backend is unreachable.** Where
+`proxy_selfheal.drive` used to return — a heal that gave up, three deaths back to
+back, or a generation that never became ready — it now backs off (2 s doubling to
+60 s, jittered ±25% so a fleet does not converge on one second) and keeps asking
+for as long as the client's stdio pipe is open. In-flight calls are still failed
+fast with the existing JSON-RPC error, so no call hangs silently, and the client
+keeps its MCP server: when a backend comes back, the very next tool call works.
+The one lifetime the proxy ever legitimately had is the client's, and stdin EOF
+is still the exit. The `proxy: teardown after failed heal` report described a
+thing that no longer happens and is now `proxy: backend unreachable, retrying`,
+carrying the same `reason` values plus the attempt number and the delay.
+
+**(d) A newer backend of ours is adopted, never evicted.** Two identities on one
+desktop each read the other as stale — `fingerprint_mismatch` answers "these
+digests differ", never "mine is older" — so each evicted the other on every proxy
+start. F-886 stops that only when the loser owns live browsers, and a fleet
+mid-upgrade is exactly the population where neither does yet. A recorded version
+strictly newer than ours now MATCHES identity, and everything downstream follows
+from that one predicate. Same version + different digest (issue #14's
+editable-install flow) is untouched, an older backend is still evicted when
+unprotected, and an unresolvable version on either side is never "newer", so
+every uncomparable case falls back to today's cold start.
+
 ### Fixed — F-890: an inherited `FASTMCP_*` variable made every backend launch crash at import
 
 For sixty-six minutes on 2026-09-18 (04:26-05:33) every backend spawn died with

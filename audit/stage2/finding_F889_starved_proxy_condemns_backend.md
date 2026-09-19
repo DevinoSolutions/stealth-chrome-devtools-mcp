@@ -235,7 +235,14 @@ vocabulary are untouched.
 one clause in `_identity_matches`, one `backend_env.scrub` call in
 `_start_server_process` (F-890), and the two now-unreachable teardown lines in
 `backend_leg` deleted. The file was at 999 of its 1000-LOC budget, which is what
-forced every other line of this change into a leaf; it is at 999 still.
+forced every other line of this change into a leaf; it is at **1000 of 1000**. Two
+things paid for the wiring, and neither is padding-removal: F-890's scrub ABSORBED
+the `STEALTH_MCP_NO_AUTO_RECOVERY` pop and its three-line comment (999 -> 997), and
+four docstring passages were compressed without losing an argument — `SOURCE_ROOT`'s
+comment (which also carried a stale claim, "frozen at 1.2.0"),
+`_report_eviction_decision`'s, `_backend_http_ready`'s plan_M1 cross-reference, and
+`_identity_matches`' own new paragraph. The cap ratchets down only, so the next change
+here extracts a leaf.
 
 **`embedded/server.py`** starts the heartbeat on the http serve path only. A stdio
 standalone backend records nothing and has no proxy watching it, so it stamps nothing.
@@ -308,16 +315,38 @@ Updated deliberately, with the justification convention 4 requires — these pin
 behaviour (c) reverses, and each is now the negative of what it was:
 
 - `test_proxy_selfheal.py::test_an_unhealable_death_returns_for_the_legacy_teardown`
-  and `::test_an_unhealable_death_still_tears_the_proxy_down` — an unhealable death
-  now opens a backoff and a generation 2, and `drive` does not return;
-- `test_proxy_selfheal.py::test_a_flapping_backend_stops_being_healed` — flapping
-  still stops the healing, and now enters backoff instead of returning;
+  -> `::test_an_unhealable_death_no_longer_returns`, and
+  `::test_an_unhealable_death_still_tears_the_proxy_down` ->
+  `::test_an_unhealable_death_no_longer_tears_the_proxy_down` (which now asserts the
+  heal loop is demonstrably still going and `_proxy_streams` has NOT returned);
+- `::test_a_flapping_backend_stops_being_healed` ->
+  `::test_a_flapping_backend_stops_being_hammered_but_not_abandoned` — the premise is
+  unchanged, the remedy is a delay rather than an exit;
+- `::test_a_bridge_failure_before_readiness_is_not_an_incident` ->
+  `::..._is_an_incident_but_not_a_death`: it IS retried now, and what `armed` still
+  decides is that there is nothing to CONFIRM;
+- `::test_a_generation_that_lived_earns_the_heal_budget_back` — the property is
+  unchanged but no longer observable as a return, so it asserts instead that none of
+  those heals was preceded by an unreachable report;
+- `::test_inflight_calls_are_failed_not_replayed` — same assertions, new loop bound;
 - `test_proxy_sentry_reporting.py`'s two teardown pins — the event is
-  `UNREACHABLE_EVENT` with the same `reason` values;
-- `test_proxy_backend_death.py`'s unhealable premise — restated as "the proxy stays
-  up";
-- `test_e2e_lifecycle_resilience.py`'s two log-grep rows — the `giving up` wording is
-  gone; the rows follow it.
+  `UNREACHABLE_EVENT` with the same `reason` values plus `attempt`;
+  `::test_a_backend_that_never_became_ready_reports_nothing` ->
+  `::..._is_now_reported` (what survives is the narrower F-843 fact: no CONDEMNED
+  event, because nothing was ever confirmed dead); and
+  `::test_a_raising_seam_cannot_break_the_proxy_flow` — a broken reporter must now
+  leave the RETRY loop intact rather than the return on schedule;
+- `test_e2e_lifecycle_resilience.py`'s two log-grep rows — `giving up` was the exit
+  F-889 deleted, so the phrase is `backing off` and the two keys are
+  `unreachable:unhealable` / `unreachable:flapping`. That file's nodes are all
+  `integration`-marked and were NOT run here; each substring was verified to occur in
+  the module the oracle names, which is exactly what the oracle checks.
+
+Both new-behaviour halves were MUTATION-CHECKED rather than merely observed green:
+forcing `build_identity.newer` to `False` in `_identity_matches` (with
+`__pycache__` cleared) killed exactly the four `test_mixed_version_adoption.py` nodes
+that assert forward adoption and left the other 21 — including the ordering table and
+"an older backend is still evicted" — passing.
 
 ## 6. Residuals
 
@@ -354,7 +383,31 @@ behaviour (c) reverses, and each is now the negative of what it was:
 6. **(d) has no downgrade story.** A fleet that rolls BACK leaves a newer recorded
    backend that every older proxy now adopts, and the rollback does not take effect
    until that backend dies. This is the intended direction of the asymmetry; it is
-   named here because "my downgrade did nothing" is otherwise a mystery.
+   named here because "my downgrade did nothing" is otherwise a mystery. `RUNBOOK.md`
+   says so and names `stop` as the way to make a rollback apply now.
+7. **(a)'s per-tick charge can fall short of `interval` when a sleep returns EARLY.**
+   The arithmetic in §3(a) — charge `>= interval` always — rests on
+   `factor = nap_actual / interval` being `>= 1`. It is CLAMPED at 1.0, so a nap that
+   the OS returns from slightly early (timer granularity) charges `nap_actual + probe`,
+   which can be a hair under `interval`. The consequence is bounded and benign: the
+   window is not yet spent on the third strike, the run defers ONE tick, and the
+   detection window is ~14 s instead of ~12 s in that rare case. It is not free to
+   remove — charging the nominal `interval` instead of the observed time would stop
+   the window measuring anything — and `test_proxy_starvation_witness.py`'s
+   real-`FairWindow` node covers the ordinary case rather than this one.
+8. **(b) costs one small file write every 3 s per backend**, an `os.replace` of a
+   sub-kilobyte file, done on a worker thread. On a spinning disk or a synced folder
+   that is not free; the state dir is `~/.stealth-mcp`, which on this developer's
+   machine is NOT under OneDrive, but need not be true of every user. There is no
+   knob to turn it off, deliberately (F-853's rule): an operator cannot know their own
+   scheduler's lag better than the process measuring it.
+9. **The heartbeat starts with the FIRST MCP session, not at bind.** It is armed in
+   `app_lifespan`, which over streamable HTTP runs per session (guarded to once per
+   process). A backend that has bound its socket but never been handshaked stamps
+   nothing — so its entry reads "absent", i.e. no evidence, and the confirmation phase
+   runs exactly as in 2.1.9. In practice the proxy's own readiness probe IS a session,
+   so the watchdog is never armed before the heartbeat is; the gap is real only for a
+   backend nothing has ever talked to, which no proxy is watching.
 7. **§(e): the 81 temp-profile Chrome processes are NOT this product's, and nothing
    should be done about them.** Traced end to end:
    - `browser_manager._launch_browser` has exactly two branches
@@ -375,12 +428,11 @@ behaviour (c) reverses, and each is now the negative of what it was:
      script.
    - **The discriminator is the prefix.** nodriver 0.47's `Config.__init__` does
      synthesize a profile when none is given — but through
-     `temp_profile_dir()`, which is `tempfile.mkdtemp(prefix="uc_")`
-     (`nodriver/core/config.py:245-248`). The orphans are `tmp*`, which is
-     `mkdtemp()`'s DEFAULT prefix and therefore cannot be nodriver's. Measured on this
-     box: 1024 `tmp*` directories in `%LOCALAPPDATA%\Temp`, 459 of them holding a
-     Chrome `Default\`, and **zero** `uc_*` directories — consistent with "no path in
-     this product has ever synthesized one".
+     `temp_profile_dir()`, which is `tempfile.mkdtemp(prefix="uc_")`. Re-verified
+     2026-09-19 against the installed library:
+     `path = os.path.normpath(tempfile.mkdtemp(prefix="uc_"))`. The orphans are
+     `tmp*`, which is `mkdtemp()`'s DEFAULT prefix and therefore cannot be
+     nodriver's.
    - The 8 live `tmp*` Chrome roots at the time of the trace all share one parent, a
      different local project's scraper (`-m src.main browser-scraper --workers 9`),
      and their argv lacks `--remote-allow-origins=*`, which nodriver's `Config` adds
@@ -390,5 +442,33 @@ behaviour (c) reverses, and each is now the negative of what it was:
      `src/` matches `tmp*`, and **nothing should**: reaping a foreign Chrome is
      precisely what F-811 forbids, and `tmp*` is the default prefix of every Python
      program on the machine.
+   - **CORRECTION (2026-09-19).** This section previously claimed **zero** `uc_*`
+     directories on this box, and offered that as evidence that "no path in this
+     product has ever synthesized one". That measurement no longer holds and the
+     inference it supported was too strong: there are **18** `uc_*` directories in
+     `%LOCALAPPDATA%\Temp` right now. What they are, measured: **all 18 are EMPTY**
+     (no `Default\`), they were created today in three groups of six (10:18, 10:25,
+     10:36), and **no Chrome process on the machine has a `uc_*` or a `Temp\tmp*`
+     `--user-data-dir`** (51 `chrome.exe` alive, 0 matching either). The mechanism is
+     that `uc.Config.__init__` calls `temp_profile_dir()` **at construction**
+     (`if not user_data_dir: self._user_data_dir = temp_profile_dir()`), so merely
+     BUILDING a config without a profile creates a directory and no browser need ever
+     run in it. Six-at-a-time is the shape of a concurrent-spawn test.
+   - The claim that survives, and it is the one that matters, is the narrower one:
+     `src/` has exactly **two** `uc.Config(` sites (`browser_manager.py:539`,
+     `desktop_launch.py:505`) and **both pass `user_data_dir=` explicitly**, so the
+     product does not reach the synthesizing branch on any path traced above. And
+     even if one ever did, the resulting directory would match
+     `PROFILE_SWEEP_PREFIX = "uc_"` — our own sweep already covers exactly that
+     shape. The 81 `tmp*` orphans still cannot be ours, because `tmp*` is the one
+     prefix nodriver never produces.
 
-   **Recommendation: none.** No code change, no sweep, no widened matcher.
+   **Recommendation: none.** No code change, no sweep, no widened matcher. Two
+   follow-ups are NAMED rather than done, because both land in files a sibling agent
+   (F-888) is editing right now and a tiny edit there would be a merge conflict for no
+   measured defect: (i) empty `uc_*` shells left by config construction are swept
+   only when a backend runs its startup sweep, so a box that only ever runs tests
+   accumulates them — harmless, zero bytes, but visible; (ii) whether an orphaned
+   browser's owner stamp reaches `browser_pids.json` early enough to be reapable when
+   its owning backend is gone was NOT re-verified here, because `browser_pid_registry`
+   and `process_cleanup` are exactly F-888's surface.
