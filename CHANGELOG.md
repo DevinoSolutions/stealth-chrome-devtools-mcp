@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.10
 
 ### Fixed — F-882d: the meta-refresh node named two of that shape's three truthful states
 
