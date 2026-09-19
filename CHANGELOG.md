@@ -254,6 +254,156 @@ environment and nowhere else. What we drop from our own process is reported at
 WARNING rather than INFO, because this runs before logging is configured and
 Python's last-resort handler starts at WARNING.
 
+### Added — F-888: persistent named profiles and CDP re-attach after a backend restart
+
+A backend that died took its browsers' logins with it. On 2026-09-18 a backend
+went unresponsive under 60 concurrent sessions; the replacement's startup orphan
+sweep killed every browser the dead one owned, including a human's logged-in
+Amazon Seller Central session. Two more logins were stranded the same week by the
+other half of the gap: their backend is still alive, but `stop` and `restart`
+both end with its browsers terminated, so there was no verb that finished with
+the login intact. F-886 (2.1.9) only stopped a cold start from EVICTING a backend
+that owns browsers; a backend that dies for any other reason was still fatal.
+
+**A browser on a persistent profile is now handed over, not killed.** One
+predicate, `browser_pid_registry.on_persistent_profile`, applied at the two
+places a browser died without a client asking for it. At SHUTDOWN
+(`_cleanup_all_tracked`) such a browser is left running and left tracked, so
+`stop` and `restart` finish with the login alive. At STARTUP RECOVERY
+(`_recover_orphaned_processes`) it is skipped rather than reaped, and picked up
+by the new adoption pass. A disposable auto-clone is unaffected in both places —
+still killed, still deleted — and `kill-orphans --force` still takes everything,
+because an operator asking is the authority the rule otherwise supplies.
+
+**A new backend re-attaches over CDP and keeps the client's instance id.**
+`browser_reattach.run`, driven fire-and-forget from `app_lifespan` so it can
+never delay a serve. Adoption requires four conditions
+and each one alone refuses (`browser_reattach.adoptable`): the owner is not a
+live backend of ours (two backends driving one Chrome is F-886's harm), the
+profile is persistent, the recorded pid is still that Chrome, and a CDP endpoint
+is recoverable. The endpoint has three witnesses — the port this release now
+records in `browser_pids.json` (`cdp_port`), `--remote-debugging-port` on the
+process command line, then Chrome's own `DevToolsActivePort` — and the last two are
+what let a 2.1.8/2.1.9 record, which carried no port at all, be adopted. The
+instance is registered under its RECORDED id, with its live url and title read
+through `tab_identity` rather than the cached pair, so a client holding an id
+from before the restart still reaches the same browser.
+
+**A named profile's persistence is now stated and pinned rather than emergent.**
+`user_data_dir=<name or absolute path>` already survived close, the clone GC and
+storage cap, `cleanup --apply` and `kill-orphans` in 2.1.9 — but that guarantee
+was three hand-written copies of one condition that happened to agree. There is
+no new parameter and no new layout: the condition has one home, the four
+guarantees are pinned in `tests/test_browser_reattach.py`, and a test fails if
+the literal comes back.
+
+**Spawning onto a held profile re-attaches to it**, rather than walking to a
+sibling directory (F-871). This is the second entry point into the same rule and
+it is the one that matters in practice: the browser this feature exists for has
+**no record entry at all** — measured on the real stranded Chrome (pid 115652,
+`--remote-debugging-port=9223`), whose owner backend died and whose successor
+rewrote `browser_pids.json` without it — so the startup pass, which walks
+entries, would walk past it forever. The witness here is Chrome's own process
+singleton (`profile_lock.profile_hold`) and the record is consulted only to
+refuse a browser a LIVE sibling backend owns. **So recovering a logged-in browser
+whose backend died is one call: spawn with the same `user_data_dir`.** A failure
+on this path never reaps — a client asked for that browser, and killing it
+because we could not attach would be this bug committed by its own fix.
+
+The endpoint ladder now asks the process command line BEFORE
+`DevToolsActivePort`, also measured: the stranded Chrome had no such file while
+running, so a file-first ladder found nothing to attach to. The file keeps its
+rung for `--remote-debugging-port=0`, which the command line cannot answer.
+
+**Which process on that profile is the browser is asked explicitly**
+(`browser_cmdline.browser_process`: the one with no `--type`). A profile is held
+by a whole process TREE and `profile_hold` names whichever member its witness
+iterated first — measured on one real spawn, eleven processes on one profile, of
+which only the browser and the six renderers carry `--remote-debugging-port` at
+all. Adopting the named member was a coin flip: a `utility` child yielded no port
+and the adoption declined, while a `renderer` would have been adopted and stamped
+onto `Browser._process_pid`, so the instance would be discarded the moment that
+renderer recycled and `close_instance` would kill a renderer while the browser
+kept running. Relatedly, "a browser holds this directory and we could not get in"
+is now a named `reattach_declined` reason rather than the same silence an empty
+directory produces.
+
+A new RUNBOOK playbook ("Recover a stranded login") gives both paths plus the one
+case that still needs an operator — a backend that is alive but unreachable,
+which must be stopped before its browsers can be taken over.
+
+Also: the nodriver host-and-port pair that makes `uc.start` connect instead of
+spawn moved out of `desktop_launch.launch_and_attach` into
+the new `cdp_attach` leaf, so the delegated headed launch
+(F-810) and a backend adopting a browser now use one door.
+`browser_reattach.reap_recorded` is the one home for "reap this entry", shared by
+startup recovery and by a failed adoption's fallback — which is exactly 2.1.9's
+behaviour for that entry, with the directory still spared. The whole subsystem
+takes the `BrowserManager` and the `ProcessCleanup` as arguments
+(`spawn_leak`'s precedent), which is what keeps both of those files inside their
+grandfathered LOC caps; `browser_manager.py`'s ratchets down 1493 -> 1492.
+
+**The claim that makes adoption safe between processes.** The refusal above —
+never take a browser a live backend of ours owns — was a classification followed,
+much later, by the ownership stamp a successful attach writes. Between those two
+moments every other backend on the machine reads the same record, sees the same
+dead owner and reaches the same verdict, so two backends could drive one Chrome:
+F-886's harm, reached by the fix meant to prevent it. An `asyncio` lock cannot
+help, because the racers are processes. Both entry points now take a CLAIM
+(`browser_pid_registry.claim_browser`) BEFORE the CDP door: the check and the
+ownership stamp happen inside ONE `update_entries` mutate, under the record's own
+file lock, keyed on the PID (the instance id is not stable across the two entry
+points, so two backends would mint two ids and both "win"). A failed attach hands
+it back. That is also what answers two concurrent spawns onto one held directory
+— the second reads a live owner and is refused — and the spawn then proceeds
+normally, reporting `spawn_diagnostics["reattach_declined"]` rather than walking
+away silently.
+
+**And a lost claim is never a reason to kill a browser.** Holding the claim
+across the attach is the new `browser_claim` leaf (`held`), because the guarantee
+it needs is about an `await`: the claim is taken inside the block that releases
+it, it is shielded (cancelling an `await asyncio.to_thread(...)` does not stop
+the worker thread — it still writes), and the task is kept so a teardown can hand
+back a claim that landed after the enclosing budget had given up on it. The two
+outcomes that are NOT evidence about the browser are named types — `Refused` (a
+sibling backend claimed it first) and `Undecided`, its subclass (the record write
+itself failed) — and the startup pass now catches them: the entry and the browser
+are left exactly as found, with a WARNING naming the reason. Reaping stays
+reserved for a browser we claimed and then could not attach to, and only on the
+startup pass; the spawn path still never reaps.
+
+**An adopted instance now reports measured values, not the caller's request.**
+`headless` comes off the holder's command line and the window is MEASURED through
+`window_sizing.measure` — a read that deliberately does not RESIZE, because
+`apply_and_measure` would have moved a human's open window to a default they never
+asked for. What cannot be read back off a running browser is named
+(`spawn_diagnostics["not_restored"]`: `extra_headers`, `timezone_id`,
+`user_agent`, `proxy`) instead of being re-asserted as though it had been applied.
+The adopted tab also gets this backend's dynamic-hook interception, exactly as a
+spawn does; without it a hook created against an adopted instance was registered
+and never fired. Spawn arguments that describe a LAUNCH are ignored rather than
+refused on the re-attach path, and listed in
+`spawn_diagnostics["ignored_spawn_args"]`.
+
+**A browser whose egress proxy died with its backend is adopted and stamped.** An
+authenticated `proxy=` spawn points Chrome at a forwarder inside the backend, so
+the forwarder dies with it while the launch arg lives on. `browser_cmdline`
+connect-probes a loopback `--proxy-server` and the diagnostics carry
+`dead_egress_proxy` plus a WARNING. Adopted rather than refused, because on the
+record path a refusal routes to the reap — which turns a recoverable login into a
+kill.
+
+Smaller, all from the same review: a classification failure now resolves toward
+SPARING the entry with a logged warning (it was a bare `contextlib.suppress`,
+which dropped the entry out of the spared set and let recovery kill a human's
+Chrome with nothing written anywhere); adoption requires BOTH halves of a pid's
+identity where reaping is content with one, and the recovered port is JOINED to
+the profile, so a recycled pid on a stranger's chrome.exe cannot be adopted and
+later killed; the attach runs behind a shield so a timeout cannot strand the
+connection it opened; and what a running browser's own command line says about it
+is a new leaf, `browser_cmdline`. `process_cleanup.py`'s cap ratchets down
+1017 -> 1009.
+
 ### Fixed — F-882e: `navigate` failed about a healthy page when the document moved under its landing read
 
 The fourth sibling of F-882b/c/d and the first that is a product defect. The
