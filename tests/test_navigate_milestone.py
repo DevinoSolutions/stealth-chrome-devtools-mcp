@@ -22,18 +22,24 @@ stubbed, exactly as the F-824 pins do, so the wait under test is the product's.
 from __future__ import annotations
 
 import asyncio
+from typing import ClassVar
 
 import pytest
 from nodriver import cdp
 from nodriver.core.connection import ProtocolException
 
-from fakes import FakeTab
+from fakes import TARGET_SWAPPED_ERROR, FakeTab
 from stealth_chrome_devtools_mcp.embedded import navigation_milestone
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 URL = "https://fake.test/target"
+
+#: Chrome's swap wording, taken from the harness's copy of the CI traceback —
+#: never from ``navigation_milestone``, so a pin built on it measures the
+#: product's key against Chrome's text rather than against the product.
+SWAPPED_TEXT = str(TARGET_SWAPPED_ERROR["message"])
 
 
 @pytest.fixture
@@ -750,10 +756,21 @@ async def test_a_page_that_swaps_under_every_read_raises_and_keeps_its_tab(
 ):
     """The bound. A page replacing itself faster than the read can answer must
     still end — the re-read is a fixed small number, never a loop the page
-    controls. Past it Chrome's own error reaches the caller unchanged (it is not
-    a timeout, so it is not reworded), and the F-824 recovery still does not
-    fire: ``Inspected target navigated or closed`` is the page's doing, not a
-    stale tab's."""
+    controls — and the F-824 recovery still does not fire past it, because
+    ``Inspected target navigated or closed`` is the page's doing and not a stale
+    tab's (that half held before F-882e and is asserted so it keeps holding if
+    ``_is_recoverable_navigation_error``'s marker list is ever widened).
+
+    **What the exception type pins, and what it does not.** Chrome's own
+    `ProtocolException` reaching the caller is what happens TODAY for a CDP
+    error anywhere in this tree, and F-882e deliberately does not change it
+    here: wrapping it in a `ToolError` at this one call site would give CDP
+    failures a second shape depending on which read raised them, which is the
+    defect convention 4 names. So this asserts the type to pin that the retry
+    does not SWALLOW or REWORD what it failed to absorb — it is not a claim that
+    a raw library exception is the right operator-facing answer. Giving the
+    whole class one convention-2 shape is a separate change with a wider blast
+    radius than one navigation; finding §6 carries the argument."""
     tab = FakeTab(lifecycle="after", landing_swaps=99)
     replacements = _with_tab(monkeypatch, tab)
 
@@ -767,27 +784,44 @@ async def test_a_page_that_swaps_under_every_read_raises_and_keeps_its_tab(
 
 
 class _OtherProtocolErrorTab(FakeTab):
-    """A tab whose landing read fails for a reason that is NOT a document swap —
-    same ``-32000``, different subject (Chrome reuses that code for every server
-    error it has, which is why the code alone can never be the key)."""
+    """A tab whose landing read fails with a protocol error the test chooses."""
+
+    landing_error: ClassVar[dict[str, object]] = {}
 
     async def evaluate(self, expression, *args, **kwargs):
         if "location.href" in expression and "document.title" in expression:
             self.evaluate_calls.append(expression)
-            raise ProtocolException(
-                {"code": -32000, "message": "DOM agent hasn't been enabled"}
-            )
+            raise ProtocolException(self.landing_error)
         return await super().evaluate(expression, *args, **kwargs)
 
 
-async def test_another_protocol_error_from_the_landing_read_is_not_retried():
-    """The key is narrow: only the swap earns a second read. Anything else is
-    raised from the FIRST one — a re-read for an error that says nothing about
-    the document having moved is a retry loop nobody asked for, and it would
-    hide a real fault behind three identical failures."""
+@pytest.mark.parametrize(
+    ("error", "match"),
+    [
+        # The swap's CODE under another subject. Measured: this is F-884's
+        # masking error, and it is why `-32000` alone can never be the key —
+        # Chrome answers every server error it has with that code.
+        ({"code": -32000, "message": "DOM agent hasn't been enabled"}, "DOM agent"),
+        # The swap's MESSAGE under another code. No measurement says Chrome
+        # ever sends this pairing; what it pins is that the KEY needs both
+        # halves, which the docstring and CLAUDE.md both claim. Without it,
+        # deleting the code half from `document_swapped` left every pin green.
+        ({"code": -32602, "message": SWAPPED_TEXT}, "Inspected target"),
+    ],
+    ids=["swap-code-other-subject", "swap-message-other-code"],
+)
+async def test_another_protocol_error_from_the_landing_read_is_not_retried(
+    error, match
+):
+    """The key is narrow: only the swap earns a second read, and it takes BOTH
+    halves to be one. Anything else is raised from the FIRST read — a re-read
+    for an error that says nothing about the document having moved is a retry
+    loop nobody asked for, and it would hide a real fault behind three
+    identical failures."""
     tab = _OtherProtocolErrorTab(lifecycle="after")
+    tab.landing_error = error
 
-    with pytest.raises(ProtocolException, match="DOM agent"):
+    with pytest.raises(ProtocolException, match=match):
         await navigation_milestone.landing(tab)
 
     assert len(_landing_reads(tab)) == 1

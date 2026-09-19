@@ -120,15 +120,23 @@ evidence of a real swap and the re-read is measurably about the NEW document):
 |---|---|---|
 | `…_a_document_that_commits_under_the_landing_read_is_read_again` | `landing` answers `(landing url, "")`, in two reads, and that pair is in the E2E node's own `_meta_refresh_states` | yes — `ProtocolException: Inspected target navigated or closed [code: -32000]` out of `landing` |
 | `…_the_tool_answers_success_when_the_read_raced_the_refresh` | the same race through `BrowserManager.navigate`: `success: True`, one `Page.navigate`, no `_replace_main_tab` | yes — the exception reached the caller, under the identical warning line CI printed |
-| `…_a_page_that_swaps_under_every_read_raises_and_keeps_its_tab` | the bound: exactly `LANDING_SWAP_RETRIES + 1` reads, Chrome's error unchanged (not reworded), still no stale-tab recovery | guard, not RED — the no-retry half already held; the read-count half is new |
-| `…_another_protocol_error_from_the_landing_read_is_not_retried` | a `-32000` with a different message is raised from the FIRST read | guard — it is what fails if the key is widened |
+| `…_a_page_that_swaps_under_every_read_raises_and_keeps_its_tab` | the bound: exactly `LANDING_SWAP_RETRIES + 1` reads, Chrome's error neither swallowed nor reworded, still no stale-tab recovery | guard, not RED — the no-retry half already held; the read-count half is new |
+| `…_another_protocol_error_from_the_landing_read_is_not_retried` (×2) | BOTH halves of the key: the swap's code under another subject, and the swap's message under another code, each raised from the FIRST read | guard — it is what fails if either half is dropped |
 
 Mutation-checked with `__pycache__` cleared before each run:
 
 | mutation | red |
 |---|---|
-| `document_swapped` keyed on the code only | `…_another_protocol_error_…` |
+| `document_swapped` keyed on the code only | `…[swap-code-other-subject]` |
+| `document_swapped` keyed on the message only | `…[swap-message-other-code]` |
 | `LANDING_SWAP_RETRIES = 0` | the two RED pins above |
+
+The message-only mutation is the one the first round of this work did not catch:
+the docstring and CLAUDE.md claim both halves are required, and nothing measured
+the code half until the second case was parametrized in (review of `46b9112`).
+Its error dict is a synthetic pairing — no measurement says Chrome sends that
+message under `-32602` — and it is honest about being one: what it pins is the
+KEY's shape, not a browser behaviour.
 
 Suites run by explicit path (Windows, `uv run python -m pytest`):
 `test_navigate_milestone.py` (29), `test_navigation_truthfulness.py`,
@@ -177,13 +185,27 @@ that a loaded runner widens, not with a platform difference.
    would be a second statement of a decision already made. What holds that in
    place is now a pin rather than a coincidence of substrings — which is worth
    knowing before anyone widens that marker list.
-5. **The same error can reach every other CDP read in the tree** — `page_storage`,
+5. **A swap that survives the bound reaches the caller as a raw `nodriver`
+   `ProtocolException`, not a `ToolError` — deliberately, and it is now pinned.**
+   That is convention 2's shape only for failures the tool itself decides; a CDP
+   error surfaces as the library's exception everywhere in this tree today, and
+   it is exactly what both CI tracebacks printed, so nothing here is a
+   regression. Wrapping it at this ONE call site would make the same class of
+   browser failure arrive in two different shapes depending on which read raised
+   it — the second-way defect — so the choice is to keep it uniform and say so.
+   The pin asserts the type to state that the retry neither swallows nor rewords
+   what it could not absorb; it is not a claim that a raw library exception is
+   the best operator-facing answer. Giving CDP failures one convention-2 shape,
+   with an operator message like "the page replaced itself faster than the
+   landing could be read", is a real improvement and a separate change: its
+   blast radius is every CDP call site, not one navigation.
+6. **The same error can reach every other CDP read in the tree** — `page_storage`,
    `tab_identity`, `click_target`, the cloner aspects. Nothing here changes them,
    and nothing here should: `landing` is the one read that runs immediately after
    a navigation, i.e. the one place a document swap is the EXPECTED event rather
    than a surprise. A general "retry any read whose document moved" policy would
    be a different finding with a different argument.
-6. **The E2E node remains the only real-Chrome witness**, and it is timing
+7. **The E2E node remains the only real-Chrome witness**, and it is timing
    dependent: two hits across the macOS integration run/attempts sampled between
    2026-09-17 and 2026-09-19 (the census in the classification), and the same
    node is green on every other cell. A green run of it does not prove this fix
