@@ -68,6 +68,55 @@ def version(package: str) -> str:
         return UNKNOWN_VERSION
 
 
+def _segments(value: object) -> tuple[int, ...] | None:
+    """``"2.1.9"`` -> ``(2, 1, 9)``; anything else -> ``None``.
+
+    Deliberately strict and deliberately NOT ``packaging.version``: that is not
+    a declared dependency of this package, and our own versions are plain
+    ``X.Y.Z``. Anything that does not parse as such — a pre-release suffix, a
+    local version, a hand-edited record's integer, ``None`` — is UNCOMPARABLE,
+    which :func:`newer` resolves to "not newer", i.e. onto today's behaviour.
+    """
+    if not isinstance(value, str):
+        return None
+    parts = value.split(".")
+    if not all(part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
+def newer(recorded: object, ours: str) -> bool:
+    """True iff ``recorded`` is a version of ours STRICTLY NEWER than ``ours``.
+
+    F-889 (d). A mixed-version fleet — an in-place upgrade, a ``uvx @latest``
+    session beside a ``uv tool`` install — had one eviction loop left after
+    F-886: two identities on one desktop each read the other as stale and each
+    evicted the other on every proxy start. F-886 stops that only when the loser
+    owns live browsers, and a fleet MID-UPGRADE is exactly the population where
+    neither does yet. Adopting the newer one breaks the symmetry in the
+    direction a fleet should converge in: the older proxy is a byte bridge over
+    MCP-on-HTTP and has no tool knowledge of its own to be wrong about.
+
+    Two guards, both failing CLOSED onto today's cold start. Anything
+    unparseable is not newer (see :func:`_segments`). And
+    :data:`UNKNOWN_VERSION` is never newer and never older ON EITHER SIDE — a
+    process that could not resolve its own build has no claim to make about
+    someone else's, and a RECORD that could not resolve its own is exactly the
+    one the gate exists to refuse.
+
+    Unequal segment counts are zero-extended, so ``2.2`` and ``2.2.0`` are the
+    same build and neither is newer than the other.
+    """
+    if UNKNOWN_VERSION in (recorded, ours):
+        return False
+    theirs, mine = _segments(recorded), _segments(ours)
+    if theirs is None or mine is None:
+        return False
+    width = max(len(theirs), len(mine))
+    pad = (0,) * width
+    return (theirs + pad)[:width] > (mine + pad)[:width]
+
+
 def source_fingerprint(root: Path) -> str | None:
     """SHA-256 over every ``*.py`` under *root*, or ``None`` if it cannot be
     read after ``ATTEMPTS`` passes.

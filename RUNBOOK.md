@@ -108,7 +108,8 @@ the whole directory while no backend runs costs you nothing but a cold start.
 
 | Entry | What |
 |---|---|
-| `server.json` | the **backend registry**: one entry per display context *and identity* (schema v3, a list — F-886), naming that backend's port, pid, version, and source fingerprint. This is what discovery reads to decide which backend to talk to. A v2 or pre-2.0.4 record still reads; a 2.1.8-or-older client reading a v3 one sees no backends at all |
+| `server.json` | the **backend registry**: one entry per display context *and identity* (schema v3, a list — F-886), naming that backend's port, pid, version, and source fingerprint. This is what discovery reads to decide which backend to talk to. A v2 or pre-2.0.4 record still reads; a 2.1.8-or-older client reading a v3 one sees no backends at all. **F-889 did NOT change this file** — the heartbeat lives beside it, in its own per-port sidecar (next row) |
+| `heartbeat-<port>.json` | F-889: the backend on that port stamping its OWN liveness every 3 s — `heartbeat_at` (a wall-clock `time.time()`) and `heartbeat_pid` — written from its event loop. That is how a proxy tells "the backend is dead" from "I was not scheduled". A separate file per port so it has exactly one writer and can never clobber `server.json`, which is written under the cold-start lock that a 3-second heartbeat must not take. Deleted with the entry, by both doors out of the record: `stop` and `cleanup --apply` forget it, and a cold start that supersedes an old entry of ours unlinks that port's file as it records the new one. What is NOT tidied is a backend still running that nothing has recorded — it keeps stamping and re-creates its own file about 3 s after a `cleanup --apply`; that is a backend to `stop`, not a file to delete. Safe to delete by hand: a missing or stale (>30 s, or a pid that is not the entry's) stamp is simply no evidence, never a fault, and the proxy falls back to exactly its 2.1.9 behaviour |
 | `server.port` | legacy, write-only — kept for a reader that no longer exists (see the `DESIGN.md` §10 ledger) |
 | `singleton.lock` | the cold-start mutex; an empty file that persists between runs |
 | `browser_pids.json` | the **browser-pid registry**: which browser processes are tracked, and which backend owns each one (`owner_pid`, `owner_create_time`) |
@@ -195,6 +196,53 @@ the answer; that field is a Linux-only hint.
 ---
 
 ## Recovery playbooks
+
+### "Connection closed" on every session at once (F-889)
+**This should no longer happen, and if it does the cause is not the backend.**
+Since F-889 a proxy never ends its own session: when it cannot reach a backend it
+backs off (2 s, doubling, capped at 60 s, jittered) and keeps retrying while the
+client's stdio pipe is open. So a session that is stuck reports as tool calls that
+wait, not as a disconnect, and it recovers by itself the moment a backend answers —
+there is nothing to restart by hand.
+
+What to look at while it is stuck, in the spawning proxy's `proxy-<pid>.log`:
+
+* `no backend for port N; retrying in Xs (attempt K)` — the proxy is alive and
+  waiting. A climbing `attempt` with a growing delay is the designed shape; check
+  `backend-boot.log` for why the backend will not start.
+* `port N: K strikes, but this process is not being scheduled; deferring the
+  verdict (F-889)` — **the machine is starved, the backend is probably fine.**
+  Check free RAM and CPU before touching anything; this line means the watchdog
+  declined to believe its own timeout.
+* `backend on port N reported its own loop turning Xs ago; the probe timeouts are
+  ours, not its death (F-889) [K/10]` — the backend's own heartbeat vetoed a
+  condemnation. Same conclusion: look at the machine, not at the product. The
+  `[K/10]` is the veto BUDGET: ten deferred strike runs, then the next line fires.
+* `backend on port N is still stamping (Xs ago) but has failed K fair-time strike
+  runs; asking the confirmation gate anyway (F-889 review M1)` — **this one is
+  about the product, not the machine.** The backend's event loop is turning but
+  its HTTP listener is not answering us, and the heartbeat has run out of
+  standing. Expect a heal shortly after. Grab `backend-boot.log` and the backend's
+  own log before it is replaced.
+* `the client process (pid N) that started this proxy is gone; nobody is
+  listening, so this proxy ends` — normal. The proxy ends on stdin EOF; this is
+  the backstop for a client that died without its pipe closing, checked once a
+  minute. If you see many of these at once, something killed a wave of clients.
+  The pid named is the first ancestor that is NOT a launcher of ours — the walk
+  steps over the venv `python` trampoline, `uv`/`uvx` and the console-script
+  redirector, all of which live exactly as long as the proxy does — so expect it
+  to be the MCP client (`claude.exe`, `node`) or the shell that ran it, never
+  `uv.exe`. No such line ever appearing is the designed behaviour when the walk
+  cannot settle: unknown presence never ends a session.
+
+The Sentry event for a session without a backend is `proxy: backend unreachable,
+retrying` (it replaced `proxy: teardown after failed heal`, which described an exit
+that no longer exists). Its `reason` is `unhealable` (this recovery failed) or
+`flapping` (three deaths back to back), and it carries the first `delay`. It fires
+**once per outage, not once per retry**, and is closed by exactly one
+`proxy: backend reachable again` (INFO) carrying `attempts` and `outage_seconds`.
+An `unreachable` with no `reachable` after it is an outage that never ended. Every
+individual retry is still in the proxy's own log file.
 
 ### Backend is `wedged` (socket open, not answering)
 `restart`. It terminates the hung process and cold-starts a fresh one under the same
@@ -303,6 +351,14 @@ Nothing needs doing — both sessions work, each on its own backend. To collapse
 back to one, make every client on the machine run the same install, then `stop` and
 let the next session cold-start. `doctor` probes every entry and will tell you which
 is which; `cleanup --apply` reclaims entries whose backend is genuinely dead.
+
+**An UPGRADE now collapses them by itself** (F-889 (d)). A backend whose recorded
+version is strictly newer than the arriving client's is adopted rather than evicted,
+so once one session is upgraded the rest converge onto its backend as they reconnect,
+instead of the two evicting each other on every proxy start. The asymmetry only points
+forward: a DOWNGRADE does not take effect until the newer backend dies (`stop` it if
+you mean the rollback to apply now). Same version + different source bytes — the case
+above — is unchanged, because that is a code edit and not an upgrade.
 
 **Caveat for a mixed fleet.** The protection lives in the *arriving* client. An
 install older than 2.1.9 does not have it and will still terminate a backend that is

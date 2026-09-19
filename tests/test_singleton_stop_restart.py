@@ -220,9 +220,11 @@ class TestSpawnEnvScrub:
         assert "STEALTH_MCP_NO_AUTO_RECOVERY" not in kwargs["env"]
 
     def test_child_env_otherwise_matches_parent(self, isolated_state, monkeypatch):
-        """The scrub removes exactly one key - it must not silently drop the
-        rest of the parent's environment (e.g. PATH), which would break the
-        child's ability to locate its own interpreter/DLLs."""
+        """The scrub removes a NAMED set (this key, and since F-890 the
+        FASTMCP_ family) - it must not silently drop the rest of the parent's
+        environment (e.g. PATH), which would break the child's ability to locate
+        its own interpreter/DLLs. The F-890 half is pinned in
+        tests/test_backend_env_scrub.py, which drives this same composer."""
         # Deliberately NOT STEALTH_MCP_*-prefixed: settings.py loudly rejects
         # any unrecognized STEALTH_MCP_* key, which would fail this test for
         # an unrelated reason if the canary used that prefix.

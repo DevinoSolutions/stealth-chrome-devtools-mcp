@@ -191,6 +191,42 @@ class TestHealBackend:
 # --------------------------------------------------------------------------
 # drive — the generation loop
 # --------------------------------------------------------------------------
+class _EnoughError(Exception):
+    """Ends a ``drive`` that correctly never ends (F-889 (c)).
+
+    Since F-889 the proxy does not return when a recovery runs out of allowance
+    — it backs off and asks again — so every node below that used to observe a
+    RETURN now has to observe the loop going round instead. ``drive`` re-raises
+    whatever ``heal_backend`` raises, so a COUNT of heals is an exact loop bound
+    on any machine, where a wall-clock window would measure how much of its
+    budget the first cold import ate.
+    """
+
+
+def _heal_counter(monkeypatch, *, answers, stop_after):
+    """A ``heal_backend`` double: pops ``answers`` (the last one sticks) and
+    raises :class:`_EnoughError` once it has been asked ``stop_after`` times."""
+    asked = []
+
+    async def fake_heal(dead_port, **_kw):
+        asked.append(dead_port)
+        if len(asked) >= stop_after:
+            raise _EnoughError
+        return answers[0] if len(answers) == 1 else answers.pop(0)
+
+    monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
+    return asked
+
+
+@pytest.fixture()
+def fast_backoff(monkeypatch):
+    """F-889's retry schedule, shrunk: what these nodes are about is the SHAPE
+    of the loop, and the real 2 s base would make each of them a wall-clock
+    wait. The schedule itself is pinned in ``test_proxy_retry_forever.py``."""
+    monkeypatch.setattr(proxy_selfheal, "RETRY_BASE_SECONDS", 0.001)
+    monkeypatch.setattr(proxy_selfheal, "RETRY_MAX_SECONDS", 0.01)
+
+
 def _drive_kwargs(**overrides):
     async def connect(_url, _replay, armed):
         armed.set()
@@ -321,26 +357,30 @@ class TestDrive:
         assert len(generations) == 2, "the client must be re-bridged, not dropped"
         assert str(PORT_A) in generations[1], "onto the backend that is still there"
 
-    async def test_a_bridge_failure_before_readiness_is_not_an_incident(
-        self, monkeypatch
+    async def test_a_bridge_failure_before_readiness_is_an_incident_but_not_a_death(
+        self, monkeypatch, fast_backoff
     ):
-        """``armed`` is the discriminator's other half: a backend that never
-        answered an initialize was never ours to lose, so the pre-F-838 answer
-        stands — return at once instead of spending a recovery budget on a cold
-        start that already had its own 120s."""
-        heals = []
+        """SOFT golden, REVERSED deliberately by F-889 (c).
+
+        This node used to assert ``heals == []``: a backend that never answered
+        an initialize was never ours to lose, so ``drive`` returned at once and
+        the proxy exited. That was the LAST door the exit still had, and it is
+        the outage reached by the other route — a backend that simply took
+        longer than ``BACKEND_READY_TIMEOUT`` under load cost the client its MCP
+        server. It is an incident to RETRY now
+        (:data:`proxy_selfheal.NEVER_READY_CAUSE`).
+
+        What is UNCHANGED, and is the half ``armed`` still decides: nothing was
+        serving us, so there is nothing to CONFIRM. The dead-vs-busy gate is for
+        a backend that was demonstrably ours a moment ago."""
         confirmations = []
 
         async def connect(_url, _replay, _armed):
             return  # readiness never came; armed stays unset
 
-        async def fake_heal(dead_port, **_kw):
-            heals.append(dead_port)
-            return PORT_B
+        heals = _heal_counter(monkeypatch, answers=[PORT_B], stop_after=2)
 
-        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
-
-        with anyio.fail_after(5):
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
             await proxy_selfheal.drive(
                 **_drive_kwargs(
                     connect=connect,
@@ -348,7 +388,7 @@ class TestDrive:
                 )
             )
 
-        assert heals == []
+        assert len(heals) == 2, "readiness that never came must be retried"
         assert confirmations == [], "nothing was serving us; nothing to confirm"
 
     async def test_the_client_going_away_still_exits_without_healing(self, monkeypatch):
@@ -389,19 +429,24 @@ class TestDrive:
         assert heals == [], "a departed client must not be healed for"
         assert confirmations == [], "cancellation is not a verdict to confirm"
 
-    async def test_an_unhealable_death_returns_for_the_legacy_teardown(
-        self, monkeypatch
+    async def test_an_unhealable_death_no_longer_returns(
+        self, monkeypatch, fast_backoff
     ):
+        """SOFT golden, REVERSED deliberately by F-889 (c). This node used to
+        assert only that ``drive`` RETURNED, which ``_proxy_streams`` read as
+        "tear down for reconnect" — the proxy exited and the user saw
+        "Connection closed". It now asks again, and the full shape of that is
+        pinned in ``test_proxy_retry_forever.py``."""
+
         async def watch(_port):
             return  # confirmed dead, immediately
 
-        async def fake_heal(_dead_port, **_kw):
-            return None
+        heals = _heal_counter(monkeypatch, answers=[None], stop_after=3)
 
-        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
-
-        with anyio.fail_after(5):
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
             await proxy_selfheal.drive(**_drive_kwargs(watch=watch))
+
+        assert len(heals) == 3
 
     async def test_a_busy_backend_never_heals(self, monkeypatch):
         """F-820's distinction survives: 'busy' is the watchdog simply not
@@ -418,49 +463,60 @@ class TestDrive:
 
         assert heals == []
 
-    async def test_a_flapping_backend_stops_being_healed(self, monkeypatch):
-        """Every replacement dies at once: healing forever would be the tight
-        retry loop in slow motion, so the streak is capped and the caller tears
-        down instead."""
-        heals = []
+    async def test_a_flapping_backend_stops_being_hammered_but_not_abandoned(
+        self, monkeypatch, fast_backoff
+    ):
+        """SOFT golden, REVERSED deliberately by F-889 (c).
+
+        The premise is unchanged — healing a backend that dies at once, forever
+        and at full speed, would be the tight retry loop in slow motion — but
+        the remedy is. This used to assert ``len(heals) ==
+        MAX_CONSECUTIVE_HEALS`` and a return; the budget now triggers a BACKOFF,
+        so the run continues past it at a rate that costs the machine nothing.
+        "Stop hammering" is a 60 s wait, not the end of the session."""
+        beyond = proxy_selfheal.MAX_CONSECUTIVE_HEALS + 2
 
         async def watch(_port):
             return  # every generation is confirmed dead immediately
 
-        async def fake_heal(dead_port, **_kw):
-            heals.append(dead_port)
-            return dead_port + 1
+        heals = _heal_counter(monkeypatch, answers=[PORT_B], stop_after=beyond)
 
-        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
-
-        with anyio.fail_after(5):
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
             await proxy_selfheal.drive(**_drive_kwargs(watch=watch))
 
-        assert len(heals) == proxy_selfheal.MAX_CONSECUTIVE_HEALS
+        assert len(heals) == beyond, "the flap budget is a delay, not a terminus"
 
     async def test_a_generation_that_lived_earns_the_heal_budget_back(
-        self, monkeypatch
+        self, monkeypatch, fast_backoff
     ):
-        """A proxy up for hours must keep being healed; only back-to-back
-        deaths exhaust the budget."""
+        """A proxy up for hours must keep being healed at FULL SPEED; only
+        back-to-back deaths spend the budget and earn a backoff.
+
+        The observation changed with F-889 (c) — the run no longer ends — but
+        the property does not: with every generation counted as a real working
+        session, ``MAX_CONSECUTIVE_HEALS + 2`` heals must all have been
+        immediate, i.e. none of them preceded by an unreachable report."""
         monkeypatch.setattr(proxy_selfheal, "HEAL_STREAK_RESET_SECONDS", 0.0)
-        heals = []
+        beyond = proxy_selfheal.MAX_CONSECUTIVE_HEALS + 2
+        reports = []
+        monkeypatch.setattr(
+            proxy_selfheal, "_unreachable", lambda **kw: reports.append(kw)
+        )
 
         async def watch(_port):
             return
 
-        async def fake_heal(dead_port, **_kw):
-            heals.append(dead_port)
-            return None if len(heals) > proxy_selfheal.MAX_CONSECUTIVE_HEALS else 1
+        heals = _heal_counter(monkeypatch, answers=[PORT_B], stop_after=beyond)
 
-        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
-
-        with anyio.fail_after(5):
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
             await proxy_selfheal.drive(**_drive_kwargs(watch=watch))
 
-        assert len(heals) == proxy_selfheal.MAX_CONSECUTIVE_HEALS + 1
+        assert len(heals) == beyond
+        assert reports == [], "a generation that lived must never cost a backoff"
 
-    async def test_inflight_calls_are_failed_not_replayed(self, monkeypatch):
+    async def test_inflight_calls_are_failed_not_replayed(
+        self, monkeypatch, fast_backoff
+    ):
         sink = _Sink()
         pending = proxy_selfheal.PendingCalls()
         pending.track(_request(7, "tools/call").message.root)
@@ -468,12 +524,9 @@ class TestDrive:
         async def watch(_port):
             return
 
-        async def fake_heal(_dead_port, **_kw):
-            return None
+        _heal_counter(monkeypatch, answers=[None], stop_after=3)
 
-        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
-
-        with anyio.fail_after(5):
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
             await proxy_selfheal.drive(
                 **_drive_kwargs(watch=watch, pending=pending, client_write=sink)
             )
@@ -674,12 +727,25 @@ class TestProxyStreamsRebridges:
 
             tg.cancel_scope.cancel()
 
-    async def test_an_unhealable_death_still_tears_the_proxy_down(self, wired_proxy):
-        """The pre-F-838 fallback: healing is a backstop, not a promise."""
-        links, death = wired_proxy["links"], wired_proxy["death"]
+    async def test_an_unhealable_death_no_longer_tears_the_proxy_down(
+        self, wired_proxy, fast_backoff
+    ):
+        """SOFT golden, REVERSED deliberately by F-889 (c).
 
-        async def fake_heal(_dead_port, **_kw):
-            return None
+        This node used to wait for ``_proxy_streams`` to RETURN and call that
+        the pre-F-838 fallback — "healing is a backstop, not a promise". The
+        promise it declined to make is the one the client actually needs: an
+        exit here is Claude Code's "Connection closed", and on 2026-09-18 a
+        RAM-starved machine took this door 114 times for a backend answering in
+        227 ms. The stdio leg must stay open and the proxy must keep asking.
+
+        Generation 2 still does not open, because healing still fails — what
+        changed is that the proxy is still there when it stops failing."""
+        links, death = wired_proxy["links"], wired_proxy["death"]
+        heals = []
+
+        async def fake_heal(dead_port, **_kw):
+            heals.append(dead_port)  # answers None: healing never succeeds
 
         wired_proxy["monkeypatch"].setattr(proxy_selfheal, "heal_backend", fake_heal)
 
@@ -702,8 +768,10 @@ class TestProxyStreamsRebridges:
                 await gen1.send(_response(1, {"protocolVersion": "2025-03-26"}))
 
             death.set()
-            with anyio.fail_after(10):
-                await returned.wait()
+            with anyio.fail_after(5):
+                while len(heals) < 3:  # the loop is demonstrably still going
+                    await anyio.sleep(0.01)
+            assert not returned.is_set(), "the proxy must NOT have torn down"
             tg.cancel_scope.cancel()
 
         assert len(links) == 1, "an unhealable death must not open a generation 2"

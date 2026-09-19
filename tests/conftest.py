@@ -85,7 +85,8 @@ os.environ.setdefault("STEALTH_MCP_NO_AUTO_RECOVERY", "1")
 # Test runs must not ship their deliberately-injected failures to the real
 # Sentry project: sentry_init() is on by default, LoggingIntegration forwards
 # every ERROR-level log, and real backends spawned by integration tests inherit
-# this env (singleton's child_env strips only NO_AUTO_RECOVERY). One local
+# this env (singleton's child_env strips only NO_AUTO_RECOVERY and, since F-890,
+# the FASTMCP_ family). One local
 # 15-hour test campaign shipped ~50k noise events before this line existed.
 # test_observability.py still exercises the default-on path — it deletes the
 # var explicitly via monkeypatch.
