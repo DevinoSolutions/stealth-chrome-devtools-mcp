@@ -1,0 +1,331 @@
+# F-888 — a backend that dies takes its browsers' logins with it
+
+**Severity**: HIGH — a human's logged-in session is destroyed by a backend
+restart, a heal, or a crash, with no warning and no way back. Observed three
+times in two days on one machine.
+
+**Status**: FIXED on `fix/F888-persistent-profile-reattach`.
+
+---
+
+## 1. The mechanism
+
+A browser lives in the backend process, but the thing a human cares about lives
+on disk and in that browser's memory: a logged-in session. When the backend goes
+away, four separate pieces of code decide what happens to the Chrome it owned,
+and every one of them decided "kill it".
+
+**04:13–04:20 UTC, 2026-09-18.** The sole backend (pid 64836) went unresponsive
+under 60 concurrent sessions. A replacement cold-started on the same port. Its
+mandatory startup orphan sweep — `process_cleanup.recover_orphans`, handed to
+`serve_startup.after_serving` by `activate()` — walked `browser_pids.json`, found
+every entry whose recorded owner was the now-dead 64836, and reaped them. Among
+them was instance `b52e7f37`, an Amazon Seller Central session a human had logged
+into by hand. `process_cleanup.kill_process` names it in the log. Nine hours
+later the client saw `Connection closed`, then a fresh backend holding an
+unrelated instance.
+
+The sweep was not wrong about ownership. `browser_pid_registry.is_reapable` is
+F-808's fix and it is correct: an entry whose owner is not a live backend of ours
+is unowned. What was missing is that "unowned" had exactly one consequence, and
+the tool had no way to express the other one — *adopt it*.
+
+The same day, two more logins were stranded by the second shape of the same gap.
+Backend 173824 is still alive and still owns them — instance `4301d842` (a
+RevenueCat login on `C:\stealth-mcp-browser-sessions\sessions\MASTER_CHAT-…`) and
+a Seller Central login on a client-supplied absolute dir
+(`…\amazon-buy-bot\seller-central-profile`) — but every proxy that could reach
+that backend has died. The browsers are running, the record names them, and
+nothing can talk to them: `stop` and `restart` both terminate the backend, and
+the backend's own shutdown path (`_cleanup_all_tracked`) kills every browser it
+tracks on the way out. There was no verb that ended with those logins alive.
+
+F-886 (2.1.9) narrowed one door: a cold start no longer EVICTS a backend that
+owns live browsers. It says nothing about a backend that dies for any other
+reason, which is every other way this happens.
+
+### The four decisions, before
+
+| Where | What it did to a browser whose backend is gone |
+|---|---|
+| `process_cleanup._recover_orphaned_processes` | killed it, then asked whether to delete its profile |
+| `process_cleanup._cleanup_all_tracked` (atexit / SIGTERM) | killed it |
+| `singleton.stop_backend` / `restart_backend` | killed the backend, which ran the above |
+| nothing at all | there was no adoption path, and no port recorded to build one on |
+
+### The missing fact
+
+Even with the will to adopt, the tool could not: **nothing persisted the CDP
+port.** nodriver assigns it inside `uc.start` (`browser.py:374-375`), keeps it in
+`browser.config.port`, and that object dies with the process. `browser_pids.json`
+carried the pid, the profile dir and the clone flag — everything except the one
+number needed to speak to the browser again. Measured: zero hits for `cdp_port`,
+`websocket_url` or `DevToolsActivePort` anywhere under `src/` before this change.
+
+---
+
+## 2. What already existed, and what did not
+
+Ask (1) of this finding was "make a named profile persistent". The first job was
+to find out how much of that was already true. It was almost all of it.
+
+`spawn_browser(user_data_dir=<name or absolute path>)` resolves to
+`clone_storage.resolve_profile_selection`'s `explicit` role, which sets
+`uses_custom_data_dir=True` and `auto_clone=False`. Four guarantees follow, and
+all four already held:
+
+| Guarantee | Held in 2.1.9? | Where |
+|---|---|---|
+| (a) not deleted on `close_instance` | **yes** | `_cleanup_profile_for_metadata` refuses a custom non-clone dir |
+| (b) not reclaimed by the clone GC / storage cap | **yes** | `clone_is_auto` needs an explicit `auto_clean: true` marker a named profile never gets |
+| (c) not removed by `cleanup --apply` | **yes** | the delete list is gated on `clone_is_auto`; a named profile can only be TRIMMED of regenerable caches, and an absolute path outside the clone root is never even enumerated |
+| (d) not removed by `kill-orphans` | **yes** | the same guard as (a); the verb kills the browser, which is its purpose, and leaves the directory |
+
+So ask (1) is satisfied by NAMING, DOCUMENTING and PINNING it — there is no
+`profile=` alias, no new parameter and no new layout, because adding one would be
+a second way to say `user_data_dir`.
+
+What the guarantee did NOT have was a name. The condition
+`uses_custom_data_dir is True and not auto_clone` was written out by hand in two
+places in `process_cleanup` (the delete guard and the untrack decision) and was
+about to be needed in a third. Three copies of one condition is how they come to
+disagree, and the disagreement is silent in both directions: a directory spared
+from deletion whose entry is dropped anyway is a live Chrome nothing on disk can
+find, and a browser spared at shutdown whose directory is then deleted is this
+incident with an extra step. It is now
+`browser_pid_registry.on_persistent_profile`, and a pin fails if the literal
+comes back.
+
+---
+
+## 3. The rule chosen, and the two rejected
+
+### Chosen — **a browser on a persistent profile is handed over, not killed**
+
+One predicate, applied at the two places a browser dies without a client asking:
+
+* **Shutdown** (`_cleanup_all_tracked`): a persistent browser is left running and
+  left TRACKED. `stop` and `restart` therefore end with the login alive.
+* **Startup recovery** (`_recover_orphaned_processes`): a persistent browser
+  whose owner is gone is skipped rather than reaped, and picked up by the
+  adopter.
+
+And one adoption, `browser_reattach.run`, driven fire-and-forget from
+`app_lifespan` on `clone_storage.spawn_background_sweep`'s precedent, because it
+reaches a browser over CDP and nothing about readiness depends on it (F-856's
+argument, at the exact code path F-856 was about).
+
+**Where the code lives, and why not in the two obvious files.** The pass takes
+the `BrowserManager` and the `ProcessCleanup` as ARGUMENTS and lives beside the
+rule it applies, on `spawn_leak.reap_launched_browsers`'s precedent (which takes
+its `ProcessCleanup` the same way and reaches the same private helpers). Two
+reasons, and the second is not aesthetic. The first is convention 4: the rule,
+the endpoint ladder, the door and the pass are one subject, and a pass in another
+file is a second place the rule gets asked from. The second is the LOC gate —
+`browser_manager.py` and `process_cleanup.py` both sit on grandfathered caps that
+ratchet DOWN only, and `tools/check_file_budgets.py`'s remedy for a change that
+would grow one is exactly this: extract a leaf. `browser_manager` keeps only the
+one thing that cannot move (recording the port `uc.start` assigned — the single
+moment that number exists outside this process's memory), and `process_cleanup`
+keeps only its two decisions, three lines and an argument. Both caps hold;
+`browser_manager`'s ratchets 1493 -> 1492.
+
+**The adoption rule needs four conditions and each one alone refuses**
+(`browser_reattach.adoptable`):
+
+1. **The owner is not a live backend of ours** — `is_reapable`, the one ownership
+   rule, asked with the same injected witness recovery uses. Two backends driving
+   one Chrome is F-886's harm reached from the other side.
+2. **The profile is persistent** — `on_persistent_profile`. A disposable
+   auto-clone is never adopted; its whole contract is that it dies with its
+   browser, and adopting one would keep a throwaway profile alive forever.
+3. **The recorded pid is still that Chrome** — alive, create_time within the
+   existing recycled-pid tolerance, and a Chromium-family process name.
+   Composed from `process_cleanup`'s two existing predicates rather than a third.
+4. **A CDP endpoint is recoverable.** Asked HERE, before the reaper is told to
+   skip anything: a candidate we can neither adopt nor reap leaks forever.
+
+**The endpoint has three witnesses**, most trusted first
+(`browser_reattach.endpoint`):
+
+| Witness | Why it is where it is |
+|---|---|
+| the recorded `cdp_port` | written at track time since this release; it is about THIS instance |
+| `<user_data_dir>/DevToolsActivePort`, first line | Chrome's own record of the port it bound, inside the profile |
+| `--remote-debugging-port` on the pid's command line | what nodriver passed it (`Config.__call__` appends it from `config.port`) |
+
+The last two exist for LEGACY entries. 2.1.8 and 2.1.9 recorded no port at all,
+and those are precisely the records carrying the two stranded logins, so an
+adoption path that only read the new field would have fixed the next incident and
+not this one. They are ordered after the recorded port because a record we wrote
+is about this instance, while a file or a command line is about whatever holds
+the directory now.
+
+**The door is one door.** Setting BOTH `host` and `port` on a nodriver `Config`
+is what makes `uc.start` connect instead of spawn (`browser.py:371-375`:
+`connect_existing = True`, and `create_subprocess_exec` is behind
+`if not connect_existing`). `desktop_launch.launch_and_attach` was already
+standing in that door for F-810. Rather than write a second one, the two lines
+moved to `browser_reattach.attach_config` / `attach` and `desktop_launch` became
+that module's second consumer. A pin reads its source and fails if `config.host =`
+or `uc.start(` comes back.
+
+### Rejected — **a `--keep-browsers` flag on `stop` / `restart`**
+
+The obvious shape, and it is a second shutdown policy. Two flags' worth of
+behaviour where one predicate already answers the question, an operator who has
+to know which verb to type to not lose a login, and a default that is still
+wrong. The persistence of a profile is a property the CALLER already declared
+when they passed `user_data_dir`; asking them to re-declare it at shutdown is
+asking the same question twice and accepting two answers.
+
+### Rejected — **keep reaping, and restore the login from the profile on disk**
+
+Tempting, because the profile genuinely survives (§2 (a)-(d)) and a later
+`spawn_browser(user_data_dir=…)` would reopen it. It does not hold: a Chrome
+killed with `TerminateProcess` / `SIGKILL` has not necessarily flushed its
+session, session cookies are by definition not on disk, and the human's open tabs
+and in-page state are gone regardless. The profile surviving is what makes the
+FALLBACK acceptable (§6), not what makes the reap acceptable.
+
+---
+
+## 4. Blast radius
+
+**What changed for a disposable clone: nothing.** Every condition that spares a
+browser requires `on_persistent_profile`, which an auto-clone fails. It is still
+killed at shutdown, still reaped at startup, and its directory is still deleted.
+
+**What changed for `kill-orphans --force`: nothing.** `force` skips the
+classification entirely. An operator asking IS the authority the adoption rule
+otherwise supplies — the same argument `backend_eviction` makes for its ungated
+act.
+
+**What changed for `close_instance`: nothing.** The spare is about SHUTDOWN, not
+about a close. A client that asks for a browser to close still gets it closed.
+
+**What a client sees after a restart.** The proxy heals to a new backend, which
+means a new MCP session: the client re-initializes, as it already did. Its
+`instance_id` is unchanged — adoption registers under the RECORDED id — so a
+tool call carrying an id from before the restart reaches the same browser.
+`list_instances` reports the adopted instance like any other, with its LIVE url
+and title read through `tab_identity` (F-874), never the cached
+`last_navigated_*` pair, which for an adopted instance would be empty.
+
+**Cost of a wedged browser.** One `ATTACH_BUDGET_SECONDS` (15 s), once, on a
+background task, after which that entry is reaped exactly as 2.1.9 would have
+reaped it. It cannot delay a serve and it cannot cost another instance anything:
+the adoption pass takes its OWN lock, not `BrowserManager._lock`, which every
+tool body takes for a dict read.
+
+**Record schema.** `cdp_port` joins `browser_pids.json`'s entry, built by
+`new_entry` and copied by `normalize_entries` in the same commit — the two halves
+the module docstring says must never drift. An entry without the key reads as
+`None`, which is "ask the other two witnesses", not a lie.
+
+---
+
+## 5. Tests
+
+`tests/test_browser_reattach.py`, 38 pins, hermetic — the record is a `tmp_path`
+file on every one, both liveness witnesses are injected, the `ProcessCleanup` the
+pass writes through is a double, and the CDP door is patched.
+
+| Class | What it pins |
+|---|---|
+| `TestPersistenceGuarantees` | the four guarantees of §2, each at the function that could break it, plus the other side of (a): a clone IS still deleted |
+| `TestOnePersistencePredicate` | one condition, one home; a legacy entry is not persistent; the literal is gone from `process_cleanup` |
+| `TestAdoptionRule` | each of the four conditions refuses alone; a malformed entry does not lose the others |
+| `TestEndpointLadder` | recorded port wins; the two legacy fallbacks; `0` / out-of-range / a hand-edited `true` are all "no port"; both command-line spellings |
+| `TestRecoverySparesAdoptable` | adoptable is neither killed nor forgotten; a plain orphan is still reaped; both verdicts in one pass; `force` takes everything |
+| `TestShutdownHandsOver` | a persistent browser survives shutdown WITH its entry; a clone does not |
+| `TestManagerAdoption` | the client keeps its instance id and gets the live page; ownership moves through the one write; a failed attach falls back to the reap with the directory spared; no tab is refused; an already-registered instance is left alone; a wedged attach is bounded; `app_lifespan` hands the pass BOTH collaborators |
+| `TestOneDoor` | the config carries host, port and the profile; `desktop_launch` uses that one door |
+
+`tests/fakes.py` grows `FakeBrowser(main_tab=…)` — nodriver's `Browser.main_tab`,
+what an attach hands back.
+
+**And one real-Chrome node**, `tests/test_e2e_persistent_profile_reattach.py`
+(marked `integration`), because every pin above patches the CDP door and so none
+of them can prove the one thing the incident was about: that a second `uc.start`
+against a port the first backend's Chrome is listening on CONNECTS to that
+renderer rather than launching a new browser. It spawns a real Chrome on a real
+named profile, writes `window.__f888` into the live page, drops the manager's
+handle WITHOUT killing the process (what a `TerminateProcess`d backend leaves
+behind), hands a fresh manager the record, and asserts the adopted instance keeps
+its id and `window.__f888` is still set. That last assertion is a claim about the
+RENDERER, not the profile directory — a re-spawn onto the same `user_data_dir`
+would pass a cookie check and fail this one. It also pins `reattached: true`, the
+recorded port, the live `current_url` from `tab_identity` (F-874), and that a
+second pass adopts nothing because ownership moved.
+
+**Measured, not asserted**: this node PASSES on the development machine
+(Windows 11, Chrome 152, 2026-09-19) — one run, green, with the Chrome process
+count returning to its baseline afterwards. The owner in its record is this
+process's own pid behind a patched `is_reapable` rather than a fabricated dead
+pid, because a fabricated one can be recycled onto a live process between the
+write and the read and the resulting flake would look exactly like a genuine
+adoption refusal.
+
+---
+
+## 6. Residuals
+
+**A persistent browser we cannot attach to is still killed.** The fallback for a
+failed adoption is `reap_recorded`, i.e. exactly what 2.1.9 did to that entry, so
+this is not a regression — but it is not the ideal either: the alternative is an
+unbounded orphan leak, and a Chrome nothing can reach is indistinguishable from
+one nothing will ever reach. What makes it acceptable is §2: the reap is handed
+the two keys that spare the DIRECTORY, so the profile and its on-disk cookies are
+still there for the next `spawn_browser(user_data_dir=…)`. What it costs is the
+session cookies and the open tabs.
+
+**Recovering the two stranded logins needs the operator to stop backend 173824
+first.** The adoption rule refuses a browser whose owner is a LIVE backend of
+ours, and it must — that is F-886's harm. The recipe is in RUNBOOK ("recover a
+stranded login"): stop that backend, then start a session, and the new backend
+adopts them. On Windows this already works with the 2.1.9 backend that is running
+today, because `psutil.terminate()` is `TerminateProcess`, which runs no handler
+— so 2.1.9's `_cleanup_all_tracked` never fires and the browsers survive the stop
+by accident. On POSIX a 2.1.9 backend still kills them on the way out; the fix
+must be INSTALLED before the stop for that platform to behave.
+
+**`spawn_browser(user_data_dir=…)` does NOT adopt; adoption is the backend's own
+startup and nothing else.** This was considered as the surface — "asked for a
+profile a live unowned Chrome holds, attach to it instead of walking to
+`<name>-2`" — and deliberately not built, because it is a SECOND trigger for one
+rule, and convention 4 says a second way is a defect. The startup pass already
+covers every shape the incident produced: a backend that dies leaves its browsers
+running, and the next backend adopts them before a client asks for anything.
+What the decision costs is one narrow case — a browser whose owner died AFTER
+this backend started, whose caller then spawns onto its directory: that walks to a
+sibling directory and opens a different, logged-out profile. It is visible rather
+than silent (`spawn_diagnostics.profile_selection.walked_to`, F-871), the login is
+not lost (the Chrome is still running and the NEXT backend adopts it), and the
+`spawn_browser` docstring and RUNBOOK both say plainly that spawning is not how
+you reach it. There is no `profile=` parameter either, for the same reason:
+`user_data_dir` already IS the persistent-profile option, and a second spelling of
+it would be a second way to say one thing.
+
+**The adoption pass is driven from `app_lifespan`, which is once per process
+(`_LIFESPAN_STARTED`), not once per heal.** A backend that adopts nothing at
+startup because the browsers' owner was still alive then will not re-check later.
+The window is narrow (the owner has to die after this backend started and before
+this backend is asked for anything) and the browsers are not lost — the NEXT
+backend adopts them — but a periodic re-check, or a check on the idle reaper's
+tick, would close it. Deliberately not added here: a second trigger is a second
+place the rule is asked from, and the incident does not need it.
+
+**`uses_custom_data_dir` is the load-bearing half of the persistence predicate
+and it comes from nodriver's config readback.** An entry written by 2.0.3 as a
+bare int, or hand-edited to drop the key, reads as NOT persistent — which is the
+safe direction here (a temp profile reclaimed, rather than a named profile kept
+alive by an adoption that should never have happened) and is pinned as such. It
+does mean a genuinely named profile recorded by 2.0.3 is not adoptable; those
+records predate the port field anyway, so there is nothing to adopt them with.
+
+**Standalone stdio still closes everything.** `app_lifespan`'s non-HTTP teardown
+calls `browser_manager.close_all()`, which is a CLOSE per instance and so is not
+covered by the shutdown spare. That path is the 1.x single-process contract and
+the backend does not run on it; left alone deliberately rather than given a
+fourth opinion about what a shutdown means.

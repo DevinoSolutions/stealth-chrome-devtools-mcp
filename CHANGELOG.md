@@ -24,6 +24,68 @@ state deterministically with a held supersession and asserts its answer is in
 the E2E node's own set — so an unnamed state fails on every lane instead of once
 in a while on one cell. No `src/` change.
 
+### Added — F-888: persistent named profiles and CDP re-attach after a backend restart
+
+A backend that died took its browsers' logins with it. On 2026-09-18 a backend
+went unresponsive under 60 concurrent sessions; the replacement's startup orphan
+sweep killed every browser the dead one owned, including a human's logged-in
+Amazon Seller Central session. Two more logins were stranded the same week by the
+other half of the gap: their backend is still alive, but `stop` and `restart`
+both end with its browsers terminated, so there was no verb that finished with
+the login intact. F-886 (2.1.9) only stopped a cold start from EVICTING a backend
+that owns browsers; a backend that dies for any other reason was still fatal.
+
+**A browser on a persistent profile is now handed over, not killed.** One
+predicate, `browser_pid_registry.on_persistent_profile`, applied at the two
+places a browser died without a client asking for it. At SHUTDOWN
+(`_cleanup_all_tracked`) such a browser is left running and left tracked, so
+`stop` and `restart` finish with the login alive. At STARTUP RECOVERY
+(`_recover_orphaned_processes`) it is skipped rather than reaped, and picked up
+by the new adoption pass. A disposable auto-clone is unaffected in both places —
+still killed, still deleted — and `kill-orphans --force` still takes everything,
+because an operator asking is the authority the rule otherwise supplies.
+
+**A new backend re-attaches over CDP and keeps the client's instance id.**
+`browser_reattach.run`, driven fire-and-forget from `app_lifespan` so it can
+never delay a serve. Adoption requires four conditions
+and each one alone refuses (`browser_reattach.adoptable`): the owner is not a
+live backend of ours (two backends driving one Chrome is F-886's harm), the
+profile is persistent, the recorded pid is still that Chrome, and a CDP endpoint
+is recoverable. The endpoint has three witnesses — the port this release now
+records in `browser_pids.json` (`cdp_port`), Chrome's own `DevToolsActivePort`,
+and `--remote-debugging-port` on the process command line — and the last two are
+what let a 2.1.8/2.1.9 record, which carried no port at all, be adopted. The
+instance is registered under its RECORDED id, with its live url and title read
+through `tab_identity` rather than the cached pair, so a client holding an id
+from before the restart still reaches the same browser.
+
+**A named profile's persistence is now stated and pinned rather than emergent.**
+`user_data_dir=<name or absolute path>` already survived close, the clone GC and
+storage cap, `cleanup --apply` and `kill-orphans` in 2.1.9 — but that guarantee
+was three hand-written copies of one condition that happened to agree. There is
+no new parameter and no new layout: the condition has one home, the four
+guarantees are pinned in `tests/test_browser_reattach.py`, and a test fails if
+the literal comes back.
+
+Adoption is the BACKEND's own startup and nothing else: `spawn_browser` still
+walks to a sibling directory when the profile it was handed is held (F-871), and
+deliberately does not grow a second trigger for the same rule. The
+`spawn_browser` docstring and a new RUNBOOK playbook ("Recover a stranded login")
+both say so, and give the one recipe that needs an operator — stopping a backend
+that is still alive but unreachable, after which the next backend adopts its
+browsers.
+
+Also: the nodriver host-and-port pair that makes `uc.start` connect instead of
+spawn moved out of `desktop_launch.launch_and_attach` into
+`browser_reattach.attach_config` / `attach`, so the delegated headed launch
+(F-810) and a backend adopting a browser now use one door.
+`browser_reattach.reap_recorded` is the one home for "reap this entry", shared by
+startup recovery and by a failed adoption's fallback — which is exactly 2.1.9's
+behaviour for that entry, with the directory still spared. The whole subsystem
+takes the `BrowserManager` and the `ProcessCleanup` as arguments
+(`spawn_leak`'s precedent), which is what keeps both of those files inside their
+grandfathered LOC caps; `browser_manager.py`'s ratchets down 1493 -> 1492.
+
 
 ## 2.1.9
 

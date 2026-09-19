@@ -254,6 +254,48 @@ check. Under `--force`, browsers a healthy backend is actively using are killed 
 That reach is deliberate, because it is what makes `--force` work against the wedged
 backend it exists for, but it means `--force` is never the casual option.
 
+### Recover a stranded login
+
+A browser on a **persistent profile** — one a caller named with
+`spawn_browser(user_data_dir=…)` — is no longer killed when its backend goes away
+(F-888). `stop`, `restart`, a proxy heal and a crash all now end with that Chrome
+still running, and the next backend re-attaches to it over CDP **at its own
+startup**, under the same `instance_id`. So the normal case needs no recipe: start
+a session, and the login is already in `list_instances` (its entry carries
+`spawn_diagnostics.reattached: true`). Give it a moment — the pass runs off the
+first-serve path so it cannot delay the backend answering.
+
+Two cases do need a hand.
+
+**The owner backend is still ALIVE (wedged, or just unreachable because every
+proxy that could talk to it has died).** Adoption refuses a browser whose owner is
+a live backend of ours, and it must — two backends driving one Chrome is what
+F-886 exists to prevent. Stop that backend first, then start a session:
+
+```console
+stealth-chrome-devtools status          # read the port off the summary
+stealth-chrome-devtools stop --port <that backend's port>
+```
+
+`stop` terminates the backend and leaves its persistent-profile browsers running;
+the next backend adopts them. (On Windows this also works against a 2.1.9 backend
+that is running today, because `stop` is `TerminateProcess`, which runs no
+handler, so 2.1.9's kill-everything shutdown path never fires. On POSIX a 2.1.9
+backend still kills them on the way out — install this release **before** the
+stop.)
+
+**The browser cannot be re-attached at all** (Chrome is wedged, or nothing in the
+ladder names a port). It is reaped, exactly as 2.1.9 would have reaped it — but
+the **profile directory is spared**, so the on-disk cookies are still there. Spawn
+onto the same directory and log in again if the session cookies are gone:
+`spawn_browser(user_data_dir="<the same name or absolute path>")`.
+
+What NOT to do: do not `spawn_browser` with that `user_data_dir` while its Chrome
+is still running and unadopted. That does not adopt it — it walks to a sibling
+directory (F-871, reported in `spawn_diagnostics.profile_selection.walked_to`),
+which is a different profile and a different login. And `kill-orphans --force`
+takes persistent-profile browsers too; that is what `--force` means.
+
 ### Disk filling up
 Look before you reclaim — neither of these changes anything on disk:
 
