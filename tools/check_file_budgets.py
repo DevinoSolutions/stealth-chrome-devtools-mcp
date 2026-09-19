@@ -102,10 +102,24 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # cost were paid for by collapsing `_replace_main_tab`'s Args:/Returns: block
     # that only restated its own signature (the plan_F856 mechanism). Cap ==
     # actual.
+    # F-834 stage 2 RATCHETS DOWN 1492 -> 1485, MERGED with the above and
+    # measured rather than derived. "How long does a Chrome we just launched get
+    # to open its DevTools endpoint" is `browser_connect.py` now — nodriver's
+    # answer is a `range(5)` of 0.5 s sleeps, and two of the three gate cells
+    # have never once answered inside it on a cold binary. What this file keeps
+    # is the launch itself and the one `install()` ahead of the F-810 branch
+    # that says whose budget decides; that line, its import and the sentence
+    # naming them are the three lines it costs. The arithmetic of the two
+    # branches does NOT add up on its own: both paid with the SAME
+    # `_replace_main_tab` Args:/Returns: block and only one such payment exists,
+    # so the merge landed at 1494 — above BOTH rows, i.e. a cap raise, which is
+    # never allowed. `get_navigation_tab`'s own signature-echo block is the
+    # second payment (the plan_F856 mechanism again), and 1485 is then the
+    # merged file measured. Cap == actual.
     "embedded/browser_manager.py": (
-        1492,
+        1485,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
-        " + F-882 + F-888",
+        " + F-882 + F-888 + F-834b",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
