@@ -25,6 +25,7 @@ from pathlib import Path
 import psutil
 
 from stealth_chrome_devtools_mcp.embedded import (
+    backend_env,
     backend_eviction,
     backend_liveness,
     backend_registry,
@@ -389,11 +390,8 @@ def _start_server_process(port: int):
         )
         boot_log = None
 
-    # A spawned backend must always own its lifecycle (reap its own orphaned
-    # browsers on init) even when the CLI-invoking parent set this to skip
-    # its own recovery-on-import (cli.py's os.environ.setdefault).
     child_env = dict(os.environ)
-    child_env.pop("STEALTH_MCP_NO_AUTO_RECOVERY", None)
+    backend_env.scrub(child_env)  # F-890 + M8-2: what the backend must not inherit
     if cmd[0] != sys.executable:
         # F-866: the bypassed redirector's own venv hand-off. ``getpath`` reads it
         # to find ``pyvenv.cfg``, then CPython drops it from the environment before

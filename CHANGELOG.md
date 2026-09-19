@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Fixed — F-890: an inherited `FASTMCP_*` variable made every backend launch crash at import
+
+For sixty-six minutes on 2026-09-18 (04:26-05:33) every backend spawn died with
+a `pydantic.ValidationError` before one line of our code ran, and the only trace
+was `backend-boot.log`: the proxy hands the backend the MCP client's environment
+whole, and `fastmcp` 2.11.2 builds a `pydantic_settings.BaseSettings` AT IMPORT
+whose `env_prefixes` are `["FASTMCP_", "FASTMCP_SERVER_"]`. An inherited
+`FASTMCP_PORT=""` is therefore parsed into `port: int` before `--port` exists as
+a concept, and `int("")` does not validate. Measured on the installed stack;
+the bare `port`/`PORT` names have no effect at all, so a fix written against
+them would have shipped as a fix for a bug it did not touch.
+
+The child env is now scrubbed at THE one composition site
+(`singleton._start_server_process`) through the new `embedded/backend_env.py`,
+which drops the whole `FASTMCP_` family rather than overriding the field that
+crashed us — the backend's configuration comes from the argv we build, so every
+one of those names is a second input to a decision already made, and
+`FASTMCP_STATELESS_HTTP` would not even crash, it would silently give the bridge
+a transport it is not written against. The prefix is scrubbed rather than a
+field list derived from the library, because the stdio proxy must never import
+`fastmcp`; a test pins the constant against `fastmcp`'s own `model_config`, and
+a subprocess node proves the crash and its absence after the scrub. The module
+also absorbed M8-2's `STEALTH_MCP_NO_AUTO_RECOVERY` pop (same sentence, one
+home). `os.environ` is never touched; the removed NAMES are logged at INFO,
+never their values.
+
 ### Fixed — F-882d: the meta-refresh node named two of that shape's three truthful states
 
 The third sibling of F-882b and F-882c, in the same node, and again not a
