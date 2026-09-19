@@ -225,6 +225,19 @@ it back. That is also what answers two concurrent spawns onto one held directory
 normally, reporting `spawn_diagnostics["reattach_declined"]` rather than walking
 away silently.
 
+**And a lost claim is never a reason to kill a browser.** Holding the claim
+across the attach is the new `browser_claim` leaf (`held`), because the guarantee
+it needs is about an `await`: the claim is taken inside the block that releases
+it, it is shielded (cancelling an `await asyncio.to_thread(...)` does not stop
+the worker thread — it still writes), and the task is kept so a teardown can hand
+back a claim that landed after the enclosing budget had given up on it. The two
+outcomes that are NOT evidence about the browser are named types — `Refused` (a
+sibling backend claimed it first) and `Undecided`, its subclass (the record write
+itself failed) — and the startup pass now catches them: the entry and the browser
+are left exactly as found, with a WARNING naming the reason. Reaping stays
+reserved for a browser we claimed and then could not attach to, and only on the
+startup pass; the spawn path still never reaps.
+
 **An adopted instance now reports measured values, not the caller's request.**
 `headless` comes off the holder's command line and the window is MEASURED through
 `window_sizing.measure` — a read that deliberately does not RESIZE, because

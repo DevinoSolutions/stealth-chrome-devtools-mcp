@@ -117,9 +117,17 @@ def browser_process(pids: Collection[int] | None, expect_dir: str) -> int | None
     ``--type`` is the whole rule and nothing else is consulted — not the parent
     pid (the browser's own parent is whatever launched it, which on Windows is a
     trampoline that has already exited) and not the port (a renderer has it too).
-    Returns None when no member qualifies, which the caller reports rather than
-    swallows.
+
+    Returns None when no member qualifies **and when more than one does**, which
+    the caller reports rather than swallows. Chrome's process singleton normally
+    guarantees exactly one browser per directory, but the states this whole
+    feature operates in are precisely the ones where it does not hold: F-871's
+    stale or absent ``SingletonLock``, and a hard-killed Chrome on Windows whose
+    ``lockfile`` says nothing about a pid. Taking ``[0]`` of two roots would put
+    the same set-ordering coin flip back — SILENTLY, which is the property this
+    function exists to remove — so an ambiguous answer is no answer.
     """
+    found: list[int] = []
     for pid in pids or ():
         if not isinstance(pid, int):
             continue
@@ -131,8 +139,8 @@ def browser_process(pids: Collection[int] | None, expect_dir: str) -> int | None
             on_disk
         ) != browser_pid_registry.normalize_path(expect_dir):
             continue
-        return pid
-    return None
+        found.append(pid)
+    return found[0] if len(found) == 1 else None
 
 
 def is_headless(pid: int) -> bool:

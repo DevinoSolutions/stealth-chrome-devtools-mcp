@@ -26,6 +26,7 @@ pinned for SHAPE only, by reading the config nodriver would have been handed.
 import asyncio
 import json
 import socket
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -34,6 +35,7 @@ import pytest
 
 from fakes import FakeBrowser, FakeTab
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_claim,
     browser_cmdline,
     browser_reattach,
     cdp_attach,
@@ -946,6 +948,51 @@ class TestWhatTheCommandLineSays:
             with self._with_cmdline("chrome", f"--proxy-server=127.0.0.1:{live_port}"):
                 assert browser_cmdline.dead_local_proxy(CHROME_PID) is None
 
+    def test_two_browser_roots_on_one_directory_answer_nothing(self):
+        """F-888 re-review L-new-1. Chrome's singleton normally guarantees one
+        browser per directory — but the states this feature operates in are
+        exactly the ones where it does not: F-871's stale or absent
+        ``SingletonLock``, and a hard-killed Chrome on Windows whose ``lockfile``
+        names no pid. Taking ``[0]`` of two roots puts the set-ordering coin flip
+        back SILENTLY, which is the property this function exists to remove, so
+        an ambiguous answer is no answer and the caller reports it."""
+        argv = ["chrome", r"--user-data-dir=C:\ours"]
+        table = {41001: argv, 41002: argv}
+        with patch.object(
+            browser_cmdline, "arguments", side_effect=lambda pid: table.get(pid, [])
+        ):
+            assert browser_cmdline.browser_process({41001}, r"C:\ours") == 41001
+            assert browser_cmdline.browser_process(set(table), r"C:\ours") is None
+
+
+class TestIgnoredArgsNamesOnlyWhatTheCallerPassed:
+    """F-888 re-review M-new-3. ``ignored_spawn_args`` exists to be BELIEVED —
+    its own docstring says "the ones you passed" — so it may not name an argument
+    the handler filled in on the caller's behalf."""
+
+    def _args(self, **passed):
+        from stealth_chrome_devtools_mcp.embedded.tool_sections import (
+            browser_management,
+        )
+
+        return browser_management._launch_only_args(**passed)
+
+    def test_an_unset_sandbox_is_not_reported(self):
+        """`sandbox` is resolved from None to a real bool before the spawn runs,
+        and passing the RESOLVED value named it on every single re-attach — which
+        devalues the field for the arguments that actually matter."""
+        assert self._args(sandbox=None) == []
+
+    def test_a_sandbox_the_caller_really_passed_is_reported(self):
+        assert self._args(sandbox=False) == ["sandbox"]
+
+    def test_only_what_differs_from_the_default_is_named(self):
+        assert self._args(headless=False, viewport_width=1920, proxy=None) == []
+        assert self._args(headless=True, viewport_width=800) == [
+            "headless",
+            "viewport_width",
+        ]
+
 
 class TestAnAdoptedInstanceTellsTheTruth:
     """F-888 review M2. What ``_build_instance`` fills in from OPTIONS is a
@@ -1136,6 +1183,99 @@ class TestHeldAdoptionNeverReaps:
         assert diagnostics["ignored_spawn_args"] == ["headless", "proxy"]
 
 
+class TestALostClaimIsNeverAReap:
+    """F-888 RE-review HIGH. The startup pass reaps on failure, and that is right
+    for exactly one class of failure: evidence about the BROWSER.
+
+    A claim another backend won, or a claim that could not be written at all, is
+    evidence about US. Reaping on either was strictly worse than the race the
+    claim was introduced to end: backends B and C both classify entry E adoptable
+    from their own snapshot, C claims first and adopts, and B would then kill
+    every browser on that profile predating its own `_init_time` — which C's
+    adopted browser does — and drop the entry C has just re-stamped. The human's
+    login dies, C holds a handle to a corpse, and nothing on disk names it.
+    """
+
+    @pytest.fixture
+    def cleanup(self, tmp_path):
+        double = _spawn_cleanup(tmp_path)
+        double._drop_recorded = MagicMock()
+        return double
+
+    async def _pass_with(self, cleanup, claim_result):
+        """One `run` over one adoptable entry, with the claim forced."""
+        manager = MagicMock()
+        manager._lock = asyncio.Lock()
+        manager._instances = {}
+        with (
+            patch.object(
+                browser_reattach,
+                "adoptable_for",
+                return_value=_classified(**{"i-kept": _adoptable_record()}),
+            ),
+            patch.object(browser_reattach, "claim", **claim_result),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(cdp_attach, "attach") as attach,
+            patch.object(browser_reattach, "reap_recorded") as reap,
+        ):
+            adopted = await browser_reattach.run(manager, cleanup)
+        return adopted, reap, attach
+
+    @pytest.mark.asyncio
+    async def test_a_browser_a_sibling_claimed_first_is_spared_not_reaped(
+        self, cleanup
+    ):
+        """The race the claim exists for, ending the way it must. `claim` answers
+        None — a live backend of ours owns it — and this pass leaves BOTH the
+        browser and the entry alone. The entry especially: it is the winner's
+        stamp, and dropping it would leave a live adopted browser that nothing on
+        disk names."""
+        adopted, reap, attach = await self._pass_with(cleanup, {"return_value": None})
+
+        assert adopted == []
+        assert reap.call_count == 0, (
+            "a browser a sibling backend legitimately claimed was reaped by this pass"
+        )
+        assert cleanup._drop_recorded.call_count == 0, (
+            "the winner's entry was dropped, leaving its browser unnamed on disk"
+        )
+        assert attach.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_record_write_failure_is_spared_not_reaped(self, cleanup):
+        """`update_entries` raises BY DESIGN on a lock timeout or an OSError
+        writing the record. That says nothing whatsoever about the browser, so
+        converting it into a kill put a human's logged-in Chrome inside the blast
+        radius of a transient state-dir error."""
+        adopted, reap, _ = await self._pass_with(
+            cleanup, {"side_effect": OSError("record locked")}
+        )
+
+        assert adopted == []
+        assert reap.call_count == 0
+        assert cleanup._drop_recorded.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_browser_level_failure_still_reaps(self, cleanup):
+        """The other side, and why the handler cannot simply stop reaping: an
+        orphan we CLAIMED and then could not reach must still reach one of the
+        two ends 2.1.9 had, or it leaks forever."""
+        adopted, reap, _ = await self._pass_with(
+            cleanup,
+            {"return_value": registry.Claimed(instance_id="i-kept", previous=None)},
+        )
+
+        assert adopted == []
+        assert reap.call_count == 1
+        cleanup._drop_recorded.assert_called_once_with({"i-kept"})
+
+    def test_the_two_spare_reasons_are_one_class(self):
+        """`Undecided` is a SUBCLASS of `Refused` on purpose: every caller's
+        handling is identical, so one `except Refused` has to cover both. Two
+        sibling types is how one of them comes to be missed at a handler."""
+        assert issubclass(browser_claim.Undecided, browser_reattach.Refused)
+
+
 class TestTheCrossProcessClaim:
     """F-888 review HIGH. Adoption is safe between PROCESSES or it is not safe:
     an asyncio lock cannot help, because the racers are backends."""
@@ -1210,6 +1350,35 @@ class TestTheCrossProcessClaim:
         registry.release_claim(cleanup.pid_file, claimed)
         assert _read(cleanup.pid_file) == {}
 
+    def test_a_claim_never_flips_a_disposable_entry_to_persistent(self, tmp_path):
+        """F-888 re-review L-new-3. The held path is deliberately not gated on
+        ``on_persistent_profile`` — there is usually no record to read it from —
+        but the claim writes both keys as "persistent". On an entry that ALREADY
+        exists that would convert a disposable auto-clone into a profile nothing
+        ever reclaims and a browser nothing ever reaps, from a caller merely
+        naming that directory by hand. What the record says about disposability
+        is a fact about how the profile was CREATED; a claim is a statement about
+        ownership and has no standing to change it."""
+        cleanup = _spawn_cleanup(tmp_path)
+        _seed(
+            cleanup.pid_file,
+            {
+                "i-clone": _entry(
+                    owner_pid=DEAD_OWNER, auto_clone=True, uses_custom_data_dir=False
+                )
+            },
+        )
+
+        claimed = browser_reattach.claim(cleanup, self._candidate())
+
+        assert claimed is not None
+        entry = _read(cleanup.pid_file)["i-clone"]
+        assert entry["auto_clone"] is True
+        assert entry["uses_custom_data_dir"] is False
+        assert registry.on_persistent_profile(entry) is False
+        # The ownership half DID land — that is the part a claim is for.
+        assert entry["owner_pid"] == registry.owner_identity()[0]
+
     @pytest.mark.asyncio
     async def test_the_attach_is_never_reached_when_the_claim_is_refused(
         self, tmp_path
@@ -1249,6 +1418,84 @@ class TestTheCrossProcessClaim:
             await browser_reattach.adopt_held_profile(BrowserManager(), cleanup, "C:/p")
 
         assert registry.read_entries(cleanup.pid_file) == before
+
+    @pytest.mark.asyncio
+    async def test_the_budget_expiring_after_the_claim_still_releases_it(
+        self, tmp_path
+    ):
+        """F-888 re-review M-new-2. The whole adoption runs under
+        ``ATTACH_BUDGET_SECONDS``, so the cancellation can land anywhere after
+        the claim — and the claim must be released on THAT path too.
+
+        A claim taken outside the handler that releases it leaves the record
+        naming this LIVE backend as the owner of a browser it does not hold.
+        Nothing recovers that while we run: our own classification reads a live
+        owner, recovery spares it, and every other backend is refused. It is the
+        one failure mode that produces an *unreachable* browser, which is the
+        state this whole finding exists to abolish.
+        """
+        cleanup = _spawn_cleanup(tmp_path)
+        _seed(cleanup.pid_file, {"i-was": _entry(owner_pid=DEAD_OWNER)})
+        before = registry.read_entries(cleanup.pid_file)
+
+        async def _never_answers(*_args, **_kwargs):
+            await asyncio.sleep(10)
+
+        with (
+            patch.object(browser_reattach, "ATTACH_BUDGET_SECONDS", 0.25),
+            patch.object(browser_reattach, "held_by", return_value=self._candidate()),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(cdp_attach, "attach", side_effect=_never_answers),
+        ):
+            held = await browser_reattach.adopt_held_profile(
+                BrowserManager(), cleanup, "C:/p"
+            )
+
+        assert held.instance_id is None
+        assert registry.read_entries(cleanup.pid_file) == before, (
+            "a budget that expired after the claim left the record naming us as "
+            "the owner of a browser we never attached to"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_budget_expiring_while_the_claim_lands_still_releases_it(
+        self, tmp_path
+    ):
+        """The narrowest window, and the only one that produces an UNREACHABLE
+        browser. Cancelling an ``await asyncio.to_thread(...)`` does not stop the
+        worker thread — it still takes the record lock and still writes — so the
+        result is never handed back while the stamp lands anyway. Asking the TASK
+        what it wrote is the only way to release it."""
+        cleanup = _spawn_cleanup(tmp_path)
+        _seed(cleanup.pid_file, {"i-was": _entry(owner_pid=DEAD_OWNER)})
+        before = registry.read_entries(cleanup.pid_file)
+        real_claim = browser_reattach.claim
+
+        def _slow_claim(*args, **kwargs):
+            time.sleep(0.4)  # the worker thread; the budget expires under it
+            return real_claim(*args, **kwargs)
+
+        with (
+            patch.object(browser_reattach, "ATTACH_BUDGET_SECONDS", 0.05),
+            patch.object(browser_reattach, "held_by", return_value=self._candidate()),
+            patch.object(browser_reattach, "claim", side_effect=_slow_claim),
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(cdp_attach, "attach") as attach,
+        ):
+            held = await browser_reattach.adopt_held_profile(
+                BrowserManager(), cleanup, "C:/p"
+            )
+            # The worker thread outlives the cancellation; let it land and let
+            # the teardown's release follow it.
+            await asyncio.sleep(1.0)
+
+        assert held.instance_id is None
+        assert attach.call_count == 0
+        assert registry.read_entries(cleanup.pid_file) == before, (
+            "the claim landed after the budget expired and nothing released it: "
+            "the record now names this live backend as the owner of a browser "
+            "it never attached to, which no other backend can ever adopt"
+        )
 
 
 class TestNamedSessionDirIsNeverReclaimed:

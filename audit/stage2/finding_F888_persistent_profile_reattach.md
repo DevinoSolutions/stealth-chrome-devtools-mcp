@@ -354,7 +354,7 @@ the module docstring says must never drift. An entry without the key reads as
 
 ## 5. Tests
 
-`tests/test_browser_reattach.py`, 77 pins, hermetic — the record is a `tmp_path`
+`tests/test_browser_reattach.py`, 88 pins, hermetic — the record is a `tmp_path`
 file on every one, both liveness witnesses are injected, the `ProcessCleanup` the
 pass writes through is a double, and the CDP door is patched. The one thing NOT
 stubbed out is the claim: it writes to that real `tmp_path` record, because a
@@ -370,7 +370,9 @@ claim whose file lock is faked proves nothing about two processes.
 | `TestShutdownHandsOver` | a persistent browser survives shutdown WITH its entry; a clone does not |
 | `TestManagerAdoption` | the client keeps its instance id and gets the live page; ownership moves through the one write; a failed attach falls back to the reap with the directory spared; no tab is refused; an already-registered instance is left alone; a wedged attach is bounded; `app_lifespan` hands the pass BOTH collaborators |
 | `TestHeldProfileAdoption` | **a holder with NO entry at all is adoptable** (the incident's exact shape); the port comes from the holder's command line; **the BROWSER is adopted when the witness names a child**; a dead owner's entry donates its instance id; a live backend's browser is never taken; nothing holding the dir is a silent None, while a tree with no browser process and a holder with no recoverable port each decline with a NAMED reason |
-| `TestTheCrossProcessClaim` | the claim is taken before the door and released on failure; keyed on the pid; a second backend reading a live owner is `Refused`; the decision is the one made inside the mutate |
+| `TestTheCrossProcessClaim` | the claim is taken before the door and released on failure; keyed on the pid; a second backend reading a live owner is `Refused`; the decision is the one made inside the mutate; a claim never flips a disposable entry to persistent; the budget expiring AFTER the claim and WHILE it is still landing both still release it |
+| `TestALostClaimIsNeverAReap` | two backends racing one dead-owner browser: exactly one adopts, the other SPARES and the entry survives with the winner's stamp; a record write that raises spares too; a browser-level failure still reaps; `Undecided` is one class with `Refused`, so one handler covers both |
+| `TestIgnoredArgsNamesOnlyWhatTheCallerPassed` | `ignored_spawn_args` reports only arguments whose value differs from the tool's own default — a `sandbox` the caller really passed IS named, the one this handler resolves for them is not |
 | `TestWhatTheCommandLineSays` | the port is joined to the profile; headless is measured; a dead loopback proxy is reported and a live one is not |
 | `TestAnAdoptedInstanceTellsTheTruth` | measured headless and window size, `not_restored`, `ignored_spawn_args`, hooks and interception on the adopted tab |
 | `TestHeldAdoptionNeverReaps` | a failed attach on the spawn path spawns instead and **kills nothing** — no reap, no record drop; a successful one answers with the instance id and stamps `reattached` |

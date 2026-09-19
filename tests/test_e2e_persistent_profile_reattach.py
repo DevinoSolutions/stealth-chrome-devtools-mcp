@@ -76,6 +76,27 @@ async def _warmup():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _record_in_tmp(tmp_path):
+    """THE one redirection of the browser record, for every node in this file.
+
+    Each node's first `spawn_browser` goes through the REAL `rt.process_cleanup`
+    and records a **persistent** entry (`uses_custom_data_dir=True`,
+    `auto_clone=False`) for a browser the node then deliberately leaves running
+    mid-test. Before F-888 a leaked entry like that was inert; now it is exactly
+    what the next real backend on this machine classifies as adoptable, spares
+    from its orphan sweep and attaches to. Writing it into the developer's live
+    `~/.stealth-mcp/browser_pids.json` is therefore not a tidiness point.
+
+    Autouse and module-wide rather than per node, so a node added later cannot
+    forget it — which is how two of the three came to be missing it.
+    """
+    with patch.object(
+        tool_runtime.process_cleanup, "pid_file", tmp_path / "browser_pids.json"
+    ):
+        yield
+
+
 def _cleanup_on(pid_file) -> ProcessCleanup:
     """A ProcessCleanup whose record is the test's file, built without __init__.
 
@@ -274,21 +295,16 @@ async def test_spawn_re_attaches_to_a_holder_with_no_record_entry(
         manager._instances.pop(first)
         manager._spawn_diagnostics.pop(first, None)
 
-        # The record is redirected to an ABSENT tmp file rather than stubbed
-        # empty at one read: the claim taken before the door reads AND WRITES it,
-        # so a stub over `_load_tracked_pids` alone would leave the claim reading
-        # the developer's live `~/.stealth-mcp` record — where this test's own
-        # first spawn is recorded under a LIVE owner, which is a correct refusal
-        # about the wrong record. Redirecting the path gives the incident's real
-        # shape, no entry at all, and keeps every write inside tmp_path.
-        with patch.object(
-            tool_runtime.process_cleanup,
-            "pid_file",
-            tmp_path / "browser_pids.json",
-        ):
-            result = await spawn(
-                headless=True, user_data_dir=str(profile), **sandbox_kwargs()
-            )
+        # The record this spawn reads and WRITES is the module fixture's tmp
+        # file, and it has to be a real redirection rather than a stub over
+        # `_load_tracked_pids`: the claim taken before the door reads AND writes
+        # it. It also has to hold no entry for this browser, which is the
+        # incident's real shape — so the entry the first spawn left is dropped
+        # here, leaving the directory as the only thing that still names it.
+        tool_runtime.process_cleanup.pid_file.unlink(missing_ok=True)
+        result = await spawn(
+            headless=True, user_data_dir=str(profile), **sandbox_kwargs()
+        )
         second = result["instance_id"]
 
         diagnostics = result["spawn_diagnostics"]

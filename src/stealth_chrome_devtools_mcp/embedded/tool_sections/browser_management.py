@@ -168,12 +168,15 @@ async def spawn_browser(
     # held directory owes the caller the reason the re-attach was not taken.
     held = rt.browser_reattach.Held()
     try:
-        if sandbox is None:
-            sandbox = not (is_running_as_root() or is_running_in_container())
-        elif isinstance(sandbox, str):
-            sandbox = sandbox.lower() in ("true", "1", "yes", "on", "enabled")
-        elif isinstance(sandbox, int) or not isinstance(sandbox, bool):
-            sandbox = bool(sandbox)
+        # What the CALLER passed, captured before the resolution below turns an
+        # unset `sandbox` into a real bool. `ignored_spawn_args` reports the
+        # arguments a caller gave that a running browser cannot be given, and a
+        # field whose docstring says "the ones you passed" has to be true of the
+        # one argument this handler fills in for them — it named `sandbox` on
+        # every single re-attach, which devalues the field for the args that
+        # matter (F-888 re-review M-new-3).
+        requested_sandbox = sandbox
+        sandbox = _resolved_sandbox(sandbox)
 
         # BEFORE profile selection, because selection is where F-871's walk to
         # <name>-2 happens: a live browser already holding the requested profile
@@ -198,7 +201,7 @@ async def spawn_browser(
                     browser_args=browser_args,
                     timezone_id=timezone_id,
                     extra_headers=extra_headers,
-                    sandbox=sandbox,
+                    sandbox=requested_sandbox,
                 ),
             )
             if held.instance_id:
@@ -346,11 +349,32 @@ def _launch_only_args(**passed: Any) -> list[str]:
         "extra_headers": None,
         "sandbox": None,
     }
+    # Compared against the DEFAULT, never tested for truthiness: `sandbox=False`
+    # is the one value of that argument a caller would bother to pass, and a
+    # truthiness guard dropped exactly it while reporting the resolved `True`
+    # nobody asked for. An empty list or dict is "passed nothing" and is the one
+    # falsy shape that still reads as unset.
     return sorted(
         name
         for name, value in passed.items()
-        if value and value != defaults.get(name, object())
+        if value != defaults.get(name, object()) and value not in ([], {})
     )
+
+
+def _resolved_sandbox(sandbox: Any | None) -> bool:
+    """The caller's ``sandbox`` as the bool the launch needs.
+
+    Unset means "decide for me", and the decision is the one Chrome forces:
+    running as root or inside a container, the sandbox cannot be had. Everything
+    else is a caller who said something — including the strings an MCP client
+    sends for a boolean — and is read literally. Extracted from ``spawn_browser``
+    only because the body is at its statement cap; the ladder is unchanged.
+    """
+    if sandbox is None:
+        return not (is_running_as_root() or is_running_in_container())
+    if isinstance(sandbox, str):
+        return sandbox.lower() in ("true", "1", "yes", "on", "enabled")
+    return bool(sandbox)
 
 
 async def _adopted_instance_record(

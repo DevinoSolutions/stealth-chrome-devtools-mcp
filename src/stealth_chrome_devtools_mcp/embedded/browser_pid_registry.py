@@ -262,6 +262,26 @@ class Claimed:
     previous: Entry | None
 
 
+def _kept_disposability(previous: Entry) -> Entry:
+    """The two keys a claim may never REWRITE on an entry that already exists.
+
+    ``on_persistent_profile`` is read from ``uses_custom_data_dir`` and
+    ``auto_clone``, and a claim writes both as "persistent" — right for the
+    browser it was written for, which has no entry at all. But the held path is
+    deliberately not gated on that predicate (there is usually no record to read
+    it from), so a caller who names an AUTO-CLONE directory by hand would
+    otherwise flip a disposable profile into one nothing ever reclaims and a
+    browser nothing ever reaps. What the record already says about disposability
+    is a fact about how that profile was CREATED, and a claim is a statement
+    about ownership; it has no standing to change it.
+    """
+    return {
+        key: previous[key]
+        for key in ("uses_custom_data_dir", "auto_clone")
+        if key in previous
+    }
+
+
 def claim_browser(  # noqa: PLR0913  PERMANENT(the record path, the browser's identity, the entry to write, the owner to stamp and the liveness witness are five independent facts; a struct would put the schema in a second place — see new_entry)
     path: Path,
     *,
@@ -312,7 +332,8 @@ def claim_browser(  # noqa: PLR0913  PERMANENT(the record path, the browser's id
         else:
             outcome["id"] = instance_id
         taken = str(outcome["id"])
-        merged = {**(recorded.get(taken) or {}), **entry}
+        previous_entry = recorded.get(taken) or {}
+        merged = {**previous_entry, **entry, **_kept_disposability(previous_entry)}
         return {
             **recorded,
             taken: with_owner(merged, owner_pid, owner_create_time),

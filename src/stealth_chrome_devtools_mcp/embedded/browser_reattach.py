@@ -5,10 +5,10 @@ through it" (F-888).
 Four parts, and they are one module because each exists only to serve the first:
 a classification that names nothing to attach to is useless, a door nothing is
 allowed through is a second spawn path, and a pass in another file is a second
-place the rule gets asked from. What is NOT here is reading a live process's
-argv — that is ``browser_cmdline``, a leaf with one question of its own — and the
-cross-process claim, which is ``browser_pid_registry``'s because it is a write to
-that record.
+place the rule gets asked from. What is NOT here is reading a live process's argv
+(``browser_cmdline``), the claim's WRITE (``browser_pid_registry``) or the
+lifecycle that holds that claim across the attach (``browser_claim``) — three
+leaves, each with one question of its own.
 
 Both collaborators arrive as ARGUMENTS — the ``ProcessCleanup`` and the
 ``BrowserManager`` — on ``spawn_leak.reap_launched_browsers``'s precedent, which
@@ -59,18 +59,12 @@ earns its rung: ``--remote-debugging-port=0`` gives a command line
 :func:`browser_pid_registry.valid_port` rejects as "not bound yet", and the file
 is where Chrome wrote the port it resolved that to.
 
-**The door** (:func:`attach_config` + :func:`attach`). Setting BOTH ``host`` and
-``port`` on a nodriver ``Config`` is what makes ``uc.start`` connect instead of
-spawn — nodriver's own gate, ``browser.py`` lines 371-375: with neither set it
-assigns ``127.0.0.1`` and a free port and launches Chrome; with both set it takes
-``connect_existing`` and never reaches ``create_subprocess_exec``. That gate is
-the only door into a running browser and ``desktop_launch.launch_and_attach`` was
-already standing in it, so the two lines that open it moved here and that
-function is now this module's SECOND consumer rather than a second door. It
-builds the config, needs ``config()`` for the argv it hands the Task Scheduler,
-and attaches with the SAME object afterwards — which is why the two halves are
-separate functions and not one call. ``CDP_HOST`` is a constant rather than an
-argument because both launch paths already fix ``127.0.0.1``.
+**The door is not here.** Entering a browser that is already running is a
+question ``desktop_launch.launch_and_attach`` had too, so it is ONE leaf with two
+consumers: :mod:`cdp_attach`, which owns the nodriver gate (setting BOTH ``host``
+and ``port`` on a ``Config`` is what makes ``uc.start`` connect instead of spawn),
+the reclaiming attach and the close that drops connections without touching the
+process. What this module owns is WHEN to knock and what to do with what answers.
 
 A leaf in the sense that matters: it imports no module that imports it. Both
 liveness witnesses arrive as ARGUMENTS on ``backend_liveness``'s pattern, so the
@@ -84,7 +78,6 @@ usually has nothing to adopt.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,6 +86,7 @@ from typing import TYPE_CHECKING
 import psutil
 
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_claim,
     browser_cmdline,
     browser_pid_registry,
     cdp_attach,
@@ -101,6 +95,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     tool_errors,
     window_sizing,
 )
+from stealth_chrome_devtools_mcp.embedded.browser_claim import Refused
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions, BrowserState
@@ -113,33 +108,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
     from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
-# Both launch paths give Chrome this and only this (nodriver `browser.py:374`
-# on the spawn path, the literal in `desktop_launch.launch_and_attach` on the
-# delegated one), so the endpoint is a port and the host is a fact.
-CDP_HOST = "127.0.0.1"
-
 # Chrome writes the port it actually bound here, first line, inside the profile
 # it was launched on. The second line is the browser websocket path, which we do
 # not use — nodriver builds its own from host and port.
 DEVTOOLS_PORT_FILE = "DevToolsActivePort"
-
 
 # One adoption's whole CDP budget: the websocket connect plus nodriver's initial
 # target discovery. A browser that has stopped answering must cost this once and
 # then be reaped like any other orphan, never hang a backend's startup — which is
 # the failure F-856 removed from this exact code path.
 ATTACH_BUDGET_SECONDS = 15.0
-
-
-class Refused(tool_errors.ToolError):
-    """A live backend of ours owns that browser, so it is not ours to take.
-
-    Its own type because the two entry points must report it differently from
-    every other failure: "we could not reach it" sends a spawn to a different
-    directory and is worth a line in the log, while THIS one is the rule working
-    — the operator has a browser they can still get back, and what they need is
-    the remedy, not a stack trace.
-    """
 
 
 @dataclass(frozen=True)
@@ -720,13 +698,18 @@ async def run(manager: BrowserManager, cleanup: ProcessCleanup) -> list[str]:
     ``tab_identity``, never the cached pair (F-874), which for an adopted browser
     would be empty.
 
-    Idempotent, and serialized by ``_pass_lock``, because ``app_lifespan`` drives
-    it and FastMCP runs that per MCP session. A successful adoption re-stamps the
-    entry's owner to US, so a second session's classification finds nothing.
+    Idempotent, and serialized by ``_pass_lock``. ``app_lifespan`` runs it ONCE
+    per process (``server.py``'s ``_LIFESPAN_STARTED``), so the lock is not about
+    two MCP sessions; it is what keeps a future second caller from opening two
+    connections to one Chrome. A successful adoption re-stamps the entry's owner
+    to US, so any later classification finds nothing.
 
-    Never raises. One browser that cannot be adopted costs its own entry and
-    nothing else: it is reaped exactly as 2.1.9's startup recovery would have
-    reaped it, with the reason logged at WARNING.
+    Never raises, and it reaps on ONE class of failure only: evidence about the
+    BROWSER — the attach was refused, it reports no tab, it is wedged — logged at
+    WARNING and reaped exactly as 2.1.9's startup recovery would have reaped it.
+    A ``Refused`` (a sibling backend claimed it first, or the claim could not be
+    written at all) is the opposite instruction and is handled above the blanket
+    handler: the entry and the browser are left exactly as they are.
     """
     async with _pass_lock:
         classified = await asyncio.to_thread(adoptable_for, cleanup)
@@ -745,11 +728,30 @@ async def run(manager: BrowserManager, cleanup: ProcessCleanup) -> list[str]:
                     _adopt_one(manager, cleanup, candidate),
                     timeout=ATTACH_BUDGET_SECONDS,
                 )
-            except Exception as exc:  # noqa: BLE001  PERMANENT(a startup background pass must never raise; every failure has the one remedy below)
-                # Blind on purpose: this pass runs on a background task at
-                # startup and MUST never raise. Every failure — a refused
-                # connect, a wedged browser, a nodriver change — has the same
-                # remedy, which is the reap below, so narrowing the catch would
+            except Refused as exc:
+                # THE one outcome that must never reach the reap below, and the
+                # two shapes of it are one class on purpose (`Undecided` is a
+                # subclass): a sibling backend legitimately claimed this browser
+                # first, or the claim could not be written at all. Neither is
+                # evidence about the BROWSER.
+                #
+                # Reaping here was strictly worse than the race it was added to
+                # fix. Backends B and C start together and both classify entry E
+                # adoptable from their own snapshot; C claims first and adopts;
+                # B's claim is refused, and B would then kill every browser on
+                # that profile predating its own `_init_time` — which C's adopted
+                # browser does — and drop the entry C has just re-stamped. The
+                # login dies, C holds a handle to a corpse, and nothing on disk
+                # names it. A lost claim is the rule WORKING; it leaves the entry
+                # and the browser exactly as they are.
+                report("reattach", f"Left to its owner: {exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001  PERMANENT(a startup background pass must never raise; every failure that is evidence about the BROWSER has the one remedy below)
+                # Blind on purpose BELOW the refusal above: this pass runs on a
+                # background task at startup and MUST never raise. What is left
+                # after `Refused` is evidence about the browser — a refused
+                # connect, no tab, a wedged Chrome, a nodriver change — and all
+                # of it has the same remedy, the reap, so narrowing further would
                 # only turn an unforeseen one into an unhandled task exception.
                 failed.add(instance_id)
                 # Shape only in the message — a profile path names the operating
@@ -847,16 +849,45 @@ async def _adopt_one(
 
     The claim comes FIRST, before a single byte reaches Chrome, because the thing
     it protects against is another backend doing all of this at the same time.
+    ``browser_claim.held`` is what holds it across the attach and hands it back on
+    every path that does not end in ownership — including the cancellation the
+    caller's ``ATTACH_BUDGET_SECONDS`` delivers, which is why the claim is taken
+    INSIDE that block and not before it. The connection's own teardown is the
+    INNER handler and the claim's is the outer one, in that order deliberately:
+    the browser must be let go of before the record stops saying it is ours.
     """
-    claimed = await asyncio.to_thread(claim, cleanup, candidate)
-    if claimed is None:
-        raise Refused(
-            f"a live backend of ours already owns the browser holding that "
-            f"directory (pid {candidate.pid}); two backends driving one Chrome "
-            f"is the defect F-886 fixed, so it was left alone. Stop that backend "
-            f"first — see RUNBOOK, 'Recover a stranded login'"
+    async with browser_claim.held(
+        lambda: claim(cleanup, candidate),
+        lambda landed: browser_pid_registry.release_claim(cleanup.pid_file, landed),
+        pid=candidate.pid,
+    ) as claimed:
+        instance_id = claimed.instance_id
+        return await _attach_one(
+            manager,
+            cleanup,
+            candidate,
+            instance_id,
+            extra_diagnostics=extra_diagnostics,
         )
-    instance_id = claimed.instance_id
+
+
+async def _attach_one(
+    manager: BrowserManager,
+    cleanup: ProcessCleanup,
+    candidate: Adoptable,
+    instance_id: str,
+    *,
+    extra_diagnostics: dict[str, object] | None = None,
+) -> str:
+    """Open the connection, publish the instance, and answer its id.
+
+    Split from the claim only so each failure has ONE handler: this one closes
+    the CONNECTION and never the browser — an adoption that failed must leave the
+    Chrome exactly as it found it, because the caller's fallback is the thing
+    allowed to decide it dies. The registration order matches ``spawn_browser``'s
+    deliberately: nothing is published into the manager's instances until the tab
+    answers, so a half-adopted browser is never visible to a tool body.
+    """
     browser: Browser | None = None
     try:
         browser = await cdp_attach.attach_reclaiming(
@@ -962,16 +993,7 @@ async def _adopt_one(
         instance.update_activity()
         in_memory_storage.store_instance(instance_id, instance.model_dump(mode="json"))
     except BaseException:
-        # The connection, not the browser: an adoption that failed must leave the
-        # Chrome exactly as it found it, because the caller's fallback is the
-        # thing allowed to decide it dies. The claim goes back too — the record
-        # naming us as the owner of a browser we do not hold is WORSE than what
-        # we found, since the next backend would then refuse to adopt it.
         if browser is not None:
             await cdp_attach.close(browser)
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(
-                browser_pid_registry.release_claim, cleanup.pid_file, claimed
-            )
         raise
     return instance_id
