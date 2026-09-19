@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Fixed — F-834 stage 2: a Chrome still opening its DevTools endpoint was killed as a failed spawn
+
+nodriver 0.47 gives a Chrome it just launched `0.25 + 5 × 0.5 = 2.75 s` to answer
+`/json/version` (`core/browser.py:411-435`) — a loop count with no `Config` field
+behind it. Chrome routinely misses it. The F-870 cold-start probe, which runs on
+every gate cell before the suite with the runner idle and launching exactly ONE
+Chrome, measures `ms_to_json_version`:
+
+| cell | gate run | launch 1 (cold) | launch 2 (warm) |
+|---|---|---|---|
+| macOS/ARM64 | 35304880367 | 3943.6 ms | 581.6 ms |
+| macOS/ARM64 | 35316298288 | 4786.0 ms | 1289.7 ms |
+| macOS/ARM64 | 35454765486 | 5839.1 ms | 2138.7 ms |
+| Windows/X64 | 35316298288 | 4250.0 ms | 344.0 ms |
+| Linux/X64 | 35316298288 | 685.8 ms | 232.6 ms |
+
+Two of the three cells have never once answered inside the window on a cold
+binary, and the warmest macOS reading already spends 78 % of it on one launch
+with nothing else running. What followed was correct and wasted: the attempt
+raised "Failed to connect", no `Browser` was handed back, F-860's reap killed
+the Chrome that was coming up and logged a WARNING on the backend's durable
+channel, and F-834 stage 1 relaunched from cold onto the directory the reap had
+just freed. On the six-way fleet (`spawn 26.0s`, 1 lead + 5 in 3 lanes on 3
+cpus) a follower lost that race often enough to fail four of the last five
+macOS gate runs — `tests/test_e2e_fleet.py`, runs 35454765486 (attempts 1 and
+2), 35316298288 (attempt 3) and 35304880367 (attempt 1).
+
+The budget is ours now. `embedded/browser_connect.py` is THE one home for "how
+long does a freshly launched Chrome get to open its DevTools endpoint", and
+`browser_manager._launch_browser` installs it once ahead of the F-810 branch, so
+every launch in the tree is covered. `CONNECT_PATIENCE_SECONDS` is 30.0 — ~5×
+the worst measured cold launch — and it is a **ceiling, not a wait**: an
+endpoint that opens in 300 ms costs 300 ms and the common path is unchanged. A
+launcher that has already exited ends the wait immediately, so the one case this
+could have slowed (Chrome dies at launch) is faster than 2.1.9, which polls a
+dead port for the full 2.75 s. The seam is `HTTPApi.get`, the only call that
+sits between "Chrome is spawned" and "the endpoint answers" and nodriver's
+single caller of it; this closes the fix F-870 §6 wrote down and declined to
+ship for want of exactly the number §7 has since measured. No new knob, no
+attach path, no weakened oracle — `spawn_leak`'s warning still fires for a spawn
+that genuinely leaves a Chrome behind. `browser_manager.py`'s LOC cap ratchets
+down 1493 → 1490. See
+`audit/stage2/finding_F834b_connect_deadline.md`.
+
 ### Fixed — F-882d: the meta-refresh node named two of that shape's three truthful states
 
 The third sibling of F-882b and F-882c, in the same node, and again not a
