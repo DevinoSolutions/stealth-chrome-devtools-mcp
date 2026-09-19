@@ -441,6 +441,14 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
     ``==``, so F-829's UNREADABLE sentinel keeps its one meaning here too: a
     predecessor recorded while the source could not be hashed is not thereby a
     stranger whose entry we must preserve forever.
+
+    **A superseded entry takes its heartbeat sidecar with it** (F-889 review
+    N5), exactly as a forgotten one does — this is the OTHER door out of the
+    record, and our own respawn onto a new port goes through it. The port we are
+    recording is deliberately spared: a re-record on the SAME port describes the
+    same listener, and deleting that backend's own stamp would blind the watchdog
+    for a whole staleness window. Only entries this call drops are touched, so a
+    stranger keeps its entry and therefore its file.
     """
     entry: BackendEntry = {
         "port": port,
@@ -449,18 +457,26 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
         "source_fingerprint": source_fingerprint,
         "display_context": display_context,
     }
-    entries = [
-        recorded
-        for recorded in read_backends(path)
-        if recorded.get("port") != port
-        and not (
+    entries: list[BackendEntry] = []
+    superseded: list[object] = []
+    for recorded in read_backends(path):
+        if recorded.get("port") == port or (
             recorded.get("display_context") == display_context
             and recorded.get("version") == version
             and not fingerprint_mismatch(recorded, source_fingerprint)
-        )
-    ]
+        ):
+            superseded.append(recorded.get("port"))
+            continue
+        entries.append(recorded)
     entries.append(entry)
     _write(path, entries)
+    clear_record(
+        *(
+            heartbeat_path(path, p)
+            for p in superseded
+            if isinstance(p, int) and p != port
+        )
+    )
 
 
 #: The two fields of the heartbeat SIDECAR (F-889 (b)): a wall timestamp and the

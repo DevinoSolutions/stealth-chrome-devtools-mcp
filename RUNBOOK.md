@@ -109,7 +109,7 @@ the whole directory while no backend runs costs you nothing but a cold start.
 | Entry | What |
 |---|---|
 | `server.json` | the **backend registry**: one entry per display context *and identity* (schema v3, a list — F-886), naming that backend's port, pid, version, and source fingerprint. This is what discovery reads to decide which backend to talk to. A v2 or pre-2.0.4 record still reads; a 2.1.8-or-older client reading a v3 one sees no backends at all. **F-889 did NOT change this file** — the heartbeat lives beside it, in its own per-port sidecar (next row) |
-| `heartbeat-<port>.json` | F-889: the backend on that port stamping its OWN liveness every 3 s — `heartbeat_at` (a wall-clock `time.time()`) and `heartbeat_pid` — written from its event loop. That is how a proxy tells "the backend is dead" from "I was not scheduled". A separate file per port so it has exactly one writer and can never clobber `server.json`, which is written under the cold-start lock that a 3-second heartbeat must not take. Deleted with the entry (`stop`, `cleanup --apply`). Safe to delete by hand: a missing or stale (>30 s, or a pid that is not the entry's) stamp is simply no evidence, never a fault, and the proxy falls back to exactly its 2.1.9 behaviour |
+| `heartbeat-<port>.json` | F-889: the backend on that port stamping its OWN liveness every 3 s — `heartbeat_at` (a wall-clock `time.time()`) and `heartbeat_pid` — written from its event loop. That is how a proxy tells "the backend is dead" from "I was not scheduled". A separate file per port so it has exactly one writer and can never clobber `server.json`, which is written under the cold-start lock that a 3-second heartbeat must not take. Deleted with the entry, by both doors out of the record: `stop` and `cleanup --apply` forget it, and a cold start that supersedes an old entry of ours unlinks that port's file as it records the new one. What is NOT tidied is a backend still running that nothing has recorded — it keeps stamping and re-creates its own file about 3 s after a `cleanup --apply`; that is a backend to `stop`, not a file to delete. Safe to delete by hand: a missing or stale (>30 s, or a pid that is not the entry's) stamp is simply no evidence, never a fault, and the proxy falls back to exactly its 2.1.9 behaviour |
 | `server.port` | legacy, write-only — kept for a reader that no longer exists (see the `DESIGN.md` §10 ledger) |
 | `singleton.lock` | the cold-start mutex; an empty file that persists between runs |
 | `browser_pids.json` | the **browser-pid registry**: which browser processes are tracked, and which backend owns each one (`owner_pid`, `owner_create_time`) |
@@ -228,6 +228,12 @@ What to look at while it is stuck, in the spawning proxy's `proxy-<pid>.log`:
   listening, so this proxy ends` — normal. The proxy ends on stdin EOF; this is
   the backstop for a client that died without its pipe closing, checked once a
   minute. If you see many of these at once, something killed a wave of clients.
+  The pid named is the first ancestor that is NOT a launcher of ours — the walk
+  steps over the venv `python` trampoline, `uv`/`uvx` and the console-script
+  redirector, all of which live exactly as long as the proxy does — so expect it
+  to be the MCP client (`claude.exe`, `node`) or the shell that ran it, never
+  `uv.exe`. No such line ever appearing is the designed behaviour when the walk
+  cannot settle: unknown presence never ends a session.
 
 The Sentry event for a session without a backend is `proxy: backend unreachable,
 retrying` (it replaced `proxy: teardown after failed heal`, which described an exit

@@ -146,6 +146,44 @@ class TestTheWrite:
 
         assert not backend_registry.heartbeat_path(record, PORT).exists()
 
+    def test_superseding_an_entry_deletes_its_sidecar_too(self, record):
+        """The other door an entry leaves by (F-889 review N5). ``forget_entries``
+        is not the only one: our own respawn onto a NEW port supersedes our old
+        entry by (context, identity), and until now that left the old port's
+        sidecar behind forever — one file per port a client ever bound, and a
+        stamp a recycled port could be read against."""
+        backend_registry.stamp_heartbeat(record, port=PORT, pid=PID, at=1000.0)
+        assert backend_registry.heartbeat_path(record, PORT).exists()
+
+        _record(record, (OTHER_PORT, PID + 1, "win-session-1"))
+
+        assert [e["port"] for e in backend_registry.read_backends(record)] == [
+            OTHER_PORT
+        ]
+        assert not backend_registry.heartbeat_path(record, PORT).exists()
+
+    def test_recording_the_same_port_again_keeps_the_sidecar(self, record):
+        """The one superseded entry that must NOT lose its file: a re-record on
+        the SAME port describes the same listener, and the stamp beside it is
+        that backend's own. Deleting it would blind the watchdog for a whole
+        staleness window for no reason at all."""
+        backend_registry.stamp_heartbeat(record, port=PORT, pid=PID, at=1000.0)
+
+        _record(record, (PORT, PID, "win-session-1"))
+
+        assert backend_registry.heartbeat_path(record, PORT).exists()
+
+    def test_a_strangers_sidecar_is_never_touched(self, record):
+        """Superseding drops entries; it does not sweep the directory. A backend
+        on another port for another identity keeps its entry, so it keeps its
+        stamp."""
+        _record(record, (OTHER_PORT, PID + 1, "win-session-2"))
+        backend_registry.stamp_heartbeat(record, port=OTHER_PORT, pid=PID + 1, at=1.0)
+
+        _record(record, (52001, PID + 2, "win-session-1"))
+
+        assert backend_registry.heartbeat_path(record, OTHER_PORT).exists()
+
     def test_it_leaves_no_temp_residue(self, record):
         """``os.replace``d through the module's one atomic commit, like every
         other write here: a reader concurrent with a stamp sees the whole old

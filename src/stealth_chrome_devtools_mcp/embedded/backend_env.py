@@ -63,10 +63,22 @@ every path by which this package imports ``fastmcp``: ``server.main()``'s
 the same line through ``cli._cmd_serve``. An operator with a stray
 ``FASTMCP_PORT=""`` in their shell gets the identical import-time
 ``ValidationError`` there, with the identical absence of a log line. So
-:func:`scrub_process_env` applies the SAME table to our own environment, once, at
-the top of the one entrypoint every path goes through. The composer keeps its own
+:func:`scrub_process_env` applies the THIRD PARTY's half of the table to our own
+environment, at the top of ``server.main()`` and again at ``cli._server()``, the
+two doors this package has onto an ``import fastmcp``. The composer keeps its own
 call because ``restart_backend`` reaches it from the ops CLI without passing
-through that entrypoint at all.
+through either.
+
+**The two tables are deliberately not the same table** (F-889 review N1). The
+child's is one name wider: it also drops ``STEALTH_MCP_NO_AUTO_RECOVERY``, below.
+Applied to OUR OWN environment that removal is a bug — the flag is the operator's
+own answer, which ``cli.py`` sets with ``os.environ.setdefault`` precisely so that
+``doctor`` and ``status`` stay read-only, and deleting it re-enables the orphan
+reaping a read-only verb exists not to do. One shared ``_inherited_fastmcp`` holds
+the half they do share, so the prefix still lives in exactly one place; what
+differs is one clause, and it differs because the two environments belong to two
+different parties. **Nothing here ever deletes a** ``STEALTH_MCP_*`` **name from
+our own process.**
 
 That second function READS ``os.environ``, which the repo otherwise confines to
 ``settings.py``. Deliberate, and narrow: that rule is about CONFIGURATION — every
@@ -109,50 +121,76 @@ FASTMCP_PREFIX = "FASTMCP_"
 NO_AUTO_RECOVERY = "STEALTH_MCP_NO_AUTO_RECOVERY"
 
 
-def scrub(env: MutableMapping[str, str]) -> list[str]:
-    """Remove from ``env`` every name the backend must not inherit, in place;
-    return the names removed, sorted.
-
-    A ``MutableMapping`` and not a ``dict``, because it has two callers with two
-    different mappings: the child-env copy ``_start_server_process`` owns, and
-    ``os.environ`` itself through :func:`scrub_process_env`.
+def _inherited_fastmcp(env: MutableMapping[str, str]) -> list[str]:
+    """The third party's names in ``env``, sorted — the half BOTH scrubs share.
 
     Case-folded, because the lookup on the other side is: ``fastmcp``'s
     ``model_config`` sets ``case_sensitive=False``, and Windows folds env-var
     case in the OS as well — so ``fastmcp_port``, ``FastMCP_Port`` and
-    ``FASTMCP_PORT`` are one variable and all three must go. The same fold is
-    applied to :data:`NO_AUTO_RECOVERY`, which pydantic-settings reads
-    case-insensitively for exactly the same reason.
+    ``FASTMCP_PORT`` are one variable and all three must go.
     """
-    removed = sorted(
-        name
-        for name in env
-        if name.upper().startswith(FASTMCP_PREFIX) or name.upper() == NO_AUTO_RECOVERY
-    )
-    for name in removed:
+    return sorted(name for name in env if name.upper().startswith(FASTMCP_PREFIX))
+
+
+def _remove(
+    env: MutableMapping[str, str], names: list[str], *, level: int
+) -> list[str]:
+    """Delete ``names`` from ``env`` in place and report them, once.
+
+    The LEVEL is the caller's because the two callers are heard by different
+    ears (F-889 review N4). :func:`scrub` runs inside a proxy whose logging is
+    already configured, so its line lands in the durable log at INFO.
+    :func:`scrub_process_env` runs BEFORE ``configure_logging`` — that is the
+    whole point of where it sits — and Python's last-resort handler emits at
+    WARNING and above, so an INFO line there would be written to nothing at all.
+    """
+    for name in names:
         del env[name]  # on ``os.environ`` this is a real ``unsetenv``
-    if removed:
+    if names:
         # Names only. Never a value (F-869's discipline): this reaches the
         # durable proxy log, and an environment is where tokens live.
-        _logger.info(
+        _logger.log(
+            level,
             "backend env: dropped %d inherited variable(s): %s",
-            len(removed),
-            ", ".join(removed),
+            len(names),
+            ", ".join(names),
         )
-    return removed
+    return names
+
+
+def scrub(env: MutableMapping[str, str]) -> list[str]:
+    """Remove from ``env`` every name the BACKEND must not inherit, in place;
+    return the names removed, sorted.
+
+    A ``MutableMapping`` and not a ``dict`` because ``os.environ`` is one too —
+    but this is the CHILD's table, and it is one name wider than the process
+    table below. :data:`NO_AUTO_RECOVERY` is folded in the same way, which
+    pydantic-settings reads case-insensitively for the same reason the prefix is.
+    """
+    ours = [name for name in env if name.upper() == NO_AUTO_RECOVERY]
+    return _remove(env, sorted(_inherited_fastmcp(env) + ours), level=logging.INFO)
 
 
 def scrub_process_env() -> list[str]:
-    """:func:`scrub`, applied to THIS process's own environment (F-890 M5).
+    """The FASTMCP half of :func:`scrub`, applied to THIS process's own
+    environment (F-890 M5), and **never a** ``STEALTH_MCP_*`` **name**.
 
     Called once, from ``server.main()``, before any path through that entrypoint
     can import ``fastmcp`` — which on the ``runpy`` fallthrough happens in this
-    very process. The same table, applied to a different mapping: a second list
-    of names here is exactly the drift convention 4 is about, so there is one
-    ``scrub`` and this is a two-line application of it.
+    very process.
+
+    **Two mappings, two tables, and the difference is the whole point** (F-889
+    review N1). The child-env table also drops :data:`NO_AUTO_RECOVERY`, because
+    a SPAWNED backend must reap its own orphans whatever its parent decided for
+    itself. Applied here that name says the opposite thing: it is the operator's
+    own answer — ``cli.py`` sets it with ``os.environ.setdefault`` so that
+    ``doctor`` and ``status`` stay read-only — and deleting it from our own
+    environment silently re-enables the reaping those verbs exist not to do.
+    Every name this removes belongs to a third party; not one of them is ours.
 
     Deleting from ``os.environ`` is a real ``unsetenv``, so the removal also
     covers anything this process later spawns — which is why the composer's own
     call is belt-and-braces rather than the only defence.
     """
-    return scrub(os.environ)  # noqa: TID251  PERMANENT(F-890 M5: this deletes a THIRD PARTY's names before a library parses them; it reads no STEALTH_MCP_* configuration, which is what settings.py is the one home for - argued in this module's docstring)
+    env = os.environ  # noqa: TID251  PERMANENT(F-890 M5: this deletes a THIRD PARTY's names before a library parses them; it reads no STEALTH_MCP_* configuration, which is what settings.py is the one home for - argued in this module's docstring)
+    return _remove(env, _inherited_fastmcp(env), level=logging.WARNING)

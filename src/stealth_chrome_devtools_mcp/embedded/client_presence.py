@@ -51,9 +51,64 @@ _logger = logging.getLogger("stealth.proxy")
 #: tuning, which is why it is not a knob (F-853's rule).
 CHECK_SECONDS = 60.0
 
-#: What :func:`capture` hands back: the parent's ``(pid, create_time)``, or
+#: What :func:`capture` hands back: the client's ``(pid, create_time)``, or
 #: ``None`` for "could not be asked", which :func:`present` reads as present.
 ClientToken = tuple[int, float] | None
+
+#: Launchers that RUN a command and wait for it. Named, not guessed: each one
+#: lives exactly as long as the proxy under it, so naming one is naming a
+#: process that cannot be seen to go away first.
+_LAUNCHER_NAMES = frozenset({"uv", "uv.exe", "uvx", "uvx.exe"})
+
+#: Our own console scripts (``pyproject.toml`` ``[project.scripts]``). On Windows
+#: each is a redirector that re-execs the real interpreter — F-866's paragraph,
+#: read from the other side.
+_OUR_SCRIPTS = frozenset(
+    {
+        "stealth-chrome-devtools-mcp",
+        "stealth-chrome-devtools-mcp.exe",
+        "stealth-chrome-devtools",
+        "stealth-chrome-devtools.exe",
+    }
+)
+
+#: An import name is a better witness than an exe name for "this is a python of
+#: ours": the interpreter can be called anything.
+_PACKAGE_MARK = "stealth_chrome_devtools_mcp"
+
+#: How many ancestors the walk may examine before giving up. Four is the longest
+#: chain measured (trampoline, ``uv``, shell, client); eight is twice that and
+#: still terminates promptly on a tree with a cycle or a very long shim stack.
+WALK_LIMIT = 8
+
+
+def _is_shim(proc: psutil.Process, ours: list[str]) -> bool:
+    """True when ``proc`` is a launcher or an interpreter shim rather than the
+    client — i.e. a process that exists only because we do.
+
+    Four clauses, each a MEASURED shape and none of them a heuristic about what
+    a client looks like:
+
+    1. a named launcher (``uv``/``uvx``), which waits on its child by design;
+    2. one of our own console-script redirectors;
+    3. a command line BYTE-IDENTICAL to ours — the hallmark of the Windows venv
+       ``python.exe`` trampoline, which spawns a second process with the same
+       argv to do the work (measured: pids 148200 and 52904 differed in nothing
+       else);
+    4. any argv token carrying our package name — a python of ours spelled some
+       other way.
+    """
+    name = (proc.name() or "").lower()
+    if name in _LAUNCHER_NAMES or name in _OUR_SCRIPTS:
+        return True
+    cmdline = proc.cmdline()
+    if cmdline == ours:
+        return True
+    return any(
+        _PACKAGE_MARK in part
+        or part.rsplit("\\", 1)[-1].rsplit("/", 1)[-1].lower() in _OUR_SCRIPTS
+        for part in cmdline
+    )
 
 
 def capture() -> ClientToken:
@@ -63,15 +118,45 @@ def capture() -> ClientToken:
     client we were actually launched by. Asked later it would describe whatever
     we were reparented to, which on POSIX is init and is immortal — i.e. the
     check would silently stop working at exactly the moment it was needed.
+
+    **The direct parent is usually not the client** (F-889 review N2). Measured
+    on this machine, the chain above a proxy is ``python.exe`` (us) →
+    ``python.exe`` (the venv trampoline, same argv) → ``uv.exe`` (waiting) →
+    the shell → ``claude.exe``; on POSIX the trampoline is absent and ``uvx``
+    still waits. Every one of those shims outlives us by construction, so a
+    token naming one can never become "gone" while a session is stranded — which
+    is precisely how the exit came to miss the 116 stale proxies it exists for.
+    So the walk climbs past them to the first ancestor that is nobody's shim,
+    and stops THERE: climbing further would name a terminal that outlives the
+    client, which is the same miss by a longer route.
+
+    **Walking too far is the safe direction and walking short is not.** Every
+    ancestor lives at least as long as the one below it, so an over-eager skip
+    delays the exit (the failure mode this module already tolerates) while a
+    misidentified shim can only ever make it later, never earlier. That is why
+    the ambiguous cases — a walk that does not settle inside :data:`WALK_LIMIT`,
+    an ancestor psutil will not describe, no parent at all — all answer ``None``:
+    presence unknown, so this proxy never exits on this ground.
     """
     try:
-        parent = psutil.Process(os.getpid()).parent()
-        if parent is None:
-            return None
-        return (parent.pid, parent.create_time())
+        me = psutil.Process(os.getpid())
+        ours = me.cmdline()
+        proc = me.parent()
+        for _ in range(WALK_LIMIT):
+            if proc is None:
+                return None
+            if not _is_shim(proc, ours):
+                return (proc.pid, proc.create_time())
+            proc = proc.parent()
     except (psutil.Error, OSError):
         _logger.debug("could not identify the client process", exc_info=True)
         return None
+    _logger.debug(
+        "gave up identifying the client after %d ancestors; this proxy will not "
+        "exit on the client's account",
+        WALK_LIMIT,
+    )
+    return None
 
 
 def present(token: ClientToken) -> bool:

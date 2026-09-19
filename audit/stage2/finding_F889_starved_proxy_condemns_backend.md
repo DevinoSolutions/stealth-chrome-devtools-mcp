@@ -434,11 +434,19 @@ that assert forward adoption and left the other 21 — including the ordering ta
    which the review measured losing a sibling's `record_backend` and resurrecting an
    entry `forget_entries` had just dropped (H3). `heartbeat-<port>.json` has exactly
    one writer, so there is no merge and no snapshot; `stamp_heartbeat` never opens
-   `server.json` at all, and `forget_entries` deletes the sidecar with the entry. What
-   is left: a sidecar whose entry is removed by hand rather than through
-   `forget_entries` is never cleaned up. It is inert — `self_report` starts from the
-   ENTRY and requires the recorded `pid` to match — so the cost is one sub-kilobyte
-   file, and `cleanup --apply` goes through `forget_entries` like every other writer.
+   `server.json` at all, and BOTH doors out of the record now take the sidecar with the
+   entry — `forget_entries` (`stop`, `cleanup --apply`) and, since review N5,
+   `record_backend`, which unlinks a SUPERSEDED entry's file as it writes the new one.
+   The port being recorded is deliberately spared: a re-record on the same port
+   describes the same listener, and dropping that stamp would blind the watchdog for a
+   whole staleness window. What is left: a sidecar whose entry is removed by hand rather
+   than through either door is never cleaned up, and — the sharper case — a backend that
+   is still RUNNING re-creates its own file about 3 s after a `forget_entries`, so "it
+   leaves with the record" holds only once the backend is gone. Both are inert:
+   `self_report` starts from the ENTRY and requires the recorded `pid` to match, so a
+   file with nothing behind it is not a claim anyone can read, and the cost is one
+   sub-kilobyte file. A stamping backend nobody has recorded is a backend to `stop`, not
+   a file to delete; `RUNBOOK.md` says so beside the state-dir row.
 4. **The heartbeat cadence costs one small file write every 3 s per backend.** It is
    an `os.replace` of a sub-kilobyte file, done on a worker thread. On a spinning disk
    or a synced folder that is not free, and the state dir is `~/.stealth-mcp` — which
@@ -493,10 +501,48 @@ that assert forward adoption and left the other 21 — including the ordering ta
     That check is a `psutil` poll every `CHECK_SECONDS` = 60, not a notification, so a
     client killed without its pipe closing leaves one idle proxy for up to a minute.
     Every uncertainty resolves to PRESENT — no parent, psutil refusing, a partial
-    answer — because a false "gone" disconnects a live session while a false "present"
-    costs one idle process the next EOF collects. On POSIX a proxy reparented to init
-    before `capture()` runs is indistinguishable from one whose client is alive; the
-    capture is therefore the first thing `_proxy_streams` does.
+    answer, an ancestor walk that does not settle — because a false "gone" disconnects a
+    live session while a false "present" costs one idle process the next EOF collects. On
+    POSIX a proxy reparented to init before `capture()` runs is indistinguishable from
+    one whose client is alive; the capture is therefore the first thing `_proxy_streams`
+    does.
+
+    **The parent is not the client, and the first pass named the parent** (review N2,
+    measured on this machine 2026-09-19):
+
+    ```
+    0  148200  python.exe   <- this proxy
+    1   52904  python.exe   <- venv trampoline, byte-identical command line
+    2  163492  uv.exe       <- `uv run python -c ...`, waiting on its child
+    3  165448  pwsh.exe     <- the shell that ran it
+    4   60444  claude.exe   <- the MCP client
+    ```
+
+    Both shims outlive the proxy by construction — the trampoline IS our own launcher
+    and `uv` waits for it — so a token naming either can never be seen to go away while
+    a session is stranded. On POSIX there is no trampoline but `uvx` waits in the same
+    way, which is the population the review named. `capture()` therefore climbs past
+    launcher and interpreter shims (a named launcher, one of our console-script
+    redirectors, an argv identical to ours, any argv token carrying the package name) to
+    the first ancestor that is nobody's shim.
+
+    Two things that walk costs, both stated rather than hidden:
+
+    - **It can walk too far, and that is the safe direction.** Every ancestor lives at
+      least as long as the one below it, so an over-eager skip only DELAYS the exit,
+      while stopping short of the client makes it never fire at all. Measured above, the
+      walk stepped over `pwsh.exe` — whose command line happened to name our package —
+      and landed on `claude.exe`, its parent, which is also the client. A shell wrapper
+      (`cmd /c uvx stealth-chrome-devtools-mcp`) is skipped for the same reason and by
+      design: a process whose whole job is to run our command is a launcher of ours.
+    - **The mirror hazard is a launcher that spawns and EXITS.** A shim that returns
+      immediately would be a false "gone" if it were named — which is exactly why the
+      walk steps over shims rather than trusting them, and why the ancestor it names is
+      always further from us than every shim it skipped.
+
+    An ambiguous walk (more than `WALK_LIMIT` = 8 shims, an ancestor psutil will not
+    describe) answers `None`, i.e. presence unknown, i.e. this proxy never exits on this
+    ground — the 2.1.9 behaviour minus nothing.
 12. **`main()` returns without a proxy when `ensure_server_running` answers `None`**
     (review L2). (c)'s "the ONE exit is the client's" is a statement about a RUNNING
     proxy: before one exists, `server.main()`'s stdio branch falls through to

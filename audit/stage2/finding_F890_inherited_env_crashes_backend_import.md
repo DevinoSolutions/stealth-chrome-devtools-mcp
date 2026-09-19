@@ -129,11 +129,24 @@ that import with the operator's environment untouched:
 - `stealth-chrome-devtools serve --http`, which reaches the same line through
   `cli._cmd_serve`.
 
-`backend_env.scrub_process_env()` is `scrub` applied to `os.environ`, called ONCE as the
-first statement of `server.main()` — the one entrypoint every one of those paths goes
-through, including `_cmd_serve`, which delegates to it. One function, one table, one
-call site. The composer keeps its own call because `restart_backend` reaches it from the
-ops CLI without passing through that entrypoint at all.
+`backend_env.scrub_process_env()` applies the THIRD PARTY's half of the table to
+`os.environ`, as the first statement of `server.main()` — the entrypoint both of those
+paths go through, including `_cmd_serve`, which delegates to it. The composer keeps its
+own call because `restart_backend` reaches it from the ops CLI without passing through
+that entrypoint at all.
+
+**Corrected by the F-889 review.** Two sentences above were overstated and are now
+wrong-to-read, so they are repaired here rather than left:
+
+- *"the one entrypoint every one of those paths goes through"* — it is not. `cli._server()`
+  imports `embedded.server` for `status`, `doctor`, `stop`, `restart`, `cleanup` and
+  `kill-orphans`, which is the SECOND door onto an `import fastmcp` and the one an
+  operator reaches for when nothing starts (N3). It carries the same call now, placed in
+  front of the same import as the `STEALTH_MCP_NO_AUTO_RECOVERY` setdefault that was
+  already there. Two call sites for two entrypoints; still one table.
+- *"is `scrub` applied to `os.environ`"* — it applies the FASTMCP clause only, and never
+  a `STEALTH_MCP_*` name (N1). See residual 5: on our own process that removal deletes
+  the operator's own read-only guard.
 
 **The `os.environ` exception, argued rather than assumed.** This repo confines
 `os.environ` to `settings.py`. That rule is about CONFIGURATION: every `STEALTH_MCP_*`
@@ -238,6 +251,30 @@ The `.env` file is a residual and not addressed here; see §6.
    The scrub fixes the launch, so a proxy that heals will now bring one up — but a
    backend spawned by a 2.1.9 proxy in the same fleet still inherits the variable.
    Mixed-version fleets must upgrade together, which is the standing rule.
-4. **We never learn that the variable was there** unless the backend spawns. The INFO
-   line is written by the spawning proxy, so a session that only ADOPTS an existing
-   backend reports nothing — correctly, since it composed no environment.
+4. **We never learn that the variable was there** unless the backend spawns, or unless
+   THIS process was about to import `fastmcp` itself. The composer's INFO line is
+   written by the spawning proxy, so a session that only ADOPTS an existing backend
+   reports nothing — correctly, since it composed no environment. What
+   `scrub_process_env` removes from our own process is reported at WARNING (F-889 review
+   N4), because it runs before `configure_logging` by design and Python's last-resort
+   handler emits at WARNING and above: at INFO that line was written to nothing at all.
+5. **The two scrub tables are NOT the same table, deliberately** (F-889 review N1). The
+   child-env table also drops `STEALTH_MCP_NO_AUTO_RECOVERY` (M8-2's rule: a spawned
+   backend must reap its own orphans whatever its parent decided for itself).
+   `scrub_process_env` must not, and the first pass did: measured on `987d363`, it
+   returned `['FASTMCP_PORT', 'STEALTH_MCP_NO_AUTO_RECOVERY']` and left the operator's
+   own flag unset, silently re-enabling in `doctor` and `status` exactly the reaping
+   those verbs exist not to do. **Nothing now deletes a `STEALTH_MCP_*` name from our
+   own process.** The shared half (`_inherited_fastmcp`) still has one home, so the
+   prefix cannot drift; what differs is one clause, and it differs because the two
+   environments belong to two different parties. The child-env composer was audited for
+   the same over-reach and is clean — exactly one `STEALTH_MCP_*` name is named, which
+   is pinned rather than asserted.
+6. **`server.main()` is not "the one line every path reaches"** — §3 overstated it, and
+   the review found the second door (F-889 review N3). `cli._server()` imports
+   `embedded.server` for `status`, `doctor`, `stop`, `restart`, `cleanup` and
+   `kill-orphans`, so a stray `FASTMCP_PORT=""` killed the very verbs an operator runs
+   to diagnose it — the pin reproduces the incident's own `ValidationError` through that
+   door. The scrub joins the environment write already standing in front of that import,
+   so there are two call sites for two entrypoints and still one table. `profiles` (via
+   `_clone_storage`) does not import `fastmcp` and does not need one.

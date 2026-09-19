@@ -156,9 +156,10 @@ not take it: unlocked, a whole-record read-modify-write is a lost update by
 construction. One file per port has one writer, so there is no merge and no
 snapshot; the record itself is byte-for-byte what 2.1.9 reads and writes, so the
 schema version does not move and an older fleet is unaffected in both directions.
-The sidecar is deleted with its entry, and a stamp for a port the record no
-longer names is not evidence about anything, so it can never resurrect a
-forgotten entry.
+The sidecar is deleted with its entry by both doors out of the record — forgetting
+it (`stop`, `cleanup --apply`) and superseding it (a cold start of ours moving to
+a new port) — and a stamp for a port the record no longer names is not evidence
+about anything, so it can never resurrect a forgotten entry.
 
 **The veto it buys is bounded.** A heartbeat proves the event LOOP is turning, not
 that the HTTP listener is reachable, so a fresh stamp may defer condemnation for
@@ -181,7 +182,13 @@ processes**, so is the client process itself going away: the new
 `(pid, create_time)` pair at start and ends the proxy once that exact process is
 gone. That is not a decision about the backend, it is noticing nobody is
 listening, and every uncertainty about it resolves to "still there" so it can
-never disconnect a live session.
+never disconnect a live session. The process it names is not the direct parent:
+above a proxy sit a venv `python` trampoline with an identical command line and a
+waiting `uv`/`uvx`, both of which live exactly as long as the proxy does, so it
+walks past those (and past our own console-script redirector) to the first
+ancestor that is nobody's launcher — otherwise the check could never fire for the
+population it exists for. A walk that cannot settle answers "unknown", which
+reads as present.
 
 The `proxy: teardown after failed heal` report described a thing that no longer
 happens and is now `proxy: backend unreachable, retrying`, carrying the same
@@ -229,14 +236,23 @@ field list derived from the library, because the stdio proxy must never import
 `fastmcp`; a test pins the constant against `fastmcp`'s own `model_config`, and
 a subprocess node proves the crash and its absence after the scrub. The module
 also absorbed M8-2's `STEALTH_MCP_NO_AUTO_RECOVERY` pop (same sentence, one
-home). The removed NAMES are logged at INFO, never their values.
+home) — for the CHILD env, which is the only environment that rule was ever
+about. The removed NAMES are logged, never their values.
 
-The composer is not the only way this package imports `fastmcp`, so the same
-table is also applied to our OWN environment — once, as the first statement of
-`server.main()`. `--transport http` runs `embedded/server.py` in that very
-process through `runpy`, and `stealth-chrome-devtools serve --http` delegates to
-the same function, so an operator with a stray `FASTMCP_PORT=""` in their shell
-hit the identical crash with the identical absence of a log line.
+The composer is not the only way this package imports `fastmcp`, so the third
+party's names are also dropped from our OWN environment, at the two doors that
+reach such an import: the first statement of `server.main()` (`--transport http`
+runs `embedded/server.py` in that very process through `runpy`, and
+`stealth-chrome-devtools serve --http` delegates to the same function) and
+`cli._server()`, which every ops verb but `profiles` goes through — so a stray
+`FASTMCP_PORT=""` in an operator's shell no longer kills `status` and `doctor`,
+the two commands they would run to find out why nothing starts. **Only the third
+party's names**: our own process keeps every `STEALTH_MCP_*` variable it was
+started with, including the `STEALTH_MCP_NO_AUTO_RECOVERY` flag that keeps the
+read-only verbs read-only. That removal belongs to the spawned backend's
+environment and nowhere else. What we drop from our own process is reported at
+WARNING rather than INFO, because this runs before logging is configured and
+Python's last-resort handler starts at WARNING.
 
 ## 2.1.9
 

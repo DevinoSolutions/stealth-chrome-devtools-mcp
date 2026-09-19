@@ -22,6 +22,7 @@ about is this test's own.
 from __future__ import annotations
 
 import inspect
+import itertools
 import os
 
 import anyio
@@ -31,15 +32,183 @@ import pytest
 from stealth_chrome_devtools_mcp.embedded import client_presence, singleton
 
 
+class _FakeProc:
+    """One node of a fake process tree. Only the four things ``capture`` asks."""
+
+    def __init__(self, pid, name, cmdline, parent=None, create_time=None, refuse=False):
+        self.pid = pid
+        self._name = name
+        self._cmdline = list(cmdline)
+        self._parent = parent
+        self._create_time = float(pid) if create_time is None else create_time
+        self._refuse = refuse
+
+    def name(self):
+        if self._refuse:
+            raise psutil.AccessDenied(self.pid)
+        return self._name
+
+    def cmdline(self):
+        if self._refuse:
+            raise psutil.AccessDenied(self.pid)
+        return list(self._cmdline)
+
+    def parent(self):
+        return self._parent
+
+    def create_time(self):
+        return self._create_time
+
+
+def _tree(monkeypatch, *chain: _FakeProc) -> _FakeProc:
+    """Wire ``chain`` leaf-first into a tree ``capture`` will walk, and make the
+    leaf this process. Returns the leaf."""
+    for child, parent in itertools.pairwise(chain):
+        child._parent = parent
+    table = {proc.pid: proc for proc in chain}
+    monkeypatch.setattr(client_presence.os, "getpid", lambda: chain[0].pid)
+    monkeypatch.setattr(client_presence.psutil, "Process", lambda pid: table[pid])
+    return chain[0]
+
+
+#: The proxy's own command line in the fake trees below — the shape a venv
+#: python trampoline repeats verbatim.
+_OUR_CMDLINE = [r"C:\w\.venv\Scripts\python.exe", "-m", "stealth_chrome_devtools_mcp"]
+
+
 class TestIdentifyingTheClient:
-    def test_capture_names_our_own_parent_as_a_pid_and_a_create_time(self):
+    def test_capture_names_a_live_ancestor_that_is_not_a_shim_of_ours(self):
+        """Against the REAL tree this test is running in. It cannot assert WHICH
+        ancestor — that depends on how the suite was launched — only that the
+        answer is one of them and is not one of the launchers the walk exists to
+        step over (under ``uv run`` the direct parent IS ``uv.exe``)."""
         token = client_presence.capture()
-        parent = psutil.Process(os.getpid()).parent()
 
-        assert token == (parent.pid, parent.create_time())
+        assert token is not None
+        ancestors = {
+            (p.pid, p.create_time()) for p in psutil.Process(os.getpid()).parents()
+        }
+        assert token in ancestors
+        assert (
+            psutil.Process(token[0]).name().lower()
+            not in client_presence._LAUNCHER_NAMES
+        )
 
-    def test_our_own_parent_is_present(self):
+    def test_the_captured_client_is_present(self):
         assert client_presence.present(client_presence.capture()) is True
+
+    def test_it_walks_past_the_uv_trampoline_to_the_client(self, monkeypatch):
+        """The measured Windows chain (F-889 review N2), ancestor by ancestor::
+
+            python.exe  <- this proxy
+            python.exe  <- the venv trampoline: the SAME command line
+            uv.exe      <- `uv run python -c ...`, waiting on its child
+            pwsh.exe    <- the client
+            claude.exe
+
+        Both shims outlive us by construction — the trampoline is our own
+        process's launcher and ``uv`` waits for it — so naming either one is
+        naming something that can never be seen to go away first. That is why
+        the exit "missed its population": 116 stale proxies, every one of them
+        with a live ``uv`` above it.
+        """
+        _tree(
+            monkeypatch,
+            _FakeProc(148200, "python.exe", _OUR_CMDLINE),
+            _FakeProc(52904, "python.exe", _OUR_CMDLINE),
+            _FakeProc(163492, "uv.exe", ["uv", "run", "python", "-c", "..."]),
+            _FakeProc(144992, "pwsh.exe", ["pwsh", "-NoProfile"]),
+            _FakeProc(60444, "claude.exe", ["claude"]),
+        )
+
+        assert client_presence.capture() == (144992, 144992.0)
+
+    def test_it_walks_past_the_console_script_redirector(self, monkeypatch):
+        """``stealth-chrome-devtools-mcp.exe`` is a redirector that re-execs the
+        real interpreter (F-866's paragraph, from the other side): it is one of
+        OURS, so it is never the client."""
+        _tree(
+            monkeypatch,
+            _FakeProc(10, "python.exe", _OUR_CMDLINE),
+            _FakeProc(11, "stealth-chrome-devtools-mcp.exe", ["stealth-…-mcp.exe"]),
+            _FakeProc(12, "node", ["node", "/opt/claude/cli.js"]),
+        )
+
+        assert client_presence.capture() == (12, 12.0)
+
+    def test_the_posix_shape_walks_past_uvx(self, monkeypatch):
+        """No trampoline on POSIX — ``uvx`` spawns the interpreter directly —
+        and ``uvx`` waits, so it is the one shim to step over there."""
+        _tree(
+            monkeypatch,
+            _FakeProc(10, "python3.14", ["/home/u/.venv/bin/python3.14", "-m", "x"]),
+            _FakeProc(11, "uvx", ["uvx", "stealth-chrome-devtools-mcp"]),
+            _FakeProc(12, "node", ["node", "/opt/claude/cli.js"]),
+        )
+
+        assert client_presence.capture() == (12, 12.0)
+
+    def test_a_python_running_our_package_is_never_the_client(self, monkeypatch):
+        """The third clause: a shim we did not name, spelled as an interpreter
+        with our package on its command line. Its cmdline is not byte-identical
+        to ours, so the trampoline test alone would stop here."""
+        _tree(
+            monkeypatch,
+            _FakeProc(10, "python.exe", _OUR_CMDLINE),
+            _FakeProc(
+                11,
+                "python.exe",
+                [
+                    "python.exe",
+                    "-c",
+                    "import stealth_chrome_devtools_mcp as m; m.main()",
+                ],
+            ),
+            _FakeProc(12, "claude.exe", ["claude"]),
+        )
+
+        assert client_presence.capture() == (12, 12.0)
+
+    def test_the_first_ancestor_that_is_nobodys_shim_is_taken_as_is(self, monkeypatch):
+        """The walk stops at the FIRST non-shim and never keeps climbing: a
+        terminal above the client outlives it, and naming it would be the same
+        miss by a longer route."""
+        _tree(
+            monkeypatch,
+            _FakeProc(10, "python.exe", _OUR_CMDLINE),
+            _FakeProc(11, "claude.exe", ["claude"]),
+            _FakeProc(12, "pwsh.exe", ["pwsh"]),
+        )
+
+        assert client_presence.capture() == (11, 11.0)
+
+    def test_a_walk_that_does_not_settle_is_unknown(self, monkeypatch):
+        """Ambiguity resolves to "presence unknown", which :func:`present` reads
+        as PRESENT — so this proxy never exits on this ground. A bounded walk
+        that answered anyway would be guessing at which ancestor is the client,
+        and the cost of guessing wrong is a disconnected live session."""
+        chain = [_FakeProc(100, "python.exe", _OUR_CMDLINE)]
+        chain += [_FakeProc(101 + i, "uv.exe", ["uv", "run"]) for i in range(20)]
+        _tree(monkeypatch, *chain)
+
+        assert client_presence.capture() is None
+
+    def test_an_ancestor_that_will_not_be_read_is_unknown(self, monkeypatch):
+        """Same direction, and the same reason: a shim we cannot classify is not
+        a client we may name."""
+        _tree(
+            monkeypatch,
+            _FakeProc(10, "python.exe", _OUR_CMDLINE),
+            _FakeProc(11, "uv.exe", ["uv", "run"]),
+            _FakeProc(12, "?", [], refuse=True),
+        )
+
+        assert client_presence.capture() is None
+
+    def test_no_parent_at_all_is_unknown(self, monkeypatch):
+        _tree(monkeypatch, _FakeProc(10, "python.exe", _OUR_CMDLINE))
+
+        assert client_presence.capture() is None
 
     def test_a_pid_that_is_not_running_is_gone(self):
         assert client_presence.present((_unused_pid(), 1.0)) is False

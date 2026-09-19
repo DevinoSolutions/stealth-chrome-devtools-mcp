@@ -212,15 +212,133 @@ class TestOurOwnEnvironmentIsScrubbedBeforeFastMCPIsImported:
         assert "FASTMCP_LOG_LEVEL" in removed
         assert os.environ["STEALTH_MCP_NO_ERROR_REPORTING"] == "1"
 
-    def test_it_is_the_same_rule_and_not_a_second_one(self, monkeypatch):
-        """``scrub_process_env`` is ``scrub`` applied to ``os.environ``. A
-        separate name table here would be exactly the drift convention 4 is
-        about, so the pin is that the one table is what runs."""
-        seen = []
-        monkeypatch.setattr(backend_env, "scrub", lambda env: seen.append(env) or ["x"])
+    @pytest.mark.parametrize(
+        "spelling",
+        ["STEALTH_MCP_NO_AUTO_RECOVERY", "stealth_mcp_no_auto_recovery"],
+    )
+    def test_it_never_deletes_a_typed_setting_of_ours(self, monkeypatch, spelling):
+        """The two environments are not the same environment, and the table is
+        not the same table (F-889 review N1).
 
-        assert backend_env.scrub_process_env() == ["x"]
-        assert seen and seen[0] is os.environ
+        ``STEALTH_MCP_NO_AUTO_RECOVERY`` is removed from the CHILD's env because
+        a spawned backend must reap its own orphans whatever its parent decided
+        for itself. Applied to OUR OWN process it says the opposite thing: it is
+        the operator's answer, set by ``cli.py``'s ``os.environ.setdefault``
+        before ``doctor`` and ``status`` import anything, and deleting it
+        silently re-enables the orphan reaping a read-only verb exists not to
+        do. Measured on ``987d363``: ``scrub_process_env`` removed
+        ``['FASTMCP_PORT', 'STEALTH_MCP_NO_AUTO_RECOVERY']``.
+
+        Both spellings, because the removal is case-folded on both sides and a
+        rule that only spares the shouting one spares nothing on Windows.
+        """
+        monkeypatch.setenv(spelling, "1")
+        monkeypatch.setenv("FASTMCP_PORT", "")
+
+        removed = backend_env.scrub_process_env()
+
+        assert removed == ["FASTMCP_PORT"]
+        assert os.environ.get(spelling) == "1", (
+            "our own environment is the operator's; only the third party's "
+            "names are ours to delete from it"
+        )
+
+    def test_the_ops_cli_scrubs_before_it_imports_the_server_too(self, monkeypatch):
+        """``server.main()`` is not the only door onto an ``import fastmcp``
+        (F-889 review N3): ``cli._server()`` is the other one, and ``status``,
+        ``doctor``, ``stop``, ``restart``, ``cleanup`` and ``kill-orphans`` all
+        go through it. An operator with a stray ``FASTMCP_PORT=""`` got the same
+        import-time ``ValidationError`` from the verb they were running to
+        diagnose it. It is already the one place that writes the environment
+        before that import, so the scrub joins the line that is there.
+        """
+        from stealth_chrome_devtools_mcp import cli
+
+        monkeypatch.setenv("STEALTH_MCP_NO_AUTO_RECOVERY", "1")
+        monkeypatch.setenv("FASTMCP_PORT", "")
+
+        cli._server()
+
+        assert "FASTMCP_PORT" not in os.environ
+        assert os.environ["STEALTH_MCP_NO_AUTO_RECOVERY"] == "1", (
+            "the read-only guard the CLI sets for itself is not ours to delete"
+        )
+
+    def test_the_child_env_still_loses_it(self):
+        """The other half of N1: narrowing the PROCESS scrub must not narrow the
+        COMPOSER's, which is where M8-2's rule lives and always did."""
+        env = {"STEALTH_MCP_NO_AUTO_RECOVERY": "1", "PATH": "/bin"}
+
+        assert backend_env.scrub(env) == ["STEALTH_MCP_NO_AUTO_RECOVERY"]
+        assert env == {"PATH": "/bin"}
+
+    def test_the_child_env_reaches_for_no_other_setting_of_ours(self):
+        """The composer audit, as a pin rather than a paragraph: exactly ONE
+        ``STEALTH_MCP_*`` name is named, so a knob added to ``settings.py``
+        tomorrow still reaches the backend it configures."""
+        env = {
+            "STEALTH_MCP_NO_AUTO_RECOVERY": "1",
+            "STEALTH_MCP_NO_ERROR_REPORTING": "1",
+            "STEALTH_MCP_LOG_DIR": "/tmp/logs",
+            "FASTMCP_PORT": "",
+            "PATH": "/bin",
+        }
+
+        backend_env.scrub(env)
+
+        assert sorted(env) == [
+            "PATH",
+            "STEALTH_MCP_LOG_DIR",
+            "STEALTH_MCP_NO_ERROR_REPORTING",
+        ]
+
+    def test_the_fastmcp_half_is_one_rule_and_not_a_second_one(self, monkeypatch):
+        """Two mappings, two tables — but the ``FASTMCP_`` half is ONE rule, and
+        a second prefix list here would be exactly the drift convention 4 is
+        about. Pinned by asking both functions about the same spellings.
+
+        Compared case-FOLDED on purpose: ``os.environ`` upper-cases its keys on
+        Windows and keeps them verbatim on POSIX, so a name-for-name comparison
+        would pin the platform rather than the rule.
+        """
+        spellings = {"FASTMCP_PORT": "", "fastmcp_log_level": "TRACE", "PATH": "/bin"}
+        for name, value in spellings.items():
+            monkeypatch.setenv(name, value)
+
+        from_process = {name.upper() for name in backend_env.scrub_process_env()}
+        from_composer = {name.upper() for name in backend_env.scrub(dict(spellings))}
+
+        assert from_process == from_composer == {"FASTMCP_PORT", "FASTMCP_LOG_LEVEL"}
+
+    def test_the_process_scrub_reports_at_a_level_that_can_be_heard(self):
+        """``scrub_process_env`` runs BEFORE ``configure_logging`` (that is the
+        point of it), and Python's last-resort handler emits at WARNING and
+        above — so an INFO line there is written to nothing at all (review N4).
+        The composer's call keeps INFO: by then the proxy's logging is up and
+        the line lands in the durable log.
+        """
+        records: list[logging.LogRecord] = []
+
+        class _ListHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.getLogger("stealth.proxy")
+        handler = _ListHandler()
+        logger.addHandler(handler)
+        prior = logger.level
+        logger.setLevel(logging.DEBUG)
+        os.environ["FASTMCP_PORT"] = "s3cret-value"
+        try:
+            backend_env.scrub_process_env()
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(prior)
+            os.environ.pop("FASTMCP_PORT", None)
+
+        assert [r.levelno for r in records] == [logging.WARNING]
+        assert "FASTMCP_PORT" in records[0].getMessage()
+        assert "s3cret-value" not in records[0].getMessage()
 
 
 class TestTheRemovalIsReportedByNameOnly:
