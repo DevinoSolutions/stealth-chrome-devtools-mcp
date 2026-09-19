@@ -179,3 +179,68 @@ async def test_a_live_page_survives_its_backend_and_is_re_attached(
 
     # The profile directory outlives the browser, which is guarantee (a).
     assert profile.exists()
+
+
+async def test_spawn_re_attaches_to_a_holder_with_no_record_entry(
+    fixture_app_server, tmp_empty_root, tmp_path
+):
+    """The REAL stranded login's shape, reproduced with real Chrome.
+
+    Measured on the machine: the Seller Central Chrome (pid 115652, port 9223)
+    is alive, its owner backend is gone, and it has **no entry in
+    browser_pids.json at all** — the successor backend rewrote the record
+    without it. ``browser_reattach.run`` walks entries, so it would walk past
+    this browser forever. The only thing that still names it is the directory,
+    which is what a caller passes to ``spawn_browser(user_data_dir=…)``.
+
+    So the record is emptied here rather than seeded, and the port is recovered
+    from the holder's real command line through the real ladder. What this
+    proves is the whole point: asking to spawn onto that profile REACHES the
+    running browser instead of walking to a sibling directory and opening a
+    logged-out one.
+    """
+    manager = tool_runtime.browser_manager
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+
+    profile = tmp_path / "seller-central"
+    first = (
+        await spawn(headless=True, user_data_dir=str(profile), **sandbox_kwargs())
+    )["instance_id"]
+
+    second = None
+    chrome_pid = None
+    try:
+        await navigate_and_settle(first, f"{fixture_app_server}/interactions.html")
+        await eval_js(first, "window.__f888_held = 'seller-central'")
+        chrome_pid = manager._instances[first]["browser"]._process_pid
+
+        # The backend died and the successor pruned the record. Drop the handle,
+        # leave Chrome running, and let the tool see an EMPTY record.
+        manager._instances.pop(first)
+        manager._spawn_diagnostics.pop(first, None)
+
+        with patch.object(
+            tool_runtime.process_cleanup, "_load_tracked_pids", return_value={}
+        ):
+            result = await spawn(
+                headless=True, user_data_dir=str(profile), **sandbox_kwargs()
+            )
+        second = result["instance_id"]
+
+        assert result["spawn_diagnostics"].get("reattached") is True, (
+            f"expected a re-attach, got {result['spawn_diagnostics']!r}"
+        )
+        # Nothing recorded an id for it, so a fresh one is minted — but it names
+        # the SAME renderer, which is the claim that matters.
+        assert await eval_js(second, "window.__f888_held") == "seller-central"
+        # And it did NOT walk: F-871's sibling directory was never created.
+        assert not (tmp_path / "seller-central-2").exists()
+    finally:
+        with contextlib.suppress(Exception):
+            await close(instance_id=second or first)
+        if second is None and chrome_pid is not None:
+            with contextlib.suppress(Exception):
+                import psutil
+
+                psutil.Process(chrome_pid).kill()

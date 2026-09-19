@@ -209,6 +209,8 @@ class TestLoadBearingSymbols:
             "embedded.browser_reattach": [
                 "adoptable",
                 "adoptable_for",
+                "held_by",
+                "adopt_held_profile",
                 "endpoint",
                 "attach_config",
                 "attach",

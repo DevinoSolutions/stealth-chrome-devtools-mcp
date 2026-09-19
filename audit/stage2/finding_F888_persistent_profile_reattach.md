@@ -79,11 +79,29 @@ all four already held:
 | (a) not deleted on `close_instance` | **yes** | `_cleanup_profile_for_metadata` refuses a custom non-clone dir |
 | (b) not reclaimed by the clone GC / storage cap | **yes** | `clone_is_auto` needs an explicit `auto_clean: true` marker a named profile never gets |
 | (c) not removed by `cleanup --apply` | **yes** | the delete list is gated on `clone_is_auto`; a named profile can only be TRIMMED of regenerable caches, and an absolute path outside the clone root is never even enumerated |
+| (b)/(c) for a session dir with **no marker at all** | **yes** | measured below |
 | (d) not removed by `kill-orphans` | **yes** | the same guard as (a); the verb kills the browser, which is its purpose, and leaves the directory |
 
 So ask (1) is satisfied by NAMING, DOCUMENTING and PINNING it — there is no
 `profile=` alias, no new parameter and no new layout, because adding one would be
 a second way to say `user_data_dir`.
+
+**Measured answer for a session dir whose browser is already gone.** The second
+stranded login (`C:\stealth-mcp-browser-sessions\sessions\MASTER_CHAT-299040179676`)
+has no Chrome left; the directory is all that remains, so "never auto-deleted"
+carries the whole guarantee on its own. Every delete in `clone_storage` was read:
+there are five `_rmtree_robust` call sites and exactly ONE of them can reach a
+session directory — `_trash_clone`, whose targets come from a single selection
+gate, `if not entry.is_dir() or not clone_is_auto(entry): continue`. The other
+four are the trash purge (only inside the trash dir), the regenerable-cache trim
+(subdirectories only, session state preserved), and `_copy_profile_tree`'s clone
+refresh (guarded by `_is_relative_to(target, clone_root)` *and*
+`_profile_has_running_browser`). So the answer is `clone_is_auto`'s, and it fails
+safe in **both** shapes a named session dir can have: with no marker at all it
+returns False at `if not marker.exists()`, and with the marker the server writes
+for a named profile it returns `bool(data.get("auto_clean", False))` = False.
+Pinned both ways in `TestNamedSessionDirIsNeverReclaimed`. A named directory can
+be TRIMMED of regenerable caches; it cannot be removed.
 
 What the guarantee did NOT have was a name. The condition
 `uses_custom_data_dir is True and not auto_clone` was written out by hand in two
@@ -145,21 +163,61 @@ keeps only its two decisions, three lines and an argument. Both caps hold;
 4. **A CDP endpoint is recoverable.** Asked HERE, before the reaper is told to
    skip anything: a candidate we can neither adopt nor reap leaks forever.
 
+### The second entry point, and why the first is not enough
+
+A first draft of this fix adopted from the RECORD only, at backend startup, and
+argued in §6 that a spawn-time surface would be a second trigger for one rule.
+**Live observation of the machine disproved that**, and the reversal is the most
+important correction in this finding.
+
+The stranded Seller Central Chrome — pid 115652, on
+`…\amazon-buy-bot\seller-central-profile`, `--remote-debugging-port=9223`, owner
+backend 173824 gone — **has no entry in `browser_pids.json` at all.** The
+successor backend (46740) rewrote the record without it. That is not an exotic
+case; it is the ordinary consequence of the thing this finding is about: a
+backend dies, a replacement starts, and the replacement's record write is the
+last word. `run` iterates entries, so for that browser it iterates nothing and
+walks past it forever. The startup pass could never have recovered the very login
+that prompted the work.
+
+It is also why that Chrome SURVIVED the successor's orphan sweep — the sweep
+walks the record too, and it was not in it. That accident is not relied on: the
+spare rule (persistent + alive) is pinned for the case where the entry IS
+present.
+
+So there is a second entry point, `held_by` / `adopt_held_profile`, and the thing
+that makes it one rule rather than two is what it asks: the refusal is
+`is_reapable`, the identical call `run` makes, and the attach is the identical
+`_adopt_one`. What differs is only the WITNESS that finds the browser — the
+directory a caller just named, through `profile_lock.profile_hold`, instead of a
+record entry — and one policy: **a failure here never reaps.** `run` is startup
+recovery, where an unreachable orphan has to end somewhere and the fallback is
+2.1.9's reap. Here a client asked for that browser, and killing it because we
+could not attach would be this finding's own harm committed by the fix.
+
 **The endpoint has three witnesses**, most trusted first
 (`browser_reattach.endpoint`):
 
 | Witness | Why it is where it is |
 |---|---|
 | the recorded `cdp_port` | written at track time since this release; it is about THIS instance |
-| `<user_data_dir>/DevToolsActivePort`, first line | Chrome's own record of the port it bound, inside the profile |
-| `--remote-debugging-port` on the pid's command line | what nodriver passed it (`Config.__call__` appends it from `config.port`) |
+| `--remote-debugging-port` on the pid's command line | what nodriver passed it (`Config.__call__` appends it from `config.port`); definitionally the LIVE process's |
+| `<user_data_dir>/DevToolsActivePort`, first line | Chrome's own record of the port it bound — but a file, which outlives its writer |
 
-The last two exist for LEGACY entries. 2.1.8 and 2.1.9 recorded no port at all,
-and those are precisely the records carrying the two stranded logins, so an
-adoption path that only read the new field would have fixed the next incident and
-not this one. They are ordered after the recorded port because a record we wrote
-is about this instance, while a file or a command line is about whatever holds
-the directory now.
+The last two exist for entries and processes that name no port themselves. 2.1.8
+and 2.1.9 recorded none at all, and those are precisely the browsers carrying the
+stranded logins, so an adoption path that only read the new field would have
+fixed the next incident and not this one.
+
+**The order of the last two is measured, not assumed.** The stranded Seller
+Central Chrome has **no `DevToolsActivePort` file in its profile** while running,
+so a ladder that asked the file first would have found nothing to attach to for
+the one browser this finding exists to recover. The command line cannot be stale
+in that way: it belongs to the process we just proved is holding the directory.
+The file keeps its rung for the one case the command line cannot answer — a
+caller passing `--remote-debugging-port=0`, where the argv says `0` (which
+`valid_port` rejects as "not bound yet") and the file holds the port Chrome
+actually resolved it to.
 
 **The door is one door.** Setting BOTH `host` and `port` on a nodriver `Config`
 is what makes `uc.start` connect instead of spawn (`browser.py:371-375`:
@@ -227,7 +285,7 @@ the module docstring says must never drift. An entry without the key reads as
 
 ## 5. Tests
 
-`tests/test_browser_reattach.py`, 38 pins, hermetic — the record is a `tmp_path`
+`tests/test_browser_reattach.py`, 49 pins, hermetic — the record is a `tmp_path`
 file on every one, both liveness witnesses are injected, the `ProcessCleanup` the
 pass writes through is a double, and the CDP door is patched.
 
@@ -240,32 +298,44 @@ pass writes through is a double, and the CDP door is patched.
 | `TestRecoverySparesAdoptable` | adoptable is neither killed nor forgotten; a plain orphan is still reaped; both verdicts in one pass; `force` takes everything |
 | `TestShutdownHandsOver` | a persistent browser survives shutdown WITH its entry; a clone does not |
 | `TestManagerAdoption` | the client keeps its instance id and gets the live page; ownership moves through the one write; a failed attach falls back to the reap with the directory spared; no tab is refused; an already-registered instance is left alone; a wedged attach is bounded; `app_lifespan` hands the pass BOTH collaborators |
+| `TestHeldProfileAdoption` | **a holder with NO entry at all is adoptable** (the incident's exact shape); the port comes from the holder's command line; a dead owner's entry donates its instance id; a live backend's browser is never taken; nothing holding the dir, and a holder with no recoverable port, both decline |
+| `TestHeldAdoptionNeverReaps` | a failed attach on the spawn path spawns instead and **kills nothing** — no reap, no record drop; a successful one answers with the instance id and stamps `reattached` |
+| `TestNamedSessionDirIsNeverReclaimed` | fact (b)/(c) for both shapes a named session dir has on disk: no marker, and the server's own `auto_clean: false` marker |
 | `TestOneDoor` | the config carries host, port and the profile; `desktop_launch` uses that one door |
 
 `tests/fakes.py` grows `FakeBrowser(main_tab=…)` — nodriver's `Browser.main_tab`,
 what an attach hands back.
 
-**And one real-Chrome node**, `tests/test_e2e_persistent_profile_reattach.py`
+**And two real-Chrome nodes**, `tests/test_e2e_persistent_profile_reattach.py`
 (marked `integration`), because every pin above patches the CDP door and so none
 of them can prove the one thing the incident was about: that a second `uc.start`
 against a port the first backend's Chrome is listening on CONNECTS to that
-renderer rather than launching a new browser. It spawns a real Chrome on a real
-named profile, writes `window.__f888` into the live page, drops the manager's
-handle WITHOUT killing the process (what a `TerminateProcess`d backend leaves
-behind), hands a fresh manager the record, and asserts the adopted instance keeps
-its id and `window.__f888` is still set. That last assertion is a claim about the
-RENDERER, not the profile directory — a re-spawn onto the same `user_data_dir`
-would pass a cookie check and fail this one. It also pins `reattached: true`, the
-recorded port, the live `current_url` from `tab_identity` (F-874), and that a
-second pass adopts nothing because ownership moved.
+renderer rather than launching a new browser.
 
-**Measured, not asserted**: this node PASSES on the development machine
-(Windows 11, Chrome 152, 2026-09-19) — one run, green, with the Chrome process
-count returning to its baseline afterwards. The owner in its record is this
-process's own pid behind a patched `is_reapable` rather than a fabricated dead
-pid, because a fabricated one can be recycled onto a live process between the
-write and the read and the resulting flake would look exactly like a genuine
-adoption refusal.
+1. **The record path.** Spawns a real Chrome on a real named profile, writes
+   `window.__f888` into the live page, drops the manager's handle WITHOUT killing
+   the process (what a `TerminateProcess`d backend leaves behind), hands a fresh
+   manager the record, and asserts the adopted instance keeps its id and
+   `window.__f888` is still set. That assertion is a claim about the RENDERER,
+   not the profile directory — a re-spawn onto the same `user_data_dir` would
+   pass a cookie check and fail this one. Also pins `reattached: true`, the
+   recorded port, the live `current_url` from `tab_identity` (F-874), and that a
+   second pass adopts nothing because ownership moved.
+2. **The holder path, with an EMPTY record** — the real stranded shape. Same
+   setup, but the record is emptied rather than seeded, and the recovery is a
+   plain `spawn_browser(user_data_dir=…)` through the tool. The port is
+   recovered from the live Chrome's real command line through the real ladder.
+   It asserts `reattached: true`, that `window.__f888_held` is still readable
+   (same renderer), and that **F-871's `<name>-2` sibling directory was never
+   created** — i.e. the spawn reached the browser instead of walking away from
+   it.
+
+**Measured, not asserted**: both nodes PASS on the development machine
+(Windows 11, Chrome 152, 2026-09-19), with the Chrome process count returning to
+its baseline afterwards. The owner in node 1's record is this process's own pid
+behind a patched `is_reapable` rather than a fabricated dead pid, because a
+fabricated one can be recycled onto a live process between the write and the read
+and the resulting flake would look exactly like a genuine adoption refusal.
 
 ---
 
@@ -290,22 +360,9 @@ today, because `psutil.terminate()` is `TerminateProcess`, which runs no handler
 by accident. On POSIX a 2.1.9 backend still kills them on the way out; the fix
 must be INSTALLED before the stop for that platform to behave.
 
-**`spawn_browser(user_data_dir=…)` does NOT adopt; adoption is the backend's own
-startup and nothing else.** This was considered as the surface — "asked for a
-profile a live unowned Chrome holds, attach to it instead of walking to
-`<name>-2`" — and deliberately not built, because it is a SECOND trigger for one
-rule, and convention 4 says a second way is a defect. The startup pass already
-covers every shape the incident produced: a backend that dies leaves its browsers
-running, and the next backend adopts them before a client asks for anything.
-What the decision costs is one narrow case — a browser whose owner died AFTER
-this backend started, whose caller then spawns onto its directory: that walks to a
-sibling directory and opens a different, logged-out profile. It is visible rather
-than silent (`spawn_diagnostics.profile_selection.walked_to`, F-871), the login is
-not lost (the Chrome is still running and the NEXT backend adopts it), and the
-`spawn_browser` docstring and RUNBOOK both say plainly that spawning is not how
-you reach it. There is no `profile=` parameter either, for the same reason:
-`user_data_dir` already IS the persistent-profile option, and a second spelling of
-it would be a second way to say one thing.
+**There is no `profile=` parameter.** `user_data_dir` already IS the
+persistent-profile option, and a second spelling of it would be a second way to
+say one thing. It is DOCUMENTED as that option instead.
 
 **The adoption pass is driven from `app_lifespan`, which is once per process
 (`_LIFESPAN_STARTED`), not once per heal.** A backend that adopts nothing at

@@ -259,13 +259,26 @@ backend it exists for, but it means `--force` is never the casual option.
 A browser on a **persistent profile** — one a caller named with
 `spawn_browser(user_data_dir=…)` — is no longer killed when its backend goes away
 (F-888). `stop`, `restart`, a proxy heal and a crash all now end with that Chrome
-still running, and the next backend re-attaches to it over CDP **at its own
-startup**, under the same `instance_id`. So the normal case needs no recipe: start
-a session, and the login is already in `list_instances` (its entry carries
-`spawn_diagnostics.reattached: true`). Give it a moment — the pass runs off the
-first-serve path so it cannot delay the backend answering.
+still running, and **two paths re-attach to it over CDP**:
 
-Two cases do need a hand.
+1. **A new backend adopts what the record names, at its own startup.** Start a
+   session and the login is already in `list_instances`, under its original
+   `instance_id`. Give it a moment — the pass runs off the first-serve path so it
+   cannot delay the backend answering.
+2. **Spawning onto the profile re-attaches to whatever holds it.**
+   `spawn_browser(user_data_dir="<the same name or path>")` returns the RUNNING
+   browser — same renderer, same open page, `spawn_diagnostics.reattached: true`
+   — instead of walking to a sibling directory.
+
+Path 2 is the one that matters when the record has lost the browser, which is the
+normal outcome of a backend dying and being replaced: the successor rewrites
+`browser_pids.json` without it, so there is no entry left for path 1 to walk.
+Measured on the real incident — the stranded Seller Central Chrome had **no entry
+at all** and **no `DevToolsActivePort` file**; its port was recovered from
+`--remote-debugging-port=` on the process command line. **So the general recipe is
+one call: spawn with the same `user_data_dir`.**
+
+Two cases still need a hand.
 
 **The owner backend is still ALIVE (wedged, or just unreachable because every
 proxy that could talk to it has died).** Adoption refuses a browser whose owner is
@@ -285,16 +298,22 @@ backend still kills them on the way out — install this release **before** the
 stop.)
 
 **The browser cannot be re-attached at all** (Chrome is wedged, or nothing in the
-ladder names a port). It is reaped, exactly as 2.1.9 would have reaped it — but
-the **profile directory is spared**, so the on-disk cookies are still there. Spawn
-onto the same directory and log in again if the session cookies are gone:
-`spawn_browser(user_data_dir="<the same name or absolute path>")`.
+ladder names a port). On the spawn path this never kills it — the spawn just
+proceeds normally and you get a *different* directory, reported in
+`spawn_diagnostics.profile_selection.walked_to`; if that happens, the old Chrome
+is still running and can be closed by hand. On the *startup recovery* path a
+recorded browser that cannot be reached is reaped exactly as 2.1.9 reaped it, but
+the **profile directory is spared** either way, so the on-disk cookies survive for
+a fresh spawn — you may just have to log in again if the session cookies are gone.
 
-What NOT to do: do not `spawn_browser` with that `user_data_dir` while its Chrome
-is still running and unadopted. That does not adopt it — it walks to a sibling
-directory (F-871, reported in `spawn_diagnostics.profile_selection.walked_to`),
-which is a different profile and a different login. And `kill-orphans --force`
-takes persistent-profile browsers too; that is what `--force` means.
+Things worth knowing:
+
+- `kill-orphans --force` takes persistent-profile browsers too; that is what
+  `--force` means.
+- A profile directory under the session root is **never** reclaimed by the
+  storage cap or `cleanup --apply`, whether or not it carries a clone marker —
+  only disposable auto-clones are, and a named profile is never one. A named
+  directory can be *trimmed* of regenerable caches, never removed.
 
 ### Disk filling up
 Look before you reclaim — neither of these changes anything on disk:

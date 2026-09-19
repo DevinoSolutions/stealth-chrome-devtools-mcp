@@ -67,13 +67,27 @@ no new parameter and no new layout: the condition has one home, the four
 guarantees are pinned in `tests/test_browser_reattach.py`, and a test fails if
 the literal comes back.
 
-Adoption is the BACKEND's own startup and nothing else: `spawn_browser` still
-walks to a sibling directory when the profile it was handed is held (F-871), and
-deliberately does not grow a second trigger for the same rule. The
-`spawn_browser` docstring and a new RUNBOOK playbook ("Recover a stranded login")
-both say so, and give the one recipe that needs an operator — stopping a backend
-that is still alive but unreachable, after which the next backend adopts its
-browsers.
+**Spawning onto a held profile re-attaches to it**, rather than walking to a
+sibling directory (F-871). This is the second entry point into the same rule and
+it is the one that matters in practice: the browser this feature exists for has
+**no record entry at all** — measured on the real stranded Chrome (pid 115652,
+`--remote-debugging-port=9223`), whose owner backend died and whose successor
+rewrote `browser_pids.json` without it — so the startup pass, which walks
+entries, would walk past it forever. The witness here is Chrome's own process
+singleton (`profile_lock.profile_hold`) and the record is consulted only to
+refuse a browser a LIVE sibling backend owns. **So recovering a logged-in browser
+whose backend died is one call: spawn with the same `user_data_dir`.** A failure
+on this path never reaps — a client asked for that browser, and killing it
+because we could not attach would be this bug committed by its own fix.
+
+The endpoint ladder now asks the process command line BEFORE
+`DevToolsActivePort`, also measured: the stranded Chrome had no such file while
+running, so a file-first ladder found nothing to attach to. The file keeps its
+rung for `--remote-debugging-port=0`, which the command line cannot answer.
+
+A new RUNBOOK playbook ("Recover a stranded login") gives both paths plus the one
+case that still needs an operator — a backend that is alive but unreachable,
+which must be stopped before its browsers can be taken over.
 
 Also: the nodriver host-and-port pair that makes `uc.start` connect instead of
 spawn moved out of `desktop_launch.launch_and_attach` into

@@ -43,15 +43,23 @@ all four hold, asked in cheapest-first order:
 **The endpoint ladder** (:func:`endpoint`), three witnesses in order of trust:
 
 * the port this record CARRIES (``cdp_port``, written at track time since 2.1.10);
-* ``<user_data_dir>/DevToolsActivePort``, whose first line is the port Chrome
-  actually bound — Chrome's own file, written by the browser we are looking at;
 * ``--remote-debugging-port=`` on that pid's command line, which is what nodriver
-  passed it (``Config.__call__`` appends the flag from ``config.port``).
+  passed it (``Config.__call__`` appends the flag from ``config.port``);
+* ``<user_data_dir>/DevToolsActivePort``, whose first line is the port Chrome
+  actually bound.
 
-The last two exist for LEGACY entries: 2.1.8/2.1.9 recorded no port at all, and
-those are precisely the records carrying today's stranded logins. They are
-ordered after the recorded port because a record we wrote is about THIS instance,
-while a file or a command line is about whatever process holds the directory now.
+The last two exist for entries — and processes — that name no port themselves:
+2.1.8/2.1.9 recorded none at all, and those are precisely the browsers carrying
+today's stranded logins. The recorded port leads because a record WE wrote is
+about THIS instance. The command line comes next because it is definitionally
+the live process's, while ``DevToolsActivePort`` is a file that outlives the
+browser that wrote it — and measured on the stranded Seller Central Chrome
+(pid 115652, `--remote-debugging-port=9223`), the file was **absent** while the
+browser was running, so a ladder that asked it first would have found nothing to
+attach to. The file still earns its rung: a caller that passes
+``--remote-debugging-port=0`` gets a command line saying ``0``, which
+:func:`browser_pid_registry.valid_port` rejects as "not bound yet", and the file
+is where Chrome writes the port it actually resolved that to.
 
 **The door** (:func:`attach_config` + :func:`attach`). Setting BOTH ``host`` and
 ``port`` on a nodriver ``Config`` is what makes ``uc.start`` connect instead of
@@ -83,6 +91,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -198,22 +207,22 @@ def endpoint(entry: browser_pid_registry.Entry) -> int | None:
 
     Three witnesses, most trusted first (see the module docstring). Each one is
     re-checked as an int in range rather than trusted: the record tolerates a
-    hand edit, ``DevToolsActivePort`` survives the browser that wrote it, and a
-    command line is whatever the process says it is.
+    hand edit, a command line is whatever the process says it is, and
+    ``DevToolsActivePort`` survives the browser that wrote it.
     """
     recorded = browser_pid_registry.recorded_port(entry)
     if recorded is not None:
         return recorded
 
-    profile_dir = entry.get("user_data_dir")
-    if isinstance(profile_dir, str) and profile_dir:
-        from_file = _port_from_profile(Path(profile_dir))
-        if from_file is not None:
-            return from_file
-
     pid = entry.get("pid")
     if isinstance(pid, int):
-        return _port_from_cmdline(pid)
+        from_cmdline = _port_from_cmdline(pid)
+        if from_cmdline is not None:
+            return from_cmdline
+
+    profile_dir = entry.get("user_data_dir")
+    if isinstance(profile_dir, str) and profile_dir:
+        return _port_from_profile(Path(profile_dir))
     return None
 
 
@@ -357,6 +366,152 @@ def reap_recorded(
     killed = cleanup._kill_processes_for_metadata(instance_id, metadata, recovery=True)
     cleanup._cleanup_profile_for_metadata(instance_id, metadata)
     return killed
+
+
+def held_by(
+    user_data_dir: str,
+    *,
+    read_entries: Callable[[], browser_pid_registry.Entries],
+    owner_alive: Callable[[int, float | None], bool],
+    live_pids: object,
+    new_instance_id: str,
+) -> Adoptable | None:
+    """The live Chrome holding *user_data_dir* that we may take over, or None.
+
+    THE second entry point into the one adoption rule, and the record is NOT its
+    input — because the browser this exists for **has no record entry at all**.
+    Measured on the stranded Seller Central Chrome (pid 115652, port 9223): its
+    owner backend 173824 died, and the SUCCESSOR backend rewrote
+    ``browser_pids.json`` without it, so by the time anyone could adopt it there
+    was nothing in the record to iterate. :func:`run` walks entries; it would
+    walk straight past this browser forever. The only thing that still names it
+    is the DIRECTORY it holds, which is exactly what a caller passes to
+    ``spawn_browser(user_data_dir=…)``.
+
+    So the witness here is Chrome's own process singleton, through
+    ``profile_lock.profile_hold`` — THE one home for "is this profile held by a
+    live process, and who holds it" (F-871) — and the record is consulted only to
+    REFUSE: if any entry names this pid and its owner is a live backend of ours,
+    that browser belongs to a sibling backend and taking it is F-886's harm from
+    the other side. An entry with a DEAD owner is not a refusal; it is a gift,
+    because it carries the instance id the client used to hold, which we reuse.
+
+    Deliberately NOT gated on :func:`browser_pid_registry.on_persistent_profile`:
+    that predicate reads a RECORD, and there is no record here. The caller
+    passing an explicit ``user_data_dir`` is the same declaration by hand — a
+    disposable auto-clone is one the server chose, and a caller naming it is
+    naming a directory they intend to keep.
+    """
+    from stealth_chrome_devtools_mcp.embedded import profile_lock
+
+    hold = profile_lock.profile_hold(Path(user_data_dir), live_pids)
+    if hold is None or not isinstance(hold.pid, int):
+        # Nothing holds it, or something does but no witness could name the pid
+        # (Windows' bare `lockfile`). Without a pid there is no command line to
+        # read and no process to prove alive, so this is not adoptable — the
+        # caller spawns, exactly as before.
+        return None
+
+    # The record is read ONLY once something is known to hold the directory, and
+    # `read_entries` is a callable for exactly that reason: the overwhelmingly
+    # common spawn is onto a directory nobody holds, and that one must not pay
+    # for a record read it cannot use.
+    entries = read_entries()
+    recorded_id: str | None = None
+    for instance_id, entry in entries.items():
+        if entry.get("pid") != hold.pid:
+            continue
+        # The SAME ownership rule `run` applies, inverted: not reapable means a
+        # live backend of ours still owns this browser, and two backends driving
+        # one Chrome is F-886's harm. Asked through `is_reapable` rather than
+        # re-read here, so the two entry points cannot come to disagree.
+        if not browser_pid_registry.is_reapable(entry, owner_alive):
+            return None
+        recorded_id = instance_id
+        break
+
+    entry_for_port: browser_pid_registry.Entry = (
+        dict(entries[recorded_id])
+        if recorded_id is not None
+        else {"pid": hold.pid, "user_data_dir": user_data_dir}
+    )
+    port = endpoint(entry_for_port)
+    if port is None:
+        return None
+    return Adoptable(
+        instance_id=recorded_id or new_instance_id,
+        pid=hold.pid,
+        user_data_dir=user_data_dir,
+        port=port,
+    )
+
+
+async def adopt_held_profile(
+    manager: BrowserManager, cleanup: ProcessCleanup, user_data_dir: str
+) -> str | None:
+    """Re-attach to the live Chrome holding *user_data_dir*; its id, or None.
+
+    The spawn path's one question, asked BEFORE profile selection because the
+    alternative answer is F-871's walk to ``<name>-2`` — a different directory,
+    a different profile and a logged-out one, which for a human's Seller Central
+    session is the loss this finding exists to stop.
+
+    **A failure here never reaps.** That is the one place this differs from
+    :func:`run`, and the difference is the caller's intent: `run` is startup
+    recovery, where an unreachable orphan must end somewhere, and the fallback is
+    the reap 2.1.9 already did. Here a CLIENT asked for a browser, and killing
+    the Chrome they were trying to reach because we could not attach to it would
+    be this finding's own harm committed by the fix. Every failure returns None
+    and the spawn proceeds exactly as it does today.
+
+    Never raises.
+    """
+    async with _pass_lock:
+        try:
+            candidate = await asyncio.to_thread(
+                held_by,
+                user_data_dir,
+                read_entries=cleanup._load_tracked_pids,
+                owner_alive=cleanup._owner_backend_alive,
+                live_pids=getattr(cleanup, "_get_browser_pids_for_profile", None),
+                new_instance_id=str(uuid.uuid4()),
+            )
+        except Exception as exc:  # noqa: BLE001  PERMANENT(a classification failure must cost the spawn nothing but this branch)
+            debug_logger.log_warning(
+                "browser_reattach",
+                "held",
+                f"Could not classify the holder of the requested profile "
+                f"({type(exc).__name__}); spawning instead.",
+                error=exc,
+            )
+            return None
+        if candidate is None:
+            return None
+        if candidate.instance_id in manager._instances:
+            return candidate.instance_id
+        try:
+            await asyncio.wait_for(
+                _adopt_one(manager, cleanup, candidate.instance_id, candidate),
+                timeout=ATTACH_BUDGET_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001  PERMANENT(see the docstring: a failed adoption here must never kill the caller's browser)
+            debug_logger.log_warning(
+                "browser_reattach",
+                "held",
+                f"A live browser holds the requested profile on port "
+                f"{candidate.port} but could not be re-attached to "
+                f"({type(exc).__name__}); spawning instead, which will select a "
+                f"different directory.",
+                error=exc,
+            )
+            return None
+        report(
+            "held",
+            f"Re-attached to the running browser already holding the requested "
+            f"profile rather than spawning beside it; instance "
+            f"{candidate.instance_id}",
+        )
+        return candidate.instance_id
 
 
 # ---------------------------------------------------------------------------

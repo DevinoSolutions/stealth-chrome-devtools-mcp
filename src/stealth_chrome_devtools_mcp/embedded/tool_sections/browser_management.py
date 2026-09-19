@@ -110,15 +110,18 @@ async def spawn_browser(
             deleted by close_instance, by the clone GC, by `cleanup --apply` or by
             `kill-orphans`, and since F-888 its BROWSER survives the backend too: a
             backend that stops, restarts, heals or crashes leaves such a browser
-            RUNNING, and the next backend re-attaches to it over CDP AT ITS OWN
-            STARTUP, under the original instance_id, so a human's logged-in session
-            is not lost. That means after a restart you do NOT spawn again: the
-            browser is already there — call list_instances and use the id it reports
-            (``spawn_diagnostics["reattached"]: true``). Spawning onto a
-            user_data_dir some OTHER live Chrome still holds does not adopt it; it
-            walks to a sibling directory (F-871, reported in
-            ``spawn_diagnostics["profile_selection"]["walked_to"]``), which is a
-            different profile and a different login.
+            RUNNING, and it is RE-ATTACHED to over CDP rather than replaced, so a
+            human's logged-in session is not lost. Two paths reach it and you need
+            neither by name: a new backend adopts the browsers it finds recorded
+            at its own startup (same instance_id as before), and spawning with a
+            user_data_dir a live browser still holds re-attaches to THAT browser
+            instead of walking to a sibling directory. Either way the answer
+            carries ``spawn_diagnostics["reattached"]: true``, and the page is the
+            one that was already open — not a fresh tab on the same cookies. So to
+            recover a logged-in browser whose backend died, just spawn with the
+            same user_data_dir. The one case that refuses is a browser some OTHER
+            LIVE backend still owns (two backends driving one Chrome is a defect);
+            stop that backend first — see RUNBOOK, "Recover a stranded login".
         sandbox (Optional[Any]): Enable browser sandbox. Accepts bool, string ('true'/'false'), int (1/0), or None for auto-detect.
 
     Network interception captures request/response metadata by default, but
@@ -156,6 +159,21 @@ async def spawn_browser(
             sandbox = sandbox.lower() in ("true", "1", "yes", "on", "enabled")
         elif isinstance(sandbox, int) or not isinstance(sandbox, bool):
             sandbox = bool(sandbox)
+
+        # BEFORE profile selection, because selection is where F-871's walk to
+        # <name>-2 happens: a live browser already holding the requested profile
+        # is RE-ATTACHED to rather than walked away from (F-888). The browser
+        # this exists for has no registry entry at all — its owner backend died
+        # and the successor rewrote the record without it — so the directory the
+        # caller just named is the only thing that still finds it. Returns None
+        # for every other case, including a live sibling backend's browser, and
+        # never raises: an adoption that cannot happen costs this spawn nothing.
+        if user_data_dir:
+            adopted_id = await rt.browser_reattach.adopt_held_profile(
+                rt.browser_manager, rt.process_cleanup, user_data_dir
+            )
+            if adopted_id:
+                return await _adopted_instance_record(adopted_id, block_resources)
 
         profile_selection = await rt.clone_storage.resolve_profile_selection(
             user_data_dir
@@ -252,6 +270,42 @@ async def spawn_browser(
         }
     except Exception as e:
         raise ToolError(f"Failed to spawn browser: {e!s}")
+
+
+async def _adopted_instance_record(
+    instance_id: str, block_resources: list[str] | None
+) -> dict[str, Any]:
+    """``spawn_browser``'s answer for a browser it re-attached to (F-888).
+
+    The SAME five keys a spawn returns, because from the caller's side nothing
+    else is different: they asked for a browser on that profile and they have
+    one. What tells them it was not launched now is
+    ``spawn_diagnostics["reattached"]``, set at the adoption site.
+
+    Interception is set up here for the same reason the spawn path does it: an
+    adopted tab has none of this backend's handlers on it, so a caller passing
+    ``block_resources`` to a spawn that adopted would otherwise be silently
+    ignored.
+    """
+    data = await rt.browser_manager.get_instance(instance_id)
+    if not data:
+        raise ToolError(
+            f"Re-attached instance {instance_id} vanished before it could be reported"
+        )
+    instance = data["instance"]
+    tab = await rt.browser_manager.get_tab(instance_id)
+    if tab:
+        await rt.network_interceptor.setup_interception(
+            tab, instance_id, block_resources
+        )
+    return {
+        "instance_id": instance_id,
+        "state": instance.state,
+        "headless": instance.headless,
+        "viewport": instance.viewport,
+        "spawn_diagnostics": await rt.browser_manager.get_spawn_diagnostics(instance_id)
+        or {},
+    }
 
 
 async def _live_instance_record(inst: "BrowserInstance") -> dict[str, Any]:

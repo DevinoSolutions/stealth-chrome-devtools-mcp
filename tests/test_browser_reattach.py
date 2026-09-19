@@ -287,21 +287,39 @@ class TestEndpointLadder:
         entry = _entry(user_data_dir=str(profile), cdp_port=PORT)
         assert browser_reattach.endpoint(entry) == PORT
 
+    def test_then_the_command_line(self, tmp_path):
+        """Second rung: definitionally the live process's own port."""
+        entry = _entry(user_data_dir=str(tmp_path / "gone"), cdp_port=None)
+        with patch.object(browser_reattach, "_port_from_cmdline", return_value=8123):
+            assert browser_reattach.endpoint(entry) == 8123
+
+    def test_the_command_line_outranks_chromes_file(self, tmp_path):
+        """Ordering, stated as a pin rather than left to the reader. The file
+        outlives the browser that wrote it; the command line cannot."""
+        profile = tmp_path / "p"
+        profile.mkdir()
+        (profile / browser_reattach.DEVTOOLS_PORT_FILE).write_text("9999\n/devtools/x")
+        entry = _entry(user_data_dir=str(profile), cdp_port=None)
+        with patch.object(browser_reattach, "_port_from_cmdline", return_value=8123):
+            assert browser_reattach.endpoint(entry) == 8123
+
     def test_a_legacy_entry_falls_back_to_chromes_own_file(self, tmp_path):
-        """``DevToolsActivePort``: Chrome's own record of the port it bound,
-        first line, inside the profile it was launched on."""
+        """Last rung, and it still earns its place: a caller passing
+        ``--remote-debugging-port=0`` has a command line that names no usable
+        port, and the file is where Chrome wrote the one it resolved that to.
+
+        ``_port_from_cmdline`` is patched rather than left to the real process
+        table — the recorded pid is a literal, and on a busy machine it may name
+        a real process whose command line would decide this assertion.
+        """
         profile = tmp_path / "p"
         profile.mkdir()
         (profile / browser_reattach.DEVTOOLS_PORT_FILE).write_text(
             "9999\n/devtools/browser/abc\n"
         )
         entry = _entry(user_data_dir=str(profile), cdp_port=None)
-        assert browser_reattach.endpoint(entry) == 9999
-
-    def test_then_the_command_line(self, tmp_path):
-        entry = _entry(user_data_dir=str(tmp_path / "gone"), cdp_port=None)
-        with patch.object(browser_reattach, "_port_from_cmdline", return_value=8123):
-            assert browser_reattach.endpoint(entry) == 8123
+        with patch.object(browser_reattach, "_port_from_cmdline", return_value=None):
+            assert browser_reattach.endpoint(entry) == 9999
 
     @pytest.mark.parametrize("cmdline_port", ["0", "70000", "nonsense", ""])
     def test_an_unusable_port_is_no_port(self, tmp_path, cmdline_port):
@@ -637,6 +655,198 @@ class TestManagerAdoption:
             "rt.browser_reattach.start(rt.browser_manager, rt.process_cleanup)"
             in source
         )
+
+
+# ---------------------------------------------------------------------------
+# The browser with NO record entry — the one the record-driven pass cannot see
+# ---------------------------------------------------------------------------
+
+
+class TestHeldProfileAdoption:
+    """The measured shape of the real stranded login: Chrome alive on
+    ``…\\amazon-buy-bot\\seller-central-profile`` with ``--remote-debugging-port=9223``,
+    owner backend 173824 gone, **no entry in browser_pids.json at all** (the
+    successor backend rewrote the record without it), and **no
+    ``DevToolsActivePort`` file** in the profile.
+
+    ``run`` walks entries, so it would walk past this browser forever. The only
+    thing that still names it is the directory a caller passes to
+    ``spawn_browser(user_data_dir=…)``.
+    """
+
+    HELD = r"C:\Users\x\AppData\Local\amazon-buy-bot\seller-central-profile"
+
+    def _held(self, *, entries=None, hold_pid=CHROME_PID, cmdline_port=9223):
+        """`held_by` with both witnesses injected and the process table faked."""
+        hold = (
+            SimpleNamespace(pid=hold_pid, reason="process")
+            if hold_pid is not None
+            else None
+        )
+        with (
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.profile_lock.profile_hold",
+                return_value=hold,
+            ),
+            patch.object(
+                browser_reattach, "_port_from_cmdline", return_value=cmdline_port
+            ),
+        ):
+            return browser_reattach.held_by(
+                self.HELD,
+                read_entries=lambda: entries if entries is not None else {},
+                owner_alive=_owner_alive,
+                live_pids=None,
+                new_instance_id="i-new",
+            )
+
+    def test_a_holder_with_no_entry_at_all_is_adoptable(self):
+        """The incident's exact shape. An empty record must not mean "nothing to
+        adopt" — it is how the successor backend left the machine."""
+        found = self._held(entries={})
+        assert found is not None
+        assert found.pid == CHROME_PID
+        assert found.port == 9223
+        assert found.user_data_dir == self.HELD
+        # Nothing recorded an id for it, so the caller's minted one is used.
+        assert found.instance_id == "i-new"
+
+    def test_the_port_comes_from_the_holders_command_line(self):
+        """No record and no ``DevToolsActivePort`` file — measured true of the
+        stranded Chrome — leaves the process table as the only witness."""
+        with (
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.profile_lock.profile_hold",
+                return_value=SimpleNamespace(pid=CHROME_PID, reason="process"),
+            ),
+            patch.object(
+                browser_reattach.psutil,
+                "Process",
+                return_value=SimpleNamespace(
+                    cmdline=lambda: [
+                        "chrome.exe",
+                        f"--user-data-dir={self.HELD}",
+                        "--remote-debugging-port=9223",
+                    ]
+                ),
+            ),
+        ):
+            found = browser_reattach.held_by(
+                self.HELD,
+                read_entries=dict,
+                owner_alive=_owner_alive,
+                live_pids=None,
+                new_instance_id="i-new",
+            )
+        assert found is not None and found.port == 9223
+
+    def test_a_dead_owners_entry_donates_its_instance_id(self):
+        """When the record DOES still name it, the client's id is preserved
+        rather than a new one minted — the same promise `run` makes."""
+        found = self._held(entries={"i-was": _entry(owner_pid=DEAD_OWNER)})
+        assert found is not None and found.instance_id == "i-was"
+
+    def test_a_live_backends_browser_is_never_taken(self):
+        """F-886 from the other side. The refusal is `is_reapable`, the same one
+        `run` asks, so the two entry points cannot disagree."""
+        assert self._held(entries={"theirs": _entry(owner_pid=LIVE_OWNER)}) is None
+
+    def test_nothing_holding_the_directory_is_not_adoptable(self):
+        """The ordinary case by far: the caller gets a normal spawn."""
+        assert self._held(hold_pid=None) is None
+
+    def test_a_holder_we_cannot_name_a_port_for_is_not_adoptable(self):
+        """Windows' bare ``lockfile`` witness yields no pid, and a holder with no
+        recoverable port has nothing to attach to. Either way: spawn instead."""
+        assert self._held(cmdline_port=None) is None
+        assert self._held(hold_pid=None, cmdline_port=9223) is None
+
+
+class TestHeldAdoptionNeverReaps:
+    """The one place this differs from `run`, and it is load-bearing: a CLIENT
+    asked for this browser, so a failed attach must never kill it."""
+
+    @pytest.mark.asyncio
+    async def test_a_failed_attach_spawns_instead_and_kills_nothing(self):
+        manager = BrowserManager()
+        cleanup = MagicMock()
+        candidate = browser_reattach.Adoptable(
+            instance_id="i-held", pid=CHROME_PID, user_data_dir="C:/p", port=9223
+        )
+        with (
+            patch.object(browser_reattach, "held_by", return_value=candidate),
+            patch.object(
+                browser_reattach, "attach_config", return_value=SimpleNamespace()
+            ),
+            patch.object(
+                browser_reattach, "attach", side_effect=ConnectionRefusedError("no")
+            ),
+            patch.object(browser_reattach, "reap_recorded") as reap,
+        ):
+            adopted = await browser_reattach.adopt_held_profile(
+                manager, cleanup, "C:/p"
+            )
+
+        assert adopted is None, "a failed adoption must fall through to the spawn"
+        assert reap.call_count == 0, (
+            "the caller's own logged-in browser must never be reaped by the path "
+            "that was trying to reach it"
+        )
+        assert cleanup._drop_recorded.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_successful_adoption_answers_with_the_instance_id(self):
+        manager = BrowserManager()
+        cleanup = MagicMock()
+        tab = FakeTab(url="https://sellercentral.amazon.com/home")
+        browser = FakeBrowser(alive=None, pid=CHROME_PID, main_tab=tab)
+        candidate = browser_reattach.Adoptable(
+            instance_id="i-held", pid=CHROME_PID, user_data_dir="C:/p", port=9223
+        )
+        with (
+            patch.object(browser_reattach, "held_by", return_value=candidate),
+            patch.object(
+                browser_reattach, "attach_config", return_value=SimpleNamespace()
+            ),
+            patch.object(browser_reattach, "attach", return_value=browser),
+        ):
+            adopted = await browser_reattach.adopt_held_profile(
+                manager, cleanup, "C:/p"
+            )
+
+        assert adopted == "i-held"
+        assert manager._spawn_diagnostics["i-held"]["reattached"] is True
+
+
+class TestNamedSessionDirIsNeverReclaimed:
+    """Fact 3 of the live report: the other stranded login's Chrome is gone but
+    its directory under the session root must still be there for a re-spawn.
+
+    Measured against the ONE selection gate the storage sweep uses, for both
+    shapes a named session dir can have on disk."""
+
+    def test_a_marker_less_directory_is_not_a_reclaim_target(self, tmp_path):
+        """A directory the server did not create a marker for — which is what a
+        hand-made or legacy session dir looks like — reads as NOT auto."""
+        from stealth_chrome_devtools_mcp.embedded import clone_storage
+
+        session = tmp_path / "MASTER_CHAT-299040179676"
+        session.mkdir()
+        assert clone_storage.clone_is_auto(session) is False
+
+    def test_a_named_sessions_marker_is_not_a_reclaim_target(self, tmp_path):
+        """And the shape the server DOES write for a named profile: an explicit
+        ``auto_clean: false``."""
+        from stealth_chrome_devtools_mcp.embedded import clone_storage
+
+        session = tmp_path / "MASTER_CHAT-299040179676"
+        session.mkdir()
+        (session / ".stealth_chrome_devtools_mcp_clone.json").write_text(
+            json.dumps({"source_kind": "explicit", "auto_clean": False}),
+            encoding="utf-8",
+        )
+        assert clone_storage.clone_is_auto(session) is False
+        assert clone_storage.clone_is_named(session) is True
 
 
 # ---------------------------------------------------------------------------
