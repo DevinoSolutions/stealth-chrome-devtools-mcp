@@ -555,7 +555,10 @@ class TestOwnershipCheckCannotFailStartup:
         monkeypatch.setattr(
             process_cleanup.debug_logger,
             "log_warning",
-            lambda *args: warnings.append(args),
+            # `**kwargs` because the classifier's warning carries `error=` (F-869
+            # forwards it as exc_info); a positional-only double would turn that
+            # into a TypeError inside the very handler this pin is about.
+            lambda *args, **kwargs: warnings.append(args),
         )
 
         pc._recover_orphaned_processes()
