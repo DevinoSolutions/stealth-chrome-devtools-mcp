@@ -55,10 +55,9 @@ _logger = logging.getLogger("stealth.proxy")
 LOCK_FILE = STATE_DIR / "singleton.lock"
 DEFAULT_PORT = 19222
 # The installed package tree (the .../stealth_chrome_devtools_mcp dir this file
-# lives under). _source_fingerprint() hashes every *.py below it so a backend
-# running now-stale source is evicted and respawned exactly like a version
-# mismatch (F-206/F-120/F-504): on this editable install the package version is
-# frozen at 1.2.0, so the version key alone can never see an in-place source edit.
+# lives under). _source_fingerprint() hashes every *.py below it, so an in-place
+# source edit is visible where a frozen editable-install version never is
+# (F-206/F-120/F-504); build_identity.source_fingerprint carries the argument.
 SOURCE_ROOT = Path(__file__).resolve().parent.parent
 STARTUP_TIMEOUT = 30
 SERVER_NAME = "stealth-chrome-devtools-mcp"
@@ -194,9 +193,15 @@ def _identity_matches(entry: backend_registry.BackendEntry | None) -> bool:
     which must know whether the backend it is about to terminate is a
     STRANGER's — and a third since, port SELECTION. Re-spelling it would let
     #14's version rule and F-829's three-state digest rule drift apart.
+
+    F-889 (d) adds ONE clause — a recorded version strictly NEWER than ours also
+    matches, so a mid-upgrade fleet adopts forward instead of ping-pong-evicting;
+    the comparison and its guards are ``build_identity.newer``'s.
     """
-    return (entry or {}).get("version") == _server_version() and (
-        not backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
+    recorded = (entry or {}).get("version")
+    return build_identity.newer(recorded, _server_version()) or (
+        recorded == _server_version()
+        and not backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
     )
 
 
@@ -435,8 +440,7 @@ def _backend_http_ready(port: int, *, timeout: float = LIVENESS_PROBE_TIMEOUT) -
     malformed response) resolves to False - `_server_is_healthy`'s fail-closed
     contract, where a probe error reads as "not ready" and never propagates.
     The ~10 duplicated lines of that twin's `initialize` shape are deliberate
-    (plan_M1 SS2.2 rejected-alternative #4, cross-review ruling: M1/M3
-    singleton regions stay disjoint); consolidating is a future finding.
+    (plan_M1 SS2.2 #4: M1/M3 regions stay disjoint); consolidating is a finding.
     """
     import httpx
     from mcp.types import DEFAULT_NEGOTIATED_VERSION
@@ -500,10 +504,8 @@ def _source_fingerprint() -> str | None:
 def _report_eviction_decision(port: int, spared: list[int]) -> None:
     """Ship the source-change decision that was actually TAKEN (F-886 review,
     F4); it used to be shipped before the kill site decided, so a refusal
-    reached Sentry and the durable log as an eviction. Wire only on the refusal
-    path — ``backend_eviction.clear_stale`` already writes that WARNING with the
-    same count. The evicted wording is byte-unchanged because
-    ``tests/test_e2e_lifecycle_resilience.py`` greps the log for it.
+    reached Sentry and the durable log as an eviction. The evicted wording is
+    byte-unchanged because ``tests/test_e2e_lifecycle_resilience.py`` greps it.
     """
     if spared:
         capture_lifecycle(
@@ -815,6 +817,9 @@ async def _watch_backend_liveness(port: int, **kwargs: object) -> None:
     run = anyio.to_thread.run_sync
     kwargs.setdefault("is_healthy", lambda: run(_backend_http_ready, port))
     kwargs.setdefault("confirm_probe", lambda: run(_same_identity_backend_ready, port))
+    # F-889's second witness. INLINE, not off-thread: a small local JSON read.
+    witness = backend_liveness.self_report
+    kwargs.setdefault("heartbeat", lambda: witness(SERVER_STATE_FILE, port))
     await backend_watchdog.watch_liveness(port, **kwargs)
 
 
@@ -827,9 +832,10 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
     ``initialize`` answer and swallowing the backend's duplicate ``initialize``
     response so the client never sees two.
 
-    F-838: a CONFIRMED-dead backend no longer ends the proxy — the client stays
-    connected on stdio while the backend leg heals and re-bridges onto a
-    replacement. That loop, its bound and the herd live in ``proxy_selfheal``.
+    F-838/F-889: a CONFIRMED-dead backend no longer ends the proxy, and neither
+    does a heal that fails — the client stays connected on stdio while the
+    backend leg heals, backs off and re-bridges. That loop, its bounds and the
+    herd live in ``proxy_selfheal``.
     """
     import anyio
     from mcp.client.streamable_http import streamablehttp_client
@@ -937,11 +943,10 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                 tg.start_soon(from_backend)
 
     async def backend_leg():
-        # F-838/F-843: the leg outlives any single backend. proxy_selfheal owns
-        # the generation loop — connect, watch, confirm — and on any confirmed
-        # incident heals via ensure_server_running (the SAME startup path, so
-        # the same reuse gate and cold-start lock) before re-bridging. It
-        # returns only when nothing is left to heal; the teardown below runs.
+        # F-838/F-843/F-889: the leg outlives any single backend. proxy_selfheal
+        # owns the generation loop and heals via ensure_server_running (the SAME
+        # startup path, so the same reuse gate and cold-start lock). It never
+        # returns — the client's EOF below is this process's one exit.
         await proxy_selfheal.drive(
             port=port,
             url_for=_backend_http_url,
@@ -954,8 +959,6 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
             ensure_running=ensure_server_running,
             await_ready=_await_backend_http,
         )
-        _logger.warning("backend became unreachable; tearing down for reconnect")
-        tg.cancel_scope.cancel()
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(backend_leg)

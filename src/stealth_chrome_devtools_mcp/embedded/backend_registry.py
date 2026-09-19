@@ -463,6 +463,45 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
     _write(path, entries)
 
 
+#: The backend's own liveness stamp on its own entry (F-889 (b)): a wall
+#: timestamp and the pid that wrote it. Two OPTIONAL fields on an existing v3
+#: entry, which is why :data:`SCHEMA_VERSION` does not move — nothing about the
+#: record's SHAPE changed. The compatibility runs both ways: a 2.1.9 reader
+#: copies entries whole and ignores them, and a 2.1.9 backend writes none, so a
+#: newer reader sees "absent" and behaves exactly as 2.1.9 did.
+HEARTBEAT_AT = "heartbeat_at"
+HEARTBEAT_PID = "heartbeat_pid"
+
+
+def stamp_heartbeat(path: Path, *, port: int, pid: int, at: float) -> bool:
+    """Write the backend's own liveness stamp onto the entry claiming ``port``;
+    True iff an entry was found and the record was written (F-889 (b)).
+
+    Matched on PORT and on nothing else, and that is what makes it safe to run
+    every few seconds from a process that holds no lock: **writing nothing when
+    no entry claims the port is the whole contract.** A stamp must never be able
+    to resurrect an entry ``forget_entries`` has just dropped, or a proxy
+    cleaning up a dead record would find it back a moment later.
+
+    Read-merge-write like every other writer here, through the same atomic
+    :func:`_write`. It does NOT take the cold-start lock: a backend that took it
+    every few seconds would serialise itself against every proxy start on the
+    machine. The cost of that choice is named rather than hidden — a
+    ``record_backend`` landing between this read and this write loses ONE stamp,
+    which is one interval of extra age, corrected by the next one.
+    """
+    entries = read_backends(path)
+    stamped = False
+    for entry in entries:
+        if entry.get("port") == port:
+            entry[HEARTBEAT_AT] = at
+            entry[HEARTBEAT_PID] = pid
+            stamped = True
+    if stamped:
+        _write(path, entries)
+    return stamped
+
+
 def forget_entries(path: Path, entries: list[BackendEntry]) -> list[str]:
     """Drop the NAMED entries, keeping every other; return the display contexts
     actually forgotten, in recorded order (F-880).

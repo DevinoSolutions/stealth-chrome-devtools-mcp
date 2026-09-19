@@ -197,6 +197,32 @@ class TestInitPlacement:
 # --------------------------------------------------------------------------
 # 2. the four lifecycle transitions
 # --------------------------------------------------------------------------
+class _EnoughError(Exception):
+    """Ends a ``drive`` that correctly never ends (F-889 (c)) — see
+    ``test_proxy_selfheal._EnoughError`` for why the bound is a COUNT."""
+
+
+def _heal_counter(monkeypatch, *, answers, stop_after):
+    asked = []
+
+    async def fake_heal(dead_port, **_kw):
+        asked.append(dead_port)
+        if len(asked) >= stop_after:
+            raise _EnoughError
+        return answers[0] if len(answers) == 1 else answers.pop(0)
+
+    monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
+    return asked
+
+
+@pytest.fixture()
+def fast_backoff(monkeypatch):
+    """F-889's retry schedule, shrunk: these nodes are about which EVENT ships,
+    not about how long the wait is (pinned in ``test_proxy_retry_forever``)."""
+    monkeypatch.setattr(proxy_selfheal, "RETRY_BASE_SECONDS", 0.001)
+    monkeypatch.setattr(proxy_selfheal, "RETRY_MAX_SECONDS", 0.01)
+
+
 def _drive_kwargs(**overrides):
     async def connect(_url, _replay, armed):
         armed.set()
@@ -344,66 +370,72 @@ class TestHealOutcomesAreReported:
         # F-843: and WHICH witness saw the death this heal answered.
         assert healed[0][2]["cause"] == proxy_selfheal.WATCHDOG_CAUSE
 
-    async def test_an_unhealable_backend_ships_the_user_visible_teardown(
-        self, captured, monkeypatch
+    async def test_an_unhealable_backend_ships_the_user_visible_report(
+        self, captured, monkeypatch, fast_backoff
+    ):
+        """SOFT golden, RENAMED with F-889 (c). ``TEARDOWN_EVENT`` described a
+        thing that no longer happens — the proxy does not tear down — so the
+        event is ``UNREACHABLE_EVENT`` now, carrying the same ``reason`` values
+        plus the attempt number and the delay. ERROR is kept: the client is not
+        being served right now, which is the one thing a user still feels."""
+
+        async def watch(_port):
+            return
+
+        _heal_counter(monkeypatch, answers=[None], stop_after=2)
+
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
+            await proxy_selfheal.drive(**_drive_kwargs(watch=watch))
+
+        events = [e for e in captured if e[0] == proxy_selfheal.UNREACHABLE_EVENT]
+        assert len(events) == 1
+        assert events[0][1] == "error", "not being served is what the user feels"
+        assert events[0][2]["reason"] == "unhealable"
+        assert events[0][2]["port"] == PORT_A
+        assert events[0][2]["attempt"] == 1
+
+    async def test_a_flapping_backend_ships_the_report_too(
+        self, captured, monkeypatch, fast_backoff
     ):
         async def watch(_port):
             return
 
-        async def fake_heal(_dead_port, **_kw):
-            return None
-
-        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
-
-        with anyio.fail_after(5):
-            await proxy_selfheal.drive(**_drive_kwargs(watch=watch))
-
-        teardowns = [e for e in captured if e[0] == proxy_selfheal.TEARDOWN_EVENT]
-        assert len(teardowns) == 1
-        assert teardowns[0][1] == "error", "the disconnect the user feels is an error"
-        assert teardowns[0][2]["reason"] == "unhealable"
-        assert teardowns[0][2]["port"] == PORT_A
-
-    async def test_a_flapping_backend_ships_the_teardown_too(
-        self, captured, monkeypatch
-    ):
-        async def watch(_port):
-            return
-
-        async def fake_heal(dead_port, **_kw):
-            return dead_port + 1
-
-        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
-
-        with anyio.fail_after(5):
-            await proxy_selfheal.drive(**_drive_kwargs(watch=watch))
-
-        teardowns = [e for e in captured if e[0] == proxy_selfheal.TEARDOWN_EVENT]
-        assert len(teardowns) == 1
-        assert teardowns[0][2]["reason"] == "flapping"
-        assert (
-            teardowns[0][2]["consecutive_heals"] > proxy_selfheal.MAX_CONSECUTIVE_HEALS
+        _heal_counter(
+            monkeypatch,
+            answers=[PORT_A + 1],
+            stop_after=proxy_selfheal.MAX_CONSECUTIVE_HEALS + 2,
         )
 
-    async def test_a_backend_that_never_became_ready_reports_nothing(
-        self, captured, monkeypatch
-    ):
-        """SOFT golden, updated deliberately with F-843.
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
+            await proxy_selfheal.drive(**_drive_kwargs(watch=watch))
 
-        This node used to arm the generation and then let ``connect`` return,
-        asserting silence — which is exactly the shape F-843 turned out to be:
-        an armed backend whose leg ends IS an incident, and reporting nothing
-        was the defect, not the contract. What the node was really protecting is
-        that a generation with nothing to lose stays silent, so it now states
-        that premise properly: readiness never came, ``armed`` never set."""
+        events = [e for e in captured if e[0] == proxy_selfheal.UNREACHABLE_EVENT]
+        assert events
+        assert events[0][2]["reason"] == "flapping"
+        assert events[0][2]["consecutive_heals"] > proxy_selfheal.MAX_CONSECUTIVE_HEALS
+
+    async def test_a_backend_that_never_became_ready_is_now_reported(
+        self, captured, monkeypatch, fast_backoff
+    ):
+        """SOFT golden, updated twice.
+
+        With F-843 it stated that a generation with nothing to lose stays
+        silent. F-889 (c) reverses that half: readiness that never came is the
+        last door the proxy's exit had, so it is an incident to RETRY, and a
+        retry that is happening must be reported or a session sitting without a
+        server is invisible. What stays true is the narrower F-843 fact — no
+        CONDEMNED event, because nothing was ever confirmed dead."""
 
         async def connect(_url, _replay, _armed):
             return  # never armed: no backend was ever serving this proxy
 
-        with anyio.fail_after(5):
+        _heal_counter(monkeypatch, answers=[None], stop_after=2)
+
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
             await proxy_selfheal.drive(**_drive_kwargs(connect=connect))
 
-        assert captured == []
+        assert [e[0] for e in captured] == [proxy_selfheal.UNREACHABLE_EVENT]
+        assert captured[0][2]["reason"] == "unhealable"
 
     async def test_the_client_going_away_reports_nothing(self, captured, monkeypatch):
         """The client's own exit is not a backend disconnect. It reaches
@@ -553,26 +585,25 @@ class TestCaptureSeamContract:
         assert seen["level"] == "error"
         assert seen["context"][1] == {"port": 7}
 
-    async def test_a_raising_seam_cannot_break_the_proxy_flow(self, monkeypatch):
+    async def test_a_raising_seam_cannot_break_the_proxy_flow(
+        self, monkeypatch, fast_backoff
+    ):
         """The reporter is a backstop's backstop: even a capture that throws
-        must leave the heal loop's control flow exactly as it was."""
+        must leave the heal loop's control flow exactly as it was — which since
+        F-889 (c) means the RETRY loop keeps going rather than the return
+        happening on schedule."""
 
         def _boom(*_a, **_k):
             raise RuntimeError("reporting exploded")
 
         monkeypatch.setattr(observability, "capture_lifecycle", _boom)
 
-        heals = []
-
         async def watch(_port):
             return
 
-        async def fake_heal(dead_port, **_kw):
-            heals.append(dead_port)
+        heals = _heal_counter(monkeypatch, answers=[None], stop_after=3)
 
-        monkeypatch.setattr(proxy_selfheal, "heal_backend", fake_heal)
-
-        with anyio.fail_after(5):
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
             await proxy_selfheal.drive(**_drive_kwargs(watch=watch))
 
-        assert heals == [PORT_A], "the flow must be untouched by a broken reporter"
+        assert heals == [PORT_A] * 3, "the flow must survive a broken reporter"

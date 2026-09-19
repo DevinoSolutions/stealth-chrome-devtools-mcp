@@ -39,6 +39,8 @@ schema and its read-merge-write protocol are that module's and always were.
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import TYPE_CHECKING, NamedTuple
 
 from stealth_chrome_devtools_mcp.embedded import backend_registry
@@ -47,10 +49,22 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+_logger = logging.getLogger("stealth.proxy")
+
 #: The one word the down/wedged/responsive ladder cannot reach: an entry whose
 #: ``port`` is not an int (the record tolerates hand-editing and two schema
 #: versions). There is nothing to probe, so there is no liveness claim to make.
 NO_PORT = "no port recorded"
+
+#: How often the backend stamps its own entry, and how old a stamp may be and
+#: still be evidence. The two are stated together because their RELATION is the
+#: decision: 30 / 3 is TEN consecutive missed loop iterations. Sized against the
+#: incident rather than against taste — a backend answering ``initialize`` in
+#: 227 ms is stamping, and a backend starved badly enough to miss ten
+#: consecutive iterations while its socket still answers is a state nobody has
+#: observed. A reader cannot change one without seeing the other.
+HEARTBEAT_INTERVAL_SECONDS = 3.0
+HEARTBEAT_STALE_SECONDS = 30.0
 
 
 def probe_port(
@@ -106,6 +120,135 @@ def probe_recorded(
         if best[0] == "none" or (best[0] == "down" and verdict == "wedged"):
             best = (verdict, port)
     return best
+
+
+def self_report(path: Path, port: int) -> float | None:
+    """How long ago the backend on ``port`` last said its own event loop was
+    turning, or ``None`` when it has not said so recently enough to be evidence
+    (F-889 (b)).
+
+    **The second witness, and the only one a starved prober cannot fake.** Every
+    other liveness answer in this tree is a claim by the PROBER: a timeout says
+    "it did not answer in N seconds", which is a fact about the backend only
+    while we were awake to hear an answer. On 2026-09-18 the machine had 2.4 GB
+    free of 125.7 and 114 stdio proxies paged out to ~0 MB; their 2 s probes
+    timed out, the watchdog condemned, and the backend they condemned answered
+    an ``initialize`` in 227 ms throughout. This function is how that proxy can
+    tell "the backend is dead" from "I was not scheduled": no HTTP, no socket,
+    no thread — one small local JSON read.
+
+    It answers the AGE rather than a bool so the reporting line can say how
+    fresh the evidence was; callers test ``is not None``, never truthiness,
+    because a stamp written this instant is ``0.0``.
+
+    ``None`` — i.e. no evidence — for every one of: no entry on that port, no
+    stamp (a 2.1.9 backend, which is what makes a mixed fleet degrade to
+    today's behaviour instead of misreading silence as death), a hand-edited
+    non-numeric stamp, a ``heartbeat_pid`` that disagrees with the entry's own
+    ``pid`` (the stamp is a leftover from a predecessor on that port, not a
+    claim by the process recorded there), and a stamp further than
+    :data:`HEARTBEAT_STALE_SECONDS` from now IN EITHER DIRECTION — a clock that
+    jumped forward is not a backend that is alive.
+
+    ``time.time()`` and not ``time.monotonic()`` deliberately: the writer and
+    the reader are DIFFERENT PROCESSES, and monotonic clocks are not comparable
+    across them. The cost is that a wall-clock step changes an age, which the
+    symmetric bound above turns into "no evidence" — falling back to the
+    confirmation phase, i.e. to exactly today's behaviour.
+    """
+    entry = backend_registry.backend_on_port(backend_registry.read_record(path), port)
+    if entry is None:
+        return None
+    at = entry.get(backend_registry.HEARTBEAT_AT)
+    if isinstance(at, bool) or not isinstance(at, int | float):
+        return None
+    if entry.get(backend_registry.HEARTBEAT_PID) != entry.get("pid"):
+        return None
+    age = time.time() - float(at)
+    return age if abs(age) <= HEARTBEAT_STALE_SECONDS else None
+
+
+def stamp(path: Path, port: int, pid: int) -> bool:
+    """Write one heartbeat; never raise. True iff the record was updated.
+
+    The write is ``backend_registry.stamp_heartbeat``'s — the record's schema
+    and its read-merge-write protocol are that module's and always were, and a
+    stamp that could resurrect a forgotten entry is the failure it guards.
+    """
+    try:
+        return backend_registry.stamp_heartbeat(
+            path, port=port, pid=pid, at=time.time()
+        )
+    except Exception:  # noqa: BLE001  PERMANENT(a liveness stamp must not kill the backend)
+        _logger.debug("could not stamp the backend heartbeat", exc_info=True)
+        return False
+
+
+async def beat(
+    path: Path, port: int, pid: int, *, interval: float | None = None
+) -> None:
+    """Stamp ``path`` every ``interval`` seconds, forever, from the caller's
+    event loop.
+
+    **It must run on the EVENT LOOP, and that is the entire design.** The
+    failure the watchdog exists for (F-501) is a backend whose dispatch loop is
+    dead while its socket stays open. A heartbeat on an OS thread, or in a
+    signal handler, would keep stamping straight through exactly that failure
+    and would defend the one backend that deserves condemning. Driven from the
+    loop it cannot: the same wedge that stops answering ``initialize`` stops
+    this coroutine being resumed, the stamp ages past
+    :data:`HEARTBEAT_STALE_SECONDS`, and the strikes plus the confirmation
+    condemn it as they always did. **The heartbeat can only ever say "I am
+    scheduled and my loop is turning"** — which is precisely the fact a starved
+    prober cannot establish and has no other way to obtain.
+
+    The WRITE itself goes to a worker thread: it is an ``os.replace`` of a
+    sub-kilobyte file, but ``_commit``'s Windows sharing retry can sleep up to
+    0.1 s, and the event loop this exists to demonstrate is turning must not be
+    the thing blocked to demonstrate it. The loop is still the thing being
+    measured — it has to schedule the hand-off and be resumed afterwards.
+    """
+    import anyio
+
+    every = HEARTBEAT_INTERVAL_SECONDS if interval is None else interval
+    while True:
+        await anyio.to_thread.run_sync(stamp, path, port, pid)
+        await anyio.sleep(every)
+
+
+_BEATING = False
+
+
+def start_beating(path: Path, port: int, pid: int) -> bool:
+    """Start :func:`beat` on the running loop, once per process; True iff this
+    call is the one that started it.
+
+    Idempotent on ``session_hygiene.install()``'s precedent and for the same
+    reason — ``server.py`` is executed three times under runpy — and a no-op
+    with no running loop, so a caller outside an event loop gets no heartbeat
+    rather than an exception. Never raises: a backend that cannot stamp is a
+    backend without a second witness, which degrades to 2.1.9's behaviour, and
+    that is strictly better than a backend that will not serve.
+    """
+    global _BEATING  # noqa: PLW0603  PERMANENT(once-per-process guard; the suite patches this name)
+    if _BEATING:
+        return False
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    _BEATING = True
+    # Held so the task is not garbage-collected mid-flight; it outlives the
+    # process's serving life by construction, so nothing ever cancels it.
+    loop.create_task(beat(path, port, pid))  # noqa: RUF006  PERMANENT(process-lifetime task)
+    _logger.info(
+        "backend heartbeat started on port %d every %.1fs",
+        port,
+        HEARTBEAT_INTERVAL_SECONDS,
+    )
+    return True
 
 
 class Surveyed(NamedTuple):

@@ -29,11 +29,30 @@ the cold-start lock does what it already does for a 40-session startup herd:
 exactly one wins and spawns, the rest find the lock held, return immediately and
 adopt what the winner brings up.
 
-**Bounded, then honest.** ``HEAL_ATTEMPTS`` tries, each with a
+**Bounded, then patient** (F-889 (c)). ``HEAL_ATTEMPTS`` tries, each with a
 ``HEAL_ATTEMPT_SECONDS`` readiness budget and a fixed backoff between them, is
-the entire allowance. A proxy that still has no backend returns to its caller
-and the pre-F-838 teardown runs — a backstop that retried forever would just be
-a proxy pretending to be alive, which is the failure mode it exists to end.
+one recovery's allowance. What happens when that allowance is gone USED to be a
+return, which ``singleton._proxy_streams`` read as "tear down for reconnect" —
+so the proxy process exited and Claude Code rendered it as "Connection closed".
+The premise under that exit has been false since this module's first line: *MCP
+clients do not reliably respawn a stdio server mid-session*. F-838 removed the
+exit for a backend death it could heal and left it for a heal that failed; on
+2026-09-18 a RAM-starved machine took that door 114 times in one window, for a
+backend that was answering ``initialize`` in 227 ms.
+
+So the exit is DELETED, not lengthened. A proxy with no backend backs off
+(``RETRY_BASE_SECONDS`` doubling to ``RETRY_MAX_SECONDS``, jittered so a fleet
+orphaned by one death does not re-enter the startup path in the same second) and
+keeps trying for as long as its stdio pipe is open. ``MAX_CONSECUTIVE_HEALS``
+becomes the trigger for that backoff rather than for an exit: three deaths in a
+row still mean "stop hammering", but "stop hammering" is a 60 s wait, not the
+end of the session. A generation that never became READY is an incident to
+retry too — that was the last door the exit still had. The client keeps its MCP
+server; calls issued while no backend exists are answered by ``PendingCalls`` as
+they always were, and the very next call after a backend returns works. The one
+lifetime this process ever legitimately had is the CLIENT's: ``pump_client``'s
+EOF cancels the task group from outside, and :func:`drive` simply never returns
+on its own.
 
 **In-flight calls are failed, never replayed.** ``PendingCalls`` reports the
 requests the dead backend was actually holding as JSON-RPC errors, so the client
@@ -89,6 +108,16 @@ HEAL_BACKOFF_SECONDS = 1.0
 MAX_CONSECUTIVE_HEALS = 3
 HEAL_STREAK_RESET_SECONDS = 300.0
 
+# F-889 (c). The wait between retries once a recovery has exhausted its own
+# allowance. Exponential so a machine that is genuinely down is not hammered,
+# CAPPED so a backend that comes back is picked up within a minute rather than
+# hours, and JITTERED because the population this exists for is a FLEET: 114
+# proxies orphaned by one death would otherwise re-enter ``ensure_running`` in
+# the same second, which is the herd the cold-start lock already has to absorb.
+RETRY_BASE_SECONDS = 2.0
+RETRY_MAX_SECONDS = 60.0
+RETRY_JITTER = 0.25
+
 # JSON-RPC "Internal error" — the only reserved code that fits "the server this
 # call was sent to stopped existing".
 _BACKEND_DIED_CODE = -32603
@@ -100,7 +129,13 @@ _BACKEND_DIED_CODE = -32603
 # a report nobody can search for.
 CONDEMNED_EVENT = "proxy: backend condemned"
 HEALED_EVENT = "proxy: backend healed"
-TEARDOWN_EVENT = "proxy: teardown after failed heal"
+# F-889 (c) RENAMES the third. ``TEARDOWN_EVENT`` ("proxy: teardown after failed
+# heal") described a thing that no longer happens — the proxy does not tear down
+# — and a report whose name outlives its meaning is worse than no report. Its
+# successor answers the same question a search for "how often does stealth still
+# disconnect" was asking: how often a proxy enters retry, with the same two
+# ``reason`` values it always carried.
+UNREACHABLE_EVENT = "proxy: backend unreachable, retrying"
 
 # Why a backend generation ended, for the generations recovery answers (F-843).
 # One vocabulary, carried on every report the recovery emits, because "the
@@ -110,6 +145,12 @@ TEARDOWN_EVENT = "proxy: teardown after failed heal"
 WATCHDOG_CAUSE = "watchdog"  # F-820's strikes + confirmation concluded
 CONNECTION_LOST_CAUSE = "connection_lost"  # the leg broke; the backend is gone
 CONNECTION_RESET_CAUSE = "connection_reset"  # the leg broke; the backend is not
+# F-889 (c): readiness never came, so nothing was ever there to lose. It used to
+# be the one ending that was not an incident, which made it the last door the
+# proxy's exit still had. It is an incident to RETRY now, and it is named rather
+# than folded into a neighbour because what a reader must not conclude from it
+# is that a backend died.
+NEVER_READY_CAUSE = "never_ready"
 # Internal sentinel: the bridge leg ended while armed, verdict not yet asked.
 _BRIDGE_ENDED = "bridge_ended"
 
@@ -135,23 +176,43 @@ def _report(message: str, *, level: str = "warning", **fields: object) -> None:
         _logger.debug("could not report a lifecycle transition", exc_info=True)
 
 
-def _teardown(*, port: int, generation: int, reason: str, streak: int) -> None:
-    """The one report for the ONE remaining user-visible disconnect.
+def _retry_delay(attempt: int) -> float:
+    """The wait before retry number ``attempt`` (1-based), jittered.
 
-    ``drive`` gives up on two axes — this recovery failed (``unhealable``) and
-    recoveries keep failing (``flapping``) — but the user experiences a single
-    thing: the MCP server went away. One event with a ``reason``, not two event
-    names, so a search for "how often does stealth still disconnect" is one
-    query. ERROR level: after F-838 this is the only path left that ends a
-    session, so it is not a warning about something, it is the something.
+    ``random`` is the right tool and not a security question: the jitter exists
+    to de-synchronise a fleet of proxies, and predicting it buys an attacker who
+    is already inside the process nothing.
+    """
+    import random
+
+    base = min(RETRY_BASE_SECONDS * 2.0 ** (attempt - 1), RETRY_MAX_SECONDS)
+    return base * (1.0 + random.uniform(-RETRY_JITTER, RETRY_JITTER))  # noqa: S311  PERMANENT(de-synchronising a fleet is not cryptography)
+
+
+def _unreachable(  # noqa: PLR0913  PERMANENT(function interface)
+    *, port: int, generation: int, reason: str, streak: int, attempt: int, delay: float
+) -> None:
+    """The one report for "this proxy has no backend and is going to wait".
+
+    ``drive`` runs out of allowance on two axes — this recovery failed
+    (``unhealable``) and recoveries keep failing (``flapping``) — but what the
+    operator wants counted is a single thing: how long this session has been
+    without a server. One event with a ``reason``, not two event names, so the
+    question is one query. ERROR level, kept from its ``TEARDOWN_EVENT``
+    predecessor: the client is not being served right now, which is the one
+    thing a user still feels. ``attempt`` and ``delay`` are new and are the
+    point — a retry series that is still climbing reads very differently from
+    one parked at the 60 s cap.
     """
     _report(
-        TEARDOWN_EVENT,
+        UNREACHABLE_EVENT,
         level="error",
         port=port,
         generation=generation,
         reason=reason,
         consecutive_heals=streak,
+        attempt=attempt,
+        delay=round(delay, 1),
     )
 
 
@@ -387,15 +448,22 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
     ensure_running: Callable[[int], int | None],
     await_ready: Callable[..., Awaitable[bool]],
 ) -> None:
-    """Own the proxy's backend leg across backend GENERATIONS.
+    """Own the proxy's backend leg across backend GENERATIONS — forever.
 
-    One iteration per backend. A generation that ends with nothing to recover
-    from (the client went away, readiness never came) returns at once — that is
-    the pre-F-838 behaviour, untouched. Every OTHER ending is an incident with a
-    ``cause``, and every cause heals, while healing works and the deaths are not
-    a flap; ``replay()`` yields the client's original ``initialize`` so the next
-    generation opens with a real handshake and its own fresh ``mcp-session-id``.
-    Returning means the caller should tear down, which is what it always did.
+    One iteration per backend. EVERY ending is an incident with a ``cause``, and
+    every cause heals; ``replay()`` yields the client's original ``initialize``
+    so the next generation opens with a real handshake and its own fresh
+    ``mcp-session-id``.
+
+    **It does not return** (F-889 (c)). When a recovery runs out of allowance —
+    ``heal_backend`` gave up, or ``MAX_CONSECUTIVE_HEALS`` deaths came back to
+    back — this backs off and tries again, for as long as the client's stdio
+    pipe is open. It used to return, and ``singleton._proxy_streams`` read that
+    as "tear down for reconnect": the proxy process exited and every Claude Code
+    session on the machine saw "Connection closed", for a backend that was
+    answering in 227 ms. The ONE exit is the client's own: ``pump_client``'s EOF
+    cancels this task group from OUTSIDE, and that cancellation unwinds through
+    ``_one_generation``'s ``async with`` rather than producing a verdict here.
 
     The cause never branches the recovery, and that is deliberate: healing IS
     ``ensure_running``, which reuses a live same-identity backend and spawns only
@@ -406,50 +474,79 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
     proxy pretending to be alive exactly as much as a backend that keeps dying.
 
     ``generation`` exists only to be reported (F-827): a heal is far easier to
-    read as "the 3rd backend under this proxy" than as a port number, and both
-    give-up exits carry it too, so a teardown says how much recovery preceded
-    it. Nothing in the loop's decisions reads it.
+    read as "the 3rd backend under this proxy" than as a port number, and the
+    backoff reports carry it too, so an unreachable line says how much recovery
+    preceded it. Nothing in the loop's decisions reads it.
     """
+    import anyio
+
     current: int = port
     resend: object = None
     streak = 0
     generation = 1
+    attempt = 0
     while True:
         started = time.monotonic()
-        cause = await _one_generation(
-            url=url_for(current),
-            replay_msg=resend,
-            port=current,
-            connect=connect,
-            watch=watch,
-            confirm_alive=confirm_alive,
-            pending=pending,
-            client_write=client_write,
+        # A generation that never became READY answers None. That used to be the
+        # one ending that was not an incident, and so the last door the exit had.
+        cause = (
+            await _one_generation(
+                url=url_for(current),
+                replay_msg=resend,
+                port=current,
+                connect=connect,
+                watch=watch,
+                confirm_alive=confirm_alive,
+                pending=pending,
+                client_write=client_write,
+            )
+            or NEVER_READY_CAUSE
         )
-        if cause is None:
-            return
         if time.monotonic() - started >= HEAL_STREAK_RESET_SECONDS:
             streak = 0  # that generation was a real working session
         streak += 1
+        healed = None
         if streak > MAX_CONSECUTIVE_HEALS:
             _logger.error(
-                "backend lost %d times in a row (%s); giving up", streak, cause
+                "backend lost %d times in a row (%s); backing off", streak, cause
             )
-            _teardown(
-                port=current, generation=generation, reason="flapping", streak=streak
+        else:
+            healed = await heal_backend(
+                current,
+                ensure_running=ensure_running,
+                await_ready=await_ready,
+                url_for=url_for,
             )
-            return
-        healed = await heal_backend(
-            current,
-            ensure_running=ensure_running,
-            await_ready=await_ready,
-            url_for=url_for,
-        )
-        if healed is None:
-            _teardown(
-                port=current, generation=generation, reason="unhealable", streak=streak
+        while healed is None:
+            # The one wait. Whichever allowance ran out, the remedy is the same
+            # — stop hammering, stay connected, ask again — so there is one loop
+            # and a ``reason``, not two shapes of giving up.
+            attempt += 1
+            delay = _retry_delay(attempt)
+            _logger.error(
+                "no backend for port %d; retrying in %.1fs (attempt %d)",
+                current,
+                delay,
+                attempt,
             )
-            return
+            _unreachable(
+                port=current,
+                generation=generation,
+                reason="flapping" if streak > MAX_CONSECUTIVE_HEALS else "unhealable",
+                streak=streak,
+                attempt=attempt,
+                delay=delay,
+            )
+            await anyio.sleep(delay)
+            # The wait IS the flap remedy, so the streak has been served.
+            streak = 0
+            healed = await heal_backend(
+                current,
+                ensure_running=ensure_running,
+                await_ready=await_ready,
+                url_for=url_for,
+            )
+        attempt = 0
         generation += 1
         # The recovery the user never saw. Reported at INFO because it is the
         # denominator: a teardown means little without how often healing WORKED.

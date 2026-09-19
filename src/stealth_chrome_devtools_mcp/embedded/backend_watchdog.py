@@ -25,8 +25,39 @@ Its history, unchanged by the move:
 * **F-856** — that gate now spends its patience in fairly scheduled seconds
   (``scheduling_lag``), so a confirmation reached while this process itself was
   not being scheduled is no longer mistaken for evidence about the backend. The
-  strikes are untouched: they never condemned on their own, so their timing was
-  never the thing to make elastic.
+  strikes were left untouched: they never condemned on their own, so their
+  timing did not look like the thing to make elastic.
+* **F-889** — it was. Measured 2026-09-18: the machine had 2.4 GB free of 125.7
+  and 114 stdio proxies paged out to ~0 MB, so the STRIKE phase's ``sleep(2.0)``
+  and each 2 s probe were spent on a process that was awake for almost none of
+  them, while the backend they condemned answered ``initialize`` in 227 ms with
+  no error in its own log. 829 condemnations in seven days, and every Claude
+  Code session on the machine saw "Connection closed" at once. Two things
+  changed here, and the second is why the first is not merely a longer wait:
+
+  (a) a strike run may not conclude until a :class:`~scheduling_lag.FairWindow`
+  of ``interval * (failures_before_teardown - 1)`` has been SPENT — charged in
+  fair seconds, so a run that reached three strikes without this process being
+  scheduled defers instead of condemning. On an idle machine nothing changes:
+  the per-tick charge is ``interval * (1 + probe / nap_actual)``, which is
+  ``>= interval`` always, so the remaining ticks always spend the window and the
+  human-pinned ~12 s hard-down detection stands. Under starvation it stretches
+  and still TERMINATES, because ``MAX_STRETCH`` bounds the window at 4x its
+  patience in wall seconds.
+
+  (b) a condemnation now needs TWO witnesses, and the second one is the backend.
+  ``heartbeat`` reports how long ago the backend said its own event loop was
+  turning (``backend_liveness.self_report``: one small local JSON read, no HTTP,
+  no socket, no thread). A fresh self-report against a failed client probe means
+  "I am starved", never "it is dead", so the run RESETS. A stale or absent one
+  falls through to the confirmation phase exactly as before — which is what
+  keeps a mixed fleet, where the backend is 2.1.9 and stamps nothing, behaving
+  precisely as it does today.
+
+Both collaborators are OPTIONAL and both defaults are inert where the existing
+suite drives this: with ``interval=0.0`` the window has patience ``0.0`` and is
+expired on its first ask, and with no ``heartbeat`` supplied there is no second
+witness to consult.
 """
 
 from __future__ import annotations
@@ -34,6 +65,8 @@ from __future__ import annotations
 import inspect
 import logging
 from typing import TYPE_CHECKING
+
+from stealth_chrome_devtools_mcp.embedded import scheduling_lag
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -53,6 +86,8 @@ async def watch_liveness(  # noqa: PLR0913  PERMANENT(function interface)
     interval: float = 2.0,
     failures_before_teardown: int = 3,
     sleep: Callable[[float], Awaitable[None]] | None = None,
+    heartbeat: Callable[[], float | None] | None = None,
+    fair_window: Callable[[float], object] | None = None,
 ) -> None:
     """Return once the backend on ``port`` is CONFIRMED unusable.
 
@@ -66,6 +101,19 @@ async def watch_liveness(  # noqa: PLR0913  PERMANENT(function interface)
     verdict; both may be sync or awaitable, and both are supplied by the caller
     so this module never has to know which probes are ours. ``sleep`` is the
     tick, injectable for tests.
+
+    ``heartbeat`` is F-889's SECOND WITNESS — the backend's own report of how
+    long ago its event loop last turned, or ``None`` for "no evidence". It is
+    called INLINE and never through ``_ask``/a worker thread: it is a small
+    local JSON read, and the exact-call-list pin in
+    ``tests/test_watchdog_busy_vs_dead.py`` is what states that. Tested with
+    ``is not None``, never for truthiness, because a stamp written this instant
+    is ``0.0``.
+
+    ``fair_window`` builds the patience window a strike run must spend before it
+    may conclude; it defaults to ``scheduling_lag.FairWindow``, THE one home for
+    "was this process scheduled fairly", which is consumed here and never
+    modified.
     """
     import anyio
 
@@ -73,21 +121,69 @@ async def watch_liveness(  # noqa: PLR0913  PERMANENT(function interface)
         res = probe()
         return await res if inspect.isawaitable(res) else res
 
-    nap = sleep or anyio.sleep
+    build_window = scheduling_lag.FairWindow if fair_window is None else fair_window
+    # The window's patience is the nominal time the REMAINING ticks should take,
+    # so a run that has genuinely had its full detection window still concludes
+    # on the same strike it always did.
+    patience = interval * (failures_before_teardown - 1)
+
+    async def tick(window: object) -> None:
+        """Pause between probes. Once a run is open the pause IS the
+        measurement — ``FairWindow.nap`` waits and observes its own lag in one
+        call, which is what keeps the two from drifting apart — so it runs on a
+        worker thread: it sleeps, and run inline it would freeze the stdio pump
+        (plan_M1 §2.2 rejected alternative #3). A caller that injects its own
+        ``sleep`` OWNS the pause and therefore its measurement, and the window
+        then charges wall seconds — which is what the pre-F-889 watchdog did and
+        what the ``interval=0`` unit tests require.
+        """
+        if sleep is not None:
+            await sleep(interval)
+        elif window is None:
+            await anyio.sleep(interval)
+        else:
+            await anyio.to_thread.run_sync(window.nap, interval)
+
     consecutive = 0
+    window = None
     while True:
-        await nap(interval)
+        await tick(window)
         if await _ask(is_healthy):
-            consecutive = 0
+            consecutive, window = 0, None
             continue
         consecutive += 1
         _logger.warning(
             "probe failed %d/%d on port %d", consecutive, failures_before_teardown, port
         )
+        if window is None:
+            window = build_window(patience)
+        # Asked EVERY tick once a run is open, so each tick is charged at the
+        # lag that tick's own nap measured rather than at whatever the last one
+        # happened to be.
+        spent = window.expired()
         if consecutive < failures_before_teardown:
+            continue
+        if not spent:
+            _logger.warning(
+                "port %d: %d strikes, but this process is not being scheduled; "
+                "deferring the verdict (F-889)",
+                port,
+                consecutive,
+            )
+            continue
+        age = heartbeat() if heartbeat is not None else None
+        if age is not None:
+            # The one thing a starved prober cannot establish about itself.
+            _logger.info(
+                "backend on port %d reported its own loop turning %.1fs ago; "
+                "the probe timeouts are ours, not its death (F-889)",
+                port,
+                age,
+            )
+            consecutive, window = 0, None
             continue
         if not await _ask(confirm_probe):
             _logger.warning("backend on port %d confirmed unusable", port)
             return
         _logger.info("backend on port %d was busy, not dead", port)
-        consecutive = 0
+        consecutive, window = 0, None
