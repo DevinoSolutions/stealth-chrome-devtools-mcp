@@ -136,6 +136,12 @@ HEALED_EVENT = "proxy: backend healed"
 # disconnect" was asking: how often a proxy enters retry, with the same two
 # ``reason`` values it always carried.
 UNREACHABLE_EVENT = "proxy: backend unreachable, retrying"
+# F-889 review M2: the OTHER end of the same episode. An opening event with no
+# closing one cannot distinguish an outage that lasted four seconds from one that
+# is still running, so every ``UNREACHABLE_EVENT`` is answered by exactly one of
+# these — carrying what the series cost (``attempts``) and how long the client
+# went unserved (``outage_seconds``). INFO, because coming back is not an error.
+REACHABLE_EVENT = "proxy: backend reachable again"
 
 # Why a backend generation ended, for the generations recovery answers (F-843).
 # One vocabulary, carried on every report the recovery emits, because "the
@@ -189,8 +195,8 @@ def _retry_delay(attempt: int) -> float:
     return base * (1.0 + random.uniform(-RETRY_JITTER, RETRY_JITTER))  # noqa: S311  PERMANENT(de-synchronising a fleet is not cryptography)
 
 
-def _unreachable(  # noqa: PLR0913  PERMANENT(function interface)
-    *, port: int, generation: int, reason: str, streak: int, attempt: int, delay: float
+def _unreachable(
+    *, port: int, generation: int, reason: str, streak: int, delay: float
 ) -> None:
     """The one report for "this proxy has no backend and is going to wait".
 
@@ -200,9 +206,17 @@ def _unreachable(  # noqa: PLR0913  PERMANENT(function interface)
     without a server. One event with a ``reason``, not two event names, so the
     question is one query. ERROR level, kept from its ``TEARDOWN_EVENT``
     predecessor: the client is not being served right now, which is the one
-    thing a user still feels. ``attempt`` and ``delay`` are new and are the
-    point — a retry series that is still climbing reads very differently from
-    one parked at the 60 s cap.
+    thing a user still feels.
+
+    **Once per EPISODE — the first entry into backoff — and never per retry**
+    (F-889 review M2). The backoff climbs to a 60 s cap and then keeps going for
+    as long as the client is attached, so a report inside the loop has no bound:
+    one proxy left overnight is ~1400 ERROR events, and the population this
+    exists for is 114 proxies orphaned by a single backend death. That is not a
+    louder signal, it is the quota spent by the machine least able to say
+    anything new. ``delay`` is the FIRST wait, which is how a reader can tell an
+    episode that opened from one that has been parked at the cap — and how long
+    it actually ran is :data:`REACHABLE_EVENT`'s to say.
     """
     _report(
         UNREACHABLE_EVENT,
@@ -211,7 +225,6 @@ def _unreachable(  # noqa: PLR0913  PERMANENT(function interface)
         generation=generation,
         reason=reason,
         consecutive_heals=streak,
-        attempt=attempt,
         delay=round(delay, 1),
     )
 
@@ -377,14 +390,19 @@ async def _one_generation(  # noqa: PLR0913  PERMANENT(function interface)
     ``armed`` is also what separates the two ways the bridge leg can end. Ended
     while armed, this backend was demonstrably serving us a moment ago, so its
     leg breaking is an incident to confirm (F-843). Ended BEFORE it — readiness
-    never came — nothing was ever there to lose: that keeps its pre-F-838
-    answer, ``None``, so a proxy whose backend never booted still fails honestly
-    instead of grinding through a recovery budget.
+    never came — nothing was ever there to lose, and this answers ``None``.
 
-    Returning ``None`` is also the client's exit, but only by never being
-    reached: a client that goes away cancels this task group from OUTSIDE, and
-    that cancellation unwinds through the ``async with`` below rather than
-    producing a verdict at all.
+    **``None`` is no longer "fail honestly and stop"** (F-889 (c)). It used to
+    be: a proxy whose backend never booted returned, and the process exited. That
+    was the last door the exit had, and an ordinary one — a backend slower than
+    ``BACKEND_READY_TIMEOUT`` under herd load is the outage reached by the other
+    route. ``drive`` maps it to :data:`NEVER_READY_CAUSE` and retries like every
+    other ending; what this function still owes is the DISTINCTION, so the report
+    can say a backend was never there rather than implying one died.
+
+    The client's exit passes through here only by never being reached: a client
+    that goes away cancels this task group from OUTSIDE, and that cancellation
+    unwinds through the ``async with`` below rather than producing a verdict.
     """
     import anyio
 
@@ -517,26 +535,32 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
                 await_ready=await_ready,
                 url_for=url_for,
             )
+        episode_started = time.monotonic()
         while healed is None:
             # The one wait. Whichever allowance ran out, the remedy is the same
             # — stop hammering, stay connected, ask again — so there is one loop
             # and a ``reason``, not two shapes of giving up.
             attempt += 1
             delay = _retry_delay(attempt)
+            # The durable log keeps EVERY attempt — it is a local file nobody
+            # pays for, and a retry series climbing toward the cap is exactly
+            # what a post-mortem reads. Sentry gets the episode, not the series.
             _logger.error(
                 "no backend for port %d; retrying in %.1fs (attempt %d)",
                 current,
                 delay,
                 attempt,
             )
-            _unreachable(
-                port=current,
-                generation=generation,
-                reason="flapping" if streak > MAX_CONSECUTIVE_HEALS else "unhealable",
-                streak=streak,
-                attempt=attempt,
-                delay=delay,
-            )
+            if attempt == 1:
+                _unreachable(
+                    port=current,
+                    generation=generation,
+                    reason=(
+                        "flapping" if streak > MAX_CONSECUTIVE_HEALS else "unhealable"
+                    ),
+                    streak=streak,
+                    delay=delay,
+                )
             await anyio.sleep(delay)
             # The wait IS the flap remedy, so the streak has been served.
             streak = 0
@@ -545,6 +569,17 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
                 ensure_running=ensure_running,
                 await_ready=await_ready,
                 url_for=url_for,
+            )
+        if attempt:
+            # The episode closed. Without this point every outage that recovered
+            # is indistinguishable in the data from one still running.
+            _report(
+                REACHABLE_EVENT,
+                level="info",
+                port=healed,
+                generation=generation,
+                attempts=attempt,
+                outage_seconds=round(time.monotonic() - episode_started, 1),
             )
         attempt = 0
         generation += 1

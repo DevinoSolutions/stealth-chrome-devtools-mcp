@@ -114,15 +114,39 @@ what the pre-F-889 watchdog did and what the `interval=0` unit tests require.
 ### (b) The backend is a witness to its own liveness
 
 **Condemnation now needs two witnesses, and the second one is the backend.** The
-backend stamps a wall timestamp and its pid into its own `server.json` entry every
-`HEARTBEAT_INTERVAL_SECONDS` (3 s) from an **asyncio task on its event loop**; the
-proxy reads it with **no HTTP, no socket and no thread** — one small local JSON read.
+backend stamps a wall timestamp and its pid into a per-port **sidecar**,
+`~/.stealth-mcp/heartbeat-<port>.json`, every `HEARTBEAT_INTERVAL_SECONDS` (3 s) from
+an **asyncio task on its event loop**; the proxy reads it with **no HTTP, no socket
+and no thread** — one small local JSON read.
 
 | probe | heartbeat | verdict |
 |---|---|---|
-| times out | fresh (≤ 30 s old, pid matches) | busy, **or I am starved** — never dead. Strike run resets. |
+| times out | fresh (≤ 30 s old, pid matches) | busy, **or I am starved** — never dead. Strike run resets, up to `HEARTBEAT_VETOES` = 10 runs. |
+| times out | fresh, budget spent | the confirmation phase runs — the loop is alive, the LISTENER is not |
 | times out | stale | the confirmation phase runs, exactly as today |
 | times out | absent | the confirmation phase runs, exactly as today |
+
+**A sidecar, and not two fields on the `server.json` entry.** The first pass put them
+on the entry and wrote them back through the same whole-record read-modify-write every
+other writer here uses. Every other writer runs under the cold-start lock; this one
+cannot, because a backend taking that lock every 3 s would serialise itself against
+every proxy start on the machine. Unlocked, that read-modify-write is a lost update by
+construction, and the review measured both harms it produces: a sibling's
+`record_backend` landing in the window was written back out of existence, and a
+`forget_entries` was undone from the pre-forget snapshot. A per-port file has exactly
+ONE writer — the backend on that port — so there is no merge to get wrong and no
+snapshot to hold. `backend_registry` still owns it: the name (`HEARTBEAT_NAME`), the
+shape, the atomic `_commit_json` and the deletion (`forget_entries` unlinks a forgotten
+entry's sidecar). `self_report` starts from the ENTRY and only then reads the sidecar,
+so a stamp can never be evidence about a backend the record no longer names.
+
+**And the veto is BOUNDED.** The heartbeat proves the event LOOP is turning; it does
+not prove the HTTP LISTENER is reachable, and those can come apart. An unconditional
+veto therefore traded the outage for a hang. `HEARTBEAT_VETOES` = 10 completed strike
+runs, each of which must spend its own `FairWindow` first — so the budget is counted
+in FAIR-time rounds, spent slowly by a genuinely starved proxy and at the nominal rate
+by a fairly scheduled one. It refills on any healthy tick or successful confirmation.
+The bound this buys is in §6 residual 2.
 
 **Why the event loop, and how a wedged-but-alive backend is still caught.** The
 failure the watchdog exists for (F-501) is a backend whose dispatch loop is dead while
@@ -140,12 +164,10 @@ starved badly enough to miss ten consecutive loop iterations while its socket st
 answers is a state nobody has observed. Both numbers live in `backend_liveness`, with
 their relation stated, so a reader cannot change one without seeing the other.
 
-The schema change is backward compatible in both directions. The two fields are
-optional and additive on a v3 entry: a 2.1.9 proxy reading a v3 record ignores them
-(`backends_in` copies entries whole), and a 2.1.9 backend writes none, so a
-2.2.0 proxy reads "absent" and behaves exactly as 2.1.9 did. `SCHEMA_VERSION` does
-not move, because nothing about the record's SHAPE changed — only two more optional
-fields on an entry that already tolerates hand-editing and two prior schemas.
+There is no schema change at all, in either direction. `server.json` is byte-for-byte
+the record it was: a 2.1.9 proxy reads it unchanged, a 2.1.9 backend writes no sidecar,
+and a 2.2.0 proxy reads "absent" and behaves exactly as 2.1.9 did. `SCHEMA_VERSION`
+does not move, and bumping it would have made an upgrade evict where it should adopt.
 
 ### (c) The proxy never exits because the backend is unreachable
 
@@ -171,12 +193,28 @@ lifetime it ever legitimately had; `_proxy_streams` cancels the task group from
 `pump_client`'s EOF, so the exit path is unchanged and `drive` simply never returns
 on its own.
 
+**"Never exits on its own decision about the backend" is not "never exits."** The same
+outage's cleanup found **116 stale proxy processes**, so a retry loop with nobody
+attached is this defect wearing the opposite sign. `client_presence` adds the SECOND
+exit and it is a fact about the outside world, not a decision about a server: the
+process that STARTED this proxy is captured at start as a `(pid, create_time)` PAIR —
+never a bare pid, which is recycled — and a task polling every `CHECK_SECONDS` = 60
+cancels the group once that exact process is gone. Every uncertainty resolves to
+PRESENT: a false "gone" disconnects a live session, while a false "present" costs one
+idle process the next EOF collects. Both exits live OUTSIDE `backend_leg`, so the
+backend still cannot end a session under any circumstances.
+
 The one report name changes with it. `TEARDOWN_EVENT`
 (`"proxy: teardown after failed heal"`, ERROR) described a thing that no longer
 happens; it is `UNREACHABLE_EVENT` (`"proxy: backend unreachable, retrying"`) now,
-shipped once per backoff with the same `reason` (`unhealable` / `flapping`), plus the
-attempt number and the delay. A search for "how often does stealth still disconnect"
-is answered by its successor: how often a proxy enters retry.
+shipped **once per outage EPISODE** — the first entry into backoff — with the same
+`reason` (`unhealable` / `flapping`) and the first delay, and answered by exactly one
+`REACHABLE_EVENT` (INFO) carrying `attempts` and `outage_seconds` when the episode
+closes. One per RETRY was the first pass's shape and is unbounded: the series climbs
+to a 60 s cap and then runs for as long as the client is attached, so one proxy left
+overnight is ~1400 ERROR events and the population this exists for is 114 of them. The
+durable proxy log still records every attempt — it is a local file nobody pays for,
+and a series climbing toward the cap is exactly what a post-mortem reads.
 
 ### (d) A newer backend is adopted, never evicted
 
@@ -186,14 +224,27 @@ desktop each evict the other on every proxy start. F-886 stops that when the los
 owns browsers. It does not stop it when neither does, and a fleet mid-upgrade is
 exactly the population where neither does yet.
 
-`singleton._identity_matches` gains one clause: **a recorded version strictly NEWER
-than ours matches.** A newer backend is therefore reusable, so `clear_stale` returns
-before the kill site, `_select_backend_port` never steps on its port, and the
-watchdog's confirmation passes for it. An OLDER backend is evicted exactly as before
-(if unprotected), and SAME version + different digest keeps issue #14's
-editable-install behaviour untouched — that comparison is still
-`backend_registry.fingerprint_mismatch`, so F-829's unreadable sentinel keeps its one
-meaning.
+**Two questions, two predicates — and the first pass answered both with one, which
+inverted F-886.** "Would I ADOPT what is on this port instead of spawning?" is
+`singleton._adoptable_identity`: ours, or a recorded version strictly NEWER than ours.
+"Is this entry MINE?" is `singleton._identity_matches`, unchanged since F-886.
+
+Widening `_identity_matches` to mean adoption made a newer stranger read as *ours*, so
+`backend_eviction.protected`'s condition 2 returned no browsers and the kill site
+**terminated a newer sibling that was momentarily unreachable and still holding its
+user's logged-in Chrome** (measured, review H1). It also handed `restart` the
+stranger's port back, which is precisely the F-886 regression that rule exists to
+prevent (review M4). Adopting forward means *step aside*, never *take the port*.
+
+So `_adoptable_identity` is read by the REUSE GATE (`_same_identity_backend_ready`) and
+by nothing else. A newer backend that ANSWERS is reusable, so `clear_stale` returns at
+its first answer and never reaches the kill; a newer backend that does NOT answer is a
+stranger's, so F-886 protects it while it owns a live browser and `_select_backend_port`
+steps aside from its port. `restart` and `stop` go on targeting our own identity's
+backend exactly as before. An OLDER backend is evicted exactly as before (if
+unprotected), and SAME version + different digest keeps issue #14's editable-install
+behaviour untouched — that comparison is still `backend_registry.fingerprint_mismatch`,
+so F-829's unreadable sentinel keeps its one meaning.
 
 The comparison lives in `build_identity.newer`, beside `version` — the one home for
 "which build is THIS process running" — as a plain numeric-segment compare.
@@ -359,23 +410,40 @@ that assert forward adoption and left the other 21 — including the ordering ta
    calls, and now they wait. For a long outage that is a client hanging on a tool call
    instead of losing its server. It is the deliberate trade (c) makes, and beyond 1024
    buffered messages `pump_client` itself blocks.
-2. **The heartbeat is a liveness claim, not a usefulness claim.** A backend whose
-   event loop turns but whose tool bodies all fail keeps stamping, and this witness
-   will keep vetoing its condemnation. That is correct — the watchdog's job was never
-   to judge tool health — but it means the ONE failure this makes slower to detect is
-   a backend that is scheduled and responsive at the loop level while being unable to
-   answer `initialize`. The confirmation phase still catches it; it just waits for the
-   stamp to age first (≤ 30 s).
-3. **Two writers, no lock, on `server.json`.** The heartbeat write is atomic
-   (`_write`'s tmp + `os.replace`) and re-reads first, but it does not hold the
-   cold-start lock, so a `record_backend` landing between the read and the write can
-   lose one stamp. The cost is one 3 s interval of extra age, and the next stamp
-   corrects it. Making the backend take the cold-start lock every 3 s would serialise
-   it against every proxy start on the machine, which is a much worse trade.
+2. **The heartbeat is a liveness claim, not a usefulness claim — and the veto it buys
+   is bounded at ~2 minutes.** A backend whose event loop turns but whose HTTP
+   listener never answers keeps stamping. The first pass let that veto condemnation
+   forever, i.e. it traded the outage for a hang; the review (M1) called it and
+   `backend_watchdog.HEARTBEAT_VETOES` = 10 is the answer. **The number that replaces
+   the earlier unmeasured "≤ 30 s" claim:** a veto costs one whole strike run, and a
+   run cannot conclude until its `FairWindow` is spent, so the budget is counted in
+   FAIR-time rounds. At the pinned defaults (`interval` 2.0,
+   `failures_before_teardown` 3) one run is 3 ticks plus a `FairWindow(4.0)` — about
+   **12 s** on a fairly scheduled machine, and at most `4.0 * MAX_STRETCH` = 16 s of
+   window plus its probes when starved. Eleven runs therefore reach the confirmation
+   gate after **≈ 132 s idle and ≤ ≈ 242 s under maximal starvation**, and that gate
+   then decides on its own `REUSE_PATIENCE_SECONDS` terms. The budget refills on any
+   healthy tick or successful confirmation, so it bounds one continuous failure
+   episode rather than the session. The cost is stated plainly: a loop-alive
+   listener-dead backend is detected in about two minutes rather than twelve seconds.
+   Nobody has observed that state; the state on the other side of the trade cost 114
+   sessions at once.
+3. **The heartbeat is a SIDECAR, and a stale sidecar can outlive a hand-edited
+   record.** The first pass wrote two fields onto the backend's own `server.json`
+   entry through a whole-record read-modify-write with no lock every three seconds,
+   which the review measured losing a sibling's `record_backend` and resurrecting an
+   entry `forget_entries` had just dropped (H3). `heartbeat-<port>.json` has exactly
+   one writer, so there is no merge and no snapshot; `stamp_heartbeat` never opens
+   `server.json` at all, and `forget_entries` deletes the sidecar with the entry. What
+   is left: a sidecar whose entry is removed by hand rather than through
+   `forget_entries` is never cleaned up. It is inert — `self_report` starts from the
+   ENTRY and requires the recorded `pid` to match — so the cost is one sub-kilobyte
+   file, and `cleanup --apply` goes through `forget_entries` like every other writer.
 4. **The heartbeat cadence costs one small file write every 3 s per backend.** It is
-   an `os.replace` of a sub-kilobyte file. On a spinning disk or a synced folder that
-   is not free, and the state dir is `~/.stealth-mcp` — which on this developer's
-   machine is NOT under OneDrive, but need not be true of every user.
+   an `os.replace` of a sub-kilobyte file, done on a worker thread. On a spinning disk
+   or a synced folder that is not free, and the state dir is `~/.stealth-mcp` — which
+   on this developer's machine is NOT under OneDrive, but need not be true of every
+   user. There is no knob to turn it off, deliberately (F-853's rule).
 5. **`MAX_STRETCH` still bounds (a).** A process starved beyond 4× for the whole strike
    run will still spend its window. What saves it then is (b), and what saves it if
    (b) is absent (a 2.1.9 backend) is nothing — a mixed fleet gets (a) and (c) but not
@@ -393,82 +461,109 @@ that assert forward adoption and left the other 21 — including the ordering ta
    window is not yet spent on the third strike, the run defers ONE tick, and the
    detection window is ~14 s instead of ~12 s in that rare case. It is not free to
    remove — charging the nominal `interval` instead of the observed time would stop
-   the window measuring anything — and `test_proxy_starvation_witness.py`'s
-   real-`FairWindow` node covers the ordinary case rather than this one.
-8. **(b) costs one small file write every 3 s per backend**, an `os.replace` of a
-   sub-kilobyte file, done on a worker thread. On a spinning disk or a synced folder
-   that is not free; the state dir is `~/.stealth-mcp`, which on this developer's
-   machine is NOT under OneDrive, but need not be true of every user. There is no
-   knob to turn it off, deliberately (F-853's rule): an operator cannot know their own
-   scheduler's lag better than the process measuring it.
-9. **The heartbeat starts with the FIRST MCP session, not at bind.** It is armed in
+   the window measuring anything. `test_proxy_starvation_witness.py`'s
+   real-`FairWindow` node now drives `scheduling_lag._now` rather than sleeping
+   (review L4), so it pins the ordinary arithmetic deterministically and does not
+   cover this case at all.
+8. **The heartbeat starts with the FIRST MCP session, not at bind.** It is armed in
    `app_lifespan`, which over streamable HTTP runs per session (guarded to once per
    process). A backend that has bound its socket but never been handshaked stamps
-   nothing — so its entry reads "absent", i.e. no evidence, and the confirmation phase
-   runs exactly as in 2.1.9. In practice the proxy's own readiness probe IS a session,
-   so the watchdog is never armed before the heartbeat is; the gap is real only for a
+   nothing — so it reads "absent", i.e. no evidence, and the confirmation phase runs
+   exactly as in 2.1.9. In practice the proxy's own readiness probe IS a session, so
+   the watchdog is never armed before the heartbeat is; the gap is real only for a
    backend nothing has ever talked to, which no proxy is watching.
-7. **§(e): the 81 temp-profile Chrome processes are NOT this product's, and nothing
-   should be done about them.** Traced end to end:
-   - `browser_manager._launch_browser` has exactly two branches
-     (`browser_manager.py:534-546`) and both pass `options.user_data_dir` —
-     `desktop_launch.launch_and_attach(...)` or `uc.Config(user_data_dir=...)`.
-     `_resolve_launch_args` never touches it.
-   - `BrowserManager.spawn_browser` has ONE caller in `src/`
-     (`tool_sections/browser_management.py:169`) and it always sets
-     `user_data_dir=selected_user_data_dir` from `clone_storage.resolve_profile_selection`.
-   - `resolve_profile_selection` has three returns, all `str(<concrete path>)`
-     (`clone_storage.py:963-968`, `:973-978`, `:896` via `_copy_clone_from_source`);
-     its only other exit RAISES. `_fallback_profile_selection` returns a dict carrying
-     the same non-empty dir, a fresh `resolve_profile_selection`, or `None` — and
-     `None` is re-raised by the caller (`browser_management.py:190-191`), never
-     launched on.
-   - `desktop_launch.launch_and_attach` passes the dir into `uc.Config`
-     (`desktop_launch.py:505-510`) and writes the resulting argv into its launcher
-     script.
-   - **The discriminator is the prefix.** nodriver 0.47's `Config.__init__` does
-     synthesize a profile when none is given — but through
-     `temp_profile_dir()`, which is `tempfile.mkdtemp(prefix="uc_")`. Re-verified
-     2026-09-19 against the installed library:
-     `path = os.path.normpath(tempfile.mkdtemp(prefix="uc_"))`. The orphans are
-     `tmp*`, which is `mkdtemp()`'s DEFAULT prefix and therefore cannot be
-     nodriver's.
-   - The 8 live `tmp*` Chrome roots at the time of the trace all share one parent, a
-     different local project's scraper (`-m src.main browser-scraper --workers 9`),
-     and their argv lacks `--remote-allow-origins=*`, which nodriver's `Config` adds
-     unconditionally to every browser this product launches.
-   - `process_cleanup._sweep_orphaned_temp_profiles` globs
-     `PROFILE_SWEEP_PREFIX = "uc_"` (`process_cleanup.py:50`, `:572`). Nothing under
-     `src/` matches `tmp*`, and **nothing should**: reaping a foreign Chrome is
-     precisely what F-811 forbids, and `tmp*` is the default prefix of every Python
-     program on the machine.
-   - **CORRECTION (2026-09-19).** This section previously claimed **zero** `uc_*`
-     directories on this box, and offered that as evidence that "no path in this
-     product has ever synthesized one". That measurement no longer holds and the
-     inference it supported was too strong: there are **18** `uc_*` directories in
-     `%LOCALAPPDATA%\Temp` right now. What they are, measured: **all 18 are EMPTY**
-     (no `Default\`), they were created today in three groups of six (10:18, 10:25,
-     10:36), and **no Chrome process on the machine has a `uc_*` or a `Temp\tmp*`
-     `--user-data-dir`** (51 `chrome.exe` alive, 0 matching either). The mechanism is
-     that `uc.Config.__init__` calls `temp_profile_dir()` **at construction**
-     (`if not user_data_dir: self._user_data_dir = temp_profile_dir()`), so merely
-     BUILDING a config without a profile creates a directory and no browser need ever
-     run in it. Six-at-a-time is the shape of a concurrent-spawn test.
-   - The claim that survives, and it is the one that matters, is the narrower one:
-     `src/` has exactly **two** `uc.Config(` sites (`browser_manager.py:539`,
-     `desktop_launch.py:505`) and **both pass `user_data_dir=` explicitly**, so the
-     product does not reach the synthesizing branch on any path traced above. And
-     even if one ever did, the resulting directory would match
-     `PROFILE_SWEEP_PREFIX = "uc_"` — our own sweep already covers exactly that
-     shape. The 81 `tmp*` orphans still cannot be ours, because `tmp*` is the one
-     prefix nodriver never produces.
+9. **Adoption and eviction are two predicates now, and only one of them moved.**
+   `_adoptable_identity` (ours, or strictly newer) is read by the reuse gate and by
+   nothing else; `_identity_matches` still means "mine" and is what
+   `backend_eviction.protected`, `port_for_context` and `own_or_first_port` ask, so
+   F-886 and the operator verbs are byte-for-byte what they were. The consequence to
+   name: a newer sibling that is NOT answering and owns NO browser is still evicted,
+   exactly like any other stranger's. Adopting forward protects a mid-upgrade fleet
+   from the ping-pong loop; it does not make a newer backend immortal.
+10. **`stop` targets the ADOPTION walk's backend, not an identity.** On a two-identity
+    desktop where BOTH backends answer, `stop` stops whichever the walk names first,
+    which is the sibling recorded first. That is pre-F-889 behaviour (it is
+    `_probe_backend_status`, which has never consulted an identity predicate) and
+    F-889 did not change it; `stop --port` names one explicitly. Pinned as it stands
+    in `test_mixed_version_adoption.py` rather than changed, because changing an
+    operator verb's target was explicitly out of scope for this fix.
+11. **The proxy's SECOND exit is a poll, not an event.** (c) says the proxy never ends
+    over the backend; the same outage's cleanup found 116 stale proxies, so
+    `client_presence` ends it when the process that STARTED it is gone (review M3).
+    That check is a `psutil` poll every `CHECK_SECONDS` = 60, not a notification, so a
+    client killed without its pipe closing leaves one idle proxy for up to a minute.
+    Every uncertainty resolves to PRESENT — no parent, psutil refusing, a partial
+    answer — because a false "gone" disconnects a live session while a false "present"
+    costs one idle process the next EOF collects. On POSIX a proxy reparented to init
+    before `capture()` runs is indistinguishable from one whose client is alive; the
+    capture is therefore the first thing `_proxy_streams` does.
+12. **`main()` returns without a proxy when `ensure_server_running` answers `None`**
+    (review L2). (c)'s "the ONE exit is the client's" is a statement about a RUNNING
+    proxy: before one exists, `server.main()`'s stdio branch falls through to
+    `runpy.run_path`, which starts a standalone stdio backend instead. That path is
+    unchanged by F-889 and is the pre-existing behaviour for "no port could be chosen
+    at all"; it is named here because the (c) sentence reads as absolute and is not.
+13. **§(e): the 81 temp-profile Chrome processes are NOT this product's, and nothing
+    should be done about them.** Traced end to end:
+    - `browser_manager._launch_browser` has exactly two branches
+      (`browser_manager.py:534-546`) and both pass `options.user_data_dir` —
+      `desktop_launch.launch_and_attach(...)` or `uc.Config(user_data_dir=...)`.
+      `_resolve_launch_args` never touches it.
+    - `BrowserManager.spawn_browser` has ONE caller in `src/`
+      (`tool_sections/browser_management.py:169`) and it always sets
+      `user_data_dir=selected_user_data_dir` from `clone_storage.resolve_profile_selection`.
+    - `resolve_profile_selection` has three returns, all `str(<concrete path>)`
+      (`clone_storage.py:963-968`, `:973-978`, `:896` via `_copy_clone_from_source`);
+      its only other exit RAISES. `_fallback_profile_selection` returns a dict carrying
+      the same non-empty dir, a fresh `resolve_profile_selection`, or `None` — and
+      `None` is re-raised by the caller (`browser_management.py:190-191`), never
+      launched on.
+    - `desktop_launch.launch_and_attach` passes the dir into `uc.Config`
+      (`desktop_launch.py:505-510`) and writes the resulting argv into its launcher
+      script.
+    - **The discriminator is the prefix.** nodriver 0.47's `Config.__init__` does
+      synthesize a profile when none is given — but through
+      `temp_profile_dir()`, which is `tempfile.mkdtemp(prefix="uc_")`. Re-verified
+      2026-09-19 against the installed library:
+      `path = os.path.normpath(tempfile.mkdtemp(prefix="uc_"))`. The orphans are
+      `tmp*`, which is `mkdtemp()`'s DEFAULT prefix and therefore cannot be
+      nodriver's.
+    - The 8 live `tmp*` Chrome roots at the time of the trace all share one parent, a
+      different local project's scraper (`-m src.main browser-scraper --workers 9`),
+      and their argv lacks `--remote-allow-origins=*`, which nodriver's `Config` adds
+      unconditionally to every browser this product launches.
+    - `process_cleanup._sweep_orphaned_temp_profiles` globs
+      `PROFILE_SWEEP_PREFIX = "uc_"` (`process_cleanup.py:50`, `:572`). Nothing under
+      `src/` matches `tmp*`, and **nothing should**: reaping a foreign Chrome is
+      precisely what F-811 forbids, and `tmp*` is the default prefix of every Python
+      program on the machine.
+    - **CORRECTION (2026-09-19).** This section previously claimed **zero** `uc_*`
+      directories on this box, and offered that as evidence that "no path in this
+      product has ever synthesized one". That measurement no longer holds and the
+      inference it supported was too strong: there are **18** `uc_*` directories in
+      `%LOCALAPPDATA%\Temp` right now. What they are, measured: **all 18 are EMPTY**
+      (no `Default\`), they were created today in three groups of six (10:18, 10:25,
+      10:36), and **no Chrome process on the machine has a `uc_*` or a `Temp\tmp*`
+      `--user-data-dir`** (51 `chrome.exe` alive, 0 matching either). The mechanism is
+      that `uc.Config.__init__` calls `temp_profile_dir()` **at construction**
+      (`if not user_data_dir: self._user_data_dir = temp_profile_dir()`), so merely
+      BUILDING a config without a profile creates a directory and no browser need ever
+      run in it. Six-at-a-time is the shape of a concurrent-spawn test.
+    - The claim that survives, and it is the one that matters, is the narrower one:
+      `src/` has exactly **two** `uc.Config(` sites (`browser_manager.py:539`,
+      `desktop_launch.py:505`) and **both pass `user_data_dir=` explicitly**, so the
+      product does not reach the synthesizing branch on any path traced above. And
+      even if one ever did, the resulting directory would match
+      `PROFILE_SWEEP_PREFIX = "uc_"` — our own sweep already covers exactly that
+      shape. The 81 `tmp*` orphans still cannot be ours, because `tmp*` is the one
+      prefix nodriver never produces.
 
-   **Recommendation: none.** No code change, no sweep, no widened matcher. Two
-   follow-ups are NAMED rather than done, because both land in files a sibling agent
-   (F-888) is editing right now and a tiny edit there would be a merge conflict for no
-   measured defect: (i) empty `uc_*` shells left by config construction are swept
-   only when a backend runs its startup sweep, so a box that only ever runs tests
-   accumulates them — harmless, zero bytes, but visible; (ii) whether an orphaned
-   browser's owner stamp reaches `browser_pids.json` early enough to be reapable when
-   its owning backend is gone was NOT re-verified here, because `browser_pid_registry`
-   and `process_cleanup` are exactly F-888's surface.
+    **Recommendation: none.** No code change, no sweep, no widened matcher. Two
+    follow-ups are NAMED rather than done, because both land in files a sibling agent
+    (F-888) is editing right now and a tiny edit there would be a merge conflict for no
+    measured defect: (i) empty `uc_*` shells left by config construction are swept
+    only when a backend runs its startup sweep, so a box that only ever runs tests
+    accumulates them — harmless, zero bytes, but visible; (ii) whether an orphaned
+    browser's owner stamp reaches `browser_pids.json` early enough to be reapable when
+    its owning backend is gone was NOT re-verified here, because `browser_pid_registry`
+    and `process_cleanup` are exactly F-888's surface.

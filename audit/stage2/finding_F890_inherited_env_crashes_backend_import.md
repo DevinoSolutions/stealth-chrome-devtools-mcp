@@ -118,6 +118,37 @@ behaviour is byte-identical (`tests/test_singleton_stop_restart.py::TestSpawnEnv
 still passes unchanged) and `singleton.py` went 999 -> 997 LOC rather than growing,
 which is what left room for F-889's wiring in the same file.
 
+### Added by the review (M5) — the same table, applied to our OWN environment
+
+The composer is not every path by which this package imports `fastmcp`. Two more reach
+that import with the operator's environment untouched:
+
+- `server.main()`'s `runpy` fallthrough — `--transport http` runs `embedded/server.py`
+  **in this process**, so an operator with a stray `FASTMCP_PORT=""` in their shell gets
+  the identical import-time `ValidationError`, with the identical absence of a log line;
+- `stealth-chrome-devtools serve --http`, which reaches the same line through
+  `cli._cmd_serve`.
+
+`backend_env.scrub_process_env()` is `scrub` applied to `os.environ`, called ONCE as the
+first statement of `server.main()` — the one entrypoint every one of those paths goes
+through, including `_cmd_serve`, which delegates to it. One function, one table, one
+call site. The composer keeps its own call because `restart_backend` reaches it from the
+ops CLI without passing through that entrypoint at all.
+
+**The `os.environ` exception, argued rather than assumed.** This repo confines
+`os.environ` to `settings.py`. That rule is about CONFIGURATION: every `STEALTH_MCP_*`
+knob is a typed field in one home, and a second reader of one is a second answer. This
+reads no configuration and produces no value — it deletes a THIRD PARTY's names from our
+own process before a library parses them, by the table stated one function above.
+Putting the call in `settings.py` would move a `FASTMCP_` prefix into the `STEALTH_MCP_*`
+home and make `settings` an importer of `embedded/`; splitting the table from its
+application would put one rule in two files. Neither is better than one named exception,
+so the deviation is named here and in the module docstring.
+
+Deleting from `os.environ` is a real `unsetenv`, so the removal also covers anything the
+process later spawns — which is why the composer's call is belt-and-braces rather than
+the only defence. `scrub` takes a `MutableMapping` for exactly these two callers.
+
 The prefix constant lives in `backend_env`, not in a test, and a test proves it still
 covers the installed library: `tests/test_backend_env_scrub.py` imports
 `fastmcp.settings.Settings`, reads `env_prefixes` off its own `model_config`, and
@@ -145,9 +176,12 @@ worse outcome than a crash that names itself.
 
 ## 4. Blast radius
 
-`scrub` is called exactly once, on a `dict` copy that `_start_server_process` owns.
-It never touches `os.environ`, so the proxy's own environment is unchanged and no
-other process is affected.
+`scrub` has two callers. `_start_server_process` passes a `dict` copy it owns, so that
+call affects nothing but the child it is about. `scrub_process_env` passes `os.environ`
+and therefore DOES change the running process — deliberately, and only by removing
+`FASTMCP_*` and `STEALTH_MCP_NO_AUTO_RECOVERY`, none of which any code of ours reads.
+For the stdio proxy that is a no-op in effect; for the `runpy` fallthrough it is the
+whole fix.
 
 A backend that WANTED a `FASTMCP_*` setting loses it. There is no such caller: none of
 our code reads one, `mcp.run` is given host and port explicitly, and
@@ -168,7 +202,13 @@ The `.env` file is a residual and not addressed here; see §6.
   case-folded `fastmcp_port` go too;
 - `STEALTH_MCP_*`, `PATH` and every unrelated name survive;
 - `STEALTH_MCP_NO_AUTO_RECOVERY` still goes, so absorbing the pop did not lose it;
-- `scrub` never touches `os.environ` — the proxy's own environment is unchanged;
+- `scrub` never touches `os.environ` — the child-env path leaves the composer's own
+  environment unchanged;
+- **the M5 half**: `server.main()` with `--transport http` reaches `runpy` with
+  `FASTMCP_PORT` already absent from `os.environ`, the stdio branch is scrubbed too
+  (one call at the top of the one entrypoint, not one per branch), and
+  `scrub_process_env` is pinned to be `scrub(os.environ)` rather than a second name
+  table;
 - the INFO line names the variables and carries no value;
 - the library pin: every prefix in the installed `fastmcp.settings.Settings`'
   `env_prefixes` starts with `backend_env.FASTMCP_PREFIX`, and `port` is still

@@ -56,9 +56,31 @@ the same sentence as the one above ("a name in the parent's environment must not
 reach a decision the backend makes for itself"), so it lives here rather than as
 a second removal site two lines away from this one.
 
-A leaf: stdlib only, and it never touches ``os.environ`` — it mutates the dict
-copy ``_start_server_process`` owns, so the proxy's own environment is unchanged
-and no other process is affected. The removed NAMES are logged, never their
+**Two call sites, one rule** (F-890 review M5). The child-env composer is not
+every path by which this package imports ``fastmcp``: ``server.main()``'s
+``runpy`` fallthrough runs ``embedded/server.py`` IN THIS PROCESS — that is what
+``--transport http`` does — and ``stealth-chrome-devtools serve --http`` reaches
+the same line through ``cli._cmd_serve``. An operator with a stray
+``FASTMCP_PORT=""`` in their shell gets the identical import-time
+``ValidationError`` there, with the identical absence of a log line. So
+:func:`scrub_process_env` applies the SAME table to our own environment, once, at
+the top of the one entrypoint every path goes through. The composer keeps its own
+call because ``restart_backend`` reaches it from the ops CLI without passing
+through that entrypoint at all.
+
+That second function READS ``os.environ``, which the repo otherwise confines to
+``settings.py``. Deliberate, and narrow: that rule is about CONFIGURATION — every
+``STEALTH_MCP_*`` knob is a typed field in one home, and a second reader of one
+is a second answer. This reads no configuration and produces no value; it deletes
+a THIRD PARTY's names from our own process before a library parses them, and the
+table it deletes by is stated here, once. Moving the call to ``settings.py``
+would put a ``FASTMCP_`` prefix in the ``STEALTH_MCP_*`` home and make ``settings``
+an importer of ``embedded/``; splitting the table from its application would put
+the rule in two files. Neither is better than one named exception.
+
+A leaf: stdlib only. :func:`scrub` never touches ``os.environ`` — it mutates the
+dict copy ``_start_server_process`` owns — so the two functions stay honest about
+which environment each one changes. The removed NAMES are logged, never their
 values: an environment variable is a place secrets live and this line reaches the
 durable log.
 """
@@ -66,6 +88,11 @@ durable log.
 from __future__ import annotations
 
 import logging
+import os
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import MutableMapping
 
 # One stream: which variables a proxy declined to pass on is part of that
 # proxy's story, so this goes to the log ``configure_logging("proxy")`` already
@@ -82,9 +109,13 @@ FASTMCP_PREFIX = "FASTMCP_"
 NO_AUTO_RECOVERY = "STEALTH_MCP_NO_AUTO_RECOVERY"
 
 
-def scrub(env: dict[str, str]) -> list[str]:
+def scrub(env: MutableMapping[str, str]) -> list[str]:
     """Remove from ``env`` every name the backend must not inherit, in place;
     return the names removed, sorted.
+
+    A ``MutableMapping`` and not a ``dict``, because it has two callers with two
+    different mappings: the child-env copy ``_start_server_process`` owns, and
+    ``os.environ`` itself through :func:`scrub_process_env`.
 
     Case-folded, because the lookup on the other side is: ``fastmcp``'s
     ``model_config`` sets ``case_sensitive=False``, and Windows folds env-var
@@ -99,7 +130,7 @@ def scrub(env: dict[str, str]) -> list[str]:
         if name.upper().startswith(FASTMCP_PREFIX) or name.upper() == NO_AUTO_RECOVERY
     )
     for name in removed:
-        del env[name]
+        del env[name]  # on ``os.environ`` this is a real ``unsetenv``
     if removed:
         # Names only. Never a value (F-869's discipline): this reaches the
         # durable proxy log, and an environment is where tokens live.
@@ -109,3 +140,19 @@ def scrub(env: dict[str, str]) -> list[str]:
             ", ".join(removed),
         )
     return removed
+
+
+def scrub_process_env() -> list[str]:
+    """:func:`scrub`, applied to THIS process's own environment (F-890 M5).
+
+    Called once, from ``server.main()``, before any path through that entrypoint
+    can import ``fastmcp`` — which on the ``runpy`` fallthrough happens in this
+    very process. The same table, applied to a different mapping: a second list
+    of names here is exactly the drift convention 4 is about, so there is one
+    ``scrub`` and this is a two-line application of it.
+
+    Deleting from ``os.environ`` is a real ``unsetenv``, so the removal also
+    covers anything this process later spawns — which is why the composer's own
+    call is belt-and-braces rather than the only defence.
+    """
+    return scrub(os.environ)  # noqa: TID251  PERMANENT(F-890 M5: this deletes a THIRD PARTY's names before a library parses them; it reads no STEALTH_MCP_* configuration, which is what settings.py is the one home for - argued in this module's docstring)

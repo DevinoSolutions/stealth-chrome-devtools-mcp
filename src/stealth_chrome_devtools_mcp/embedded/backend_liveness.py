@@ -141,14 +141,20 @@ def self_report(path: Path, port: int) -> float | None:
     fresh the evidence was; callers test ``is not None``, never truthiness,
     because a stamp written this instant is ``0.0``.
 
+    **It starts from the ENTRY and only then reads the sidecar**, and that
+    ordering is what makes resurrection impossible (F-889 review H3): the stamp
+    itself is a per-port file with a single writer that never opens
+    ``server.json``, so it cannot put an entry anywhere — and with no entry there
+    is nothing for a stamp to be evidence ABOUT.
+
     ``None`` — i.e. no evidence — for every one of: no entry on that port, no
-    stamp (a 2.1.9 backend, which is what makes a mixed fleet degrade to
-    today's behaviour instead of misreading silence as death), a hand-edited
-    non-numeric stamp, a ``heartbeat_pid`` that disagrees with the entry's own
-    ``pid`` (the stamp is a leftover from a predecessor on that port, not a
-    claim by the process recorded there), and a stamp further than
-    :data:`HEARTBEAT_STALE_SECONDS` from now IN EITHER DIRECTION — a clock that
-    jumped forward is not a backend that is alive.
+    sidecar (a 2.1.9 backend, which is what makes a mixed fleet degrade to
+    today's behaviour instead of misreading silence as death), an unreadable or
+    hand-edited sidecar, a :data:`~backend_registry.HEARTBEAT_PID` that
+    disagrees with the ENTRY's own ``pid`` (the stamp is then a leftover from a
+    predecessor on that port, not a claim by the process recorded there), and a
+    stamp further than :data:`HEARTBEAT_STALE_SECONDS` from now IN EITHER
+    DIRECTION — a clock that jumped forward is not a backend that is alive.
 
     ``time.time()`` and not ``time.monotonic()`` deliberately: the writer and
     the reader are DIFFERENT PROCESSES, and monotonic clocks are not comparable
@@ -159,21 +165,22 @@ def self_report(path: Path, port: int) -> float | None:
     entry = backend_registry.backend_on_port(backend_registry.read_record(path), port)
     if entry is None:
         return None
-    at = entry.get(backend_registry.HEARTBEAT_AT)
+    stamp = backend_registry.read_heartbeat(path, port)
+    at = stamp.get(backend_registry.HEARTBEAT_AT)
     if isinstance(at, bool) or not isinstance(at, int | float):
         return None
-    if entry.get(backend_registry.HEARTBEAT_PID) != entry.get("pid"):
+    if stamp.get(backend_registry.HEARTBEAT_PID) != entry.get("pid"):
         return None
     age = time.time() - float(at)
     return age if abs(age) <= HEARTBEAT_STALE_SECONDS else None
 
 
 def stamp(path: Path, port: int, pid: int) -> bool:
-    """Write one heartbeat; never raise. True iff the record was updated.
+    """Write one heartbeat; never raise. True iff the sidecar was published.
 
-    The write is ``backend_registry.stamp_heartbeat``'s — the record's schema
-    and its read-merge-write protocol are that module's and always were, and a
-    stamp that could resurrect a forgotten entry is the failure it guards.
+    The write is ``backend_registry.stamp_heartbeat``'s — the sidecar's name,
+    shape, atomic commit and deletion are that module's, beside the record it
+    sits next to and deliberately not IN it.
     """
     try:
         return backend_registry.stamp_heartbeat(

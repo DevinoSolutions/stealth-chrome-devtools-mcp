@@ -26,18 +26,29 @@ starvation it stretches and still terminates, because `MAX_STRETCH` bounds it at
 4x its patience in wall seconds. `FairWindow` is consumed, never modified.
 
 **(b) The backend is a witness to its own liveness.** It stamps a wall timestamp
-and its pid into its own `server.json` entry every 3 s **from its event loop**,
-and a proxy reads it with no HTTP, no socket and no thread. A fresh self-report
-against a failed client probe means "I am starved", not "it is dead", and resets
-the strike run; a stale one (10 missed stamps) or an absent one falls through to
-the confirmation phase exactly as before. The event loop is the whole design: the
-failure the watchdog exists for is a backend whose dispatch loop is dead while
-its socket stays open, and a heartbeat on a thread would keep stamping through
-it. The two fields are **optional additions to the v3 entry**, so the schema
-version does not move and 2.1.9 is unaffected in both directions — an older
-reader ignores them, an older backend writes none and a newer reader reads
-"absent". A stamp writes nothing when no entry claims the port, so it can never
-resurrect an entry that was just forgotten.
+and its pid into a per-port sidecar, `~/.stealth-mcp/heartbeat-<port>.json`, every
+3 s **from its event loop**, and a proxy reads it with no HTTP, no socket and no
+thread. A fresh self-report against a failed client probe means "I am starved",
+not "it is dead", and resets the strike run; a stale one (10 missed stamps) or an
+absent one falls through to the confirmation phase exactly as before. The event
+loop is the whole design: the failure the watchdog exists for is a backend whose
+dispatch loop is dead while its socket stays open, and a heartbeat on a thread
+would keep stamping through it. A SIDECAR and not a field on the record, because
+`server.json` is written under the cold-start lock and a 3-second heartbeat must
+not take it: unlocked, a whole-record read-modify-write is a lost update by
+construction. One file per port has one writer, so there is no merge and no
+snapshot; the record itself is byte-for-byte what 2.1.9 reads and writes, so the
+schema version does not move and an older fleet is unaffected in both directions.
+The sidecar is deleted with its entry, and a stamp for a port the record no
+longer names is not evidence about anything, so it can never resurrect a
+forgotten entry.
+
+**The veto it buys is bounded.** A heartbeat proves the event LOOP is turning, not
+that the HTTP listener is reachable, so a fresh stamp may defer condemnation for
+at most `HEARTBEAT_VETOES` = 10 completed strike runs — each of which must spend
+its own `FairWindow` first, making the budget one of FAIR-time rounds. A starved
+proxy spends it slowly; a fairly scheduled one reaches the confirmation gate in
+about two minutes and heals from there.
 
 **(c) The proxy never exits because the backend is unreachable.** Where
 `proxy_selfheal.drive` used to return — a heal that gave up, three deaths back to
@@ -46,21 +57,37 @@ back, or a generation that never became ready — it now backs off (2 s doubling
 for as long as the client's stdio pipe is open. In-flight calls are still failed
 fast with the existing JSON-RPC error, so no call hangs silently, and the client
 keeps its MCP server: when a backend comes back, the very next tool call works.
-The one lifetime the proxy ever legitimately had is the client's, and stdin EOF
-is still the exit. The `proxy: teardown after failed heal` report described a
-thing that no longer happens and is now `proxy: backend unreachable, retrying`,
-carrying the same `reason` values plus the attempt number and the delay.
+The one lifetime the proxy ever legitimately had is the client's. Stdin EOF is
+still the exit — and, because the same outage's cleanup found **116 stale proxy
+processes**, so is the client process itself going away: the new
+`embedded/client_presence.py` captures the launching process as a
+`(pid, create_time)` pair at start and ends the proxy once that exact process is
+gone. That is not a decision about the backend, it is noticing nobody is
+listening, and every uncertainty about it resolves to "still there" so it can
+never disconnect a live session.
+
+The `proxy: teardown after failed heal` report described a thing that no longer
+happens and is now `proxy: backend unreachable, retrying`, carrying the same
+`reason` values plus the first delay — shipped **once per outage, not once per
+retry** (the retry series is unbounded), and closed by exactly one
+`proxy: backend reachable again` carrying `attempts` and `outage_seconds`. Every
+individual attempt is still in the proxy's own log file.
 
 **(d) A newer backend of ours is adopted, never evicted.** Two identities on one
 desktop each read the other as stale — `fingerprint_mismatch` answers "these
 digests differ", never "mine is older" — so each evicted the other on every proxy
 start. F-886 stops that only when the loser owns live browsers, and a fleet
 mid-upgrade is exactly the population where neither does yet. A recorded version
-strictly newer than ours now MATCHES identity, and everything downstream follows
-from that one predicate. Same version + different digest (issue #14's
-editable-install flow) is untouched, an older backend is still evicted when
-unprotected, and an unresolvable version on either side is never "newer", so
-every uncomparable case falls back to today's cold start.
+strictly newer than ours is now ADOPTABLE, through a predicate of its own
+(`_adoptable_identity`) read by the reuse gate and nothing else. "Is this entry
+mine" stays `_identity_matches` and stays exactly what it was, because the
+protection rule and the operator verbs ask it: adopting forward means **step
+aside**, never take the port, so a newer sibling that is not answering is still
+protected while it owns a live browser, and `restart`/`stop` still target our own
+identity's backend. Same version + different digest (issue #14's editable-install
+flow) is untouched, an older backend is still evicted when unprotected, and an
+unresolvable version on either side is never "newer", so every uncomparable case
+falls back to today's cold start.
 
 ### Fixed — F-890: an inherited `FASTMCP_*` variable made every backend launch crash at import
 
@@ -85,8 +112,14 @@ field list derived from the library, because the stdio proxy must never import
 `fastmcp`; a test pins the constant against `fastmcp`'s own `model_config`, and
 a subprocess node proves the crash and its absence after the scrub. The module
 also absorbed M8-2's `STEALTH_MCP_NO_AUTO_RECOVERY` pop (same sentence, one
-home). `os.environ` is never touched; the removed NAMES are logged at INFO,
-never their values.
+home). The removed NAMES are logged at INFO, never their values.
+
+The composer is not the only way this package imports `fastmcp`, so the same
+table is also applied to our OWN environment — once, as the first statement of
+`server.main()`. `--transport http` runs `embedded/server.py` in that very
+process through `runpy`, and `stealth-chrome-devtools serve --http` delegates to
+the same function, so an operator with a stray `FASTMCP_PORT=""` in their shell
+hit the identical crash with the identical absence of a log line.
 
 ### Fixed — F-882d: the meta-refresh node named two of that shape's three truthful states
 

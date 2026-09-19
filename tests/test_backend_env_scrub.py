@@ -21,6 +21,8 @@ COVERS every prefix that library reads.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 
 import pytest
 
@@ -132,6 +134,93 @@ class TestTheChildEnvIsScrubbed:
         singleton._start_server_process(4321)
 
         assert os.environ.get("FASTMCP_PORT") == ""
+
+
+class TestOurOwnEnvironmentIsScrubbedBeforeFastMCPIsImported:
+    """F-890 review M5 — the child-env composer is not every entry path.
+
+    ``_start_server_process`` covers the backend the PROXY spawns, which is how
+    the 2026-09-18 incident happened and is the common case. It is not the only
+    way this package comes to import ``fastmcp``: ``main()``'s ``runpy``
+    fallthrough runs ``embedded/server.py`` IN THIS PROCESS (that is what
+    ``--transport http`` does), and ``stealth-chrome-devtools serve --http``
+    reaches the same line through ``_cmd_serve``. An operator with a stray
+    ``FASTMCP_PORT=""`` in their shell gets the identical import-time
+    ``ValidationError`` on both, with the identical absence of a log line.
+
+    One function, in the one home, called once from the one entrypoint every
+    path goes through.
+    """
+
+    def test_main_scrubs_this_process_before_reaching_runpy(self, monkeypatch):
+        """THE M5 pin, driven through the real ``main()``."""
+        import os
+
+        from stealth_chrome_devtools_mcp import server as shim
+
+        monkeypatch.setenv("FASTMCP_PORT", "")
+        monkeypatch.setattr(sys, "argv", ["x", "--transport", "http"])
+        seen = {}
+
+        def fake_runpy(path, run_name):
+            seen["fastmcp_port"] = os.environ.get("FASTMCP_PORT", "<absent>")
+
+        monkeypatch.setattr(shim.runpy, "run_path", fake_runpy)
+
+        shim.main()
+
+        assert seen["fastmcp_port"] == "<absent>", (
+            "the backend this process becomes must not inherit it either"
+        )
+
+    def test_the_stdio_proxy_branch_is_scrubbed_too(self, monkeypatch):
+        """One call at the top of the one entrypoint, not one per branch: a
+        scrub placed per-branch is the second-way defect waiting for a third
+        branch. It costs the proxy nothing — it never reads a ``FASTMCP_*``
+        name — and it means the env ``_start_server_process`` copies is already
+        clean, with that composer's own scrub as the belt to this braces (the
+        CLI's ``restart`` reaches it without passing through here at all)."""
+        import os
+
+        from stealth_chrome_devtools_mcp import server as shim
+
+        monkeypatch.setenv("FASTMCP_PORT", "8000")
+        monkeypatch.setattr(sys, "argv", ["x", "--transport", "stdio"])
+        monkeypatch.setattr(shim, "_start_proxy_error_reporting", lambda: None)
+        monkeypatch.setattr(
+            "stealth_chrome_devtools_mcp.embedded.logging_setup.configure_logging",
+            lambda _role: None,
+        )
+        monkeypatch.setattr(
+            "stealth_chrome_devtools_mcp.embedded.singleton.ensure_server_running",
+            lambda port: None,
+        )
+        monkeypatch.setattr(shim.runpy, "run_path", lambda *_a, **_kw: None)
+
+        shim.main()
+
+        assert "FASTMCP_PORT" not in os.environ
+
+    def test_it_returns_what_it_removed_and_leaves_the_rest(self, monkeypatch):
+        monkeypatch.setenv("FASTMCP_LOG_LEVEL", "TRACE")
+        monkeypatch.setenv("STEALTH_MCP_NO_ERROR_REPORTING", "1")
+
+        removed = backend_env.scrub_process_env()
+
+        import os
+
+        assert "FASTMCP_LOG_LEVEL" in removed
+        assert os.environ["STEALTH_MCP_NO_ERROR_REPORTING"] == "1"
+
+    def test_it_is_the_same_rule_and_not_a_second_one(self, monkeypatch):
+        """``scrub_process_env`` is ``scrub`` applied to ``os.environ``. A
+        separate name table here would be exactly the drift convention 4 is
+        about, so the pin is that the one table is what runs."""
+        seen = []
+        monkeypatch.setattr(backend_env, "scrub", lambda env: seen.append(env) or ["x"])
+
+        assert backend_env.scrub_process_env() == ["x"]
+        assert seen and seen[0] is os.environ
 
 
 class TestTheRemovalIsReportedByNameOnly:

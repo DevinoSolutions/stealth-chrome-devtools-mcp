@@ -463,43 +463,73 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
     _write(path, entries)
 
 
-#: The backend's own liveness stamp on its own entry (F-889 (b)): a wall
-#: timestamp and the pid that wrote it. Two OPTIONAL fields on an existing v3
-#: entry, which is why :data:`SCHEMA_VERSION` does not move — nothing about the
-#: record's SHAPE changed. The compatibility runs both ways: a 2.1.9 reader
-#: copies entries whole and ignores them, and a 2.1.9 backend writes none, so a
-#: newer reader sees "absent" and behaves exactly as 2.1.9 did.
+#: The two fields of the heartbeat SIDECAR (F-889 (b)): a wall timestamp and the
+#: pid that wrote it. Not fields on a ``server.json`` entry — see
+#: :func:`stamp_heartbeat` for why that was the review's H3 — which is also why
+#: :data:`SCHEMA_VERSION` does not move: the record's shape is untouched, so the
+#: compatibility runs both ways (a 2.1.9 reader sees the record it always saw; a
+#: 2.1.9 backend writes no sidecar, so a newer reader sees "absent" and behaves
+#: exactly as 2.1.9 did).
 HEARTBEAT_AT = "heartbeat_at"
 HEARTBEAT_PID = "heartbeat_pid"
+#: One sidecar per PORT, beside the record. A basename pattern rather than a
+#: bound directory, on ``browser_pid_registry.RECORD_NAME``'s precedent: every
+#: function here still takes the whole record path, so nothing binds a state dir
+#: at import time and a test that redirects ``SERVER_STATE_FILE`` redirects this
+#: with it.
+HEARTBEAT_NAME = "heartbeat-{port}.json"
+
+
+def heartbeat_path(path: Path, port: int) -> Path:
+    """The heartbeat sidecar for ``port``, beside the record at ``path``."""
+    return path.with_name(HEARTBEAT_NAME.format(port=port))
 
 
 def stamp_heartbeat(path: Path, *, port: int, pid: int, at: float) -> bool:
-    """Write the backend's own liveness stamp onto the entry claiming ``port``;
-    True iff an entry was found and the record was written (F-889 (b)).
+    """Publish the backend's own liveness stamp for ``port``; True iff written.
 
-    Matched on PORT and on nothing else, and that is what makes it safe to run
-    every few seconds from a process that holds no lock: **writing nothing when
-    no entry claims the port is the whole contract.** A stamp must never be able
-    to resurrect an entry ``forget_entries`` has just dropped, or a proxy
-    cleaning up a dead record would find it back a moment later.
+    **It writes a per-port SIDECAR and never touches ``server.json``** — that is
+    the whole design and it is F-889 review H3's answer. The first pass put two
+    optional fields on the backend's own entry and wrote them back through the
+    same whole-record read-modify-write every other writer here uses. Every
+    other writer runs under singleton's cold-start lock; this one cannot, because
+    a backend taking that lock every three seconds would serialise itself against
+    every proxy start on the machine. Unlocked, the read-modify-write is a lost
+    update by construction, and two different processes landing in its window
+    produced two different harms — a sibling's ``record_backend`` written back
+    out of existence, and a ``forget_entries`` undone from the pre-forget
+    snapshot. Both measured against the shipped code.
 
-    Read-merge-write like every other writer here, through the same atomic
-    :func:`_write`. It does NOT take the cold-start lock: a backend that took it
-    every few seconds would serialise itself against every proxy start on the
-    machine. The cost of that choice is named rather than hidden — a
-    ``record_backend`` landing between this read and this write loses ONE stamp,
-    which is one interval of extra age, corrected by the next one.
+    A sidecar has exactly ONE writer — the backend listening on that port — so
+    there is no merge to get wrong and no snapshot to hold. The record stays
+    ``server.json``'s, the high-frequency per-backend fact lives beside it, and
+    ``backend_registry`` is still THE home: this module owns the name, the shape,
+    the atomic commit and the deletion (:func:`forget_entries` unlinks a
+    forgotten entry's sidecar), and :func:`read_heartbeat` is the one reader.
+
+    Unconditional, deliberately: it does not check whether an entry claims the
+    port. Resurrection is prevented at the READ instead — ``self_report`` starts
+    from the ENTRY and requires the recorded pid to match — so a sidecar with no
+    entry behind it is not a claim anybody can read, and re-introducing the check
+    would re-introduce the record read this function exists to remove.
     """
-    entries = read_backends(path)
-    stamped = False
-    for entry in entries:
-        if entry.get("port") == port:
-            entry[HEARTBEAT_AT] = at
-            entry[HEARTBEAT_PID] = pid
-            stamped = True
-    if stamped:
-        _write(path, entries)
-    return stamped
+    _commit_json(heartbeat_path(path, port), {HEARTBEAT_AT: at, HEARTBEAT_PID: pid})
+    return True
+
+
+def read_heartbeat(path: Path, port: int) -> dict[str, object]:
+    """``port``'s heartbeat sidecar as recorded, or ``{}``.
+
+    THE one reader. Never raises and never guesses: absent, unreadable, or any
+    JSON that is not an object all answer ``{}``, which ``self_report`` turns
+    into "no evidence" — i.e. into exactly the behaviour a fleet with no
+    heartbeats at all already has.
+    """
+    try:
+        data = json.loads(heartbeat_path(path, port).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def forget_entries(path: Path, entries: list[BackendEntry]) -> list[str]:
@@ -540,14 +570,24 @@ def forget_entries(path: Path, entries: list[BackendEntry]) -> list[str]:
         return []
     survivors: list[BackendEntry] = []
     forgotten: list[str] = []
+    dropped_ports: list[object] = []
     for recorded in read_backends(path):
         context = str(recorded["display_context"])
         if (context, recorded.get("port"), recorded.get("pid")) in condemned:
             forgotten.append(context)
+            dropped_ports.append(recorded.get("port"))
             continue
         survivors.append(recorded)
     if forgotten:
         _write(path, survivors)
+        # F-889 (b): the heartbeat sidecar is owned by the entry, so it leaves
+        # with it. Otherwise the state dir accumulates one small file per port
+        # ever used, and a port later recorded to a DIFFERENT backend could be
+        # read against a predecessor's stamp (the pid check would refuse it, but
+        # relying on that is relying on a guard rather than on ownership).
+        clear_record(
+            *(heartbeat_path(path, p) for p in dropped_ports if isinstance(p, int))
+        )
     return forgotten
 
 
@@ -577,21 +617,34 @@ def _commit(tmp: Path, path: Path) -> None:
 
 
 def _write(path: Path, entries: list[BackendEntry]) -> None:
-    """Write the v3 record atomically: stage into a sibling temp file, then
-    ``Path.replace`` (i.e. ``os.replace``) — so a reader concurrent with a write
-    sees the whole old record or the whole new one, never a truncated file, and
-    a crash mid-write cannot leave the record unparseable.
+    """Write the v3 record atomically.
 
-    No locking here on purpose. Every production writer already runs under
-    singleton's cold-start file lock, so what this module owes is atomicity of
-    an individual write, not a merge protocol between racing writers.
+    No locking here on purpose. Every production writer of THIS file already
+    runs under singleton's cold-start file lock, so what this module owes is
+    atomicity of an individual write, not a merge protocol between racing
+    writers. (The heartbeat sidecar is the one file here with no lock over it,
+    which is exactly why it is a separate file with a single writer — see
+    :func:`stamp_heartbeat`.)
+    """
+    _commit_json(path, {"schema": SCHEMA_VERSION, "backends": entries})
+
+
+def _commit_json(path: Path, payload: dict[str, object]) -> None:
+    """Publish ``payload`` at ``path`` atomically: stage into a sibling temp
+    file, then ``Path.replace`` (i.e. ``os.replace``) — so a reader concurrent
+    with a write sees the whole old file or the whole new one, never a truncated
+    one, and a crash mid-write cannot leave it unparseable.
+
+    THE one atomic write in this module, shared by the record and by the
+    heartbeat sidecar, so a second spelling of the staging dance cannot appear
+    beside it.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     # pid-suffixed so two processes staging at once cannot collide on the temp
     # name; the same directory so the replace stays within one filesystem.
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(json.dumps({"schema": SCHEMA_VERSION, "backends": entries}))
+        tmp.write_text(json.dumps(payload))
         _commit(tmp, path)
     except BaseException:
         # ACCEPTED GAP: this cleans up a failed write, but a process killed

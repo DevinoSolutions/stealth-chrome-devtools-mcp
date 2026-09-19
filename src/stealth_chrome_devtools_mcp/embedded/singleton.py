@@ -28,9 +28,11 @@ from stealth_chrome_devtools_mcp.embedded import (
     backend_env,
     backend_eviction,
     backend_liveness,
+    backend_probe,
     backend_registry,
     backend_watchdog,
     build_identity,
+    client_presence,
     display_context,
     scheduling_lag,
 )
@@ -194,14 +196,44 @@ def _identity_matches(entry: backend_registry.BackendEntry | None) -> bool:
     STRANGER's — and a third since, port SELECTION. Re-spelling it would let
     #14's version rule and F-829's three-state digest rule drift apart.
 
-    F-889 (d) adds ONE clause — a recorded version strictly NEWER than ours also
-    matches, so a mid-upgrade fleet adopts forward instead of ping-pong-evicting;
-    the comparison and its guards are ``build_identity.newer``'s.
+    It answers "is this entry MINE", and deliberately not "would I adopt it".
+    F-889's first pass widened it to cover forward adoption and thereby inverted
+    F-886 for the exact population (d) exists to protect: a NEWER stranger's
+    backend read as ours, so `backend_eviction.protected`'s condition 2 returned
+    no browsers and the kill site terminated a sibling still holding its user's
+    logged-in Chrome (measured, F-889 review H1). Adoption is
+    :func:`_adoptable_identity` — a separate name, consumed by the reuse gate
+    alone — because the two questions have opposite answers for one entry and a
+    predicate cannot hold both.
     """
     recorded = (entry or {}).get("version")
-    return build_identity.newer(recorded, _server_version()) or (
-        recorded == _server_version()
-        and not backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
+    return recorded == _server_version() and not backend_registry.fingerprint_mismatch(
+        entry, _source_fingerprint()
+    )
+
+
+def _adoptable_identity(entry: backend_registry.BackendEntry | None) -> bool:
+    """True iff we would REUSE ``entry``'s backend instead of spawning: ours, or
+    a build strictly NEWER than ours (F-889 (d)).
+
+    The forward half, and the one clause that ends the mixed-version eviction
+    loop. ``fingerprint_mismatch`` answers "these two digests differ", never
+    "mine is older", so two identities on one desktop each read the other as
+    stale and each evicted the other on every proxy start — five waves in one
+    measured session, every browser killed. A fleet MID-UPGRADE is precisely the
+    population F-886's browser-protection rule does not cover, because neither
+    side owns a browser yet. The comparison and its fail-closed guards are
+    ``build_identity.newer``'s.
+
+    Adopting forward means STEP ASIDE, never take the port, so this is read by
+    :func:`_same_identity_backend_ready` and by nothing else. Port selection,
+    the protection rule and the operator verbs all keep asking
+    :func:`_identity_matches`: a newer backend that is not answering must stay
+    protected while it owns a live browser, and ``restart``/``stop`` must go on
+    targeting our OWN identity's backend exactly as they did before F-889.
+    """
+    return _identity_matches(entry) or build_identity.newer(
+        (entry or {}).get("version"), _server_version()
     )
 
 
@@ -212,6 +244,10 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     is unknown, not a contradiction — see ``fingerprint_mismatch``) — and it
     answers a real ``initialize`` in the patience window (F-301/F-501: a wedged
     backend holds its socket open, so only the app-level probe counts).
+
+    THE one consumer of :func:`_adoptable_identity`, so "same identity" here has
+    always meant "one we would reuse" — since F-889 (d) that includes a build
+    strictly NEWER than ours. The name is kept because the suite patches it.
 
     ``patience`` is F-807's anti-fratricide grace for the cold-start lock path:
     a healthy backend absorbing a many-session startup herd can miss a single
@@ -231,7 +267,7 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     # The entry recorded ON THIS PORT, not merely the first: under F-808's
     # per-context record another desktop's backend says nothing about `port`.
     entry = backend_registry.backend_on_port(_read_server_state(), port) or {}
-    if not _identity_matches(entry):
+    if not _adoptable_identity(entry):
         return False
     patience = REUSE_PATIENCE_SECONDS if patience is None else patience
     # Busy backends answer slowly, so the patient path probes with the wider
@@ -433,61 +469,15 @@ def _backend_http_ready(port: int, *, timeout: float = LIVENESS_PROBE_TIMEOUT) -
     """Single-shot, synchronous app-level liveness probe: True iff the backend
     on ``port`` answers a real ``initialize`` with HTTP 200.
 
-    The promoted, reusable form of what `_await_backend_http` proves at startup
-    (initialize->200), as ONE attempt instead of a poll loop, so sync callers
-    (discovery, CLI) can call it directly and the watchdog can drive it
-    off-thread. Never raises: any failure (connection refused, timeout,
-    malformed response) resolves to False - `_server_is_healthy`'s fail-closed
-    contract, where a probe error reads as "not ready" and never propagates.
-    The ~10 duplicated lines of that twin's `initialize` shape are deliberate
-    (plan_M1 SS2.2 #4: M1/M3 regions stay disjoint); consolidating is a finding.
+    A binding, for the reason every binding in this file is one (see
+    `_probe_port`): the suite patches THIS name, and what it knows that
+    `backend_probe` must not is which URL a PORT of ours means. The probe
+    itself - the `initialize` payload, the throwaway-session DELETE and the
+    fail-closed contract - is `backend_probe.ready`'s, which is where the ~10
+    lines this used to copy from `_await_backend_http` now live once (the
+    plan_M1 SS2.2 #4 debt this docstring carried, paid by the F-889 review).
     """
-    import httpx
-    from mcp.types import DEFAULT_NEGOTIATED_VERSION
-
-    probe = {
-        "jsonrpc": "2.0",
-        "id": 0,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": DEFAULT_NEGOTIATED_VERSION,
-            "capabilities": {},
-            "clientInfo": {"name": "liveness-probe", "version": "0"},
-        },
-    }
-    headers = {
-        "Accept": "application/json, text/event-stream",
-        "Content-Type": "application/json",
-    }
-    url = _backend_http_url(port)
-    try:
-        with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
-            resp = client.post(url, json=probe, headers=headers)
-            if resp.status_code != 200:
-                return False
-            session_id = resp.headers.get("mcp-session-id")
-            if session_id:
-                try:
-                    client.delete(
-                        url, headers={**headers, "mcp-session-id": session_id}
-                    )
-                except Exception:
-                    # Best-effort cleanup of the throwaway liveness session;
-                    # the probe itself already succeeded.
-                    _logger.debug(
-                        "liveness-probe session cleanup failed", exc_info=True
-                    )
-            return True
-    except Exception as e:
-        # Fail-closed: connection refused (down), a hung/wedged backend that
-        # never answers (timeout), or any other transport error all read as
-        # "not ready" - matching _server_is_healthy's contract. DEBUG, not
-        # WARNING (M10a convention, cf. _await_backend_http's identical catch):
-        # this fires routinely during a normal cold start and on every watchdog
-        # tick while a backend is briefly busy - the caller decides when
-        # repeated failures are WARNING-worthy, not this single-attempt probe.
-        _logger.debug("liveness probe attempt failed", exc_info=e)
-        return False
+    return backend_probe.ready(_backend_http_url(port), timeout)
 
 
 # The two build-identity bindings. Wrappers for the reason every binding in
@@ -506,6 +496,12 @@ def _report_eviction_decision(port: int, spared: list[int]) -> None:
     F4); it used to be shipped before the kill site decided, so a refusal
     reached Sentry and the durable log as an eviction. The evicted wording is
     byte-unchanged because ``tests/test_e2e_lifecycle_resilience.py`` greps it.
+
+    Wire only on the refusal path — ``backend_eviction.clear_stale`` already
+    writes that WARNING with the same count. (Restored verbatim: F-889's first
+    pass compressed this sentence away to land the file at exactly 1000 LOC, and
+    it was guidance, not prose — the headroom now comes from extracting
+    ``backend_probe`` instead, which is what convention 4 asked for anyway.)
     """
     if spared:
         capture_lifecycle(
@@ -744,61 +740,12 @@ async def _await_backend_http(
 ) -> bool:
     """Poll the backend with a real ``initialize`` until it returns HTTP 200.
 
-    Stronger than a socket probe *and* than "any HTTP response": a freshly bound
-    uvicorn socket can answer (4xx) while FastMCP's MCP session manager is still
-    starting — forwarding to it then fails with ``400`` (the same class of race
-    as the old ``-32000``). Only a 200 to an ``initialize`` proves the MCP layer
-    is genuinely ready to accept the client's session.
+    The binding half of `backend_probe.await_ready` - it owns the DEADLINE this
+    tree gives a cold start, and the suite patches this name. Why an
+    ``initialize`` and not a socket connect or "any HTTP response" is argued
+    once, in that module's docstring.
     """
-    import anyio
-    import httpx
-    from mcp.types import DEFAULT_NEGOTIATED_VERSION
-
-    probe = {
-        "jsonrpc": "2.0",
-        "id": 0,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": DEFAULT_NEGOTIATED_VERSION,
-            "capabilities": {},
-            "clientInfo": {"name": "readiness-probe", "version": "0"},
-        },
-    }
-    headers = {
-        "Accept": "application/json, text/event-stream",
-        "Content-Type": "application/json",
-    }
-    deadline = time.monotonic() + deadline_seconds
-    interval = 0.1
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-        while time.monotonic() < deadline:
-            try:
-                resp = await client.post(url, json=probe, headers=headers)
-                if resp.status_code == 200:
-                    # Terminate the throwaway readiness session so it does not
-                    # linger on the backend (one per proxy start otherwise).
-                    session_id = resp.headers.get("mcp-session-id")
-                    if session_id:
-                        try:
-                            await client.delete(
-                                url, headers={**headers, "mcp-session-id": session_id}
-                            )
-                        except Exception:
-                            # Best-effort cleanup of the throwaway readiness
-                            # session; the probe itself already succeeded.
-                            _logger.debug(
-                                "readiness-probe session cleanup failed",
-                                exc_info=True,
-                            )
-                    return True
-            except Exception:
-                # Expected during cold start (connection refused before the
-                # backend's socket is bound) - DEBUG, not a real problem
-                # unless it persists until the deadline (see run_backend).
-                _logger.debug("backend readiness probe attempt failed", exc_info=True)
-            await anyio.sleep(interval)
-            interval = min(interval * 1.5, 1.0)
-    return False
+    return await backend_probe.await_ready(url, deadline_seconds)
 
 
 async def _watch_backend_liveness(port: int, **kwargs: object) -> None:
@@ -849,6 +796,12 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
 
     from stealth_chrome_devtools_mcp.embedded import proxy_selfheal
 
+    # F-889 review M3: WHO launched us, captured now and never again — asked
+    # later it would name whatever we were reparented to (init, on POSIX), i.e.
+    # the check would stop working at exactly the moment it is needed. The rule
+    # and its fail-open direction are `client_presence`'s; what to DO about the
+    # answer is this function's, exactly as it is for `pump_client` returning.
+    client = client_presence.capture()
     to_backend_tx, to_backend_rx = anyio.create_memory_object_stream(1024)
     init_request_id = {"value": None}
     init_message = {"value": None}
@@ -942,6 +895,17 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                 tg.start_soon(to_backend)
                 tg.start_soon(from_backend)
 
+    async def client_watch():
+        # The SECOND exit, and deliberately not a third KIND of one: EOF and
+        # this both mean "nobody is listening", and both end the session from
+        # OUTSIDE the backend leg. F-889 (c) removed the proxy's ability to end
+        # a session over the BACKEND; the same outage's cleanup found 116 stale
+        # proxies, so "never exits on its own decision about the backend" has to
+        # keep being different from "never exits". Declared before `backend_leg`
+        # so the source pins that read that function's body cannot see it.
+        await client_presence.await_gone(client)
+        tg.cancel_scope.cancel()
+
     async def backend_leg():
         # F-838/F-843/F-889: the leg outlives any single backend. proxy_selfheal
         # owns the generation loop and heals via ensure_server_running (the SAME
@@ -962,6 +926,7 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(backend_leg)
+        tg.start_soon(client_watch)
         # Drive the client pump in the main task. When the client (Claude Code)
         # disconnects, stdin hits EOF and pump_client returns — at which point we
         # cancel everything. Otherwise run_backend's from_backend loop stays

@@ -376,8 +376,10 @@ class TestHealOutcomesAreReported:
         """SOFT golden, RENAMED with F-889 (c). ``TEARDOWN_EVENT`` described a
         thing that no longer happens — the proxy does not tear down — so the
         event is ``UNREACHABLE_EVENT`` now, carrying the same ``reason`` values
-        plus the attempt number and the delay. ERROR is kept: the client is not
-        being served right now, which is the one thing a user still feels."""
+        plus the first retry delay. ERROR is kept: the client is not being
+        served right now, which is the one thing a user still feels. One per
+        EPISODE and not per retry (F-889 review M2) — the series is unbounded,
+        so a per-retry event is an unbounded event."""
 
         async def watch(_port):
             return
@@ -392,7 +394,7 @@ class TestHealOutcomesAreReported:
         assert events[0][1] == "error", "not being served is what the user feels"
         assert events[0][2]["reason"] == "unhealable"
         assert events[0][2]["port"] == PORT_A
-        assert events[0][2]["attempt"] == 1
+        assert isinstance(events[0][2]["delay"], float)
 
     async def test_a_flapping_backend_ships_the_report_too(
         self, captured, monkeypatch, fast_backoff

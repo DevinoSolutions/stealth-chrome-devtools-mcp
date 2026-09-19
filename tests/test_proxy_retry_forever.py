@@ -301,16 +301,33 @@ class TestWhatTheClientSeesMeanwhile:
         unreachable = [
             e for e in captured_lifecycle if e[0] == proxy_selfheal.UNREACHABLE_EVENT
         ]
-        assert [e[2]["attempt"] for e in unreachable] == [1, 2], (
-            "the retry series must climb while it is failing"
+        assert len(unreachable) == 1, "one event per EPISODE, whatever it costs"
+        recovered = [
+            e for e in captured_lifecycle if e[0] == proxy_selfheal.REACHABLE_EVENT
+        ]
+        assert [e[2]["attempts"] for e in recovered] == [2], (
+            "the recovery event carries what the series cost"
         )
 
 
 class TestTheReport:
-    async def test_it_ships_once_per_backoff_with_reason_attempt_and_delay(
+    """F-889 review M2 — ONE event per outage episode, not one per retry.
+
+    The backoff climbs to a 60 s cap and then keeps going for as long as the
+    client is attached, so a report inside the loop is unbounded: an overnight
+    outage on one proxy is ~1400 ERROR events, and 114 proxies orphaned by one
+    backend death multiply it. That is not a louder signal, it is a quota spent
+    on the machine that is least able to say anything new. The question the
+    event answers — "how often does stealth still disconnect, and for how
+    long" — needs exactly two points: the episode opened, and the episode
+    closed with a duration and a cost.
+    """
+
+    async def test_it_ships_once_per_episode_however_long_the_series_runs(
         self, monkeypatch, fast_backoff, captured_lifecycle
     ):
-        _heal_counter(monkeypatch, answers=[None], stop_after=3)
+        """THE M2 pin. Five failed retries, ONE event."""
+        _heal_counter(monkeypatch, answers=[None], stop_after=6)
 
         with anyio.fail_after(5), pytest.raises(_EnoughError):
             await proxy_selfheal.drive(**_drive_kwargs(watch=_dead_watch))
@@ -318,15 +335,81 @@ class TestTheReport:
         events = [
             e for e in captured_lifecycle if e[0] == proxy_selfheal.UNREACHABLE_EVENT
         ]
-        assert events, "a proxy with no backend must say so"
-        assert all(e[1] == "error" for e in events), (
-            "not being served is the thing the user feels"
-        )
+        assert len(events) == 1, "a retry is not an incident; an outage is"
+        assert events[0][1] == "error", "not being served is the thing the user feels"
         first = events[0][2]
         assert first["reason"] == "unhealable"
         assert first["port"] == PORT_A
-        assert first["attempt"] == 1
         assert isinstance(first["delay"], float)
+
+    async def test_the_recovery_carries_the_outage_duration_and_its_cost(
+        self, monkeypatch, fast_backoff, captured_lifecycle
+    ):
+        """The closing point. Without it the opening one is a leak in the data:
+        every episode that ever recovered looks identical to one still running.
+        """
+        # Two failed retries, then a recovery, then the next generation's first
+        # ask ends the drive before a second episode can open.
+        _heal_counter(monkeypatch, answers=[None, None, PORT_B], stop_after=4)
+
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
+            await proxy_selfheal.drive(**_drive_kwargs(watch=_dead_watch))
+
+        recovered = [
+            e for e in captured_lifecycle if e[0] == proxy_selfheal.REACHABLE_EVENT
+        ]
+        assert len(recovered) == 1
+        assert recovered[0][1] == "info", "coming back is not an error"
+        fields = recovered[0][2]
+        assert fields["port"] == PORT_B
+        assert fields["attempts"] == 2
+        assert isinstance(fields["outage_seconds"], float)
+
+    async def test_a_recovery_with_no_backoff_ships_no_recovery_event(
+        self, monkeypatch, fast_backoff, captured_lifecycle
+    ):
+        """An ordinary heal is not an outage that ended. ``HEALED_EVENT`` has
+        always been the denominator for those, and a second event beside it
+        would double-count every successful recovery in the tree."""
+        _heal_counter(monkeypatch, answers=[PORT_B], stop_after=3)
+
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
+            await proxy_selfheal.drive(**_drive_kwargs(watch=_dead_watch))
+
+        assert not [
+            e for e in captured_lifecycle if e[0] == proxy_selfheal.REACHABLE_EVENT
+        ]
+        assert not [
+            e for e in captured_lifecycle if e[0] == proxy_selfheal.UNREACHABLE_EVENT
+        ]
+
+    async def test_a_second_episode_ships_its_own_pair(
+        self, monkeypatch, fast_backoff, captured_lifecycle
+    ):
+        """The counter is per EPISODE, so a session that survives two outages
+        reports two of each — otherwise 'once' would quietly become 'once ever'.
+        """
+        # heal 1 fails, 2 recovers (episode one); 3 fails, 4 recovers (episode
+        # two); 5 is an ordinary heal with no backoff at all; 6 ends the drive.
+        _heal_counter(
+            monkeypatch, answers=[None, PORT_B, None, PORT_A, PORT_A], stop_after=6
+        )
+
+        with anyio.fail_after(5), pytest.raises(_EnoughError):
+            await proxy_selfheal.drive(**_drive_kwargs(watch=_dead_watch))
+
+        names = [
+            e[0]
+            for e in captured_lifecycle
+            if e[0]
+            in (proxy_selfheal.UNREACHABLE_EVENT, proxy_selfheal.REACHABLE_EVENT)
+        ]
+        assert names == [
+            proxy_selfheal.UNREACHABLE_EVENT,
+            proxy_selfheal.REACHABLE_EVENT,
+            proxy_selfheal.UNREACHABLE_EVENT,
+            proxy_selfheal.REACHABLE_EVENT,
+        ]
 
     async def test_a_flap_is_reported_as_flapping(
         self, monkeypatch, fast_backoff, captured_lifecycle
@@ -355,6 +438,7 @@ class TestTheReport:
         assert (
             proxy_selfheal.UNREACHABLE_EVENT == "proxy: backend unreachable, retrying"
         )
+        assert proxy_selfheal.REACHABLE_EVENT == "proxy: backend reachable again"
 
 
 class TestTheProxyKeepsItsStdioLegOpen:

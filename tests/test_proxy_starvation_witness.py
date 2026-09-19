@@ -212,18 +212,32 @@ class TestAStrikeMustBeEarnedInFairlyScheduledSeconds:
         assert len(built) == 1
         assert isinstance(built[0], scheduling_lag.FairWindow)
 
-    async def test_three_real_misses_on_an_idle_machine_still_condemn(self):
+    async def test_three_real_misses_on_an_idle_machine_still_condemn(
+        self, monkeypatch
+    ):
         """The idle-machine arithmetic, against the REAL FairWindow: the per-tick
         charge is ``interval * (1 + probe / nap_actual)``, which is ``>=
         interval`` always, so ``failures_before_teardown - 1`` ticks always spend
-        the window and the human-pinned ~12 s detection is preserved in shape."""
+        the window and the human-pinned ~12 s detection is preserved in shape.
+
+        **The clock is driven, not slept** (F-889 review L4). With a real sleep
+        this node measures the runner's timer granularity: the charge is clamped
+        at ``factor >= 1``, so a sleep that returns EARLY leaves the window
+        unspent, the tick defers, and the node hangs past its own bound on a
+        loaded machine. ``scheduling_lag._now`` is that module's single timing
+        seam and exists for exactly this; advancing it by the full interval is
+        what "an idle machine" MEANS, stated rather than hoped for.
+        """
         naps = []
+        clock = [0.0]
+        monkeypatch.setattr(scheduling_lag, "_now", lambda: clock[0])
 
         async def nap(seconds):
             # The caller owns the pause, so the window charges wall seconds --
             # exactly what the pre-F-889 watchdog did.
             naps.append(seconds)
-            await anyio.sleep(seconds)
+            clock[0] += seconds
+            await anyio.lowlevel.checkpoint()
 
         with anyio.fail_after(10):
             await backend_watchdog.watch_liveness(
@@ -320,6 +334,103 @@ class TestTheBackendIsTheSecondWitness:
             )
 
         assert confirm_calls == [1]
+
+
+class TestTheVetoIsBounded:
+    """F-889 review M1 — the heartbeat proves the LOOP, not the LISTENER.
+
+    An unconditional veto traded the outage for a hang: a backend whose event
+    loop turns while its HTTP listener never answers (a closed socket, a broken
+    session manager) became undetectable. The budget is counted in RUNS, and a
+    run cannot conclude until its ``FairWindow`` is spent, so a starved proxy
+    spends it slowly and a fairly scheduled one at the nominal rate.
+    """
+
+    async def test_a_backend_that_only_stamps_is_eventually_confirmed(
+        self, proxy_records
+    ):
+        """THE M1 pin. Fresh heartbeat every round, probes failing every round —
+        the gate is reached after the budget, and the watch RETURNS."""
+        confirm_calls = []
+
+        with anyio.fail_after(5):
+            await backend_watchdog.watch_liveness(
+                PORT,
+                interval=0.0,
+                failures_before_teardown=3,
+                is_healthy=lambda: False,
+                confirm_probe=lambda: confirm_calls.append(1) or False,
+                sleep=_bounded_nap(200),
+                heartbeat=lambda: 0.4,
+                heartbeat_vetoes=2,
+            )
+
+        assert confirm_calls == [1], "the veto must not defer the gate forever"
+        assert _strikes(proxy_records) == [1, 2, 3] * 3, (
+            "exactly budget+1 full strike runs: two vetoed, the third not"
+        )
+        assert any(
+            r.levelno == logging.WARNING and "asking the confirmation gate" in r.msg
+            for r in proxy_records
+        ), "spending the last veto must be visible, not silent"
+
+    async def test_the_budget_refills_when_the_backend_answers_again(self):
+        """It bounds ONE continuous failure episode, not the session. A backend
+        that recovers and later fails again gets its full standing back —
+        otherwise a long session would slowly lose the protection the incident
+        is about."""
+        confirm_calls = []
+        # miss,miss,miss (veto 1/1) | miss,miss,miss (budget spent -> gate) is
+        # what a NON-refilling budget produces. With the healthy tick below the
+        # second run's veto must be granted again, so the gate is reached only on
+        # the THIRD full run.
+        healthy = iter([False, False, False, True])
+
+        with anyio.fail_after(5):
+            await backend_watchdog.watch_liveness(
+                PORT,
+                interval=0.0,
+                failures_before_teardown=3,
+                is_healthy=lambda: next(healthy, False),
+                confirm_probe=lambda: confirm_calls.append(1) or False,
+                sleep=_bounded_nap(200),
+                heartbeat=lambda: 0.4,
+                heartbeat_vetoes=1,
+            )
+
+        assert confirm_calls == [1]
+
+    async def test_a_successful_confirmation_also_refills_it(self):
+        """'Busy, not dead' is the strongest recovery signal there is — stronger
+        than one healthy fast probe — so it cannot leave the budget spent."""
+        confirm_calls = []
+
+        def confirm():
+            confirm_calls.append(1)
+            return len(confirm_calls) == 1  # busy the first time, dead the next
+
+        with anyio.fail_after(5):
+            await backend_watchdog.watch_liveness(
+                PORT,
+                interval=0.0,
+                failures_before_teardown=1,
+                is_healthy=lambda: False,
+                confirm_probe=confirm,
+                sleep=_bounded_nap(200),
+                heartbeat=lambda: 0.4,
+                heartbeat_vetoes=1,
+            )
+
+        # 1 veto -> gate (busy) -> refill -> 1 veto -> gate (dead). Without the
+        # refill the second round would reach the gate one veto early.
+        assert len(confirm_calls) == 2
+
+    def test_the_default_budget_is_ten_rounds(self):
+        """Stated, not implied. At the pinned defaults one run is ~12 s on a
+        fairly scheduled machine, so the bound this buys is ~2 minutes before
+        the confirmation gate is asked — the number that replaces F-889's
+        unmeasured '<= 30 s' claim."""
+        assert backend_watchdog.HEARTBEAT_VETOES == 10
 
 
 class TestTheProductionWiring:

@@ -7,16 +7,28 @@ out to ~0 MB; their 2 s probes timed out, the watchdog condemned, and the backen
 they condemned answered an MCP ``initialize`` in 227 ms throughout, with zero
 errors in its own log for the whole window.
 
-So the backend stamps a wall timestamp and its pid into its own ``server.json``
-entry from its EVENT LOOP, and a proxy reads it with no HTTP, no socket and no
-thread. A fresh stamp plus a failed client probe is "I am starved", not "it is
-dead".
+So the backend stamps a wall timestamp and its pid from its EVENT LOOP, and a
+proxy reads it with no HTTP, no socket and no thread. A fresh stamp plus a failed
+client probe is "I am starved", not "it is dead".
+
+**It stamps a SIDECAR, never ``server.json``** (F-889 review H3). The first pass
+put two optional fields on the backend's own entry and wrote them back through a
+whole-record read-modify-write, unlocked, every three seconds — which is a lost
+update by construction: a sibling's ``record_backend`` landing between the read
+and the write was erased, and a stamp interleaved with ``forget_entries``
+RESURRECTED the entry that had just been dropped (both measured). Taking the
+cold-start lock instead would serialise every backend on the machine against
+every proxy start at 3 s intervals, so the record is not the right home for a
+high-frequency per-backend fact at all. ``heartbeat-<port>.json`` has exactly ONE
+writer — the backend on that port — so there is no merge to get wrong, and the
+record it publishes is entirely its own. ``backend_registry`` still owns the
+file: its name, its shape, its atomic commit and its deletion.
 
 The two halves are pinned separately because they are different questions: the
-WRITE (``backend_registry.stamp_heartbeat`` — may it touch any other entry? may
-it create one?) and the READ (``backend_liveness.self_report`` — what counts as
-evidence?). Hermetic: ``tmp_path`` records only, and ``time.time`` steered
-through the reader's own clock.
+WRITE (may it touch ``server.json`` at all? what cleans it up?) and the READ
+(``backend_liveness.self_report`` — what counts as evidence?). Hermetic:
+``tmp_path`` records only, and ``time.time`` steered through the reader's own
+clock.
 """
 
 from __future__ import annotations
@@ -52,86 +64,110 @@ def record(tmp_path):
 
 
 class TestTheWrite:
-    def test_it_stamps_the_entry_on_that_port(self, record):
+    def test_it_stamps_a_sidecar_beside_the_record(self, record):
         assert (
             backend_registry.stamp_heartbeat(record, port=PORT, pid=PID, at=1000.0)
             is True
         )
 
-        entry = backend_registry.backend_on_port(
-            backend_registry.read_record(record), PORT
-        )
-        assert entry[backend_registry.HEARTBEAT_AT] == 1000.0
-        assert entry[backend_registry.HEARTBEAT_PID] == PID
+        sidecar = backend_registry.heartbeat_path(record, PORT)
+        assert sidecar.name == f"heartbeat-{PORT}.json"
+        assert sidecar.parent == record.parent
+        assert backend_registry.read_heartbeat(record, PORT) == {
+            backend_registry.HEARTBEAT_AT: 1000.0,
+            backend_registry.HEARTBEAT_PID: PID,
+        }
 
-    def test_it_leaves_every_other_entry_byte_identical(self, tmp_path):
-        path = _record(
-            tmp_path / "server.json",
-            (PORT, PID, "win-session-1"),
-            (OTHER_PORT, 999, "win-session-2"),
-        )
-        before = backend_registry.backend_on_port(
-            backend_registry.read_record(path), OTHER_PORT
-        )
+    def test_it_never_writes_server_json_at_all(self, record):
+        """**H3, stated as a single fact.** A whole-record read-modify-write from
+        an unlocked writer running every three seconds is a lost update waiting
+        for a sibling; it cannot be made safe by being careful, only by not
+        touching the record. The byte comparison is the pin."""
+        before = record.read_bytes()
 
-        backend_registry.stamp_heartbeat(path, port=PORT, pid=PID, at=1000.0)
+        backend_registry.stamp_heartbeat(record, port=PORT, pid=PID, at=1000.0)
 
-        after = backend_registry.backend_on_port(
-            backend_registry.read_record(path), OTHER_PORT
-        )
-        assert after == before, "a sibling's entry must not move"
+        assert record.read_bytes() == before
 
-    def test_it_writes_nothing_when_no_entry_claims_the_port(self, record):
-        """THE contract that makes a lock-free writer safe: a stamp must never
-        resurrect an entry ``forget_entries`` has just dropped, or a proxy
-        cleaning up a dead record would find it back a moment later."""
-        before = record.read_text()
+    def test_a_stamp_holds_no_snapshot_of_the_record_to_lose(self, record, monkeypatch):
+        """**Both measured failures at their shared root.**
+
+        The shipped stamp did ``read_backends`` → mutate → ``_write``, unlocked,
+        every three seconds. Two different processes landing in that window
+        produced two different harms, and neither is fixable by being careful:
+        a sibling's ``record_backend`` was written back out of existence, and a
+        ``forget_entries`` was undone — the dropped entry came back from the
+        pre-forget snapshot. Reproduced against the shipped code in
+        ``$TEMP/verify_review.py``.
+
+        The fix is not a better merge, it is holding no snapshot at all. Pinned
+        by making every door onto ``server.json`` explode for the duration: a
+        stamp that opens none cannot lose or resurrect anything in it.
+        """
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("a heartbeat must not read or write server.json")
+
+        monkeypatch.setattr(backend_registry, "read_backends", forbidden)
+        monkeypatch.setattr(backend_registry, "read_record", forbidden)
+        monkeypatch.setattr(backend_registry, "_write", forbidden)
 
         assert (
-            backend_registry.stamp_heartbeat(
-                record, port=OTHER_PORT, pid=PID, at=1000.0
-            )
-            is False
+            backend_registry.stamp_heartbeat(record, port=PORT, pid=PID, at=1000.0)
+            is True
         )
 
-        assert record.read_text() == before
-        assert backend_registry.read_backends(record) == backend_registry.backends_in(
-            backend_registry.read_record(record)
-        )
-
-    def test_a_forgotten_entry_stays_forgotten(self, record):
+    def test_a_forgotten_entry_is_never_resurrected(self, record):
+        """The second measured failure. The shipped stamp rewrote the whole
+        record from a pre-``forget_entries`` read, so the entry a proxy had just
+        cleaned up came back. A stamp cannot put an entry anywhere now — and the
+        READ still refuses, because it requires the entry to be there."""
         entry = backend_registry.backend_on_port(
             backend_registry.read_record(record), PORT
         )
         backend_registry.forget_entries(record, [entry])
 
-        assert (
-            backend_registry.stamp_heartbeat(record, port=PORT, pid=PID, at=1000.0)
-            is False
-        )
-        assert backend_registry.read_backends(record) == []
+        backend_registry.stamp_heartbeat(record, port=PORT, pid=PID, at=time.time())
 
-    def test_a_stamp_survives_a_concurrent_record_of_a_different_port(self, record):
+        assert backend_registry.read_backends(record) == []
+        assert backend_liveness.self_report(record, PORT) is None
+
+    def test_forgetting_an_entry_deletes_its_sidecar(self, record):
+        """Owned by the record, so it leaves with the record. Without this the
+        state dir accumulates one small file per port ever used, and a recycled
+        port could be read against a predecessor's stamp."""
         backend_registry.stamp_heartbeat(record, port=PORT, pid=PID, at=1000.0)
-        backend_registry.record_backend(
-            record,
-            port=OTHER_PORT,
-            version="2.1.9",
-            pid=999,
-            source_fingerprint="a" * 64,
-            display_context="win-session-2",
-        )
+        assert backend_registry.heartbeat_path(record, PORT).exists()
 
         entry = backend_registry.backend_on_port(
             backend_registry.read_record(record), PORT
         )
-        assert entry[backend_registry.HEARTBEAT_AT] == 1000.0
+        backend_registry.forget_entries(record, [entry])
+
+        assert not backend_registry.heartbeat_path(record, PORT).exists()
+
+    def test_it_leaves_no_temp_residue(self, record):
+        """``os.replace``d through the module's one atomic commit, like every
+        other write here: a reader concurrent with a stamp sees the whole old
+        file or the whole new one, never a truncated one."""
+        backend_registry.stamp_heartbeat(record, port=PORT, pid=PID, at=1000.0)
+
+        assert [p.name for p in record.parent.glob("*.tmp")] == []
+
+    def test_a_stamp_for_an_unrecorded_port_is_no_evidence(self, record):
+        """It costs one small file and says nothing: :func:`self_report` starts
+        from the ENTRY, so a sidecar with no entry behind it is not a claim
+        anybody can read."""
+        backend_registry.stamp_heartbeat(
+            record, port=OTHER_PORT, pid=PID, at=time.time()
+        )
+
+        assert backend_liveness.self_report(record, OTHER_PORT) is None
 
     def test_the_schema_version_does_not_move(self, record):
-        """Two OPTIONAL fields on an existing entry are not a shape change. A
-        2.1.9 reader copies entries whole and ignores them; a 2.1.9 backend
-        writes none, so a newer reader sees 'absent'. Bumping the schema would
-        make an upgrade evict rather than adopt."""
+        """The record's shape is untouched — there is no new field on it at all
+        now. A 2.1.9 reader and a 2.1.9 backend are both unaffected; bumping the
+        schema would make an upgrade evict rather than adopt."""
         backend_registry.stamp_heartbeat(record, port=PORT, pid=PID, at=1000.0)
 
         assert backend_registry.read_record(record)["schema"] == 3
@@ -197,15 +233,27 @@ class TestTheRead:
 
     @pytest.mark.parametrize("hand_edit", ["soon", None, True, [1], {"a": 1}])
     def test_a_hand_edited_stamp_is_not_evidence(self, record, hand_edit):
-        """This record tolerates hand-editing and two prior schemas, so every
-        field read re-checks its own type. ``True`` is in the table because
-        ``isinstance(True, int)`` is True in Python and a bool is not a time."""
+        """Every field read re-checks its own type. ``True`` is in the table
+        because ``isinstance(True, int)`` is True in Python and a bool is not a
+        time."""
         import json
 
-        raw = json.loads(record.read_text())
-        raw["backends"][0][backend_registry.HEARTBEAT_AT] = hand_edit
-        raw["backends"][0][backend_registry.HEARTBEAT_PID] = PID
-        record.write_text(json.dumps(raw))
+        backend_registry.heartbeat_path(record, PORT).write_text(
+            json.dumps(
+                {
+                    backend_registry.HEARTBEAT_AT: hand_edit,
+                    backend_registry.HEARTBEAT_PID: PID,
+                }
+            )
+        )
+
+        assert backend_liveness.self_report(record, PORT) is None
+
+    @pytest.mark.parametrize("junk", ["not json at all", "[]", '"a string"', "null"])
+    def test_an_unreadable_sidecar_is_not_evidence(self, record, junk):
+        """Never raises, and never guesses. An unreadable sidecar falls back to
+        today's behaviour — the confirmation phase — exactly as an absent one."""
+        backend_registry.heartbeat_path(record, PORT).write_text(junk)
 
         assert backend_liveness.self_report(record, PORT) is None
 
@@ -220,10 +268,9 @@ class TestTheBackendSideTask:
                 seen = set()
                 while len(seen) < 2:
                     await asyncio.sleep(0.01)
-                    entry = backend_registry.backend_on_port(
-                        backend_registry.read_record(record), PORT
+                    at = backend_registry.read_heartbeat(record, PORT).get(
+                        backend_registry.HEARTBEAT_AT
                     )
-                    at = (entry or {}).get(backend_registry.HEARTBEAT_AT)
                     if at is not None:
                         seen.add(at)
                 task.cancel()
