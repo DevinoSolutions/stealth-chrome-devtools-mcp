@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased
+
+### Added — F-891: `stealthy`, one CLI that can also drive the backend's tools
+
+Nothing in a shell could call a tool on the running backend. On 2026-09-19,
+recovering a stranded Seller Central login therefore cost a hand-written 40-line
+MCP stdio client (`reattach_seller_central.py`) whose only job was to invoke
+`spawn_browser(user_data_dir=…)` — a script that had to know the protocol, the
+result shape and how to start a proxy, to make one call the product already
+supports.
+
+The ops CLI gains six verbs and a new name. `stealthy` and
+`stealth-chrome-devtools` are **one CLI under two names** — the same `cli:main`,
+one parser, one `_DISPATCH` — and help text names whichever you typed. The
+existing verbs are unchanged.
+
+- `stealthy call <tool> [--arg k=v ...] [--json '<object>']` reaches **any** tool.
+  There is no per-tool argparse mirror: the tool's own schema on the backend is
+  the validation, so a 95th tool is callable the day it is registered and the
+  tool count stays derived. `--arg` values are JSON when they parse
+  (`headless=false`, `browser_args=["--x"]`) and strings when they do not
+  (`C:\Users\me\profile`), split on the first `=` so a query string survives.
+- `stealthy ls` / `nav` / `close` / `spawn` are sugar over `list_instances`,
+  `navigate`, `close_instance` and `spawn_browser`; instance ids resolve by
+  unique prefix, and an ambiguous one names every match instead of picking.
+- `stealthy spawn --profile <name-or-path>` is the stranded-login recipe as one
+  command, and prints `REATTACHED : yes` with the holder's pid when F-888 gave it
+  the browser that was already running. `--master` names the master DIRECTORY,
+  which is what makes it land on master itself: an argument-less spawn reaches
+  master only while master is free and clones from it otherwise.
+- `stealthy tools [--section X]` lists the LIVE backend's surface and states the
+  installed build's registry count beside it, because when those two disagree the
+  shell and the backend are different builds — which is the answer.
+
+They talk MCP streamable-HTTP straight to the backend, selected **exactly** the
+way `status` selects it (`singleton._probe_backend_status`, F-868) and started
+through the existing `ensure_server_running` path when none is running, so the
+cold-start lock, F-886's step-aside and F-889's adopt-forward apply unchanged;
+`--no-start` makes the absence an error. No stdio proxy is spawned per command.
+Output is a table on a terminal and JSON in a pipe or under `--json`; exit codes
+are 0 ok / 1 tool error / 2 usage / 3 no backend. The MCP session each call opens
+is terminated on the way out rather than left for F-862's sweep.
+
+Two new leaves: `embedded/backend_client.py` (the session, the call, and the one
+reading of an answer — `structuredContent` with EMPTY `content` is the common
+shape, measured) and `cli_call.py` (the six verb bodies; `cli.py` keeps every
+parser and stays under its LOC budget).
+
 ## 2.1.10
 
 ### Fixed — F-882d: the meta-refresh node named two of that shape's three truthful states

@@ -72,6 +72,13 @@ class TestDocumentedCliVerbs:
         "restart",
         "kill-orphans",
         "serve",
+        # F-891 — the six verbs that drive the LIVE backend's tool surface.
+        "tools",
+        "call",
+        "ls",
+        "spawn",
+        "nav",
+        "close",
     ]
 
     def test_verbs_exist_and_are_documented(self):
@@ -98,6 +105,7 @@ class TestNavMapModules:
         "browser_pid_registry",
         "browser_reattach",
         "browser_cmdline",
+        "backend_client",
         "cdp_attach",
         "tool_registry",
         "tool_errors",

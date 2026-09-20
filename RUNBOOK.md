@@ -337,6 +337,20 @@ at all** and **no `DevToolsActivePort` file**; its port was recovered from
 `--remote-debugging-port=` on the process command line. **So the general recipe is
 one call: spawn with the same `user_data_dir`.**
 
+From a shell that is one command, and since F-891 you do not need an MCP client
+to make it:
+
+```console
+stealthy spawn --profile "C:\Users\me\AppData\Local\amazon-buy-bot\seller-central-profile" --headed
+```
+
+It talks to the backend this shell would be served by (the one `status` reports),
+starts one if none is running, and prints `REATTACHED : yes` with the holder's pid
+when it got the browser that was already open rather than a new one. That command
+is what replaced the hand-written 40-line stdio client this recipe needed on
+2026-09-19 — `stealthy call spawn_browser --arg user_data_dir=…` is the same call
+without the sugar.
+
 Two cases still need a hand.
 
 **The owner backend is still ALIVE (wedged, or just unreachable because every

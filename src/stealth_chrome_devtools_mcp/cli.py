@@ -674,6 +674,43 @@ def _cmd_kill_orphans(args) -> int:
     return 0
 
 
+def _cli_call():
+    """The tool-driving verbs (F-891), imported lazily.
+
+    They are the only verbs that speak MCP, so the ops verbs must not pay for
+    the client library: ``profiles`` and ``status`` reach a running backend
+    through nothing heavier than a socket and a probe. Same reason every
+    ``embedded`` import in this file is inside the function that needs it.
+    """
+    from stealth_chrome_devtools_mcp import cli_call
+
+    return cli_call
+
+
+def _cmd_tools(args) -> int:
+    return _cli_call().cmd_tools(args)
+
+
+def _cmd_call(args) -> int:
+    return _cli_call().cmd_call(args)
+
+
+def _cmd_ls(args) -> int:
+    return _cli_call().cmd_ls(args)
+
+
+def _cmd_spawn(args) -> int:
+    return _cli_call().cmd_spawn(args)
+
+
+def _cmd_nav(args) -> int:
+    return _cli_call().cmd_nav(args)
+
+
+def _cmd_close(args) -> int:
+    return _cli_call().cmd_close(args)
+
+
 def _cmd_serve(args) -> int:
     # Delegate to the same entrypoint as `stealth-chrome-devtools-mcp` so server
     # lifecycle (incl. orphan recovery) behaves exactly as normal.
@@ -704,16 +741,134 @@ _DISPATCH = {
     "restart": _cmd_restart,
     "kill-orphans": _cmd_kill_orphans,
     "serve": _cmd_serve,
+    "tools": _cmd_tools,
+    "call": _cmd_call,
+    "ls": _cmd_ls,
+    "spawn": _cmd_spawn,
+    "nav": _cmd_nav,
+    "close": _cmd_close,
 }
+
+#: The console-script names this ONE ``main`` is installed under
+#: (``pyproject.toml`` ``[project.scripts]``), canonical first. F-891 added
+#: ``stealthy``; ``stealth-chrome-devtools`` stays because it is in every
+#: operator's muscle memory and in this repo's own RUNBOOK. One CLI, two names —
+#: never two CLIs (convention 4).
+SCRIPT_NAMES = ("stealthy", "stealth-chrome-devtools")
+
+
+def _prog_name() -> str:
+    """The name this process was invoked as, for help text and usage lines.
+
+    A CLOSED set, and that is the point: ``argparse``'s own default is
+    ``basename(sys.argv[0])``, which under pytest prints ``pytest`` and under
+    ``python -m`` prints ``__main__``, so help text would advertise a command
+    that does not exist. Anything unrecognised falls back to the canonical name.
+    """
+    invoked = Path(sys.argv[0] or "").name.removesuffix(".exe")
+    return invoked if invoked in SCRIPT_NAMES else SCRIPT_NAMES[0]
+
+
+def _backend_flags() -> argparse.ArgumentParser:
+    """The flags every tool-driving verb shares (F-891).
+
+    A parent parser rather than six copies: ``--no-start`` and ``--timeout``
+    mean the same thing for all six, and six declarations are six places for one
+    of them to drift. ``--json`` is deliberately NOT here — on ``call`` it names
+    the arguments object, not an output mode.
+    """
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument(
+        "--no-start",
+        action="store_true",
+        help="fail instead of starting a backend when none is running",
+    )
+    shared.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="per-call budget in seconds (default: the client's)",
+    )
+    return shared
+
+
+def _add_tool_verbs(sub, shared: argparse.ArgumentParser) -> None:
+    """The six verbs that drive the LIVE backend's tools (F-891).
+
+    Bodies live in ``cli_call``; what is here is the surface. ``call`` has no
+    per-tool mirror on purpose — the tool's own schema on the backend is the
+    validation, so a 95th tool is reachable the day it is registered.
+    """
+    tools = sub.add_parser(
+        "tools", parents=[shared], help="list the live backend's tools"
+    )
+    tools.add_argument("--section", default=None, help="only tools in this section")
+    tools.add_argument("--json", action="store_true", help="JSON output")
+
+    call = sub.add_parser(
+        "call",
+        parents=[shared],
+        help="call ANY tool on the live backend (the core verb)",
+    )
+    call.add_argument("tool", help="tool name, e.g. spawn_browser")
+    call.add_argument(
+        "--arg",
+        action="append",
+        metavar="KEY=VALUE",
+        help="one argument; the value is JSON when it parses, else a string",
+    )
+    call.add_argument(
+        "--json",
+        default=None,
+        metavar="OBJECT",
+        help="the whole arguments object as JSON (--arg wins per key). On THIS "
+        "verb --json is the arguments, not an output mode: `call` always "
+        "prints the tool's structured result as JSON.",
+    )
+
+    listing = sub.add_parser("ls", parents=[shared], help="list browser instances")
+    listing.add_argument("--json", action="store_true", help="JSON output")
+
+    spawn = sub.add_parser("spawn", parents=[shared], help="spawn a browser")
+    profile = spawn.add_mutually_exclusive_group()
+    profile.add_argument(
+        "--profile", default=None, help="persistent profile: a name or an absolute path"
+    )
+    profile.add_argument(
+        "--master",
+        action="store_true",
+        help="the MASTER profile itself (re-attaches when it is already running)",
+    )
+    headed = spawn.add_mutually_exclusive_group()
+    headed.add_argument("--headed", action="store_true", help="show a window")
+    headed.add_argument("--headless", action="store_true", help="no window")
+    spawn.add_argument("--url", default=None, help="navigate here after spawning")
+    spawn.add_argument("--json", action="store_true", help="JSON output")
+
+    nav = sub.add_parser("nav", parents=[shared], help="navigate an instance")
+    nav.add_argument("instance", help="instance id, or a unique prefix of one")
+    nav.add_argument("url")
+    nav.add_argument(
+        "--wait",
+        default=None,
+        choices=("load", "domcontentloaded", "networkidle"),
+        help="milestone to wait for (default: the tool's)",
+    )
+    nav.add_argument("--json", action="store_true", help="JSON output")
+
+    close = sub.add_parser("close", parents=[shared], help="close an instance")
+    close.add_argument("instance", help="instance id, or a unique prefix of one")
+    close.add_argument("--json", action="store_true", help="JSON output")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="stealth-chrome-devtools",
-        description="Ops CLI for the stealth Chrome DevTools MCP server "
-        "(inspect, reclaim disk, start). For browser automation, use the MCP server.",
+        prog=_prog_name(),
+        description="CLI for the stealth Chrome DevTools MCP server: inspect and "
+        "operate the backend, and drive its tools from a shell.",
     )
     sub = parser.add_subparsers(dest="command")
+    _add_tool_verbs(sub, _backend_flags())
 
     sub.add_parser(
         "status", help="show backend state, browser-session root, and storage caps"

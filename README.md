@@ -343,19 +343,48 @@ adopted that app's `PORT`, `DEBUG`, and `SENTRY_DSN` as the server's own.
 
 ## CLI
 
-Installs a `stealth-chrome-devtools` ops command for managing the server and its
-disk usage. (This is for *ops* — to drive a browser, use the MCP server or its
-HTTP backend.)
+Installs a **`stealthy`** command. It both operates the backend and drives its
+tools, so a shell can do anything an AI client can. (`stealth-chrome-devtools` is
+the same command under its older name — one CLI, two names, not two tools.)
+
+### Drive the browser from a shell
+
+Every one of these talks to the **backend your shell would be served by** — the
+same one `status` reports — and starts one if none is running (`--no-start` makes
+that an error instead). Output is a table on a terminal and JSON in a pipe:
+
+```console
+stealthy ls                                          # browser instances
+stealthy spawn --profile seller-central --headed     # recover a stranded login
+stealthy spawn --master --headed                     # the MASTER profile itself
+stealthy nav e364 https://example.com --wait load    # ids resolve by prefix
+stealthy call get_cookies --arg instance_id=e364c31b --arg domain=example.com
+stealthy tools --section browser-management
+```
+
+`call` reaches **any** tool the backend serves — there is no per-tool mirror
+here, so a newly added tool is callable the day it ships. `--arg key=value`
+values are JSON when they parse (`headless=false`, `viewport_width=1200`,
+`browser_args=["--x"]`) and plain strings when they do not; `--json '<object>'`
+passes the whole arguments object at once.
+
+`spawn --profile <name-or-path>` is the **stranded-login recovery**: if a browser
+is already holding that profile it is re-attached to over CDP — same window, same
+open page — and the answer says `REATTACHED`. See RUNBOOK, *Recover a stranded
+login*. `spawn --master` names the master profile directory explicitly, which is
+what makes it land on master itself rather than on a clone.
+
+### Operate the backend
 
 These four only read and preview — they change nothing, and the test suite runs
 them on every commit, so they are known to work:
 
 <!-- doc-example: runnable -->
 ```console
-stealth-chrome-devtools status
-stealth-chrome-devtools profiles
-stealth-chrome-devtools cleanup
-stealth-chrome-devtools cleanup --browser-session-cap-gb 12
+stealthy status
+stealthy profiles
+stealthy cleanup
+stealthy cleanup --browser-session-cap-gb 12
 ```
 
 `status` reports whether the backend is up plus the browser-session root and both
@@ -367,9 +396,9 @@ These are not auto-executed — `--apply` deletes, `serve` does not return, and
 `doctor` needs Chrome installed:
 
 ```console
-stealth-chrome-devtools cleanup --apply               # actually reclaim
-stealth-chrome-devtools doctor                        # check Chrome / environment
-stealth-chrome-devtools serve --http --port 19222     # start the server
+stealthy cleanup --apply               # actually reclaim
+stealthy doctor                        # check Chrome / environment
+stealthy serve --http --port 19222     # start the server
 ```
 
 `cleanup` deletes idle auto-clones over the clone cap and trims idle named
@@ -380,9 +409,16 @@ uses the same selectors as the automatic sweep, so the preview matches `--apply`
 ## Preparing the Master Profile
 
 1. Start the MCP server
-2. Call `spawn_browser()` without `user_data_dir`
+2. Call `spawn_browser()` without `user_data_dir` — or, from a shell,
+   `stealthy spawn --master --headed`
 3. Sign in to your accounts in the browser that opens
 4. Close it — future sessions use this profile or clone from it
+
+The two are not quite the same call and the difference only shows when master is
+already running: an argument-less `spawn_browser()` reaches master **only while
+it is free** and silently clones from it otherwise, while `--master` names the
+directory, so it lands on master itself and re-attaches to a master that is
+already open.
 
 ## Requirements
 
