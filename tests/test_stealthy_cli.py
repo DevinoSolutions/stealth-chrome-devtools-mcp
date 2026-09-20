@@ -149,11 +149,6 @@ class TestArgumentParsing:
 class TestResultUnwrapping:
     """THE one reading of a tool's answer, and the shapes it has to survive."""
 
-    def test_structured_content_is_the_answer(self):
-        assert backend_client.result_value({"instance_id": "a"}, []) == {
-            "instance_id": "a"
-        }
-
     def test_a_sole_result_key_is_unwrapped(self):
         """FastMCP wraps a NON-dict return (``list_instances`` returns a list)
         in ``{"result": ...}``; unwrapping only the SOLE-key shape is what keeps
@@ -166,9 +161,13 @@ class TestResultUnwrapping:
         assert backend_client.result_value(payload, []) == payload
 
     def test_empty_content_with_structured_content_still_answers(self):
-        """The measured prototype shape: ``content`` empty, the answer in
-        ``structuredContent``. A reader that took ``content[0].text`` first
-        raised IndexError on every successful call."""
+        """The measured prototype shape and the COMMON one: ``content`` empty,
+        the answer in ``structuredContent``. A reader that took
+        ``content[0].text`` first raised IndexError on every successful call.
+
+        Structured content being the answer at all is this same node — one
+        assertion, because "``structuredContent`` wins" and "an empty
+        ``content`` is not a failure" are one claim about one call shape."""
         assert backend_client.result_value({"ok": True}, []) == {"ok": True}
 
     def test_text_content_is_the_fallback_and_is_parsed_when_it_is_json(self):
@@ -541,17 +540,6 @@ class TestExitCodesAreClosed:
         group = ExceptionGroup("tg", [ValueError("a"), ValueError("b")])
         assert cli_call._verdict(group)[0] == cli_call.EXIT_INTERNAL
 
-    def test_a_broken_pipe_beats_the_transport_row_it_is_a_subclass_of(self):
-        """The ORDER is the fix, so it is pinned separately from the path that
-        produces one: swapping the two rows leaves every node above green."""
-        assert cli_call._verdict(BrokenPipeError(32, "Broken pipe")) == (
-            cli_call.EXIT_BROKEN_PIPE,
-            "",
-        )
-        assert cli_call._verdict(ConnectionResetError("gone"))[0] == (
-            cli_call.EXIT_NO_BACKEND
-        )
-
     def test_a_protocol_refusal_is_a_tool_error(self):
         """An unknown tool is the everyday one: the round trip worked and the
         fix is in what was asked, so it is exit 1 and not exit 3."""
@@ -604,7 +592,15 @@ class TestExitCodesAreClosed:
         the shell, and `BrokenPipeError` is an `OSError`, so before its own row
         it fell through to the transport row and reported "could not reach the
         backend" about a round trip that had already succeeded. The pipe row
-        must sit ABOVE that one."""
+        must sit ABOVE that one.
+
+        This is the ONE pin for that order, end to end rather than on `_verdict`
+        alone, because the order is only half of it: `_abandon_stdout` and the
+        silent stderr are the other half and a unit node cannot see either.
+        Measured under mutation — moving the row below the transport row
+        reproduces the shipped sentence verbatim. That the transport row itself
+        still answers 3 is `test_no_path_out_of_main_prints_a_traceback`'s
+        `ConnectionResetError` case, so neither claim is pinned twice."""
         abandoned = []
         monkeypatch.setattr(cli_call, "_abandon_stdout", lambda: abandoned.append(1))
         monkeypatch.setattr(sys, "stdout", _ClosedReader())
@@ -780,15 +776,28 @@ class TestSpawnVerb:
         self, responsive, recorder, monkeypatch, capsys
     ):
         """The table path is the one an operator actually watches, so the M3
-        ordering has to hold on BOTH sides of `wants_json`."""
-        monkeypatch.setattr(cli_call, "wants_json", lambda *a, **k: False)
+        ordering has to hold on BOTH sides of `wants_json`.
+
+        The terminal is REAL here — `isatty`, not a patched `wants_json` —
+        because this node's whole claim is about the side a terminal lands on:
+        patching the rule out would pin the branch while asserting nothing
+        about how a shell reaches it, and `wants_json(sys.stdout, …)` resolving
+        its stream at call time is the link that makes the pair work. The other
+        table nodes patch the rule deliberately: their claim is the table's
+        CONTENT, and it is this file's one `isatty` that says which mode a
+        terminal gets."""
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
         recorder.answers["spawn_browser"] = {"instance_id": "abc-123"}
         recorder.fail = "navigate"
 
         assert cli.main(["spawn", "--url", "https://x.test/"]) == (
             cli_call.EXIT_TOOL_ERROR
         )
-        assert "abc-123" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        # The TABLE line, not the id alone: an `isatty` patch that failed to
+        # take would emit the id as JSON and satisfy a bare `"abc-123" in out`,
+        # so the node would pass while measuring the other branch.
+        assert "instance   : abc-123" in out
 
 
 class TestLsVerb:

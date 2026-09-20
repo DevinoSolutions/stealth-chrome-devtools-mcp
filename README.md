@@ -378,6 +378,24 @@ with no `--profile` is whatever `spawn_browser()` itself selects. Either way the
 answer prints the `profile_selection` the backend actually made — role and
 directory — so you can see what you got rather than infer it.
 
+#### Exit codes are a closed set
+
+Every failure there is becomes one of these, and errors are one line on stderr —
+a script never gets a raw traceback paired with Python's own exit 1:
+
+| Code | Means |
+|---|---|
+| `0` | it worked |
+| `1` | the tool answered and said **no** — the round trip succeeded |
+| `2` | usage: a bad flag, a bad `--arg`, an ambiguous id, no verb at all (argparse's own code, so its refusals and ours are indistinguishable to a script) |
+| `3` | no backend: nothing running and `--no-start`, or the transport failed, so nothing on the backend ever saw the request |
+| `70` | a bug in the CLI itself (`EX_SOFTWARE`) — never 1, which would blame the tool |
+| `130` | `Ctrl-C` |
+| `141` | the **reader** went away: `128 + SIGPIPE`, so `stealthy ls \| head -1` under `set -o pipefail` looks exactly like `ls \| head -1`. No message — your `head` did what you asked |
+
+`--traceback` adds the full stack **after** that one line; it never replaces it
+and never changes the code.
+
 ### Operate the backend
 
 These four only read and preview — they change nothing, and the test suite runs

@@ -155,7 +155,14 @@ keyword argument. Both are now behaviours rather than claims.
   own task group). A transport failure is **3** and not 1: nothing on the
   backend saw the request, so there is no answer to report. Our own bug is
   **70** (`EX_SOFTWARE`) and deliberately not 1, which means "the tool said no".
-  `Ctrl-C` is **130**. Measured under mutation: narrowing the `except` back to
+  `Ctrl-C` is **130**, and a reader that went away is **141** (the second
+  review's find, below). The whole set is **0 / 1 / 2 / 3 / 70 / 130 / 141**,
+  and all three surfaces that state a SET state that one: `cli_call`'s
+  constant-block docstring, README's *Exit codes are a closed set* table and
+  the CHANGELOG entry. RUNBOOK deliberately names one code only — the 3 its own
+  `--no-start` paragraph produces — because a second full table there is a
+  second place for the set to drift. Measured under mutation: narrowing the
+  `except` back to
   the named refusals makes the transport node raise through `main` and the
   interrupt node abort the pytest run outright — which is what a shell saw.
 - **The DELETE is pinned, not the flag.** `TestSessionHygiene` drives the REAL
