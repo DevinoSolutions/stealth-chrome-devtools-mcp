@@ -889,7 +889,7 @@ def require_allowed_user_data_dir(user_data_dir: str | None) -> None:
     PUBLIC because `spawn_browser` asks it before `adopt_held_profile`, which
     re-attaches to whatever live browser holds the requested directory and runs
     in front of selection (F-894 review M1). The rule is `require_allowed`; this
-    supplies which directories are ours, and the ``None`` only a tool can pass."""
+    and the resolver are its TWO callers, and this one takes the tool's ``None``."""
     if user_data_dir:
         profile_seed.require_allowed(
             user_data_dir,

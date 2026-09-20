@@ -276,7 +276,7 @@ def require_allowed(
     (F-888) and matches the requested directory against live browsers, so an
     absolute snapshot path with a browser on it — the exact state F-893 is
     about — was RE-ATTACHED to and the resolver never saw the request. So
-    ``spawn_browser`` asks first, beside its other pre-flight guard, and the
+    ``spawn_browser`` asks first, ahead of its other pre-flight guard, and the
     resolver asks again because it is public and has its own callers.
 
     Asking twice is free and correct: it is a path decision plus at most one
