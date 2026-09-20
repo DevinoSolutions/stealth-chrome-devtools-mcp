@@ -338,19 +338,22 @@ section's allowed names, and a second launcher-resolution node),
    neither (F-874's three record shapes). `get_instance_state` has them, per
    instance, one `stealthy call` away. Widening `list_instances` is a tool-surface
    change and was deliberately not made here.
-11. **`cli.py` is at 985 raw lines against a 1000-LOC budget that ratchets down
-   only** — **15 lines of headroom**, so the next verb does NOT fit and the cut
+11. **`cli.py` is at 981 raw lines against a 1000-LOC budget that ratchets down
+   only** — **19 lines of headroom**, so the next verb does NOT fit and the cut
    comes first. The natural one is the ops verbs' bodies, on the same argument
    that moved these six out.
 
-   Three numbers have been claimed for this file and the two that are not 985
-   are both measurement artefacts, so the method is recorded rather than the
-   answer alone. `tools/check_file_budgets.py` counts
-   `len(path.read_text().splitlines())` — raw lines, blanks and comments
-   included — and that is the only count the gate enforces. Measured that way
-   through git blobs: `c13b12a` 956, `1eee656` 977, this commit 985. An earlier
-   draft of this section said 956, which was true of the commit it was written
-   against and stale afterwards. The round-2 review said 819 and concluded "181
+   FOUR numbers have been claimed for this file and the three that are not 981
+   are all measurement artefacts, so the method is recorded rather than the
+   answer alone. `tools/check_file_budgets.py:207` counts
+   `len(path.read_text(encoding="utf-8").splitlines())` — raw lines, blanks and
+   comments included — and that is the only count the gate enforces. Measured
+   that way through git blobs: `c13b12a` 956, `1eee656` 977, `dfcbc44` 981,
+   `db26a23` 981. An earlier draft of this section said 956, which was true of
+   the commit it was written against and stale afterwards; a later one said 985
+   with "15 lines of headroom", which was true of no commit at all — it was
+   asserted from memory rather than read, which is the same failure as the 819
+   below by a shorter route. The round-2 review said 819 and concluded "181
    lines of headroom"; 819 is what `rtk proxy git show <rev>:<path> |
    Measure-Object -Line` returns for a file whose real count is 977, and the
    same pipeline returns 564 for a 693-line `cli_call.py` — so the shell
