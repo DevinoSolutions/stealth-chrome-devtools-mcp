@@ -345,28 +345,32 @@ def cmd_ls(args: argparse.Namespace) -> int:
 
 
 def _spawn_arguments(args: argparse.Namespace) -> dict[str, object]:
-    """``spawn_browser``'s arguments, from the four sugar flags.
+    """``spawn_browser``'s arguments, from the three sugar flags.
 
-    ``--master`` is ``user_data_dir=<the master directory>`` and that is not a
-    shortcut for an unnamed spawn: an unnamed spawn reaches master only while
-    master is FREE (``clone_storage.resolve_profile_selection`` falls through to
-    a clone the moment a browser holds it), so a flag whose whole promise is
-    "the master profile itself" cannot be spelled as one. Naming the directory
-    also buys F-888: a master that is already running is RE-ATTACHED to instead
-    of cloned past. The role it produces is therefore ``explicit``, not
-    ``master`` — the verb prints the role it got rather than the one it hoped
-    for.
+    ``--profile`` is passed STRAIGHT THROUGH as ``user_data_dir`` — a name or an
+    absolute path, exactly as the tool takes it, with no interpretation here.
+    That is the whole of profile selection at this layer, deliberately: what a
+    name resolves to is ``clone_storage.resolve_profile_selection``'s answer and
+    the verb PRINTS it back (role + directory), so the CLI can never claim a
+    profile the backend did not actually pick.
+
+    **There is no `--master`.** It was built and removed before shipping: an
+    unnamed spawn reaches the master profile only while master is FREE, so the
+    flag had to name master's DIRECTORY to keep its promise — and naming a
+    directory is what ``--profile`` already does. Worse, `master` as a bare NAME
+    resolves to ``sessions/master``, a different profile entirely (F-894), so the
+    flag would have taught a spelling that is a trap one character away. The
+    session vocabulary replacing it (``--session NAME`` + ``--from <session>``,
+    with ``default`` reserved for what is today the master profile) is where that
+    question belongs; shipping ``--master`` would have meant renaming it in the
+    next release.
 
     Neither ``--headed`` nor ``--headless`` sends no ``headless`` argument at
     all, so the tool's own default decides; sending one either way would be a
     second answer to a question ``spawn_browser`` already answers.
     """
     arguments: dict[str, object] = {}
-    if args.master:
-        from stealth_chrome_devtools_mcp.embedded import clone_storage
-
-        arguments["user_data_dir"] = str(clone_storage.master_profile_dir())
-    elif args.profile:
+    if args.profile:
         arguments["user_data_dir"] = args.profile
     if args.headed:
         arguments["headless"] = False

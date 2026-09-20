@@ -48,7 +48,7 @@ different mains fails.
 | `tools [--section X]` | the LIVE backend's surface, with the installed registry's count beside it |
 | `call <tool> [--arg k=v] [--json '<obj>']` | any tool; no per-tool mirror |
 | `ls` | `list_instances`, as a table or as its record |
-| `spawn [--profile\|--master] [--headed\|--headless] [--url]` | `spawn_browser` + optional navigation |
+| `spawn [--profile X] [--headed\|--headless] [--url]` | `spawn_browser` + optional navigation |
 | `nav <instance> <url> [--wait]` | `navigate`, ids by unique prefix |
 | `close <instance>` | `close_instance`, ids by unique prefix |
 
@@ -91,19 +91,37 @@ The tool's own schema on the backend is the validation.
 this feature exists for, and a string-only rule cannot express a bool. The split
 is on the FIRST `=` so a url's query string survives.
 
-**`--master` names the directory.** This is the part most likely to be
-"simplified" later, so: an argument-less `spawn_browser()` reaches master only
-while master is FREE — `clone_storage.resolve_profile_selection`
-(`clone_storage.py:971`) tests `_profile_has_running_browser(master)` and falls
-through to a clone the moment a browser holds it. A flag whose promise is "the
-master profile itself" therefore cannot be spelled as an unnamed spawn. Naming
-the directory also buys F-888: the re-attach branch in
-`tool_sections/browser_management.py` is gated on `if user_data_dir:` and runs
-BEFORE profile selection, so a master that is already running is re-attached to
-rather than cloned past. The measured consequence is that the role is
-`explicit`, not `master` — nothing special-cases the master path
-(`master_profile_dir()` has three call sites, all inside `clone_storage`) — and
-the verb PRINTS the role it got instead of relabelling it.
+**`--master` was built and then REMOVED before shipping.** The brief asked for a
+flag that lands on the master profile itself, and the measurement behind it
+stands: an argument-less `spawn_browser()` reaches master only while master is
+FREE — `clone_storage.resolve_profile_selection` (`clone_storage.py:971`) tests
+`_profile_has_running_browser(master)` and falls through to a clone the moment a
+browser holds it — so "the master profile itself" genuinely cannot be spelled as
+an unnamed spawn, and naming the directory is also what buys F-888's re-attach
+(the branch in `tool_sections/browser_management.py` is gated on
+`if user_data_dir:` and runs BEFORE profile selection). What removed the flag is
+the parallel design study (`design_session_ux.md`, 2026-09-20), on two grounds
+this finding did not have:
+
+1. **The word is a trap.** `master` as a bare NAME does not mean the master
+   profile — a relative `user_data_dir` is anchored under the clone root, so
+   `user_data_dir="master"` resolves to `sessions/master`, a different profile
+   that exists on this machine at 0.46 GB (F-894, measured). A flag named
+   `--master` teaches that word one resolution step away from a directory that
+   is not what it says.
+2. **It would be renamed next release.** The master/snapshot vocabulary is being
+   replaced by `--session NAME` + `--from <session>` with `default` reserved as
+   the presented name for today's master (F-892+). Shipping `--master` into a
+   surface whose owning study has already decided to retire the word is shipping
+   a rename.
+
+So phase 1's `spawn` takes `--profile <name-or-path>` (straight through as
+`user_data_dir`, which reaches master's directory by absolute path for anyone who
+wants it — with role `explicit`, because nothing special-cases the master path:
+`master_profile_dir()` has three call sites, all inside `clone_storage`),
+`--headed`/`--headless` and `--url`. The verb PRINTS
+`spawn_diagnostics.profile_selection` (role + directory) and `reattached`, so
+what the resolver chose is visible rather than asserted by a flag name.
 
 **F-874 survives the table.** A `partial` or `stored` record deliberately carries
 no `current_url`. `instance_rows` marks the last-known value with
@@ -179,13 +197,20 @@ section's allowed names, and a second launcher-resolution node),
    neither (F-874's three record shapes). `get_instance_state` has them, per
    instance, one `stealthy call` away. Widening `list_instances` is a tool-surface
    change and was deliberately not made here.
-6. **`cli.py` is at 957 raw lines against a 1000-LOC budget that ratchets down
+6. **`cli.py` is at 956 raw lines against a 1000-LOC budget that ratchets down
    only.** The next verb extracts, it does not fit. The natural next cut is the
    ops verbs' bodies, on the same argument that moved these six out.
-7. **The `--master` role reads `explicit`.** Truthful, and mildly surprising to
-   anyone expecting `master`. Whether `resolve_profile_selection` should
-   recognise its own master directory when it is named explicitly is a
-   profile-selection question, owned by the parallel master/snapshot UX study,
-   and was deliberately not decided here: changing it silently would move what
-   every existing caller of `user_data_dir=` gets.
+7. **`--profile` is superseded the day F-892+ lands.** The session vocabulary
+   (`--session NAME` to name a session, `--from <session>` to say what it is
+   seeded from, `default` reserved for today's master) is the spelling a user of
+   the session system should ever need; `--profile` then stays as the RAW
+   directory escape hatch — the one way to hand `spawn_browser` a
+   `user_data_dir` verbatim, including an absolute path to master's own
+   directory. Two consequences are live until then and are not this CLI's to
+   fix: a bare relative name resolves under the clone root, so `--profile master`
+   is `sessions/master` and not the master profile (F-894), and whether
+   `resolve_profile_selection` should recognise its own master directory when it
+   is named explicitly (the role reads `explicit`, truthfully) is a
+   profile-selection question owned by that study. Changing either silently
+   would move what every existing `user_data_dir=` caller gets.
 8. **The PyPI name is unclaimed, not reserved.** See §4.

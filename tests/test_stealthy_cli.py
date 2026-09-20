@@ -357,38 +357,29 @@ class TestCallVerb:
 
 
 class TestSpawnVerb:
-    def test_master_names_the_master_directory_explicitly(
-        self, responsive, recorder, monkeypatch, capsys
-    ):
-        """`--master` must land on the master profile ITSELF. An unnamed spawn
-        only reaches it while it is free (`clone_storage.resolve_profile_selection`
-        falls through to a clone when a browser holds it), so the flag names the
-        directory — which is also what makes F-888 re-attach to a master that is
-        already running instead of cloning past it."""
-        from stealth_chrome_devtools_mcp.embedded import clone_storage
-
-        monkeypatch.setattr(
-            clone_storage, "master_profile_dir", lambda: Path("/tmp/root/master")
-        )
-        recorder.answers["spawn_browser"] = {
-            "instance_id": "abc",
-            "spawn_diagnostics": {"profile_selection": {"profile_role": "explicit"}},
-        }
-        assert cli.main(["spawn", "--master", "--json"]) == 0
-        name, arguments = recorder.calls[0]
-        assert name == "spawn_browser"
-        assert arguments["user_data_dir"] == str(Path("/tmp/root/master"))
-
     def test_profile_passes_user_data_dir_through_untouched(self, responsive, recorder):
+        """A name and a path both go through VERBATIM. What a name RESOLVES to is
+        `clone_storage.resolve_profile_selection`'s answer, and this verb's job is
+        to report that answer back (`profile_selection`), never to pre-empt it."""
         recorder.answers["spawn_browser"] = {"instance_id": "abc"}
         assert cli.main(["spawn", "--profile", "seller-central", "--json"]) == 0
         assert recorder.calls[0][1]["user_data_dir"] == "seller-central"
+        assert cli.main(["spawn", "--profile", r"C:\p\dir", "--json"]) == 0
+        assert recorder.calls[-1][1]["user_data_dir"] == r"C:\p\dir"
 
-    def test_master_and_profile_together_are_a_usage_error(self, responsive, recorder):
+    def test_there_is_no_master_flag(self):
+        """`--master` was built and REMOVED before shipping; this pin keeps it out.
+
+        Two measured reasons. `master` as a bare NAME resolves to
+        `sessions/master`, a DIFFERENT profile (F-894), so a flag spelled that way
+        teaches a word that is a trap one resolution step from the thing it names.
+        And the vocabulary replacing it — `--session NAME` + `--from <session>`,
+        with `default` reserved — owns that question (F-892+), so shipping the flag
+        would mean renaming it next release. `--profile <absolute path>` already
+        reaches any directory, master's included.
+        """
         with pytest.raises(SystemExit) as excinfo:
-            cli.build_parser().parse_args(
-                ["spawn", "--master", "--profile", "seller-central"]
-            )
+            cli.build_parser().parse_args(["spawn", "--master"])
         assert excinfo.value.code == cli_call.EXIT_USAGE
 
     def test_neither_headed_nor_headless_sends_no_headless_argument(

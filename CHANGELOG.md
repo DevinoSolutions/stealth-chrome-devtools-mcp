@@ -27,9 +27,13 @@ existing verbs are unchanged.
   unique prefix, and an ambiguous one names every match instead of picking.
 - `stealthy spawn --profile <name-or-path>` is the stranded-login recipe as one
   command, and prints `REATTACHED : yes` with the holder's pid when F-888 gave it
-  the browser that was already running. `--master` names the master DIRECTORY,
-  which is what makes it land on master itself: an argument-less spawn reaches
-  master only while master is free and clones from it otherwise.
+  the browser that was already running. The value is passed through as
+  `user_data_dir` untouched and a `spawn` with no `--profile` is whatever
+  `spawn_browser()` itself selects; either way the `profile_selection` the
+  backend made — role and directory — is printed, so nothing has to be inferred.
+  There is deliberately **no** `--master`: `master` as a bare name resolves to
+  `sessions/master`, a different profile (F-894), and the vocabulary that will
+  name the master profile is `--session`/`--from` with `default` reserved.
 - `stealthy tools [--section X]` lists the LIVE backend's surface and states the
   installed build's registry count beside it, because when those two disagree the
   shell and the backend are different builds — which is the answer.

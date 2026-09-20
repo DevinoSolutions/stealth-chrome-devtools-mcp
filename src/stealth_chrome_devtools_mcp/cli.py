@@ -830,14 +830,11 @@ def _add_tool_verbs(sub, shared: argparse.ArgumentParser) -> None:
     listing.add_argument("--json", action="store_true", help="JSON output")
 
     spawn = sub.add_parser("spawn", parents=[shared], help="spawn a browser")
-    profile = spawn.add_mutually_exclusive_group()
-    profile.add_argument(
-        "--profile", default=None, help="persistent profile: a name or an absolute path"
-    )
-    profile.add_argument(
-        "--master",
-        action="store_true",
-        help="the MASTER profile itself (re-attaches when it is already running)",
+    spawn.add_argument(
+        "--profile",
+        default=None,
+        help="persistent profile: a name or an absolute path, passed straight "
+        "through as user_data_dir (re-attaches when a browser already holds it)",
     )
     headed = spawn.add_mutually_exclusive_group()
     headed.add_argument("--headed", action="store_true", help="show a window")

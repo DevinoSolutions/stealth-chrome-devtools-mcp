@@ -356,7 +356,7 @@ that an error instead). Output is a table on a terminal and JSON in a pipe:
 ```console
 stealthy ls                                          # browser instances
 stealthy spawn --profile seller-central --headed     # recover a stranded login
-stealthy spawn --master --headed                     # the MASTER profile itself
+stealthy spawn --headed                              # whatever spawn_browser() picks
 stealthy nav e364 https://example.com --wait load    # ids resolve by prefix
 stealthy call get_cookies --arg instance_id=e364c31b --arg domain=example.com
 stealthy tools --section browser-management
@@ -371,8 +371,10 @@ passes the whole arguments object at once.
 `spawn --profile <name-or-path>` is the **stranded-login recovery**: if a browser
 is already holding that profile it is re-attached to over CDP — same window, same
 open page — and the answer says `REATTACHED`. See RUNBOOK, *Recover a stranded
-login*. `spawn --master` names the master profile directory explicitly, which is
-what makes it land on master itself rather than on a clone.
+login*. The name or path goes through as `user_data_dir` untouched; a `spawn`
+with no `--profile` is whatever `spawn_browser()` itself selects. Either way the
+answer prints the `profile_selection` the backend actually made — role and
+directory — so you can see what you got rather than infer it.
 
 ### Operate the backend
 
@@ -410,15 +412,13 @@ uses the same selectors as the automatic sweep, so the preview matches `--apply`
 
 1. Start the MCP server
 2. Call `spawn_browser()` without `user_data_dir` — or, from a shell,
-   `stealthy spawn --master --headed`
+   `stealthy spawn --headed`
 3. Sign in to your accounts in the browser that opens
 4. Close it — future sessions use this profile or clone from it
 
-The two are not quite the same call and the difference only shows when master is
-already running: an argument-less `spawn_browser()` reaches master **only while
-it is free** and silently clones from it otherwise, while `--master` names the
-directory, so it lands on master itself and re-attaches to a master that is
-already open.
+That reaches master **only while master is free**; once a browser holds it, the
+same call clones from the snapshot instead. The `profile_selection` in the answer
+(`profile_role` + the directory) says which of the two you got.
 
 ## Requirements
 
