@@ -194,6 +194,19 @@ they asked), and stdout is re-pointed at the null device before returning, becau
 otherwise the interpreter's own exit flush fails again outside every handler and
 CPython answers with exit 120 — a code outside the advertised set.
 
+**Both ways out reach that, and the SUCCESS path is the one you meet first.** A
+verb that fails mid-write is the easy half; a verb that succeeds leaves the tail
+of any output over the 8 KB buffer unwritten, and it lands at interpreter
+finalisation with the reader long gone — so `stealthy call get_page_content |
+head -1` exited **120** with `Exception ignored on flushing sys.stdout` while the
+docs said 141. The run now ends with an explicit flush inside the guarded region.
+It catches `OSError`, not `BrokenPipeError`: the measured Windows finalisation
+error is `EINVAL` (errno 22), not a pipe error at all. The one-line report is
+likewise emitted under `contextlib.suppress(OSError)`, because `2>&1 | head -1`
+closes stderr too and that print lives inside the handler; and
+`asyncio.CancelledError` joined the caught set, being the last `BaseException`
+shape that could leave a set advertised as closed.
+
 `--traceback` prints the stack **as well as** the one-line message, and
 deliberately does not re-raise: an exception leaving `main` goes past
 `sentry_init()`, and `sys.excepthook` would ship a `BackendCallError` carrying the

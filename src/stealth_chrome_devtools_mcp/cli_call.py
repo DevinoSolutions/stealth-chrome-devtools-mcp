@@ -41,6 +41,7 @@ it anywhere; what the backend already records, it records.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from typing import TYPE_CHECKING
 
@@ -85,8 +86,8 @@ EXIT_TOOL_ERROR = 1
 EXIT_USAGE = 2
 EXIT_NO_BACKEND = 3
 EXIT_INTERNAL = 70
-EXIT_BROKEN_PIPE = 141
 EXIT_INTERRUPTED = 130
+EXIT_BROKEN_PIPE = 141
 
 #: The mark a table puts in front of a url or title that is the LAST KNOWN one
 #: rather than the current one. F-874 is the whole reason it exists: a `partial`
@@ -336,14 +337,26 @@ def _verdict(exc: BaseException) -> tuple[int, str]:
       knows what they pressed — so it costs one word and
       :data:`EXIT_INTERRUPTED`. It is handled at all because the alternative is
       Python's own traceback and exit 1, the TOOL-error code, for a key that
-      was meant;
+      was meant. ``asyncio.CancelledError`` shares the row: it is a
+      ``BaseException`` that is neither an ``Exception`` nor a
+      ``KeyboardInterrupt`` nor a group, so a cancellation arriving from
+      anywhere but the SIGINT ``asyncio.run`` already converts was the one
+      remaining shape that could leave a set advertised as closed;
     * our own three named refusals, unchanged;
     * ``BrokenPipeError`` — **and it must sit ABOVE the transport row, because
       it is an ``OSError`` and that row would otherwise swallow it** (F-891
       review M2). It comes from OUR OWN ``print``, after a round trip that
       worked, so "could not reach the backend" is a false statement about the
       one thing this function exists to keep straight. Empty message, by
-      design: see :data:`EXIT_BROKEN_PIPE`;
+      design: see :data:`EXIT_BROKEN_PIPE`. **The row is keyed on the TYPE and
+      not on the site, and that has a residual worth naming** (delta review
+      S3): ``httpx`` writing to a backend socket the peer closed also raises
+      ``BrokenPipeError``, and it is reported here as a broken pipe — silent,
+      141 — where the truthful answer is 3. "It comes from our own ``print``"
+      is the overwhelmingly common case, not a guarantee. Narrowing it to the
+      site would mean a flag set around every emit and read here, i.e. a second
+      way to know where an exception came from; the residual is the cheaper
+      side of that trade and is stated rather than hidden;
     * a TRANSPORT failure — ``httpx`` could not reach it, the socket died, the
       read budget expired — is :data:`EXIT_NO_BACKEND` and not a tool error:
       nothing on the backend ever saw the request, so there is no answer to
@@ -361,13 +374,19 @@ def _verdict(exc: BaseException) -> tuple[int, str]:
     ones above it. It is built inside the function because two of its types are
     lazy imports this file must not pay for on an ops verb.
     """
+    import asyncio
+
     import httpx
     from mcp.shared.exceptions import McpError
 
     from stealth_chrome_devtools_mcp.embedded.backend_client import BackendCallError
 
     judgements: tuple[tuple[type | tuple[type, ...], int, Callable[..., str]], ...] = (
-        (KeyboardInterrupt, EXIT_INTERRUPTED, lambda _exc: "interrupted"),
+        (
+            (KeyboardInterrupt, asyncio.CancelledError),
+            EXIT_INTERRUPTED,
+            lambda _exc: "interrupted",
+        ),
         (UsageError, EXIT_USAGE, lambda exc: f"error: {exc}"),
         (NoBackendError, EXIT_NO_BACKEND, lambda exc: f"error: {exc}"),
         (BackendCallError, EXIT_TOOL_ERROR, str),
@@ -403,15 +422,31 @@ def _abandon_stdout() -> None:
     the set had been honoured. Re-pointing fd 1 at the null device makes that
     final flush a no-op, so the code we chose is the code the shell sees.
 
-    The suppression is the whole mechanism and not laziness: a captured or
-    replaced ``sys.stdout`` has no ``fileno``, and a stream that owns no file
-    descriptor cannot fail to flush one.
+    Tolerating a missing ``fileno`` is the whole mechanism and not laziness: a
+    captured or replaced ``sys.stdout`` has no descriptor, and a stream that
+    owns none cannot fail to flush one.
+
+    Called from BOTH paths out of :func:`_run` — the verdict when a pipe error
+    surfaced inside the body, and the explicit flush that ends the success path
+    (F-891 delta review M1). It is idempotent and costs one ``open``.
     """
-    import contextlib
     import os
 
-    with contextlib.suppress(OSError, ValueError, AttributeError):
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    try:
+        target = sys.stdout.fileno()
+    except (OSError, ValueError, AttributeError):
+        # A captured or replaced stdout owns no descriptor, so there is no
+        # final flush of one to fail — asked FIRST so the null device is never
+        # opened for a stream that cannot use it (review nit: the old single
+        # statement opened the fd and then abandoned it when `fileno` raised).
+        return
+    spare = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(spare, target)
+    except OSError:
+        pass
+    finally:
+        os.close(spare)
 
 
 def _run(args: argparse.Namespace, body: VerbBody) -> int:
@@ -428,14 +463,17 @@ def _run(args: argparse.Namespace, body: VerbBody) -> int:
     local probe, never a backend round trip, so a bad invocation still costs the
     backend nothing.
 
-    The ``except`` clause names three types and not ``BaseException``, and each
+    The ``except`` clause names four types and not ``BaseException``, and each
     is load-bearing: ``Exception`` is the ordinary case and covers
-    ``ExceptionGroup``; ``KeyboardInterrupt`` is not an ``Exception``; and a
-    ``BaseExceptionGroup`` that is not an ``ExceptionGroup`` is the shape an
-    interrupt takes when it reaches us through the transport's own task group.
-    ``SystemExit`` is deliberately outside all three — argparse raising it is
-    how exit 2 already leaves this process, and catching it here would turn a
-    refusal into a status this function invented.
+    ``ExceptionGroup``; ``KeyboardInterrupt`` is not an ``Exception``;
+    ``asyncio.CancelledError`` is neither, and is safe to catch HERE precisely
+    because this is not inside a task — ``asyncio.run`` has already torn the
+    loop down, so nothing is being deprived of its cancellation (delta review
+    nit); and a ``BaseExceptionGroup`` that is not an ``ExceptionGroup`` is the
+    shape an interrupt takes when it reaches us through the transport's own
+    task group. ``SystemExit`` is deliberately outside all four — argparse
+    raising it is how exit 2 already leaves this process, and catching it here
+    would turn a refusal into a status this function invented.
 
     ``--traceback`` PRINTS the stack after the one line, and deliberately does
     NOT re-raise (F-891 review S1). Re-raising looked equivalent and was not:
@@ -466,11 +504,20 @@ def _run(args: argparse.Namespace, body: VerbBody) -> int:
         # names every kind it can and calls the rest OUR bug, code 70.
         Exception,  # noqa: BLE001  PERMANENT(F-891 — the closed exit-code set)
         KeyboardInterrupt,
+        asyncio.CancelledError,
         BaseExceptionGroup,
     ) as exc:
         code, line = _verdict(exc)
         if line:
-            print(line, file=sys.stderr)
+            # The reader of STDERR can be gone too (`... 2>&1 | head -1`), and
+            # this print is inside the handler, so its own BrokenPipeError
+            # would leave `_run`, leave `main`, and reach `sys.excepthook` —
+            # the traceback-plus-exit-1 (and the Sentry ship) that this whole
+            # function exists to prevent, produced by the line reporting it.
+            # The message is already lost either way; the CODE is what a script
+            # reads (review S2).
+            with contextlib.suppress(OSError):
+                print(line, file=sys.stderr)
         if getattr(args, "traceback", False):
             import traceback
 
@@ -478,6 +525,22 @@ def _run(args: argparse.Namespace, body: VerbBody) -> int:
         if code == EXIT_BROKEN_PIPE:
             _abandon_stdout()
         return code
+    # The SUCCESS path has the same hole and it is the one a user meets first
+    # (review M1, measured): `print` leaves the tail of any output above the
+    # 8 KB `TextIOWrapper` buffer unwritten, and without this flush it is
+    # written at interpreter finalisation — outside every handler, which is
+    # `Exception ignored on flushing sys.stdout` and exit 120. Flushing HERE
+    # brings that failure inside the guarded region, where it becomes the same
+    # 141 the failure path already returns.
+    #
+    # `OSError` and not `BrokenPipeError`: the measured Windows finalisation
+    # error is `EINVAL` (errno 22), not a pipe error at all, so a handler keyed
+    # on the pipe type would leave the real shape on 120.
+    try:
+        sys.stdout.flush()
+    except OSError:
+        _abandon_stdout()
+        return EXIT_BROKEN_PIPE
     return EXIT_OK
 
 

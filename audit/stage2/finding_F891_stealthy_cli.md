@@ -208,6 +208,32 @@ the six verbs and therefore outside everything the first round had pinned.
   CPython exits **120**, a code outside the advertised set produced after the
   set had been honoured. Measured under mutation — moving the row below the
   transport row reproduces the shipped sentence verbatim.
+
+  **The delta review then measured that half of that was still open, on the
+  path a user meets first.** `_abandon_stdout` was reachable only from the
+  verdict, i.e. only when a pipe error surfaced INSIDE a verb. A verb that
+  SUCCEEDS printed through `print`, returned 0, and left the tail of any output
+  above the 8 KB `TextIOWrapper` buffer to be written at interpreter
+  finalisation — outside every handler. Reproduced product-free on this machine:
+  exit **120** with `Exception ignored on flushing sys.stdout`, and on Windows
+  the error is `OSError EINVAL` (errno 22), not `BrokenPipeError` at all. The
+  reachable shape is any answer over 8 KB through a closed pipe — `stealthy call
+  get_page_content | head -1`, `get_debug_view`, `list_network_requests` — and
+  four documents were by then claiming 141 for it. `_run` now ends with an
+  explicit `sys.stdout.flush()` inside the guarded region, keyed on `OSError` so
+  the measured shape is covered and not only the pipe type. Pinned on both
+  errnos and mutation-checked (dropping the flush reddens both).
+
+  Two smaller doors out of the same set went with it: the one-line report is
+  emitted under `contextlib.suppress(OSError)`, because `... 2>&1 | head -1`
+  closes stderr and that `print` sits INSIDE the handler, so its own
+  `BrokenPipeError` reached `sys.excepthook` — a traceback, exit 1 and a Sentry
+  ship produced by the line reporting the failure quietly; and
+  `asyncio.CancelledError` joined `_run`'s `except`, the last `BaseException`
+  shape that was neither an `Exception`, a `KeyboardInterrupt` nor a group.
+  `_abandon_stdout`'s body is now executed by a pin of its own (it asserts the
+  DESCRIPTOR moved), where before only its CALL was pinned and replacing the
+  body with `pass` passed the whole file.
 - **`--traceback` shipped the tool's payload to Sentry.** It re-raised, so the
   exception left `main` past `sentry_init()` and `sys.excepthook` sent it —
   carrying a `BackendCallError` built from the tool's own words, which this
@@ -403,3 +429,22 @@ section's allowed names, and a second launcher-resolution node),
    profile-selection question owned by that study. Changing either silently
    would move what every existing `user_data_dir=` caller gets.
 13. **The PyPI name is unclaimed, not reserved.** See §4.
+14. **A transport-side broken pipe is reported as a broken pipe** (delta review
+   S3). The `BrokenPipeError` row is keyed on the TYPE, not on the site, and the
+   docstring's "it comes from OUR OWN `print`" is the overwhelmingly common case
+   rather than a guarantee: `httpx` writing to a backend socket the peer closed
+   raises the same class out of the transport, so the operator gets an empty
+   stderr and 141 where the truthful answer is 3, "could not reach the backend".
+   Kept rather than fixed, deliberately: narrowing the row to the site means a
+   flag set around every emit and consulted here, which is a second way to know
+   where an exception came from, in the one function whose whole job is to not
+   need one. The residual is low-frequency (the backend is loopback and it is
+   the READ that usually fails, giving `TimeoutError`) and is now stated in
+   `_verdict`'s own docstring rather than left as a premise reading like a
+   proof.
+15. **`stealthy` bare is pinned in two suites.** The same two assertions live in
+   `tests/test_cli.py` and in `TestExitCodesAreClosed`. Left as a pair on
+   purpose — they are two suites' contracts, and the class that owns the closed
+   set should be able to see the one path through `main` that reaches no verb —
+   but it is the one duplicate the dedupe pass kept, so it is named here rather
+   than rediscovered.

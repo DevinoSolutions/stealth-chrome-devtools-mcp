@@ -467,6 +467,29 @@ class _ClosedReader(io.StringIO):
         return False
 
 
+class _BufferedReaderGone(io.StringIO):
+    """A stdout whose reader left while the last chunk was still BUFFERED.
+
+    The shape the review measured, and the commonest one this CLI can actually
+    produce: `stealthy call get_page_content | head -1`. Output above the 8 KB
+    `TextIOWrapper` buffer flushes early, the OS pipe buffer absorbs it, and the
+    REMAINDER is written at interpreter finalisation — after `head` has gone,
+    outside every handler. So the write here SUCCEEDS and the flush is what
+    fails, which is the opposite of `_ClosedReader` and is why one double cannot
+    serve both.
+    """
+
+    def __init__(self, error: OSError) -> None:
+        super().__init__()
+        self._error = error
+
+    def flush(self) -> None:
+        raise self._error
+
+    def isatty(self) -> bool:
+        return False
+
+
 class TestExitCodesAreClosed:
     """F-891 review M1. Every exception becomes one of the codes, and never a
     traceback: exit 1 means "the tool answered and said no", so a crash in the
@@ -616,6 +639,105 @@ class TestExitCodesAreClosed:
             "without this the interpreter's exit flush fails again outside every "
             "handler and CPython exits 120, outside the advertised set"
         )
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            BrokenPipeError(32, "Broken pipe"),
+            OSError(22, "Invalid argument"),
+        ],
+        ids=["the flush itself raises EPIPE", "Windows finalisation EINVAL"],
+    )
+    def test_a_successful_verb_whose_buffered_output_never_lands_is_still_141(
+        self, responsive, recorder, monkeypatch, capsys, error
+    ):
+        """F-891 delta review M1 — the exit-120 hole was closed on the FAILURE
+        path only, while four documents said it was closed.
+
+        `_abandon_stdout` was reachable from one place: inside `_run`'s
+        `except`, gated on the verdict. It therefore ran only when a
+        `BrokenPipeError` surfaced INSIDE the body. On the success path nothing
+        flushed, so `print` left the text in the `TextIOWrapper`, `main`
+        returned 0, and the write happened at interpreter finalisation —
+        outside every handler, which is `Exception ignored on flushing
+        sys.stdout` and exit **120**, the exact code the set exists to exclude.
+
+        Both errnos are pinned because the measured Windows shape is EINVAL and
+        not `BrokenPipeError` at all (review M1's repro), which is why the fix
+        catches `OSError`: a handler keyed on the pipe type would pass the first
+        of these and leave the real one on 120.
+        """
+        abandoned = []
+        monkeypatch.setattr(cli_call, "_abandon_stdout", lambda: abandoned.append(1))
+        monkeypatch.setattr(sys, "stdout", _BufferedReaderGone(error))
+        recorder.answers["list_instances"] = []
+
+        code = cli.main(["ls", "--json"])
+        assert code == cli_call.EXIT_BROKEN_PIPE == 141, (
+            "a verb that did its work and could not deliver it is still the "
+            "pipe case; 0 would claim output the reader never got"
+        )
+        assert capsys.readouterr().err == ""
+        assert abandoned == [1], (
+            "without this the finalisation flush fails again outside every "
+            "handler and CPython exits 120"
+        )
+
+    def test_abandoning_stdout_really_redirects_the_descriptor(
+        self, monkeypatch, tmp_path
+    ):
+        """F-891 delta review S1. The CALL was pinned and the BODY was not, so
+        replacing `_abandon_stdout`'s body with `pass` passed the whole file —
+        and that body is the only line that does the work, the only one that
+        differs per platform, and the one whose triple `suppress` could swallow
+        a genuine bug.
+
+        A real file stands in for the terminal, so what is measured is the
+        descriptor: after the redirect, bytes written to THAT stream must not
+        reach it. `sys.stdout` is the test's own file and never fd 1, so the
+        pytest process's own output is untouched.
+        """
+        target = tmp_path / "stdout.txt"
+        with target.open("w", encoding="utf-8") as handle:
+            monkeypatch.setattr(sys, "stdout", handle)
+            cli_call._abandon_stdout()
+            handle.write("this went to the void")
+            handle.flush()
+        assert target.read_text(encoding="utf-8") == "", (
+            "the descriptor was not redirected, so the interpreter's own exit "
+            "flush would still fail and still exit 120"
+        )
+
+    def test_a_cancellation_is_interrupted_and_not_an_escape(
+        self, responsive, monkeypatch, capsys
+    ):
+        """The fourth name in `_run`'s tuple (delta review nit).
+        `asyncio.CancelledError` is a `BaseException` that is neither an
+        `Exception`, nor a `KeyboardInterrupt`, nor a group — so before this it
+        left `main` and became Python's traceback and exit 1, out of a set
+        advertised as closed. `asyncio.run` converts the SIGINT case, which is
+        why this needs a cancel from elsewhere to reach at all."""
+        import asyncio
+
+        async def boom(*_args, **_kwargs):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(backend_client, "call_tool", boom)
+        assert cli.main(["call", "list_tabs"]) == cli_call.EXIT_INTERRUPTED
+        assert "Traceback" not in capsys.readouterr().err
+
+    def test_a_closed_stderr_cannot_take_the_exception_out_of_main(
+        self, responsive, recorder, monkeypatch
+    ):
+        """F-891 delta review S2. `stealthy call navigate 2>&1 | head -1`: the
+        one-line report is printed INSIDE the handler, so its own
+        `BrokenPipeError` left `_run`, left `main`, and reached
+        `sys.excepthook` — a traceback, Python's exit 1 and a ship to Sentry,
+        produced by the line whose job was to report the failure quietly."""
+        recorder.fail = "navigate"
+        monkeypatch.setattr(sys, "stderr", _ClosedReader())
+        # No `pytest.raises`: a propagating BrokenPipeError fails here.
+        assert cli.main(["call", "navigate"]) == cli_call.EXIT_TOOL_ERROR
 
     def test_a_bare_base_exception_group_is_caught_by_main(
         self, responsive, monkeypatch
