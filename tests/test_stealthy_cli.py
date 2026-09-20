@@ -52,10 +52,19 @@ def _never_the_operators_record(monkeypatch, tmp_path):
     `_probe_backend_status` was patched to "nothing is running". A patched
     binding only isolates the paths it is on; the record path is isolated here
     for all of them.
+
+    BOTH homes, not just the one `singleton` re-exports (F-891 review S4). The
+    one `setattr` was sufficient for today's nodes — none reaches a writer on a
+    default path — but a fixture whose docstring says "the record path" and
+    redirects one NAME is one un-redirected writer away from the leak it exists
+    to prevent, and `backend_registry` is where every writer resolves its own.
     """
-    from stealth_chrome_devtools_mcp.embedded import singleton
+    from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 
     monkeypatch.setattr(singleton, "SERVER_STATE_FILE", tmp_path / "server.json")
+    monkeypatch.setattr(backend_registry, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(backend_registry, "SERVER_STATE_FILE", tmp_path / "server.json")
+    monkeypatch.setattr(backend_registry, "PORT_FILE", tmp_path / "server.port")
 
 
 def _pyproject() -> dict:
@@ -445,6 +454,20 @@ class TestTheCliNeverEvictsALiveBackend:
         assert recorder.urls == ["http://127.0.0.1:42003/mcp/"]
 
 
+class _ClosedReader(io.StringIO):
+    """A stdout whose reader has gone — `stealthy ls | head -1` after `head`
+    has taken its line. The failure is raised by the WRITE, which is where a
+    real broken pipe raises it, so the exception travels the production path
+    (out of `print`, out of `_emit_json`, into `_run`) rather than being handed
+    to `_verdict` by the test."""
+
+    def write(self, text: str) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def isatty(self) -> bool:
+        return False
+
+
 class TestExitCodesAreClosed:
     """F-891 review M1. Every exception becomes one of the codes, and never a
     traceback: exit 1 means "the tool answered and said no", so a crash in the
@@ -518,6 +541,17 @@ class TestExitCodesAreClosed:
         group = ExceptionGroup("tg", [ValueError("a"), ValueError("b")])
         assert cli_call._verdict(group)[0] == cli_call.EXIT_INTERNAL
 
+    def test_a_broken_pipe_beats_the_transport_row_it_is_a_subclass_of(self):
+        """The ORDER is the fix, so it is pinned separately from the path that
+        produces one: swapping the two rows leaves every node above green."""
+        assert cli_call._verdict(BrokenPipeError(32, "Broken pipe")) == (
+            cli_call.EXIT_BROKEN_PIPE,
+            "",
+        )
+        assert cli_call._verdict(ConnectionResetError("gone"))[0] == (
+            cli_call.EXIT_NO_BACKEND
+        )
+
     def test_a_protocol_refusal_is_a_tool_error(self):
         """An unknown tool is the everyday one: the round trip worked and the
         fix is in what was asked, so it is exit 1 and not exit 3."""
@@ -527,15 +561,80 @@ class TestExitCodesAreClosed:
         error = McpError(ErrorData(code=-32602, message="Unknown tool: nope"))
         assert cli_call._verdict(error)[0] == cli_call.EXIT_TOOL_ERROR
 
-    def test_traceback_re_raises_after_the_one_line_is_printed(
+    def test_traceback_prints_the_stack_and_still_returns_the_verdict(
         self, responsive, recorder, capsys
     ):
         """Both, never one instead of the other: the operator debugging this
         needs the stack, and the line is what everyone else reads."""
         recorder.fail = "navigate"
-        with pytest.raises(backend_client.BackendCallError):
-            cli.main(["call", "navigate", "--traceback"])
+        assert cli.main(["call", "navigate", "--traceback"]) == (
+            cli_call.EXIT_TOOL_ERROR
+        )
+        err = capsys.readouterr().err
+        assert "navigate exploded" in err
+        assert "Traceback" in err
+
+    def test_traceback_never_lets_the_exception_leave_main(
+        self, responsive, recorder, capsys
+    ):
+        """F-891 review S1. `cli.main`'s first statement is `sentry_init()`, so
+        an exception that escapes is shipped by `sys.excepthook` — carrying a
+        `BackendCallError` built from the TOOL'S OWN WORDS, which is the one
+        thing this module's docstring promises it never sends anywhere (and
+        `BackendCallError` is not a `ToolError`, so `expected_events`' rule
+        would not drop it). The stack has to reach the operator without the
+        payload reaching the network."""
+        recorder.fail = "navigate"
+        # No `pytest.raises`: nothing may propagate. A re-raise fails here.
+        assert isinstance(cli.main(["call", "navigate", "--traceback"]), int)
         assert "navigate exploded" in capsys.readouterr().err
+
+    def test_no_subcommand_is_a_usage_error_and_not_a_tool_error(self, capsys):
+        """F-891 review M1. `stealthy` bare prints help, and that is a USAGE
+        condition: exit 1 would tell a script the tool answered and refused.
+        It is the one path through `main` that reaches no verb, which is why
+        the rest of this class could not see it."""
+        assert cli.main([]) == cli_call.EXIT_USAGE == 2
+        assert "usage" in capsys.readouterr().out.lower()
+
+    def test_a_broken_pipe_is_not_a_missing_backend(
+        self, responsive, recorder, monkeypatch, capsys
+    ):
+        """F-891 review M2. `stealthy ls | head -1` is the commonest idiom in
+        the shell, and `BrokenPipeError` is an `OSError`, so before its own row
+        it fell through to the transport row and reported "could not reach the
+        backend" about a round trip that had already succeeded. The pipe row
+        must sit ABOVE that one."""
+        abandoned = []
+        monkeypatch.setattr(cli_call, "_abandon_stdout", lambda: abandoned.append(1))
+        monkeypatch.setattr(sys, "stdout", _ClosedReader())
+        recorder.answers["list_instances"] = []
+
+        code = cli.main(["ls", "--json"])
+        assert code == cli_call.EXIT_BROKEN_PIPE == 141
+        assert code != cli_call.EXIT_NO_BACKEND
+        assert capsys.readouterr().err == "", (
+            "the operator's own `head` did what they asked; a diagnostic is noise"
+        )
+        assert abandoned == [1], (
+            "without this the interpreter's exit flush fails again outside every "
+            "handler and CPython exits 120, outside the advertised set"
+        )
+
+    def test_a_bare_base_exception_group_is_caught_by_main(
+        self, responsive, monkeypatch
+    ):
+        """The third name in `_run`'s `except` tuple. A `BaseExceptionGroup`
+        that is NOT an `ExceptionGroup` is what an interrupt becomes through the
+        transport's own anyio task group, and neither `Exception` nor
+        `KeyboardInterrupt` catches it — so deleting that name from the tuple
+        used to pass the whole file."""
+
+        async def boom(*_args, **_kwargs):
+            raise BaseExceptionGroup("tg", [KeyboardInterrupt()])
+
+        monkeypatch.setattr(backend_client, "call_tool", boom)
+        assert cli.main(["call", "list_tabs"]) == cli_call.EXIT_INTERRUPTED
 
 
 class TestCallVerb:
@@ -743,6 +842,9 @@ class TestLsVerb:
             if row[:1].isalnum()
         }
         assert "https://live.test/" in lines["aaa"]
+        assert cli_call.LAST_KNOWN_MARK not in lines["aaa"], (
+            "a regression that marked EVERY row still contains the live url"
+        )
         assert cli_call.LAST_KNOWN_MARK in lines["bbb"]
         assert cli_call.LAST_KNOWN_MARK in lines["ccc"]
 
@@ -806,6 +908,24 @@ class TestNavAndCloseVerbs:
 
 
 class TestToolsVerb:
+    @pytest.fixture(autouse=True)
+    def _the_process_environment_is_borrowed(self, monkeypatch):
+        """Every node here reaches `cli._server()`, which MUTATES `os.environ`
+        — a `setdefault` of `STEALTH_MCP_NO_AUTO_RECOVERY` and then
+        `backend_env.scrub_process_env()`, whose `_remove` is a real `del`
+        (F-891 review S3). Neither is restored and `conftest` has no autouse env
+        isolation, so without this the residue reaches every later node in the
+        session: one that depends on the guard being UNSET, or on a `FASTMCP_*`
+        name still existing, fails for a reason no part of it names.
+
+        Swapping the whole mapping is what covers a `del` as well as a set —
+        `monkeypatch.delenv` restores a name only if the test names it, and the
+        names the scrub removes are the operator's, not this file's.
+        """
+        import os
+
+        monkeypatch.setattr(os, "environ", dict(os.environ))
+
     TOOLS = [  # noqa: RUF012  PERMANENT(test fixture data, never mutated)
         {"name": "spawn_browser", "description": "Spawn a new browser instance."},
         {"name": "navigate", "description": "Navigate to a URL."},
@@ -841,8 +961,13 @@ class TestToolsVerb:
         recorder.answers["__tools__"] = self.TOOLS
         assert cli.main(["tools"]) == 0
         out = capsys.readouterr().out
-        assert "3" in out
-        assert "installed build" in out.lower()
+        headline = out.splitlines()[0]
+        assert headline.startswith(f"{len(self.TOOLS)} tools on the live backend")
+        assert "installed build" in headline.lower()
+        # The two numbers must actually DISAGREE, or the node passes for a
+        # version of this line that prints one count twice.
+        registry = int(headline.rsplit(" ", 1)[-1])
+        assert registry != len(self.TOOLS) and registry > 3
 
 
 SESSION_ID = "session-under-test"
@@ -1047,3 +1172,36 @@ class TestSessionHygiene:
             "the budget moved onto the httpx client; re-read backend_client."
             "http_client before trusting --timeout again"
         )
+
+    async def test_the_one_transport_seam_puts_the_budget_on_the_read_clock(self):
+        """F-891 review S2. `http_client` is documented as THE one transport
+        seam and as the one place the two clocks are decided — and every node
+        above reaches it through a fixture that RE-IMPLEMENTS its body, so
+        swapping which clock got the budget, or dropping `follow_redirects`,
+        failed nothing at all. This drives the real function.
+
+        The two clocks are two for a reason worth failing over: a tool call
+        waits under `read`, so a backend whose socket is gone must be reported
+        on the short `connect` budget rather than at the end of a 180 s one.
+        """
+        client = backend_client.http_client(7.0)
+        try:
+            assert client.timeout.read == 7.0
+            assert client.timeout.connect == backend_client.CONNECT_TIMEOUT_SECONDS
+            assert client.timeout.connect != 7.0, "the two clocks are not one clock"
+            assert client.follow_redirects is True, (
+                "the MCP default; nothing here may be narrower than the transport"
+                " the SDK would have built"
+            )
+        finally:
+            await client.aclose()
+
+    def test_the_timeout_flag_reaches_that_seam_end_to_end(
+        self, responsive, fake_backend
+    ):
+        """`--timeout` → `_timeout()` → `budget_seconds` → `http_client`. Every
+        link was there and none of them was asserted, so a verb that dropped the
+        keyword would have served the default budget in silence."""
+        assert cli.main(["ls", "--timeout", "9", "--json"]) == 0
+        assert fake_backend.budget == 9.0
+        assert fake_backend.budget != backend_client.DEFAULT_TIMEOUT_SECONDS

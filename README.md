@@ -351,7 +351,9 @@ the same command under its older name — one CLI, two names, not two tools.)
 
 Every one of these talks to the **backend your shell would be served by** — the
 same one `status` reports — and starts one if none is running (`--no-start` makes
-that an error instead). Output is a table on a terminal and JSON in a pipe:
+that an error instead: a live backend is always used as-is, whatever build it is,
+but starting one can evict a *wedged* backend of another build). Output is a
+table on a terminal and JSON in a pipe:
 
 ```console
 stealthy ls                                          # browser instances

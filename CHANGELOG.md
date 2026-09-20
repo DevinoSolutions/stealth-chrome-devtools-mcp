@@ -46,11 +46,27 @@ cold-start lock, F-886's step-aside and F-889's adopt-forward apply unchanged;
 Output is a table on a terminal and JSON in a pipe or under `--json`.
 
 **Exit codes are a closed set**: 0 ok / 1 the tool answered and said no / 2 usage
-/ 3 no backend, which is also where a transport failure lands (nothing on the
-backend saw the request, so there is no answer to report) / 70 a bug in the CLI
-itself / 130 `Ctrl-C`. Every exception is mapped, so no invocation ever pairs a
-raw traceback with Python's default exit 1 — the code that means the tool
-refused. `--traceback` prints the stack **as well as** the one-line message.
+— including `stealthy` with no subcommand, which prints help and is the same kind
+of mistake argparse answers with 2 / 3 no backend, which is also where a transport
+failure lands (nothing on the backend saw the request, so there is no answer to
+report) / 70 a bug in the CLI itself / 130 `Ctrl-C` / 141 the READER went away.
+Every exception is mapped, so no invocation ever pairs a raw traceback with
+Python's default exit 1 — the code that means the tool refused.
+
+141 is `128 + SIGPIPE` and it needs its own row, above the transport one: a
+`BrokenPipeError` is an `OSError`, so `stealthy ls | head -1` and `stealthy tools
+| less` with `q` pressed early reported *"could not reach the backend"* about a
+round trip that had already succeeded — a false statement about the backend, made
+by the one function whose job is to keep transport and tool apart, over the
+commonest idiom in the shell. It prints nothing (the operator's `head` did what
+they asked), and stdout is re-pointed at the null device before returning, because
+otherwise the interpreter's own exit flush fails again outside every handler and
+CPython answers with exit 120 — a code outside the advertised set.
+
+`--traceback` prints the stack **as well as** the one-line message, and
+deliberately does not re-raise: an exception leaving `main` goes past
+`sentry_init()`, and `sys.excepthook` would ship a `BackendCallError` carrying the
+tool's own payload — exactly what this CLI promises it never sends anywhere.
 
 **The CLI never evicts a live backend.** The one selection is identity-blind, so
 a backend built from a different source tree answers and is adopted rather than

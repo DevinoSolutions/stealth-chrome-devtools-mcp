@@ -780,7 +780,9 @@ def _backend_flags() -> argparse.ArgumentParser:
     ``--traceback`` is the one way to see a stack from these verbs, because
     ``cli_call._run`` turns every exception into one stderr line and a closed
     exit code (F-891 review M1). A flag and not an env var: this package reads
-    its environment in ``settings.py`` and nowhere else.
+    its environment in ``settings.py`` and nowhere else. It PRINTS the stack and
+    never re-raises — an exception leaving ``main`` goes past `sentry_init()`
+    and ships the tool's own payload off the machine (review S1).
 
     ``--no-start``'s help names the consequence it prevents, not merely what it
     switches off (F-891 review S1): a responsive backend is always adopted,
@@ -808,7 +810,7 @@ def _backend_flags() -> argparse.ArgumentParser:
     shared.add_argument(
         "--traceback",
         action="store_true",
-        help="also re-raise the failure, so the full stack is printed",
+        help="also print the full stack, in addition to the one-line message",
     )
     return shared
 
@@ -969,7 +971,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if not args.command:
         parser.print_help()
-        return 1
+        # USAGE, never 1 (F-891 review M1): naming no verb is argparse's own
+        # kind of mistake, and exit 1 now means "the tool answered and said no".
+        return _cli_call().EXIT_USAGE
     return _DISPATCH[args.command](args)
 
 

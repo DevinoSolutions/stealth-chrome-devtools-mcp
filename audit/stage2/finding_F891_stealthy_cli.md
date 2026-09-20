@@ -143,19 +143,7 @@ second bounds what a tool call waits under. `--timeout` therefore sets the
 second; connecting keeps a separate 30 s so a vanished socket is reported in
 seconds rather than at the end of a 180 s tool budget.
 
-## 4. Name check
-
-- `Get-Command stealthy` on the development machine: **not found** — no
-  collision on PATH.
-- `https://pypi.org/pypi/stealthy/json`: **404** — no PyPI project of that name,
-  so no third-party distribution can install a competing `stealthy` script today.
-
-Neither is a guarantee about the future: a PyPI project named `stealthy` could be
-registered tomorrow and ship a console script of the same name, and pip would let
-whichever was installed last win. That risk is named rather than mitigated —
-`stealth-chrome-devtools` remains installed and unambiguous.
-
-## 3b. What the first review changed (and one thing it changed back)
+## 3b. What the two reviews changed (and one thing they changed back)
 
 The review at `a4b4741` found the promised closed exit-code set was not closed
 and the session termination the client exists to guarantee was pinned only as a
@@ -193,9 +181,76 @@ keyword argument. Both are now behaviours rather than claims.
   IS true (a foreign identity is adopted, the reuse gate is never asked, only an
   empty answer reaches a cold start) stayed.
 
+The review at `1eee656` then found the set still open at two doors, both outside
+the six verbs and therefore outside everything the first round had pinned.
+
+- **`stealthy` with no subcommand returned 1.** A pre-F-891 line, harmless until
+  this feature gave 1 a meaning: it told a script the tool had answered and
+  refused, about a shell that had not named a verb. It returns
+  `EXIT_USAGE` now, the same code argparse's own refusals carry.
+- **A broken pipe was reported as an unreachable backend.** `BrokenPipeError` is
+  an `OSError`, so `stealthy ls | head -1` fell through to the transport row and
+  printed `error: could not reach the backend (BrokenPipeError: [Errno 32]
+  Broken pipe)` — a false statement about the backend, made by the one function
+  whose job is to keep transport and tool apart, on the commonest idiom in the
+  shell. It has its own row ABOVE the transport row now, `EXIT_BROKEN_PIPE`
+  (141 = 128 + SIGPIPE, what a coreutils program dying of SIGPIPE reports, so
+  `set -o pipefail` sees the same thing from `stealthy` as from `ls | head`) and
+  no message at all. `_abandon_stdout` closes the same hole at the other end:
+  without it the interpreter's exit flush fails again OUTSIDE every handler and
+  CPython exits **120**, a code outside the advertised set produced after the
+  set had been honoured. Measured under mutation — moving the row below the
+  transport row reproduces the shipped sentence verbatim.
+- **`--traceback` shipped the tool's payload to Sentry.** It re-raised, so the
+  exception left `main` past `sentry_init()` and `sys.excepthook` sent it —
+  carrying a `BackendCallError` built from the tool's own words, which this
+  module's docstring promises it never sends anywhere, and which
+  `expected_events`' convention rule would not have dropped (it is not a
+  `ToolError`). It prints the stack with `traceback.print_exc()` now and exits on
+  the verdict's code. Removing the re-raise is also what made `BLE001` fire on
+  `_run`'s catch, which now carries an owner-tagged suppression rather than a
+  lint-shaped excuse for narrowing the one place that must catch everything.
+- **`http_client` — "THE one transport seam" — was executed by no test.** The
+  `fake_backend` fixture RE-IMPLEMENTED its body (the same `httpx.Timeout`, the
+  same `follow_redirects`) and then replaced the production function, so
+  swapping which clock got the caller's budget, or dropping the redirect
+  setting, failed nothing. Two nodes now drive the real one: the budget lands on
+  `read` and `connect` keeps its own short clock, and `--timeout 9` is asserted
+  end to end at the seam. Measured under mutation — swapping the two clocks, and
+  making `_timeout` ignore the flag, each turn exactly one of them RED.
+- **`TestToolsVerb` was mutating the real `os.environ` permanently.** Every node
+  there reaches `cli._server()`, which `setdefault`s `STEALTH_MCP_NO_AUTO_RECOVERY`
+  and then runs `backend_env.scrub_process_env()`, whose `_remove` is a real
+  `del` — and `conftest` has no autouse env isolation, so the residue reached
+  every later node in the session. An autouse fixture swaps the whole mapping
+  for a copy; swapping rather than `delenv` is what covers the deletions, whose
+  names belong to the operator and are not knowable here.
+- **The autouse record fixture redirected one NAME and claimed the path.** It
+  set `singleton.SERVER_STATE_FILE` only — sufficient for today's nodes, and one
+  un-redirected writer away from the leak the fixture exists to prevent, since
+  every writer resolves its own name in `backend_registry`. That module's
+  `STATE_DIR`, `SERVER_STATE_FILE` and `PORT_FILE` are redirected in the same
+  fixture now, so the docstring is true of the code rather than of the intent.
+- **README documented `--no-start` without the eviction disclosure** the other
+  three surfaces carry (`backend_url`'s docstring, the flag's own help, RUNBOOK's
+  recovery recipe). It is the most user-facing of the four and the only one an
+  installing user reads; it carries the same clause now.
+
+## 4. Name check
+
+- `Get-Command stealthy` on the development machine: **not found** — no
+  collision on PATH.
+- `https://pypi.org/pypi/stealthy/json`: **404** — no PyPI project of that name,
+  so no third-party distribution can install a competing `stealthy` script today.
+
+Neither is a guarantee about the future: a PyPI project named `stealthy` could be
+registered tomorrow and ship a console script of the same name, and pip would let
+whichever was installed last win. That risk is named rather than mitigated —
+`stealth-chrome-devtools` remains installed and unambiguous.
+
 ## 5. Proof
 
-`tests/test_stealthy_cli.py`, 74 hermetic nodes: argument parsing (JSON vs
+`tests/test_stealthy_cli.py`, 81 hermetic nodes: argument parsing (JSON vs
 string, the `--json` merge, the three usage refusals), result unwrapping (all
 three measured shapes plus the two negative ones), prefix resolution (exact wins,
 ambiguous names every match), TTY vs pipe, backend selection (one probe; the
@@ -203,10 +258,12 @@ ambiguous names every match), TTY vs pipe, backend selection (one probe; the
 set end-to-end through `main` (each kind asserting the code, one line of stderr
 and no `Traceback`), the four session-termination paths against the real SDK, the
 six verbs' arguments and rendering, and `spawn --url`'s ordering on both the JSON
-and the table path. Nothing starts a backend, opens a socket or launches Chrome —
-and an autouse fixture points `singleton.SERVER_STATE_FILE` at a tmp file for
-every node, so the operator's own record is unreachable from this file by
-construction rather than by each node remembering.
+and the table path, the one transport seam's two clocks and `--timeout` reaching
+it. Nothing starts a backend, opens a socket or launches Chrome — and an autouse
+fixture points `singleton.SERVER_STATE_FILE` **and `backend_registry`'s
+`STATE_DIR`/`SERVER_STATE_FILE`/`PORT_FILE`** at a tmp dir for every node, so the
+operator's own record is unreachable from this file by construction rather than
+by each node remembering.
 
 `tests/test_stealthy_cli_e2e.py`, nodes marked `integration`: an isolated
 backend started in a throwaway `HOME`, a `server.json` written by hand so the
@@ -245,29 +302,55 @@ section's allowed names, and a second launcher-resolution node),
    non-ASCII is pinned either, and a unicode argument round-trips through
    `json.dumps` and `print` onto a Windows console, which is a live
    `UnicodeEncodeError` surface adjacent to F-823.
-5. **70 and 130 widen the advertised set from four codes to six.** The brief
-   asked for 0/1/2/3 plus one documented code for `Ctrl-C`. A CLI bug mapped to
-   1 would be the exact confusion M1 removes and mapped to 3 would be a lie, so
-   it got `EX_SOFTWARE` rather than a lie or a collision. Named here because it
+5. **70, 130 and 141 widen the advertised set from four codes to seven.** The
+   brief asked for 0/1/2/3 plus one documented code for `Ctrl-C`. A CLI bug
+   mapped to 1 would be the exact confusion M1 removes and mapped to 3 would be
+   a lie; a broken pipe mapped to 3 was the lie review M2 found shipped. Each
+   got its own conventional code rather than a collision. Named here because it
    is a deviation from what was asked for, not because it is in doubt.
-3. **`--json` means two things.** On `call` it supplies the arguments object; on
+6. **`_abandon_stdout`'s `dup2` is not executed by any test.** The broken-pipe
+   node asserts it is CALLED (it is monkeypatched), because letting the real one
+   run would point the pytest process's own fd 1 at the null device. What is
+   pinned is the decision; what is not is the three-line stdlib call under it.
+7. **The cancellation node drives `opened()` and not `call_tool`.** So "a tool
+   call cancelled mid-flight still DELETEs" is pinned one layer below the shape
+   an operator's `Ctrl-C` actually takes. Making it faithful needs a transport
+   that hangs, and `httpx.MockTransport`'s handler is synchronous — it would
+   block the loop it is supposed to let cancel.
+8. **`--json` means two things.** On `call` it supplies the arguments object; on
    the other five it selects output. `call` has no output mode to choose (it
    always prints the tool's structured result), and the help text says so, but a
    caller typing `stealthy call list_instances --json` expecting output-JSON gets
    an argparse "expected one argument" error rather than what they meant. It is a
    loud failure, not a silent wrong answer, which is why it was accepted.
-4. **`tools` pays an `import fastmcp`.** Section grouping and `--section` read
+9. **`tools` pays an `import fastmcp`.** Section grouping and `--section` read
    `tool_registry.SECTION_TOOLS`, which is filled by `embedded/server.py`'s
    binding loop, so the verb goes through `cli._server()`. No other tool-driving
    verb does. A backend-side section field on the tool list would remove it.
-5. **`ls` cannot show headed/headless or the profile.** `list_instances` reports
+10. **`ls` cannot show headed/headless or the profile.** `list_instances` reports
    neither (F-874's three record shapes). `get_instance_state` has them, per
    instance, one `stealthy call` away. Widening `list_instances` is a tool-surface
    change and was deliberately not made here.
-6. **`cli.py` is at 956 raw lines against a 1000-LOC budget that ratchets down
-   only.** The next verb extracts, it does not fit. The natural next cut is the
-   ops verbs' bodies, on the same argument that moved these six out.
-7. **`--profile` is superseded the day F-892+ lands.** The session vocabulary
+11. **`cli.py` is at 985 raw lines against a 1000-LOC budget that ratchets down
+   only** — **15 lines of headroom**, so the next verb does NOT fit and the cut
+   comes first. The natural one is the ops verbs' bodies, on the same argument
+   that moved these six out.
+
+   Three numbers have been claimed for this file and the two that are not 985
+   are both measurement artefacts, so the method is recorded rather than the
+   answer alone. `tools/check_file_budgets.py` counts
+   `len(path.read_text().splitlines())` — raw lines, blanks and comments
+   included — and that is the only count the gate enforces. Measured that way
+   through git blobs: `c13b12a` 956, `1eee656` 977, this commit 985. An earlier
+   draft of this section said 956, which was true of the commit it was written
+   against and stale afterwards. The round-2 review said 819 and concluded "181
+   lines of headroom"; 819 is what `rtk proxy git show <rev>:<path> |
+   Measure-Object -Line` returns for a file whose real count is 977, and the
+   same pipeline returns 564 for a 693-line `cli_call.py` — so the shell
+   pipeline, not the file, is what shrank. **Count this file by reading its
+   bytes, never through that pipeline** (`rtk-grep-false-negatives`, the same
+   hazard at a different verb).
+12. **`--profile` is superseded the day F-892+ lands.** The session vocabulary
    (`--session NAME` to name a session, `--from <session>` to say what it is
    seeded from, `default` reserved for today's master) is the spelling a user of
    the session system should ever need; `--profile` then stays as the RAW
@@ -280,4 +363,4 @@ section's allowed names, and a second launcher-resolution node),
    is named explicitly (the role reads `explicit`, truthfully) is a
    profile-selection question owned by that study. Changing either silently
    would move what every existing `user_data_dir=` caller gets.
-8. **The PyPI name is unclaimed, not reserved.** See §4.
+13. **The PyPI name is unclaimed, not reserved.** See §4.

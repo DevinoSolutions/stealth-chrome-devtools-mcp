@@ -57,16 +57,30 @@ if TYPE_CHECKING:
 #: exit status a script cannot tell from a tool's refusal (F-891 review M1).
 #:
 #: 2 is argparse's own, so a usage error this file detects and one argparse
-#: detects leave the same trace. 130 is the shell's convention for SIGINT
-#: (128 + 2) and is what a ``Ctrl-C`` costs. 70 is ``EX_SOFTWARE`` from
-#: ``sysexits.h`` and means OUR bug, deliberately not 1: exit 1 says "the tool
-#: answered and said no", and a script branching on it must not be handed a
-#: crash in the CLI wearing the backend's answer.
+#: detects leave the same trace — and `cli.main`'s "no subcommand" branch
+#: returns it too, because printing help is a usage condition. 130 is the
+#: shell's convention for SIGINT (128 + 2) and is what a ``Ctrl-C`` costs. 70 is
+#: ``EX_SOFTWARE`` from ``sysexits.h`` and means OUR bug, deliberately not 1:
+#: exit 1 says "the tool answered and said no", and a script branching on it
+#: must not be handed a crash in the CLI wearing the backend's answer.
+#:
+#: 141 is ``128 + SIGPIPE`` and means THE READER WENT AWAY — `stealthy ls | head
+#: -1`, `stealthy tools | less` with `q` pressed early (F-891 review M2). It is
+#: its own code because the alternatives are both false statements: a
+#: `BrokenPipeError` is an `OSError`, so without this row it reached the
+#: transport row and said "could not reach the backend" about a round trip that
+#: had already succeeded, and :data:`EXIT_OK` would claim a complete answer for
+#: output that was truncated. 141 is also what a coreutils program dying of
+#: SIGPIPE reports, so `set -o pipefail` sees from `stealthy` exactly what it
+#: sees from `ls | head`. It prints NOTHING: the operator's `head` did what they
+#: asked, and a diagnostic on the terminal for the commonest idiom in the shell
+#: would be noise.
 EXIT_OK = 0
 EXIT_TOOL_ERROR = 1
 EXIT_USAGE = 2
 EXIT_NO_BACKEND = 3
 EXIT_INTERNAL = 70
+EXIT_BROKEN_PIPE = 141
 EXIT_INTERRUPTED = 130
 
 #: The mark a table puts in front of a url or title that is the LAST KNOWN one
@@ -319,6 +333,12 @@ def _verdict(exc: BaseException) -> tuple[int, str]:
       Python's own traceback and exit 1, the TOOL-error code, for a key that
       was meant;
     * our own three named refusals, unchanged;
+    * ``BrokenPipeError`` — **and it must sit ABOVE the transport row, because
+      it is an ``OSError`` and that row would otherwise swallow it** (F-891
+      review M2). It comes from OUR OWN ``print``, after a round trip that
+      worked, so "could not reach the backend" is a false statement about the
+      one thing this function exists to keep straight. Empty message, by
+      design: see :data:`EXIT_BROKEN_PIPE`;
     * a TRANSPORT failure — ``httpx`` could not reach it, the socket died, the
       read budget expired — is :data:`EXIT_NO_BACKEND` and not a tool error:
       nothing on the backend ever saw the request, so there is no answer to
@@ -346,6 +366,7 @@ def _verdict(exc: BaseException) -> tuple[int, str]:
         (UsageError, EXIT_USAGE, lambda exc: f"error: {exc}"),
         (NoBackendError, EXIT_NO_BACKEND, lambda exc: f"error: {exc}"),
         (BackendCallError, EXIT_TOOL_ERROR, str),
+        (BrokenPipeError, EXIT_BROKEN_PIPE, lambda _exc: ""),
         (
             (httpx.HTTPError, OSError, TimeoutError),
             EXIT_NO_BACKEND,
@@ -364,6 +385,28 @@ def _verdict(exc: BaseException) -> tuple[int, str]:
         f"internal error in stealthy ({type(exc).__name__}: {exc}) — "
         "re-run with --traceback for the full stack"
     )
+
+
+def _abandon_stdout() -> None:
+    """Point this process's stdout at the void, once the reader has gone.
+
+    Returning :data:`EXIT_BROKEN_PIPE` is not enough on its own. Whatever
+    ``print`` had buffered is still flushed when the interpreter finalises, that
+    write fails again OUTSIDE every handler there is, and CPython answers with
+    ``Exception ignored in: <_io.TextIOWrapper name='<stdout>'>`` on stderr and
+    exit **120** — a code outside the set this file advertises, produced after
+    the set had been honoured. Re-pointing fd 1 at the null device makes that
+    final flush a no-op, so the code we chose is the code the shell sees.
+
+    The suppression is the whole mechanism and not laziness: a captured or
+    replaced ``sys.stdout`` has no ``fileno``, and a stream that owns no file
+    descriptor cannot fail to flush one.
+    """
+    import contextlib
+    import os
+
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
 def _run(args: argparse.Namespace, body: VerbBody) -> int:
@@ -389,10 +432,15 @@ def _run(args: argparse.Namespace, body: VerbBody) -> int:
     how exit 2 already leaves this process, and catching it here would turn a
     refusal into a status this function invented.
 
-    ``--traceback`` re-raises whatever it was AFTER the one line is printed, so
-    the human-readable answer is never traded for the stack: an operator
-    debugging this gets both. It is a flag rather than an env var because this
-    file reads no environment (``settings.py`` is the one env home).
+    ``--traceback`` PRINTS the stack after the one line, and deliberately does
+    NOT re-raise (F-891 review S1). Re-raising looked equivalent and was not:
+    the exception then left ``main``, past ``cli.sentry_init()``, and
+    ``sys.excepthook`` shipped it — carrying a ``BackendCallError`` built from
+    the tool's own words, which is exactly what this module's docstring promises
+    it "neither logs nor ships anywhere". ``BackendCallError`` is not a
+    ``tool_errors.ToolError``, so ``expected_events``' convention rule would not
+    have dropped it either. The operator gets the same stack on stderr, the
+    process still exits on the verdict's code, and nothing leaves the machine.
     """
     import asyncio
 
@@ -404,11 +452,26 @@ def _run(args: argparse.Namespace, body: VerbBody) -> int:
 
     try:
         asyncio.run(drive())
-    except (Exception, KeyboardInterrupt, BaseExceptionGroup) as exc:
+    except (
+        # BLE001 fired the moment `--traceback` stopped re-raising (review S1),
+        # and the blind catch is the whole contract rather than an oversight:
+        # this is THE one place an exception becomes a status, and an exception
+        # that escaped would be the traceback-plus-exit-1 that F-891 review M1
+        # exists to remove. `_verdict` is where the breadth is paid back — it
+        # names every kind it can and calls the rest OUR bug, code 70.
+        Exception,  # noqa: BLE001  PERMANENT(F-891 — the closed exit-code set)
+        KeyboardInterrupt,
+        BaseExceptionGroup,
+    ) as exc:
         code, line = _verdict(exc)
-        print(line, file=sys.stderr)
+        if line:
+            print(line, file=sys.stderr)
         if getattr(args, "traceback", False):
-            raise
+            import traceback
+
+            traceback.print_exc()
+        if code == EXIT_BROKEN_PIPE:
+            _abandon_stdout()
         return code
     return EXIT_OK
 
