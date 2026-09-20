@@ -105,6 +105,9 @@ class TestDocumentedCliVerbs:
         dispatchable = set(cli._DISPATCH) | set(cli._cli_call().DISPATCH)
         assert dispatchable == offered
         assert set(self.VERBS) == offered
+        # The ops table wins SILENTLY on a shared key, and set equality above
+        # passes a duplicate — so the disjointness is its own assertion.
+        assert not (set(cli._DISPATCH) & set(cli._cli_call().DISPATCH))
 
     def test_renamed_flag_present_old_absent_in_cli(self):
         parser = cli.build_parser()

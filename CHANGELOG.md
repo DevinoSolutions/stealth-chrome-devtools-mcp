@@ -184,24 +184,35 @@ report) / 70 a bug in the CLI itself / 130 `Ctrl-C` / 141 the READER went away.
 Every exception is mapped, so no invocation ever pairs a raw traceback with
 Python's default exit 1 — the code that means the tool refused.
 
-141 is `128 + SIGPIPE` and it needs its own row, above the transport one: a
-`BrokenPipeError` is an `OSError`, so `stealthy ls | head -1` and `stealthy tools
-| less` with `q` pressed early reported *"could not reach the backend"* about a
-round trip that had already succeeded — a false statement about the backend, made
-by the one function whose job is to keep transport and tool apart, over the
-commonest idiom in the shell. It prints nothing (the operator's `head` did what
-they asked), and stdout is re-pointed at the null device before returning, because
-otherwise the interpreter's own exit flush fails again outside every handler and
-CPython answers with exit 120 — a code outside the advertised set.
+141 is `128 + SIGPIPE` and it needs its own judgement, asked before the transport
+one: a `BrokenPipeError` is an `OSError`, so `stealthy ls | head -1` and `stealthy
+tools | less` with `q` pressed early reported *"could not reach the backend"* about
+a round trip that had already succeeded — a false statement about the backend,
+made by the one function whose job is to keep transport and tool apart, over the
+commonest idiom in the shell. The judgement is keyed on the errno and not only the
+type, because the same closed pipe is `BrokenPipeError` (EPIPE) on every POSIX and
+a bare `OSError(EINVAL)` on Windows — measured through a REAL pipe, where a row
+keyed on the type alone still answered 3 on Windows while every hermetic double
+passed. It prints nothing (the operator's `head` did what they asked), and stdout
+is re-pointed at the null device before returning, because otherwise the
+interpreter's own exit flush fails again outside every handler and CPython answers
+with exit 120 — a code outside the advertised set.
 
 **Both ways out reach that, and the SUCCESS path is the one you meet first.** A
 verb that fails mid-write is the easy half; a verb that succeeds leaves the tail
 of any output over the 8 KB buffer unwritten, and it lands at interpreter
 finalisation with the reader long gone — so `stealthy call get_page_content |
 head -1` exited **120** with `Exception ignored on flushing sys.stdout` while the
-docs said 141. The run now ends with an explicit flush inside the guarded region.
-It catches `OSError`, not `BrokenPipeError`: the measured Windows finalisation
-error is `EINVAL` (errno 22), not a pipe error at all. The one-line report is
+docs said 141. Every run now ends with ONE explicit flush in `cli.main`, after
+whichever dispatch table answered — so it holds for the eight ops verbs too
+(`stealthy profiles | head -1` had the same hole), not only for the six tool
+verbs. It is a second guarded site rather than a row in the exit-code table: it
+catches `OSError`, not `BrokenPipeError`, because the measured Windows
+finalisation error is `EINVAL` (errno 22), not a pipe error at all, and the table
+would have routed that shape to the transport row and answered 3 about a round
+trip that succeeded. The redirect-to-null that follows cannot raise either, even
+out of descriptors — it runs inside handlers, where an escape would be the
+traceback this whole set exists to prevent. The one-line report is
 likewise emitted under `contextlib.suppress(OSError)`, because `2>&1 | head -1`
 closes stderr too and that print lives inside the handler; and
 `asyncio.CancelledError` joined the caught set, being the last `BaseException`

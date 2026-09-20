@@ -230,6 +230,40 @@ def test_the_installed_stealthy_script_drives_a_real_backend(isolated_backend):
     )
 
 
+def test_a_reader_that_left_costs_141_through_a_real_pipe(isolated_backend):
+    """F-891 delta review S3 — the >8 KB-through-a-closed-pipe witness.
+
+    The hermetic tier pins the HANDLER with doubles whose ``flush`` raises; it
+    cannot pin the SHAPE — which errno, at which buffer boundary, on which
+    platform — and the shape is the whole reason the fix is keyed on ``OSError``
+    rather than ``BrokenPipeError`` (the measured Windows finalisation error is
+    ``EINVAL``). So this node is the real thing: the installed launcher, a real
+    pipe, the read end closed BEFORE the child has written a byte (the child
+    spends its first second importing and shaking hands, so there is no race to
+    lose), and an answer — ``tools --json``, 94 schemas — that is far over the
+    8 KB ``TextIOWrapper`` buffer. The child sees the reader gone either inside
+    the verb (``BrokenPipeError`` → the verdict's own row) or at ``main``'s
+    flush (``OSError`` → the same 141); what it must never see is the
+    interpreter's own exit flush failing outside every handler, which is exit
+    120 and ``Exception ignored on flushing sys.stdout`` on stderr. It is also
+    the only node that reaches ``_abandon_stdout``'s real ``os.open``.
+    """
+    proc = subprocess.Popen(  # noqa: S603  PERMANENT(the gate harness drives real subprocesses)
+        [str(resolve_launcher(name="stealthy")), "tools", "--json", "--no-start"],
+        cwd=isolated_backend["cwd"],
+        env=isolated_backend["env"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+    proc.stdout.close()  # `head -1` has left
+    err = proc.stderr.read().decode("utf-8", errors="replace")
+    code = proc.wait(timeout=CLI_TIMEOUT)
+    assert code == 141, f"exit {code}; stderr:\n{err}"
+    assert "Exception ignored" not in err, err
+    assert "Traceback (most recent call last)" not in err, err
+
+
 def test_a_tool_failure_exits_1_with_the_tools_own_message(isolated_backend):
     """The error convention, at the wire: a tool that RAISES comes back as a
     message on stderr and exit 1, with nothing on stdout for a script to parse

@@ -458,13 +458,63 @@ class _ClosedReader(io.StringIO):
     has taken its line. The failure is raised by the WRITE, which is where a
     real broken pipe raises it, so the exception travels the production path
     (out of `print`, out of `_emit_json`, into `_run`) rather than being handed
-    to `_verdict` by the test."""
+    to `_verdict` by the test.
+
+    `error` is what the write raises: `BrokenPipeError` (EPIPE, every POSIX)
+    by default, or the `OSError(EINVAL)` a Windows pipe raises for the same
+    event — measured through a real pipe by `tests/test_stealthy_cli_e2e.py`,
+    where the type-keyed row missed it and the CLI answered 3."""
+
+    def __init__(self, error: OSError | None = None) -> None:
+        super().__init__()
+        self._error = error or BrokenPipeError(32, "Broken pipe")
 
     def write(self, text: str) -> int:
-        raise BrokenPipeError(32, "Broken pipe")
+        raise self._error
 
     def isatty(self) -> bool:
         return False
+
+
+class _ReaderGoneWithDescriptor:
+    """`_BufferedReaderGone` with a REAL descriptor behind it.
+
+    The StringIO doubles own no `fileno`, so `_abandon_stdout` returns before
+    it opens anything — which is right for them and useless for pinning what
+    happens when the OPEN itself fails (delta review M1). This one hands out a
+    real file's descriptor (never fd 1: the pytest process's own stdout is
+    untouched), so the body runs all the way to `os.open`.
+    """
+
+    def __init__(self, handle) -> None:
+        self._handle = handle
+
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
+        raise OSError(22, "Invalid argument")
+
+    def fileno(self) -> int:
+        return self._handle.fileno()
+
+    def isatty(self) -> bool:
+        return False
+
+
+def _devnull_exhausted(monkeypatch) -> None:
+    """`os.open(os.devnull)` answers EMFILE; every other open is untouched, so
+    the node's own files and the record fixture keep working."""
+    import os
+
+    real_open = os.open
+
+    def exhausted(path, *args, **kwargs):
+        if path == os.devnull:
+            raise OSError(24, "Too many open files")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", exhausted)
 
 
 class _BufferedReaderGone(io.StringIO):
@@ -608,14 +658,29 @@ class TestExitCodesAreClosed:
         assert cli.main([]) == cli_call.EXIT_USAGE == 2
         assert "usage" in capsys.readouterr().out.lower()
 
+    @pytest.mark.parametrize(
+        "error",
+        [
+            BrokenPipeError(32, "Broken pipe"),
+            OSError(22, "Invalid argument"),
+        ],
+        ids=["POSIX EPIPE", "Windows EINVAL"],
+    )
     def test_a_broken_pipe_is_not_a_missing_backend(
-        self, responsive, recorder, monkeypatch, capsys
+        self, responsive, recorder, monkeypatch, capsys, error
     ):
         """F-891 review M2. `stealthy ls | head -1` is the commonest idiom in
         the shell, and `BrokenPipeError` is an `OSError`, so before its own row
         it fell through to the transport row and reported "could not reach the
-        backend" about a round trip that had already succeeded. The pipe row
-        must sit ABOVE that one.
+        backend" about a round trip that had already succeeded. The pipe
+        judgement must be asked BEFORE that row.
+
+        And it must be keyed on the ERRNO as well as the type (round 4, S3's
+        witness): on Windows the write to a pipe whose reader left raises
+        `OSError(EINVAL)`, not `BrokenPipeError`, so a type-keyed row passed
+        the POSIX case and left the real Windows one saying "could not reach
+        the backend" — measured through a real pipe in
+        `tests/test_stealthy_cli_e2e.py`, exit 3.
 
         This is the ONE pin for that order, end to end rather than on `_verdict`
         alone, because the order is only half of it: `_abandon_stdout` and the
@@ -626,7 +691,7 @@ class TestExitCodesAreClosed:
         `ConnectionResetError` case, so neither claim is pinned twice."""
         abandoned = []
         monkeypatch.setattr(cli_call, "_abandon_stdout", lambda: abandoned.append(1))
-        monkeypatch.setattr(sys, "stdout", _ClosedReader())
+        monkeypatch.setattr(sys, "stdout", _ClosedReader(error))
         recorder.answers["list_instances"] = []
 
         code = cli.main(["ls", "--json"])
@@ -708,6 +773,58 @@ class TestExitCodesAreClosed:
             "flush would still fail and still exit 120"
         )
 
+    def test_abandoning_stdout_survives_descriptor_exhaustion(
+        self, monkeypatch, tmp_path
+    ):
+        """F-891 delta review M1 (round 4). The fd-leak nit split the one
+        `suppress` into a guarded `fileno` and a guarded `dup2` and left
+        `os.open(os.devnull)` between them UNGUARDED. Under EMFILE it raised out
+        of `_abandon_stdout` — which is called from inside `_run`'s `except`
+        and from the flush handler, the two places an exception cannot be
+        afforded — so the error left `main` and reached `sys.excepthook`: a
+        traceback, exit 1 and a Sentry ship, from the function whose docstring
+        is the closed set's last line of defence. An agent fleet leaking
+        handles is not an exotic premise on this machine."""
+        _devnull_exhausted(monkeypatch)
+        with (tmp_path / "stdout.txt").open("w", encoding="utf-8") as handle:
+            monkeypatch.setattr(sys, "stdout", handle)
+            # No `pytest.raises`: a propagating OSError fails here.
+            assert cli_call._abandon_stdout() is None
+
+    def test_a_reader_gone_under_descriptor_exhaustion_is_still_141(
+        self, responsive, recorder, monkeypatch, tmp_path
+    ):
+        """The claim behind the node above, end to end: with the REAL
+        `_abandon_stdout` (not the recording stub the other pipe nodes use) and
+        no descriptor to be had, `main` still answers 141 and nothing escapes.
+        """
+        _devnull_exhausted(monkeypatch)
+        recorder.answers["list_instances"] = []
+        with (tmp_path / "stdout.txt").open("w", encoding="utf-8") as handle:
+            monkeypatch.setattr(sys, "stdout", _ReaderGoneWithDescriptor(handle))
+            assert cli.main(["ls", "--json"]) == cli_call.EXIT_BROKEN_PIPE
+
+    def test_an_ops_verb_whose_buffered_output_never_lands_is_141_too(
+        self, monkeypatch, capsys
+    ):
+        """F-891 delta review S2 (round 4). The flush lived in `_run`, which
+        only the six tool verbs use; the eight ops verbs `print` straight out
+        of `cli.py`, so `stealthy profiles | head -1` on a machine with many
+        sessions was still `Exception ignored on flushing sys.stdout` and exit
+        120 — same binary, same `main`. The flush is ONE, in `main`, after
+        whichever table dispatched, so both tables share the one home for "the
+        reader went away". The verb body is stubbed: what is pinned is `main`,
+        and a real `profiles` would size the operator's real session root."""
+        abandoned = []
+        monkeypatch.setattr(cli_call, "_abandon_stdout", lambda: abandoned.append(1))
+        monkeypatch.setattr(cli, "_clone_storage", lambda: None)
+        monkeypatch.setattr(cli, "_collect_profiles", lambda cs: [])
+        monkeypatch.setattr(sys, "stdout", _BufferedReaderGone(OSError(22, "EINVAL")))
+
+        assert cli.main(["profiles"]) == cli_call.EXIT_BROKEN_PIPE == 141
+        assert capsys.readouterr().err == ""
+        assert abandoned == [1]
+
     def test_a_cancellation_is_interrupted_and_not_an_escape(
         self, responsive, monkeypatch, capsys
     ):
@@ -726,18 +843,25 @@ class TestExitCodesAreClosed:
         assert cli.main(["call", "list_tabs"]) == cli_call.EXIT_INTERRUPTED
         assert "Traceback" not in capsys.readouterr().err
 
+    @pytest.mark.parametrize(
+        "extra", [[], ["--traceback"]], ids=["one-line report", "stack print"]
+    )
     def test_a_closed_stderr_cannot_take_the_exception_out_of_main(
-        self, responsive, recorder, monkeypatch
+        self, responsive, recorder, monkeypatch, extra
     ):
         """F-891 delta review S2. `stealthy call navigate 2>&1 | head -1`: the
         one-line report is printed INSIDE the handler, so its own
         `BrokenPipeError` left `_run`, left `main`, and reached
         `sys.excepthook` — a traceback, Python's exit 1 and a ship to Sentry,
-        produced by the line whose job was to report the failure quietly."""
+        produced by the line whose job was to report the failure quietly.
+
+        `--traceback` is the second case (round 4 S1): `print_exc` is the same
+        stderr door one line below the one that was closed, and it is exactly
+        when an operator is piping output around."""
         recorder.fail = "navigate"
         monkeypatch.setattr(sys, "stderr", _ClosedReader())
         # No `pytest.raises`: a propagating BrokenPipeError fails here.
-        assert cli.main(["call", "navigate"]) == cli_call.EXIT_TOOL_ERROR
+        assert cli.main(["call", "navigate", *extra]) == cli_call.EXIT_TOOL_ERROR
 
     def test_a_bare_base_exception_group_is_caught_by_main(
         self, responsive, monkeypatch

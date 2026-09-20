@@ -343,20 +343,26 @@ def _verdict(exc: BaseException) -> tuple[int, str]:
       anywhere but the SIGINT ``asyncio.run`` already converts was the one
       remaining shape that could leave a set advertised as closed;
     * our own three named refusals, unchanged;
-    * ``BrokenPipeError`` — **and it must sit ABOVE the transport row, because
-      it is an ``OSError`` and that row would otherwise swallow it** (F-891
-      review M2). It comes from OUR OWN ``print``, after a round trip that
-      worked, so "could not reach the backend" is a false statement about the
-      one thing this function exists to keep straight. Empty message, by
-      design: see :data:`EXIT_BROKEN_PIPE`. **The row is keyed on the TYPE and
-      not on the site, and that has a residual worth naming** (delta review
-      S3): ``httpx`` writing to a backend socket the peer closed also raises
-      ``BrokenPipeError``, and it is reported here as a broken pipe — silent,
-      141 — where the truthful answer is 3. "It comes from our own ``print``"
-      is the overwhelmingly common case, not a guarantee. Narrowing it to the
-      site would mean a flag set around every emit and read here, i.e. a second
-      way to know where an exception came from; the residual is the cheaper
-      side of that trade and is stated rather than hidden;
+    * the READER WENT AWAY — :func:`_reader_gone` — **and it must be asked
+      BEFORE the transport row, because it is an ``OSError`` and that row would
+      otherwise swallow it** (F-891 review M2). It comes from OUR OWN ``print``,
+      after a round trip that worked, so "could not reach the backend" is a
+      false statement about the one thing this function exists to keep
+      straight. Empty message, by design: see :data:`EXIT_BROKEN_PIPE`. Keyed
+      on the ERRNO and not only the type, because the same closed pipe is
+      ``BrokenPipeError`` on POSIX and a bare ``OSError(EINVAL)`` on Windows
+      (round 4, measured through a real pipe: the type-keyed row passed every
+      double and answered 3 on Windows) — the one judgement that reads an
+      attribute, which is why it stands in front of the table rather than in
+      it. **Keyed on the error and not on the SITE, and that has a residual
+      worth naming** (delta review S3): ``httpx`` writing to a backend socket
+      the peer closed also raises ``BrokenPipeError``, and it is reported here
+      as a broken pipe — silent, 141 — where the truthful answer is 3. "It
+      comes from our own ``print``" is the overwhelmingly common case, not a
+      guarantee. Narrowing it to the site would mean a flag set around every
+      emit and read here, i.e. a second way to know where an exception came
+      from; the residual is the cheaper side of that trade and is stated rather
+      than hidden;
     * a TRANSPORT failure — ``httpx`` could not reach it, the socket died, the
       read budget expired — is :data:`EXIT_NO_BACKEND` and not a tool error:
       nothing on the backend ever saw the request, so there is no answer to
@@ -390,7 +396,6 @@ def _verdict(exc: BaseException) -> tuple[int, str]:
         (UsageError, EXIT_USAGE, lambda exc: f"error: {exc}"),
         (NoBackendError, EXIT_NO_BACKEND, lambda exc: f"error: {exc}"),
         (BackendCallError, EXIT_TOOL_ERROR, str),
-        (BrokenPipeError, EXIT_BROKEN_PIPE, lambda _exc: ""),
         (
             (httpx.HTTPError, OSError, TimeoutError),
             EXIT_NO_BACKEND,
@@ -402,12 +407,30 @@ def _verdict(exc: BaseException) -> tuple[int, str]:
     )
 
     exc = _unwrapped(exc)
+    # In front of the table and not a row of it: the one judgement keyed on an
+    # errno, and it has to precede the transport row's `OSError` (review M2).
+    if _reader_gone(exc):
+        return EXIT_BROKEN_PIPE, ""
     for kinds, code, message in judgements:
         if isinstance(exc, kinds):
             return code, message(exc)
     return EXIT_INTERNAL, (
         f"internal error in stealthy ({type(exc).__name__}: {exc}) — "
         "re-run with --traceback for the full stack"
+    )
+
+
+def _reader_gone(exc: BaseException) -> bool:
+    """Is ``exc`` a write to a stdout whose reader has left? Two measured
+    spellings of ONE event: ``BrokenPipeError`` (EPIPE) on every POSIX, and a
+    bare ``OSError(EINVAL)`` on Windows (round 4: ``tools --json`` into a real
+    closed pipe answered 3 under the type-keyed row,
+    ``tests/test_stealthy_cli_e2e.py``). The type is asked as well as the errno
+    so a ``BrokenPipeError`` raised with no errno still counts."""
+    import errno
+
+    return isinstance(exc, BrokenPipeError) or (
+        isinstance(exc, OSError) and exc.errno in (errno.EPIPE, errno.EINVAL)
     )
 
 
@@ -426,9 +449,15 @@ def _abandon_stdout() -> None:
     captured or replaced ``sys.stdout`` has no descriptor, and a stream that
     owns none cannot fail to flush one.
 
-    Called from BOTH paths out of :func:`_run` — the verdict when a pipe error
-    surfaced inside the body, and the explicit flush that ends the success path
-    (F-891 delta review M1). It is idempotent and costs one ``open``.
+    Called from TWO places — the verdict in :func:`_run` when a pipe error
+    surfaced inside a tool verb's body, and the ONE flush that ends
+    ``cli.main`` for every verb of both tables (F-891 delta review M1, S2). It
+    is idempotent and costs one ``open``.
+
+    **Nothing in this body may raise.** Both callers sit inside a handler, so
+    an escape here reaches ``sys.excepthook`` — traceback, exit 1, a Sentry
+    ship — from the function whose job is to keep the set closed (round-4 M1:
+    ``os.open`` sat unguarded between two guarded calls and EMFILE took it).
     """
     import os
 
@@ -440,13 +469,22 @@ def _abandon_stdout() -> None:
         # opened for a stream that cannot use it (review nit: the old single
         # statement opened the fd and then abandoned it when `fileno` raised).
         return
-    spare = os.open(os.devnull, os.O_WRONLY)
+    try:
+        spare = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        # Descriptor exhaustion. The exit flush may then still fail and cost
+        # us 120, but that is the interpreter's code and not an escape of ours.
+        return
     try:
         os.dup2(spare, target)
     except OSError:
+        # A `dup2` that fails leaves fd 1 exactly as it was — the redirect did
+        # not happen, nothing was half-done — so the worst outcome is the 120
+        # this function exists to prevent, never a traceback out of `main`.
         pass
     finally:
-        os.close(spare)
+        with contextlib.suppress(OSError):
+            os.close(spare)
 
 
 def _run(args: argparse.Namespace, body: VerbBody) -> int:
@@ -521,26 +559,17 @@ def _run(args: argparse.Namespace, body: VerbBody) -> int:
         if getattr(args, "traceback", False):
             import traceback
 
-            traceback.print_exc()
+            # Same closed-stderr door as the one-line report above, one line
+            # below it (round-4 S1) — and `--traceback` is exactly when an
+            # operator is piping output around.
+            with contextlib.suppress(OSError):
+                traceback.print_exc()
         if code == EXIT_BROKEN_PIPE:
             _abandon_stdout()
         return code
-    # The SUCCESS path has the same hole and it is the one a user meets first
-    # (review M1, measured): `print` leaves the tail of any output above the
-    # 8 KB `TextIOWrapper` buffer unwritten, and without this flush it is
-    # written at interpreter finalisation — outside every handler, which is
-    # `Exception ignored on flushing sys.stdout` and exit 120. Flushing HERE
-    # brings that failure inside the guarded region, where it becomes the same
-    # 141 the failure path already returns.
-    #
-    # `OSError` and not `BrokenPipeError`: the measured Windows finalisation
-    # error is `EINVAL` (errno 22), not a pipe error at all, so a handler keyed
-    # on the pipe type would leave the real shape on 120.
-    try:
-        sys.stdout.flush()
-    except OSError:
-        _abandon_stdout()
-        return EXIT_BROKEN_PIPE
+    # The SUCCESS path's >8 KB tail (review M1) is flushed by `cli._delivered`,
+    # ONCE, after whichever dispatch table answered — deliberately not here,
+    # because the eight ops verbs had the same hole (round-4 S2).
     return EXIT_OK
 
 

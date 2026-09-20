@@ -219,10 +219,34 @@ the six verbs and therefore outside everything the first round had pinned.
   the error is `OSError EINVAL` (errno 22), not `BrokenPipeError` at all. The
   reachable shape is any answer over 8 KB through a closed pipe — `stealthy call
   get_page_content | head -1`, `get_debug_view`, `list_network_requests` — and
-  four documents were by then claiming 141 for it. `_run` now ends with an
-  explicit `sys.stdout.flush()` inside the guarded region, keyed on `OSError` so
-  the measured shape is covered and not only the pipe type. Pinned on both
-  errnos and mutation-checked (dropping the flush reddens both).
+  four documents were by then claiming 141 for it. Every run now ends with ONE
+  explicit `sys.stdout.flush()` — `cli._delivered`, in `main`, after whichever
+  dispatch table answered — keyed on `OSError` so the measured shape is covered
+  and not only the pipe type. It sat in `_run` first, which covered the six tool
+  verbs and left the eight ops verbs (`stealthy profiles | head -1`) on 120
+  under the same binary (round-4 S2); one home in `main` is what makes the claim
+  true of the CLI rather than of one table. It is a second guarded site and not
+  a `_verdict` row on purpose: `_verdict` would route EINVAL to the transport
+  row and answer 3. Pinned on both errnos for a tool verb and for an ops verb,
+  mutation-checked (dropping the flush reddens all three), and witnessed through
+  a REAL pipe by `tests/test_stealthy_cli_e2e.py` — the installed launcher,
+  `tools --json` (far over 8 KB), read end closed before the first byte, exit
+  141 and no `Exception ignored` on stderr. **That witness was RED on its first
+  run and it was not the harness**: on Windows the write into the closed pipe
+  raised inside the verb as a bare `OSError(EINVAL)`, not `BrokenPipeError`, so
+  the type-keyed pipe row missed it and the transport row answered
+  `error: could not reach the backend (OSError: [Errno 22] Invalid argument)`,
+  exit 3 — about a round trip that had succeeded, the exact false statement
+  review M2 fixed for the POSIX spelling. Every hermetic double had passed. The
+  judgement is `_reader_gone` now: `BrokenPipeError` by type, or an `OSError`
+  whose errno is EPIPE or EINVAL, asked in front of the table because it is the
+  one judgement that reads an attribute; the hermetic pin runs under both
+  spellings. Round-4 M1, from the same review:
+  the fd-leak nit had left `_abandon_stdout`'s `os.open(os.devnull)` between two
+  guarded calls, unguarded, so EMFILE escaped `main` from inside a handler —
+  every call in that body is now tolerated, and the stack print under
+  `--traceback` is under the same `suppress(OSError)` as the one-line report
+  (round-4 S1: `... --traceback 2>&1 | head -1`).
 
   Two smaller doors out of the same set went with it: the one-line report is
   emitted under `contextlib.suppress(OSError)`, because `... 2>&1 | head -1`

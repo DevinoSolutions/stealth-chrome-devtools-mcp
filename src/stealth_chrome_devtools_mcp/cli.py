@@ -720,9 +720,9 @@ def _cli_call():
 
     Building the parser now imports that module, so the laziness is thinner
     than it was — but what it protects is unchanged and measured: ``cli_call``
-    imports only ``argparse`` and ``sys`` at module scope, and every reach for
-    ``backend_client`` (and through it ``httpx`` and the ``mcp`` SDK) is still
-    inside the function that needs it.
+    imports only stdlib (``argparse``, ``contextlib``, ``sys``, ``typing``) at
+    module scope, and every reach for ``backend_client`` (and through it
+    ``httpx`` and the ``mcp`` SDK) is still inside the function that needs it.
     """
     from stealth_chrome_devtools_mcp import cli_call
 
@@ -879,11 +879,43 @@ def main(argv=None) -> int:
         parser.print_help()
         # USAGE, never 1 (F-891 review M1): naming no verb is argparse's own
         # kind of mistake, and exit 1 now means "the tool answered and said no".
-        return _cli_call().EXIT_USAGE
+        return _delivered(_cli_call().EXIT_USAGE)
     handler = _DISPATCH.get(args.command)
     if handler is None:
         handler = _cli_call().DISPATCH[args.command]
-    return handler(args)
+    return _delivered(handler(args))
+
+
+def _delivered(code: int) -> int:
+    """THE one flush, for every verb of BOTH dispatch tables (F-891 delta
+    review M1 + round-4 S2).
+
+    ``print`` leaves the tail of any output above the 8 KB ``TextIOWrapper``
+    buffer unwritten, and it lands at interpreter finalisation — after
+    ``head`` has gone, outside every handler — as ``Exception ignored on
+    flushing sys.stdout`` and exit **120**, outside the advertised set. So
+    ``stealthy call get_page_content | head -1`` and ``stealthy profiles |
+    head -1`` both exited 120 while the docs said 141. Flushing HERE brings the
+    failure into a handler where it becomes 141, and putting the ONE flush in
+    ``main`` rather than in ``cli_call._run`` is what makes it true for the
+    eight ops verbs too: one home for "the reader went away", not one per
+    table.
+
+    This is a second guarded site, deliberately NOT routed through
+    ``cli_call._verdict``: it catches ``OSError`` and not ``BrokenPipeError``
+    because the measured Windows finalisation error is ``EINVAL`` (errno 22),
+    not a pipe error at all — and ``_verdict`` would route that shape to the
+    transport row and answer 3, "could not reach the backend", about a round
+    trip that succeeded. The cost is that any other ``OSError`` from this
+    flush (a full disk, ENOSPC) also reads as 141; the finding's §6 owns it.
+    """
+    try:
+        sys.stdout.flush()
+    except OSError:
+        calls = _cli_call()
+        calls._abandon_stdout()
+        return calls.EXIT_BROKEN_PIPE
+    return code
 
 
 if __name__ == "__main__":
