@@ -266,8 +266,9 @@ def require_allowed(
     clone_root: Path,
     snapshot: Path,
     inside: Callable[[Path, Path], bool],
-) -> None:
-    """Raise ``ToolError`` when this ``user_data_dir`` may not be honoured.
+) -> Path:
+    """Raise ``ToolError`` when this ``user_data_dir`` may not be honoured, and
+    answer WHERE it lands when it may.
 
     THE one gate, and it is deliberately callable from TWO places (F-894 review
     M1). Asking it only inside ``resolve_profile_selection`` was not enough:
@@ -278,17 +279,21 @@ def require_allowed(
     ``spawn_browser`` asks first, beside its other pre-flight guard, and the
     resolver asks again because it is public and has its own callers.
 
-    Asking twice is free and correct: this is a pure path decision, no I/O
-    beyond ``Path.resolve``, and one home for the rule is worth more than one
-    call. The MASTER path passes here — the resolver, not this gate, is where
-    it becomes the master ROLE, and it must still reach the re-attach in front
-    of it, where being adopted is the right outcome.
+    Asking twice is free and correct: it is a path decision plus at most one
+    ``Path.resolve`` and one ``exists()`` — the stat ``reserved_reason`` takes
+    to decide whether there is an existing directory to name an escape to — so
+    two calls are two stats, and one home for the rule is worth more than one
+    call. It ANSWERS the anchored path so the resolver does not anchor a second
+    time for the same request (review n6); ``anchor`` keeps its one home and is
+    now reached once per selection. The MASTER path passes here — the resolver,
+    not this gate, is where it becomes the master ROLE, and it must still reach
+    the re-attach in front of it, where being adopted is the right outcome.
     """
-    refusal = reserved_reason(
-        requested, anchor(requested, session_root, clone_root, inside), snapshot
-    )
+    resolved = anchor(requested, session_root, clone_root, inside)
+    refusal = reserved_reason(requested, resolved, snapshot)
     if refusal is not None:
         raise ToolError(f"user_data_dir rejected: {refusal}")
+    return resolved
 
 
 def reserved_reason(requested: str, resolved: Path, snapshot: Path) -> str | None:
@@ -325,7 +330,7 @@ def reserved_reason(requested: str, resolved: Path, snapshot: Path) -> str | Non
         return (
             f"{requested!r} names a drive but is not an absolute path, so it "
             "would be created as a session name rather than opened. Pass a "
-            "fully qualified path (with separators) or a bare session name."
+            "path this host reads as absolute, or a bare session name."
         )
     name = asked.name.casefold()
     if not asked.is_absolute() and name in RESERVED_NAMES:

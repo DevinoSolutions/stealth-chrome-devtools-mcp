@@ -886,10 +886,10 @@ def _copy_clone_from_source(
 
 def require_allowed_user_data_dir(user_data_dir: str | None) -> None:
     """Raise if this ``user_data_dir`` names something a caller may not open.
-    PUBLIC because `spawn_browser` must ask it before `adopt_held_profile`,
-    which re-attaches to whatever live browser holds the named directory and
-    runs in front of selection (F-894 review M1). The rule is
-    `profile_seed.require_allowed`; this supplies which directories are ours."""
+    PUBLIC because `spawn_browser` asks it before `adopt_held_profile`, which
+    re-attaches to whatever live browser holds the requested directory and runs
+    in front of selection (F-894 review M1). The rule is `require_allowed`; this
+    supplies which directories are ours, and the ``None`` only a tool can pass."""
     if user_data_dir:
         profile_seed.require_allowed(
             user_data_dir,
@@ -931,10 +931,10 @@ async def resolve_profile_selection(
         user_data_dir = None
 
     if user_data_dir:
-        # F-894: refused before anything is created, and in front of the walk.
-        require_allowed_user_data_dir(user_data_dir)
-        explicit = profile_seed.anchor(
-            user_data_dir, default_session_root(), clone_root, _is_relative_to
+        # F-894: refused before anything is created, in front of the walk — and
+        # the gate ANSWERS where it lands, so `anchor` runs once (review n6).
+        explicit = profile_seed.require_allowed(
+            user_data_dir, default_session_root(), clone_root, snapshot, _is_relative_to
         )
         # If the requested path (inside clone_root) is already held by a running
         # browser, find the next free numbered variant rather than crashing.

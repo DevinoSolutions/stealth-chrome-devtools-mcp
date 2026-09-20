@@ -60,11 +60,17 @@ passed only because its fixture had no browser on the snapshot; it pinned the
 resolver, not the product.
 
 So `profile_seed.require_allowed` is the raise-shaped gate and **two sites ask
-it**: `spawn_browser`, beside its headed-visibility guard and outside its `try`,
+it**: `spawn_browser`, AHEAD of its headed-visibility guard and outside its
+`try` (see §5's last residual for why ahead),
 and `resolve_profile_selection`, which is public and has its own callers. One
-rule, one home, two callers — it is a pure path decision (no I/O beyond
-`Path.resolve`), so asking twice is free, and one home is worth more than one
-call. Being outside the `try` also stops the refusal being re-labelled
+rule, one home, two callers — it is a path decision plus at most one
+`Path.resolve` and one `exists()` (the stat M3 added, to decide whether there is
+an existing directory to name an escape to), so asking twice is two stats, and
+one home is worth more than one call. The gate also ANSWERS the anchored path,
+so `profile_seed.anchor` runs ONCE per selection rather than once to judge and
+once to use (review n6); the `clone_storage` wrapper the spawn calls discards
+that answer, because a guard has no use for it. Being outside the `try` also
+stops the refusal being re-labelled
 `Failed to spawn browser: …` (review m9), which is the wrong word for a request
 we declined to act on at all.
 
@@ -116,6 +122,12 @@ Four more from the review round:
   resolver-only pin did. Mutation-checked: deleting the `spawn_browser` call
   turns it RED with `Failed to spawn browser: adopt_held_profile must not be
   reached`, i.e. the re-attach really is in front.
+* `test_a_reserved_name_is_refused_where_no_window_can_be_shown` — the ORDER of
+  the two pre-flight guards, patching `desktop_launch.can_deliver_headed_window`
+  to False (what a runner with no desktop IS for this handler) and spawning
+  HEADED, so the guard being ordered would fire. It asserts the reservation's
+  wording and the ABSENCE of F-808's. Mutation-checked: putting the F-808 guard
+  back in front turns it RED with the display-context message.
 * `test_the_drive_refusal_does_not_depend_on_the_host_flavour` — §6 above.
 * `test_an_existing_reserved_dir_is_told_how_to_reach_it` and
   `test_a_reserved_name_with_no_directory_says_nothing_about_one` — the escape
@@ -173,6 +185,25 @@ Four more from the review round:
   becomes one anchored session name, which is this finding's harm; it is
   platform-dependent by nature and is therefore NOT pinned cross-platform. The
   price is a POSIX user with a directory genuinely named `C:something`, who is
-  refused and told to pass a fully qualified path. **POSIX is verified here by
+  refused and told to pass "a path this host reads as absolute" — phrased that
+  way rather than "with separators" (review n5), because a POSIX caller who was
+  refused for `C:\Users\x\p` DID pass separators, just the other flavour's.
+  **POSIX is verified here by
   flavour simulation and by reasoning only** — no Linux or macOS run was made
   from this machine; CI is the witness.
+* **The reservation now runs AHEAD of the F-808 headed-visibility guard, and
+  that order is a decision rather than an accident.** `test_a_held_snapshot_is_
+  refused_before_any_re_attach` went RED on every Linux cell of run 35532848939
+  and green on Windows and macOS: the runner has no desktop, the F-808 guard
+  stood first, and a headed spawn naming a reserved path was answered "this
+  context cannot display a window" — so on those hosts the reservation was
+  unreachable through the tool at all. Both guards are pre-flight and
+  side-effect-free, so their order changes nothing but which message a caller
+  gets when BOTH apply, and the caller-shaped refusal is the one worth sending:
+  a reserved path is refused on every machine there is, while "no desktop here"
+  is a fact about this backend, and a caller told the second goes looking for a
+  display they do not need. The pin also passes `headless=True` now, so its
+  subject is the reservation and not the runner's desktop, and the order has its
+  own pin (§4) rather than riding on that one. **The residual**: there is no
+  general rule here about guard ordering — these two were ordered on this
+  argument, and a third pre-flight guard would have to make its own.

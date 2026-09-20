@@ -59,7 +59,18 @@ resolver. `browser_reattach.adopt_held_profile` runs in front of profile
 selection and matches the requested directory against live browsers, so an
 absolute snapshot path **with a browser on it** — the exact state F-893 is about
 — was re-attached to and the resolver never saw the request. One rule, two sites
-that ask it; it is a pure path decision, so asking twice is free.
+that ask it; it is a path decision plus one `Path.resolve` and one `exists()`, so
+asking twice costs two stats.
+
+That refusal also runs AHEAD of the headed-visibility guard (F-808). Both are
+pre-flight and neither has a side effect, so the order decides only which message
+a caller gets when both apply — and on a host with no desktop (every Linux CI
+cell, and any backend started outside a desktop session) the headed guard used to
+answer first, so a reserved `user_data_dir` came back as "this context cannot
+display a window" and the reservation was unreachable through the tool. A
+reserved path is refused on every machine there is; "no desktop here" is a fact
+about one backend, and answering with it sends a caller after a display they do
+not need.
 
 **If you already have a session directory named `master`, `master-snapshot` or
 `default`** (one exists on the machine this was measured on, 0.46 GB), nothing is

@@ -151,9 +151,28 @@ async def spawn_browser(
         ``requested``/``actual``/``inner_viewport``/``clamped`` so a size the OS
         overrode is visible rather than silent.
     """
-    # BEFORE any other work, and outside the try so it is not re-wrapped (F-808):
-    # a spawn nobody could ever see must not first clone a profile dir onto disk.
-    # F-810 demoted it to a FALLBACK: it fires only when delegation is impossible.
+    # FIRST of the two pre-flight guards, and outside the try, for three reasons
+    # (F-894 review M1 + m9 + its round-3 CI red). `adopt_held_profile` matches
+    # the requested directory against live browsers, so an absolute snapshot path
+    # with a browser on it — the exact state F-893 is about — was ADOPTED and the
+    # resolver, which is where the reservation used to be asked, never saw the
+    # request. A caller-input refusal raised inside the try would be re-wrapped by
+    # the handler as "Failed to spawn browser: …", which is the wrong label for a
+    # request we declined to act on at all. And it sits AHEAD of the F-808 guard
+    # below because a refusal about what the CALLER ASKED FOR outranks one about
+    # what THIS HOST can do: a reserved path is refused on every machine there is,
+    # while "no desktop here" is a fact about this backend, and a caller told the
+    # second about a request that fails the first goes looking for a display they
+    # do not need. Measured: every headless CI cell answered the F-808 message for
+    # a reserved snapshot path, so the reservation was unreachable there. Neither
+    # guard has a side effect, so the order decides only which message is sent.
+    # The rule has one home; this is the second site that asks it.
+    rt.clone_storage.require_allowed_user_data_dir(user_data_dir)
+
+    # Then the HOST-shaped guard, also outside the try so it is not re-wrapped
+    # (F-808): a spawn nobody could ever see must not first clone a profile dir
+    # onto disk. F-810 demoted it to a FALLBACK: it fires only when delegation is
+    # impossible.
     from stealth_chrome_devtools_mcp.embedded import desktop_launch
 
     if not headless and not desktop_launch.can_deliver_headed_window():
@@ -164,16 +183,6 @@ async def spawn_browser(
             "launch it there instead (F-810). Start the backend from a desktop session "
             "or pass headless=True; `stealth-chrome-devtools doctor` lists the contexts."
         )
-    # BEFORE the re-attach below and outside the try, for two reasons (F-894
-    # review M1 + m9). `adopt_held_profile` matches the requested directory
-    # against live browsers, so an absolute snapshot path with a browser on it
-    # — the exact state F-893 is about — was ADOPTED and the resolver, which is
-    # where the reservation used to be asked, never saw the request. And a
-    # caller-input refusal raised in here would be re-wrapped by the handler as
-    # "Failed to spawn browser: …", which is the wrong label for a request we
-    # declined to act on at all. The rule has one home; this is the second site
-    # that asks it.
-    rt.clone_storage.require_allowed_user_data_dir(user_data_dir)
 
     # Outside the try because the handler READS it: a spawn that fails onto a
     # held directory owes the caller the reason the re-attach was not taken.

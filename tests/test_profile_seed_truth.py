@@ -21,7 +21,11 @@ from types import SimpleNamespace
 import pytest
 
 from fakes import FakeBrowserManager, held_profile
-from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_seed
+from stealth_chrome_devtools_mcp.embedded import (
+    clone_storage,
+    desktop_launch,
+    profile_seed,
+)
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -177,12 +181,21 @@ class TestLoginWitnesses:
     def test_the_dead_refresh_window_is_gone(self):
         """`_clone_needs_refresh` and `_profile_refresh_days` had no callers and
         carried the second spelling of the marker name (review M2). The knob
-        they read, `BROWSER_PROFILE_REFRESH_DAYS`, KEEPS its Settings field: it
-        is in `.env.example` and both shipped example configs, and a `.env`
-        naming a field the model no longer has is an `extra="forbid"` crash."""
+        they read, `BROWSER_PROFILE_REFRESH_DAYS`, KEEPS its Settings field —
+        a `.env` naming a field the model no longer has is an `extra="forbid"`
+        crash — but nothing presents it as live: it is COMMENTED OUT in
+        `.env.example` (the name stays, which is all
+        `test_env_example_documents_every_field` asks) and REMOVED from both
+        shipped example configs, which used to set it."""
         assert not hasattr(clone_storage, "_clone_needs_refresh")
         assert not hasattr(clone_storage, "_profile_refresh_days")
         assert hasattr(get_settings(), "browser_profile_refresh_days")
+        repo_root = Path(__file__).resolve().parent.parent
+        env_example = (repo_root / ".env.example").read_text(encoding="utf-8")
+        assert "#BROWSER_PROFILE_REFRESH_DAYS" in env_example
+        for example in ("examples/claude.mcp.json", "examples/codex.config.toml"):
+            text = (repo_root / example).read_text(encoding="utf-8")
+            assert "BROWSER_PROFILE_REFRESH_DAYS" not in text, example
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +387,18 @@ class TestReservedProfileNames:
         resolver-only pin passed because its fixture had no browser there.
 
         Both halves matter: the raise, and that no adoption was ATTEMPTED.
-        Without the second, this can pass again for the same wrong reason.
+        Without the second, this can pass again for the same wrong reason —
+        which is also why the patch below is `raising=True` (the default):
+        `raising=False` would have let a RENAMED `adopt_held_profile` satisfy
+        `attempts == []` by never having been patched at all (review n4).
+
+        `headless=True` is load-bearing and not tidiness: at eed4ae9 this pin was
+        RED on every Linux cell (run 35532848939) and green on Windows and macOS,
+        because a headed spawn on a runner with no desktop answered F-808's "this
+        context cannot display a window" and never reached the reservation. The
+        production fix is the ORDER — the caller-shaped refusal now runs ahead of
+        the host-shaped one — and asking headless here is what keeps the pin's
+        subject the reservation rather than the runner's desktop.
         """
         held_profile(real_layout_root["snapshot"])
         attempts = []
@@ -389,18 +413,48 @@ class TestReservedProfileNames:
             lambda *a, **k: SimpleNamespace(pid=4321, reason="held-by-test"),
         )
         srv = patched_server(browser_manager=FakeBrowserManager())
-        monkeypatch.setattr(
-            rt.browser_reattach, "adopt_held_profile", never_reached, raising=False
-        )
+        monkeypatch.setattr(rt.browser_reattach, "adopt_held_profile", never_reached)
 
         with pytest.raises(ToolError, match="seed"):
             await call_tool(
                 srv,
                 "spawn_browser",
                 user_data_dir=str(real_layout_root["snapshot"]),
+                headless=True,
                 sandbox=False,
             )
         assert attempts == []
+
+    @pytest.mark.asyncio
+    async def test_a_reserved_name_is_refused_where_no_window_can_be_shown(
+        self, real_layout_root, call_tool, patched_server, monkeypatch
+    ):
+        """The CALLER-shaped refusal runs ahead of the HOST-shaped one.
+
+        CI RED at eed4ae9 on every Linux cell (run 35532848939) and green on
+        Windows and macOS: the F-808 headed-visibility guard stood first, so on a
+        runner with no desktop a reserved ``user_data_dir`` was answered with
+        "this context cannot display a window" and the reservation was never
+        asked at all. Both guards are pre-flight and side-effect-free, so their
+        order decides nothing but which message the caller gets — and a reserved
+        path is refused on EVERY host, while "no desktop here" is a fact about
+        this one, so answering with the second sends a caller looking for a
+        display they do not need.
+
+        Patching ``can_deliver_headed_window`` to False is what that runner IS
+        for this handler, which is what lets the order be pinned on every
+        platform instead of only where a desktop happens to be absent. The spawn
+        is deliberately HEADED, so the guard being ordered would fire.
+        """
+        monkeypatch.setattr(desktop_launch, "can_deliver_headed_window", lambda: False)
+        srv = patched_server(browser_manager=FakeBrowserManager())
+
+        with pytest.raises(ToolError) as excinfo:
+            await call_tool(srv, "spawn_browser", user_data_dir="master", sandbox=False)
+
+        message = str(excinfo.value)
+        assert "user_data_dir rejected" in message
+        assert "F-808" not in message
 
     @pytest.mark.asyncio
     async def test_an_ordinary_name_is_unaffected(self, real_layout_root):
