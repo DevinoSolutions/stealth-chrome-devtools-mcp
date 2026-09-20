@@ -152,6 +152,12 @@ class Settings(BaseSettings):
     browser_master_snapshot_dir: str | None = Field(
         None, validation_alias="BROWSER_MASTER_SNAPSHOT_DIR"
     )
+    # INERT since F-892 and kept deliberately: its only reader
+    # (``clone_storage._clone_needs_refresh``) had no callers of its own and was
+    # deleted with it, so nothing refreshes a copy after N days. The field stays
+    # because ``extra="forbid"`` makes an existing ``.env`` that names it a
+    # startup crash; it is commented out of ``.env.example`` and README calls it
+    # inert. Give it a reader or drop the field — do not leave it half-alive.
     browser_profile_refresh_days: int = Field(
         7, validation_alias="BROWSER_PROFILE_REFRESH_DAYS"
     )

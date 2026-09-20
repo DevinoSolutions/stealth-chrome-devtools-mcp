@@ -254,6 +254,12 @@ def failing_spawn_server(patched_server, monkeypatch):
     monkeypatch.setattr(spawn_exhaustion, "exhaustion_hint", lambda path: None)
 
     class _CloneStorage:
+        def require_allowed_user_data_dir(self, user_data_dir):
+            """F-894 review M1: `spawn_browser` asks the reservation before the
+            re-attach, so a double of this module has to offer it. A no-op here
+            — this fixture spawns with no `user_data_dir` and is about the
+            failure PREFIX, not about which directories may be named."""
+
         async def resolve_profile_selection(self, user_data_dir):
             return {"user_data_dir": None, "profile_role": "none"}
 

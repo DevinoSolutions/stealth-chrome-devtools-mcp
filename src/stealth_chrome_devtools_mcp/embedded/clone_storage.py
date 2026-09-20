@@ -16,20 +16,20 @@ internal-only helpers keep theirs.
 import asyncio
 import hashlib
 import itertools
-import json
 import os
 import re
 import shutil
 import threading
 import time
 import urllib.parse
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from stealth_chrome_devtools_mcp.embedded import profile_lock
+from stealth_chrome_devtools_mcp.embedded import profile_lock, profile_seed
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 
@@ -61,10 +61,6 @@ def master_snapshot_dir() -> Path:
     if configured:
         return Path(configured).expanduser()
     return default_session_root() / "master-snapshot"
-
-
-def _profile_refresh_days() -> int:
-    return get_settings().browser_profile_refresh_days
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -152,28 +148,10 @@ def _dir_size_bytes(path: Path) -> int:
 
 
 def clone_is_auto(clone_dir: Path) -> bool:
-    """True only for server-created disposable auto-clones.
-
-    Never true for user-named/explicit profiles (they persist by design) or for
-    directories the server did not create (no clone marker). Disposability is
-    carried by an explicit ``auto_clean`` flag written at clone time.
-
-    Fail-safe on legacy markers: a marker that predates the ``auto_clean`` flag
-    is NEVER treated as disposable. The old source-kind fallback
-    (``not source_kind.startswith("explicit")``) misjudged user-named profiles
-    cloned from a plain ``master-snapshot`` as auto and let the storage-cap sweep
-    permanently delete a logged-in business session — a silent, unrecoverable
-    loss. Wrongly keeping a stale auto-clone only costs bounded disk, so the
-    ambiguity resolves to "keep".
-    """
-    marker = clone_dir / ".stealth_chrome_devtools_mcp_clone.json"
-    if not marker.exists():
-        return False
-    try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return bool(data.get("auto_clean", False))
+    """The disposable auto-clones — the marker's question, ``profile_seed``'s
+    (its docstring carries the fail-safe-on-a-legacy-marker argument). A
+    wrapper: every sweep, trim and CLI site reads this name."""
+    return profile_seed.is_auto(clone_dir)
 
 
 # ── Authoritative in-flight / live clone protection ──────────────────────────
@@ -392,18 +370,8 @@ def browser_session_storage_cap_bytes() -> int:
 
 
 def clone_is_named(clone_dir: Path) -> bool:
-    """True for user-named/explicit profiles (the persistent ones). They are
-    never deleted, but they *can* be trimmed of regenerable data when idle."""
-    marker = clone_dir / ".stealth_chrome_devtools_mcp_clone.json"
-    if not marker.exists():
-        return False
-    try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    if "auto_clean" in data:
-        return not bool(data["auto_clean"])
-    return str(data.get("source_kind", "")).startswith("explicit")
+    """The persistent profiles — the marker's question, ``profile_seed``'s."""
+    return profile_seed.is_named(clone_dir)
 
 
 def _regenerable_dirs_in_profile(profile_dir: Path) -> list[Path]:
@@ -701,47 +669,52 @@ def _rmtree_robust(path: Path, retries: int = 3) -> None:
                 )
 
 
+# F-893: why a copy did not run — the copier is the one place that knows.
+TARGET_IN_USE = "target-in-use"
+SNAPSHOT_IN_USE = "snapshot-in-use"
+
+
 def _copy_profile_tree(
     source: Path, target: Path, clone_root: Path, source_kind: str = "profile"
-) -> None:
+) -> str | None:
+    """Copy *source* over *target*, and report whether the copy actually RAN:
+    None when it did, ``TARGET_IN_USE`` when a live browser holds the target.
+
+    Refusing is right — rewriting a directory a Chrome is writing to would be
+    the harm — but it is not success, and the bare ``return`` it used to be let
+    the refresh report a refreshed snapshot with not one byte moved (F-893).
+    The other two callers hand the answer to ``_require_copied``."""
     if not source.exists():
         target.mkdir(parents=True, exist_ok=True)
-        return
+        return None
     if not _is_relative_to(target, clone_root):
         raise ValueError(f"Refusing to refresh clone outside clone root: {target}")
     if target.exists():
         if _profile_has_running_browser(target):
-            return
+            return TARGET_IN_USE
         _rmtree_robust(target)
     target.mkdir(parents=True, exist_ok=True)
     _copy_profile_delta(source, target)
     time.sleep(0.2)
     _copy_profile_delta(source, target)
-    marker = {
-        "source": str(source),
-        "source_kind": source_kind,
-        "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        # Disposable auto-clones may be reclaimed by the storage-cap sweep;
-        # explicit/named profiles (explicit-* source kinds) never are.
-        "auto_clean": not str(source_kind).startswith("explicit"),
-    }
-    (target / ".stealth_chrome_devtools_mcp_clone.json").write_text(
-        json.dumps(marker, indent=2),
-        encoding="utf-8",
+    profile_seed.write_marker(
+        target,
+        source=source,
+        source_kind=source_kind,
+        seeded_from=profile_seed.seed_name(
+            source, master_profile_dir(), master_snapshot_dir()
+        ),
     )
+    return None
 
 
-def _clone_needs_refresh(target: Path) -> bool:
-    if not target.exists():
-        return True
-    refresh_days = _profile_refresh_days()
-    if refresh_days <= 0:
-        return False
-    marker = target / ".stealth_chrome_devtools_mcp_clone.json"
-    if not marker.exists():
-        return False
-    cutoff = datetime.now() - timedelta(days=refresh_days)
-    return datetime.fromtimestamp(marker.stat().st_mtime) < cutoff
+def _require_copied(refusal: str | None, target: Path) -> None:
+    """A copy these callers cannot have refused (F-893 review m4): both copy
+    into a directory they have just found free, with no ``await`` in between.
+    One inserted ``await`` makes it reachable, and what it would hand back is an
+    empty directory the caller is told is their profile — so it raises."""
+    if refusal is not None:
+        raise ToolError(f"profile copy into {target} was refused: {refusal}")
 
 
 def _refresh_master_snapshot_if_safe(reason: str) -> dict[str, Any]:
@@ -758,37 +731,45 @@ def _refresh_master_snapshot_if_safe(reason: str) -> dict[str, Any]:
         return result
 
     try:
-        _copy_profile_tree(
+        refused = _copy_profile_tree(
             master, snapshot, default_session_root(), f"master-snapshot-{reason}"
         )
-        result["snapshot_refreshed"] = True
+        # F-893: a copy the snapshot's own live browser refused is not a refresh.
+        if refused is None:
+            result["snapshot_refreshed"] = True
+        else:
+            result["snapshot_error"] = SNAPSHOT_IN_USE
     except Exception as exc:
         result["snapshot_error"] = f"{type(exc).__name__}: {exc}"
     return result
 
 
+def _refresh_snapshot_if_stale() -> None:
+    """Freshen the snapshot before a copy when master has newer logins and is
+    not in use. Both copy paths asked this the same two-line way — a second way
+    to do one thing, and two places F-892 would have had to widen."""
+    if _snapshot_needs_refresh():
+        _refresh_master_snapshot_if_safe("pre-clone-stale")
+
+
 def _snapshot_needs_refresh() -> bool:
     """Return True when master has auth-relevant files newer than the last snapshot.
 
-    Checks a small set of key Chrome profile files whose mtime changes on
-    login/logout.  Fast (stat-only) and safe to call before every clone.
-    """
-    master = master_profile_dir()
+    WHICH files witness a login is ``profile_seed.LOGIN_WITNESSES`` and is not
+    re-spelled here, not even in prose: this function carried the list inline, it
+    named the pre-Chrome-96 cookie jar, and a pure cookie login therefore never
+    reached this branch at all (F-892). Stat-only; safe before a clone."""
     snapshot = master_snapshot_dir()
     if not snapshot.exists():
         return False  # no snapshot yet; creation is handled elsewhere
-    marker = snapshot / ".stealth_chrome_devtools_mcp_clone.json"
+    marker = snapshot / profile_seed.MARKER_NAME
     if not marker.exists():
         return True
     try:
-        snapshot_time = marker.stat().st_mtime
-        for rel in ("Default/Cookies", "Default/Login Data", "Default/Web Data"):
-            src = master / rel
-            if src.exists() and src.stat().st_mtime > snapshot_time:
-                return True
+        written = profile_seed.newest_login_write(master_profile_dir())
+        return written is not None and written > marker.stat().st_mtime
     except OSError:
-        pass
-    return False
+        return False
 
 
 def _root_to_path(root: Any) -> str | None:
@@ -899,12 +880,36 @@ def _copy_clone_from_source(
         "clone_source_path": str(source),
         "master_snapshot_path": str(master_snapshot_dir()),
     }
-    _copy_profile_tree(source, clone, clone_root, source_kind)
+    _require_copied(_copy_profile_tree(source, clone, clone_root, source_kind), clone)
     return selection
 
 
+def require_allowed_user_data_dir(user_data_dir: str | None) -> None:
+    """Raise if this ``user_data_dir`` names something a caller may not open.
+    PUBLIC because `spawn_browser` asks it before `adopt_held_profile`, which
+    re-attaches to whatever live browser holds the requested directory and runs
+    in front of selection (F-894 review M1). The rule is `require_allowed`; this
+    and the resolver are its TWO callers, and this one takes the tool's ``None``."""
+    if user_data_dir:
+        profile_seed.require_allowed(
+            user_data_dir,
+            default_session_root(),
+            clone_root_dir(),
+            master_snapshot_dir(),
+            _is_relative_to,
+        )
+
+
 def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, Any]:
-    return dict(profile_selection)
+    """The selection as ``spawn_diagnostics.profile_selection`` reports it — the
+    ONE site every role passes through, which is why F-895's seed provenance is
+    stamped here. It is read from the marker on disk, so a directory that
+    already existed reports the seed it was actually made from."""
+    public = dict(profile_selection)
+    selected = public.get("user_data_dir")
+    if isinstance(selected, str) and selected:
+        public.update(profile_seed.provenance(Path(selected)))
+    return public
 
 
 async def resolve_profile_selection(
@@ -919,21 +924,18 @@ async def resolve_profile_selection(
     clone_root = clone_root_dir()
     snapshot = master_snapshot_dir()
 
+    # F-894: the master BY PATH is the master, not an explicit clone of itself,
+    # so it gets the ROLE that makes `close_instance` refresh the snapshot.
+    asked = Path(user_data_dir).expanduser() if user_data_dir else None
+    if asked is not None and profile_seed.same_dir(asked, master):
+        user_data_dir = None
+
     if user_data_dir:
-        explicit = Path(user_data_dir).expanduser()
-        if not explicit.is_absolute():
-            # Resolve relative names so they land inside clone_root (sessions/).
-            # First anchor against session_root; if the result is already inside
-            # clone_root (e.g. "sessions/github-session"), keep it — otherwise
-            # prepend clone_root so a bare name like "github-session" becomes
-            # sessions/github-session.  This avoids the double-sessions path
-            # sessions/sessions/github-session when the user includes the prefix.
-            anchored = default_session_root() / explicit
-            explicit = (
-                anchored
-                if _is_relative_to(anchored, clone_root)
-                else clone_root / explicit
-            )
+        # F-894: refused before anything is created, in front of the walk — and
+        # the gate ANSWERS where it lands, so `anchor` runs once (review n6).
+        explicit = profile_seed.require_allowed(
+            user_data_dir, default_session_root(), clone_root, snapshot, _is_relative_to
+        )
         # If the requested path (inside clone_root) is already held by a running
         # browser, find the next free numbered variant rather than crashing.
         # For a NAMED profile that walk is an identity change — a different set
@@ -950,15 +952,14 @@ async def resolve_profile_selection(
                     "walk_reason": hold.reason,
                 }
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
-            # Refresh stale snapshot before copying so the clone carries the
-            # latest logins (only runs when master is not in use).
-            if _snapshot_needs_refresh():
-                _refresh_master_snapshot_if_safe("pre-clone-stale")
+            _refresh_snapshot_if_stale()
             source = snapshot if snapshot.exists() else master
             source_kind = (
                 "explicit-master-snapshot" if source == snapshot else "explicit-master"
             )
-            _copy_profile_tree(source, explicit, clone_root, source_kind)
+            _require_copied(
+                _copy_profile_tree(source, explicit, clone_root, source_kind), explicit
+            )
         explicit.parent.mkdir(parents=True, exist_ok=True)
         return {
             "user_data_dir": str(explicit),
@@ -991,9 +992,7 @@ async def resolve_profile_selection(
     # sweep target.
     spawn_background_sweep("pre-clone")
 
-    # Freshen snapshot before cloning if master has newer auth data and is not in use.
-    if _snapshot_needs_refresh():
-        _refresh_master_snapshot_if_safe("pre-clone-stale")
+    _refresh_snapshot_if_stale()
 
     if source_override is not None:
         source = source_override

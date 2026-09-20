@@ -2,6 +2,137 @@
 
 ## Unreleased
 
+### Fixed — F-892: the snapshot staleness witness stated a file Chrome stopped writing in v96
+
+`_snapshot_needs_refresh` decided whether the master snapshot was behind the
+master by stating `Default/Cookies`, `Default/Login Data` and `Default/Web
+Data`. Chrome moved the cookie jar to `Default/Network/` in version 96.
+Measured 2026-09-20 on this machine's live master profile and its snapshot:
+`Default/Cookies` is **absent from both** while `Default/Network/Cookies` is
+524,288 B. So a login that writes only cookies — Google SSO, Amazon Seller
+Central, any SPA that never offers to save a password — never made the snapshot
+look stale, and the `pre-clone-stale` refresh depended entirely on `Login Data`
+(only when Chrome saves a password) or `Web Data` (autofill). For the most
+common login shape the trigger was dead.
+
+The list is now `profile_seed.LOGIN_WITNESSES`, led by the current cookie jar
+with the pre-96 path kept beside it, and it is spelled in exactly one place —
+not even a docstring may repeat it, which a pin enforces, because a stale prose
+copy is how the original claim survived. The pin's fixture is built from the
+measured layout of a real Chrome profile, never from our own copier's output.
+
+### Fixed — F-893: a snapshot refresh that copied nothing reported success
+
+`_copy_profile_tree` returned early when the TARGET directory was held by a live
+browser, and `_refresh_master_snapshot_if_safe` then set
+`snapshot_refreshed: True` regardless — so callers were told the seed carried
+the master's logins when not one byte had moved. Refusing is right; reporting
+it as a refresh is not.
+
+The precondition was live: measured 2026-09-20, a Chrome had been running on
+`master-snapshot` itself, and the residue it left is unambiguous — the
+snapshot's `Default/Network/Cookies` is 7 s **newer** than the master's and its
+`Local State` is 133,607 B against the master's 90,406, which `shutil.copy2`
+from that master cannot produce. `_copy_profile_tree` now reports the refusal
+and the refresh answers `snapshot_refreshed: False` with
+`snapshot_error: "snapshot-in-use"`. The existing `"master-in-use"` arm is
+unchanged.
+
+### Fixed — F-894: `user_data_dir="master"` silently opened a different profile
+
+A bare relative name is anchored under the clone root, so `"master"` resolved to
+`<root>/sessions/master`, not `<root>/master`, and was created as a fresh clone.
+Measured: that directory exists, 0.46 GB, marker `explicit-master-snapshot`,
+created 2026-09-11 — someone asked for the master profile by its documented name
+and got a nine-day-old copy, with no warning.
+
+`master`, `master-snapshot` and `default` are now reserved names and raise
+`ToolError` naming the word, before anything is created and in front of F-871's
+`<name>-2` walk so a reserved name can never come back as `master-2`. The
+snapshot PATH is refused too — a browser driven there writes into the seed every
+later session copies from, which is how F-893's precondition arose. The master
+by absolute path is deliberately still allowed and now selects the master ROLE,
+which is what makes `close_instance` refresh the snapshot afterwards.
+
+The refusal is asked at the SPAWN, before F-888's re-attach, not only inside the
+resolver. `browser_reattach.adopt_held_profile` runs in front of profile
+selection and matches the requested directory against live browsers, so an
+absolute snapshot path **with a browser on it** — the exact state F-893 is about
+— was re-attached to and the resolver never saw the request. One rule, two sites
+that ask it; it is a path decision plus one `Path.resolve` and one `exists()`, so
+asking twice costs two stats.
+
+That refusal also runs AHEAD of the headed-visibility guard (F-808). Both are
+pre-flight and neither has a side effect, so the order decides only which message
+a caller gets when both apply — and on a host with no desktop (every Linux CI
+cell, and any backend started outside a desktop session) the headed guard used to
+answer first, so a reserved `user_data_dir` came back as "this context cannot
+display a window" and the reservation was unreachable through the tool. A
+reserved path is refused on every machine there is; "no desktop here" is a fact
+about one backend, and answering with it sends a caller after a display they do
+not need.
+
+**If you already have a session directory named `master`, `master-snapshot` or
+`default`** (one exists on the machine this was measured on, 0.46 GB), nothing is
+deleted or hidden: it is still listed by `profiles` and still openable by its
+**absolute path**, or rename it to a name that is not reserved. The refusal
+message says so when such a directory exists. RUNBOOK's "Disk filling up" carries
+the one-time job.
+
+A drive-qualified path that is not absolute (`C:foo`, what a Windows absolute
+path becomes once a lenient string layer has eaten its backslashes) is refused
+as well. That is not a hypothetical: it reproduces, exactly,
+`sessions/stealth-mcp-browser-sessionssessionsstealth-chrome-devtools-mcp-f876e3d7f2ec`
+(0.35 GB) — `Path.is_absolute()` is False for a drive-relative path, so the
+resolver anchored a fully qualified path as a bare session name. **On every
+platform**: a drive is a Windows concept (`PurePosixPath("C:foo").drive` is
+`""`, measured), so the first cut of this rule read the host's flavour and let
+the identical string through on Linux and macOS. The drive is now read through
+`PureWindowsPath` while "would this be anchored rather than opened" stays on the
+native flavour the resolver anchors with — one rule, same answer everywhere, and
+`anchor` keeps its one home.
+
+### Added — F-895: sessions now say which seed they came from, and whether it has moved on
+
+The clone marker gains `seeded_from` (the seed by name) and `seeded_at`, written
+beside the three legacy keys so a 2.1.10 reader still finds what it looks for.
+`spawn_diagnostics.profile_selection` and `stealth-chrome-devtools profiles`
+both report those plus `seed_changed_since`, computed from F-892's witness list
+— the same one, never a second. A marker carrying neither key reads
+`seeded_from: "unknown"` with `seed_changed_since: None`, and `created_at` is
+deliberately not substituted for `seeded_at`: when a directory was made is not a
+claim about which seed it was made from, and the whole point is that a profile
+frozen since August must not read as up to date. Sizes, mtimes, roles and a seed
+name only — no profile content is read, printed or logged.
+
+### Removed — a documented refresh window that never ran
+
+`clone_storage._clone_needs_refresh` and `_profile_refresh_days` had no callers
+anywhere in the tree, and the first carried a second spelling of the clone
+marker's filename — breaking the one-home claim inside the commit that made it.
+Both are deleted and the marker name joins the grep pin. The
+`BROWSER_PROFILE_REFRESH_DAYS` **setting keeps its field**, because `Settings` is
+`extra="forbid"` and a `.env` naming a field the model no longer has crashes at
+startup — but nothing presents it as live any more: README calls it inert instead
+of claiming it refreshes copies after N days, `.env.example` comments it out with
+the reason, the two shipped example configs no longer set it, and the field
+itself carries the reason. If you have `BROWSER_PROFILE_REFRESH_DAYS` in your own
+`.env` or client config it still loads and still does nothing; you can drop it.
+
+### Changed — the seed's own subject has one home
+
+New leaf `embedded/profile_seed.py`: the clone marker (its name, schema, read,
+write and the auto/named verdicts), the login witnesses, and where a
+`user_data_dir` request lands plus which directories a caller may not name.
+`clone_storage.py` keeps a wrapper per name the suite and the CLI call, and its
+LOC budget **ratchets down** 1055 → 1054 — the extraction is what paid for these
+four fixes rather than a raised cap.
+
+### Fixed — CLAUDE.md's glossary taught a parameter that raises
+
+The "browser session / named session" row said `spawn_browser(session_name=…)`.
+There is no such parameter and never has been; it is `user_data_dir`.
+
 ### Added — F-891: `stealthy`, one CLI that can also drive the backend's tools
 
 Nothing in a shell could call a tool on the running backend. On 2026-09-19,
@@ -85,8 +216,12 @@ operator a browser they can name.
 
 Two new leaves: `embedded/backend_client.py` (the session, the call, and the one
 reading of an answer — `structuredContent` with EMPTY `content` is the common
-shape, measured) and `cli_call.py` (the six verb bodies; `cli.py` keeps every
-parser and stays under its LOC budget).
+shape, measured) and `cli_call.py` (the six verbs' parsers, bodies and dispatch
+table). `cli.py` keeps the one parser TREE, the one `main` and both script
+names, and calls `cli_call.add_parsers(sub)` once — so there is still exactly
+one `--help` and one set of verbs, and a flag now sits beside the code that
+explains it. It is **890 LOC against the 1000 budget**, which ratchets down
+only; no cap was raised.
 
 ## 2.1.10
 

@@ -432,6 +432,22 @@ profiles over the browser-session cap — **logins are kept**. Override caps for
 with `--clone-cap-gb` / `--browser-session-cap-gb` (`0` disables a cap). `profiles`
 lists what is on disk first.
 
+`profiles` also prints, under each session, the seed it was copied from and when —
+plus `SEED CHANGED SINCE` when that seed has taken a login write since (F-895). A
+session created before 2.1.11 has no such record and reads `seeded from unknown`;
+that is the truth, not a fault, and nothing back-fills it. The master and the
+snapshot rows carry no seed line because they ARE the seed.
+
+**One-time job if you have a session directory named `master`, `master-snapshot` or
+`default`.** Those three names are reserved as of F-894: `spawn_browser` used to
+anchor a bare name under `sessions/`, so `user_data_dir="master"` silently opened
+`sessions/master` — a copy of the snapshot — instead of the master profile. Asking
+for one now raises `user_data_dir rejected: 'master' is a reserved profile name …`.
+Your directory is **not** touched, is still listed by `profiles`, and stays reachable
+two ways: open it by its **absolute path**, or rename it to a name that is not
+reserved and use that. To use the shared profile the sessions are seeded from, spawn
+with **no** `user_data_dir` at all.
+
 `cleanup` also reports the `backend records:` line — how many backends `server.json`
 records and how many of those are **dead** (F-880: nothing is listening on the recorded
 port AND the recorded pid is not a backend of ours). Nothing else in the product ever

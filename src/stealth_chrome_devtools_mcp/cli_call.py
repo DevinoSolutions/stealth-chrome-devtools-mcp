@@ -40,12 +40,17 @@ it anywhere; what the backend already records, it records.
 
 from __future__ import annotations
 
+import argparse
 import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import argparse
     from collections.abc import Callable, Coroutine, Iterable, Sequence
+
+    #: What ``parser.add_subparsers()`` hands back. The name is private to
+    #: ``argparse`` and there is no public spelling of it, so it is written
+    #: ONCE here rather than at the one function that takes it.
+    SubParsers = argparse._SubParsersAction[argparse.ArgumentParser]
 
     #: What a verb hands :func:`_run`: a coroutine function taking the ONE
     #: selected backend url. Typed rather than `object`, so a verb whose body
@@ -754,3 +759,144 @@ def cmd_tools(args: argparse.Namespace) -> int:
             print(line)
 
     return _run(args, body)
+
+
+# ── the six verbs' own parser surface ────────────────────────────────────────
+
+
+def _backend_flags() -> argparse.ArgumentParser:
+    """The flags every tool-driving verb shares (F-891).
+
+    A parent parser rather than six copies: ``--no-start``, ``--timeout`` and
+    ``--traceback`` mean the same thing for all six, and six declarations are
+    six places for one of them to drift. ``--json`` is deliberately NOT here —
+    on ``call`` it names the arguments object, not an output mode.
+
+    ``--traceback`` is the one way to see a stack from these verbs, because
+    :func:`_run` turns every exception into one stderr line and a closed exit
+    code (F-891 review M1). A flag and not an env var: this package reads its
+    environment in ``settings.py`` and nowhere else. It PRINTS the stack and
+    never re-raises — an exception leaving ``main`` goes past `sentry_init()`
+    and ships the tool's own payload off the machine (review S1).
+
+    ``--no-start``'s help names the consequence it prevents, not merely what it
+    switches off (F-891 review S1): a responsive backend is always adopted,
+    whatever build it is, but a cold start is the PROXY's cold start and can
+    evict a wedged one. That is the whole reason an operator would reach for
+    this flag, and a help string saying only "do not start one" leaves them to
+    discover it.
+    """
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument(
+        "--no-start",
+        action="store_true",
+        help=(
+            "fail instead of starting a backend when none is running; a live "
+            "backend is always used as-is, but starting one can evict a wedged "
+            "backend of another build"
+        ),
+    )
+    shared.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="per-call budget in seconds (default: the client's)",
+    )
+    shared.add_argument(
+        "--traceback",
+        action="store_true",
+        help="also print the full stack, in addition to the one-line message",
+    )
+    return shared
+
+
+def add_parsers(sub: SubParsers) -> None:
+    """Contribute the six verbs' subparsers to ``cli``'s ONE parser tree.
+
+    Parsers and bodies in one file because they are one question. They were
+    split — declarations in ``cli.py``, meaning here — and the split showed:
+    this module's own docstring explains what ``--profile`` does while the
+    ``add_argument`` that offers it lived in another file, so adding a flag to
+    ``spawn`` meant editing two homes and either could drift from the other
+    (convention 4, reached from the side where the second way is a second
+    FILE). ``cli.py`` still owns the parser TREE, both script names and the
+    ops verbs; what moved is only the six verbs' own surface.
+
+    ``call`` has no per-tool mirror on purpose — the tool's own schema on the
+    backend is the validation, so a 95th tool is reachable the day it is
+    registered.
+    """
+    shared = _backend_flags()
+
+    tools = sub.add_parser(
+        "tools", parents=[shared], help="list the live backend's tools"
+    )
+    tools.add_argument("--section", default=None, help="only tools in this section")
+    tools.add_argument("--json", action="store_true", help="JSON output")
+
+    call = sub.add_parser(
+        "call",
+        parents=[shared],
+        help="call ANY tool on the live backend (the core verb)",
+    )
+    call.add_argument("tool", help="tool name, e.g. spawn_browser")
+    call.add_argument(
+        "--arg",
+        action="append",
+        metavar="KEY=VALUE",
+        help="one argument; the value is JSON when it parses, else a string",
+    )
+    call.add_argument(
+        "--json",
+        default=None,
+        metavar="OBJECT",
+        help="the whole arguments object as JSON (--arg wins per key). On THIS "
+        "verb --json is the arguments, not an output mode: `call` always "
+        "prints the tool's structured result as JSON.",
+    )
+
+    listing = sub.add_parser("ls", parents=[shared], help="list browser instances")
+    listing.add_argument("--json", action="store_true", help="JSON output")
+
+    spawn = sub.add_parser("spawn", parents=[shared], help="spawn a browser")
+    spawn.add_argument(
+        "--profile",
+        default=None,
+        help="persistent profile: a name or an absolute path, passed straight "
+        "through as user_data_dir (re-attaches when a browser already holds it)",
+    )
+    headed = spawn.add_mutually_exclusive_group()
+    headed.add_argument("--headed", action="store_true", help="show a window")
+    headed.add_argument("--headless", action="store_true", help="no window")
+    spawn.add_argument("--url", default=None, help="navigate here after spawning")
+    spawn.add_argument("--json", action="store_true", help="JSON output")
+
+    nav = sub.add_parser("nav", parents=[shared], help="navigate an instance")
+    nav.add_argument("instance", help="instance id, or a unique prefix of one")
+    nav.add_argument("url")
+    nav.add_argument(
+        "--wait",
+        default=None,
+        choices=("load", "domcontentloaded", "networkidle"),
+        help="milestone to wait for (default: the tool's)",
+    )
+    nav.add_argument("--json", action="store_true", help="JSON output")
+
+    close = sub.add_parser("close", parents=[shared], help="close an instance")
+    close.add_argument("instance", help="instance id, or a unique prefix of one")
+    close.add_argument("--json", action="store_true", help="JSON output")
+
+
+#: Verb name -> body, for ``cli.main``'s dispatch. Here rather than as six
+#: one-line shims in ``cli.py``: the shims restated this mapping in a second
+#: place, and a verb added here but forgotten there is a parser that reaches no
+#: body. ``cli.py`` keeps its own table for the ops verbs and consults this one
+#: for everything it does not recognise.
+DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
+    "tools": cmd_tools,
+    "call": cmd_call,
+    "ls": cmd_ls,
+    "spawn": cmd_spawn,
+    "nav": cmd_nav,
+    "close": cmd_close,
+}

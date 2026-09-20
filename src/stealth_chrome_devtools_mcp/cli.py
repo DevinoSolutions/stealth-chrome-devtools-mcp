@@ -92,7 +92,13 @@ def _role(cs, path: Path) -> str:
 
 
 def _collect_profiles(cs) -> list[dict]:
-    """Every profile under the session root with size, role, and in-use flag."""
+    """Every profile under the session root with size, role, in-use flag and
+    seed provenance (F-895). The provenance is ``profile_seed.provenance``'s —
+    the same three fields ``spawn_diagnostics.profile_selection`` reports, read
+    from the same marker, so the CLI and a spawn can never disagree about where
+    a session came from."""
+    from stealth_chrome_devtools_mcp.embedded import profile_seed
+
     rows: list[dict] = []
 
     def _row(path: Path, role: str) -> dict:
@@ -102,6 +108,7 @@ def _collect_profiles(cs) -> list[dict]:
             "role": role,
             "size": cs._dir_size_bytes(path),
             "in_use": cs._profile_has_running_browser(path),
+            **profile_seed.provenance(path),
         }
 
     master = cs.master_profile_dir()
@@ -119,6 +126,31 @@ def _collect_profiles(cs) -> list[dict]:
             if child.is_dir()
         )
     return rows
+
+
+def _seed_line(row: dict[str, object]) -> str:
+    """One profile's seed provenance as a line (F-895), or "" for a row where
+    the question does not arise.
+
+    "seed changed since" is printed only when it is True: False is the ordinary
+    case and would be noise, and None means the marker could not say — which is
+    reported as an unknown seed rather than as a fresh one, because a profile
+    frozen since August reading "up to date" is the silence this finding closes.
+
+    The master and the snapshot ARE the seed, so asking what seeded them is a
+    category error; they carry no marker and reported "seeded from unknown"
+    about themselves, on exactly the two rows an operator reads first (review
+    m6). An unmarked SESSION directory still says unknown — there the answer is
+    genuinely not known, which is the thing worth printing.
+    """
+    if row.get("role") in {"master", "snapshot"}:
+        return ""
+    seeded_from = row.get("seeded_from") or "unknown"
+    seeded_at = row.get("seeded_at")
+    if not seeded_at:
+        return f"seeded from {seeded_from} (when: unknown)"
+    line = f"seeded from {seeded_from} at {seeded_at}"
+    return line + ("  SEED CHANGED SINCE" if row.get("seed_changed_since") else "")
 
 
 def _gb_to_bytes(gb: float | None, fallback: int) -> int:
@@ -426,6 +458,9 @@ def _cmd_profiles(_args) -> int:
             f"  {row['name'][:44]:44s} {row['role']:11s} "
             f"{_human(row['size']):>10s}  in_use={row['in_use']}"
         )
+        seed = _seed_line(row)
+        if seed:
+            print(f"  {'':44s} {seed}")
     print(f"  {'total':44s} {'':11s} {_human(sum(r['size'] for r in rows)):>10s}")
     return 0
 
@@ -675,40 +710,23 @@ def _cmd_kill_orphans(args) -> int:
 
 
 def _cli_call():
-    """The tool-driving verbs (F-891), imported lazily.
+    """The six tool-driving verbs (F-891) — parsers, bodies and dispatch —
+    imported lazily.
 
     They are the only verbs that speak MCP, so the ops verbs must not pay for
     the client library: ``profiles`` and ``status`` reach a running backend
     through nothing heavier than a socket and a probe. Same reason every
     ``embedded`` import in this file is inside the function that needs it.
+
+    Building the parser now imports that module, so the laziness is thinner
+    than it was — but what it protects is unchanged and measured: ``cli_call``
+    imports only ``argparse`` and ``sys`` at module scope, and every reach for
+    ``backend_client`` (and through it ``httpx`` and the ``mcp`` SDK) is still
+    inside the function that needs it.
     """
     from stealth_chrome_devtools_mcp import cli_call
 
     return cli_call
-
-
-def _cmd_tools(args) -> int:
-    return _cli_call().cmd_tools(args)
-
-
-def _cmd_call(args) -> int:
-    return _cli_call().cmd_call(args)
-
-
-def _cmd_ls(args) -> int:
-    return _cli_call().cmd_ls(args)
-
-
-def _cmd_spawn(args) -> int:
-    return _cli_call().cmd_spawn(args)
-
-
-def _cmd_nav(args) -> int:
-    return _cli_call().cmd_nav(args)
-
-
-def _cmd_close(args) -> int:
-    return _cli_call().cmd_close(args)
 
 
 def _cmd_serve(args) -> int:
@@ -732,6 +750,10 @@ def _cmd_serve(args) -> int:
     return 0
 
 
+#: The OPS verbs. The six tool-driving verbs are `cli_call.DISPATCH`'s, beside
+#: the bodies they name; :func:`main` consults it for anything not here, so one
+#: table covers the lifecycle and the other covers the tool surface, each next
+#: to what it dispatches to.
 _DISPATCH = {
     "status": _cmd_status,
     "profiles": _cmd_profiles,
@@ -741,12 +763,6 @@ _DISPATCH = {
     "restart": _cmd_restart,
     "kill-orphans": _cmd_kill_orphans,
     "serve": _cmd_serve,
-    "tools": _cmd_tools,
-    "call": _cmd_call,
-    "ls": _cmd_ls,
-    "spawn": _cmd_spawn,
-    "nav": _cmd_nav,
-    "close": _cmd_close,
 }
 
 #: The console-script names this ONE ``main`` is installed under
@@ -769,118 +785,6 @@ def _prog_name() -> str:
     return invoked if invoked in SCRIPT_NAMES else SCRIPT_NAMES[0]
 
 
-def _backend_flags() -> argparse.ArgumentParser:
-    """The flags every tool-driving verb shares (F-891).
-
-    A parent parser rather than six copies: ``--no-start``, ``--timeout`` and
-    ``--traceback`` mean the same thing for all six, and six declarations are
-    six places for one of them to drift. ``--json`` is deliberately NOT here —
-    on ``call`` it names the arguments object, not an output mode.
-
-    ``--traceback`` is the one way to see a stack from these verbs, because
-    ``cli_call._run`` turns every exception into one stderr line and a closed
-    exit code (F-891 review M1). A flag and not an env var: this package reads
-    its environment in ``settings.py`` and nowhere else. It PRINTS the stack and
-    never re-raises — an exception leaving ``main`` goes past `sentry_init()`
-    and ships the tool's own payload off the machine (review S1).
-
-    ``--no-start``'s help names the consequence it prevents, not merely what it
-    switches off (F-891 review S1): a responsive backend is always adopted,
-    whatever build it is, but a cold start is the PROXY's cold start and can
-    evict a wedged one. That is the whole reason an operator would reach for
-    this flag, and a help string saying only "do not start one" leaves them to
-    discover it.
-    """
-    shared = argparse.ArgumentParser(add_help=False)
-    shared.add_argument(
-        "--no-start",
-        action="store_true",
-        help=(
-            "fail instead of starting a backend when none is running; a live "
-            "backend is always used as-is, but starting one can evict a wedged "
-            "backend of another build"
-        ),
-    )
-    shared.add_argument(
-        "--timeout",
-        type=float,
-        default=None,
-        help="per-call budget in seconds (default: the client's)",
-    )
-    shared.add_argument(
-        "--traceback",
-        action="store_true",
-        help="also print the full stack, in addition to the one-line message",
-    )
-    return shared
-
-
-def _add_tool_verbs(sub, shared: argparse.ArgumentParser) -> None:
-    """The six verbs that drive the LIVE backend's tools (F-891).
-
-    Bodies live in ``cli_call``; what is here is the surface. ``call`` has no
-    per-tool mirror on purpose — the tool's own schema on the backend is the
-    validation, so a 95th tool is reachable the day it is registered.
-    """
-    tools = sub.add_parser(
-        "tools", parents=[shared], help="list the live backend's tools"
-    )
-    tools.add_argument("--section", default=None, help="only tools in this section")
-    tools.add_argument("--json", action="store_true", help="JSON output")
-
-    call = sub.add_parser(
-        "call",
-        parents=[shared],
-        help="call ANY tool on the live backend (the core verb)",
-    )
-    call.add_argument("tool", help="tool name, e.g. spawn_browser")
-    call.add_argument(
-        "--arg",
-        action="append",
-        metavar="KEY=VALUE",
-        help="one argument; the value is JSON when it parses, else a string",
-    )
-    call.add_argument(
-        "--json",
-        default=None,
-        metavar="OBJECT",
-        help="the whole arguments object as JSON (--arg wins per key). On THIS "
-        "verb --json is the arguments, not an output mode: `call` always "
-        "prints the tool's structured result as JSON.",
-    )
-
-    listing = sub.add_parser("ls", parents=[shared], help="list browser instances")
-    listing.add_argument("--json", action="store_true", help="JSON output")
-
-    spawn = sub.add_parser("spawn", parents=[shared], help="spawn a browser")
-    spawn.add_argument(
-        "--profile",
-        default=None,
-        help="persistent profile: a name or an absolute path, passed straight "
-        "through as user_data_dir (re-attaches when a browser already holds it)",
-    )
-    headed = spawn.add_mutually_exclusive_group()
-    headed.add_argument("--headed", action="store_true", help="show a window")
-    headed.add_argument("--headless", action="store_true", help="no window")
-    spawn.add_argument("--url", default=None, help="navigate here after spawning")
-    spawn.add_argument("--json", action="store_true", help="JSON output")
-
-    nav = sub.add_parser("nav", parents=[shared], help="navigate an instance")
-    nav.add_argument("instance", help="instance id, or a unique prefix of one")
-    nav.add_argument("url")
-    nav.add_argument(
-        "--wait",
-        default=None,
-        choices=("load", "domcontentloaded", "networkidle"),
-        help="milestone to wait for (default: the tool's)",
-    )
-    nav.add_argument("--json", action="store_true", help="JSON output")
-
-    close = sub.add_parser("close", parents=[shared], help="close an instance")
-    close.add_argument("instance", help="instance id, or a unique prefix of one")
-    close.add_argument("--json", action="store_true", help="JSON output")
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=_prog_name(),
@@ -888,7 +792,9 @@ def build_parser() -> argparse.ArgumentParser:
         "operate the backend, and drive its tools from a shell.",
     )
     sub = parser.add_subparsers(dest="command")
-    _add_tool_verbs(sub, _backend_flags())
+    # ONE parser tree; the six tool verbs contribute their own surface, which
+    # is why their flags and their bodies can no longer drift apart (F-891).
+    _cli_call().add_parsers(sub)
 
     sub.add_parser(
         "status", help="show backend state, browser-session root, and storage caps"
@@ -974,7 +880,10 @@ def main(argv=None) -> int:
         # USAGE, never 1 (F-891 review M1): naming no verb is argparse's own
         # kind of mistake, and exit 1 now means "the tool answered and said no".
         return _cli_call().EXIT_USAGE
-    return _DISPATCH[args.command](args)
+    handler = _DISPATCH.get(args.command)
+    if handler is None:
+        handler = _cli_call().DISPATCH[args.command]
+    return handler(args)
 
 
 if __name__ == "__main__":

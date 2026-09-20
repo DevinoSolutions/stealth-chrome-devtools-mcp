@@ -338,18 +338,47 @@ section's allowed names, and a second launcher-resolution node),
    neither (F-874's three record shapes). `get_instance_state` has them, per
    instance, one `stealthy call` away. Widening `list_instances` is a tool-surface
    change and was deliberately not made here.
-11. **`cli.py` is at 981 raw lines against a 1000-LOC budget that ratchets down
-   only** — **19 lines of headroom**, so the next verb does NOT fit and the cut
-   comes first. The natural one is the ops verbs' bodies, on the same argument
-   that moved these six out.
+11. **`cli.py` is at 890 raw lines against a 1000-LOC budget that ratchets down
+   only** — **110 lines of headroom**, and the cut that bought them has been
+   made rather than merely named.
 
-   FOUR numbers have been claimed for this file and the three that are not 981
-   are all measurement artefacts, so the method is recorded rather than the
-   answer alone. `tools/check_file_budgets.py:207` counts
+   It came due at the merge of main's F-892..895, whose `profiles` seed lines
+   put the file at **1016** and made pre-commit refuse the merge commit. The
+   two candidates were F-895's `profiles` rendering (`_collect_profiles`,
+   `_role`, `_seed_line`, ≈75 lines) and F-891's own tool-verb SURFACE
+   (`_backend_flags`, `_add_tool_verbs`, the six `_cmd_*` shims, ≈131). The
+   second was taken, for a reason that is not its size: the shipped split put
+   `spawn`'s `--profile` declaration in `cli.py` while the only statement of
+   what `--profile` MEANS was in `cli_call`, so adding a flag touched two homes
+   and either could drift — convention 4 reached from the side where the second
+   way is a second FILE. `cli_call.add_parsers(sub)` and `cli_call.DISPATCH`
+   are the whole interface; `cli.py` keeps the one parser tree, the one `main`,
+   the dispatch order and both script names, so "not a second CLI" is still
+   true and is now a statement about the TREE rather than about where six
+   `add_argument` calls are written. The profiles alternative would have left
+   that split in place and bought a third of the headroom.
+
+   It costs one thing, stated rather than hidden: building the parser now
+   imports `cli_call` on every invocation, so `stealthy status` pays for it.
+   Measured, that is `argparse` and `sys` — the module's entire import list —
+   because `backend_client`, and through it `httpx` and the `mcp` SDK, are
+   still reached inside the functions that need them. The property the lazy
+   `_cli_call()` was written for ("an ops verb never pays for the MCP client")
+   is intact; the docstring no longer claims more than that.
+
+   `tests/test_doc_claims.py` grew the pin the split needs: every documented
+   verb must resolve through the SAME two-table lookup `main` uses, and the
+   reverse direction — every dispatchable verb is offered by the parser — is
+   its own node, because two tables is exactly how a body could come to have no
+   parser.
+
+   The number has been wrong here more than once, so the method is recorded
+   rather than the answer alone. `tools/check_file_budgets.py:207` counts
    `len(path.read_text(encoding="utf-8").splitlines())` — raw lines, blanks and
    comments included — and that is the only count the gate enforces. Measured
    that way through git blobs: `c13b12a` 956, `1eee656` 977, `dfcbc44` 981,
-   `db26a23` 981. An earlier draft of this section said 956, which was true of
+   `db26a23` 981, the F-892..895 merge **1016** (over, and refused), this commit
+   **890**. An earlier draft of this section said 956, which was true of
    the commit it was written against and stale afterwards; a later one said 985
    with "15 lines of headroom", which was true of no commit at all — it was
    asserted from memory rather than read, which is the same failure as the 819
