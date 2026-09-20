@@ -75,7 +75,22 @@ unchanged `"master-in-use"`; an unobstructed refresh → still `True` with no
 error key; and `_copy_profile_tree` itself returning `TARGET_IN_USE` with no
 marker written. Mutation-checked.
 
-## 5. Residuals
+## 5. The other two callers (review m4)
+
+The docstring asserts that only the refresh can reach the refusal, and that is
+true today: the explicit branch is guarded by `not explicit.exists()`, and
+`_copy_clone_from_source`'s target comes from `_available_clone_dir` /
+`_unique_clone_dir` with **no `await` between the availability check and the
+copy**, so it is atomic on the event loop. Nothing enforced it. One inserted
+`await` turns a refusal into an empty directory the caller is told is their
+profile, so both now pass the answer to `_require_copied`, which raises.
+
+It is pinned two ways because the branch is unreachable: directly (the guard
+raises on `TARGET_IN_USE`, returns None otherwise) and by AST — exactly one call
+to `_copy_profile_tree` may be unguarded, and it must be the refresh's. A third
+discarding site fails the pin.
+
+## 6. Residuals
 
 * **The refusal is reported, not repaired.** A browser on the snapshot still
   blocks every refresh for as long as it runs. That is deliberate — never kill

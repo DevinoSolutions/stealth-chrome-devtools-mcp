@@ -40,15 +40,18 @@ still the trap. The snapshot PATH is refused for a second reason as well: a
 browser driven on the snapshot directory writes into the seed every later
 session copies from, which is how F-893's precondition arose.
 
-A leaf: stdlib only. The master and snapshot directories, the profile and the
-refresh window all arrive as ARGUMENTS, so this module never learns where a
-session root is and ``clone_storage`` stays the one home for that.
+A leaf: stdlib plus ``tool_errors``, whose whole contract is to import nothing
+from ``embedded``. The master and snapshot directories, the profile and the
+``inside`` predicate all arrive as ARGUMENTS, so this module never learns where
+a session root is and ``clone_storage`` stays the one home for that.
 """
 
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 MARKER_NAME = ".stealth_chrome_devtools_mcp_clone.json"
 
@@ -137,9 +140,14 @@ def read_marker(profile: Path) -> dict[str, object]:
 
 
 def seed_name(source: Path, master: Path, snapshot: Path) -> str:
-    """The seed's NAME — the word a user can say about where a profile came
-    from. The two the product owns are named; anything else is its directory
-    name, which is what a per-session seed will be."""
+    """The seed's NAME rather than its path — what a profile was copied from.
+
+    The two the product owns are named; anything else is its directory name,
+    which is what a per-session seed will be. The value written today is
+    ``master-snapshot``, i.e. the word the session-vocabulary phase (F-896)
+    renames to ``default`` — it is a name, not yet the name a user would
+    choose, and the field exists partly so that rename has one place to land.
+    """
     if same_dir(source, snapshot):
         return "master-snapshot"
     if same_dir(source, master):
@@ -252,6 +260,37 @@ def anchor(
     return anchored if inside(anchored, clone_root) else clone_root / asked
 
 
+def require_allowed(
+    requested: str,
+    session_root: Path,
+    clone_root: Path,
+    snapshot: Path,
+    inside: Callable[[Path, Path], bool],
+) -> None:
+    """Raise ``ToolError`` when this ``user_data_dir`` may not be honoured.
+
+    THE one gate, and it is deliberately callable from TWO places (F-894 review
+    M1). Asking it only inside ``resolve_profile_selection`` was not enough:
+    ``browser_reattach.adopt_held_profile`` runs in FRONT of profile selection
+    (F-888) and matches the requested directory against live browsers, so an
+    absolute snapshot path with a browser on it — the exact state F-893 is
+    about — was RE-ATTACHED to and the resolver never saw the request. So
+    ``spawn_browser`` asks first, beside its other pre-flight guard, and the
+    resolver asks again because it is public and has its own callers.
+
+    Asking twice is free and correct: this is a pure path decision, no I/O
+    beyond ``Path.resolve``, and one home for the rule is worth more than one
+    call. The MASTER path passes here — the resolver, not this gate, is where
+    it becomes the master ROLE, and it must still reach the re-attach in front
+    of it, where being adopted is the right outcome.
+    """
+    refusal = reserved_reason(
+        requested, anchor(requested, session_root, clone_root, inside), snapshot
+    )
+    if refusal is not None:
+        raise ToolError(f"user_data_dir rejected: {refusal}")
+
+
 def reserved_reason(requested: str, resolved: Path, snapshot: Path) -> str | None:
     """Why this ``user_data_dir`` may not be honoured, or None (F-894).
 
@@ -265,7 +304,16 @@ def reserved_reason(requested: str, resolved: Path, snapshot: Path) -> str | Non
     False for it, so the resolver treats a drive-qualified path as a bare name
     and anchors it: MEASURED, that is exactly how
     ``sessions/stealth-mcp-browser-sessionssessionsstealth-chrome-devtools-mcp-…``
-    came to exist.
+    came to exist. **The two halves of that test read two different flavours on
+    purpose.** A drive is a Windows concept and ``PurePosixPath("C:foo").drive``
+    is ``""`` (measured), so reading it through the HOST's flavour made the
+    refusal a Windows-only rule and the pin RED on all six POSIX CI cells; the
+    drive is therefore read through ``PureWindowsPath``, which on Windows is the
+    host flavour and changes nothing there. "Would this be ANCHORED rather than
+    opened", though, is a question about the flavour the resolver actually
+    anchors with, so it stays plain ``Path`` — and ``anchor`` keeps its one home.
+    For ``C:foo`` both flavours answer "not absolute", which is what makes the
+    refusal identical on every platform.
 
     The MASTER path is deliberately NOT refused, and is not even a parameter
     here — driving the master directly is how a human logs in, and the caller
@@ -273,7 +321,7 @@ def reserved_reason(requested: str, resolved: Path, snapshot: Path) -> str | Non
     this question at all.
     """
     asked = Path(requested)
-    if asked.drive and not asked.is_absolute():
+    if PureWindowsPath(requested).drive and not asked.is_absolute():
         return (
             f"{requested!r} names a drive but is not an absolute path, so it "
             "would be created as a session name rather than opened. Pass a "
@@ -281,10 +329,20 @@ def reserved_reason(requested: str, resolved: Path, snapshot: Path) -> str | Non
         )
     name = asked.name.casefold()
     if not asked.is_absolute() and name in RESERVED_NAMES:
+        # F-894 review M3: an operator may ALREADY have a session directory of
+        # this name — one exists on the machine the finding was measured on —
+        # and "pick another name" is advice for a new session, not for theirs.
+        # The escape is named only when there is something to escape to.
+        existing = (
+            f" The existing directory at {resolved} is still openable by its "
+            "absolute path, or rename it to a name that is not reserved."
+            if resolved.exists()
+            else ""
+        )
         return (
             f"{name!r} is a reserved profile name and never means a session of "
             "that name. Spawn with no user_data_dir to use the shared profile "
-            "the sessions are seeded from; pick another name for a session."
+            f"the sessions are seeded from; pick another name for a session.{existing}"
         )
     if same_dir(resolved, snapshot):
         return (

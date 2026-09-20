@@ -22,7 +22,7 @@ import shutil
 import threading
 import time
 import urllib.parse
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,10 +61,6 @@ def master_snapshot_dir() -> Path:
     if configured:
         return Path(configured).expanduser()
     return default_session_root() / "master-snapshot"
-
-
-def _profile_refresh_days() -> int:
-    return get_settings().browser_profile_refresh_days
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -152,10 +148,9 @@ def _dir_size_bytes(path: Path) -> int:
 
 
 def clone_is_auto(clone_dir: Path) -> bool:
-    """True only for server-created disposable auto-clones — the marker's
-    question, answered in ``profile_seed.is_auto`` (its docstring carries the
-    fail-safe argument). A wrapper: every sweep, trim and CLI site reads this
-    name, and the suite patches it."""
+    """The disposable auto-clones — the marker's question, ``profile_seed``'s
+    (its docstring carries the fail-safe-on-a-legacy-marker argument). A
+    wrapper: every sweep, trim and CLI site reads this name."""
     return profile_seed.is_auto(clone_dir)
 
 
@@ -674,8 +669,7 @@ def _rmtree_robust(path: Path, retries: int = 3) -> None:
                 )
 
 
-# F-893: why a copy did not run. ``_copy_profile_tree`` is the ONE place that
-# knows, and it says so rather than returning as though it had copied.
+# F-893: why a copy did not run — the copier is the one place that knows.
 TARGET_IN_USE = "target-in-use"
 SNAPSHOT_IN_USE = "snapshot-in-use"
 
@@ -688,10 +682,8 @@ def _copy_profile_tree(
 
     Refusing is right — rewriting a directory a Chrome is writing to would be
     the harm — but it is not success, and the bare ``return`` it used to be let
-    ``_refresh_master_snapshot_if_safe`` report a refreshed snapshot with not one
-    byte moved (F-893). A value, not an exception: only that one of the three
-    callers can reach the branch.
-    """
+    the refresh report a refreshed snapshot with not one byte moved (F-893).
+    The other two callers hand the answer to ``_require_copied``."""
     if not source.exists():
         target.mkdir(parents=True, exist_ok=True)
         return None
@@ -716,17 +708,13 @@ def _copy_profile_tree(
     return None
 
 
-def _clone_needs_refresh(target: Path) -> bool:
-    if not target.exists():
-        return True
-    refresh_days = _profile_refresh_days()
-    if refresh_days <= 0:
-        return False
-    marker = target / ".stealth_chrome_devtools_mcp_clone.json"
-    if not marker.exists():
-        return False
-    cutoff = datetime.now() - timedelta(days=refresh_days)
-    return datetime.fromtimestamp(marker.stat().st_mtime) < cutoff
+def _require_copied(refusal: str | None, target: Path) -> None:
+    """A copy these callers cannot have refused (F-893 review m4): both copy
+    into a directory they have just found free, with no ``await`` in between.
+    One inserted ``await`` makes it reachable, and what it would hand back is an
+    empty directory the caller is told is their profile — so it raises."""
+    if refusal is not None:
+        raise ToolError(f"profile copy into {target} was refused: {refusal}")
 
 
 def _refresh_master_snapshot_if_safe(reason: str) -> dict[str, Any]:
@@ -758,9 +746,8 @@ def _refresh_master_snapshot_if_safe(reason: str) -> dict[str, Any]:
 
 def _refresh_snapshot_if_stale() -> None:
     """Freshen the snapshot before a copy when master has newer logins and is
-    not in use. Both copy paths in the resolver asked this the same two-line
-    way, which is a second way to do one thing — and the two would have had to
-    be widened together by F-892."""
+    not in use. Both copy paths asked this the same two-line way — a second way
+    to do one thing, and two places F-892 would have had to widen."""
     if _snapshot_needs_refresh():
         _refresh_master_snapshot_if_safe("pre-clone-stale")
 
@@ -893,16 +880,31 @@ def _copy_clone_from_source(
         "clone_source_path": str(source),
         "master_snapshot_path": str(master_snapshot_dir()),
     }
-    _copy_profile_tree(source, clone, clone_root, source_kind)
+    _require_copied(_copy_profile_tree(source, clone, clone_root, source_kind), clone)
     return selection
+
+
+def require_allowed_user_data_dir(user_data_dir: str | None) -> None:
+    """Raise if this ``user_data_dir`` names something a caller may not open.
+    PUBLIC because `spawn_browser` must ask it before `adopt_held_profile`,
+    which re-attaches to whatever live browser holds the named directory and
+    runs in front of selection (F-894 review M1). The rule is
+    `profile_seed.require_allowed`; this supplies which directories are ours."""
+    if user_data_dir:
+        profile_seed.require_allowed(
+            user_data_dir,
+            default_session_root(),
+            clone_root_dir(),
+            master_snapshot_dir(),
+            _is_relative_to,
+        )
 
 
 def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, Any]:
     """The selection as ``spawn_diagnostics.profile_selection`` reports it — the
     ONE site every role passes through, which is why F-895's seed provenance is
-    stamped here and not per branch. It is read from the marker on disk, so a
-    directory that already existed reports the seed it was actually made from.
-    """
+    stamped here. It is read from the marker on disk, so a directory that
+    already existed reports the seed it was actually made from."""
     public = dict(profile_selection)
     selected = public.get("user_data_dir")
     if isinstance(selected, str) and selected:
@@ -929,15 +931,11 @@ async def resolve_profile_selection(
         user_data_dir = None
 
     if user_data_dir:
+        # F-894: refused before anything is created, and in front of the walk.
+        require_allowed_user_data_dir(user_data_dir)
         explicit = profile_seed.anchor(
             user_data_dir, default_session_root(), clone_root, _is_relative_to
         )
-        # F-894: a request the resolver would silently turn into a DIFFERENT
-        # profile is refused before anything is created — in front of the walk,
-        # so a reserved name can never come back as `<name>-2` either.
-        refusal = profile_seed.reserved_reason(user_data_dir, explicit, snapshot)
-        if refusal is not None:
-            raise ToolError(f"user_data_dir rejected: {refusal}")
         # If the requested path (inside clone_root) is already held by a running
         # browser, find the next free numbered variant rather than crashing.
         # For a NAMED profile that walk is an identity change — a different set
@@ -959,7 +957,9 @@ async def resolve_profile_selection(
             source_kind = (
                 "explicit-master-snapshot" if source == snapshot else "explicit-master"
             )
-            _copy_profile_tree(source, explicit, clone_root, source_kind)
+            _require_copied(
+                _copy_profile_tree(source, explicit, clone_root, source_kind), explicit
+            )
         explicit.parent.mkdir(parents=True, exist_ok=True)
         return {
             "user_data_dir": str(explicit),

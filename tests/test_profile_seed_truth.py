@@ -15,13 +15,16 @@ Four findings, one subject: the master snapshot every session is copied from.
 import json
 import os
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 
-from fakes import held_profile
+from fakes import FakeBrowserManager, held_profile
 from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_seed
+from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.settings import get_settings
 
 MARKER = profile_seed.MARKER_NAME
 PACKAGE = Path(clone_storage.__file__).resolve().parent.parent
@@ -148,19 +151,38 @@ class TestLoginWitnesses:
         _settle(real_layout_root)
         assert clone_storage._snapshot_needs_refresh() is False
 
-    def test_witness_paths_have_exactly_one_home(self):
-        """One home: no module under the package may spell a witnessed path a
-        second time. A second copy is how the shipped list came to name a file
-        Chrome stopped writing four years ago and nobody noticed."""
-        for rel in profile_seed.LOGIN_WITNESSES:
-            spellings = [
-                path
-                for path in PACKAGE.rglob("*.py")
-                if rel in path.read_text(encoding="utf-8")
-            ]
-            assert spellings == [
-                profile_seed.__file__ and Path(profile_seed.__file__)
-            ], f"{rel!r} is spelled in {[p.name for p in spellings]}"
+    @pytest.mark.parametrize(
+        "literal",
+        [*profile_seed.LOGIN_WITNESSES, profile_seed.MARKER_NAME],
+    )
+    def test_seed_literals_have_exactly_one_home(self, literal):
+        """One home: no module under the package may spell a witnessed path —
+        or the marker's own filename — a second time, docstrings included.
+
+        A second copy is how the shipped witness list came to name a file
+        Chrome stopped writing four years ago and nobody noticed. The marker
+        name joined this pin in the review round: it was spelled twice at
+        6e3424e, in `profile_seed` and in `clone_storage._clone_needs_refresh`,
+        which broke the one-home claim inside the commit that made it.
+        """
+        spellings = sorted(
+            path.resolve()
+            for path in PACKAGE.rglob("*.py")
+            if literal in path.read_text(encoding="utf-8")
+        )
+        assert spellings == [Path(profile_seed.__file__).resolve()], (
+            f"{literal!r} is spelled in {[p.name for p in spellings]}"
+        )
+
+    def test_the_dead_refresh_window_is_gone(self):
+        """`_clone_needs_refresh` and `_profile_refresh_days` had no callers and
+        carried the second spelling of the marker name (review M2). The knob
+        they read, `BROWSER_PROFILE_REFRESH_DAYS`, KEEPS its Settings field: it
+        is in `.env.example` and both shipped example configs, and a `.env`
+        naming a field the model no longer has is an `extra="forbid"` crash."""
+        assert not hasattr(clone_storage, "_clone_needs_refresh")
+        assert not hasattr(clone_storage, "_profile_refresh_days")
+        assert hasattr(get_settings(), "browser_profile_refresh_days")
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +215,55 @@ class TestRefusedRefreshIsNotSuccess:
         result = clone_storage._refresh_master_snapshot_if_safe("test")
         assert result["snapshot_refreshed"] is True
         assert "snapshot_error" not in result
+
+    def test_the_guard_raises_rather_than_handing_back_an_empty_profile(self, tmp_path):
+        """`_require_copied` is unreachable from its two callers TODAY — both
+        copy into a directory they have just found free, with no `await` between
+        the check and the copy (review m4). It is pinned directly because it is
+        one inserted `await` away from being reachable, and what it would hand
+        back is an empty directory the caller is told is their profile."""
+        assert clone_storage._require_copied(None, tmp_path) is None
+        with pytest.raises(ToolError, match="refused"):
+            clone_storage._require_copied(clone_storage.TARGET_IN_USE, tmp_path)
+
+    def test_every_copy_site_either_reports_or_guards(self):
+        """No third site may discard the answer. Exactly one call to
+        `_copy_profile_tree` is allowed to be unguarded — the refresh, which
+        READS the refusal into its result — and every other must be wrapped in
+        `_require_copied`."""
+        import ast
+
+        tree = ast.parse(Path(clone_storage.__file__).read_text(encoding="utf-8"))
+
+        def calls_to(node, name):
+            return [
+                sub
+                for sub in ast.walk(node)
+                if isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Name)
+                and sub.func.id == name
+            ]
+
+        copies = calls_to(tree, "_copy_profile_tree")
+        guarded = [
+            inner
+            for guard in calls_to(tree, "_require_copied")
+            for inner in calls_to(guard, "_copy_profile_tree")
+        ]
+        unguarded = [c for c in copies if c not in guarded]
+        assert len(copies) == 3, [c.lineno for c in copies]
+        assert [c.lineno for c in unguarded] == [
+            c.lineno
+            for c in calls_to(
+                next(
+                    n
+                    for n in tree.body
+                    if isinstance(n, ast.FunctionDef)
+                    and n.name == "_refresh_master_snapshot_if_safe"
+                ),
+                "_copy_profile_tree",
+            )
+        ]
 
     def test_copy_tree_returns_the_refusal(self, real_layout_root):
         """The report is the copier's answer, not a second liveness read at the
@@ -261,11 +332,132 @@ class TestReservedProfileNames:
             await clone_storage.resolve_profile_selection(mangled)
         assert list(real_layout_root["sessions"].iterdir()) == []
 
+    def test_the_drive_refusal_does_not_depend_on_the_host_flavour(
+        self, monkeypatch, tmp_path
+    ):
+        """CI RED at 6e3424e, all six Linux/macOS cells, Windows green.
+
+        MEASURED: ``PureWindowsPath("C:foo").drive`` is ``"C:"`` and
+        ``PurePosixPath("C:foo").drive`` is ``""``, so a rule that reads the
+        HOST's flavour refuses the mangled path on Windows and lets the identical
+        string through on every other platform. The production fix reads the
+        drive under the flavour that HAS drives and "would this be anchored"
+        under the flavour the resolver actually anchors with — so the refusal is
+        the same answer on both, which is what this pin holds.
+
+        Patching ``profile_seed.Path`` to ``PurePosixPath`` is what a POSIX host
+        IS for this function: the only thing it builds from the caller's string
+        is ``Path(requested)``. ``reserved_reason`` is called directly because
+        ``anchor`` needs a CONCRETE path (``expanduser``), and it is the anchored
+        directory, not the flavour, that ``resolved`` carries.
+        """
+        monkeypatch.setattr(profile_seed, "Path", PurePosixPath)
+        snapshot = tmp_path / "master-snapshot"
+        mangled = "C:stealth-mcp-browser-sessionssessionsproject-f876e3d7f2ec"
+        reason = profile_seed.reserved_reason(mangled, tmp_path / mangled, snapshot)
+        assert reason is not None and "absolute" in reason
+        # And it must not over-refuse on that same host: an ordinary session
+        # name and a POSIX absolute path name no drive under either flavour.
+        assert profile_seed.reserved_reason("acme", tmp_path / "acme", snapshot) is None
+        assert profile_seed.reserved_reason("/srv/p", tmp_path / "p", snapshot) is None
+
+    @pytest.mark.asyncio
+    async def test_a_held_snapshot_is_refused_before_any_re_attach(
+        self, real_layout_root, call_tool, patched_server, monkeypatch
+    ):
+        """The refusal must be asked at the SPAWN, not only in the resolver.
+
+        F-888's `adopt_held_profile` runs in front of profile selection and
+        matches the requested directory against live browsers, so at 6e3424e a
+        snapshot path WITH A BROWSER ON IT was re-attached to and the resolver
+        never saw it — which is precisely the machine state F-893 measured. The
+        resolver-only pin passed because its fixture had no browser there.
+
+        Both halves matter: the raise, and that no adoption was ATTEMPTED.
+        Without the second, this can pass again for the same wrong reason.
+        """
+        held_profile(real_layout_root["snapshot"])
+        attempts = []
+
+        async def never_reached(*args, **kwargs):
+            attempts.append(kwargs.get("user_data_dir") or args)
+            raise AssertionError("adopt_held_profile must not be reached")
+
+        monkeypatch.setattr(
+            clone_storage.profile_lock,
+            "profile_hold",
+            lambda *a, **k: SimpleNamespace(pid=4321, reason="held-by-test"),
+        )
+        srv = patched_server(browser_manager=FakeBrowserManager())
+        monkeypatch.setattr(
+            rt.browser_reattach, "adopt_held_profile", never_reached, raising=False
+        )
+
+        with pytest.raises(ToolError, match="seed"):
+            await call_tool(
+                srv,
+                "spawn_browser",
+                user_data_dir=str(real_layout_root["snapshot"]),
+                sandbox=False,
+            )
+        assert attempts == []
+
     @pytest.mark.asyncio
     async def test_an_ordinary_name_is_unaffected(self, real_layout_root):
         result = await clone_storage.resolve_profile_selection("acme")
         assert result["profile_role"] == "explicit"
         assert Path(result["user_data_dir"]).name == "acme"
+
+    @pytest.mark.asyncio
+    async def test_an_existing_reserved_dir_is_told_how_to_reach_it(
+        self, real_layout_root
+    ):
+        """MEASURED: `sessions/master` exists on this machine, 0.46 GB. "pick
+        another name" is advice for a NEW session and useless to an operator who
+        already has that directory, so the message names the escape (review M3).
+        """
+        existing = real_layout_root["sessions"] / "master"
+        existing.mkdir()
+        with pytest.raises(ToolError) as excinfo:
+            await clone_storage.resolve_profile_selection("master")
+        message = str(excinfo.value)
+        assert "absolute path" in message
+        assert str(existing) in message
+
+    def test_the_profiles_verb_still_lists_a_refused_name(
+        self, real_layout_root, capsys
+    ):
+        """Refusing the NAME must not hide the DIRECTORY (review M3).
+
+        The refusal message, CHANGELOG and RUNBOOK all tell an operator their
+        existing ``sessions/master`` is untouched and still listed — so the
+        listing is a CLAIM the docs make and is pinned as one. It is the only
+        way to see the size before choosing between renaming it and opening it
+        by absolute path. MEASURED: that directory exists on this machine at
+        0.46 GB, marker ``explicit-master-snapshot``.
+        """
+        from stealth_chrome_devtools_mcp import cli
+
+        existing = real_chrome_profile(real_layout_root["sessions"] / "master")
+        rows = cli._collect_profiles(clone_storage)
+        assert [row["path"] for row in rows].count(existing) == 1
+
+        assert cli.main(["profiles"]) == 0
+        out = capsys.readouterr().out
+        # Two rows are named `master`: the master profile itself and the
+        # session directory the reserved name refuses to create a second time.
+        named_master = [
+            line for line in out.splitlines() if line.strip().startswith("master ")
+        ]
+        assert len(named_master) == 2, out
+
+    @pytest.mark.asyncio
+    async def test_a_reserved_name_with_no_directory_says_nothing_about_one(
+        self, real_layout_root
+    ):
+        with pytest.raises(ToolError) as excinfo:
+            await clone_storage.resolve_profile_selection("default")
+        assert "still openable" not in str(excinfo.value)
 
     @pytest.mark.asyncio
     async def test_a_reserved_name_never_walks_to_master_2(self, real_layout_root):

@@ -54,12 +54,32 @@ later session copies from, which is how F-893's precondition arose. The master
 by absolute path is deliberately still allowed and now selects the master ROLE,
 which is what makes `close_instance` refresh the snapshot afterwards.
 
+The refusal is asked at the SPAWN, before F-888's re-attach, not only inside the
+resolver. `browser_reattach.adopt_held_profile` runs in front of profile
+selection and matches the requested directory against live browsers, so an
+absolute snapshot path **with a browser on it** — the exact state F-893 is about
+— was re-attached to and the resolver never saw the request. One rule, two sites
+that ask it; it is a pure path decision, so asking twice is free.
+
+**If you already have a session directory named `master`, `master-snapshot` or
+`default`** (one exists on the machine this was measured on, 0.46 GB), nothing is
+deleted or hidden: it is still listed by `profiles` and still openable by its
+**absolute path**, or rename it to a name that is not reserved. The refusal
+message says so when such a directory exists. RUNBOOK's "Disk filling up" carries
+the one-time job.
+
 A drive-qualified path that is not absolute (`C:foo`, what a Windows absolute
 path becomes once a lenient string layer has eaten its backslashes) is refused
 as well. That is not a hypothetical: it reproduces, exactly,
 `sessions/stealth-mcp-browser-sessionssessionsstealth-chrome-devtools-mcp-f876e3d7f2ec`
 (0.35 GB) — `Path.is_absolute()` is False for a drive-relative path, so the
-resolver anchored a fully qualified path as a bare session name.
+resolver anchored a fully qualified path as a bare session name. **On every
+platform**: a drive is a Windows concept (`PurePosixPath("C:foo").drive` is
+`""`, measured), so the first cut of this rule read the host's flavour and let
+the identical string through on Linux and macOS. The drive is now read through
+`PureWindowsPath` while "would this be anchored rather than opened" stays on the
+native flavour the resolver anchors with — one rule, same answer everywhere, and
+`anchor` keeps its one home.
 
 ### Added — F-895: sessions now say which seed they came from, and whether it has moved on
 
@@ -73,6 +93,20 @@ deliberately not substituted for `seeded_at`: when a directory was made is not a
 claim about which seed it was made from, and the whole point is that a profile
 frozen since August must not read as up to date. Sizes, mtimes, roles and a seed
 name only — no profile content is read, printed or logged.
+
+### Removed — a documented refresh window that never ran
+
+`clone_storage._clone_needs_refresh` and `_profile_refresh_days` had no callers
+anywhere in the tree, and the first carried a second spelling of the clone
+marker's filename — breaking the one-home claim inside the commit that made it.
+Both are deleted and the marker name joins the grep pin. The
+`BROWSER_PROFILE_REFRESH_DAYS` **setting keeps its field**, because `Settings` is
+`extra="forbid"` and a `.env` naming a field the model no longer has crashes at
+startup — but nothing presents it as live any more: README calls it inert instead
+of claiming it refreshes copies after N days, `.env.example` comments it out with
+the reason, the two shipped example configs no longer set it, and the field
+itself carries the reason. If you have `BROWSER_PROFILE_REFRESH_DAYS` in your own
+`.env` or client config it still loads and still does nothing; you can drop it.
 
 ### Changed — the seed's own subject has one home
 

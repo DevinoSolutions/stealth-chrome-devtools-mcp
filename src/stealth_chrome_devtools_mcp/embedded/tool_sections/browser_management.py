@@ -164,6 +164,17 @@ async def spawn_browser(
             "launch it there instead (F-810). Start the backend from a desktop session "
             "or pass headless=True; `stealth-chrome-devtools doctor` lists the contexts."
         )
+    # BEFORE the re-attach below and outside the try, for two reasons (F-894
+    # review M1 + m9). `adopt_held_profile` matches the requested directory
+    # against live browsers, so an absolute snapshot path with a browser on it
+    # — the exact state F-893 is about — was ADOPTED and the resolver, which is
+    # where the reservation used to be asked, never saw the request. And a
+    # caller-input refusal raised in here would be re-wrapped by the handler as
+    # "Failed to spawn browser: …", which is the wrong label for a request we
+    # declined to act on at all. The rule has one home; this is the second site
+    # that asks it.
+    rt.clone_storage.require_allowed_user_data_dir(user_data_dir)
+
     # Outside the try because the handler READS it: a spawn that fails onto a
     # held directory owes the caller the reason the re-attach was not taken.
     held = rt.browser_reattach.Held()

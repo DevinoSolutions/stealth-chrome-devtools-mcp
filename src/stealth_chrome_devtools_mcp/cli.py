@@ -129,13 +129,22 @@ def _collect_profiles(cs) -> list[dict]:
 
 
 def _seed_line(row: dict[str, object]) -> str:
-    """One profile's seed provenance as a line (F-895).
+    """One profile's seed provenance as a line (F-895), or "" for a row where
+    the question does not arise.
 
     "seed changed since" is printed only when it is True: False is the ordinary
     case and would be noise, and None means the marker could not say — which is
     reported as an unknown seed rather than as a fresh one, because a profile
     frozen since August reading "up to date" is the silence this finding closes.
+
+    The master and the snapshot ARE the seed, so asking what seeded them is a
+    category error; they carry no marker and reported "seeded from unknown"
+    about themselves, on exactly the two rows an operator reads first (review
+    m6). An unmarked SESSION directory still says unknown — there the answer is
+    genuinely not known, which is the thing worth printing.
     """
+    if row.get("role") in {"master", "snapshot"}:
+        return ""
     seeded_from = row.get("seeded_from") or "unknown"
     seeded_at = row.get("seeded_at")
     if not seeded_at:
@@ -449,7 +458,9 @@ def _cmd_profiles(_args) -> int:
             f"  {row['name'][:44]:44s} {row['role']:11s} "
             f"{_human(row['size']):>10s}  in_use={row['in_use']}"
         )
-        print(f"  {'':44s} {_seed_line(row)}")
+        seed = _seed_line(row)
+        if seed:
+            print(f"  {'':44s} {seed}")
     print(f"  {'total':44s} {'':11s} {_human(sum(r['size'] for r in rows)):>10s}")
     return 0
 

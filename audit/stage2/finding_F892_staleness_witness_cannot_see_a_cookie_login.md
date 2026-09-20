@@ -73,6 +73,19 @@ class RED again.
 
 ## 6. Residuals
 
+* **Two reference times, one question, and it is DELIBERATE** (review m5,
+  declined). `_snapshot_needs_refresh` compares the witnesses against the
+  snapshot marker's **file mtime**; `profile_seed.changed_since` compares them
+  against the **`seeded_at` stamp inside** a marker. Routing the first through
+  the second was proposed and is wrong twice over. (1) A snapshot marker
+  written before this release has no `seeded_at`, so `changed_since` answers
+  `None` — never stale — which would silently disable the very trigger this
+  finding repairs, on every machine that has one. (2) They are not the same
+  question: a SNAPSHOT's marker is rewritten on every refresh, so its file
+  mtime *is* "when the seed was last taken"; a CLONE's marker is written once
+  and never again, so its mtime is meaningless and the stamp is the only
+  record. Two kinds of directory, two correct references. The LIST of witnesses
+  is shared, which is the part that had actually drifted.
 * **Nothing back-fills the 27 named profiles already on disk.** They were
   seeded when they were created and stay frozen; F-895 makes that visible,
   nothing here changes it.
@@ -85,18 +98,26 @@ class RED again.
   state) or, until F-893 in this same PR, silently. F-892 makes the ASK
   correct; whether the refresh then runs is F-893's and §1.6 of
   `design_session_ux.md`'s.
-* **A SECOND documented refresh window is unreachable, and this PR does not
-  touch it.** `_clone_needs_refresh` (`clone_storage.py:724`) and
-  `_profile_refresh_days` have **no callers anywhere in `src/` or `tests/`**
-  (grepped), yet `README.md:333` advertises `BROWSER_PROFILE_REFRESH_DAYS`
-  (default 7) as "Refresh copies after N days". Nothing refreshes a copy after
-  N days; the knob is inert. It was left alone deliberately — deleting the dead
-  reader would make the README claim more obviously false without deciding
-  whether the feature should exist, and that decision (wire it up, or remove
-  the knob and its four documentation sites) is a change of its own. Named
-  here because `_clone_needs_refresh` also spells the marker filename a second
-  time, which is the same one-home defect this finding is about. `vulture` does
-  not flag it — the known name-matching blind spot.
+* **A SECOND documented refresh window never ran, and its dead reader is now
+  deleted** (review M2). `_clone_needs_refresh` and `_profile_refresh_days` had
+  **no callers anywhere in `src/` or `tests/`**, and the first spelled the clone
+  marker's filename a second time — breaking this finding's own one-home claim
+  inside the commit that made it. Both are gone and `MARKER_NAME` joins the grep
+  pin. **The `BROWSER_PROFILE_REFRESH_DAYS` Settings field STAYS**: `Settings` is
+  `extra="forbid"`, so removing the field would turn an existing `.env` that
+  names it into a startup crash for a cosmetic tidy. What is corrected is every
+  place that presented it as live, so no reader can be told a knob does
+  something it does not: `README.md` said "Refresh copies after N days" and now
+  says it is inert; `.env.example` is COMMENTED OUT with the reason beside it
+  (the name stays in the file, which is what
+  `test_settings.py::test_env_example_documents_every_field` asks for); the two
+  shipped example configs no longer SET it, because an example that sets an
+  inert knob teaches it by demonstration; and the field itself carries the
+  reason at the one env home. **Whether the feature should exist at all is still
+  open**: wiring it up, or dropping the field behind a deprecation, is a change
+  of its own and is not this PR's. `vulture` never flagged the pair (the known
+  name-matching blind spot), which is why it survived to be found by review
+  rather than by a gate.
 * **`Service Worker` is still excluded from the copy**, so a PWA-style login
   whose token lives in a service-worker cache does not survive a clone at all,
   however fresh the seed is. Out of scope here; named because "the seed is

@@ -65,7 +65,22 @@ Sizes, mtimes, roles, a seed NAME and an ISO timestamp. No cookie name, no
 cookie value, no profile content is read, printed or logged by anything added
 here — `newest_login_write` calls `stat()` and never `open()`.
 
-## 6. Residuals
+## 6. What the CLI does NOT print (review m6)
+
+The master and the snapshot ARE the seed, so asking what seeded them is a
+category error — they carry no marker and reported `seeded from unknown` about
+themselves, on exactly the two rows an operator reads first. `_seed_line`
+returns `""` for those two roles and the verb skips the line. An **unmarked
+session** directory still says unknown: there the answer is genuinely not
+known, which is the thing worth printing.
+
+`seeded_from` ships `"master-snapshot"` today, which is the word the session
+vocabulary (F-896) will rename to `default` — `seed_name`'s docstring says so
+rather than calling it "the word a user can say", which overstated phase 1
+(review m7). The field existing is part of what gives that rename one place to
+land.
+
+## 7. Residuals
 
 * **It reports; it does not propagate.** A login in one session still does not
   reach another. That is deliberate (`design_session_ux.md` §3.D: default
