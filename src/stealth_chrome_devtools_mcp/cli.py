@@ -92,7 +92,13 @@ def _role(cs, path: Path) -> str:
 
 
 def _collect_profiles(cs) -> list[dict]:
-    """Every profile under the session root with size, role, and in-use flag."""
+    """Every profile under the session root with size, role, in-use flag and
+    seed provenance (F-895). The provenance is ``profile_seed.provenance``'s —
+    the same three fields ``spawn_diagnostics.profile_selection`` reports, read
+    from the same marker, so the CLI and a spawn can never disagree about where
+    a session came from."""
+    from stealth_chrome_devtools_mcp.embedded import profile_seed
+
     rows: list[dict] = []
 
     def _row(path: Path, role: str) -> dict:
@@ -102,6 +108,7 @@ def _collect_profiles(cs) -> list[dict]:
             "role": role,
             "size": cs._dir_size_bytes(path),
             "in_use": cs._profile_has_running_browser(path),
+            **profile_seed.provenance(path),
         }
 
     master = cs.master_profile_dir()
@@ -119,6 +126,22 @@ def _collect_profiles(cs) -> list[dict]:
             if child.is_dir()
         )
     return rows
+
+
+def _seed_line(row: dict[str, object]) -> str:
+    """One profile's seed provenance as a line (F-895).
+
+    "seed changed since" is printed only when it is True: False is the ordinary
+    case and would be noise, and None means the marker could not say — which is
+    reported as an unknown seed rather than as a fresh one, because a profile
+    frozen since August reading "up to date" is the silence this finding closes.
+    """
+    seeded_from = row.get("seeded_from") or "unknown"
+    seeded_at = row.get("seeded_at")
+    if not seeded_at:
+        return f"seeded from {seeded_from} (when: unknown)"
+    line = f"seeded from {seeded_from} at {seeded_at}"
+    return line + ("  SEED CHANGED SINCE" if row.get("seed_changed_since") else "")
 
 
 def _gb_to_bytes(gb: float | None, fallback: int) -> int:
@@ -426,6 +449,7 @@ def _cmd_profiles(_args) -> int:
             f"  {row['name'][:44]:44s} {row['role']:11s} "
             f"{_human(row['size']):>10s}  in_use={row['in_use']}"
         )
+        print(f"  {'':44s} {_seed_line(row)}")
     print(f"  {'total':44s} {'':11s} {_human(sum(r['size'] for r in rows)):>10s}")
     return 0
 

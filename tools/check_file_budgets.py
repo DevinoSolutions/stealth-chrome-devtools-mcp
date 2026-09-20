@@ -36,8 +36,17 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # the two-line adapter plus the walk diagnostics a named profile's caller
     # needs (requested_user_data_dir / walked_to / walk_reason). The import of
     # psutil went with the moved body, which is the rest of the payment.
+    # F-892/F-894/F-895 RATCHET DOWN 1055 -> 1054, and the ratchet is what paid
+    # for the four fixes rather than a raise. What left is the SEED's own
+    # subject, to the new profile_seed.py leaf: the clone marker (its name, its
+    # schema, the read, the write and the two auto/named verdicts), the files
+    # whose mtime witnesses a login, and where a user_data_dir request lands
+    # plus which directories a caller may not name. What stays is one wrapper
+    # per name the suite and the CLI call (clone_is_auto / clone_is_named /
+    # _snapshot_needs_refresh), the refusal report _copy_profile_tree now
+    # returns, and the two lines of the resolver that ASK the leaf.
     # Cap == actual.
-    "embedded/clone_storage.py": (1055, "plan_M4ph1 + F-871"),
+    "embedded/clone_storage.py": (1054, "plan_M4ph1 + F-871 + F-892"),
     # 1447 (DEBT(F-702)) + 2 (plan_M10a step 7a: switch_to_tab/close_tab's two
     # truly-silent `except Exception: return False` handlers now each add one
     # debug_logger.log_warning(...) line closing F-181 rows 1-2; same minimal-
