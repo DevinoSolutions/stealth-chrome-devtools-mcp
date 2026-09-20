@@ -239,9 +239,19 @@ the six verbs and therefore outside everything the first round had pinned.
   exit 3 — about a round trip that had succeeded, the exact false statement
   review M2 fixed for the POSIX spelling. Every hermetic double had passed. The
   judgement is `_reader_gone` now: `BrokenPipeError` by type, or an `OSError`
-  whose errno is EPIPE or EINVAL, asked in front of the table because it is the
-  one judgement that reads an attribute; the hermetic pin runs under both
-  spellings. Round-4 M1, from the same review:
+  whose errno is EPIPE — or EINVAL on Windows only, §6.14 — asked in front of
+  the table because it is the one judgement that reads an attribute; the
+  hermetic pin runs under both spellings on every cell through the patchable
+  `_WINDOWS` name. **Round 5 (delta review of `b09f3e7`, M1) measured that the
+  flush in `main` was still only half of it for the ops verbs**: `_delivered`
+  guarded the FLUSH and not the HANDLER, and an ops verb has no handler of its
+  own, so output that crosses the 8 KB buffer raised from inside the verb and
+  left `main` as a traceback and exit **1** — inside the set, "the tool said
+  no" — measured with CPython's own `TextIOWrapper`/`BufferedWriter` stack (100
+  B → 141, 60 000 B → escaped, both spellings). `main` now guards the dispatch
+  as well, keyed on the same `_reader_gone` so a verb's genuine `OSError` still
+  propagates; pinned over-buffer under both spellings and negatively for a
+  `PermissionError`. Round-4 M1, from the same review:
   the fd-leak nit had left `_abandon_stdout`'s `os.open(os.devnull)` between two
   guarded calls, unguarded, so EMFILE escaped `main` from inside a handler —
   every call in that body is now tolerated, and the stack print under
@@ -365,10 +375,12 @@ section's allowed names, and a second launcher-resolution node),
    a lie; a broken pipe mapped to 3 was the lie review M2 found shipped. Each
    got its own conventional code rather than a collision. Named here because it
    is a deviation from what was asked for, not because it is in doubt.
-6. **`_abandon_stdout`'s `dup2` is not executed by any test.** The broken-pipe
-   node asserts it is CALLED (it is monkeypatched), because letting the real one
-   run would point the pytest process's own fd 1 at the null device. What is
-   pinned is the decision; what is not is the three-line stdlib call under it.
+6. **The three calls after `_abandon_stdout`'s `os.open` are not executed by
+   any test.** The broken-pipe nodes assert it is CALLED (it is monkeypatched),
+   because letting the real one run would point the pytest process's own fd 1
+   at the null device; the two EMFILE nodes run the real body but return at the
+   failed `os.open`, before `dup2`, its `except` and the `os.close` suppress.
+   What is pinned is the decision; what is not is the stdlib call under it.
 7. **The cancellation node drives `opened()` and not `call_tool`.** So "a tool
    call cancelled mid-flight still DELETEs" is pinned one layer below the shape
    an operator's `Ctrl-C` actually takes. Making it faithful needs a transport
@@ -388,9 +400,10 @@ section's allowed names, and a second launcher-resolution node),
    neither (F-874's three record shapes). `get_instance_state` has them, per
    instance, one `stealthy call` away. Widening `list_instances` is a tool-surface
    change and was deliberately not made here.
-11. **`cli.py` is at 890 raw lines against a 1000-LOC budget that ratchets down
-   only** — **110 lines of headroom**, and the cut that bought them has been
-   made rather than merely named.
+11. **`cli.py` is at 937 raw lines against a 1000-LOC budget that ratchets down
+   only** — **63 lines of headroom** (890 after the extraction; rounds 4–5's
+   `_delivered` and the dispatch guard cost 47), and the cut that bought them
+   has been made rather than merely named. `cli_call.py` sits at 999.
 
    It came due at the merge of main's F-892..895, whose `profiles` seed lines
    put the file at **1016** and made pre-commit refuse the merge commit. The
@@ -453,22 +466,40 @@ section's allowed names, and a second launcher-resolution node),
    profile-selection question owned by that study. Changing either silently
    would move what every existing `user_data_dir=` caller gets.
 13. **The PyPI name is unclaimed, not reserved.** See §4.
-14. **A transport-side broken pipe is reported as a broken pipe** (delta review
-   S3). The `BrokenPipeError` row is keyed on the TYPE, not on the site, and the
-   docstring's "it comes from OUR OWN `print`" is the overwhelmingly common case
-   rather than a guarantee: `httpx` writing to a backend socket the peer closed
-   raises the same class out of the transport, so the operator gets an empty
-   stderr and 141 where the truthful answer is 3, "could not reach the backend".
-   Kept rather than fixed, deliberately: narrowing the row to the site means a
-   flag set around every emit and consulted here, which is a second way to know
-   where an exception came from, in the one function whose whole job is to not
-   need one. The residual is low-frequency (the backend is loopback and it is
-   the READ that usually fails, giving `TimeoutError`) and is now stated in
-   `_verdict`'s own docstring rather than left as a premise reading like a
-   proof.
+14. **The reader-gone judgement is keyed on the ERROR, not on the site** (delta
+   review S3, round 4). It is `_reader_gone`: `BrokenPipeError` by type, or an
+   `OSError` whose errno is EPIPE — or EINVAL on Windows only — asked in front
+   of `_verdict`'s table (and, since round 5, around `cli.main`'s dispatch for
+   the ops verbs). The docstring's "it comes from OUR OWN `print`" is the
+   overwhelmingly common case rather than a guarantee, and it now costs two
+   things. (a) `httpx` writing to a backend socket the peer closed raises
+   `BrokenPipeError` out of the transport, so the operator gets an empty stderr
+   and 141 where the truthful answer is 3; low-frequency (loopback, and it is
+   the READ that usually fails, giving `TimeoutError`). (b) On Windows an
+   `OSError(22)` from the cold start inside the same `try` (`ensure_server_running`
+   spawns, locks and writes the record; `ERROR_INVALID_PARAMETER` maps to
+   errno 22) also reads as 141 with an empty stderr where `81086bd` answered 3
+   with a named message. The arm is scoped to `win32` so six of nine CI cells
+   carry no widening; the transport itself is NOT an exposure — anyio converts
+   every socket `OSError` to `Broken/ClosedResourceError`, httpcore has none,
+   httpx maps to `httpx.*`. Kept rather than fixed, deliberately: narrowing to
+   the site means a flag set around every emit and consulted here, a second way
+   to know where an exception came from, in the one function whose whole job is
+   to not need one.
 15. **`stealthy` bare is pinned in two suites.** The same two assertions live in
    `tests/test_cli.py` and in `TestExitCodesAreClosed`. Left as a pair on
    purpose — they are two suites' contracts, and the class that owns the closed
    set should be able to see the one path through `main` that reaches no verb —
    but it is the one duplicate the dedupe pass kept, so it is named here rather
    than rediscovered.
+16. **Two doors out of the set that stay open, named.** (a) `cli._delivered`'s
+   flush catches a blanket `OSError`, so a full disk (`stealthy ls --json >
+   out` on a full volume, ENOSPC) answers 141 "the reader went away" with an
+   empty stderr; same family as §6.14, one line of a script's `set -o pipefail`
+   away from a misdiagnosis, and the cost of not keying that flush on errno
+   before the finalisation shape is measured on more than one platform. (b)
+   `stealthy --help | head -1` is still 120: argparse prints help and raises
+   `SystemExit(0)` from inside `parse_args`, so `main` never returns and no
+   flush runs; 1722 B of help dies at finalisation. No document claims a code
+   for it, and catching `SystemExit` in `main` would also catch argparse's exit
+   2, which two suites pin as the raise it is.

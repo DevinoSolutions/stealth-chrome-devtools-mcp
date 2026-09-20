@@ -883,7 +883,20 @@ def main(argv=None) -> int:
     handler = _DISPATCH.get(args.command)
     if handler is None:
         handler = _cli_call().DISPATCH[args.command]
-    return _delivered(handler(args))
+    try:
+        return _delivered(handler(args))
+    except OSError as exc:
+        # The DISPATCH is guarded and not only the flush (round-5 M1): an ops
+        # verb has no handler of its own, so a `print` that crosses the 8 KB
+        # buffer raises mid-body — `stealthy profiles | head -1` with many
+        # sessions — and left `main` as a traceback and exit 1, which the set
+        # defines as "the tool said no". Only the reader-gone shape converts;
+        # any other OSError is the verb's own failure and keeps propagating.
+        calls = _cli_call()
+        if not calls._reader_gone(exc):
+            raise
+        calls._abandon_stdout()
+        return calls.EXIT_BROKEN_PIPE
 
 
 def _delivered(code: int) -> int:
@@ -907,7 +920,9 @@ def _delivered(code: int) -> int:
     not a pipe error at all — and ``_verdict`` would route that shape to the
     transport row and answer 3, "could not reach the backend", about a round
     trip that succeeded. The cost is that any other ``OSError`` from this
-    flush (a full disk, ENOSPC) also reads as 141; the finding's §6 owns it.
+    flush (a full disk, ENOSPC) also reads as 141 — finding §6.16. It is the
+    INNER half of one region: ``main`` guards the dispatch around it, for the
+    output that crosses the buffer before the verb returns.
     """
     try:
         sys.stdout.flush()

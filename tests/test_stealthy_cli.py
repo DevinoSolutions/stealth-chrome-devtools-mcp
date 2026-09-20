@@ -691,6 +691,8 @@ class TestExitCodesAreClosed:
         `ConnectionResetError` case, so neither claim is pinned twice."""
         abandoned = []
         monkeypatch.setattr(cli_call, "_abandon_stdout", lambda: abandoned.append(1))
+        # The EINVAL arm is Windows-only (round-5 S1); pinned on every cell.
+        monkeypatch.setattr(cli_call, "_WINDOWS", True)
         monkeypatch.setattr(sys, "stdout", _ClosedReader(error))
         recorder.answers["list_instances"] = []
 
@@ -824,6 +826,78 @@ class TestExitCodesAreClosed:
         assert cli.main(["profiles"]) == cli_call.EXIT_BROKEN_PIPE == 141
         assert capsys.readouterr().err == ""
         assert abandoned == [1]
+
+    def test_einval_off_windows_is_not_a_reader_gone(
+        self, responsive, recorder, monkeypatch, capsys
+    ):
+        """Round-5 S1. EINVAL is a far broader errno than EPIPE, and the
+        closed-pipe meaning was measured on Windows only — so off Windows an
+        `OSError(22)` keeps the named transport answer instead of becoming a
+        silent 141 (a cold start's own EINVAL is the realistic source)."""
+        monkeypatch.setattr(cli_call, "_WINDOWS", False)
+        monkeypatch.setattr(sys, "stdout", _ClosedReader(OSError(22, "EINVAL")))
+        recorder.answers["list_instances"] = []
+        assert cli.main(["ls", "--json"]) == cli_call.EXIT_NO_BACKEND
+        assert "Errno 22" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "error",
+        [BrokenPipeError(32, "Broken pipe"), OSError(22, "Invalid argument")],
+        ids=["POSIX EPIPE", "Windows EINVAL"],
+    )
+    def test_an_ops_verb_whose_output_crosses_the_buffer_is_141_not_an_escape(
+        self, monkeypatch, error
+    ):
+        """Round-5 M1. `_delivered` guarded the FLUSH and not the HANDLER, and
+        an ops verb has no handler of its own: output that crosses the 8 KB
+        buffer raises from INSIDE the verb, so `stealthy profiles | head -1` on
+        a machine with many sessions left `main` as a traceback and exit 1 —
+        inside the set, meaning "the tool said no" — plus a Sentry ship.
+
+        The stack is CPython's own (`TextIOWrapper` over `BufferedWriter` over
+        a raw stream whose write raises), so the boundary is the interpreter's
+        and not a double's: the under-buffer node above could not see this.
+        """
+
+        class _DeadPipe(io.RawIOBase):
+            dead = True
+
+            def writable(self) -> bool:
+                return True
+
+            def write(self, data) -> int:
+                if self.dead:
+                    raise error
+                return len(data)
+
+        raw = _DeadPipe()
+        abandoned = []
+        monkeypatch.setattr(cli_call, "_abandon_stdout", lambda: abandoned.append(1))
+        monkeypatch.setattr(cli_call, "_WINDOWS", True)
+        monkeypatch.setitem(
+            cli._DISPATCH, "profiles", lambda _args: print("x" * 60_000) or 0
+        )
+        monkeypatch.setattr(
+            sys, "stdout", io.TextIOWrapper(io.BufferedWriter(raw), encoding="utf-8")
+        )
+        try:
+            # No `pytest.raises`: a propagating OSError fails here.
+            assert cli.main(["profiles"]) == cli_call.EXIT_BROKEN_PIPE
+        finally:
+            raw.dead = False  # so the wrapper's own close-time flush is quiet
+        assert abandoned == [1]
+
+    def test_an_ops_verbs_own_oserror_is_not_mistaken_for_a_pipe(self, monkeypatch):
+        """The other half of the same guard: only the reader-gone shape
+        converts. A verb that genuinely failed (a directory it could not
+        delete) must not come back as a silent 141."""
+
+        def refuses(_args):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setitem(cli._DISPATCH, "profiles", refuses)
+        with pytest.raises(PermissionError):
+            cli.main(["profiles"])
 
     def test_a_cancellation_is_interrupted_and_not_an_escape(
         self, responsive, monkeypatch, capsys

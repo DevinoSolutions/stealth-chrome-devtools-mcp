@@ -420,17 +420,22 @@ def _verdict(exc: BaseException) -> tuple[int, str]:
     )
 
 
+#: A name and not an inline test so the suite can pin BOTH arms on every cell.
+_WINDOWS = sys.platform == "win32"
+
+
 def _reader_gone(exc: BaseException) -> bool:
     """Is ``exc`` a write to a stdout whose reader has left? Two measured
-    spellings of ONE event: ``BrokenPipeError`` (EPIPE) on every POSIX, and a
-    bare ``OSError(EINVAL)`` on Windows (round 4: ``tools --json`` into a real
-    closed pipe answered 3 under the type-keyed row,
-    ``tests/test_stealthy_cli_e2e.py``). The type is asked as well as the errno
-    so a ``BrokenPipeError`` raised with no errno still counts."""
+    spellings of ONE event: ``BrokenPipeError`` (EPIPE) everywhere, and a bare
+    ``OSError(EINVAL)`` on WINDOWS ONLY (round 4: ``tools --json`` into a real
+    closed pipe answered 3 under the type-keyed row). EINVAL is a broad errno —
+    a cold start's own ``OSError(22)`` would read as 141 — so the arm is scoped
+    to the one platform it was measured on; finding §6.14 owns what is left."""
     import errno
 
     return isinstance(exc, BrokenPipeError) or (
-        isinstance(exc, OSError) and exc.errno in (errno.EPIPE, errno.EINVAL)
+        isinstance(exc, OSError)
+        and (exc.errno == errno.EPIPE or (_WINDOWS and exc.errno == errno.EINVAL))
     )
 
 

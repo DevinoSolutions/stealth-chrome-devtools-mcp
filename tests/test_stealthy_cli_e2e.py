@@ -257,8 +257,15 @@ def test_a_reader_that_left_costs_141_through_a_real_pipe(isolated_backend):
     )
     assert proc.stdout is not None and proc.stderr is not None
     proc.stdout.close()  # `head -1` has left
+    # Wait FIRST, bounded, then read: a wedged child must fail this node, not
+    # hang the job. It cannot deadlock — the only stderr write on this path is
+    # the verdict's one line, which for 141 is empty.
+    try:
+        code = proc.wait(timeout=CLI_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise
     err = proc.stderr.read().decode("utf-8", errors="replace")
-    code = proc.wait(timeout=CLI_TIMEOUT)
     assert code == 141, f"exit {code}; stderr:\n{err}"
     assert "Exception ignored" not in err, err
     assert "Traceback (most recent call last)" not in err, err
