@@ -772,22 +772,43 @@ def _prog_name() -> str:
 def _backend_flags() -> argparse.ArgumentParser:
     """The flags every tool-driving verb shares (F-891).
 
-    A parent parser rather than six copies: ``--no-start`` and ``--timeout``
-    mean the same thing for all six, and six declarations are six places for one
-    of them to drift. ``--json`` is deliberately NOT here — on ``call`` it names
-    the arguments object, not an output mode.
+    A parent parser rather than six copies: ``--no-start``, ``--timeout`` and
+    ``--traceback`` mean the same thing for all six, and six declarations are
+    six places for one of them to drift. ``--json`` is deliberately NOT here —
+    on ``call`` it names the arguments object, not an output mode.
+
+    ``--traceback`` is the one way to see a stack from these verbs, because
+    ``cli_call._run`` turns every exception into one stderr line and a closed
+    exit code (F-891 review M1). A flag and not an env var: this package reads
+    its environment in ``settings.py`` and nowhere else.
+
+    ``--no-start``'s help names the consequence it prevents, not merely what it
+    switches off (F-891 review S1): a responsive backend is always adopted,
+    whatever build it is, but a cold start is the PROXY's cold start and can
+    evict a wedged one. That is the whole reason an operator would reach for
+    this flag, and a help string saying only "do not start one" leaves them to
+    discover it.
     """
     shared = argparse.ArgumentParser(add_help=False)
     shared.add_argument(
         "--no-start",
         action="store_true",
-        help="fail instead of starting a backend when none is running",
+        help=(
+            "fail instead of starting a backend when none is running; a live "
+            "backend is always used as-is, but starting one can evict a wedged "
+            "backend of another build"
+        ),
     )
     shared.add_argument(
         "--timeout",
         type=float,
         default=None,
         help="per-call budget in seconds (default: the client's)",
+    )
+    shared.add_argument(
+        "--traceback",
+        action="store_true",
+        help="also re-raise the failure, so the full stack is printed",
     )
     return shared
 

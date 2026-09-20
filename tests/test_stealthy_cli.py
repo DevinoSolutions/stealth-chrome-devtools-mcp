@@ -42,6 +42,22 @@ from stealth_chrome_devtools_mcp.embedded import backend_client
 REPO = Path(__file__).resolve().parent.parent
 
 
+@pytest.fixture(autouse=True)
+def _never_the_operators_record(monkeypatch, tmp_path):
+    """No node in this file may read or write the real `~/.stealth-mcp`.
+
+    Autouse and structural rather than per-test, because the hazard is not
+    hypothetical: a selection step that reached `SERVER_STATE_FILE` directly
+    sent a real `initialize` at the operator's live backend from a node whose
+    `_probe_backend_status` was patched to "nothing is running". A patched
+    binding only isolates the paths it is on; the record path is isolated here
+    for all of them.
+    """
+    from stealth_chrome_devtools_mcp.embedded import singleton
+
+    monkeypatch.setattr(singleton, "SERVER_STATE_FILE", tmp_path / "server.json")
+
+
 def _pyproject() -> dict:
     return tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
 
@@ -319,6 +335,209 @@ class TestBackendSelection:
         assert recorder.calls == []
 
 
+class TestTheCliNeverEvictsALiveBackend:
+    """F-891 review S1. A `stealthy` invocation is a one-shot borrow of a
+    socket; the thing a cold start would replace is somebody's live session.
+
+    What makes "never evicts a LIVE backend" true is not a new rule — it is that
+    the one selection is IDENTITY-BLIND. `backend_liveness.probe_recorded` asks
+    `adoption_candidates` and the liveness ladder and nothing else, so a backend
+    built from a different source tree ANSWERS and is adopted, and
+    `ensure_server_running` — the only path that can evict — is never reached.
+    These drive the REAL walk against a real record file rather than patching
+    `_probe_backend_status`, because the identity-blindness is the claim.
+
+    What is NOT claimed, and is disclosed in `backend_url`, RUNBOOK and the
+    finding's §6: when NOTHING answers, the cold start is the proxy's own path
+    and can evict a WEDGED foreign backend holding no live browser.
+    """
+
+    def _record(self, tmp_path, monkeypatch, *, port):
+        """A stranger's backend — OUR display context, a build that is not ours
+        — written through the ONE writer.
+
+        Hand-written JSON is deliberately not used: the first draft of this
+        fixture spelled the schema key `schema_version` where the reader asks
+        for `schema`, so every entry read as no entries and the pin passed for
+        the wrong reason. `record_backend` cannot drift from `backends_in`.
+        """
+        from stealth_chrome_devtools_mcp.embedded import (
+            backend_registry,
+            display_context,
+            singleton,
+        )
+
+        record = tmp_path / "server.json"
+        monkeypatch.setattr(singleton, "SERVER_STATE_FILE", record)
+        backend_registry.record_backend(
+            record,
+            port=port,
+            version="0.0.1-someone-elses-build",
+            pid=4242,
+            source_fingerprint="a-digest-that-is-not-ours",
+            display_context=display_context.display_context(),
+        )
+        assert backend_registry.read_backends(record), "the record must be readable"
+        return record
+
+    def test_a_responsive_backend_of_a_foreign_identity_is_adopted_not_replaced(
+        self, tmp_path, monkeypatch, recorder
+    ):
+        from stealth_chrome_devtools_mcp.embedded import singleton
+
+        self._record(tmp_path, monkeypatch, port=43111)
+        starts = []
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: True)
+        monkeypatch.setattr(singleton, "_backend_http_ready", lambda port: True)
+        monkeypatch.setattr(
+            singleton, "ensure_server_running", lambda *a, **k: starts.append(1)
+        )
+        recorder.answers["list_instances"] = []
+
+        assert cli.main(["ls", "--json"]) == 0
+        assert recorder.urls == ["http://127.0.0.1:43111/mcp/"]
+        assert starts == [], (
+            "a cold start beside a live backend is the ONE way this CLI evicts"
+        )
+
+    def test_a_foreign_identity_never_reaches_the_reuse_gate_at_all(
+        self, tmp_path, monkeypatch, recorder
+    ):
+        """The gate is what a PROXY consults before reusing a backend for a whole
+        session, and it is where a fingerprint mismatch becomes an eviction. A
+        CLI that asked it would inherit that consequence for a single call."""
+        from stealth_chrome_devtools_mcp.embedded import singleton
+
+        self._record(tmp_path, monkeypatch, port=43111)
+        asked = []
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: True)
+        monkeypatch.setattr(singleton, "_backend_http_ready", lambda port: True)
+        monkeypatch.setattr(
+            singleton,
+            "_same_identity_backend_ready",
+            lambda port: asked.append(port) or False,
+        )
+        monkeypatch.setattr(
+            singleton,
+            "ensure_server_running",
+            lambda *a, **k: pytest.fail("a cold start is what evicts"),
+        )
+        recorder.answers["list_instances"] = []
+
+        assert cli.main(["ls", "--json"]) == 0
+        assert asked == []
+
+    def test_nothing_answering_is_the_only_road_to_a_cold_start(
+        self, tmp_path, monkeypatch, recorder
+    ):
+        from stealth_chrome_devtools_mcp.embedded import singleton
+
+        async def ready(url, *_args, **_kwargs):
+            return True
+
+        self._record(tmp_path, monkeypatch, port=43111)
+        monkeypatch.setattr(singleton, "_server_is_healthy", lambda port: False)
+        monkeypatch.setattr(singleton, "ensure_server_running", lambda *a, **k: 42003)
+        monkeypatch.setattr(singleton, "_await_backend_http", ready)
+        recorder.answers["list_instances"] = []
+
+        assert cli.main(["ls", "--json"]) == 0
+        assert recorder.urls == ["http://127.0.0.1:42003/mcp/"]
+
+
+class TestExitCodesAreClosed:
+    """F-891 review M1. Every exception becomes one of the codes, and never a
+    traceback: exit 1 means "the tool answered and said no", so a crash in the
+    CLI wearing that code hands a script our bug as the backend's answer."""
+
+    def test_a_transport_failure_is_no_backend_and_not_a_tool_error(
+        self, responsive, monkeypatch, capsys
+    ):
+        """Nothing on the backend ever saw the request, so there is no answer to
+        report — and the remedy (re-run, check `status`) is the no-backend one."""
+        import httpx
+
+        async def boom(*_args, **_kwargs):
+            raise httpx.ConnectError("connection refused")
+
+        monkeypatch.setattr(backend_client, "call_tool", boom)
+        assert cli.main(["call", "list_tabs"]) == cli_call.EXIT_NO_BACKEND
+        assert "could not reach the backend" in capsys.readouterr().err
+
+    def test_an_unexpected_exception_is_70_and_never_1(self):
+        code, line = cli_call._verdict(ValueError("a bug of ours"))
+        assert code == cli_call.EXIT_INTERNAL == 70
+        assert "internal error" in line
+        assert "--traceback" in line
+
+    def test_a_keyboard_interrupt_is_130(self):
+        code, line = cli_call._verdict(KeyboardInterrupt())
+        assert code == cli_call.EXIT_INTERRUPTED == 130
+        assert line == "interrupted"
+
+    @pytest.mark.parametrize(
+        ("raises", "code"),
+        [
+            (KeyboardInterrupt, 130),
+            (ValueError, 70),
+            (ConnectionResetError, 3),
+        ],
+        ids=["ctrl-c", "our own bug", "the socket went"],
+    )
+    def test_no_path_out_of_main_prints_a_traceback(
+        self, responsive, monkeypatch, capsys, raises, code
+    ):
+        """The closed set is a claim about `main`, not about `_verdict`, so each
+        kind is driven through the whole command. A traceback on stderr is the
+        failure this exists to prevent as much as a wrong code is: it is what a
+        script's error channel would carry, and Python pairs it with exit 1 —
+        the code that means "the tool answered and said no"."""
+
+        async def boom(*_args, **_kwargs):
+            raise raises("no")
+
+        monkeypatch.setattr(backend_client, "call_tool", boom)
+        assert cli.main(["call", "list_tabs"]) == code
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.err
+        assert captured.err.strip(), "silence is not an answer either"
+        assert len(captured.err.strip().splitlines()) == 1, "one line, per the contract"
+
+    def test_a_single_exception_inside_a_group_is_judged_on_its_merits(self):
+        """The transport runs under an anyio task group, which raises a GROUP.
+        Without unwrapping, every transport failure would be reported as our own
+        bug — the exact miscategorisation this class exists to prevent."""
+        import httpx
+
+        group = ExceptionGroup("tg", [httpx.ReadTimeout("slow")])
+        assert cli_call._verdict(group)[0] == cli_call.EXIT_NO_BACKEND
+
+    def test_a_group_of_several_stays_internal(self):
+        """Picking one to report would be picking which half of the truth to
+        tell."""
+        group = ExceptionGroup("tg", [ValueError("a"), ValueError("b")])
+        assert cli_call._verdict(group)[0] == cli_call.EXIT_INTERNAL
+
+    def test_a_protocol_refusal_is_a_tool_error(self):
+        """An unknown tool is the everyday one: the round trip worked and the
+        fix is in what was asked, so it is exit 1 and not exit 3."""
+        from mcp.shared.exceptions import McpError
+        from mcp.types import ErrorData
+
+        error = McpError(ErrorData(code=-32602, message="Unknown tool: nope"))
+        assert cli_call._verdict(error)[0] == cli_call.EXIT_TOOL_ERROR
+
+    def test_traceback_re_raises_after_the_one_line_is_printed(
+        self, responsive, recorder, capsys
+    ):
+        """Both, never one instead of the other: the operator debugging this
+        needs the stack, and the line is what everyone else reads."""
+        recorder.fail = "navigate"
+        with pytest.raises(backend_client.BackendCallError):
+            cli.main(["call", "navigate", "--traceback"])
+        assert "navigate exploded" in capsys.readouterr().err
+
+
 class TestCallVerb:
     def test_call_prints_the_structured_result_as_json(
         self, responsive, recorder, capsys
@@ -440,6 +659,37 @@ class TestSpawnVerb:
             "url": "https://x.test/",
         }
         assert responsive["probes"] == 1, "two tool calls, ONE backend selection"
+
+    def test_a_failed_navigation_still_leaves_the_caller_the_instance_id(
+        self, responsive, recorder, capsys
+    ):
+        """F-891 review M3. The browser EXISTS the moment the first call returns.
+        Printing at the end meant a bad url, a challenge page or an expired
+        budget took the id down with it and left a running browser — on a headed
+        spawn, a visible window — that the caller could not `nav` or `close`."""
+        recorder.answers["spawn_browser"] = {"instance_id": "abc-123"}
+        recorder.fail = "navigate"
+
+        assert cli.main(["spawn", "--url", "https://x.test/", "--json"]) == (
+            cli_call.EXIT_TOOL_ERROR
+        )
+        captured = capsys.readouterr()
+        assert "abc-123" in captured.out, "the id the caller needs to act"
+        assert "navigate exploded" in captured.err, "and the failure, not instead of it"
+
+    def test_the_id_reaches_a_terminal_too_and_not_only_a_pipe(
+        self, responsive, recorder, monkeypatch, capsys
+    ):
+        """The table path is the one an operator actually watches, so the M3
+        ordering has to hold on BOTH sides of `wants_json`."""
+        monkeypatch.setattr(cli_call, "wants_json", lambda *a, **k: False)
+        recorder.answers["spawn_browser"] = {"instance_id": "abc-123"}
+        recorder.fail = "navigate"
+
+        assert cli.main(["spawn", "--url", "https://x.test/"]) == (
+            cli_call.EXIT_TOOL_ERROR
+        )
+        assert "abc-123" in capsys.readouterr().out
 
 
 class TestLsVerb:
@@ -595,33 +845,205 @@ class TestToolsVerb:
         assert "installed build" in out.lower()
 
 
-class TestSessionHygiene:
-    """The session this CLI opens is terminated, and it is terminated by the
-    SDK's own DELETE rather than by a second spelling of one (F-862)."""
+SESSION_ID = "session-under-test"
 
-    async def test_opened_asks_the_sdk_to_terminate_on_close(self, monkeypatch):
+
+class FakeBackend:
+    """A streamable-HTTP MCP server, answered at the HTTP layer.
+
+    The whole point is that NOTHING of ours and nothing of the SDK's is faked:
+    the real `mcp` client negotiates a real session over a real
+    `httpx.AsyncClient`, and only the socket underneath it is ours. The first
+    version of this pin replaced `streamablehttp_client` with a double whose
+    `__aenter__` raised, so the exit path — the one thing the pin was named for
+    — never ran at all, and the assertion was about a keyword argument rather
+    than about a DELETE (F-891 review M2, and `mocked-fakes-can-encode-the-bug`:
+    a hand-written double can encode the very behaviour it is asked to prove).
+    """
+
+    def __init__(self, *, tool_result=None, fail_call=False):
+        self.tool_result = tool_result if tool_result is not None else {"ok": True}
+        self.fail_call = fail_call
+        self.error_call = False
+        self.budget: float | None = None
+        self.methods: list[str] = []
+        self.rpc: list[str] = []
+        self.deleted_session: str | None = None
+
+    def transport(self):
+        import httpx
+
+        return httpx.MockTransport(self._handle)
+
+    def _handle(self, request):
+        import httpx
+
+        self.methods.append(request.method)
+        if request.method == "DELETE":
+            self.deleted_session = request.headers.get("mcp-session-id")
+            return httpx.Response(200)
+        if request.method == "GET":
+            # What our own backend answers when a client opens the standing
+            # event stream it does not need; the SDK treats it as "no stream".
+            return httpx.Response(405)
+        message = json.loads(request.content)
+        method = message.get("method", "")
+        self.rpc.append(method)
+        if "id" not in message:
+            return httpx.Response(202)
+        if method == "tools/call" and self.fail_call:
+            raise httpx.ReadError("the socket died mid-call")
+        return self._answer(message, method)
+
+    def _answer(self, message, method):
+        import httpx
+
+        results = {
+            "initialize": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "fake-backend", "version": "0"},
+            },
+            "tools/call": (
+                # A tool that answered and said no. FastMCP reports a raised
+                # `ToolError` exactly here — `isError` with the message as text
+                # content — which is what `call_tool` turns into a
+                # `BackendCallError`.
+                {
+                    "content": [{"type": "text", "text": "navigate: no such instance"}],
+                    "isError": True,
+                }
+                if self.error_call
+                else {
+                    "content": [],
+                    "structuredContent": self.tool_result,
+                    "isError": False,
+                }
+            ),
+            "tools/list": {"tools": []},
+        }
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": message["id"], "result": results[method]},
+            headers={
+                "content-type": "application/json",
+                "mcp-session-id": SESSION_ID,
+            },
+        )
+
+
+@pytest.fixture()
+def fake_backend(monkeypatch):
+    """Binds a :class:`FakeBackend` under `backend_client.http_client`, the ONE
+    transport seam — so the substitution is the socket and never the protocol."""
+    import httpx
+
+    backend = FakeBackend()
+
+    def client(budget_seconds):
+        backend.budget = budget_seconds
+        return httpx.AsyncClient(
+            transport=backend.transport(),
+            follow_redirects=True,
+            timeout=httpx.Timeout(
+                backend_client.CONNECT_TIMEOUT_SECONDS, read=budget_seconds
+            ),
+        )
+
+    monkeypatch.setattr(backend_client, "http_client", client)
+    return backend
+
+
+class TestSessionHygiene:
+    """The session this CLI opens is terminated on EVERY path, and it is
+    terminated by the SDK's own DELETE rather than by a second spelling of one.
+
+    F-862's sweep reaps sessions whose client vanished; a CLI leaking one per
+    invocation would be asking that sweep to clean up after it. Each node below
+    is a different way out of :func:`backend_client.opened`.
+    """
+
+    async def test_a_successful_call_deletes_its_session(self, fake_backend):
+        answer = await backend_client.call_tool(
+            "http://127.0.0.1:1/mcp/", "list_tabs", {}
+        )
+        assert answer == {"ok": True}
+        assert fake_backend.deleted_session == SESSION_ID
+        assert fake_backend.methods[-1] == "DELETE"
+
+    async def test_a_tool_error_deletes_its_session(self, fake_backend):
+        """The tool answered and said no — a failure INSIDE a live session, so
+        the session still has to be ended on the way out. It is correct today by
+        ORDERING alone (`call_tool` leaves the `async with` before it raises),
+        which is exactly the kind of thing a refactor breaks in silence."""
+        fake_backend.error_call = True
+        with pytest.raises(backend_client.BackendCallError) as excinfo:
+            await backend_client.call_tool("http://127.0.0.1:1/mcp/", "navigate", {})
+        assert "no such instance" in str(excinfo.value)
+        assert fake_backend.deleted_session == SESSION_ID
+        assert fake_backend.methods[-1] == "DELETE"
+
+    async def test_a_transport_failure_mid_call_still_deletes(self, fake_backend):
+        """The session EXISTS — `initialize` already answered and handed back an
+        id — so a socket that dies during `tools/call` leaves a real session on
+        a real backend. This is the path a naive `try`/`finally` around the
+        happy case misses."""
+        fake_backend.fail_call = True
+        # The broad catch is the point: what is measured is the DELETE, not
+        # which shape the SDK's own task group wraps a dead socket in. Naming a
+        # type here would pin the SDK's internals instead of our contract.
+        with pytest.raises(BaseException):  # noqa: B017, PT011  PERMANENT(F-891)
+            await backend_client.call_tool("http://127.0.0.1:1/mcp/", "navigate", {})
+        assert fake_backend.deleted_session == SESSION_ID
+
+    async def test_a_cancellation_still_deletes(self, fake_backend):
+        """`Ctrl-C` and an expired outer budget both arrive as a cancellation
+        AT the await, and neither is allowed to leak a session."""
+        import asyncio
+
+        async def call():
+            async with backend_client.opened("http://127.0.0.1:1/mcp/"):
+                await asyncio.sleep(3600)
+
+        task = asyncio.ensure_future(call())
+        await asyncio.sleep(0)
+        while not fake_backend.rpc:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert fake_backend.deleted_session == SESSION_ID
+
+    async def test_the_session_announces_itself_as_the_cli(self, fake_backend):
+        """`clientInfo` is how a backend's log tells a CLI call apart from a
+        real MCP session and from a liveness probe (`backend_probe`'s two)."""
+        sent = []
+        original = fake_backend._handle
+
+        def handle(request):
+            if request.method == "POST":
+                sent.append(json.loads(request.content))
+            return original(request)
+
+        fake_backend._handle = handle
+        await backend_client.call_tool("http://127.0.0.1:1/mcp/", "list_tabs", {})
+        info = sent[0]["params"]["clientInfo"]
+        assert info["name"] == backend_client.CLIENT_NAME == "stealthy-cli"
+
+    def test_the_sdk_still_names_the_replacement_this_module_uses(self):
+        """F-891 review S2. `streamablehttp_client` is `@deprecated` at the
+        pinned mcp 1.27.1 and `streamable_http_client` is what it says to use;
+        this module uses the latter, and the latter takes a client rather than
+        the two timeout numbers — which is why `http_client` exists. If a bump
+        renames or re-signatures it, that is a decision to make deliberately."""
+        import inspect
+
         import mcp.client.streamable_http as sdk
 
-        seen = {}
-
-        class _Fake:
-            def __init__(self, url, **kwargs):
-                seen["url"] = url
-                seen["kwargs"] = kwargs
-
-            async def __aenter__(self):
-                raise _StopError
-
-            async def __aexit__(self, *exc):
-                return False
-
-        class _StopError(Exception):
-            pass
-
-        monkeypatch.setattr(sdk, "streamablehttp_client", _Fake)
-        with pytest.raises(_StopError):
-            async with backend_client.opened("http://127.0.0.1:1/mcp/"):
-                pass  # pragma: no cover - __aenter__ raises
-
-        assert seen["url"] == "http://127.0.0.1:1/mcp/"
-        assert seen["kwargs"]["terminate_on_close"] is True
+        params = inspect.signature(sdk.streamable_http_client).parameters
+        assert "http_client" in params
+        assert "terminate_on_close" in params
+        assert "timeout" not in params, (
+            "the budget moved onto the httpx client; re-read backend_client."
+            "http_client before trusting --timeout again"
+        )

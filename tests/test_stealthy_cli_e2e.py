@@ -162,7 +162,12 @@ def isolated_backend(tmp_path):
             url = f"http://127.0.0.1:{port}/mcp/"
             if not _await_backend(url, BACKEND_READY_SECONDS):
                 proc.kill()
-                pytest.skip(
+                # FAIL, never skip (F-891 review S4). Both nodes in this file
+                # hang off this fixture, so a backend that can never start made
+                # the whole integration tier read GREEN — which is the one
+                # outcome a tier whose job is to catch a broken backend must not
+                # have. A skip here says "not applicable"; this is "broken".
+                pytest.fail(
                     f"the isolated backend on {port} never became ready; console:\n"
                     + console.read_text(encoding="utf-8", errors="replace")[-4000:]
                 )

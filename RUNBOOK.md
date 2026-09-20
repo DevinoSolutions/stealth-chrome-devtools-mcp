@@ -351,6 +351,16 @@ is what replaced the hand-written 40-line stdio client this recipe needed on
 2026-09-19 — `stealthy call spawn_browser --arg user_data_dir=…` is the same call
 without the sugar.
 
+> **What "starts one if none is running" can cost, and when to pass
+> `--no-start`.** A backend that ANSWERS is always used as it is, whatever build
+> it came from — so running `stealthy` out of a dev checkout beside a released
+> backend drives that backend and never replaces it. But when nothing answers,
+> the CLI takes the *proxy's* cold start, deliberately and unforked, and that
+> path can evict: a **wedged** backend of a different build on this desktop
+> owning no live browser is terminated and replaced. Anything still holding a
+> browser is spared (F-886). If you are diagnosing a wedged backend and want it
+> left exactly as it is, add `--no-start` — the command then exits 3 instead.
+
 Two cases still need a hand.
 
 **The owner backend is still ALIVE (wedged, or just unreachable because every

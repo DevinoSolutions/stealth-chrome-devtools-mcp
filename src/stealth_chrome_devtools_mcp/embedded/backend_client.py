@@ -33,10 +33,11 @@ measured on the 2026-09-19 prototype that this feature replaces:
   others is left intact.
 * text content as the fallback, parsed as JSON when it is JSON.
 
-A leaf: the ``mcp`` SDK and stdlib, both imported lazily inside the functions
-that need them (``backend_probe``'s reason — an ops verb that never talks to a
-backend must not pay for the client). The URL arrives as an argument, so nothing
-here decides WHICH backend is being driven; that is the caller's one selection.
+A leaf: the ``mcp`` SDK, ``httpx`` and stdlib, all imported lazily inside the
+functions that need them (``backend_probe``'s reason — an ops verb that never
+talks to a backend must not pay for the client). The URL arrives as an argument,
+so nothing here decides WHICH backend is being driven; that is the caller's one
+selection.
 """
 
 from __future__ import annotations
@@ -47,12 +48,17 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    import httpx
     from mcp import ClientSession
 
-#: What this client calls itself in the backend's logs, so an operator reading
-#: them can tell a CLI call from a real MCP session and from a liveness probe
-#: (``backend_probe.LIVENESS_CLIENT``).
+#: What this client calls itself in its ``initialize``, so a backend's logs can
+#: tell a CLI call from a real MCP session and from a liveness probe
+#: (``backend_probe.LIVENESS_CLIENT``, whose ``"0"`` this version copies — the
+#: number identifies the CLIENT, and this one has no release of its own).
+#: Reached through ``ClientSession(client_info=…)``, which is the SDK's spelling
+#: of the ``clientInfo`` block ``backend_probe._request`` writes by hand.
 CLIENT_NAME = "stealthy-cli"
+CLIENT_VERSION = "0"
 
 #: The default per-call budget. Deliberately generous and deliberately NOT a
 #: `STEALTH_MCP_*` knob: it bounds a human waiting at a terminal, not a product
@@ -120,6 +126,32 @@ def _failure_message(name: str, structured: object, texts: list[str]) -> str:
     return f"{name} failed and said nothing about why"
 
 
+def http_client(budget_seconds: float) -> httpx.AsyncClient:
+    """THE one transport this module's sessions ride on, and the ONE seam a test
+    replaces to drive the real SDK against a fake server.
+
+    It is a named module function rather than an inline constructor for the
+    reason ``scroll_position._now``/``_sleep`` are: the thing worth substituting
+    is the transport, not the protocol, and a pin that swapped the protocol
+    would be pinning a double instead of the SDK.
+
+    The two clocks are the whole of what is decided here, and they are two
+    because ``httpx.Timeout(connect_and_write, read=…)`` is two. The caller's
+    budget lands on ``read`` — the clock a tool call actually waits under —
+    while connecting keeps :data:`CONNECT_TIMEOUT_SECONDS`, so a backend whose
+    socket is gone is reported in seconds rather than at the end of a 180 s tool
+    budget. ``follow_redirects=True`` is the MCP default (``create_mcp_http_
+    client``) and is kept so nothing about this transport is narrower than the
+    one the SDK would have built.
+    """
+    import httpx
+
+    return httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=httpx.Timeout(CONNECT_TIMEOUT_SECONDS, read=budget_seconds),
+    )
+
+
 @asynccontextmanager
 async def opened(
     url: str, *, budget_seconds: float = DEFAULT_TIMEOUT_SECONDS
@@ -131,35 +163,38 @@ async def opened(
     guarantee, and a default is not a guarantee — it is a value that can change
     in a dependency bump without anything here failing.
 
-    ``budget_seconds`` is the caller's whole budget and it lands on the SDK's
-    ``sse_read_timeout`` and never on its ``timeout``, because those are two
-    different clocks: ``streamablehttp_client`` builds
-    ``httpx.Timeout(timeout, read=sse_read_timeout)``
-    (``mcp/shared/_httpx_utils.py``), so the first bounds connecting and writing
-    while the SECOND is what a tool call actually waits under. Passing the budget
-    to the first would cut a 180 s spawn off after 180 s of *connecting*, which
-    never happens, and leave the answer bounded by the SDK's own 300 s default
-    instead of by ``--timeout``. Connecting keeps
-    :data:`CONNECT_TIMEOUT_SECONDS`, so a backend whose socket is gone is
-    reported in seconds rather than at the end of the tool budget.
+    **``streamable_http_client``, not ``streamablehttp_client``** (F-891
+    review S2). At the pinned ``mcp`` 1.27.1 the latter is
+    ``@deprecated("Use `streamable_http_client` instead.")``; measured, it still
+    honours ``timeout``/``sse_read_timeout`` — it builds
+    ``httpx.Timeout(timeout, read=sse_read_timeout)`` and hands the client down
+    — so this is a migration and not a bug fix. The replacement takes the
+    ``httpx.AsyncClient`` itself, which is why :func:`http_client` exists and
+    why the budget is set there. Note the ownership rule that comes with it: a
+    client we PASS is a client the SDK does not close, so it is entered here.
 
-    The name is ``budget_seconds`` and not ``timeout`` on ``navigation_
-    milestone``'s precedent: a parameter called ``timeout`` on an async function
-    reads as "wrap me in ``asyncio.timeout``" (ASYNC109), and this one is the
-    opposite — it is handed DOWN to the transport, which is the only layer that
-    can bound a reply without abandoning it.
+    The budget's name is ``budget_seconds`` and not ``timeout`` on
+    ``navigation_milestone``'s precedent: a parameter called ``timeout`` on an
+    async function reads as "wrap me in ``asyncio.timeout``" (ASYNC109), and
+    this one is the opposite — it is handed DOWN to the transport, which is the
+    only layer that can bound a reply without abandoning it.
     """
     from mcp import ClientSession as Session
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.types import Implementation
 
     async with (
-        streamablehttp_client(
-            url,
-            timeout=CONNECT_TIMEOUT_SECONDS,
-            sse_read_timeout=budget_seconds,
-            terminate_on_close=True,
-        ) as (read, write, _),
-        Session(read, write) as session,
+        http_client(budget_seconds) as client,
+        streamable_http_client(url, http_client=client, terminate_on_close=True) as (
+            read,
+            write,
+            _,
+        ),
+        Session(
+            read,
+            write,
+            client_info=Implementation(name=CLIENT_NAME, version=CLIENT_VERSION),
+        ) as session,
     ):
         await session.initialize()
         yield session

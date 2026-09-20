@@ -155,20 +155,66 @@ registered tomorrow and ship a console script of the same name, and pip would le
 whichever was installed last win. That risk is named rather than mitigated —
 `stealth-chrome-devtools` remains installed and unambiguous.
 
+## 3b. What the first review changed (and one thing it changed back)
+
+The review at `a4b4741` found the promised closed exit-code set was not closed
+and the session termination the client exists to guarantee was pinned only as a
+keyword argument. Both are now behaviours rather than claims.
+
+- **The exit codes are closed by construction.** `cli_call._verdict` maps every
+  exception onto one code and `_run` catches `Exception`, `KeyboardInterrupt`
+  and `BaseExceptionGroup` (the shape an interrupt takes through the transport's
+  own task group). A transport failure is **3** and not 1: nothing on the
+  backend saw the request, so there is no answer to report. Our own bug is
+  **70** (`EX_SOFTWARE`) and deliberately not 1, which means "the tool said no".
+  `Ctrl-C` is **130**. Measured under mutation: narrowing the `except` back to
+  the named refusals makes the transport node raise through `main` and the
+  interrupt node abort the pytest run outright — which is what a shell saw.
+- **The DELETE is pinned, not the flag.** `TestSessionHygiene` drives the REAL
+  `mcp` SDK over an `httpx.MockTransport` bound at `backend_client.http_client`,
+  the one transport seam, and asserts the session id reaches a `DELETE` on four
+  ways out: success, a tool error, a socket that dies mid-`tools/call`, and
+  cancellation. Setting `terminate_on_close=False` turns all four RED; the
+  previous single node stayed green, because its double's `__aenter__` raised
+  and the exit path never ran.
+- **`spawn --url` prints before it navigates.** Swapping the two statements back
+  turns both new nodes RED with `out=''`.
+- **S1 was implemented, then reverted to its measurement.** The first attempt
+  added `backend_liveness.any_responsive` — adopt any recorded backend that
+  answers, ignoring display context. It prevents no eviction: `probe_recorded`
+  is already identity-blind, so a live foreign-BUILD backend on this desktop is
+  adopted today, and the only entry the widening newly reaches is on another
+  desktop, where the cold start targets a different port and terminates
+  nothing. What it did add was a `spawn --headed` opening a window on a desktop
+  the operator is not watching, a CLI that silently disagrees with its own
+  `status`, and — measured, as the failing node that caught it — a real
+  `initialize` sent at the operator's live backend from a hermetic test, because
+  the widened walk read `SERVER_STATE_FILE` directly. Deleted; the pins for what
+  IS true (a foreign identity is adopted, the reuse gate is never asked, only an
+  empty answer reaches a cold start) stayed.
+
 ## 5. Proof
 
-`tests/test_stealthy_cli.py`, 55 hermetic nodes: argument parsing (JSON vs
+`tests/test_stealthy_cli.py`, 74 hermetic nodes: argument parsing (JSON vs
 string, the `--json` merge, the three usage refusals), result unwrapping (all
 three measured shapes plus the two negative ones), prefix resolution (exact wins,
 ambiguous names every match), TTY vs pipe, backend selection (one probe; the
-`--no-start` exit 3; the start path; the never-ready exit 3), the six verbs'
-arguments and rendering, and the `terminate_on_close` pin. Nothing starts a
-backend, opens a socket or launches Chrome.
+`--no-start` exit 3; the start path; the never-ready exit 3), the closed exit-code
+set end-to-end through `main` (each kind asserting the code, one line of stderr
+and no `Traceback`), the four session-termination paths against the real SDK, the
+six verbs' arguments and rendering, and `spawn --url`'s ordering on both the JSON
+and the table path. Nothing starts a backend, opens a socket or launches Chrome —
+and an autouse fixture points `singleton.SERVER_STATE_FILE` at a tmp file for
+every node, so the operator's own record is unreachable from this file by
+construction rather than by each node remembering.
 
-`tests/test_stealthy_cli_e2e.py`, one node marked `integration`: an isolated
+`tests/test_stealthy_cli_e2e.py`, nodes marked `integration`: an isolated
 backend started in a throwaway `HOME`, a `server.json` written by hand so the
 real record is never opened, and the installed `stealthy` console script driven
-as a subprocess through `tools`, `call list_instances` and `ls`. No Chrome.
+as a subprocess through `tools`, `call list_instances` and `ls`. No Chrome. A
+backend that never becomes ready is a `pytest.fail` with the console tail and no
+longer a `skip` — both nodes hang off that fixture, so a skip made a broken
+backend read as a green tier.
 
 Updated: `tests/test_doc_examples.py` (the scripts table, the README CLI
 section's allowed names, and a second launcher-resolution node),
@@ -183,6 +229,27 @@ section's allowed names, and a second launcher-resolution node),
    terminate beats every verb owning a session's lifetime — but it is two
    handshakes where one would do, and a shared per-command session is the obvious
    later refinement.
+3. **A cold start from this CLI can still evict a wedged backend of another
+   build.** When nothing answers, `backend_url` takes `ensure_server_running` —
+   the proxy's own path — and a wedged foreign-identity backend on this display
+   context owning no live browser is terminated and replaced. It is not narrowed,
+   because a second startup path would be a second way to start a backend and
+   this one carries the cold-start lock; `backend_eviction.protected` still
+   spares anything holding a browser, and `--no-start` is the opt-out. Disclosed
+   in `backend_url`'s docstring, `--no-start`'s help and RUNBOOK's recovery
+   recipe. What is NOT a residual: a backend that answers is never evicted,
+   whatever build it is, and that is pinned.
+4. **`_scalar` is bare `json.loads`, so `--arg x=null` is `None` and
+   `--arg x=NaN` is a float** (review S5). Unpinned, and unchanged this round.
+   `null` is the likeliest real surprise after `headless=false`. Nothing
+   non-ASCII is pinned either, and a unicode argument round-trips through
+   `json.dumps` and `print` onto a Windows console, which is a live
+   `UnicodeEncodeError` surface adjacent to F-823.
+5. **70 and 130 widen the advertised set from four codes to six.** The brief
+   asked for 0/1/2/3 plus one documented code for `Ctrl-C`. A CLI bug mapped to
+   1 would be the exact confusion M1 removes and mapped to 3 would be a lie, so
+   it got `EX_SOFTWARE` rather than a lie or a collision. Named here because it
+   is a deviation from what was asked for, not because it is in doubt.
 3. **`--json` means two things.** On `call` it supplies the arguments object; on
    the other five it selects output. `call` has no output mode to choose (it
    always prints the tool's structured result), and the help text says so, but a

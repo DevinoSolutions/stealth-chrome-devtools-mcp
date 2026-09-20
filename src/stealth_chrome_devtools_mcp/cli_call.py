@@ -28,8 +28,11 @@ a 95th tool is reachable from the shell the day it is registered and no release
 is needed to teach this file about it. The tool count stays derived, never typed.
 
 Output: JSON when stdout is not a terminal or ``--json`` is given, a table
-otherwise (:func:`wants_json`). Errors go to stderr. Exit codes are the four
-below and nothing else. No message here adds anything to what the tool itself
+otherwise (:func:`wants_json`). Errors go to stderr, ONE LINE each: the exit
+codes below are a closed set, :func:`_verdict` maps every exception there is
+onto one of them, and no invocation leaves a raw traceback paired with Python's
+own exit 1 — which is the code that means "the tool said no".
+No message here adds anything to what the tool itself
 returned — a tool's payload is the caller's own data (cookies, page text, a
 profile path naming the operating user), and this file neither logs it nor ships
 it anywhere; what the backend already records, it records.
@@ -49,12 +52,22 @@ if TYPE_CHECKING:
     #: takes the wrong shape is a type error and not a runtime one.
     VerbBody = Callable[[str], Coroutine[object, object, None]]
 
-#: Exit codes. Four, closed, and 2 is argparse's own, so a usage error this file
-#: detects and one argparse detects leave the same trace in a script.
+#: Exit codes, and the set is CLOSED: :func:`_verdict` maps every exception
+#: there is onto one of them, so no invocation can leave a raw traceback and an
+#: exit status a script cannot tell from a tool's refusal (F-891 review M1).
+#:
+#: 2 is argparse's own, so a usage error this file detects and one argparse
+#: detects leave the same trace. 130 is the shell's convention for SIGINT
+#: (128 + 2) and is what a ``Ctrl-C`` costs. 70 is ``EX_SOFTWARE`` from
+#: ``sysexits.h`` and means OUR bug, deliberately not 1: exit 1 says "the tool
+#: answered and said no", and a script branching on it must not be handed a
+#: crash in the CLI wearing the backend's answer.
 EXIT_OK = 0
 EXIT_TOOL_ERROR = 1
 EXIT_USAGE = 2
 EXIT_NO_BACKEND = 3
+EXIT_INTERNAL = 70
+EXIT_INTERRUPTED = 130
 
 #: The mark a table puts in front of a url or title that is the LAST KNOWN one
 #: rather than the current one. F-874 is the whole reason it exists: a `partial`
@@ -94,6 +107,33 @@ def backend_url(*, start: bool) -> tuple[str, bool]:
     block does it (F-868). A ``responsive`` answer is used as-is; anything else
     — no record, a dead record, a wedged backend — means there is nothing to
     drive, and with ``start`` the existing startup path is asked for one.
+
+    **That first step is also why this CLI never evicts a LIVE backend** (F-891
+    review S1), and it is a property of the walk rather than a rule added here:
+    ``backend_liveness.probe_recorded`` asks ``adoption_candidates`` and the
+    liveness ladder and NOTHING about identity, so a backend built from a
+    different source tree answers, is adopted, and the only path that can evict
+    — ``ensure_server_running`` — is never reached. A fingerprint mismatch is
+    the proxy REUSE GATE's business, not this CLI's: a proxy is about to serve a
+    whole session off that backend, while a one-shot command only borrows the
+    socket, and the thing it would replace is somebody's live session.
+
+    **What the second step still costs, stated rather than hidden.** When
+    nothing answers, ``ensure_server_running`` is the proxy's own cold start and
+    it CAN evict: a WEDGED backend of a foreign identity on this display
+    context, owning no live browser, is terminated and replaced exactly as a
+    proxy start from this checkout would. It is not narrowed here, because a
+    second startup path is a second way to start a backend (convention 4) and
+    this one carries the cold-start lock every caller depends on. ``--no-start``
+    is the opt-out, ``backend_eviction.protected`` spares anything still holding
+    a browser, and RUNBOOK says so where ``--no-start`` is documented.
+
+    Widening the first step to "any recorded backend that answers, whatever its
+    display context" was built and REVERTED: it prevents no eviction — the entry
+    it newly reaches is on another desktop, so the cold start targets a
+    different port and terminates nothing — while a ``spawn --headed`` driven
+    through it opens a window on a desktop the operator is not watching, and the
+    CLI silently stops agreeing with its own ``status``.
 
     ``started`` is what the caller waits on, and it is the whole reason this
     answers a PAIR. ``ensure_server_running`` returns immediately (the spawn
@@ -248,6 +288,84 @@ def instance_rows(records: Sequence[dict[str, object]]) -> list[str]:
 # ── the six verbs ────────────────────────────────────────────────────────────
 
 
+def _unwrapped(exc: BaseException) -> BaseException:
+    """The one exception inside a singly-nested ``ExceptionGroup``, else ``exc``.
+
+    The transport runs under ``anyio.create_task_group``, which raises a GROUP,
+    so without this every transport failure would arrive as the one shape
+    :func:`_verdict` cannot classify and would be reported as our own bug. Only
+    a group carrying exactly ONE leaf is unwrapped: a group of several is a
+    genuinely composite failure and gets the internal verdict, because picking
+    one of them to report would be picking which half of the truth to tell.
+    """
+    while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+        exc = exc.exceptions[0]
+    return exc
+
+
+def _verdict(exc: BaseException) -> tuple[int, str]:
+    """``(exit code, one line for stderr)`` for anything that escaped a verb.
+
+    The set is CLOSED — every branch returns and the last one is the catch-all —
+    because a CLI that lets an exception through hands a script exit 1 and a
+    traceback, which is byte-indistinguishable from "the tool said no" (F-891
+    review M1).
+
+    The judgements, in the order they are asked:
+
+    * ``KeyboardInterrupt`` is not a failure to describe — the operator already
+      knows what they pressed — so it costs one word and
+      :data:`EXIT_INTERRUPTED`. It is handled at all because the alternative is
+      Python's own traceback and exit 1, the TOOL-error code, for a key that
+      was meant;
+    * our own three named refusals, unchanged;
+    * a TRANSPORT failure — ``httpx`` could not reach it, the socket died, the
+      read budget expired — is :data:`EXIT_NO_BACKEND` and not a tool error:
+      nothing on the backend ever saw the request, so there is no answer to
+      report and re-running is the remedy. ``OSError`` covers the socket layer
+      and is the base of ``ConnectionError``; ``httpx.HTTPError`` is the base of
+      every connect/read/protocol failure the client raises; ``TimeoutError``
+      is what the read budget becomes;
+    * ``McpError`` — the backend answered, at the protocol level, that it will
+      not do this (an unknown tool is the everyday one) — is a TOOL error,
+      because the round trip worked and the fix is in what was asked;
+    * anything else is :data:`EXIT_INTERNAL`, a bug here.
+
+    A TABLE walked in order rather than a ladder of ``if``\\ s, because the order
+    IS the policy and a table cannot grow a branch that silently precedes the
+    ones above it. It is built inside the function because two of its types are
+    lazy imports this file must not pay for on an ops verb.
+    """
+    import httpx
+    from mcp.shared.exceptions import McpError
+
+    from stealth_chrome_devtools_mcp.embedded.backend_client import BackendCallError
+
+    judgements: tuple[tuple[type | tuple[type, ...], int, Callable[..., str]], ...] = (
+        (KeyboardInterrupt, EXIT_INTERRUPTED, lambda _exc: "interrupted"),
+        (UsageError, EXIT_USAGE, lambda exc: f"error: {exc}"),
+        (NoBackendError, EXIT_NO_BACKEND, lambda exc: f"error: {exc}"),
+        (BackendCallError, EXIT_TOOL_ERROR, str),
+        (
+            (httpx.HTTPError, OSError, TimeoutError),
+            EXIT_NO_BACKEND,
+            lambda exc: (
+                f"error: could not reach the backend ({type(exc).__name__}: {exc})"
+            ),
+        ),
+        (McpError, EXIT_TOOL_ERROR, lambda exc: f"error: the backend refused: {exc}"),
+    )
+
+    exc = _unwrapped(exc)
+    for kinds, code, message in judgements:
+        if isinstance(exc, kinds):
+            return code, message(exc)
+    return EXIT_INTERNAL, (
+        f"internal error in stealthy ({type(exc).__name__}: {exc}) — "
+        "re-run with --traceback for the full stack"
+    )
+
+
 def _run(args: argparse.Namespace, body: VerbBody) -> int:
     """Select the backend ONCE, hand the url to ``body``, and turn whatever
     escapes into an exit code.
@@ -261,10 +379,22 @@ def _run(args: argparse.Namespace, body: VerbBody) -> int:
     :class:`UsageError` from inside ``body``: the selection in front of it is a
     local probe, never a backend round trip, so a bad invocation still costs the
     backend nothing.
+
+    The ``except`` clause names three types and not ``BaseException``, and each
+    is load-bearing: ``Exception`` is the ordinary case and covers
+    ``ExceptionGroup``; ``KeyboardInterrupt`` is not an ``Exception``; and a
+    ``BaseExceptionGroup`` that is not an ``ExceptionGroup`` is the shape an
+    interrupt takes when it reaches us through the transport's own task group.
+    ``SystemExit`` is deliberately outside all three — argparse raising it is
+    how exit 2 already leaves this process, and catching it here would turn a
+    refusal into a status this function invented.
+
+    ``--traceback`` re-raises whatever it was AFTER the one line is printed, so
+    the human-readable answer is never traded for the stack: an operator
+    debugging this gets both. It is a flag rather than an env var because this
+    file reads no environment (``settings.py`` is the one env home).
     """
     import asyncio
-
-    from stealth_chrome_devtools_mcp.embedded.backend_client import BackendCallError
 
     async def drive() -> None:
         url, started = backend_url(start=not args.no_start)
@@ -274,15 +404,12 @@ def _run(args: argparse.Namespace, body: VerbBody) -> int:
 
     try:
         asyncio.run(drive())
-    except UsageError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return EXIT_USAGE
-    except NoBackendError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return EXIT_NO_BACKEND
-    except BackendCallError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_TOOL_ERROR
+    except (Exception, KeyboardInterrupt, BaseExceptionGroup) as exc:
+        code, line = _verdict(exc)
+        print(line, file=sys.stderr)
+        if getattr(args, "traceback", False):
+            raise
+        return code
     return EXIT_OK
 
 
@@ -413,11 +540,27 @@ def cmd_spawn(args: argparse.Namespace) -> int:
     ``spawn_browser`` takes no url (it opens a blank tab), so ``--url`` is a
     second call rather than an argument. Both run under the ONE selection this
     command made.
+
+    **The spawn's answer is emitted BEFORE the navigation is attempted** (F-891
+    review M3). The browser exists the moment the first call returns and the
+    second call can fail — a url that will not load, a challenge page, an
+    expired budget — so printing at the end meant a failed navigation took the
+    instance id down with it and left a running browser, on a headed spawn a
+    visible window, that the caller could not name to ``nav`` or ``close``.
+    Order is the whole fix: report what EXISTS, then do the thing that might not
+    work. Nothing is swallowed to buy it — the navigation's failure still
+    reaches :func:`_run` and still exits 1, so the caller gets the id AND the
+    error, which is what it takes to act.
     """
 
     async def body(url: str) -> None:
         result = await _call(url, args, "spawn_browser", _spawn_arguments(args))
         record = result if isinstance(result, dict) else {}
+        if wants_json(sys.stdout, explicit=args.json):
+            _emit_json(result)
+        else:
+            for line in _spawn_lines(record):
+                print(line)
         if args.url and record.get("instance_id"):
             await _call(
                 url,
@@ -425,11 +568,6 @@ def cmd_spawn(args: argparse.Namespace) -> int:
                 "navigate",
                 {"instance_id": record["instance_id"], "url": args.url},
             )
-        if wants_json(sys.stdout, explicit=args.json):
-            _emit_json(result)
-            return
-        for line in _spawn_lines(record):
-            print(line)
 
     return _run(args, body)
 

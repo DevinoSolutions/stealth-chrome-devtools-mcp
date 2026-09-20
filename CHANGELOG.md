@@ -43,9 +43,29 @@ way `status` selects it (`singleton._probe_backend_status`, F-868) and started
 through the existing `ensure_server_running` path when none is running, so the
 cold-start lock, F-886's step-aside and F-889's adopt-forward apply unchanged;
 `--no-start` makes the absence an error. No stdio proxy is spawned per command.
-Output is a table on a terminal and JSON in a pipe or under `--json`; exit codes
-are 0 ok / 1 tool error / 2 usage / 3 no backend. The MCP session each call opens
-is terminated on the way out rather than left for F-862's sweep.
+Output is a table on a terminal and JSON in a pipe or under `--json`.
+
+**Exit codes are a closed set**: 0 ok / 1 the tool answered and said no / 2 usage
+/ 3 no backend, which is also where a transport failure lands (nothing on the
+backend saw the request, so there is no answer to report) / 70 a bug in the CLI
+itself / 130 `Ctrl-C`. Every exception is mapped, so no invocation ever pairs a
+raw traceback with Python's default exit 1 — the code that means the tool
+refused. `--traceback` prints the stack **as well as** the one-line message.
+
+**The CLI never evicts a live backend.** The one selection is identity-blind, so
+a backend built from a different source tree answers and is adopted rather than
+replaced — a fingerprint mismatch is the proxy reuse gate's business, not a
+one-shot command's. What a cold start can still evict, when nothing answers at
+all, is a *wedged* backend of another build owning no live browser: that is the
+proxy's own startup path, unchanged and not forked, and `--no-start` is the
+opt-out. Both facts are in `--no-start`'s help.
+
+The MCP session each call opens is **terminated on the way out** — pinned on the
+happy path, on a tool error, on a mid-call transport failure and on cancellation,
+against the real `mcp` SDK driven over a fake in-process HTTP server, rather than
+by asserting that a keyword argument was passed. `spawn --url` prints the
+instance id **before** navigating, so a failed navigation still leaves the
+operator a browser they can name.
 
 Two new leaves: `embedded/backend_client.py` (the session, the call, and the one
 reading of an answer — `structuredContent` with EMPTY `content` is the common
