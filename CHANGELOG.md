@@ -181,8 +181,11 @@ Output is a table on a terminal and JSON in a pipe or under `--json`.
 of mistake argparse answers with 2 / 3 no backend, which is also where a transport
 failure lands (nothing on the backend saw the request, so there is no answer to
 report) / 70 a bug in the CLI itself / 130 `Ctrl-C` / 141 the READER went away.
-Every exception is mapped, so no invocation ever pairs a raw traceback with
-Python's default exit 1 — the code that means the tool refused.
+Every exception out of a tool verb is mapped, so no tool-verb invocation ever pairs
+a raw traceback with Python's default exit 1 — the code that means the tool
+refused. An ops verb's OWN failure (an `OSError` that is not the reader leaving —
+a directory `cleanup --apply` cannot delete) still propagates as it always did;
+that is deliberate, and stated in the finding's §6.17.
 
 141 is `128 + SIGPIPE` and it needs its own judgement, asked before the transport
 one: a `BrokenPipeError` is an `OSError`, so `stealthy ls | head -1` and `stealthy
@@ -204,9 +207,12 @@ of any output over the 8 KB buffer unwritten, and it lands at interpreter
 finalisation with the reader long gone — so `stealthy call get_page_content |
 head -1` exited **120** with `Exception ignored on flushing sys.stdout` while the
 docs said 141. Every run now ends with ONE explicit flush in `cli.main`, after
-whichever dispatch table answered — so it holds for the eight ops verbs too
-(`stealthy profiles | head -1` had the same hole), not only for the six tool
-verbs. It is a second guarded site rather than a row in the exit-code table: it
+whichever dispatch table answered, and `main` guards the DISPATCH itself with the
+same reader-gone judgement — both halves are needed for the eight ops verbs, which
+have no handler of their own: the flush catches an answer that fits the buffer,
+the guard catches one that crosses it mid-`print` (`stealthy profiles | head -1`
+with many sessions exited 120 before the flush and 1-with-a-traceback with only
+the flush). It is a second guarded site rather than a row in the exit-code table: it
 catches `OSError`, not `BrokenPipeError`, because the measured Windows
 finalisation error is `EINVAL` (errno 22), not a pipe error at all, and the table
 would have routed that shape to the transport row and answered 3 about a round

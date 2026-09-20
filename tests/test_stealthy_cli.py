@@ -827,6 +827,13 @@ class TestExitCodesAreClosed:
         assert capsys.readouterr().err == ""
         assert abandoned == [1]
 
+    def test_the_windows_arm_is_bound_to_the_real_platform(self):
+        """Every node above patches `_WINDOWS`, so a hardcoded `False` would keep
+        the whole hermetic lane green with only the integration-gated E2E node
+        as witness (round-5 review S5). One read of the unpatched value."""
+        expected = sys.platform == "win32"
+        assert cli_call._WINDOWS is expected
+
     def test_einval_off_windows_is_not_a_reader_gone(
         self, responsive, recorder, monkeypatch, capsys
     ):

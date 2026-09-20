@@ -479,7 +479,10 @@ section's allowed names, and a second launcher-resolution node),
    `OSError(22)` from the cold start inside the same `try` (`ensure_server_running`
    spawns, locks and writes the record; `ERROR_INVALID_PARAMETER` maps to
    errno 22) also reads as 141 with an empty stderr where `81086bd` answered 3
-   with a named message. The arm is scoped to `win32` so six of nine CI cells
+   with a named message — and since round 5 the same judgement wraps all eight
+   ops-verb BODIES in `cli.main`, so a `cleanup --apply` whose delete fails with
+   `OSError(22)` on Windows is a silent 141 too (measured), where every other
+   errno still propagates as the verb's own failure (§6.17). The arm is scoped to `win32` so six of nine CI cells
    carry no widening; the transport itself is NOT an exposure — anyio converts
    every socket `OSError` to `Broken/ClosedResourceError`, httpcore has none,
    httpx maps to `httpx.*`. Kept rather than fixed, deliberately: narrowing to
@@ -501,5 +504,16 @@ section's allowed names, and a second launcher-resolution node),
    `stealthy --help | head -1` is still 120: argparse prints help and raises
    `SystemExit(0)` from inside `parse_args`, so `main` never returns and no
    flush runs; 1722 B of help dies at finalisation. No document claims a code
-   for it, and catching `SystemExit` in `main` would also catch argparse's exit
-   2, which two suites pin as the raise it is.
+   for it. Closing it means catching `SystemExit` around `parse_args` in `main`
+   and returning `_delivered(exc.code)` — a second exit path for argparse's own
+   2 alongside the raise, which is why it is named here as a follow-up rather
+   than added to a round already at the `cli_call.py` cap.
+17. **An ops verb's own `OSError` still leaves `main` as a traceback and exit
+   1.** `main`'s guard converts only the reader-gone shape (`_reader_gone`);
+   any other errno from an ops-verb body — a directory `cleanup --apply` cannot
+   delete, a record `stop` cannot rewrite — propagates exactly as before F-891,
+   pinned negatively (`test_an_ops_verbs_own_oserror_is_not_mistaken_for_a_pipe`).
+   Deliberate: those verbs pre-date the closed set, no document claims a code
+   for their failures, and mapping them to 141 would hide a real failure behind
+   "the reader went away". Giving the ops verbs their own verdict is the
+   follow-up, and it is a `cli.py` change, not a `cli_call.py` one.

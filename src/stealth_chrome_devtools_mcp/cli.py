@@ -909,10 +909,10 @@ def _delivered(code: int) -> int:
     flushing sys.stdout`` and exit **120**, outside the advertised set. So
     ``stealthy call get_page_content | head -1`` and ``stealthy profiles |
     head -1`` both exited 120 while the docs said 141. Flushing HERE brings the
-    failure into a handler where it becomes 141, and putting the ONE flush in
-    ``main`` rather than in ``cli_call._run`` is what makes it true for the
-    eight ops verbs too: one home for "the reader went away", not one per
-    table.
+    failure into a handler where it becomes 141; putting the ONE flush in
+    ``main`` rather than in ``cli_call._run`` reaches the eight ops verbs for
+    the answer that FITS the buffer, and ``main``'s guard around the dispatch
+    covers the one that crosses it — one home for "the reader went away".
 
     This is a second guarded site, deliberately NOT routed through
     ``cli_call._verdict``: it catches ``OSError`` and not ``BrokenPipeError``
