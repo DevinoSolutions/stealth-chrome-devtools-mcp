@@ -377,11 +377,20 @@ both bit on the first attempt:
 
 **Green**: `tests/test_cli.py` + `tests/test_persistent_profile_risk.py`
 **44/44**, and the WHOLE non-integration suite at this revision —
-**3639 passed, 1 skipped, 290 deselected** (`-m "not integration"`, 481 s,
-exit 0). The whole suite rather than a named subset because this revision edits
-a doc fence as well as code, and `test_doc_examples.py` screens those: a subset
-chosen by the author of the change is a subset that can miss the file the
-change broke.
+**3711 passed, 1 skipped, 290 deselected**
+(`-m "not integration"`, 492.73 s, exit 0). The whole suite rather than a named
+subset because this revision edits a doc fence as well as code, and
+`test_doc_examples.py` screens those: a subset chosen by the author of the
+change is a subset that can miss the file the change broke.
+
+Measured AFTER merging 2.1.13 (`fe5cef6`), not before: this branch's own lane
+was green on both trees, but a suite count taken before a merge describes a
+revision nobody will ever run. The merge also re-checked the claims these
+artefacts MAKE — every product symbol named by the module docstring, §3.1 and
+the two CLAUDE.md rows still resolves, `process_cleanup.py:349-355` is still
+the recorded-pid fallback §6.7 cites, and `clone_storage` still imports the
+process-cleanup SINGLETON, which is the one import §5 says the hermeticity of
+every `test_cli.py` node here depends on.
 
 **Gates**: `ruff format --check`, `ruff check`, `ty check
 --exit-zero-on-warning src/`, `vulture`, `check_suppression_owners.py`,

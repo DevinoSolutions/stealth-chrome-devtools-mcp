@@ -88,7 +88,15 @@ def test_get_settings_is_cached():
 # its contents — not the defaults — are what they would measure. CI never has
 # one. ``test_the_env_file_is_our_state_dir_never_the_cwd`` carries the fix
 # unconditionally, so a revert is caught even where these two cannot run.
-_STATE_ENV_FILE = Path.home() / ".stealth-mcp" / ".env"
+# The file ``Settings`` is ACTUALLY configured to read, which since F-903 is the
+# fence's ``.env`` rather than the operator's: the suite-wide fence redirects
+# ``model_config["env_file"]`` too, because pydantic copies the path's VALUE into
+# the config when the class body runs, and a hermetic run that absorbed the
+# operator's own knobs is the same isolation defect as writing their record --
+# with ``extra="forbid"`` turning one stale key of theirs into a suite-wide
+# crash. Read from the config rather than recomputed from ``Path.home()`` so
+# this and the fence cannot disagree about which file is in play.
+_STATE_ENV_FILE = Path(Settings.model_config["env_file"])
 _needs_no_operator_config = pytest.mark.skipif(
     _STATE_ENV_FILE.exists(),
     reason=f"{_STATE_ENV_FILE} exists: its values, not the defaults, would be read",
@@ -96,10 +104,21 @@ _needs_no_operator_config = pytest.mark.skipif(
 
 
 def test_the_env_file_is_our_state_dir_never_the_cwd():
-    """The one line that fixes all three collisions: read OUR file, not theirs."""
+    """The one line that fixes all three collisions: read OUR file, not theirs.
+
+    Asserted against ``backend_registry.STATE_DIR`` -- THE definition of the
+    state dir -- rather than ``Path.home()``. The claim here is that the path is
+    ABSOLUTE and lives in our state dir, i.e. never the host project's cwd
+    (issues #55/#56); where the state dir itself is, is ``backend_registry``'s
+    claim, and under F-903's fence it is a tmp dir for the duration of a run.
+    A ``Path.home()`` spelling here would be a second answer to that question
+    and would fail for a reason that has nothing to do with #55/#56.
+    """
+    from stealth_chrome_devtools_mcp.embedded import backend_registry
+
     configured = Settings.model_config["env_file"]
     assert Path(configured).is_absolute(), configured
-    assert Path(configured) == _STATE_ENV_FILE
+    assert Path(configured) == backend_registry.STATE_DIR / ".env"
 
 
 @_needs_no_operator_config

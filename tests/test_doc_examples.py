@@ -364,7 +364,12 @@ class TestStaticScreen:
             ("stealth-chrome-devtools serve --http", "does not return"),
             ("stealth-chrome-devtools cleanup --apply", "mutates state"),
             ("stealth-chrome-devtools kill-orphans", "does not return"),
-            ("stealth-chrome-devtools-mcp --list-sections", "blocks on stdin"),
+            # The BARE launcher, deliberately. This example used to be
+            # `--list-sections`, whose stated reason stopped being true when
+            # F-905 routed every answer-and-exit flag to the backend's parser;
+            # the screen is keyed on the EXECUTABLE and still refuses it, so
+            # what changed is only which example tells the truth about itself.
+            ("stealth-chrome-devtools-mcp", "blocks on stdin"),
             ("stealth-chrome-devtools status --interactive", "waits for a human"),
             ("stealth-chrome-devtools cleanup C:/stealth", "absolute path"),
             ("stealth-chrome-devtools cleanup ../../etc", "escapes the throwaway"),
