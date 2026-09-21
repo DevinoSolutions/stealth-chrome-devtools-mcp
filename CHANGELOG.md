@@ -578,6 +578,53 @@ out of nothing.
 Known gaps and the one defect these pins caught in the fix itself are in
 `audit/stage2/finding_F910_cookie_lost_on_close.md` §5.1 and §7.
 
+### Fixed — F-919: a failed spawn no longer reaps a sibling spawn's browser
+
+A spawn that fails after Chrome launched reaps what it left running (F-860), and
+it used to decide what that was from a **start time**: everything on the
+attempt's `--user-data-dir` that started within one second of it. Concurrent
+unnamed spawns all select the shared profile by design (F-834), so when one
+loses Chrome's process singleton and fails **because** the other holds it — the
+exact case that reap promised to spare — the winner's Chrome was inside the
+loser's window and was terminated. On the shared profile that browser is the one
+the operator is logged into, and the kill arrives from another call's failure
+handler, so nothing in the surviving caller's answer says it happened.
+
+Measured on this machine: two concurrent `spawn_browser` calls stamp their
+launches **9.9-86.4 ms apart** (10 rounds through the real orchestrator), and
+the shipped fence terminates the sibling at **every** one of those separations —
+driven directly against the code as it shipped, which logs the winner as a leak
+while killing it. It spares the sibling only past 1001 ms.
+
+**Shrinking the window was rejected and the arithmetic is why.** The tolerance
+exists to absorb the kernel's rounding of a process start time, which its own
+comment puts at 10 ms on Linux and ~16 ms on Windows; sparing the sibling needs
+it below 9.9 ms. No value does both — the two quantities are the same size — so
+a smaller window is the same guess with a smaller blast radius.
+
+The fence is an **identity** now. `spawn_leak.Attempt` is a handle the
+orchestrator creates before the fallible launch and passes **into**
+`_launch_browser`, which stamps the `uc.Config` object it built onto it before
+awaiting `uc.start` — passed in rather than returned, because the moment it is
+needed is the moment that call raised. `spawn_leak.launched_pid` then reads the
+pid off the `Browser` nodriver registered for that exact object (identity, never
+a field match: two concurrent spawns build configs equal in every field),
+through `process_exit.browser_pid`, which already owns "which member of the tree
+is the browser" and refuses a handle asyncio has already collected — a stronger
+recycled-pid guard than a stored `(pid, create_time)` pair, because an
+uncollected child's pid cannot be reissued at all. `_CLOCK_TOLERANCE_SECONDS`
+and `_started_after` are deleted.
+
+**What it costs is stated rather than implied.** A Chrome that genuinely leaked
+but whose launch cannot be named is left RUNNING until the next backend start's
+orphan reap. That is the direction `profile_lock` and F-886/F-888 all chose, and
+the alternative is killing a process on a guess, which is this defect. The
+finding's §6 enumerates every path that declines and why none of them is known
+to leave a real process behind today.
+
+`audit/stage2/finding_F919_spawn_leak_fence_reaps_a_sibling.md` has the
+measurements, the run against the shipped code, and the open items.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in

@@ -237,7 +237,7 @@ def doomed_manager(monkeypatch, pid_file):
     table is never consulted here — these pin the WIRING, not the measurement.
     """
 
-    async def failing_launch(self, options, browser_executable, launch_args):
+    async def failing_launch(self, options, browser_executable, launch_args, attempt):
         raise RuntimeError(INNER_FAILURE)
 
     monkeypatch.setattr(

@@ -124,10 +124,20 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # lives — one home for "end this browser's process", rather than a wait in
     # one file and the kill it gates in another. Caps ratchet DOWN only; this
     # one is the merged file measured, as every number in this row has been.
+    # F-919 RATCHETS this row 1452 -> 1447. A failed spawn's reap is fenced on
+    # the pid nodriver launched now, not on a one-second start-time window that
+    # a concurrent sibling's Chrome fell inside 11x over. What this file gained
+    # is the handle that carries the identity across the fallible await —
+    # `spawn_leak.Attempt`, stamped inside `_launch_browser` and held by the
+    # orchestrator, because a value RETURNED from that call goes with the
+    # exception. The row had zero headroom, so the six lines were paid for by
+    # collapsing `start_idle_reaper`'s and `stop_idle_reaper`'s `Returns: None`
+    # blocks, which restated `-> None` twice over (the plan_F856 mechanism).
+    # Cap == actual.
     "embedded/browser_manager.py": (
-        1452,
+        1447,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
-        " + F-882 + F-888 + F-834b - F-910",
+        " + F-882 + F-888 + F-834b - F-910 - F-919",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
