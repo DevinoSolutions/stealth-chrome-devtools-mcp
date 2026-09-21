@@ -803,9 +803,10 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
     # because only anchoring turns a name into a directory.
     landed = require_allowed_user_data_dir(user_data_dir)
     # F-897: refused BEFORE the walk, because `--from` is about the session the
-    # caller NAMED. A target that is held is walked to `<name>-2`, which does
-    # not exist — so asking afterwards would seed a substitute directory under
-    # a flag the caller passed about theirs.
+    # caller NAMED. A held target that we DRIVE is walked to `<name>-2`, which
+    # does not exist — so asking afterwards would seed a substitute directory
+    # under a flag the caller passed about theirs; one we do not drive is
+    # refused below, and asking afterwards would never be reached at all.
     # `driven` is INERT here — `check_source=False` gates its only reader — and
     # is passed for symmetry, so a future True cannot fail closed (review S5).
     seed_from = require_allowed_seed_from(

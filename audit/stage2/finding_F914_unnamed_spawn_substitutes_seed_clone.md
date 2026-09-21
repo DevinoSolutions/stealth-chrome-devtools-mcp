@@ -126,6 +126,18 @@ the substitution, not the staleness; `seed_changed_since` already reports it and
 `close_instance` refreshes on close (F-910). A per-session seed was considered
 and declined in F-898 §10.1 for reasons that have not changed.
 
+**RESIDUAL — the `stealthy close <instance>` remedy is unactionable for exactly
+the browser these refusals are about, at TWO sites.** The refusal fires because
+the holder is a browser this backend does NOT drive, so it has no instance id
+here and `stealthy close <instance>` has nothing to name; the operator has to
+close that window themselves, which the sentence does not say. The two sites are
+`profile_target.hand_over_or_refuse` (F-914/F-915, the TARGET side) and
+`profile_source.seed_source` (shipped since F-897, the SOURCE side) — they
+phrase the same remedy the same way and are named together deliberately, because
+fixing one of the two would leave the tree less consistent than leaving both.
+Not fixed here: the right wording is a question about what an operator can act
+on across both surfaces, and it is not this finding's.
+
 **`profile_target` and `clone_trash` are new files and both are forced moves.**
 `clone_storage.py` stood at 993 of a 1000-LOC budget that ratchets DOWN only, so
 the rule went to its own home (which it deserved: it is a policy, where

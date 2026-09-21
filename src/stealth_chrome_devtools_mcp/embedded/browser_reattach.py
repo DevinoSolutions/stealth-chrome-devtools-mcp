@@ -513,9 +513,9 @@ class Held:
     """What the spawn path's re-attach question answered.
 
     Two fields, because "it was not taken" is not the same statement as "there
-    was nothing to take": a spawn that walks to ``<name>-2`` while a live browser
-    holds the directory the caller named owes that caller a reason, and a silent
-    None is exactly the walk F-871 made visible.
+    was nothing to take": a spawn that meets a live browser on the directory the
+    caller named owes that caller a reason — since F-915 the refusal carries
+    this text, and a silent None would leave that refusal unexplained.
     """
 
     instance_id: str | None = None
@@ -533,10 +533,10 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
 ) -> Held:
     """Re-attach to the live Chrome holding *user_data_dir*, or say why not.
 
-    The spawn path's one question, asked BEFORE profile selection because the
-    alternative answer is F-871's walk to ``<name>-2`` — a different directory,
-    a different profile and a logged-out one, which for a human's Seller Central
-    session is the loss this finding exists to stop.
+    The spawn path's one question, asked BEFORE profile selection because that
+    is where a held directory is settled: since F-915 a holder we cannot reach
+    is REFUSED and one we drive is copied with its jar handed over, and F-871's
+    silent walk to a logged-out ``<name>-2`` is what both of those replaced.
 
     **A failure here never reaps.** That is the one place this differs from
     :func:`run`, and the difference is the caller's intent: `run` is startup
@@ -615,8 +615,8 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
                 "held",
                 f"A live browser holds the requested profile on port "
                 f"{candidate.port} but could not be re-attached to "
-                f"({type(exc).__name__}); spawning instead, which will select a "
-                f"different directory.",
+                f"({type(exc).__name__}); it was left running and untouched, "
+                f"and since F-915 a held session we cannot reach is REFUSED.",
                 error=exc,
             )
             return Held(

@@ -93,29 +93,68 @@ def hand_over_or_refuse(
         "Nothing was created. Close that browser (`stealthy close "
         "<instance>`) and spawn again to get that session, or pass "
         "session=<a free name> (--session NAME from the CLI) for a NEW "
-        "session of your own — a fresh copy of the seed, holding none of "
-        f"{name!r}'s logins."
+        f"session of your own — {_fresh_session_holds(name)}."
     )
+
+
+def _fresh_session_holds(name: str) -> str:
+    """What the escape hatch in the refusal above actually hands back.
+
+    The one clause that cannot be shared, as DATA rather than a second message
+    (``profile_seed.require_name``'s precedent): every new session is a copy of
+    the SEED, and the seed is the shared session's own copyable form —
+    ``profile_seed.seed_name`` answers ``default`` for the shared directory and
+    for the snapshot alike. So for a NAMED holder the copy carries none of that
+    holder's logins, which is worth saying; for the SHARED one it carries
+    exactly those logins, as of the last time that browser was closed, because
+    the seed is refreshed only while it is closed
+    (``clone_storage._refresh_master_snapshot_if_safe``). The shipped sentence
+    said "holding none of X's logins" in both branches, so in the machine state
+    that is normal for the owner — their own Chrome on the shared session — it
+    told them the one remaining way forward loses the logins it in fact keeps.
+    """
+    if name == profile_seed.DEFAULT_SESSION:
+        return (
+            "a fresh copy of the seed — which is that session in copyable "
+            "form, so its logins come too, as of the last time that browser "
+            "was closed"
+        )
+    return f"a fresh copy of the seed, holding none of the logins in {name!r}"
 
 
 def still_driven_source(
     recorded: object,
     driven: Callable[[Path], bool],
 ) -> Path | None:
-    """The hand-off a PREVIOUS spawn attempt was making, carried onto the retry
-    — or dropped, because whether that source is still ours is a fact with a
-    lifetime and a retry sits on the far side of a whole browser launch.
+    """The hand-off a PREVIOUS spawn attempt was making, carried onto the retry.
 
     Carried at all because the alternative is this finding one spawn failure
     later: the retry copies from the seed again and nothing asks for the jar
-    that made the first attempt's session correct. Dropped rather than trusted
-    because a source that closed in the meantime has no connection left to read
-    through, and the hand-off would then report a FAILURE for a session that
-    never had one to make.
+    that made the first attempt's session correct.
+
+    **The ``driven`` re-ask is fail-closed insurance and nothing production can
+    reach — this docstring claimed otherwise and was wrong.** It is one
+    ``cookie_handoff.Driven`` per spawn: an immutable snapshot taken once in
+    ``spawn_browser`` and handed unchanged to the first selection and to every
+    fallback, and ``clone_storage.LIVE_SEED_KEY`` is only ever stamped on a
+    path that same object has already said yes about. So the re-ask answers
+    True for every value it can be handed, and a source that CLOSED in the
+    meantime is not what it drops.
+
+    Which means the fact with a lifetime is settled where it is actually
+    observed, one whole browser launch later:
+    ``tool_sections.browser_management._seed_cookies_over_cdp`` re-derives a
+    FRESH snapshot at the moment of use, and a source that stopped being ours
+    becomes ``seeded_via: "copy"`` plus ``cookie_handoff_error`` rather than a
+    failed spawn — deliberate, and pinned in ``tests/test_cookie_handoff.py``
+    (``TestEveryReasonAHandOffCanReport``). Re-deciding it here would be a
+    second answer to that question against a staler witness.
 
     *recorded* is whatever the previous selection carried under
     ``clone_storage.LIVE_SEED_KEY`` — that key stays there, with the selection
-    dict it belongs to, so this module never learns that dict's shape.
+    dict it belongs to, so this module never learns that dict's shape. A
+    previous attempt with no hand-off carries none onto the retry, which is the
+    branch that does the work.
     """
     if not isinstance(recorded, str) or not recorded:
         return None

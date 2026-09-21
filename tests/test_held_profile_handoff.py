@@ -343,21 +343,36 @@ class TestTheRetryDoor:
 
         assert selection[clone_storage.LIVE_SEED_KEY] == str(master)
 
-    async def test_a_retry_drops_a_hand_over_whose_source_closed(
+    async def test_a_retry_with_no_hand_over_does_not_invent_one(
         self, tmp_session_root
     ):
-        """Whether the source is still ours is a fact with a lifetime, and the
-        retry is on the far side of a whole browser launch."""
+        """The other half of ``still_driven_source``, and the reachable one: an
+        attempt that was making no hand-off must not acquire one on the retry.
+
+        This node replaces a pin that drove ``_fallback_profile_selection``
+        with no ``driven=`` at all to watch a closed source be dropped. That
+        call shape does not exist in production — ``spawn_browser`` takes ONE
+        immutable ``cookie_handoff.Driven`` and hands it to the first selection
+        and to every fallback, and ``LIVE_SEED_KEY`` is only stamped on a path
+        that same object already approved — so the drop it asserted cannot
+        happen, and the node passed against the unfixed product. Where a source
+        that stopped being ours IS observed is one browser launch later, in
+        ``_seed_cookies_over_cdp``, pinned in ``tests/test_cookie_handoff.py``
+        (``TestEveryReasonAHandOffCanReport``).
+        """
+        other = tmp_session_root["sessions"] / "elsewhere"
         previous = {
             "user_data_dir": str(tmp_session_root["sessions"] / "gone"),
             "profile_role": "clone",
             "clone_source": "default-seed",
-            clone_storage.LIVE_SEED_KEY: str(tmp_session_root["master"]),
         }
 
-        selection = await clone_storage._fallback_profile_selection(previous, 0)
+        selection = await clone_storage._fallback_profile_selection(
+            previous, 0, driven=_driving(other)
+        )
 
         assert clone_storage.LIVE_SEED_KEY not in selection
+        assert clone_storage.HANDED_OVER_KEY not in selection
 
 
 # ---------------------------------------------------------------------------
