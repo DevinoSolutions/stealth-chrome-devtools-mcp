@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.13
 
 ### Added — F-897: a new session can start from an existing one
 
