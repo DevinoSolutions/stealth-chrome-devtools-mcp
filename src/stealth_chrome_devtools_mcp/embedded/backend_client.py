@@ -33,6 +33,14 @@ measured on the 2026-09-19 prototype that this feature replaces:
   others is left intact.
 * text content as the fallback, parsed as JSON when it is JSON.
 
+**One of the two things here is not about calling a tool**: :func:`http_client`
+is THE transport seam for everything in this tree that opens an MCP session over
+HTTP, and since F-900 that includes the stdio proxy's BRIDGE, which is not a
+call at all. The bridge does not use :func:`opened` — it is a transparent pipe
+and owns its own streams — but it must not build a second httpx client, so it
+asks this seam with :data:`BRIDGE_READ_TIMEOUT`. Everything else in this module
+stays the CLI's.
+
 A leaf: the ``mcp`` SDK, ``httpx`` and stdlib, all imported lazily inside the
 functions that need them (``backend_probe``'s reason — an ops verb that never
 talks to a backend must not pay for the client). The URL arrives as an argument,
@@ -71,6 +79,30 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 #: ``--timeout`` would make a 300 s tool call wait 300 s to find out the socket
 #: is gone.
 CONNECT_TIMEOUT_SECONDS = 30.0
+
+#: The read clock for the STDIO PROXY'S BRIDGE, which is this seam's second
+#: consumer (F-900) — and it is ``None``, meaning no read deadline at all.
+#:
+#: A bridge is not a call. It holds a standing GET event stream for the life of
+#: a Claude Code session, and the backend has nothing to send on that stream
+#: while the session is quiet — ``mcp.server.streamable_http`` emits no SSE
+#: keepalive. So ANY read deadline is a deadline on being IDLE. Measured: at the
+#: SDK defaults the bridge inherited (``read=300``), the stream times out, and
+#: ``handle_get_stream`` retries it ``MAX_RECONNECTION_ATTEMPTS`` (2) times and
+#: then RETURNS — at DEBUG, telling the client nothing. After ~601 s of quiet a
+#: live proxy holds no event stream, which is precisely the discriminator
+#: :mod:`session_hygiene` uses to decide a session was ABANDONED (F-862), whose
+#: docstring promises "a live proxy — even one idle for hours — is never
+#: touched". A finite-but-larger number only moves that clock; ``None`` removes
+#: it.
+#:
+#: What bounds the bridge instead is what already did: the F-820 watchdog
+#: decides the backend is dead and ``proxy_selfheal`` heals, and an individual
+#: tool call is bounded by ``tool_runtime._clamp_timeout`` + ``_with_cdp_
+#: timeout`` at the tool body. A transport read timeout would be a SECOND answer
+#: to "is the backend still there" — and it answers wrong, because an idle
+#: session is not a dead backend.
+BRIDGE_READ_TIMEOUT: float | None = None
 
 
 class BackendCallError(Exception):
@@ -126,9 +158,9 @@ def _failure_message(name: str, structured: object, texts: list[str]) -> str:
     return f"{name} failed and said nothing about why"
 
 
-def http_client(budget_seconds: float) -> httpx.AsyncClient:
-    """THE one transport this module's sessions ride on, and the ONE seam a test
-    replaces to drive the real SDK against a fake server.
+def http_client(read_seconds: float | None) -> httpx.AsyncClient:
+    """THE one transport every session in this tree rides on, and the ONE seam a
+    test replaces to drive the real SDK against a fake server.
 
     It is a named module function rather than an inline constructor for the
     reason ``scroll_position._now``/``_sleep`` are: the thing worth substituting
@@ -136,19 +168,29 @@ def http_client(budget_seconds: float) -> httpx.AsyncClient:
     would be pinning a double instead of the SDK.
 
     The two clocks are the whole of what is decided here, and they are two
-    because ``httpx.Timeout(connect_and_write, read=…)`` is two. The caller's
-    budget lands on ``read`` — the clock a tool call actually waits under —
-    while connecting keeps :data:`CONNECT_TIMEOUT_SECONDS`, so a backend whose
-    socket is gone is reported in seconds rather than at the end of a 180 s tool
-    budget. ``follow_redirects=True`` is the MCP default (``create_mcp_http_
-    client``) and is kept so nothing about this transport is narrower than the
-    one the SDK would have built.
+    because ``httpx.Timeout(connect_and_write, read=…)`` is two. Connecting
+    always keeps :data:`CONNECT_TIMEOUT_SECONDS`, so a backend whose socket is
+    gone is reported in seconds rather than at the end of a long read budget.
+    ``follow_redirects=True`` is the MCP default (``create_mcp_http_client``)
+    and is kept so nothing about this transport is narrower than the one the SDK
+    would have built.
+
+    **``read_seconds`` and not ``budget_seconds``, because there are now two
+    consumers and only one of them has a budget** (F-900). A CLI verb passes the
+    per-call budget a human is waiting on; the stdio proxy's bridge passes
+    :data:`BRIDGE_READ_TIMEOUT`, which is ``None`` — the argument for that is at
+    the constant. Extending this function rather than adding a second one is
+    convention 4 read literally: a second constructor would be a second place
+    the connect clock, ``follow_redirects`` and the client's construction are
+    decided, which is the drift this seam exists to prevent. ``None`` is not a
+    new concept here either — it is httpx's own spelling of "no deadline" on the
+    same clock this parameter has always set.
     """
     import httpx
 
     return httpx.AsyncClient(
         follow_redirects=True,
-        timeout=httpx.Timeout(CONNECT_TIMEOUT_SECONDS, read=budget_seconds),
+        timeout=httpx.Timeout(CONNECT_TIMEOUT_SECONDS, read=read_seconds),
     )
 
 

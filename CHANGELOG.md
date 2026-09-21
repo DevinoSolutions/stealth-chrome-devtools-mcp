@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — F-900: the proxy bridge's inherited read timeout silently dropped its event stream
+
+The stdio proxy's bridge opened `streamablehttp_client(url)` — the mcp SDK's
+deprecated client, with no arguments — so it inherited
+`Timeout(connect=30, read=300, ...)`. A `read` deadline is a deadline on being
+IDLE: the standing GET event stream carries nothing while a session is quiet and
+the backend sends no SSE keepalive, so the stream timed out, was retried the
+SDK's two times, and was then abandoned for good at DEBUG after ~601 s of quiet.
+That is exactly the discriminator F-862's session sweep uses to decide a client
+has gone, whose docstring promises a live proxy idle for hours is never touched —
+so a healthy idle session was eventually reaped, surfacing as a 404 and a
+re-bridge on the next tool call.
+
+The bridge now uses `streamable_http_client` (no more `DeprecationWarning` from
+our own call sites, pinned by AST) through `backend_client.http_client`, the one
+transport seam, with `BRIDGE_READ_TIMEOUT = None`. What bounds a bridge is left
+where it already lives: the F-820 watchdog, `proxy_selfheal`, and each tool
+call's own CDP budget. Measured against a real loopback socket: a bounded read
+opens the stream twice and then loses it; the new policy holds one.
+
 ## 2.1.11
 
 ### Fixed — F-892: the snapshot staleness witness stated a file Chrome stopped writing in v96
