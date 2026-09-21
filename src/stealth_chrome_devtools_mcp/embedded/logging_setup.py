@@ -186,9 +186,21 @@ def apply_payload_log_floor() -> None:
 #:
 #: ``element.py``:537/:624/:633 log ``"could not calculate box model for %s"``
 #: with a live ``Element`` at **WARNING** — above :data:`PAYLOAD_LOG_FLOOR`, so
-#: F-906's level does not reach it, and ``dom_handler.click_element`` walks into
-#: the first of those three for any element with no box model, which is exactly
-#: the ``display: none`` case its own synthetic fallback exists for.
+#: F-906's level does not reach it, and no handler of anyone's is needed for
+#: such a record to land: production root carries none and ``logging.lastResort``
+#: (an ``_StderrHandler`` at WARNING) carries it to stderr, which for the backend
+#: IS ``backend-boot.log``.
+#:
+#: Those three sites are NOT reachable in nodriver 0.47 — measured, and it moves
+#: this finding's severity DOWN rather than up. ``Position.center`` is a
+#: non-empty 2-tuple and therefore always truthy, even for a zero-size box at the
+#: origin, so ``if not center:`` cannot open; the other two ways out of
+#: ``get_position()`` (``element.py``:499's raised ``Exception`` and the
+#: ``except IndexError`` branch's ``None``) both leave ``mouse_click`` before the
+#: warning line. This is therefore insurance, plus correctness for any FUTURE
+#: nodriver WARNING that renders an object, and the reachability premises are
+#: pinned so a bump that makes them live is a RED test rather than a Sentry
+#: event.
 #:
 #: Named as a PACKAGE and matched against ``type(arg).__module__`` rather than
 #: with ``isinstance``, because resolving the class needs ``import nodriver``
@@ -285,6 +297,37 @@ def _shape(value: object) -> str:
     return f"<{_clamped(tag)} attrs=[{', '.join(shown)}]{counted}>"
 
 
+def _carries_payload(value: object) -> bool:
+    """Is THIS argument one whose rendering can carry a page's own content?
+
+    Two clauses, and the order is the argument. An **exception is never one**,
+    whatever package defined it: its ``str()`` is a diagnostic about a failure,
+    and the one site that logs one — ``connection.py``:483, nodriver's only
+    genuine WARNING — passes ``exc_info=True`` beside it, so every sink that
+    formats a traceback renders that text ANYWAY. Redacting the ``%s`` while
+    ``exc_info`` carries it through withholds nothing and costs the Sentry
+    breadcrumb its whole diagnostic: measured, a
+    ``nodriver.core.connection.ProtocolException`` — the commonest thing a
+    CDP-touching event handler raises, and a nodriver TYPE — rendered as
+    ``<nodriver.core.connection.ProtocolException>``, losing Chrome's own
+    ``Inspected target navigated [code: -32000]``.
+
+    Otherwise it is the argument's package, matched on ``type(value).__module__``
+    and never with ``isinstance``, for :data:`PAYLOAD_ARG_PACKAGE`'s reason.
+
+    Read of the ARGUMENT alone and never of ``record.name``: whether a rendering
+    carries page content is a property of the object, not of the logger someone
+    passed it to. A gate on the logger's package left a ``stealth.*`` record
+    carrying an ``Element`` leaking (measured), which is the one shape the rule
+    exists for, in exchange for skipping a loop over arguments no record of ours
+    has — and it made this module's stated key false in the navigation map,
+    which is how the next change to it would go wrong.
+    """
+    if isinstance(value, BaseException):
+        return False
+    return type(value).__module__.partition(".")[0] == PAYLOAD_ARG_PACKAGE
+
+
 def _redacted(args: tuple[object, ...]) -> tuple[object, ...]:
     """Replace every payload-carrying argument with its shape.
 
@@ -297,12 +340,13 @@ def _redacted(args: tuple[object, ...]) -> tuple[object, ...]:
     INFO payload lines never reach this function, and the two findings compose
     exactly along that line.
     """
-    return tuple(
-        _shape(arg)
-        if type(arg).__module__.partition(".")[0] == PAYLOAD_ARG_PACKAGE
-        else arg
-        for arg in args
-    )
+    # The scan is separate from the rewrite so the overwhelmingly common record
+    # -- every one in the process that carries no nodriver object -- gets its
+    # OWN tuple back rather than an equal copy, which is what lets a pin assert
+    # IDENTITY: a stronger statement of "untouched" than equality is.
+    if not any(_carries_payload(arg) for arg in args):
+        return args
+    return tuple(_shape(arg) if _carries_payload(arg) else arg for arg in args)
 
 
 def install_payload_arg_redaction() -> None:
@@ -318,7 +362,10 @@ def install_payload_arg_redaction() -> None:
     handler — hence stderr, hence ``backend-boot.log``, a durable file — and all
     of them reached Sentry as breadcrumbs on the next event, because
     ``LoggingIntegration``'s breadcrumb handler sits at INFO and these are
-    WARNINGs.
+    WARNINGs. And with **no handler anywhere**, which is the shipped shape,
+    ``logging.lastResort`` carries it to stderr regardless. Whether those three
+    nodriver lines can FIRE is a separate question with a separate answer —
+    see :data:`PAYLOAD_ARG_PACKAGE`.
 
     **Why a record FACTORY and not a ``logging.Filter``.** Both were measured.
     ``Logger.handle`` consults only the filters of the logger the call was made
@@ -347,10 +394,16 @@ def install_payload_arg_redaction() -> None:
     ``observability`` would be a second home for one decision (convention 4)
     that could only ever matter if this one were removed.
 
-    Keyed on the argument's TYPE and never on the message text, so a nodriver
-    release is free to reword these lines. Its cost is one package test per
-    argument of every record in the process — measured at ~370 ns per record,
-    against ~1.5 us to build the record itself.
+    Keyed on the ARGUMENT's type — never on the message text, so a nodriver
+    release is free to reword these lines, and never on ``record.name``, because
+    whether a rendering carries page content is a property of the object rather
+    than of the logger it was passed to (see :func:`_carries_payload`).
+
+    **Cost, measured** (min of 7 x 200 000, against ~1.7 us to build a record):
+    ~350 ns for the chained factory CALL itself, paid by every record in the
+    process, plus ~80 ns per argument for the scan. Reading the argument rather
+    than the logger name is that per-argument half only — the 350 ns is the
+    price of installing any factory at all.
 
     Called from :func:`configure_logging` beside
     :func:`apply_payload_log_floor`, ahead of the idempotency guard and of
@@ -371,11 +424,11 @@ def install_payload_arg_redaction() -> None:
         # `record.args` is a TUPLE unless the caller passed a single mapping,
         # logging's own `%(name)s` special case -- which no measured nodriver
         # line uses, and which we leave alone rather than guess a rewrite for.
-        if (
-            isinstance(record.args, tuple)
-            and record.args
-            and record.name.partition(".")[0] == PAYLOAD_ARG_PACKAGE
-        ):
+        #
+        # Deliberately NOT gated on `record.name`: `_carries_payload` asks about
+        # the ARGUMENT, so one of our own records carrying a nodriver object is
+        # redacted exactly as nodriver's own is. See that function.
+        if isinstance(record.args, tuple) and record.args:
             record.args = _redacted(record.args)
         return record
 

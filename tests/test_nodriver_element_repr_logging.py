@@ -6,11 +6,18 @@ argument, at **WARNING** — above F-906's floor, so the floor does not touch it
 ``Element.__repr__`` renders the element's tag, **every attribute as
 ``name="value"``, and the element's whole recursive TEXT CONTENT** (measured on
 the installed nodriver 0.47.0 — the text half is not in F-906's residual note,
-which said "tag and attributes"). A password field's ``value=``, a
-``data-*`` bearing a session token and a balance in a ``<div>`` all ride in it,
-and `dom_handler.click_element` reaches the first of those three lines for any
-element with no box model — which is exactly the ``display: none`` case its own
-synthetic fallback exists for.
+which said "tag and attributes"). A password field's ``value=``, a ``data-*``
+bearing a session token and a balance in a ``<div>`` all ride in it, and such a
+record needs no handler of anyone's to land: production root carries none, so
+``logging.lastResort`` takes it to stderr, which for the backend IS
+``backend-boot.log``.
+
+Whether those three lines can FIRE is a separate question with its own answer,
+and :class:`TestReachability` is that answer: in nodriver 0.47 they cannot.
+``Position.center`` is a non-empty 2-tuple and so always truthy, and the other
+two ways out of ``get_position()`` leave ``mouse_click`` first. Those nodes are
+PREMISES — the day a nodriver bump makes the sites live, they go RED and this
+finding's severity claim is corrected in CI rather than in Sentry.
 
 These pins drive the REAL collaborators for F-906's reason — the stdlib's own
 record machinery, a real ``LoggingIntegration`` and a real
@@ -45,6 +52,7 @@ from pathlib import Path
 import pytest
 import sentry_sdk
 from nodriver import cdp
+from nodriver.core.connection import ProtocolException
 from nodriver.core.element import Element
 from sentry_sdk.integrations.logging import LoggingIntegration
 
@@ -115,6 +123,18 @@ def make_element() -> Element:
         }
     )
     return Element(node, tab=None)
+
+
+def raise_protocol_exception() -> None:
+    """A real ``ProtocolException`` from nodriver's own constructor, RAISED.
+
+    ``connection.py``:483 logs from inside its own ``except`` and passes
+    ``exc_info=True``, and that is half the argument for never shaping an
+    exception — so the pin raises for real rather than building one on a line.
+    """
+    raise ProtocolException(
+        {"message": "Inspected target navigated or closed", "code": -32000}
+    )
 
 
 class _TabLike:
@@ -524,19 +544,48 @@ class TestUntouched:
 
     def test_nodrivers_real_warning_passes_unchanged(self):
         """``connection.py``:483 names the callback, the event CLASS and the
-        exception — MEASURED: all three args are builtins, so the rule that
-        redacts the leak costs nodriver's real diagnostic nothing."""
+        exception the CALLBACK raised — so the third argument's type is the
+        caller's, never the library's, and a claim that "all three are builtins"
+        could not be measured once.
+
+        The exception here is a real ``nodriver.core.connection.
+        ProtocolException`` built by nodriver's own constructor — a nodriver
+        TYPE, and the commonest thing a CDP-touching handler raises. Under a
+        package-only rule it rendered as
+        ``<nodriver.core.connection.ProtocolException>`` and Chrome's own
+        diagnostic vanished from the Sentry breadcrumb. ``ValueError("boom")``
+        was the previous argument here and it is the ONE class that makes the
+        old claim true, i.e. a pin that encoded it instead of testing it.
+        """
         logging_setup.install_payload_arg_redaction()
         sink = self._capture()
-        logging.getLogger(CONN_LOGGER).warning(
-            "exception in callback %s for event %s => %s",
-            "a_callback",
-            "TargetInfoChanged",
-            ValueError("boom"),
-        )
+        try:
+            raise_protocol_exception()
+        except ProtocolException as exc:
+            assert type(exc).__module__.partition(".")[0] == "nodriver", (
+                "premise: the exception under test must be a NODRIVER type, or "
+                "this pin measures the rule against something it never gated"
+            )
+            logging.getLogger(CONN_LOGGER).warning(
+                "exception in callback %s for event %s => %s",
+                "a_callback",
+                "TargetInfoChanged",
+                exc,
+                exc_info=True,
+            )
         assert "a_callback" in sink.text
         assert "TargetInfoChanged" in sink.text
-        assert "boom" in sink.text
+        assert "Inspected target navigated or closed" in sink.text
+        assert "[code: -32000]" in sink.text
+
+    def test_a_nodriver_exception_is_never_shaped(self):
+        """An exception is a DIAGNOSTIC, not page content, whatever package
+        defined it — and at the one site that logs one, ``exc_info=True`` rides
+        beside it, so every sink that formats a traceback renders the text
+        anyway. Shaping the ``%s`` would withhold nothing and cost the Sentry
+        breadcrumb its whole meaning."""
+        assert logging_setup._carries_payload(ProtocolException("plain")) is False
+        assert logging_setup._carries_payload(make_element()) is True
 
     def test_websockets_warnings_pass_unchanged(self):
         """MEASURED across websockets 16.0: every WARNING+ site there is a
@@ -551,15 +600,45 @@ class TestUntouched:
         )
         assert "ConnectionResetError" in sink.text
 
-    def test_our_own_records_pass_unchanged(self):
-        """The rule is keyed on the record's LOGGER package, so a
-        ``stealth.*`` record carrying a nodriver object is untouched — our own
-        sites own their own PII discipline (F-869/F-873/F-876) and a blanket
-        rewrite here would be a second, invisible answer to it."""
+    def test_our_own_records_with_ordinary_args_pass_unchanged(self):
+        """The rule reads the ARGUMENT, so one of our own records whose
+        arguments are ordinary is byte-identical — which is the claim that
+        matters for every record in the process."""
+        logging_setup.install_payload_arg_redaction()
+        sink = self._capture()
+        logging.getLogger("stealth.backend").warning(
+            "plain %s and %d", "x", 3, exc_info=False
+        )
+        assert sink.text.strip().endswith("plain x and 3")
+
+    def test_untouched_args_keep_their_identity_not_merely_their_value(self):
+        """The scan is separate from the rewrite, so a record carrying nothing
+        payload-shaped gets its own tuple back. Identity is a stronger
+        statement of "untouched" than equality, and it is what makes the cost
+        claim checkable: no copy is built for the overwhelmingly common record.
+        """
+        logging_setup.install_payload_arg_redaction()
+        args = ("x", 3, ValueError("boom"))
+        assert logging_setup._redacted(args) is args
+
+    def test_our_own_record_carrying_an_element_is_redacted(self):
+        """The inverse of what shipped first, and the reason is one sentence:
+        whether a rendering carries page content is a property of the OBJECT,
+        not of the logger someone passed it to.
+
+        The factory used to gate on ``record.name``'s package, so a
+        ``stealth.*`` line carrying an ``Element`` leaked the whole repr —
+        measured — which is the one shape this finding exists for. Our own sites
+        keep their own PII discipline (F-869/F-873/F-876/F-877) and none of them
+        logs a nodriver object today; this is the floor under that discipline,
+        not a replacement for it.
+        """
         logging_setup.install_payload_arg_redaction()
         sink = self._capture()
         logging.getLogger("stealth.backend").warning("ours: %s", make_element())
-        assert ATTR_VALUE_MARK in sink.text
+        assert ATTR_VALUE_MARK not in sink.text
+        assert TEXT_CONTENT_MARK not in sink.text
+        assert "attrs=[" in sink.text, "it must still name the element"
 
 
 # --------------------------------------------------------------------------

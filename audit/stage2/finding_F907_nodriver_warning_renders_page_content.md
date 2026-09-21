@@ -110,7 +110,7 @@ naming so a later reader does not re-derive them:
 | `element.py`:537 | WARNING | **`Element.__repr__`** — tag + every attribute VALUE + all recursive child TEXT | every sink the level reaches; **this finding** |
 | `element.py`:624 | WARNING | the same, the drag SOURCE | ditto |
 | `element.py`:633 | WARNING | the same, the drag TARGET | ditto |
-| `connection.py`:483 | WARNING | a callback's `repr`, the event CLASS NAME, and `str(exc)` + `exc_info` | passes through UNCHANGED — the callback is ours, and a class name is not payload. Deliberately not redacted |
+| `connection.py`:483 | WARNING | a callback's `repr`, the event CLASS NAME, and `str(exc)` + `exc_info` | passes through UNCHANGED — but **not** because its arguments are the library's (see below) |
 | `tab.py`:1702 | WARNING | a constant "install opencv-python" string, no args | nothing to redact |
 | `tab.py`:1750, :1757 | WARNING | constant "could not unlink …" strings, no args | nothing to redact |
 | `element.py`:499 | — | `Exception("could not find position for %s " % self)` — the whole repr | **not a `LogRecord`**; no logging mechanism reaches it → residual 7 |
@@ -123,6 +123,49 @@ So in nodriver 0.47 the payload-rendering WARNING surface is exactly the three
 `element.py` lines, and they all pass the element through `record.args` — which
 is what makes a type-keyed args rewrite viable here where F-906 rejected a
 filter for `connection.py`'s pre-formatted string.
+
+### `connection.py`:483's third argument is the CALLER's, and the first write of this got it wrong
+
+This finding shipped a sentence saying "measured, all three of its arguments are
+builtins", in three documents, with a pin that passed `ValueError("boom")` —
+**the one exception class that makes the claim true**. It is not measurable
+once: the third argument is whatever the user callback raised.
+
+A `nodriver.core.connection.ProtocolException` — the commonest thing a
+CDP-touching event handler raises, and a nodriver TYPE — was therefore shaped,
+and what vanished was Chrome's own diagnostic rather than any payload:
+
+```
+before: exception in callback <lambda> for event TargetInfoChanged
+        => Inspected target navigated [code: -32000]
+after (wrong):  … => <nodriver.core.connection.ProtocolException>
+```
+
+So the rule now reads the argument through `_carries_payload`, and **an
+exception is never a payload-carrying argument**, whatever package defined it.
+Two reasons, and the second is the decisive one:
+
+1. An exception's `str()` is a diagnostic about a failure. F-902 already made
+   the one nodriver reply that carried cookies shape-only **at its source**
+   (`cdp_transport.CdpReplyError`), which is where a payload-bearing exception
+   belongs.
+2. **`exc_info=True` rides beside it at that very site.** Every sink that
+   formats a traceback renders the text anyway — so shaping the `%s` withholds
+   nothing and costs only the Sentry breadcrumb, which formats no traceback.
+   A redaction that is incoherent with the record's own `exc_info` is not a
+   redaction, it is a hole in one sink's diagnostic.
+
+The pin now builds a real `ProtocolException` from nodriver's own constructor,
+asserts its type IS nodriver's (so the pin cannot silently stop testing the
+gated case), and asserts Chrome's text survives.
+
+Its named cost is residual 9: `ProtocolException.__init__` has a
+`hasattr(args[0], "to_json")` branch that serialises the whole object into
+`.message`, and `tab.py`:1020 raises `ProtocolException(exception_details)` —
+a `cdp.runtime.ExceptionDetails` whose description is the PAGE's thrown error.
+That shape can carry page-authored text through an exception. It is named and
+not closed here, for reason (2): nothing this mechanism does can withhold it
+from a sink that formats `exc_info`.
 
 ## 2. The matrix — MEASURED, not reasoned
 
@@ -241,6 +284,21 @@ resolving the class needs `import nodriver` and `configure_logging` runs in the
 **stdio proxy**, which must never import the browser stack (`desktop_launch`'s
 measured cold-start paragraph).
 
+**And keyed on the ARGUMENT, never on `record.name`.** The first write gated on
+the record's logger package as well, so the loop ran only for a `nodriver.*`
+record. Measured, that left a `stealth.*` record carrying an `Element` leaking
+the whole repr — which is the one shape this finding exists for. Whether a
+rendering carries page content is a property of the OBJECT; the logger it was
+passed to is not evidence about it. Our own sites keep their own PII discipline
+(F-869/F-873/F-876/F-877) and none of them logs a nodriver object today, so this
+is a floor under that discipline and not a second answer to it — and the
+invariant it replaces (a pin asserting our records were exempt) is INVERTED
+rather than deleted, because a silent exemption in the navigation map is how the
+next change to this would go wrong.
+
+What that costs is the per-argument half only, and it is stated rather than
+implied — see the cost paragraph below.
+
 **What the replacement says.** Redacting is not silencing. An `Element` keeps
 its tag, its attribute **NAMES** and its **child COUNT**, and loses every VALUE
 and all of its text — "which control had no box model" is the entire diagnostic
@@ -275,10 +333,13 @@ websockets 16.0, every one of its WARNING-and-above sites logs a static message
 or a `str` — there is nothing there to redact, and naming it anyway would be a
 claim the evidence does not support (F-906's "no `uc` entry" reasoning).
 
-**What nodriver's real diagnostic costs.** Nothing. `connection.py`:483 — the
-one genuine WARNING in the library — passes the callback, the event **class
-name** and the exception, and measured, all three are builtins. The rule that
-redacts the leak does not touch it.
+**What nodriver's real diagnostic costs.** Nothing — but not for the reason
+this finding first gave. `connection.py`:483, the one genuine WARNING in the
+library, passes the callback, the event **class name** and **whatever the
+callback raised**. The first two are ours and a builtin; the third's type is the
+caller's, and a nodriver `ProtocolException` is the commonest case. It is
+untouched because an EXCEPTION is never a payload-carrying argument, not because
+its arguments happened to be builtins — see §1's `connection.py`:483 section.
 
 **The tolerance is TOTAL and is not a swallow.** `_shape` reads `value.tag` and
 `value.attrs.keys()`, both of which run arbitrary library code, inside
@@ -290,17 +351,43 @@ handler names the exception's **TYPE** in the rendered shape — the only channe
 left when logging about it would recurse — and never `str(exc)`, which on a
 page-derived object is page-authored, which is this finding's whole subject.
 
-**Cost.** One package test per argument of every record in the process:
-measured ~370 ns, against ~1 485 ns to build the record itself.
+**Cost — re-measured, because the first number described a cost that was not
+paid.** §3 originally said "one package test per argument of every record in
+the process: ~370 ns". With the `record.name` gate in place that loop never ran
+for a non-nodriver logger, so the sentence described work the short-circuit
+skipped. With the gate dropped it is now true, and the split matters:
+
+```
+min of 7 x 200_000, CPython 3.13.11
+  makeRecord, no args     bare 1563.9 ns   ours 1917.2 ns   +353.3
+  makeRecord, two args    bare 1744.0 ns   ours 2411.6 ns   +667.7
+  makeRecord, five args   bare 1875.9 ns   ours 2633.7 ns   +757.7
+  _redacted alone:  ()  102.1    ('x',) 179.0    ('x', 3) 257.1    5 strs 476.9
+```
+
+**~350 ns is the chained factory CALL**, paid by every record the moment any
+factory is installed and independent of this rule; **~80 ns per argument** is
+the scan, and that per-argument half is the whole price of reading the argument
+instead of the logger name. Against ~1.7 µs to build a record. The product logs
+on failures, warnings and lifecycle transitions, never per request — uvicorn
+access logging is off (`backend_uvicorn_config`) — so this is not on any hot
+path, and a record whose arguments carry nothing gets its OWN tuple back rather
+than an equal copy, which a pin asserts by identity.
 
 ## 4. Pins
 
-`tests/test_nodriver_element_repr_logging.py` — 33 nodes, all green. RED-first:
+`tests/test_nodriver_element_repr_logging.py` — 36 nodes, all green. RED-first:
 20 of them failed against the unfixed tree (7 behavioural across the
 configurations × the all-sinks assertion and the named stderr/Sentry assertion,
 plus 13 mechanism/bounds/surface), against 6 already-green invariants; the
 seven added while folding in the review's premises are `TestReachability` (5)
-and `TestLastResortSink` (2).
+and `TestLastResortSink` (2), and three more came out of the review of the fix
+itself (the `ProtocolException` exemption, the inverted `stealth.*` invariant,
+and the untouched-args identity assertion). Re-verified RED at the tip with a
+`%TEMP%` plugin that no-ops `install_payload_arg_redaction`: **16 failed, 20
+passed** — one more than before the review, because the inverted `stealth.*`
+invariant is a behavioural pin where the exemption it replaces was green either
+way.
 
 * every marker, every sink, every shipped config **and** caller root DEBUG in
   both orders;
@@ -314,8 +401,15 @@ and `TestLastResortSink` (2).
   those three sites live, the finding's severity claim fails in CI;
 * the line still NAMES the element (tag + attribute names survive) — so a
   future "fix" that silences the logger fails;
-* nodriver's real `connection.py`:483 WARNING, websockets' WARNINGs, and our own
-  `stealth.*` records all pass through untouched;
+* nodriver's real `connection.py`:483 WARNING passes through **with a real
+  `ProtocolException` built from nodriver's own constructor** — and the pin
+  first asserts that exception IS a nodriver type, so it cannot silently stop
+  testing the gated case the way the `ValueError("boom")` it replaces did;
+* websockets' WARNINGs and our own `stealth.*` records with ordinary arguments
+  pass through untouched, asserted by **identity** on the args tuple;
+* **our own `stealth.*` record carrying an `Element` IS redacted** — the
+  inversion of what shipped first, pinned so the logger-name gate cannot come
+  back as an unnoticed exemption;
 * the mechanism: a family-root filter never fires; a logger created after
   install is covered; `dictConfig(disable_existing_loggers=True)` is survived;
   install is idempotent; a pre-existing caller factory is CHAINED, not replaced;
@@ -333,15 +427,26 @@ and `TestLastResortSink` (2).
 1. **A caller who installs their own record factory AFTER ours replaces it.**
    F-906's residual 1 in this mechanism's terms. We chain to whatever we find;
    nobody can make a later caller chain to us.
-2. **Only applied where `configure_logging` is called** — both shipped
-   processes, and only the backend imports nodriver. A third party importing
-   `browser_manager` directly gets today's behaviour. Moving it to import time
-   was rejected for F-906's reason: a module that mutates global logging state
-   on import is the thing these two findings complain about a dependency doing.
-3. **The rule is the record's LOGGER package, so our OWN sites are untouched** —
-   deliberately. `stealth.*` records carrying a nodriver object keep their own
-   PII discipline (F-869/F-873/F-876/F-877), and a blanket rewrite here would be
-   a second, invisible answer to it. Pinned as an invariant, not a gap.
+2. **Only applied where `configure_logging` is called.** Three console-script
+   NAMES over two mains, and only TWO of the three reach it: the backend and
+   the stdio proxy do, and a `stealthy` / `stealth-chrome-devtools` ops process
+   calls `sentry_init()` but never `configure_logging`, so it has neither
+   F-906's floor nor this factory. Harmless today — no nodriver object exists in
+   that process — and it is F-906's pre-existing gap rather than one this
+   introduces, but "both shipped processes" was the wrong count and is corrected
+   here. A third party importing `browser_manager` directly likewise gets
+   today's behaviour. Moving it to import time was rejected for F-906's reason:
+   a module that mutates global logging state on import is the thing these two
+   findings complain about a dependency doing.
+3. **Our own `stealth.*` sites keep their own PII discipline** —
+   F-869/F-873/F-876/F-877 — and this rule is the FLOOR under it, not a
+   replacement. It used to be a gap dressed as a decision: the factory gated on
+   `record.name`'s package, so one of our records carrying an `Element` leaked
+   the whole repr, and the pin asserted that as an invariant. The gate is gone
+   and the pin is inverted. What remains residual is the direction the rule does
+   NOT run: an argument of OURS that carries page content and is not a nodriver
+   type is this mechanism's blind spot by construction, and closing that is each
+   site's own job.
 4. **An attribute name is rendered as nodriver stores it**, so `class` reads as
    `class_`. nodriver's `__repr__` maps it back; re-spelling that cosmetic
    mapping here would be a second home for it, and the key is not wrong, only
@@ -353,18 +458,18 @@ and `TestLastResortSink` (2).
 6. **`_shape` duck-types `tag`/`attrs`.** Any nodriver object offering both
    renders as an element. That is the intended generosity — it is the shape we
    want for anything element-like — and everything else falls to the type name.
-7. **`element.py`:499's exception carries the whole repr** —
+7. **`element.py`:499's exception carries the whole repr — filed as
+   [F-912](./finding_F912_element_exception_carries_repr.md).**
    `Exception("could not find position for %s " % self)`, measured to render
    `value="SECRET-VALUE"`. Unlike the three WARNINGs this one IS reachable: it
    is the `not quads` branch, it propagates past `mouse_click`'s
    `except AttributeError`, and `dom_handler.click_element` turns it into a
    `ToolError` that reaches the client, the debug ring and Sentry as the
    exception itself. **No logging mechanism can touch it** — there is no
-   `LogRecord` — so closing it means either an exception scrub in
-   `observability._scrub_event` (which would have to match on message text, the
-   thing §3 argues against) or not letting nodriver's message through
-   `dom_handler`. It is a different finding with a different mechanism and is
-   deliberately not folded in here.
+   `LogRecord` — so it needs a different mechanism at a different home, and
+   after this finding's severity correction it is the *larger* of the two. It
+   has its own number rather than living as residual text under a closed
+   finding.
 8. **`mcp/shared/session.py`:383-384 log on the ROOT logger** — a WARNING
    rendering `str(e)` for a request that failed validation, and a DEBUG
    rendering the whole JSON-RPC message root, i.e. a tool call's arguments.
@@ -373,3 +478,19 @@ and `TestLastResortSink` (2).
    floor nor this redaction reaches them, and a floor on the root logger is not
    a thing a library may install. Out of scope for both findings; named so the
    next census does not re-discover it.
+9. **A nodriver EXCEPTION can itself carry page text, and is deliberately not
+   shaped.** `ProtocolException.__init__` has a `hasattr(args[0], "to_json")`
+   branch that serialises the whole object into `.message`, and `tab.py`:1020
+   raises `ProtocolException(exception_details)` — a `cdp.runtime
+   .ExceptionDetails` whose `description` is the PAGE's own thrown error. The
+   exemption is still right: at the one site that logs an exception, `exc_info`
+   rides beside it, so nothing this mechanism does can withhold that text from a
+   sink that formats a traceback. Closing it belongs at the raise, on F-902's
+   `cdp_transport.CdpReplyError` precedent — shape-only **at the source**.
+10. **`_redacted` maps over the TOP LEVEL of `record.args` only.** A nodriver
+   `Element` nested inside a list or tuple argument is rendered in full. No
+   measured nodriver line passes a container — so this is not live — but it is
+   the shape a future one would most plausibly take, and recursing was declined
+   because an unbounded walk of an arbitrary argument runs inside
+   `Logger.makeRecord`, where `_shape`'s own total `except` already exists
+   because code that runs there must not be able to end a log call.
