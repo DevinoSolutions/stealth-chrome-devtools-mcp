@@ -81,6 +81,42 @@ class TestOneRequest:
     def test_neither_given_is_no_request_at_all(self, tmp_session_root):
         assert clone_storage.require_allowed_user_data_dir(None, None) is None
 
+    def test_a_path_keeps_the_whitespace_that_is_part_of_it(
+        self, tmp_path, tmp_session_root
+    ):
+        """Whitespace is noise around a NAME and a character inside a PATH, and
+        the one normaliser has to know which it was handed.
+
+        ``user_data_dir`` is both spellings at once — the deprecated name door
+        AND the path door — so stripping the whole request string made
+        ``/home/me/work/trailing `` open ``/home/me/work/trailing``: two
+        different directories on POSIX, which is this finding's own class of
+        silence introduced in the corner that closed N5. pathlib keeps the
+        space under both flavours (measured: ``Path("C:/x/trailing ").name`` is
+        ``'trailing '`` and the two paths compare unequal), so only our own
+        normaliser could have lost it. A path-shaped value now passes through
+        byte-for-byte, exactly as in 2.1.11.
+        """
+        target = tmp_path / "work" / "trailing "
+        assert clone_storage.require_allowed_user_data_dir(str(target), None) == str(
+            target
+        )
+
+    def test_stripping_never_turns_a_relative_request_into_a_rooted_one(
+        self, tmp_session_root
+    ):
+        """The second shape of the same mistake. ``" /tmp/x"`` has parts
+        ``(' ', 'tmp', 'x')`` — a relative request 2.1.11 anchored under the
+        clone root — and stripping it leaves a ROOTED string, which ``anchor``'s
+        ``roots.session / asked`` resets to the drive root: measured,
+        ``C:\\root\\sessions`` joined with ``/tmp/x`` is ``C:\\tmp\\x``, i.e. the
+        request escapes the session tree entirely. Both readings of that string
+        are odd; only one of them leaves the tree, and it is not the one the
+        product shipped.
+        """
+        landed = Path(clone_storage.require_allowed_user_data_dir(" /tmp/x", None))
+        assert tmp_session_root["sessions"] in landed.parents, landed
+
 
 # ---------------------------------------------------------------------------
 # 2. A session is a NAME

@@ -349,6 +349,21 @@ def anchor(requested: str, roots: Roots, inside: Callable[[Path, Path], bool]) -
     return anchored if inside(anchored, roots.clones) else roots.clones / asked
 
 
+def is_bare_name(value: str) -> bool:
+    """Is this string a NAME rather than something with a path in it?
+
+    THE one home for that half of the question, because two callers ask it for
+    opposite purposes and must not answer differently: ``profile_request``
+    REFUSES a ``session`` that is not one, and strips whitespace off an alias
+    only when it IS one. Both separators are tested literally — a backslash is
+    a separator on Windows and a legal filename character on POSIX — and the
+    drive through ``PureWindowsPath``, because a drive is a Windows concept and
+    ``PurePosixPath("C:foo").drive`` is ``""`` (measured), so reading the
+    host's flavour would make the answer differ per platform for one string.
+    """
+    return "/" not in value and "\\" not in value and not PureWindowsPath(value).drive
+
+
 def profile_request(session: str | None, user_data_dir: str | None) -> str | None:
     """THE one reading of the two spellings a caller may use (F-896).
 
@@ -359,11 +374,22 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
     two opinions about which spelling wins. That is convention 4 applied to a
     parameter rather than to a module.
 
-    It is also the ONE normaliser: surrounding whitespace is stripped off
-    BOTH spellings, because it was stripped off ``session`` alone and that made
-    ``" default "`` the shared profile while ``" acme "`` was a directory with
-    literal spaces in its name — one function pair with two answers to what a
-    name is (review N5). An alias that is only whitespace is no request at all.
+    It is also the ONE normaliser, and what it normalises is a NAME. Surrounding
+    whitespace is stripped off both spellings when the value is a bare name,
+    because it was stripped off ``session`` alone and that made ``" default "``
+    the shared profile while ``" acme "`` was a directory with literal spaces in
+    its name — one function pair with two answers to what a name is (review N5).
+
+    **A path-shaped alias passes through byte-for-byte** (delta review S), and
+    the two are told apart by ``is_bare_name`` rather than by trying: whitespace
+    is noise around a name and a CHARACTER inside a path. ``user_data_dir`` is
+    the path door as well as the deprecated name, so stripping the whole string
+    made ``/home/me/work/trailing `` open ``/home/me/work/trailing`` — two
+    directories on POSIX — and turned ``" /tmp/x"``, whose parts are
+    ``(' ', 'tmp', 'x')`` and which 2.1.11 anchored inside the clone root, into
+    a ROOTED string that ``roots.session / asked`` resets to the drive root, so
+    the request left the session tree. Both measured. A value that is only
+    whitespace is left exactly as it arrived, which is 2.1.11's answer for it.
 
     Two rules, and each exists because its absence is a silence:
 
@@ -375,16 +401,17 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
     * **``session`` takes a NAME and refuses a path.** "A session named
       ``C:\\Users\\me\\profile``" is not a sentence, and the path door stays
       open through the alias and through ``stealthy call``, which the refusal
-      says. The test is the same one ``reserved_reason`` uses for a
-      drive — ``PureWindowsPath``, because a drive is a Windows concept and
-      ``PurePosixPath("C:foo").drive`` is ``""`` (measured), so reading the
-      host's flavour would make this refusal fire on one platform only — plus
-      both separators literally, because a backslash is a separator on Windows
-      and a legal filename character on POSIX, and a name that means two
-      things on two platforms is not a name.
+      says. "Has a path in it" is ``is_bare_name``'s, so this refusal and the
+      alias's strip cannot answer it differently; the three shapes it does not
+      cover are added here because they are refusals rather than shape — an
+      absolute path with no separator or drive under some flavour, a ``~`` this
+      layer does not expand, and a name that is only dots.
     """
     if session is None:
-        return (user_data_dir or "").strip() or None
+        if not user_data_dir:
+            return None
+        bare = user_data_dir.strip()
+        return bare if bare and is_bare_name(bare) else user_data_dir
     name = session.strip()
     if not name:
         raise ToolError(
@@ -392,9 +419,7 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
             f"{DEFAULT_SESSION!r} session."
         )
     if (
-        "/" in name
-        or "\\" in name
-        or PureWindowsPath(name).drive
+        not is_bare_name(name)
         or Path(name).is_absolute()
         or name.startswith("~")
         or set(name) == {"."}
@@ -524,6 +549,10 @@ def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
             f"would reach {folded!r} rather than a session of its own name. "
             "Drop the trailing dot or space, or pick a different name."
         )
+    # Past that clause `folded == name` always, since it returns for every
+    # spelling where they differ and lands in `FOLDED_NAMES`. The two rules
+    # below are spelled on `folded` anyway so the set they test against and the
+    # value they test stay one pair; nothing here does a second fold.
     if not asked.is_absolute() and folded in RESERVED_NAMES:
         # F-894 review M3: an operator may ALREADY have a session directory of
         # this name — one exists on the machine the finding was measured on —

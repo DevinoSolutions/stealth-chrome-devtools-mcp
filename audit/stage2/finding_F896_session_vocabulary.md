@@ -252,6 +252,12 @@ commit — nine and six were two ways of miscounting that set.
 * **The held-shared-profile → disposable-copy fallback** (F-834 stage 1).
   Unchanged; only the role word it reads moved.
 * **The directories on disk.** Still `master` and `master-snapshot`.
+* **What a PATH-shaped `user_data_dir` means.** Byte-for-byte 2.1.11, including
+  its whitespace: the one normaliser strips only a bare NAME (`is_bare_name`),
+  because whitespace is noise around a name and a character inside a path —
+  `…/work/trailing ` and `…/work/trailing` are two directories on POSIX, and
+  `" /tmp/x"` is a relative request whose stripped form is a rooted one that
+  leaves the session tree (both measured, delta review S).
 * **The env vars.** Still `BROWSER_MASTER_USER_DATA_DIR` /
   `BROWSER_MASTER_SNAPSHOT_DIR`. `Settings` is `extra="forbid"`, so renaming
   them either breaks every existing `.env` or needs an alias — a second spelling
@@ -323,7 +329,16 @@ Windows — a directory nothing holds. Same class of fix, same one line.
    directory name; with `--from <session>` it becomes any session's name, which
    is why `seed_name`'s fallback is `source.name` and why the pin asserts the
    value is something `session=` accepts.
-6. **A login still does not propagate between existing sessions.** Unchanged and
+6. **The fold refusal stops at `FOLDED_NAMES`, so a caller's own two names can
+   still be one directory.** `session="acme."` and `session="acme"` are two
+   requests and, on Windows, one directory — and both are accepted (delta
+   review N-new-1). That is the intended scope: the refusal exists to stop a
+   name folding onto a word the PRODUCT owns, where the caller would get a
+   profile that is not theirs; two of a caller's own names colliding is their
+   own collision, and widening the rule would refuse ordinary names like
+   `v1.0`. Named because it is a boundary of the rule this PR adds, not a gap
+   somebody missed.
+7. **A login still does not propagate between existing sessions.** Unchanged and
    deliberate — the study's option D (write-back by default) silently merges
    identities. F-897 (`--from`) and F-898 (C2 cookie hand-off) are where that is
    addressed, and neither is in this PR.
