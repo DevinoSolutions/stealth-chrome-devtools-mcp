@@ -8,6 +8,10 @@ profile-selection resolution. Extracting it means a fault in storage GC can no
 longer disable the whole tool surface. What a request MAY name, and what the
 seed means, is ``profile_seed``'s; this module is the only thing that knows
 where those directories live, and hands them over as ``profile_seed.Roots``.
+HOW a profile directory is copied — what such a copy leaves behind and what it
+does about a file Chrome holds open — is ``profile_copy``'s (F-897); what
+stays here is the POLICY around a copy: which source, into which directory,
+refused when, and reported how.
 
 ``server.py`` (the browser tools) and ``cli.py`` (the ops CLI) import this module
 and call its public functions; ``spawn_browser`` delegates profile selection to
@@ -28,7 +32,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from stealth_chrome_devtools_mcp.embedded import profile_lock, profile_seed
+from stealth_chrome_devtools_mcp.embedded import (
+    profile_copy,
+    profile_lock,
+    profile_seed,
+)
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -82,47 +90,6 @@ def _profile_hold(profile_dir: Path) -> profile_lock.Hold | None:
 
 def _profile_has_running_browser(profile_dir: Path) -> bool:
     return _profile_hold(profile_dir) is not None
-
-
-# Regenerable Chrome profile subdirectories — caches and on-device model stores
-# that Chrome rebuilds on next launch. Single source of truth: these are both
-# excluded when cloning a profile (_profile_ignore_names) and trimmed from idle
-# profiles under storage pressure (_trim_profile_regenerable), so the clone path
-# and the trim path can never drift apart.
-_REGENERABLE_PROFILE_NAMES = frozenset(
-    {
-        "BrowserMetrics",
-        "CertificateRevocation",
-        "Crashpad",
-        "Crash Reports",
-        "DawnCache",
-        "GPUCache",
-        "GrShaderCache",
-        "GraphiteDawnCache",
-        "LOCK",
-        "lockfile",
-        "Safe Browsing",
-        "ShaderCache",
-        "SingletonCookie",
-        "SingletonLock",
-        "SingletonSocket",
-        "component_crx_cache",
-        # Heavy, regenerable caches and on-device AI models — typically ~98% of a
-        # Chrome profile by size (the on-device model alone can be ~4 GB). Excluding
-        # or trimming them leaves only real session state: cookies, logins, Web
-        # Data, Local Storage, Preferences. Chrome rebuilds them all on next launch.
-        "Cache",
-        "Code Cache",
-        "Service Worker",
-        "blob_storage",
-        "Download Service",
-        "extensions_crx_cache",
-        "optimization_guide_model_store",
-        "optimization_guide_hint_cache_store",
-        "OptGuideOnDeviceModel",
-        "OptGuideOnDeviceClassifierModel",
-    }
-)
 
 
 def clone_storage_cap_bytes() -> int:
@@ -378,7 +345,7 @@ def clone_is_named(clone_dir: Path) -> bool:
 
 def _regenerable_dirs_in_profile(profile_dir: Path) -> list[Path]:
     """Regenerable cache/model directories in a profile — those named in
-    ``_REGENERABLE_PROFILE_NAMES``, at the profile root and one level down
+    ``profile_copy.REGENERABLE_NAMES``, at the profile root and one level down
     (``Default/``, ``Profile N/``), which is where Chrome keeps its caches and
     on-device model stores. Never recurses deeper, so session-state dirs such as
     ``Local Storage`` and ``IndexedDB`` are never included."""
@@ -391,7 +358,7 @@ def _regenerable_dirs_in_profile(profile_dir: Path) -> list[Path]:
             return
         for child in children:
             try:
-                if child.is_dir() and child.name in _REGENERABLE_PROFILE_NAMES:
+                if child.is_dir() and child.name in profile_copy.REGENERABLE_NAMES:
                     found.append(child)
             except OSError:
                 continue
@@ -401,7 +368,7 @@ def _regenerable_dirs_in_profile(profile_dir: Path) -> list[Path]:
         subdirs = [
             c
             for c in profile_dir.iterdir()
-            if c.is_dir() and c.name not in _REGENERABLE_PROFILE_NAMES
+            if c.is_dir() and c.name not in profile_copy.REGENERABLE_NAMES
         ]
     except OSError:
         subdirs = []
@@ -563,69 +530,6 @@ def spawn_background_sweep(reason: str = "") -> None:
     task.add_done_callback(_BACKGROUND_SWEEPS.discard)
 
 
-def _profile_ignore_names(directory: str, names: list[str]) -> set:
-    ignored = set()
-    for name in names:
-        lower = name.lower()
-        if (
-            name in _REGENERABLE_PROFILE_NAMES
-            or name.startswith("Singleton")
-            or lower.endswith(".tmp")
-            or lower.endswith(".lock")
-            or lower in {"lock", "lockfile"}
-        ):
-            ignored.add(name)
-    return ignored
-
-
-def _copy_profile_file(source: str, target: str) -> str:
-    last_error = None
-    for attempt in range(3):
-        try:
-            shutil.copy2(source, target)
-            return target
-        except (PermissionError, OSError) as exc:
-            last_error = exc
-            if attempt < 2:
-                time.sleep(0.05 * (attempt + 1))
-    if last_error is not None:
-        log_warning = getattr(debug_logger, "log_warning", None)
-        if callable(log_warning):
-            log_warning(
-                "profile",
-                "copy_skip",
-                f"Skipping locked profile file {source}: {last_error}",
-            )
-    return target
-
-
-def _copy_profile_delta(source: Path, target: Path) -> None:
-    for directory, dirnames, filenames in os.walk(source, onerror=lambda exc: None):
-        ignored_dirs = _profile_ignore_names(directory, dirnames)
-        dirnames[:] = [name for name in dirnames if name not in ignored_dirs]
-
-        source_dir = Path(directory)
-        target_dir = target / source_dir.relative_to(source)
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-        ignored_files = _profile_ignore_names(directory, filenames)
-        for filename in filenames:
-            if filename in ignored_files:
-                continue
-            source_file = source_dir / filename
-            target_file = target_dir / filename
-            try:
-                if (
-                    not target_file.exists()
-                    or source_file.stat().st_size != target_file.stat().st_size
-                    or int(source_file.stat().st_mtime)
-                    != int(target_file.stat().st_mtime)
-                ):
-                    _copy_profile_file(str(source_file), str(target_file))
-            except (PermissionError, OSError):
-                continue
-
-
 def _rmtree_robust(path: Path, retries: int = 3) -> None:
     """Remove a directory tree, handling Windows file-lock race conditions.
 
@@ -696,9 +600,9 @@ def _copy_profile_tree(
             return TARGET_IN_USE
         _rmtree_robust(target)
     target.mkdir(parents=True, exist_ok=True)
-    _copy_profile_delta(source, target)
+    profile_copy.copy_delta(source, target)
     time.sleep(0.2)
-    _copy_profile_delta(source, target)
+    profile_copy.copy_delta(source, target)
     profile_seed.write_marker(
         target,
         source=source,
@@ -1001,7 +905,7 @@ async def resolve_profile_selection(
     elif master.exists():
         # No seed yet (first run, seed deleted, or the seed copy failed). Fall
         # back to copying directly from the live shared profile.
-        # _copy_profile_delta skips locked files (PermissionError/OSError),
+        # profile_copy.copy_delta skips locked files (PermissionError/OSError),
         # and _copy_profile_tree does a double-pass — cookies and login data
         # transfer successfully even while Chrome has it open.
         source = master

@@ -67,7 +67,7 @@ class TestModuleSurface:
             "_trash_clone",
             "_clone_trash_dir",
             "_profile_has_running_browser",
-            "_copy_profile_delta",
+            "_copy_profile_tree",
         ):
             assert callable(getattr(clone_storage, name)), name
 
