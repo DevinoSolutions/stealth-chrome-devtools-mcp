@@ -318,6 +318,57 @@ validation-failure paths, both need a different mechanism, and they are named in
 `audit/stage2/finding_F908_sse_starlette_logs_tool_result.md` §6 — beside
 F-907, the other line this floor sits below.
 
+### Fixed — F-912: a hidden password field's value no longer reaches the client in an error message
+
+`get_element_state` on an element that lays out no box answered with the
+element rendered in full — tag, **every attribute as `name="value"`**, and all
+of its descendant text:
+
+```
+Failed to get element state: could not find position for <input id="pwhidden"
+  type="password" value="SECRET-VALUE" style="display:none"></input>
+```
+
+That text is nodriver's, not ours: `element.py`:499 raises
+`Exception("could not find position for %s " % self)`, and every `except` block
+that relays `str(exc)` carries the whole element with it. Measured, it reached
+the **client**, the debug **ring** and **Sentry** in the shipped configuration —
+and the Sentry leg is not dropped as a tool failure, because `get_element_state`
+raises its `ToolError` from inside an `except` and `expected_events`'
+error-convention rule tolerates only a timeout or a cancellation behind ours.
+`click_element` wrote the same rendering to the backend log at DEBUG, then
+clicked the element synthetically and succeeded.
+
+**It is reachable by three ordinary shapes**, which is what separates this from
+F-907's insurance: measured on Chrome 153, `DOM.getContentQuads` answers an
+EMPTY LIST — not an error — for a `display:none` element and for an `<option>`
+inside a `<select>`, and by construction for a detached node, while
+`visibility:hidden`, a zero-size box, an empty inline and
+`content-visibility:hidden` all answer one quad and never reach it.
+
+The fix is at the **raise**, which is the one moment the element is still an
+OBJECT: `embedded/element_box.py` wraps `Element.get_position` and, for the one
+exception type that line produces — the bare builtin `Exception`, keyed on the
+TYPE and never on the message, because a library may reword its own sentences —
+replaces the text with F-907's shape:
+
+```
+The element has no layout box, so its position cannot be read:
+<input attrs=[type, value, data-session-token] children=1>.
+display:none, an <option> and a detached node all render nothing.
+```
+
+Redacting is not silencing: which control had no box is the whole diagnostic
+value of the line, and the new `ElementBoxError` names a condition a bare
+`Exception` named not at all. Everything that is **not** that exact type passes
+through untouched — a `ProtocolException` keeps Chrome's own words, an
+`AttributeError` still reaches `mouse_click`'s handler, a cancellation still
+cancels. The replacement is raised OUTSIDE the `except` block, so nodriver's
+message is not reachable through `__context__` either, by a traceback formatter
+or by Sentry's chain walk. One shaper — F-907's `logging_setup._shape` — and no
+second one; no change to any of the three call sites, because all three are
+correct once what they relay is shape-only.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in
