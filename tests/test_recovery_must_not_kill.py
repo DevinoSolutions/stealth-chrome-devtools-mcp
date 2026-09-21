@@ -29,6 +29,7 @@ on a dead pid. ``_sweep_orphaned_temp_profiles`` is patched out wherever
 this machine holds other agents' Chrome profiles.
 """
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -747,3 +748,251 @@ class TestFailedAdoptionReapDoesNotCrossTheSpare:
 
         # `_reap` sorts, and SPARED_SIBLING (6666) is the lower pid.
         assert killed == [SPARED_SIBLING, LIVE_CHROME]
+
+
+# ---------------------------------------------------------------------------
+# B1 — `run`'s own protected set, and the entry whose persistence is UNKNOWN
+# ---------------------------------------------------------------------------
+
+
+def _shared_record(pc, profile):
+    """One adoptable entry and one UNDECIDED entry on ONE directory."""
+    _seed(
+        pc.pid_file,
+        {
+            "i-adoptable": _entry(pid=LIVE_CHROME, user_data_dir=str(profile)),
+            # No recorded port and no live witness for one -> UNDECIDED, so it
+            # lands in `.spare` and NOT in `.adoptable`. That gap is the defect.
+            "i-undecided": _entry(
+                pid=SPARED_SIBLING, cdp_port=None, user_data_dir=str(profile)
+            ),
+        },
+    )
+
+
+class TestRunProtectsTheSparedNotTheAdoptable:
+    """``browser_reattach.run``'s failed-adoption reap is the SECOND subtraction
+    site, and it was handed the wrong set (B1).
+
+    ``run`` protects pids when it falls back to ``reap_recorded``, and it built
+    that set from ``classified.adoptable``. An entry F-916 spared is by
+    construction NOT adoptable -- it is in ``classified.unclassifiable`` -- so
+    every browser this lane exists to protect was absent from the set, while the
+    reap's kill set is DIRECTORY-matched. Two subtraction sites disagreeing is
+    exactly the shape F-917 fixed; ``process_cleanup`` asks
+    ``reap_guard.spared_pids`` and this one did not.
+
+    **These two nodes pin different things and both are needed**, because the
+    harm and the defect are currently closed by two different rules:
+
+    * the OUTCOME is F-922's -- a persistent entry gets no directory scan, so
+      the reap can only reach the pid the record names. Measured on this tree,
+      the sibling survives even with the protected set emptied entirely.
+    * the SET is this fix's, and nothing about the outcome can witness it while
+      F-922 holds. So the second node reads the set ``run`` actually hands the
+      reap. That is what fails when the set is built from ``.adoptable``, and
+      what fails if it is emptied -- neither of which any outcome assertion on
+      this tree can see.
+    """
+
+    @staticmethod
+    def _drive(pc, profile):
+        """Run one pass whose single adoption FAILS; answer (killed, protected)."""
+        manager = MagicMock()
+        manager._lock = asyncio.Lock()
+        manager._instances = {}
+        killed: list[int] = []
+        protected: list[frozenset] = []
+        before = MagicMock()
+        before.create_time.return_value = pc._init_time - 50.0
+        real_reap = browser_reattach.reap_recorded
+
+        def spy(cleanup, instance_id, metadata, protected_pids=frozenset()):
+            protected.append(protected_pids)
+            return real_reap(cleanup, instance_id, metadata, protected_pids)
+
+        with (
+            patch.object(pc, "_owner_backend_alive", _owner_alive),
+            # BOTH browsers are alive: the sibling must be spared for being
+            # UNREACHABLE (no recorded port, no live witness), not for being
+            # dead -- a dead entry is an ESTABLISHED negative and gets reaped.
+            patch.object(
+                browser_reattach, "recorded_browser_alive", lambda _c, _p, _t: True
+            ),
+            patch.object(
+                browser_cmdline, "debug_port", lambda _pid, _expect=None: None
+            ),
+            patch.object(
+                browser_reattach, "_adopt_one", side_effect=RuntimeError("refused")
+            ),
+            patch.object(browser_reattach, "reap_recorded", spy),
+            patch.object(
+                pc,
+                "_get_browser_pids_for_profile",
+                return_value={LIVE_CHROME, SPARED_SIBLING},
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process",
+                return_value=before,
+            ),
+            patch.object(
+                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+            ),
+            patch.object(pc, "_cleanup_profile_for_metadata"),
+        ):
+            asyncio.run(browser_reattach.run(manager, pc))
+        return sorted(killed), protected
+
+    def test_a_failed_adoption_does_not_kill_the_spared_sibling(self, tmp_path):
+        """The harm, end to end: the reap of the entry we could not attach to
+        must not reach the browser the same pass just refused to reap."""
+        profile = tmp_path / "master"
+        profile.mkdir()
+        pc = _cleanup(tmp_path)
+        _shared_record(pc, profile)
+
+        killed, _ = self._drive(pc, profile)
+
+        assert SPARED_SIBLING not in killed, (
+            "a browser F-916 spared was killed by a sibling's failed adoption"
+        )
+        assert killed == [LIVE_CHROME], "and the failed candidate's own is reaped"
+
+    def test_run_hands_the_reap_the_spared_pids(self, tmp_path):
+        """The set itself, because no outcome on this tree can witness it.
+
+        Both directions, so it cannot go vacuous: the spared sibling's pid must
+        be IN the set, and the candidate's own must NOT -- the reap is of that
+        candidate, and protecting it from itself would leak the browser this
+        pass has just failed to adopt.
+        """
+        profile = tmp_path / "master"
+        profile.mkdir()
+        pc = _cleanup(tmp_path)
+        _shared_record(pc, profile)
+
+        _, protected = self._drive(pc, profile)
+
+        assert len(protected) == 1, "one failed adoption, one reap"
+        assert SPARED_SIBLING in protected[0], (
+            "the spared sibling's pid is missing from the protected set: "
+            "it is built from `.adoptable`, which never contains a spared entry"
+        )
+        assert LIVE_CHROME not in protected[0]
+
+
+class TestUnknownPersistenceIsSpared:
+    """An entry that records NEITHER persistence key cannot be called disposable.
+
+    ``on_persistent_profile`` answers False for it, but that False is the
+    reader's default for a record shape that predates the keys -- not a finding
+    about the profile. Measured through the real ``recover_orphans`` with the
+    Chrome ALIVE on the shared profile: killed, and its entry dropped, on a
+    plain backend cold start. It reaches the kill through the RECORDED-pid
+    fallback, so F-922's directory-scan rule does not stop it, and F-918's guard
+    answers "may this pid be ended" rather than "is this the right entry".
+    """
+
+    @staticmethod
+    def _legacy(profile):
+        """A 2.0.3-era entry: no `uses_custom_data_dir`, no `auto_clone`."""
+        return {
+            "pid": LIVE_CHROME,
+            "create_time": 1700000000.0,
+            "user_data_dir": str(profile),
+            "cdp_port": PORT,
+            "timestamp": 0,
+            "owner_pid": DEAD_OWNER,
+            "owner_create_time": 1699999000.0,
+        }
+
+    def test_a_live_browser_on_a_keyless_entry_is_not_killed(self, tmp_path):
+        """The harm, at the one call site."""
+        profile = tmp_path / "master"
+        profile.mkdir()
+        pc = _cleanup(tmp_path)
+        _seed(pc.pid_file, {"i-legacy": self._legacy(profile)})
+
+        killed: list[int] = []
+        with (
+            patch.object(pc, "_owner_backend_alive", _owner_alive),
+            patch.object(
+                browser_reattach, "recorded_browser_alive", _recorded_browser_alive
+            ),
+            patch.object(pc, "_sweep_orphaned_temp_profiles"),
+            patch.object(
+                pc, "_get_browser_pids_for_profile", return_value={LIVE_CHROME}
+            ),
+            patch.object(
+                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+            ),
+        ):
+            pc.recover_orphans()
+
+        assert killed == [], "a live browser whose persistence is unknown was killed"
+        assert "i-legacy" in _read(pc.pid_file), (
+            "and its entry was dropped, so nothing names the browser any more"
+        )
+
+    def test_a_keyless_entry_whose_chrome_is_gone_is_still_reaped(self, tmp_path):
+        """The counter-direction, and what keeps the record able to SHRINK.
+
+        Sparing on unknown persistence ALONE would make every pre-2.0.4 entry
+        permanent -- `browser_pids.json` has no age prune, so nothing would ever
+        remove one. The spare is bought with a POSITIVE liveness witness (both
+        halves of the pid's identity), so an entry whose Chrome is provably gone
+        leaves the record exactly as it does today, and the permanent population
+        this fix adds is bounded to browsers that are actually still running.
+        """
+        profile = tmp_path / "master"
+        profile.mkdir()
+        pc = _cleanup(tmp_path)
+        entry = self._legacy(profile)
+        entry["pid"] = DEAD_CHROME
+        _seed(pc.pid_file, {"i-legacy": entry})
+
+        killed: list[int] = []
+        with (
+            patch.object(pc, "_owner_backend_alive", _owner_alive),
+            patch.object(
+                browser_reattach, "recorded_browser_alive", _recorded_browser_alive
+            ),
+            patch.object(pc, "_sweep_orphaned_temp_profiles"),
+            patch.object(pc, "_get_browser_pids_for_profile", return_value=set()),
+            patch.object(
+                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+            ),
+        ):
+            pc.recover_orphans()
+
+        assert "i-legacy" not in _read(pc.pid_file), (
+            "a keyless entry whose Chrome is gone must still leave the record"
+        )
+
+    def test_an_established_disposable_is_still_reaped(self, tmp_path):
+        """The counter-direction, and the distinction the fix rests on:
+        ``uses_custom_data_dir: False`` is an ANSWER, not an absence."""
+        profile = tmp_path / "uc_throwaway"
+        profile.mkdir()
+        entry = self._legacy(profile)
+        entry["uses_custom_data_dir"] = False
+
+        classified = browser_reattach.adoptable(
+            {"i-1": entry}, owner_alive=_owner_alive, browser_alive=_browser_alive
+        )
+
+        assert "i-1" not in classified.spare
+
+    def test_an_auto_clone_that_says_so_is_still_reaped(self, tmp_path):
+        """The other established shape: both keys present, and they answer."""
+        profile = tmp_path / "uc_throwaway"
+        profile.mkdir()
+        entry = self._legacy(profile)
+        entry["uses_custom_data_dir"] = True
+        entry["auto_clone"] = True
+
+        classified = browser_reattach.adoptable(
+            {"i-1": entry}, owner_alive=_owner_alive, browser_alive=_browser_alive
+        )
+
+        assert "i-1" not in classified.spare

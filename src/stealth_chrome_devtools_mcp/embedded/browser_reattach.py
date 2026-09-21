@@ -214,6 +214,16 @@ def _adoptable_entry(  # noqa: PLR0911  PERMANENT(one early return per condition
     if not browser_pid_registry.is_reapable(entry, owner_alive):
         return None
     if not browser_pid_registry.on_persistent_profile(entry):
+        if browser_pid_registry.persistence_recorded(entry):
+            return None
+        # The record never SAID, so that False is the reader's default for a
+        # pre-2.0.4 shape, not a finding -- measured killing a LIVE Chrome on
+        # the shared profile (F-916 §7). Spared only on BOTH halves of the pid's
+        # identity, so one whose Chrome is gone still leaves the record.
+        create_time = browser_pid_registry.recorded_time(entry, "create_time")
+        pid = entry.get("pid")
+        if isinstance(pid, int) and create_time is not None:
+            return reap_guard.UNDECIDED if browser_alive(pid, create_time) else None
         return None
 
     # Past here the entry IS persistent — a named profile or the shared one,
@@ -225,22 +235,16 @@ def _adoptable_entry(  # noqa: PLR0911  PERMANENT(one early return per condition
         return reap_guard.UNDECIDED
     create_time = browser_pid_registry.recorded_time(entry, "create_time")
     if create_time is None:
-        # ADOPTION requires both halves of a pid's identity, where REAPING is
-        # content with one (F-888 review M4). `_fallback_pid_identity_ok` answers
-        # True for a missing create_time by design — a reap that skips a recycled
-        # pid leaks a browser, which is the cheaper error — but here the same
-        # tolerance would let us take over a STRANGER's chrome.exe that happens
-        # to hold a recycled pid, stamp our ownership on it and kill it at
-        # `close_instance`. An entry too old to carry one is left to the holder
-        # path, which proves identity by the directory instead — and, since
-        # F-916, left ALIVE: not adopting it is a decision, ending it is not.
+        # ADOPTION needs BOTH halves of a pid's identity where reaping is content
+        # with one (F-888 review M4): the reap's tolerance for a missing
+        # create_time would let us take over a stranger's chrome.exe on a
+        # recycled pid and kill it at `close_instance`. Left to the holder path,
+        # which proves identity by the directory — and since F-916 left ALIVE.
         return reap_guard.UNDECIDED
     if not browser_alive(pid, create_time):
-        # The one ESTABLISHED negative left, and the one that lets a dead entry
-        # leave the record at all: this pid is not the Chrome the record names,
-        # so there is no browser here to spare. `recorded_browser_alive` does
-        # fold a psutil AccessDenied into this False; what catches THAT is
-        # F-918's guard at the kill itself, which refuses a pid it cannot read.
+        # The one ESTABLISHED negative, and what lets a dead entry leave the
+        # record at all. `recorded_browser_alive` folds a psutil AccessDenied
+        # into this False; F-918's guard at the kill catches THAT.
         return None
 
     port = cdp_endpoint.endpoint(entry)
@@ -699,11 +703,16 @@ async def run(manager: BrowserManager, cleanup: ProcessCleanup) -> list[str]:
     handler: the entry and the browser are left exactly as they are.
     """
     async with _pass_lock:
-        classified = await asyncio.to_thread(adoptable_for, cleanup)
-        # Every candidate's browser, for the reap below: these entries can share
-        # one directory, so a failed adoption's reap would otherwise end the
-        # sibling this same pass is about to adopt (F-917).
-        candidate_pids = frozenset(c.pid for c in classified.adoptable.values())
+        # ONE read, threaded into both halves: a second read could disagree
+        # about an entry re-recorded between them (`cli.py`'s per-line read).
+        entries = await asyncio.to_thread(cleanup._load_tracked_pids)
+        classified = await asyncio.to_thread(adoptable_for, cleanup, entries)
+        # **`.spare`, never `.adoptable`** (B1): the reap below kills by
+        # DIRECTORY and these entries share one, so it must be told every pid
+        # this pass decided to keep -- the adoptable ones PLUS everything F-916
+        # could not classify. Same `reap_guard.spared_pids` `process_cleanup`
+        # asks; two subtraction sites disagreeing is F-917's shape re-made.
+        candidate_pids = reap_guard.spared_pids(entries, classified.spare)
         adopted: list[str] = []
         failed: set[str] = set()
         for instance_id, candidate in classified.adoptable.items():
