@@ -10,6 +10,16 @@ from pathlib import Path
 
 EMBEDDED_DIR = Path(__file__).with_name("embedded")
 
+# F-905. `main()`'s own parser is deliberately `add_help=False` + `parse_known_args`:
+# it decides ONE thing from three flags — stdio proxy, or `runpy` the backend — and
+# every other argument belongs to `embedded/server.py`'s full parser, which re-reads
+# `sys.argv` after the runpy load. An `add_help=True` here would answer with this
+# shim's three-flag usage and hide the real one, so the help request is meant to fall
+# through. What it fell through INTO was the defect: with the default
+# `--transport stdio` it reached `ensure_server_running`, so asking for help
+# cold-started a backend. These are the two spellings that mean "answer, do not run".
+_HELP_FLAGS = frozenset({"-h", "--help"})
+
 
 def _start_proxy_error_reporting() -> threading.Thread:
     """Give the stdio proxy its own Sentry, off the critical path (F-827).
@@ -66,9 +76,16 @@ def main() -> None:
         parser.add_argument("--transport", default="stdio")
         parser.add_argument("--standalone", action="store_true")
         parser.add_argument("--singleton-port", type=int, default=DEFAULT_PORT)
-        known, _ = parser.parse_known_args()
+        known, extra = parser.parse_known_args()
 
-        if known.transport == "stdio" and not known.standalone:
+        # A help request takes the branch that can ANSWER it (F-905). The runpy
+        # load below reaches `build_arg_parser()`, whose `--help` prints the real
+        # usage and exits 0 before anything binds a port. Keyed on the request
+        # alone, so no other argv changes branch: an ordinary stdio start is
+        # byte-identical to 2.1.12's.
+        wants_help = _HELP_FLAGS.intersection(extra)
+
+        if known.transport == "stdio" and not known.standalone and not wants_help:
             from stealth_chrome_devtools_mcp.embedded.logging_setup import (
                 configure_logging,
             )

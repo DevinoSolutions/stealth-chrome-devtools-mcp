@@ -56,10 +56,32 @@ Four parts, in the order they are installed.
 
 2. **The tripwire** (:func:`install`, same call) -- ONE wrapper set serving both
    designated roots. Redirecting is enumeration, and enumeration can only ever
-   be as complete as the last audit, so the fence does not rely on it: every
-   filesystem primitive is wrapped and a target under a designated root raises.
-   That is the completeness argument -- a path a redirect misses is caught at
-   the moment of harm rather than after it.
+   be as complete as the last audit, so the fence does not rely on it alone:
+   **every door the PRODUCT goes through is wrapped**, and a target under a
+   designated root raises. That is the backstop argument -- a path the redirect
+   misses is caught at the moment of harm rather than after it.
+
+   **It is not, and cannot be, every filesystem primitive** (F-903 review M2,
+   measured on CPython 3.13.11 -- the docstring claimed the universal and the
+   universal is false). These reach a designated root and do NOT raise:
+   ``shutil.copy2`` (the ``_winapi.CopyFile2`` fast path opens no Python file
+   object), ``Path.glob``/``rglob`` (``glob._StringGlobber.scandir`` is the
+   BUILT-IN bound at ``glob`` import, so a later ``setattr(os, "scandir", …)``
+   cannot reach it), ``os.chmod``/``link``/``symlink``, ``sqlite3``, any
+   SUBPROCESS, and any fd opened BEFORE install (``os.write``, ``mmap``, a live
+   ``logging`` stream -- there is no door left to guard). For those the REDIRECT
+   is the cover and this is the backstop, which is the right way round and is
+   why the section is still worth its cost.
+
+   What IS wrapped catches the product's own profile copy -- ``_copy_profile_
+   delta`` walks with ``os.walk`` (``clone_storage.py``:603) and dies at the walk
+   before a byte is read -- plus ``os.walk``/``Path.walk``/``Path.iterdir``/
+   ``glob.glob``/``shutil.copytree``/``copy``/``copyfile``/``rmtree``/``move``/
+   ``tempfile.*(dir=)``/``logging.FileHandler``, all verified by the reviewer.
+   ``Path.glob`` deserves its own line: ``logging_setup``, ``backend_launch``
+   and ``file_based_element_cloner`` all glob state-dir paths today. Those are
+   READS of the state dir and so legal — but a future glob under the SESSION
+   root would be invisible to a guard that advertises catching reads there.
 
    **Writes for the state dir, reads AND writes for the session root**, for the
    reasons in the header. The per-root flag lives in one table
@@ -76,8 +98,23 @@ Four parts, in the order they are installed.
 3. **The kill guard** (:func:`install`, same call). The record is read ONCE, at
    install, and the pids it names are the operator's LIVE backends. Terminating
    one is the harm F-886 exists to prevent, reached from the suite instead of
-   from a cold start, so ``backend_eviction.terminate`` refuses a recorded pid.
-   Separate from the write guard because a kill leaves no filesystem trace.
+   from a cold start. Separate from the write guard because a kill leaves no
+   filesystem trace.
+
+   **It guards the two doors a kill goes through, not the callers** (F-903
+   review M1): ``psutil.Process.terminate``/``kill``/``send_signal`` and
+   ``os.kill``, each checking ``self.pid`` / the ``pid`` argument -- the number
+   the OS is about to act on. The first version guarded
+   ``backend_eviction.terminate`` and walked its ARGUMENTS, which was wrong in
+   both directions and measured so by the reviewer: that function takes a PORT
+   and computes the pid locally, so the guard never saw the pid and ALLOWED a
+   call that would have killed pid 47424, while REFUSING a call whose port
+   happened to equal a protected pid. Guarding the primitive also covers the
+   nine other kill sites the arg-walking guard could not see, in
+   ``process_cleanup``, ``spawn_leak``, ``browser_manager`` and
+   ``desktop_launch``. On POSIX ``terminate``/``kill`` are thin wrappers over
+   ``send_signal`` and the check runs twice, which is free and is why all three
+   are wrapped rather than just the one Windows needs.
 
 **Why HOME is not redirected.** Setting ``HOME``/``USERPROFILE`` would fence all
 ten bindings at once and every future one for free, and it was rejected for a
@@ -243,6 +280,45 @@ _Designated = tuple[str, str, bool, type[BaseException]]
 _TABLE_CACHE: tuple[object, tuple[_Designated, ...]] | None = None
 
 
+def _root_spellings(path: Path) -> list[str]:
+    """Every spelling of ONE designated root the OS would accept for it.
+
+    F-903 review S1. The hot guard compares strings, so a root known by one
+    spelling is fenced by one spelling -- and Windows hands out several for the
+    same directory: a junction or directory symlink pointing at it, the 8.3
+    short name (``C:\\Users\\amind\\.STEAL~1``), the ``\\\\?\\`` prefix. Each is
+    a path the product could be handed and the guard would not recognise.
+
+    Resolving here is affordable because it happens ONCE per table rebuild
+    (install, plus the pins repointing ``REAL_STATE_DIR`` at a decoy) and never
+    in :func:`_designated`, which stays on ``normpath`` -- ``realpath`` stats
+    the filesystem and would recurse into the primitives being guarded.
+
+    What this does NOT close, and the finding says so: a junction MID-path in
+    the TARGET (``C:\\link\\server.json`` where ``C:\\link`` -> the state dir)
+    is still a spelling of a fenced file that no root string is a prefix of.
+    Closing that needs a resolve per call, which is the cost this whole guard
+    is built to avoid; the redirect is what covers it.
+    """
+    spellings = [os.path.normpath(str(path)), os.path.realpath(str(path))]  # noqa: PTH100  PERMANENT(F-903: Path.resolve() is realpath plus a Path allocation; the string is what the guard compares)
+    if os.name == "nt":
+        import ctypes
+
+        for spelling in tuple(spellings):
+            buffer = ctypes.create_unicode_buffer(32768)
+            # Answers 0 for a path that does not exist, which is not an error
+            # here -- an absent root has no short name to be reached by.
+            if ctypes.windll.kernel32.GetShortPathNameW(spelling, buffer, 32768):
+                spellings.append(buffer.value)
+        # The extended-length prefix is a spelling of every one of the above and
+        # `normpath` keeps it verbatim, so `\\?\C:\…\server.json` is a fenced
+        # file no bare-drive root string is a prefix of.
+        spellings += [
+            "\\\\?\\" + s for s in tuple(spellings) if not s.startswith("\\\\")
+        ]
+    return spellings
+
+
 def _designated_roots() -> tuple[_Designated, ...]:
     """The roots this process may not touch, normalised once per change."""
     global _TABLE_CACHE
@@ -251,20 +327,23 @@ def _designated_roots() -> tuple[_Designated, ...]:
         return _TABLE_CACHE[1]
 
     rows: list[_Designated] = []
+    seen: set[str] = set()
     for path, reads_too, error in (
         (REAL_STATE_DIR, False, RealStateDirWrite),
         *((root, True, RealSessionRootAccess) for root in REAL_SESSION_ROOTS),
     ):
-        root = os.path.normpath(str(path))
-        mark = Path(root).name
-        if os.name == "nt":
-            root = root.casefold()
-            mark = mark.casefold()
-        # A root with no final component is a filesystem root (``C:\``, ``/``).
-        # Designating one would fence the whole disk off from the suite, so a
-        # misconfigured value is dropped rather than obeyed.
-        if mark:
-            rows.append((root, mark, reads_too, error))
+        for spelling in _root_spellings(path):
+            root = spelling
+            mark = Path(root).name
+            if os.name == "nt":
+                root = root.casefold()
+                mark = mark.casefold()
+            # A root with no final component is a filesystem root (``C:\``,
+            # ``/``). Designating one would fence the whole disk off from the
+            # suite, so a misconfigured value is dropped rather than obeyed.
+            if mark and root not in seen:
+                seen.add(root)
+                rows.append((root, mark, reads_too, error))
     _TABLE_CACHE = (key, tuple(rows))
     return _TABLE_CACHE[1]
 
@@ -407,7 +486,16 @@ def _install_write_guard() -> None:
 
     def _guard_paths(original, name, *, writing=True):
         def wrapper(*args, **kwargs):
-            for arg in args[:2]:
+            # KEYWORD forms are inspected too (F-903 review M4): `os.remove(
+            # path=…)`, `os.rmdir(path=…)`, `os.mkdir(path=…)` and
+            # `os.replace(src=…, dst=…)` all walked straight through an
+            # args-only guard -- measured, the fenced file was deleted. Nothing
+            # in the product uses those spellings today, but "this door is
+            # closed" may not be true of one call syntax out of two. No
+            # signature knowledge is needed: kwargs on these eight carry paths,
+            # ints (`dir_fd`) and bools, and `_designated` already answers None
+            # for anything `os.fspath` refuses.
+            for arg in (*args[:2], *kwargs.values()):
                 hit = _designated(arg, writing=writing)
                 if hit is not None:
                     raise _refuse(hit, f"called {name} on", arg)
@@ -418,7 +506,22 @@ def _install_write_guard() -> None:
     builtins.open = _guard_open(builtins.open)
     io.open = _guard_open(io.open)
     os.open = _guard_os_open(os.open)
-    for name in ("mkdir", "makedirs", "replace", "rename", "remove", "unlink", "rmdir"):
+    for name in (
+        "mkdir",
+        "makedirs",
+        "replace",
+        "rename",
+        "remove",
+        "unlink",
+        "rmdir",
+        # F-903 review M2: both are one-arg-path WRITES that reached a
+        # designated root and did not raise -- `os.truncate` emptied a fenced
+        # file, and `os.utime` is the fast path `Path.touch()` takes on a file
+        # that already exists, so a touch bumped a fenced mtime. Zero extra
+        # machinery; they simply belong in this loop.
+        "truncate",
+        "utime",
+    ):
         setattr(os, name, _guard_paths(getattr(os, name), f"os.{name}"))
     # Reading doors: only the session root forbids reads, so these pass
     # writing=False and the state dir's row skips itself.
@@ -453,26 +556,59 @@ def recorded_backend_pids() -> frozenset[int]:
 
 
 def _install_kill_guard(live: frozenset[int]) -> None:
-    """Refuse to terminate a pid the operator's real record names.
+    """Refuse to end a process the operator's real record names as a backend.
 
-    ``backend_eviction.terminate`` is the ONE act that ends a backend
-    (``singleton``'s four bindings all route through it, and ``stop_backend`` /
-    ``restart_backend`` call it directly), so one wrapper covers every door.
+    **Guard the ACT, not the argument** (F-903 review M1). The first version
+    wrapped ``backend_eviction.terminate`` and walked its arguments for an
+    ``int`` in ``live``, which does not work and was measured failing BOTH ways:
+    that function's kill target is a LOCAL, computed inside it by a machine-wide
+    ``psutil.net_connections`` scan (``pid = pid_on_port(port)``), so the guard
+    never saw it and ALLOWED a call that would have killed the operator's pid
+    47424; and the only ints it DID see were ``port`` and ``recorded_pid``, so a
+    test-owned backend binding TCP port 47424 was refused about a process the
+    operator never owned. The kill guard's whole reason for being separate from
+    the write guard is that a kill leaves no filesystem trace -- which was
+    exactly the case it did not cover.
+
+    So the wrapper goes where every kill in the tree converges: the two psutil
+    methods and ``os.kill``. That is strictly smaller (no ``backend_eviction``
+    import, no argument walk), it sees the real pid at the real moment, and it
+    also covers the nine kill sites the argument walk missed --
+    ``process_cleanup._kill_process_by_pid``, ``spawn_leak
+    .reap_launched_browsers``, ``browser_manager._blocking_teardown`` (the
+    tree's only ``os.kill``) and ``desktop_launch._kill_delegated``, all of
+    which reach live Chrome pids from a cmdline scan, and the operator's two
+    backends own human-login Chromes.
+
+    ``send_signal`` is included because ``terminate``/``kill`` are thin wrappers
+    over it on POSIX but NOT on Windows, so wrapping only the two would leave
+    a door open on one platform and double-report on the other.
     """
-    from stealth_chrome_devtools_mcp.embedded import backend_eviction
+    import psutil
 
-    original = backend_eviction.terminate
+    def _check(pid: object) -> None:
+        if isinstance(pid, int) and pid in live:
+            raise RealBackendTerminated(
+                f"test tried to end pid {pid}, a backend the operator's real "
+                f"{REAL_STATE_DIR / 'server.json'} names"
+            )
 
-    def guarded(*args, **kwargs):
-        for candidate in (*args, *kwargs.values()):
-            if isinstance(candidate, int) and candidate in live:
-                raise RealBackendTerminated(
-                    f"test tried to terminate pid {candidate}, a backend the "
-                    f"operator's real {REAL_STATE_DIR / 'server.json'} names"
-                )
-        return original(*args, **kwargs)
+    for name in ("terminate", "kill", "send_signal"):
+        original = getattr(psutil.Process, name)
 
-    backend_eviction.terminate = guarded
+        def wrapper(self, *args, _original=original, **kwargs):
+            _check(self.pid)
+            return _original(self, *args, **kwargs)
+
+        setattr(psutil.Process, name, wrapper)
+
+    original_kill = os.kill
+
+    def guarded_kill(pid, *args, **kwargs):
+        _check(pid)
+        return original_kill(pid, *args, **kwargs)
+
+    os.kill = guarded_kill
 
 
 def _fence_session_root(env: dict[str, str], root: Path) -> tuple[Path, ...]:
@@ -540,7 +676,8 @@ def install(root: Path, *, session_root: Path, env: dict[str, str]) -> frozenset
 
 
 def derived_globals() -> dict[str, str]:
-    """Every package global that is a ``Path``, by dotted name.
+    """Every package global that is a ``Path``, by dotted name -- and every
+    ``Path`` a module-level SINGLETON captured on itself.
 
     THE probe the binding table is measured with, kept here so the table and the
     thing that checks it cannot drift. ``tests/test_operator_fence.py`` calls it
@@ -556,8 +693,26 @@ def derived_globals() -> dict[str, str]:
     deleted rather than emptied, because the hazard is fixed at its source and a
     standing exclusion list is a second defence that rots; what replaces it is a
     POSITIVE pin over the whole package --
-    ``tests/test_package_entrypoint.py::TestNoModuleBodyDoesWork`` -- which fails
-    on any new module-level call rather than on the one name someone remembered.
+    ``tests/test_package_entrypoints.py::TestNoModuleBodyDoesWork`` -- which
+    fails on any new module-level call rather than on the one name someone
+    remembered.
+
+    **Module-level singletons are walked one level deep** (F-903 review S3).
+    A module GLOBAL is not the only way a state-dir path gets captured at import
+    time: ``process_cleanup.process_cleanup`` is constructed in its own module
+    body and keeps ``self.pid_file = STATE_DIR / RECORD_NAME``, and
+    ``file_based_element_cloner``'s cloner keeps an ``output_dir`` the same way.
+    Both are fenced today, and the reviewer measured that an attributes-only
+    probe reported NEITHER -- so the promise "a new derived path fails a test"
+    had a hole exactly where the redirect's own ORDER is what saves it
+    (``backend_registry.STATE_DIR`` is rebound on row 3, before row 4 imports
+    ``process_cleanup`` and constructs the singleton). Rather than write that
+    order down as load-bearing and hope, the probe now sees the capture, so a
+    singleton constructed too early is a failing pin.
+
+    Only instances of the package's OWN classes are walked, and only their
+    ``__dict__`` -- no recursion. That is where an import-time capture lives;
+    anything deeper is runtime state, which the write guard covers.
     """
     import importlib
     import pkgutil
@@ -580,4 +735,13 @@ def derived_globals() -> dict[str, str]:
                 continue
             if isinstance(value, Path):
                 out[f"{name}.{attr}"] = str(value)
+                continue
+            owner = type(value).__module__ or ""
+            if not owner.startswith("stealth_chrome_devtools_mcp"):
+                continue
+            # ``__slots__`` and C-level objects have no ``__dict__``; neither
+            # can hold an import-time capture the way an ordinary instance can.
+            for key, held in getattr(value, "__dict__", {}).items():
+                if isinstance(held, Path):
+                    out[f"{name}.{attr}.{key}"] = str(held)
     return out

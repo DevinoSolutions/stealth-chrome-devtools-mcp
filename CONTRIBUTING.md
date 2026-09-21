@@ -116,8 +116,22 @@ for free — do not re-implement any of it**:
    `proxy_selfheal` never raises), so an `Exception` would be swallowed at the
    first handler and your node would go green over a real write. If you see one,
    a path escaped a redirect; **fix the path, never the guard.**
-4. **A kill guard.** `backend_eviction.terminate` refuses a pid the operator's
-   real `server.json` names.
+   It wraps **every door the product goes through**, which is not the same as
+   every filesystem primitive and is not advertised as one: `shutil.copy2`'s
+   Win32 fast path, `Path.glob`/`rglob` (their `scandir` is bound inside `glob`
+   at import), `os.chmod`/`link`/`symlink`, `sqlite3`, any subprocess and any fd
+   opened before the fence installed all reach a designated root without
+   raising. The **redirect** is what covers those; the tripwire is the backstop
+   for what the redirect misses.
+4. **A kill guard.** `psutil.Process.terminate`/`kill`/`send_signal` and
+   `os.kill` refuse a pid the operator's real `server.json` names — the
+   primitives, so it sees the number the OS is about to act on rather than an
+   argument some caller happened to be passed.
+
+   A collection-time fence hit reads as `Interrupted: 1 error during collection`
+   with **0 tests run and exit code 2**, not as a failing node. If a selection
+   that used to run reports no tests at all, read the error above the summary
+   before assuming your `-k` is wrong.
 
 Two asymmetries, both deliberate. **Reads of the real state dir are allowed**
 (`release_gate_harness._reserved_ports()` must read the real `server.json` so an
@@ -137,19 +151,24 @@ between them. The two answer different questions and the suite needs both.
 **No module body in `src/stealth_chrome_devtools_mcp/` may CALL anything.**
 Importing a module must only define things, so that a `pkgutil.walk_packages`
 sweep, a doc generator, an import linter or an IDE can walk the package without
-running the product. This is a rule because it was once broken:
+running the product. This is a rule because it was once broken (F-904):
 `__main__.py` called `main()` at module level, so importing it started a stdio
 proxy and cold-started a backend — which is how F-903 reproduced itself while
-being investigated. `tests/test_package_entrypoint.py::TestNoModuleBodyDoesWork`
-enforces it by AST and carries the single allowance
+being investigated. It has the `if __name__ == "__main__":` guard now.
+`tests/test_package_entrypoints.py::TestNoModuleBodyDoesWork`
+enforces the general rule by AST and carries the single allowance
 (`tool_runtime`'s `cdp_transport.install()`); adding a second means writing down
 why. There is no exclusion list to add a module to — fix the module instead.
 
-**A bare `python -m stealth_chrome_devtools_mcp --help` cold-starts a backend**,
-so never reach for it to smoke-test the entrypoint. `server.main` parses with
-`add_help=False` + `parse_known_args`, so `--help` is unknown to it and the
-default `--transport stdio` carries it into `ensure_server_running`. Use
-`--transport http --help`, which reaches the backend parser that does answer it.
+**`--help` used to cold-start a backend** (F-905, fixed on this branch).
+`server.main` parses with `add_help=False` + `parse_known_args` — deliberately,
+because it decides one thing from three flags and every other argument belongs
+to `embedded/server.py`'s full parser — so `--help` was *unknown* to it and the
+default `--transport stdio` carried it into `ensure_server_running`. A help
+request now takes the `runpy` branch, which is the one that can answer it. If
+you add a flag to that shim's parser, keep the help request out of the stdio
+branch; `tests/test_package_entrypoints.py::TestAskingForHelpStartsNothing`
+fails if it goes back in.
 
 Coverage is **intentionally not** in `addopts` (it would slow every single-file TDD run
 and trip `--cov-fail-under` on partial runs). CI turns it on explicitly.

@@ -2,31 +2,61 @@
 
 ## Unreleased
 
-### Fixed — F-903: importing `stealth_chrome_devtools_mcp.__main__` started a server
+### Fixed — F-904: importing `__main__` by name started a backend
 
-`__main__.py` called `main()` at module level, with no `if __name__ ==
-"__main__":` guard. That makes IMPORTING the module indistinguishable from
-RUNNING the product: any tool that walks the package module by module — a doc
-generator, an import linter, a coverage sweep, an IDE indexer — started a stdio
-proxy, which cold-started a backend. It is not hypothetical, and it was not
-found by reading: this finding's own census probe did it, into the operator's
-live `~/.stealth-mcp` (proxy pid 188108 → backend pid 189088 on port 64986).
+`src/stealth_chrome_devtools_mcp/__main__.py` was three lines and the third was a
+bare `main()` — no `if __name__ == "__main__":` guard. `python -m
+stealth_chrome_devtools_mcp` works either way (it runs the module as `__main__`
+regardless), but anything that imports the module BY NAME —
+`importlib.import_module`, `pkgutil.walk_packages` walking the package, a stray
+`import stealth_chrome_devtools_mcp.__main__` — ran `main()` as an ordinary import
+side effect. `main()` cold-starts a real backend into the operator's
+`~/.stealth-mcp`; measured on 2026-09-21 from nothing more than an import (proxy
+pid 188108 → backend pid 189088, port 64986), by F-903's own census probe. Fixed
+with the guard the module always should have had.
 
-The guard is the whole fix. `python -m stealth_chrome_devtools_mcp` runs the
-file under the name `__main__` and is unchanged; so are both console scripts
-(they point at `server:main` and `cli:main`), `server.py`'s `runpy` load (it
-loads `embedded/server.py`, never the package `__main__`) and the `-m` argv the
-backend is spawned with. `tests/test_package_entrypoint.py` pins both halves and
-adds the rule that generalises it — **no module body in this package may CALL
-anything**, with one named allowance for `tool_runtime`'s
-`cdp_transport.install()`.
+`tests/test_package_entrypoints.py` pins both directions — importing by name is
+inert, and `runpy.run_module(..., run_name="__main__")`, the same mechanism
+`python -m` uses, still reaches `main()` — plus an end-to-end child process, and
+the rule that generalises the defect: **no module body in this package may CALL
+anything**, checked by AST over the whole package with one named allowance
+(`tool_runtime`'s `cdp_transport.install()`). That rule replaced a deny-list in
+F-903's test fence: a deny-list protects against the module someone remembered.
 
-One thing this does NOT fix, now pinned as a measured residual: `server.main`
-builds its parser with `add_help=False` and reads it with `parse_known_args`, so
-`--help` is an *unknown* argument to it and the default `--transport stdio`
-carries it into `ensure_server_running`. **A bare `python -m
-stealth_chrome_devtools_mcp --help` does not print help — it cold-starts a
-backend.**
+Nothing depended on the import-time execution, and each route was checked rather
+than assumed: the three console scripts point at `server:main` / `cli:main` and
+never touch this file, `server.py`'s `runpy` load takes `embedded/server.py`
+rather than the package `__main__`, and the backend's own `-m …` argv *is* the
+`-m` route.
+
+A second defect on the same entry point was found while fixing this one, and is
+the next entry: **asking for help cold-started a backend** (F-905).
+
+
+### Fixed — F-905: `--help` cold-started a backend instead of printing help
+
+`python -m stealth_chrome_devtools_mcp --help` (and `-h`) did not print usage.
+It started a real backend in `~/.stealth-mcp` and then ran an stdio proxy
+against it until the operator interrupted — and on a machine with a stale
+record, `ensure_server_running` can evict as well as adopt. Typing `--help` is
+not consent for any of that.
+
+`server.main` is a shim that decides one thing from three flags — stdio proxy,
+or `runpy` the real backend — and its `add_help=False` + `parse_known_args` are
+deliberate: every other argument belongs to `embedded/server.py`'s full parser,
+reached through the `runpy` load, and an `add_help=True` here would answer with
+the shim's three-flag usage and hide the real interface. The pass-through is the
+design; the defect was what the help request passed through INTO, since the
+default `--transport stdio` carried it into the proxy branch.
+
+Fixed by routing a help request to the branch that can answer it, keyed on the
+request alone — an ordinary stdio start, an `--transport http` start, a
+`--standalone` start and the backend's own `-m …` argv are byte-identical to
+2.1.12's, and a pin exists for that specifically, because "route help to runpy"
+has a lazy implementation that would delete the stdio proxy. `--help` now
+prints the backend's real usage and exits 0. Found while writing F-903's
+entrypoint pin; the finding is
+`audit/stage2/finding_F905_help_cold_starts_a_backend.md`.
 
 ### Fixed — F-903: the test suite could cold-start a real backend into the operator's state dir
 
@@ -66,11 +96,23 @@ root FORCED rather than `setdefault`-ed, with the three derived env names
 state-dir bindings across five modules re-pointed at a per-process tmp root
 (four modules FROM-import the path, so one `setattr` reaches none of the others;
 pydantic's `model_config["env_file"]` needs its own, or a hermetic run absorbs
-the operator's `.env`); a tripwire on every filesystem primitive raising a
-`BaseException` — the product is fail-open by design, so an `Exception` is
-swallowed at the first handler; and a kill guard refusing to terminate a pid the
-real record names. Bindings are measured by a probe, not grepped, and that probe
-is a pin, so a new derived global fails a test instead of escaping.
+the operator's `.env`); a tripwire on every filesystem door the PRODUCT goes
+through, raising a `BaseException` — the product is fail-open by design, so an
+`Exception` is swallowed at the first handler; and a kill guard on
+`psutil.Process.terminate`/`kill`/`send_signal` and `os.kill`, refusing a pid
+the real record names. Bindings are measured by a probe, not grepped, and that
+probe is a pin, so a new derived path — including one a module-level singleton
+captured on itself — fails a test instead of escaping.
+
+The tripwire is deliberately **not** claimed to be every filesystem primitive,
+because it is not and cannot be: `shutil.copy2`'s Win32 fast path, `Path.glob`'s
+import-bound `scandir`, `os.chmod`/`link`/`symlink`, `sqlite3`, subprocesses and
+any fd opened before the fence installs all reach a designated root without
+raising. The REDIRECT covers those; the tripwire is the backstop for what the
+redirect misses. The roots are designated by every spelling Windows answers to
+for them (realpath, 8.3 short name, `\\?\`), resolved once at install so the hot
+path stays on `normpath`; a junction used mid-path in a TARGET is still a
+spelling no root string is a prefix of, and is named as a residual.
 
 Two deliberate asymmetries. The state dir forbids WRITES only — 
 `release_gate_harness._reserved_ports()` must read the operator's own

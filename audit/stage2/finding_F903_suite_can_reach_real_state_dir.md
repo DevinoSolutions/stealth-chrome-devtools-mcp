@@ -209,12 +209,46 @@ fight over it exactly as two backends would.
 ### 4.2 The write guard
 
 Enumerating bindings is only ever as complete as the last audit, so the fence
-does not rest on it. Every write primitive is wrapped — `io.open` and
-`builtins.open` (separate module attributes for the same function; `pathlib`
-reaches the former), `os.open`, `os.mkdir`, `os.makedirs`, `os.replace`,
-`os.rename`, `os.remove`, `os.unlink`, `os.rmdir` — and a target resolving under
-the real state dir raises `RealStateDirWrite`. A path the redirect misses is
-caught at the moment of harm rather than after it.
+does not rest on it. **Every door the product goes through is wrapped** —
+`io.open` and `builtins.open` (separate module attributes for the same function;
+`pathlib` reaches the former), `os.open`, `os.mkdir`, `os.makedirs`,
+`os.replace`, `os.rename`, `os.remove`, `os.unlink`, `os.rmdir`, `os.truncate`,
+`os.utime`, plus `os.scandir`/`os.listdir` for the session root — and a target
+resolving under a designated root raises. A path the redirect misses is caught
+at the moment of harm rather than after it.
+
+**It is not every filesystem primitive, and the first draft of this section
+claimed it was** (review M2, measured on CPython 3.13.11). These reach a
+designated root and do NOT raise, and each is a residual rather than a gap in
+the argument:
+
+| Not wrapped | Why it cannot be |
+|---|---|
+| `shutil.copy2` | the `_winapi.CopyFile2` fast path opens no Python file object |
+| `Path.glob` / `rglob` | `glob._StringGlobber.scandir` is the BUILT-IN, bound inside `glob` at ITS import, so a later `setattr(os, "scandir", …)` cannot reach it |
+| `os.chmod` / `link` / `symlink` | not wrapped; they are writes nothing in the product makes to these roots |
+| `sqlite3`, any subprocess | the write happens outside this process's Python file layer |
+| any fd opened BEFORE install | `os.write`, `mmap`, a live `logging` stream — there is no door left to guard |
+
+`os.truncate` and `os.utime` were in that list until this round and are not any
+more: both are one-argument-path writes, `os.utime` is the fast path
+`Path.touch()` takes on a file that already EXISTS (so a touch bumped a fenced
+mtime while the `os.open` wrapper looked like it covered touching), and adding
+them to the wrap loop cost nothing but two strings.
+
+The reviewer verified that what IS wrapped catches the product's own profile
+copy: `_copy_profile_delta` walks with `os.walk` (`clone_storage.py`:603) and
+dies at the walk before a byte is read — and with it `Path.walk`,
+`Path.iterdir`, `glob.glob`, `shutil.copytree`/`copy`/`copyfile`/`rmtree`/
+`move`, `tempfile.*(dir=)` and `logging.FileHandler`. For everything in the
+table above the REDIRECT is the cover and the tripwire is the backstop, which
+is the right way round.
+
+**Keyword forms are inspected too** (review M4). `_guard_paths` walked `args`
+only, so `os.remove(path=…)`, `os.rmdir(path=…)`, `os.mkdir(path=…)` and
+`os.replace(src=…, dst=…)` went straight through — measured, the fenced file
+was deleted. Nothing in the product spells them that way today, but "this door
+is closed" may not be true of one call syntax out of two.
 
 `BaseException`, and that is load-bearing. The product is fail-open by design —
 `backend_registry` is a never-raise cache, `proxy_selfheal` never raises,
@@ -231,18 +265,62 @@ cannot do.
 
 Membership is a normalised-prefix test with a separator, not a bare
 `startswith`: `.stealth-mcp-browser-sessions` is a sibling the suite writes to
-constantly and must not be swallowed. `normpath`, never `resolve()` — `resolve()`
-stats the filesystem and would recurse into the primitives being guarded.
+constantly and must not be swallowed. `normpath` on the hot path, never
+`resolve()` — `resolve()` stats the filesystem and would recurse into the
+primitives being guarded.
+
+**The ROOTS, though, are resolved once** (review S1). A string comparison fences
+one spelling, and Windows answers to several for the same directory: the
+reviewer reached both real roots through an NTFS junction, a directory symlink,
+the 8.3 short name (`.stealth-mcp` → `STEALT~1`,
+`stealth-mcp-browser-sessions` → `STEALT~2`, neither of which contains its
+mark), the `\\?\` prefix, UNC `\\localhost\C$\…`, and a trailing dot on the root
+component — every one confirmed with `samefile()`. `_root_spellings` therefore
+puts the `realpath`, the `GetShortPathName` form and the `\\?\` form of each
+root in the table as extra rows, once per table rebuild, for zero per-open cost.
+What stays open is a junction used MID-PATH in the TARGET: that is a spelling of
+a fenced file no root string is a prefix of, and closing it needs a `realpath`
+per call — the cost this guard exists to avoid. The redirect covers it; §6 lists
+it.
 
 ### 4.3 The kill guard
 
 The real record is read ONCE, before the redirect points the readers elsewhere,
-and `backend_eviction.terminate` refuses a pid it names. Separate from the write
-guard because a kill leaves no filesystem trace. `terminate` is the one act that
-ends a backend — `singleton`'s four thin bindings all route through it, and
-`stop_backend`/`restart_backend` call it directly — so one wrapper covers every
-door. It refuses only RECORDED pids; several files drive the real eviction act
-against fake pids and a blanket ban would fence the suite by breaking it.
+and a pid it names may not be ended. Separate from the write guard because a
+kill leaves no filesystem trace.
+
+**The guard is on the ACT, not on a caller** (review M1, and the first version
+was wrong). It wrapped `backend_eviction.terminate` and searched its ARGUMENTS
+for a protected int, on the reasoning that `terminate` is the one act that ends
+a backend. The reasoning about `terminate` is right and the guard built on it
+does not work, measured failing both ways:
+
+* **False negative.** `terminate`'s first parameter is a PORT; its kill target
+  is a local, computed inside it (`pid = pid_on_port(port)`) by a machine-wide
+  `psutil.net_connections` scan. The guard never saw a pid, and ALLOWED a call
+  that would have ended the operator's pid 47424.
+* **False positive.** The ints it DID see were `port` and `recorded_pid`, so a
+  test-owned backend that happened to bind TCP port 47424 was refused about a
+  process the operator never owned.
+
+What every kill in the tree has in common is not a caller, it is two doors:
+`psutil.Process.terminate`/`kill`/`send_signal` and `os.kill`. The guard wraps
+those and reads `self.pid` / the `pid` argument — the number the OS is about to
+act on. That is strictly less code (no `backend_eviction` import, no argument
+walk) and it also covers the NINE kill sites the argument walk could not see:
+`process_cleanup._kill_process_by_pid`, `spawn_leak.reap_launched_browsers`,
+`browser_manager._blocking_teardown` (the tree's only `os.kill`) and
+`desktop_launch._kill_delegated`, all of which reach live Chrome pids from a
+cmdline scan — and the operator's two backends own human-login Chromes.
+`send_signal` is wrapped alongside the other two because on POSIX they are thin
+wrappers over it and on Windows they are not.
+
+It refuses only RECORDED pids; several files drive the real eviction act and the
+real orphan reaper against pids of their own, and a blanket ban would fence the
+suite by breaking it. The pins are all against a DECOY pid set, never the
+operator's, and each takes its wrapper back off in a `finally` — the first set
+installed a layer per node and left every one of them on `psutil.Process` for
+the rest of the session (review S2).
 
 ### 4.4 Why not redirect `HOME`
 
@@ -280,7 +358,15 @@ neither policy can be applied to the wrong root (pinned both ways).
 A root with no final path component (`C:\`, `/`) is dropped rather than obeyed —
 designating one would fence the suite off the whole disk.
 
-### 4.6 The product half: `__main__.py` (round 2)
+### 4.6 The product half: `__main__.py` (round 2) — now **F-904**
+
+**This defect has its own finding**:
+[`finding_F904_importing_main_starts_a_backend.md`](./finding_F904_importing_main_starts_a_backend.md),
+written in parallel by another agent and merged onto this branch (`46c67ef`).
+That is the home for it; this section is kept because F-903's census is where it
+was found and because the whole-package rule that replaced this finding's
+deny-list lives on the same pin file. Where the two disagree, F-904 wins.
+The two test files were folded into one, `tests/test_package_entrypoints.py`.
 
 Rounds 1 and 2 of this finding differ in kind, and the difference is worth
 naming. Everything above fences the SUITE. This fences nothing — it removes the
@@ -307,7 +393,7 @@ census probe of §2, and gets the same backend. The fix is the guard.
 | `singleton._server_process_cmd` / `backend_launch` | `-m stealth_chrome_devtools_mcp …` argv | no — that IS the `-m` route |
 | `import …__main__` (any sweep) | module body | **yes, and that is the fix** |
 
-`tests/test_package_entrypoint.py` is the one home for both halves. The `-m`
+`tests/test_package_entrypoints.py` is the one home for both halves. The `-m`
 contract is measured in-process through `runpy.run_module(..., run_name=
 "__main__")` — which is what `-m` IS — with `server.main` tripwired, so the node
 proves the guard lets the real door through without starting anything. The
@@ -345,16 +431,12 @@ is the shape this finding is about.
 1. ~~**`__main__.py` still runs `main()` unguarded.**~~ **FIXED** in round 2 —
    see §4.6. The deny-list it justified is deleted rather than emptied.
 
-   A NEW residual took its place and is smaller but real: **a bare `python -m
-   stealth_chrome_devtools_mcp --help` cold-starts a backend.** `server.main`
-   builds its parser with `add_help=False` and reads it with
-   `parse_known_args`, so `--help` is an unknown argument to it, and the default
-   `--transport stdio` carries it past the parser into `ensure_server_running`.
-   Asking for help starts a server. It is pinned
-   (`TestBareHelpFallsThroughToTheColdStart`, which proves it by tripwiring the
-   cold start rather than performing one) and deliberately not fixed here: the
-   parser's shape is `server.py`'s business and changing it moves what every
-   unrecognised flag does, which is a different finding's blast radius.
+   A NEW residual took its place and is now **F-905**, fixed on this branch —
+   see [`finding_F905_help_cold_starts_a_backend.md`](./finding_F905_help_cold_starts_a_backend.md).
+   A bare `python -m stealth_chrome_devtools_mcp --help` cold-started a backend:
+   `server.main` builds its parser with `add_help=False` and reads it with
+   `parse_known_args`, so `--help` was an unknown argument to it and the default
+   `--transport stdio` carried it past the parser into `ensure_server_running`.
 2. **The write guard is per-process.** A test that spawns a CHILD gets no fence
    from it; children are covered by `release_gate_harness._isolated_env`'s HOME
    redirection, which is unchanged and separately correct.
@@ -369,7 +451,7 @@ is the shape this finding is about.
    import would not be caught until it caused harm.~~ **RESOLVED** in round 2:
    the deny-list is DELETED rather than emptied, and what replaces it is a
    positive whole-package rule —
-   `test_package_entrypoint.py::TestNoModuleBodyDoesWork` refuses a bare
+   `test_package_entrypoints.py::TestNoModuleBodyDoesWork` refuses a bare
    module-level call anywhere under `src/stealth_chrome_devtools_mcp/`, with one
    named allowance (`tool_runtime`'s `cdp_transport.install()`, which is
    idempotent, does no I/O and is CLAUDE.md's documented one call site). A
@@ -405,6 +487,22 @@ is the shape this finding is about.
    `sessions/` (`e2e-warmup`, `ci-warmup`, `ci-cycle-0/1/2`, `tree-kill-test`,
    `integration-test-profile`, `ci-basic-test`, beside 87 real ones) shows it has
    failed before. Recorded as what it is rather than dramatised.
+9. **The tripwire is not every filesystem primitive**, and the table in §4.2
+   names the ones it is not: `shutil.copy2`'s Win32 fast path, `Path.glob`'s
+   import-bound `scandir`, `os.chmod`/`link`/`symlink`, `sqlite3`, subprocesses,
+   and any fd opened before install. The redirect covers them; the claim has
+   been narrowed everywhere it was made (review M2).
+10. **A junction used MID-PATH in a target still reaches a fenced file.** The
+    roots are designated by every spelling the OS answers to for THEM (§4.2,
+    review S1), which closes the 8.3, `\\?\` and root-level-link cases for zero
+    per-open cost. A link somewhere in the middle of the target is a different
+    shape and would need a `realpath` per call.
+11. **`tests/test_backend_escapes_client_job.py`'s helper child** ran real
+    backend-spawn code with the operator's real `HOME` (review S7). Nothing
+    landed, because the child hand-stubs its one writer — but it was one
+    un-stubbed writer from the real record and no in-process fence can reach a
+    child. Fixed here by adding `HOME`/`USERPROFILE` to its `_child_env`, which
+    is what every other spawning test in the suite already does.
 
 ## 7. Verification
 
@@ -471,7 +569,19 @@ measured rather than assumed — 20 000 `open`+`read` cycles, this machine:
 |---|---|
 | unguarded | 37.2 µs |
 | guarded, first cut (`abspath` + re-normalised root every call) | 45.1 µs (+5.6 µs, +14.3 %) |
-| guarded, as shipped (memoised root, substring gate, `abspath` only when relative) | 34.8 µs — below this machine's run-to-run noise |
+| guarded, as shipped (memoised root, substring gate, `abspath` only when relative) | 34.8 µs |
+
+**That last row was a bad number and the review was right to say so** (N1).
+34.8 µs is BELOW the unguarded figure, which is not a thing a wrapper can do:
+it means the measurement was inside the noise, and the reviewer's interleaved
+run (N=20 000 × 8 rounds) put the band at 11–13 µs — an order of magnitude
+larger than the effect being reported. The honest number is the isolated one:
+`_designated` costs **0.46–0.53 µs per call** (1.45 µs for a relative path,
+which pays `getcwd`) and `_designated_roots()`'s cache-hit check 0.083 µs, so
+the true overhead is **≈ 0.6 µs per open, about 1.7 %**. The caching works as
+designed; the table above is kept only to show which shape was rejected and
+why. Resolving the root spellings (§4.2) does not move this — it happens once
+per table rebuild, not per open.
 
 The substring gate is exact only for an ABSOLUTE path (the root's whole string
 is a prefix, so its last component must appear). A relative path has no such
@@ -497,3 +607,33 @@ The "the state dir is `~/.stealth-mcp`" claim those three carried implicitly now
 has ONE home, `test_operator_fence::test_the_real_state_dir_is_the_home_convention`
 — which also keeps the fence honest, since `REAL_STATE_DIR` is what the write
 guard designates.
+
+### Round 4 — the review's must-fixes
+
+Each of M1, M2 and M4 was demonstrated RED against the code it replaces, by
+restoring the shipped implementation under the NEW pins rather than by
+reasoning about it:
+
+| | RED (shipped code, new pins) | GREEN |
+|---|---|---|
+| M1 kill guard | 5 failed / 4 passed — the three `psutil` doors, `os.kill`, and the port-equals-a-pid false positive | 54 passed |
+| M2 `os.truncate`/`os.utime` + M4 keyword forms | 5 failed / 7 passed, in one selection | 54 passed |
+
+The M1 pins run against a DECOY pid set (`424242`), asserted at the top of the
+class not to be one the operator's record names, and every one of them takes its
+wrapper back off in a `finally` — S2's leak was in the pins, not the guard.
+
+Re-run after the changes, hermetic only, batched:
+
+| Batch | Files | Result |
+|---|---|---|
+| pin set | `test_operator_fence`, `test_package_entrypoints`, `test_proxy_bridge_transport`, `test_doc_claims`, `test_doc_examples`, `test_check_suppression_owners` | 141 passed |
+| kill paths + singleton | 13 files (`backend_eviction`, `backend_launch`, `process_cleanup`, `spawn_leak`, `desktop_launch`, `sweep_deferred_cleanup`, `singleton_*`, …) | 273 passed |
+| record / storage / CLI | 12 files (`cli`, `clone_storage`, `backend_registry`, `logging_setup`, `profile_lock`, `settings`, …) | 262 passed |
+| `test_backend_escapes_client_job` (S7's file, Windows-only, spawns a real child) | 2 | 2 passed, rung `scheduler` both |
+
+`~/.stealth-mcp/server.json` SHA-256 at the start and at the end of round 4:
+`1B24991EBA294507195B2BAC386A56BA78B0300B6B26837FF7360314F6D2ADAB` — byte
+identical, and the same digest as rounds 1-3. Both live backends (pid 47424 on
+port 3881, started 2026-09-20 10:45:31; pid 167540 on port 35273, started
+2026-09-20 23:08:04) alive at the end.

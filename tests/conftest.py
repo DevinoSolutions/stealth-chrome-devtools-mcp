@@ -21,7 +21,13 @@ if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 
 # Imported by bare name for the same reason ``fakes`` is, and only once the path
-# above is in place. It must come before any product import in this file.
+# above is in place. What must come before any product import is the INSTALL at
+# the bottom of this block, not this import: ``settings`` is already imported at
+# line 15 and that is fine, because nothing calls ``get_settings()`` before the
+# install and ``_fence_root`` repairs the one binding an early import costs
+# (pydantic copied ``env_file``'s VALUE into ``Settings.model_config`` when the
+# class body ran). The claim here used to be "before any product import in this
+# file", which was false and sounded load-bearing (F-903 review S5).
 import operator_fence  # noqa: E402  PERMANENT(F-903: the fence must install before any product import, and the path above is what makes this importable at all)
 
 # Redirect clone / large-response artifacts to a temp dir for the whole test

@@ -24,6 +24,7 @@ the operator's directory even when it fails.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import os
 import sys
@@ -151,8 +152,8 @@ class TestTheEnumerationCannotGoStale:
         it runs nothing.
 
         The two halves live where they belong -- that importing it is inert is
-        ``tests/test_package_entrypoint.py``'s, and so is the whole-package rule
-        that keeps any other module body from becoming the next one.
+        ``tests/test_package_entrypoints.py``'s, and so is the whole-package
+        rule that keeps any other module body from becoming the next one.
         """
         assert not hasattr(operator_fence, "_NEVER_IMPORT"), (
             "the deny-list is back; a census with an exclusion list is a census "
@@ -162,6 +163,54 @@ class TestTheEnumerationCannotGoStale:
         operator_fence.derived_globals()
 
         assert "stealth_chrome_devtools_mcp.__main__" in sys.modules
+
+    def test_the_sweep_sees_a_path_a_singleton_captured_on_itself(self):
+        """F-903 review S3: a module GLOBAL is not the only import-time capture.
+
+        ``process_cleanup``'s module-level singleton keeps
+        ``self.pid_file = STATE_DIR / RECORD_NAME``, built in its own module
+        body. The reviewer measured that an attributes-only probe reported
+        neither it nor ``file_based_element_cloner``'s ``output_dir``, so the
+        "a new derived path fails a test" promise had a hole precisely where
+        the redirect is saved by the ORDER of its own table (the singleton is
+        constructed by row 4's import, after row 3 rebinds the global it
+        reads). The sweep walks one level into the package's own instances now,
+        and this is the node that keeps it doing so.
+        """
+        found = operator_fence.derived_globals()
+        assert (
+            "stealth_chrome_devtools_mcp.embedded.process_cleanup"
+            ".process_cleanup.pid_file" in found
+        ), "the sweep no longer sees a Path a module-level singleton captured"
+
+
+class TestTheFenceReportsWhatItIsProtecting:
+    """``conftest`` keeps the live pids the kill guard was armed with.
+
+    F-903 review S6: the binding was assigned and never read, and the kill
+    guard's own nodes all use a hand-made decoy set -- so on a machine where
+    ``recorded_backend_pids()`` silently answered ``frozenset()`` every one of
+    them would still pass. These two are the anti-vacuous half: the reader is
+    proven against a record that HAS entries, and the conftest global is proven
+    to be that reader's answer for this session.
+    """
+
+    def test_the_reader_finds_the_pids_a_record_names(self, tmp_path, monkeypatch):
+        state = tmp_path / ".stealth-mcp"
+        state.mkdir()
+        (state / "server.json").write_text(
+            '{"schema_version": 3, "backends": ['
+            '{"port": 1, "pid": 4242}, {"port": 2, "pid": 4243}]}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", state)
+        assert operator_fence.recorded_backend_pids() == frozenset({4242, 4243})
+
+    def test_the_conftest_holds_what_the_fence_protects(self):
+        import conftest
+
+        live = operator_fence.recorded_backend_pids()
+        assert live == conftest._FENCED_LIVE_BACKEND_PIDS
 
 
 class TestEveryTripwireIsUnswallowable:
@@ -254,13 +303,46 @@ class TestTheWriteGuardStopsAWriteTheRedirectMissed:
                 id="os-remove",
             ),
             pytest.param(lambda d: (d / "server.json").unlink(), id="path-unlink"),
+            # F-903 review M2: both reached a designated root and did not
+            # raise. `os.truncate` emptied the fenced file; `os.utime` is the
+            # fast path `Path.touch()` takes when the file already exists, so a
+            # touch bumped a fenced mtime while `path-touch` above (which goes
+            # through `os.open`) looked like it covered touching.
+            pytest.param(lambda d: os.truncate(d / "server.json", 0), id="os-truncate"),
+            pytest.param(lambda d: os.utime(d / "server.json"), id="os-utime"),
+            # F-903 review M4: the SAME doors in keyword form, which walked
+            # straight through an args-only guard.
+            pytest.param(
+                lambda d: os.remove(path=d / "server.json"),  # noqa: PTH107  PERMANENT(F-903: os.remove IS the door under test)
+                id="os-remove-keyword",
+            ),
+            pytest.param(
+                lambda d: os.mkdir(path=d / "x"),  # noqa: PTH102  PERMANENT(F-903: os.mkdir IS the door under test)
+                id="os-mkdir-keyword",
+            ),
+            pytest.param(
+                lambda d: os.rmdir(path=d / "x"),  # noqa: PTH106  PERMANENT(F-903: os.rmdir IS the door under test)
+                id="os-rmdir-keyword",
+            ),
         ],
     )
     def test_every_write_door_is_guarded(self, decoy, monkeypatch, act):
         """One node per primitive the product writes the state dir through."""
+        (decoy / "server.json").write_text("{}", encoding="utf-8")
         monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", decoy)
         with pytest.raises(operator_fence.RealStateDirWrite):
             act(decoy)
+
+    def test_a_keyword_call_the_guard_missed_really_deleted_the_file(self, decoy):
+        """The measurement behind M4, kept as the RED half of the pair above.
+
+        With the decoy NOT designated, ``os.remove(path=…)`` deletes it -- which
+        is precisely what it did while designated, under the args-only guard.
+        """
+        target = decoy / "server.json"
+        target.write_text("{}", encoding="utf-8")
+        os.remove(path=target)  # noqa: PTH107  PERMANENT(F-903: os.remove IS the door under test)
+        assert not target.exists()
 
     def test_the_guard_survives_the_products_fail_open_handlers(
         self, decoy, monkeypatch
@@ -337,6 +419,59 @@ class TestTheWriteGuardStopsAWriteTheRedirectMissed:
         monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", designated)
         (sibling / "profile.json").write_text("{}", encoding="utf-8")
         assert (sibling / "profile.json").is_file()
+
+
+class TestEverySpellingOfARootIsFenced:
+    """F-903 review S1: one directory, several names the OS answers to.
+
+    The hot guard compares strings, so a root known by one spelling is fenced
+    by one spelling. ``_root_spellings`` resolves the alternatives ONCE per
+    table rebuild -- realpath for a junction or symlink, ``GetShortPathName``
+    for the 8.3 name, and the extended-length prefix -- and this is what keeps
+    them in the table.
+    """
+
+    @pytest.fixture()
+    def decoy(self, tmp_path, monkeypatch):
+        target = tmp_path / "stealth-mcp-decoy-directory"
+        target.mkdir()
+        monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", target)
+        return target
+
+    @pytest.mark.skipif(os.name != "nt", reason="8.3 short names are Windows'")
+    def test_the_short_name_spelling_is_refused(self, decoy):
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        assert ctypes.windll.kernel32.GetShortPathNameW(str(decoy), buffer, 32768)
+        short = Path(buffer.value)
+        # The premise: it really is a DIFFERENT string for the same directory.
+        assert str(short).casefold() != str(decoy).casefold()
+        with pytest.raises(operator_fence.RealStateDirWrite):
+            (short / "server.json").write_text("{}", encoding="utf-8")
+
+    @pytest.mark.skipif(os.name != "nt", reason=r"\\?\ is Windows'")
+    def test_the_extended_length_spelling_is_refused(self, decoy):
+        with pytest.raises(operator_fence.RealStateDirWrite):
+            Path("\\\\?\\" + str(decoy) + "\\server.json").write_text(
+                "{}", encoding="utf-8"
+            )
+
+    def test_a_link_to_the_root_is_still_not_the_root(self, tmp_path, decoy):
+        """What S1 does NOT close, pinned so the claim stays honest.
+
+        Realpathing the ROOT canonicalises the root. A junction or symlink used
+        MID-PATH in the TARGET is a spelling of a fenced file that no root
+        string is a prefix of, and closing it would need a resolve on every
+        open -- the cost this guard exists to avoid. The redirect covers it.
+        """
+        link = tmp_path / "link"
+        try:
+            link.symlink_to(decoy, target_is_directory=True)
+        except (OSError, NotImplementedError):  # no privilege on this machine
+            pytest.skip("cannot create a directory symlink here")
+        (link / "server.json").write_text("{}", encoding="utf-8")
+        assert (decoy / "server.json").is_file()
 
 
 class TestTheBrowserSessionRootIsFencedToo:
@@ -484,46 +619,130 @@ class TestReadsAreDeliberatelyNotGuarded:
         assert isinstance(_reserved_ports(), frozenset)
 
 
+# A pid the guard will be told to protect. NEVER one of the operator's: every
+# node below installs its own guard over a DECOY set, and the wrapper is taken
+# off again in a `finally` (F-903 review S2 -- the first version of these pins
+# installed a layer per node and left every one of them on the class for the
+# rest of the session).
+_DECOY_PID = 424242
+_UNPROTECTED_PID = 424243
+
+
+class _FakeProcess:
+    """As much of ``psutil.Process`` as the guard reads: ``.pid``.
+
+    The guard is a wrapper on the CLASS, so calling it unbound with this is the
+    real wrapper on a real method lookup -- and no real process is involved,
+    which is the point. The refusing path never reaches the original method;
+    the allowing path reaches the recorder installed under it.
+    """
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+
+
+@contextlib.contextmanager
+def _kill_guard(live: frozenset[int], *, record: list | None = None):
+    """Install the kill guard over optional recorders, then take it off again.
+
+    Restoring is not tidiness: ``_install_kill_guard`` sets attributes on
+    ``psutil.Process`` and on ``os``, which are process-global, so a node that
+    installs and walks away leaves its DECOY pid protected for every later test
+    in the session (F-903 review S2).
+    """
+    import psutil
+
+    names = ("terminate", "kill", "send_signal")
+    saved = {name: getattr(psutil.Process, name) for name in names}
+    saved_os_kill = os.kill
+    try:
+        if record is not None:
+            for name in names:
+                setattr(
+                    psutil.Process,
+                    name,
+                    lambda self, *a, _n=name, **k: record.append((_n, self.pid)),
+                )
+            os.kill = lambda pid, *a, **k: record.append(("os.kill", pid))
+        operator_fence._install_kill_guard(live)
+        yield
+    finally:
+        for name, original in saved.items():
+            setattr(psutil.Process, name, original)
+        os.kill = saved_os_kill
+
+
 class TestTheKillGuardProtectsALiveBackend:
-    """A recorded pid may not be terminated from the suite.
+    """A recorded pid may not be ended from the suite.
 
     Separate from the write guard because a kill leaves no filesystem trace, and
     terminating a live backend is the harm F-886 exists to prevent -- reached
     from the suite instead of from a cold start.
+
+    **These nodes are about the PID, deliberately** (F-903 review M1). The guard
+    they replace wrapped ``backend_eviction.terminate`` and searched its
+    ARGUMENTS for a protected int, and the pins matched it: they passed
+    ``terminate(4242)`` and read the refusal as proof. It was not. That
+    function's first parameter is a PORT and its kill target is a local
+    (``pid = pid_on_port(port)``), so the shipped guard ALLOWED a call that
+    would have ended the operator's pid 47424 and REFUSED a call whose port
+    merely equalled a protected pid -- measured, both ways. What every kill in
+    the tree does have in common is the two doors below.
     """
 
-    def test_a_recorded_pid_cannot_be_terminated(self, monkeypatch):
-        from stealth_chrome_devtools_mcp.embedded import backend_eviction
+    def test_the_decoy_is_not_one_of_the_operators(self):
+        """The safety premise of every node here, asserted rather than assumed."""
+        assert _DECOY_PID not in operator_fence.recorded_backend_pids()
+        assert _UNPROTECTED_PID not in operator_fence.recorded_backend_pids()
 
-        operator_fence._install_kill_guard(frozenset({4242}))
-        monkeypatch.setattr(
-            backend_eviction,
-            "terminate",
-            backend_eviction.terminate,
-            raising=False,
-        )
-        with pytest.raises(operator_fence.RealBackendTerminated):
-            backend_eviction.terminate(4242)
+    @pytest.mark.parametrize("method", ["terminate", "kill", "send_signal"])
+    def test_a_protected_pid_cannot_be_ended_through_psutil(self, method):
+        import psutil
 
-    def test_an_unrecorded_pid_is_not_refused_by_the_guard(self):
-        """The guard must not become a blanket ban on ``terminate``.
+        with _kill_guard(frozenset({_DECOY_PID})):
+            with pytest.raises(operator_fence.RealBackendTerminated):
+                getattr(psutil.Process, method)(_FakeProcess(_DECOY_PID))
 
-        Several files drive the real eviction act against fake pids; a guard
-        that refused every pid would fence the suite by breaking it.
+    def test_a_protected_pid_cannot_be_ended_through_os_kill(self):
+        """``browser_manager``'s teardown is the tree's one ``os.kill``."""
+        with _kill_guard(frozenset({_DECOY_PID})):
+            with pytest.raises(operator_fence.RealBackendTerminated):
+                os.kill(_DECOY_PID, 9)
+
+    @pytest.mark.parametrize("method", ["terminate", "kill", "send_signal"])
+    def test_an_unprotected_pid_still_goes_through(self, method):
+        """The guard must not become a blanket ban on ending a process.
+
+        Several files drive the real eviction act and the real orphan reaper
+        against pids of their own; a guard that refused every pid would fence
+        the suite by breaking it.
         """
-        captured = []
+        import psutil
 
-        def fake(pid, *args, **kwargs):
-            captured.append(pid)
-            return True
+        record: list = []
+        with _kill_guard(frozenset({_DECOY_PID}), record=record):
+            getattr(psutil.Process, method)(_FakeProcess(_UNPROTECTED_PID))
+            os.kill(_UNPROTECTED_PID, 9)
+        assert record == [(method, _UNPROTECTED_PID), ("os.kill", _UNPROTECTED_PID)]
 
+    def test_a_port_that_equals_a_protected_pid_is_not_refused(self):
+        """The false POSITIVE the argument-walking guard had, pinned.
+
+        ``backend_eviction.terminate``'s first argument is a port. Ports and
+        pids share the integer space, so on the shipped guard a test-owned
+        backend that happened to bind TCP port 47424 was refused about a
+        process the operator never owned. Here nothing is killed at all --
+        ``pid_on_port`` finds nobody and ``is_ours`` claims nobody -- so a
+        refusal could only come from reading the port as a pid.
+        """
         from stealth_chrome_devtools_mcp.embedded import backend_eviction
 
-        original = backend_eviction.terminate
-        try:
-            backend_eviction.terminate = fake
-            operator_fence._install_kill_guard(frozenset({4242}))
-            backend_eviction.terminate(9999)
-        finally:
-            backend_eviction.terminate = original
-        assert captured == [9999]
+        with _kill_guard(frozenset({_DECOY_PID})):
+            answered = backend_eviction.terminate(
+                _DECOY_PID,
+                pid_on_port=lambda _port: None,
+                recorded_pid=None,
+                is_ours=lambda _pid: False,
+                is_healthy=lambda _port: False,
+            )
+        assert answered is False
