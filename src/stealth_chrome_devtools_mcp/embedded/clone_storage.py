@@ -780,11 +780,16 @@ def require_allowed_seed_from(seed_from: str | None, landed: str | None) -> str 
     passed. The resolver asks again because it is public and has its own
     callers. It costs one ``exists()``.
 
-    What a ``seed_from`` actually copies is NOT decided here — that is
-    ``_seed_source``, at the copy itself, because whether a source is open is
-    a fact with a lifetime and the only honest place to read it is the instant
-    before the copy.
-    """
+    The SOURCE question is asked here too and its answer DISCARDED (review S1;
+    argument in finding §2.3). Its three refusals are raised inside
+    ``profile_seed.seed_source``, which the resolver calls from INSIDE
+    ``spawn_browser``'s ``try``, so they reached the caller re-labelled
+    ``Failed to spawn browser: …`` — and an inner ``except ToolError: raise``
+    does not fix that, it still unwinds into the enclosing handler.
+    **Discarding is the point**: "is this source open" is a fact with a
+    LIFETIME, so the authoritative read stays the resolver's — the statement
+    before the copy, no ``await`` between — and this ask is ADVISORY. The
+    freshen is NOT taken here (``_seed_source_for_copy``)."""
     requested = profile_seed.seed_request(seed_from)
     if requested is None:
         return None
@@ -794,7 +799,9 @@ def require_allowed_seed_from(seed_from: str | None, landed: str | None) -> str 
         target,
         shared=target is not None
         and profile_seed.same_dir(target, master_profile_dir()),
+        inside_root=target is not None and _is_relative_to(target, clone_root_dir()),
     )
+    _seed_source(requested)
     return requested
 
 
@@ -802,16 +809,26 @@ def _seed_source(seed_from: str | None) -> profile_seed.SeedSource:
     """Which directory this new session is copied from, bound to OUR four
     directories and OUR liveness witness. The rule is ``profile_seed``'s.
 
-    The pre-copy freshen is asked only for the shared session, which is the
-    only source that HAS a seed to freshen; for any other the source is the
-    session directory itself and a refresh of the shared seed would be a whole
-    profile copy nobody asked for.
+    Deliberately SIDE-EFFECT-FREE, because it is asked TWICE (review S1) and
+    only one ask is about to copy: taken twice the freshen would copy a whole
+    profile for a spawn about to be refused, and taken here a gate whose job
+    is asking questions would write to disk.
     """
-    if seed_from is None or profile_seed.is_default_name(seed_from):
-        _refresh_snapshot_if_stale()
     return profile_seed.seed_source(
         seed_from, _roots(), _is_relative_to, held=_profile_has_running_browser
     )
+
+
+def _seed_source_for_copy(seed_from: str | None) -> profile_seed.SeedSource:
+    """``_seed_source``, plus the freshen a copy from the SHARED session owes
+    its seed first — asked only for that session, the only source that HAS a
+    seed. The two may therefore answer differently on a first run (no seed yet
+    -> the live shared dir; after the freshen -> the seed), which is harmless
+    precisely because the pre-flight's answer is discarded.
+    """
+    if seed_from is None or profile_seed.is_default_name(seed_from):
+        _refresh_snapshot_if_stale()
+    return _seed_source(seed_from)
 
 
 def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, Any]:
@@ -882,7 +899,10 @@ async def resolve_profile_selection(
                     "walk_reason": hold.reason,
                 }
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
-            seed = _seed_source(seed_from)
+            # `_for_copy`, never `_seed_source`: this read owns the freshen AND
+            # is the AUTHORITATIVE hold check — the statement before the copy,
+            # no `await` between. The pre-flight's ask is advisory (review S1).
+            seed = _seed_source_for_copy(seed_from)
             _require_copied(
                 _copy_profile_tree(seed.path, explicit, clone_root, seed.kind), explicit
             )

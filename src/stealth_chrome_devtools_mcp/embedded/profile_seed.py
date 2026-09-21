@@ -319,20 +319,38 @@ def seed_sentence(fields: dict[str, object]) -> str:
     listing, while a spawn omits the line rather than claim a seed for the
     shared profile, which is nobody's copy).
 
-    "seed changed since" is printed only when it is True: False is the
-    ordinary case and would be noise, and None means the marker could not say
-    — reported as an unknown WHEN rather than as a fresh seed, because a
-    profile frozen since August reading "up to date" is the silence F-895
-    closed.
+    ``seed_changed_since`` has THREE values and each gets its own ending
+    (F-897 review N1):
+
+    * **True** — ``SEED CHANGED SINCE``, shouted, because it is an ALERT: the
+      source has taken a login since this copy was made and the copy is behind.
+    * **False** — nothing at all. The ordinary case, and a line saying "up to
+      date" on every spawn is noise that teaches a reader to skip the line.
+    * **None** — ``(source unreadable)``. It means no login witness could be
+      read in the recorded source, which a DELETED or renamed source
+      guarantees, and until F-897 it rendered BYTE-IDENTICALLY to False: a
+      vanished source read as a fresh one, and a reused name read as "up to
+      date" about a directory sharing nothing with the source but its spelling.
+      Lowercase and parenthetical on purpose — it is a caveat about what could
+      be READ, not a claim that anything is wrong, and giving it the alert's
+      register would teach a reader to ignore both. It deliberately does not
+      say "deleted": this function sees three fields and not a path, and
+      "exists but holds no login" produces the same None.
+
+    A marker that cannot say WHEN still short-circuits to ``(when: unknown)``
+    above, so a legacy marker never reaches the three-way branch.
     """
     seeded_from = fields.get("seeded_from") or UNKNOWN_SEED
     seeded_at = fields.get("seeded_at")
     if not seeded_at:
         return f"seeded from {seeded_from} (when: unknown)"
     sentence = f"seeded from {seeded_from} at {seeded_at}"
-    return sentence + (
-        "  SEED CHANGED SINCE" if fields.get("seed_changed_since") else ""
-    )
+    changed = fields.get("seed_changed_since")
+    if changed:
+        return sentence + "  SEED CHANGED SINCE"
+    if changed is None:
+        return sentence + "  (source unreadable)"
+    return sentence
 
 
 def is_default_name(requested: str) -> bool:
@@ -765,15 +783,33 @@ def seed_request(seed_from: str | None) -> str | None:
     )
 
 
-def require_new_session(requested: str, target: Path | None, *, shared: bool) -> None:
+def require_new_session(
+    requested: str,
+    target: Path | None,
+    *,
+    shared: bool,
+    inside_root: bool,
+) -> None:
     """Raise unless this ``seed_from`` has a NEW session of its own to apply to.
 
     ``seed_from`` says where a session's contents come from at the moment it
-    is CREATED, so all three refusals here are one sentence read three ways:
-    there has to be a session, it has to be the caller's own, and it must not
-    already exist.
+    is CREATED, so all FOUR refusals here are one sentence read four ways:
+    there has to be a session, it has to be the caller's own, it has to be a
+    session at all, and it must not already exist.
 
-    The third is the one with a choice in it, and the choice is deliberate.
+    The third exists because the answer to it used to be SILENCE (F-897 review
+    M1, measured). A ``user_data_dir`` landing outside the clone root is
+    opened exactly as it is — the resolver only ever seeds a directory it is
+    about to create UNDER the session root — so ``seed_from`` passed every
+    gate and was then never used: no copy, no marker, ``seeded_from:
+    unknown``, and not one word to the caller. That is this feature's own
+    commitment ("``--from`` is never silently dropped") inverted and reached
+    through the path door one argument to the left. It is decided HERE rather
+    than in the resolver because the rule is this function's — whether there
+    is a NEW SESSION for a seed to apply to — and the caller supplies the one
+    fact it cannot know, exactly as it does for ``shared``.
+
+    The fourth is the one with a choice in it, and the choice is deliberate.
     The alternatives were a silent no-op — which tells a caller their login
     came from ``work`` when it came from wherever the directory was seeded
     weeks ago — and a RE-SEED, which overwrites a profile whose whole purpose
@@ -783,13 +819,20 @@ def require_new_session(requested: str, target: Path | None, *, shared: bool) ->
     ``seed_from`` does), or pick a name that is free. The refusal NAMES where
     the existing session was actually seeded from, so a caller who expected a
     fresh copy learns what they have instead.
+
+    **Every sentence here names BOTH spellings of the remedy** (review N4).
+    The CLI prints the backend's message verbatim — one home for the rule —
+    so a caller who typed ``stealthy spawn --from work`` and is told to "pass
+    ``session=<name>``" goes looking for an argument they never typed. Keying
+    the wording on who asked would need a second message home, which is the
+    defect this module exists to prevent; naming both costs four words.
     """
     if target is None:
         raise ToolError(
             f"seed_from={requested!r} says what a NEW session is copied from, "
-            "so it needs a session of its own: pass session=<name> beside it. "
-            "A spawn that names no session gets the "
-            f"{DEFAULT_SESSION!r} session or a disposable copy of it, and "
+            "so it needs a session of its own: pass session=<name> beside it "
+            "(--session NAME from the CLI). A spawn that names no session gets "
+            f"the {DEFAULT_SESSION!r} session or a disposable copy of it, and "
             "neither is seeded from another session."
         )
     if shared:
@@ -797,7 +840,17 @@ def require_new_session(requested: str, target: Path | None, *, shared: bool) ->
             f"seed_from={requested!r} cannot apply to the "
             f"{DEFAULT_SESSION!r} session: {DEFAULT_SESSION!r} is the session "
             "every other one is seeded FROM, and is nobody's copy. Pick a name "
-            "for a new session of your own."
+            "for a new session of your own — session=<name>, or --session NAME "
+            "from the CLI."
+        )
+    if not inside_root:
+        raise ToolError(
+            f"seed_from={requested!r} copies one SESSION into another, and "
+            f"{str(target)!r} is a directory named by path rather than a "
+            "session: it is opened exactly as it is, so there is nothing for "
+            "seed_from to apply to and it would have been silently ignored. "
+            "Pass session=<name> instead (--session NAME from the CLI) — a "
+            "session is what carries a name, which is what the copy records."
         )
     if target.exists():
         raise ToolError(
@@ -806,7 +859,7 @@ def require_new_session(requested: str, target: Path | None, *, shared: bool) ->
             f"{seed_sentence(provenance(target))}. Pass session="
             f"{target.name!r} on its own to open it with the cookies and "
             f"logins it already holds, or pick a free name for a fresh copy "
-            f"of {requested!r}."
+            f"of {requested!r}. (--session NAME from the CLI.)"
         )
 
 

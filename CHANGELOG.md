@@ -111,6 +111,19 @@ alternatives were rejected deliberately: a silent no-op tells a caller their
 session came from `work` when it did not, and a re-seed overwrites a login
 somebody typed by hand.
 
+**It also raises when the target is not a session at all** — a `user_data_dir`
+naming a directory outside the session root is opened exactly as it is, so
+there is nothing for `seed_from` to apply to and it would have been silently
+ignored. Reachable only through the deprecated path spellings
+(`--arg user_data_dir=<path>`, `stealthy spawn --profile`), and refused there
+rather than dropped.
+
+**Every one of these refusals reaches you as a refusal**, not as
+`Failed to spawn browser: …`. A source that is open, a source that does not
+exist and a source naming a reserved word used to be raised from inside the
+spawn's own error handler and came back labelled as a spawn that had failed —
+about a spawn that never started.
+
 **A source that is open in a browser is refused BY NAME, and nothing is created
 on disk.** This is the safety argument the feature rests on: a profile copy
 answers a file Chrome holds by skipping it with a warning, so copying a live
@@ -135,6 +148,13 @@ rather than only `default` — and still a word you can pass straight back as
 `session=`. `stealthy spawn` prints the same `seeded from <name> at <when>`
 sentence `stealthy profiles` does; both phrase it through
 `profile_seed.seed_sentence`, so they cannot drift.
+
+That sentence also stops reporting an **unreadable** source as an unchanged
+one. `seed_changed_since` is `None` whenever no login witness can be read in
+the recorded source — which a deleted or renamed source guarantees — and until
+now that rendered byte-identically to "read it, nothing has moved". It reads
+`(source unreadable)` instead: lowercase and parenthetical, because it is a
+caveat about what could be read and not the alert `SEED CHANGED SINCE` is.
 
 **Two files were cut to pay for it, because caps ratchet down only.**
 `embedded/profile_copy.py` is the new home for copying a Chrome profile

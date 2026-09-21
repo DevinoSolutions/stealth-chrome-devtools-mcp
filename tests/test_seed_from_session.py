@@ -34,6 +34,7 @@ silence rather than an answer:
 
 import argparse
 import os
+import shutil
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
@@ -540,6 +541,13 @@ class TestSpawnBrowserTakesASeed:
     async def test_seed_from_reaches_the_resolver(
         self, call_tool, patched_server, monkeypatch, tmp_session_root
     ):
+        """The source has to EXIST for this node to be about what it says it is
+        about. It did not until the review's S1 fix, which moved the
+        source-exists check into the pre-flight — so this node was reaching the
+        resolver with a name nothing backed, and only the resolver's absence
+        (it is patched out here) kept it green."""
+        await _session_with_a_login("work", tmp_session_root)
+
         seed = await self._seed_handed_to_the_resolver(
             call_tool, patched_server, monkeypatch, session="beta", seed_from="  work  "
         )
@@ -579,6 +587,287 @@ class TestSpawnBrowserTakesASeed:
             await self._seed_handed_to_the_resolver(
                 call_tool, patched_server, monkeypatch, session="beta", seed_from="a/b"
             )
+
+
+# ---------------------------------------------------------------------------
+# 7b. Every refusal reaches the caller as a REFUSAL (review S1, M1)
+# ---------------------------------------------------------------------------
+
+
+WRAPPED = "Failed to spawn browser"
+
+
+async def _spawn_refusal(call_tool, patched_server, **kwargs) -> str:
+    """Drive the REAL tool through the REAL resolver and return the message.
+
+    Deliberately NOT `TestSpawnBrowserTakesASeed`'s harness, which patches
+    `resolve_profile_selection` away: three of these refusals are raised from
+    INSIDE the resolver, so a double in its place is exactly the blind spot
+    review S1 found. The manager is still a fake, because every node here
+    refuses before a browser is reached.
+    """
+    from types import SimpleNamespace
+
+    from fakes import FakeBrowserManager
+
+    srv = patched_server(
+        browser_manager=FakeBrowserManager(
+            spawn_instance=SimpleNamespace(
+                instance_id="i1",
+                state="active",
+                headless=True,
+                viewport={"width": 800, "height": 600},
+            ),
+            spawn_diagnostics={},
+        )
+    )
+    with pytest.raises(ToolError) as excinfo:
+        await call_tool(srv, "spawn_browser", headless=True, sandbox=False, **kwargs)
+    return str(excinfo.value)
+
+
+class TestEverySeedRefusalIsACallerRefusal:
+    """`spawn_browser`'s handler re-labels anything raised inside its `try` as
+    `Failed to spawn browser: …` — the wrong sentence for a request we declined
+    to act on, and the thing `browser_management.py`'s own comment above the
+    pre-flight forbids (F-894 review M1).
+
+    Two of the five refusals were already in the pre-flight and arrived clean.
+    The other three — a source that is open, a source that does not exist, and
+    a source naming a reserved word — were raised from inside
+    `profile_seed.seed_source`, which runs under the resolver INSIDE the try,
+    so a caller who typed `--from work` while `work` was open was told a spawn
+    had FAILED about a spawn that never started.
+
+    Every node here drives the real tool and asserts the same one thing, which
+    is why the assertion is a helper rather than five spellings of it.
+    """
+
+    def _assert_unwrapped(self, message: str, *, names: str) -> None:
+        assert not message.startswith(WRAPPED), (
+            f"a caller-input refusal was re-labelled as a failed spawn: {message!r}"
+        )
+        assert names in message, (
+            f"the refusal has to name what was refused: {message!r}"
+        )
+
+    async def test_a_running_source_refuses_without_the_failure_label(
+        self, call_tool, patched_server, tmp_session_root
+    ):
+        source = await _session_with_a_login("work", tmp_session_root)
+        held_profile(source)
+
+        message = await _spawn_refusal(
+            call_tool, patched_server, session="beta", seed_from="work"
+        )
+        self._assert_unwrapped(message, names="work")
+        assert not (tmp_session_root["sessions"] / "beta").exists(), (
+            "and still nothing on disk — the pre-flight must refuse in FRONT "
+            "of the copy, not merely earlier than the handler"
+        )
+
+    async def test_a_missing_source_refuses_without_the_failure_label(
+        self, call_tool, patched_server, tmp_session_root
+    ):
+        message = await _spawn_refusal(
+            call_tool, patched_server, session="beta", seed_from="nope"
+        )
+        self._assert_unwrapped(message, names="nope")
+
+    @pytest.mark.parametrize("requested", ["master", "master-snapshot"])
+    async def test_a_reserved_source_refuses_without_the_failure_label(
+        self, requested, call_tool, patched_server, tmp_session_root
+    ):
+        message = await _spawn_refusal(
+            call_tool, patched_server, session="beta", seed_from=requested
+        )
+        self._assert_unwrapped(message, names=requested)
+
+    async def test_an_existing_target_refuses_without_the_failure_label(
+        self, call_tool, patched_server, tmp_session_root
+    ):
+        """Already in the pre-flight; pinned in the same class so the five are
+        read together and a later move of one is visible against the rest."""
+        await _selection(session="beta")
+        message = await _spawn_refusal(
+            call_tool, patched_server, session="beta", seed_from="work"
+        )
+        self._assert_unwrapped(message, names="beta")
+
+    async def test_a_path_shaped_source_refuses_without_the_failure_label(
+        self, call_tool, patched_server, tmp_session_root
+    ):
+        message = await _spawn_refusal(
+            call_tool, patched_server, session="beta", seed_from="a/b"
+        )
+        self._assert_unwrapped(message, names="seed_from")
+
+
+class TestSeedFromNeedsASessionToApplyTo:
+    """Review M1 — the silent drop.
+
+    `seed_from` was refused for three shapes and never for the one that
+    matters most: a `user_data_dir` landing OUTSIDE the clone root. The
+    resolver only seeds a directory it is about to CREATE under the session
+    root, so for any other target the request passed every gate and was then
+    never used — no copy, no marker, `seeded_from: unknown`, and not one word
+    to the caller. That is this finding's own stated commitment inverted, and
+    it is reachable from the documented path door (`--arg user_data_dir=…`)
+    and from the still-accepted `stealthy spawn --profile`.
+    """
+
+    def _outside(self, tmp_session_root) -> Path:
+        return tmp_session_root["sessions"].parent / "elsewhere" / "profile"
+
+    async def test_an_out_of_root_target_is_refused_at_the_tool(
+        self, call_tool, patched_server, tmp_session_root
+    ):
+        outside = self._outside(tmp_session_root)
+        await _session_with_a_login("work", tmp_session_root)
+        message = await _spawn_refusal(
+            call_tool,
+            patched_server,
+            user_data_dir=str(outside),
+            seed_from="work",
+        )
+        assert not message.startswith(WRAPPED)
+        assert "seed_from" in message
+        assert not outside.exists(), (
+            "a refused request creates nothing — the same promise the running-"
+            "source refusal makes"
+        )
+
+    async def test_the_gate_refuses_it_and_not_only_the_tool(self, tmp_session_root):
+        """The rule belongs to the gate that already owns 'is there a NEW
+        session for this to apply to', so it holds for the resolver's other
+        callers too and not only for the one body that happens to ask first."""
+        outside = self._outside(tmp_session_root)
+        with pytest.raises(ToolError, match="seed_from"):
+            clone_storage.require_allowed_seed_from("work", str(outside))
+
+    async def test_a_target_inside_the_root_still_passes(self, tmp_session_root):
+        """The refusal is about WHERE the target lands, never about how it was
+        spelled: an absolute path to a session that does not exist yet, under
+        the clone root, is a session being created and keeps working."""
+        await _session_with_a_login("work", tmp_session_root)
+        inside = tmp_session_root["sessions"] / "beta"
+        assert clone_storage.require_allowed_seed_from("work", str(inside)) == "work"
+
+    def test_the_no_session_refusal_names_both_spellings(self):
+        """Review N4. The CLI prints the backend's message verbatim — one home
+        for the rule — so the one sentence has to serve a caller who typed
+        `session=` at the tool AND one who typed `--session` at the shell.
+        Naming only the tool's spelling sends a `stealthy spawn --from work`
+        user looking for an argument they did not type; a second message home
+        keyed on who asked would be the defect this file keeps closing."""
+        with pytest.raises(ToolError) as excinfo:
+            profile_seed.require_new_session(
+                "work", None, shared=False, inside_root=False
+            )
+        message = str(excinfo.value)
+        assert "session=" in message and "--session" in message
+
+    def test_every_refusal_here_names_both_spellings(self, tmp_session_root):
+        """All four, not just the one N4 named: a caller meets whichever
+        refusal their request earns, and a remedy spelled for the wrong
+        surface is no better in the other three."""
+        target = tmp_session_root["sessions"] / "beta"
+        cases = [
+            (None, {"shared": False, "inside_root": False}),
+            (target, {"shared": True, "inside_root": True}),
+            (
+                tmp_session_root["sessions"].parent / "elsewhere",
+                {"shared": False, "inside_root": False},
+            ),
+        ]
+        for requested_target, flags in cases:
+            with pytest.raises(ToolError) as excinfo:
+                profile_seed.require_new_session("work", requested_target, **flags)
+            assert "--session" in str(excinfo.value), str(excinfo.value)
+
+        target.mkdir(parents=True)
+        with pytest.raises(ToolError) as excinfo:
+            profile_seed.require_new_session(
+                "work", target, shared=False, inside_root=True
+            )
+        assert "--session" in str(excinfo.value), str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# 7d. A source that is GONE must not read as a source that is unchanged
+# ---------------------------------------------------------------------------
+
+
+class TestAnUnreadableSourceSaysSo:
+    """Review N1. `seed_changed_since` is None whenever the recorded source has
+    no login witness to read — which a DELETED directory guarantees — and the
+    sentence printed `SEED CHANGED SINCE` only for True, so a vanished source
+    rendered byte-identical to a fresh one.
+
+    Pre-existing in F-895's shape and made ordinary by F-897: until now the
+    recorded source was always the product's own seed, and it is now a
+    directory a caller can delete or rename at will.
+
+    The word is a lowercase parenthetical and not a shouty one on purpose.
+    `SEED CHANGED SINCE` is an ALERT — act on this, your copy is behind — while
+    None is a caveat about what could be read, and giving the two the same
+    register would teach a reader to ignore both.
+    """
+
+    def test_none_is_not_silence(self):
+        unchanged = profile_seed.seed_sentence(
+            {
+                "seeded_from": "work",
+                "seeded_at": "2026-01-01T00:00:00Z",
+                "seed_changed_since": False,
+            }
+        )
+        unreadable = profile_seed.seed_sentence(
+            {
+                "seeded_from": "work",
+                "seeded_at": "2026-01-01T00:00:00Z",
+                "seed_changed_since": None,
+            }
+        )
+        assert unreadable != unchanged, (
+            "a source that could not be read must not render identically to "
+            "one that was read and had not moved"
+        )
+        assert unchanged == "seeded from work at 2026-01-01T00:00:00Z", (
+            "and the ordinary case stays exactly as quiet as it was"
+        )
+
+    async def test_a_deleted_source_reaches_the_sentence_that_way(
+        self, tmp_session_root
+    ):
+        """End to end through the real marker, because the defect was a
+        COMPOSITION: `changed_since` was already answering None honestly and
+        the phrasing threw that answer away. Seed `beta` from `work`, delete
+        `work`, and read what a caller would be told about `beta`."""
+        source = await _session_with_a_login("work", tmp_session_root)
+        await _selection(session="beta", seed_from="work")
+
+        fresh = profile_seed.seed_sentence(
+            profile_seed.provenance(tmp_session_root["sessions"] / "beta")
+        )
+        shutil.rmtree(source)
+        gone = profile_seed.seed_sentence(
+            profile_seed.provenance(tmp_session_root["sessions"] / "beta")
+        )
+
+        assert "work" in fresh and "work" in gone, (
+            "the NAME it was seeded from is a fact about the copy and does not "
+            "stop being true when the source is deleted"
+        )
+        assert gone != fresh, (
+            "but 'I cannot read that source any more' is not the same answer "
+            "as 'that source has not moved'"
+        )
+
+    def test_changed_since_is_none_once_the_source_is_gone(self, tmp_session_root):
+        directory = tmp_session_root["sessions"] / "gone"
+        directory.mkdir(parents=True)
+        assert profile_seed.changed_since(directory, "2026-01-01T00:00:00Z") is None
 
 
 # ---------------------------------------------------------------------------

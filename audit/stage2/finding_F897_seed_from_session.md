@@ -111,11 +111,45 @@ would eventually cost.
 
 ### 2.3 CREATION only — an existing target RAISES
 
-`profile_seed.require_new_session` refuses three shapes, which are one sentence
-read three ways: there has to be a session (`seed_from` with no `session`), it
-has to be the caller's own (`session="default"`), and it must not already exist.
+`profile_seed.require_new_session` refuses FOUR shapes, which are one sentence
+read four ways: there has to be a session (`seed_from` with no `session`), it
+has to be the caller's own (`session="default"`), it has to be a session at all
+(a `user_data_dir` outside the clone root), and it must not already exist.
 
-The third had a real choice in it and the two alternatives were both rejected:
+**The third was a SILENT DROP and it is the review's M1** (measured, not
+reasoned). `resolve_profile_selection` only seeds a directory it is about to
+CREATE under the session root — `if not explicit.exists() and
+_is_relative_to(explicit, clone_root)` — so for a `user_data_dir` landing
+anywhere else the seed request passed every gate and was then never used:
+
+```
+=== out-of-root user_data_dir + seed_from=work ===
+no refusal raised      : True
+dir exists             : False
+carries work cookie jar: False
+seeded_from reported   : unknown
+```
+
+`spawn_browser(user_data_dir="<abs path outside the clone root>",
+seed_from="work")` succeeded, the browser got an empty profile, and `--from
+work` did nothing. That is this feature's own stated commitment — "`--from` is
+never silently dropped" — inverted, reached through the path door one argument
+to the left: `session=` cannot produce it (it refuses paths), but the documented
+escape `stealthy call spawn_browser --arg user_data_dir=<path>` and the
+still-accepted `stealthy spawn --profile` both can. The deprecated spelling
+lowers the frequency, not the shape.
+
+It is refused in `require_new_session` rather than in the resolver because the
+rule is that function's — *is there a NEW SESSION for this seed to apply to* —
+and `clone_storage` supplies the one fact it cannot know (`inside_root`)
+exactly as it already supplies `shared`. Making the resolver honour `seed_from`
+outside the root was the other option and was rejected: what `--from` copies has
+to be a session, because the name it records is a word the caller can pass back
+to `session=`, and an arbitrary directory has no such word. `inside_root` is a
+REQUIRED keyword, so a second caller must decide it rather than inherit a
+default.
+
+The fourth had a real choice in it and the two alternatives were both rejected:
 
 * **A silent no-op** tells a caller their session came from `work` when it came
   from wherever it was seeded weeks ago. That is the class of silence F-894 and
@@ -140,6 +174,44 @@ anchored directory) rather than the raw string, so "is this the shared session"
 and "does it already exist" are asked about the directory a request MEANS. The
 resolver asks again because it is public with its own callers; the cost is one
 `exists()`.
+
+**And the SOURCE question is asked in the pre-flight too, for the same class of
+reason** (review S1). Two of the five refusals were already there and reached
+the caller clean; the other three — the source is open, the source does not
+exist, the source names a reserved word — are raised inside
+`profile_seed.seed_source`, which runs under the resolver INSIDE
+`spawn_browser`'s `try`, so they arrived re-labelled:
+
+```
+Failed to spawn browser: seed_from='work' is open in a browser right now. …
+```
+
+A spawn that never started, reported as a spawn that failed. That is verbatim
+what the comment fourteen lines above the guard forbids, and it is F-894 review
+M1's whole argument reached by the new door. The obvious fix does NOT work: an
+inner `try: … except ToolError: raise` around the resolver call still unwinds
+into the enclosing `except Exception`. So `require_allowed_seed_from` calls
+`_seed_source(requested)` and DISCARDS the answer, on `require_allowed`'s own
+"asked twice on purpose" precedent.
+
+**Discarding it is the point, not a shortcut.** "Is this source open" is a fact
+with a LIFETIME, so the authoritative read stays the resolver's — the statement
+before the copy, with no `await` between the two. The pre-flight ask is
+ADVISORY: it turns the common case into a clean refusal and narrows the window
+to microseconds rather than to zero. A source opened inside that window still
+refuses, one layer down and one label differently, which is strictly better
+than what it replaces. Cost: one `Path.resolve`, one `exists()` and one
+`profile_hold` for a spawn that passes `seed_from`, and nothing at all for one
+that does not.
+
+The freshen had to be split out to make that safe: `_seed_source` is now
+side-effect-free and `_seed_source_for_copy` is the one that refreshes a stale
+shared seed first. Taken twice, that freshen would copy a whole profile for a
+spawn about to be refused; left inside the shared function, a gate whose job is
+to ask questions would write to disk. The two can answer DIFFERENTLY on a first
+run — the pre-flight sees no seed yet and reads the live shared directory, the
+copy creates the seed and reads that — which is harmless precisely because the
+pre-flight's answer is thrown away.
 
 It is also asked BEFORE the F-871 walk to `<name>-2`, for the same shape of
 reason: a held target is walked to a directory that does not exist, so a
@@ -250,6 +322,36 @@ spawn reports a spawn, so it omits the line rather than claim an unknown seed
 for the shared session, which is nobody's copy (F-895 review m6, reached from
 the other side).
 
+**`seed_changed_since` has three values and each gets its own ending** (review
+N1). It was two: `SEED CHANGED SINCE` for True and silence for everything else,
+which made `None` — "no login witness could be read in the recorded source" —
+render BYTE-IDENTICALLY to False. Measured:
+
+```
+source present:         'work'  changed=False | seeded from work at <t>
+source DELETED:         'work'  changed=None  | seeded from work at <t>
+name reused (new dir):  'work'  changed=False | seeded from work at <t>
+```
+
+A vanished source read as a fresh one. Pre-existing in F-895's shape and made
+ORDINARY by F-897: until now the recorded source was always the product's own
+seed, and it is now a directory a caller can delete or rename at will. `None`
+prints `  (source unreadable)`.
+
+Lowercase and parenthetical, deliberately NOT a second shouted phrase.
+`SEED CHANGED SINCE` is an ALERT — your copy is behind, act on it — while this
+is a caveat about what could be READ; giving them one register teaches a reader
+to ignore both. It does not say "deleted", because `seed_sentence` sees three
+fields and not a path, and a source that exists but holds no login produces the
+same `None`. Distinguishing those two would need a fourth field on
+`provenance`, i.e. a payload change, for a difference nobody can act on
+differently — named as residual 8 rather than built.
+
+The NAME is still reported for a deleted source, and that is correct rather
+than an oversight: which session a copy came from is a fact about the COPY and
+does not stop being true when the source is removed. What changes is only
+whether we claim to know the source's current state.
+
 ### 2.7 The CLI holds no second opinion
 
 `--from` is `seed_from=<what you typed>`, passed through untouched, pinned with
@@ -312,12 +414,46 @@ It also kept the signature inside `PLR0913`.
 
 ## 4. Pins
 
-`tests/test_seed_from_session.py`, **48 nodes**. RED evidence: run against the
-tree with the two extractions committed and the feature reverted,
-**40 failed, 3 passed**; the five nodes added at the F-896 merge were measured
-separately against that merge with only their two product lines un-extended
-(`seed_request`'s falsy test, and `require_name`'s empty branch raising its own
-sentence instead of `_names_nothing`'s) — **5 failed, 1 passed**.
+`tests/test_seed_from_session.py`, **62 nodes**, measured in three rounds
+because the file was written in three.
+
+1. The original 43 against the tree with the two extractions committed and the
+   feature reverted — **40 failed, 3 passed**.
+2. The five added at the F-896 merge, against that merge with only their two
+   product lines un-extended (`seed_request`'s falsy test, and `require_name`'s
+   empty branch raising its own sentence instead of `_names_nothing`'s) —
+   **5 failed, 1 passed**.
+3. The fourteen added for this review, against `c5accae` — **9 failed,
+   4 passed** (the remaining node, `test_every_refusal_here_names_both
+   _spellings`, was written after the M1 refusal existed and is stated below).
+
+Round 3's REDs, by claim:
+
+* **S1** — `test_a_running_source_…`, `test_a_missing_source_…` and
+  `test_a_reserved_source_…[master, master-snapshot]` all failed on
+  `AssertionError: a caller-input refusal was re-labelled as a failed spawn:
+  'Failed to spawn browser: …'`. Each drives the REAL tool through the REAL
+  resolver, which is the whole point: the existing tool-level nodes patch
+  `resolve_profile_selection` away, and that double is exactly the blind spot
+  the review found.
+* **M1** — `test_an_out_of_root_target_is_refused_at_the_tool` failed with
+  `DID NOT RAISE`, i.e. the silent drop reproduced at the tool;
+  `test_the_gate_refuses_it_and_not_only_the_tool` likewise at the gate.
+* **N4** — `test_the_no_session_refusal_names_both_spellings` failed on the
+  missing `--session`.
+* **N1** — `test_none_is_not_silence` and
+  `test_a_deleted_source_reaches_the_sentence_that_way` failed on
+  `assert 'seeded from work at …' != 'seeded from work at …'`, which is the
+  defect stated as an equality.
+
+The four that passed in round 3 are guards and say so:
+`test_an_existing_target_…` and `test_a_path_shaped_source_…` (already in the
+pre-flight, pinned beside the other three so a later move of one is visible
+against the rest), `test_a_target_inside_the_root_still_passes` (the M1
+refusal must not catch an ordinary named session) and
+`test_changed_since_is_none_once_the_source_is_gone` (`changed_since` was
+already answering `None` honestly — the defect was the COMPOSITION above it,
+which is why the end-to-end node is the one that failed).
 
 The four that passed on arrival are guards and are stated as such in their own
 docstrings: `test_no_from_sends_no_seed_from` and
@@ -417,6 +553,19 @@ No SOFT golden file moved.
   the retry re-opens a directory this attempt already created.
 * **Directories on disk, env vars, and existing clone markers.** As F-896 left
   them.
+* **What `stealthy spawn` prints — except that it gained a line** (review N2).
+  `seeded : seeded from default at <t>` now appears for EVERY spawn that
+  resolves to a marked directory, including an ordinary disposable clone
+  nobody passed a flag for: the gate is `seeded_from not in (None, "",
+  UNKNOWN_SEED)` and a clone's marker says `default`. It is listed here
+  because §5 otherwise reads as a complete account of what stayed still, and
+  it is KEPT rather than gated on `seeded_from != DEFAULT_SESSION`. A
+  throwaway profile's seed is the one thing about it that is not throwaway: it
+  answers "why am I logged in / not logged in in this browser", which is the
+  first question a disposable spawn raises, and the timestamp is the only
+  thing that distinguishes a clone made from a fresh seed from one made from a
+  seed last refreshed in August. Suppressing it would hide F-895's whole
+  answer from the commonest spawn there is.
 
 ---
 
@@ -461,4 +610,25 @@ No SOFT golden file moved.
    behaviour is covered where it always was — `test_profile_clone_excludes_cache.py`
    and `test_profile_resolution.py`, whose imports moved with the names. A
    dedicated file would be a third place to look for the same assertions; if
-   the module grows a decision of its own it should get one.
+   the module grows a decision of its own it should get one. Its one
+   non-move is recorded rather than folded into the "pure move" claim (review
+   N3): `ignore_names` dropped the `directory` parameter `_profile_ignore_names`
+   had — an unused `shutil.copytree(ignore=…)` vestige, and a parameter nothing
+   reads claims the answer depends on where you ask. Both call sites and both
+   test files moved with it.
+8. **`(source unreadable)` cannot say WHICH unreadable it is.** `None` covers
+   both "the recorded source directory is gone" and "it is there and holds no
+   login witness", because `seed_sentence` is handed three fields and not a
+   path. Distinguishing them means a fourth field on `provenance` — a payload
+   change, and a golden move — for a difference a caller cannot act on
+   differently: either way the honest statement is "I cannot tell you whether
+   that source has moved on". Named rather than built.
+9. **A REUSED source name still reads as `False`.** Delete `work`, create a
+   new unrelated `work`, and the copy's provenance reports a source that has
+   not moved on — about a directory sharing nothing with the original but its
+   spelling. The marker records a PATH as well as a name, and the path is the
+   same path, so nothing in the three fields can see the substitution. Closing
+   it needs an identity for a session that survives deletion (a uuid in the
+   marker), which is a schema decision this finding did not need to make.
+   F-896's "the seed a session reports is a session you can open" still holds
+   — it is simply a different session than the one that seeded it.
