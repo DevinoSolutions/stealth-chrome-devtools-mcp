@@ -30,8 +30,8 @@ import urllib.error
 import nodriver as uc
 import pytest
 from nodriver.core.browser import Browser, HTTPApi
-from nodriver.core.util import get_registered_instances
 
+from fakes import nodriver_registry
 from stealth_chrome_devtools_mcp.embedded import browser_connect, cdp_attach
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
@@ -130,8 +130,6 @@ def launcher(monkeypatch, tmp_path):
     monkeypatch.setattr("nodriver.core.browser.Connection", FakeConnection)
     monkeypatch.setattr(Browser, "update_targets", _no_targets)
 
-    known = set(get_registered_instances())
-
     def _config():
         return uc.Config(
             headless=True,
@@ -141,12 +139,11 @@ def launcher(monkeypatch, tmp_path):
             browser_args=[],
         )
 
-    yield process, _config
-    # The registry is a module global of nodriver's, and an ``atexit`` hook
-    # walks it: leave it exactly as found.
-    for browser in tuple(get_registered_instances()):
-        if browser not in known:
-            get_registered_instances().discard(browser)
+    # The registry is a module global of nodriver's and an ``atexit`` hook walks
+    # it, so it is left exactly as found — ``fakes.nodriver_registry`` is the one
+    # home for that, shared with ``test_spawn_leak``.
+    with nodriver_registry():
+        yield process, _config
 
 
 def _unwrapped() -> object:
@@ -270,14 +267,8 @@ async def test_an_attach_does_not_get_the_launch_ceiling(clock, endpoint, tmp_pa
     browser_connect.install()
     endpoint["opens_at"] = float("inf")
     config = cdp_attach.config_for(str(tmp_path / "profile"), 9222, headless=True)
-    known = set(get_registered_instances())
-    try:
-        with pytest.raises(Exception, match="Failed to connect to browser"):
-            await cdp_attach.attach(config)
-    finally:
-        for registered in tuple(get_registered_instances()):
-            if registered not in known:
-                get_registered_instances().discard(registered)
+    with nodriver_registry(), pytest.raises(Exception, match="Failed to connect"):
+        await cdp_attach.attach(config)
 
     # nodriver's own five attempts and 2.5 s, not our 30 s: nothing was launched
     # here, so there is no ``_process`` to be patient on behalf of.
@@ -339,6 +330,7 @@ async def test_the_launch_path_installs_the_patience_before_it_launches(
     every launch in the tree is covered — including the delegated one, which
     attaches through the same ``Browser.start``."""
     from stealth_chrome_devtools_mcp.embedded import browser_manager as bm
+    from stealth_chrome_devtools_mcp.embedded import spawn_leak
     from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
 
     calls: list[str] = []
@@ -351,11 +343,15 @@ async def test_the_launch_path_installs_the_patience_before_it_launches(
 
     monkeypatch.setattr(bm.desktop_launch, "launch_and_attach", _attach)
 
+    attempt = spawn_leak.Attempt()
     await BrowserManager()._launch_browser(
-        BrowserOptions(user_data_dir=str(tmp_path)), "/fake/chrome", []
+        BrowserOptions(user_data_dir=str(tmp_path)), "/fake/chrome", [], attempt
     )
 
     assert calls == ["install", "launch"]
+    # The DELEGATED launch leaves the attempt unstamped: its own cleanup is
+    # best-effort, so this fence reaches nothing there (F-919 §6, F-924).
+    assert attempt.config is None
 
 
 async def test_the_window_this_extends_is_still_the_one_in_nodrivers_source():
