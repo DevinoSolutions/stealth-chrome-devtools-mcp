@@ -1,6 +1,26 @@
-"""THE one home for "awaiting a CDP reply must never be able to cancel it".
+"""THE one home for "no single CDP reply may kill the connection".
 
-F-883 B1, and with it F-788 and F-794. One sentence holds the module:
+F-883 B1 (with F-788 and F-794) and F-902. One sentence holds the module:
+**the listener task is the only thing that resolves every future and dispatches
+every event on a connection, so nothing that happens to ONE reply may be allowed
+to end it.** Two ways in were found, two years apart, and both land here:
+
+* F-883 — the reply's own AWAIT owned it, so cancelling the caller cancelled a
+  future still registered in ``mapper`` and the late answer's ``set_result``
+  raised inside the listener;
+* F-902 — the reply's own PARSE was unguarded, so a generated ``from_json``
+  reading a field Chrome had stopped sending raised inside the listener.
+
+They are one sentence and one ``install()``, not two modules with two seams:
+both are a monkeypatch of one nodriver class applied once per process before
+any tool body runs, and splitting them would put two answers to "patch nodriver
+at startup" one import apart. The three halves are named separately below and
+each says when to DELETE it.
+
+--------------------------------------------------------------------------
+Half 1 (F-883 B1) — awaiting a reply must never be able to cancel it
+--------------------------------------------------------------------------
+
 **cancelling a Python await never un-sends a command Chrome already has, so the
 await must not be the thing that owns the reply.**
 
@@ -98,6 +118,88 @@ listener. The answer itself is discarded, and ``asyncio.shield`` retrieves the
 abandoned outcome itself when the outer future was cancelled, so nothing reaches
 the loop as "exception was never retrieved".
 
+Delete half 1 on a nodriver release whose ``send()`` removes its registration in
+a ``finally``, or whose ``_listener`` stops calling ``set_result`` on a future
+it did not check.
+
+--------------------------------------------------------------------------
+Half 2 (F-902) — a reply that cannot be PARSED must fail its own call only
+--------------------------------------------------------------------------
+
+``Transaction.__call__`` is where the listener turns a reply into a result, and
+it parses by driving the generated CDP command generator::
+
+    try:
+        self.__cdp_obj__.send(response["result"])
+    except KeyError as e:
+        raise KeyError(f"key '{e.args}' not found in message: {response['result']}")
+    except StopIteration as e:
+        self.set_result(e.value)
+
+and ``_listener`` calls it BARE. So any parse failure propagates out of the
+listener and kills the connection — the F-883 wound through the other door, and
+the shield does nothing for it, because nothing here was cancelled.
+
+MEASURED, Chrome 153.0.8010.50 + nodriver 0.47: Chrome no longer sends
+``Network.Cookie.sameParty`` (the removed First-Party-Sets field), the generated
+``Cookie.from_json`` reads ``json['sameParty']`` unconditionally, and one
+``get_cookies`` on a page holding one cookie left every later call on that tab
+hanging to ``CDP_OPERATION_TIMEOUT`` under the message "the browser may have
+crashed". Cookies are simply the one this walked into: **1199 unconditional
+required reads across nodriver 0.47's generated ``cdp/`` classes** (counted),
+every one of which is this defect waiting for Chrome to retire its field.
+
+The guard wraps ``__call__`` and completes THAT transaction with an exception
+instead: the caller of the one command that could not be read gets a real
+error, every other pending future on the connection still resolves, and the
+listener lives. A transaction already ``done()`` is left alone — a cancelled or
+delivered future has no caller left to tell, and ``set_exception`` on one raises
+``InvalidStateError``, which is the very shape this exists to stop.
+
+**The message it delivers is SHAPE ONLY, and that is a PII rule, not taste.**
+nodriver's re-raise interpolates ``response['result']`` — the WHOLE reply — into
+the exception text, so for the measured failure the string carried every cookie
+NAME and VALUE on the page; it escaped as an unretrieved task exception, which
+is the asyncio error handler, the durable log and Sentry at once. So this module
+NEVER re-raises, chains or quotes the original: it builds a fresh exception from
+the CDP method, the exception's TYPE, the reply's top-level field COUNT, and a
+missing FIELD name only when ``_missing_field`` can prove the failure named
+nothing else (``page_storage``'s discipline, F-869). Deliberately constructed
+outside the ``except`` block, so not even ``__context__`` can carry the payload
+out. ``CdpReplyError`` is deliberately NOT a ``ToolError``: convention 2's class
+is what ``expected_events`` DROPS from Sentry as the product working as designed,
+and a reply we cannot read is the opposite of that — it must ship.
+
+Delete half 2 on a nodriver release whose ``_listener`` guards its result path
+the way it already guards its event path.
+
+--------------------------------------------------------------------------
+Half 3 (F-902) — and a reply Chrome still calls valid must still PARSE
+--------------------------------------------------------------------------
+
+Half 2 makes ``get_cookies`` fail honestly instead of fatally; it does not make
+it WORK. ``_RETIRED_COOKIE_FIELDS`` is the other half: a NAMED tolerance with
+its evidence beside it, never a widened ``except`` and never "fill in whatever
+is missing" — an invented ``sourcePort`` would be a lie a caller could act on,
+where a field the protocol has DELETED has exactly one meaning left. Patched on
+``Cookie.from_json`` rather than at the three product call sites, because that
+one classmethod is also what ``Storage.getCookies`` and the three
+cookie-carrying Network EVENTS reach (``network.py`` 1507 / 1538 / 1569 / 4213),
+and three call sites would leave the events broken and the next reader to add a
+fourth site unprotected.
+
+Its one named cost: ``Cookie.to_json`` writes ``sameParty`` unconditionally, so
+a cookie read on Chrome 153 reports ``sameParty: false`` — a value Chrome never
+sent. ``False`` is what the field meant for every cookie that did not opt into a
+First-Party Set, and the feature it belonged to no longer exists, so nothing a
+caller decides can turn on it; it is stated here rather than hidden because it
+IS a synthesised field.
+
+Delete half 3 on a nodriver release whose ``Cookie.same_party`` is optional (or
+gone), which is the same release that makes ``_RETIRED_COOKIE_FIELDS`` empty.
+
+--------------------------------------------------------------------------
+
 ``install()`` is the seam, called once from ``tool_runtime``'s module body — the
 one module loaded once where ``embedded/server.py`` is executed three times
 under runpy — and it is idempotent anyway, on the precedent of
@@ -105,15 +207,19 @@ under runpy — and it is idempotent anyway, on the precedent of
 """
 
 import asyncio
+import re
 from collections.abc import Callable, Generator
 
+from nodriver.cdp.network import Cookie
 from nodriver.core.connection import Transaction
 
-__all__ = ["install", "installed"]
+__all__ = ["CdpReplyError", "install", "installed"]
 
-# The marker lives on the wrapper, never on this module, so "is the protection
-# in place" is a question about the object Python will actually call.
+# The markers live on the wrappers, never on this module, so "is the protection
+# in place" is a question about the objects Python will actually call.
 _MARKER = "__stealth_cdp_transport__"
+_RESULT_MARKER = "__stealth_cdp_result_guard__"
+_COOKIE_MARKER = "__stealth_cdp_cookie_compat__"
 
 
 def _protect(original: Callable) -> Callable:
@@ -132,13 +238,135 @@ def _protect(original: Callable) -> Callable:
     return __await__
 
 
+# ---------------------------------------------------------------------------
+# Half 2 — a reply that cannot be parsed fails its own call, not the connection.
+# ---------------------------------------------------------------------------
+
+
+class CdpReplyError(Exception):
+    """A CDP reply arrived that its generated parser could not read (F-902).
+
+    Carries SHAPE only — never any part of the reply. See the module docstring:
+    the text nodriver raises here interpolates the whole payload, and for the
+    failure this was written against that payload was a page's cookie jar.
+    """
+
+
+#: A CDP field name, as the protocol spells them. The one thing a ``KeyError``
+#: out of a generated ``from_json`` can name is the key it looked up, and every
+#: such key is a literal protocol field — but nodriver's own re-raise builds a
+#: ``KeyError`` whose single arg is the whole interpolated payload, so the shape
+#: is CHECKED rather than trusted. A payload dump can never match this.
+_FIELD_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+
+
+def _missing_field(exc: BaseException) -> str | None:
+    """The protocol FIELD a parse failure named, when that is all it named.
+
+    Walks the exception chain outermost-first and answers the first link that
+    is a ``KeyError`` carrying exactly one field-shaped string. nodriver's outer
+    re-raise fails that test (its arg is the payload); the inner ``KeyError``
+    the generated parser actually raised passes it. Anything else — a
+    ``ValueError`` from an enum, a ``TypeError`` — answers ``None`` rather than
+    risking a message built out of a VALUE.
+    """
+    seen: set[int] = set()
+    cursor: BaseException | None = exc
+    while cursor is not None and id(cursor) not in seen:
+        seen.add(id(cursor))
+        if isinstance(cursor, KeyError) and len(cursor.args) == 1:
+            key = cursor.args[0]
+            if isinstance(key, str) and _FIELD_NAME.match(key):
+                return key
+        cursor = cursor.__cause__ or cursor.__context__
+    return None
+
+
+def _describe(tx: Transaction, exc: BaseException, result: object) -> str:
+    """A report about a reply, built from nothing that was IN the reply."""
+    field = _missing_field(exc)
+    fields = len(result) if isinstance(result, dict) else "?"
+    return (
+        f"The CDP reply to {tx.method or '<unknown method>'} could not be "
+        f"parsed: {type(exc).__name__}"
+        + (f" (no {field!r} in the reply)" if field else "")
+        + f". Reply carried {fields} top-level field(s); its contents are "
+        "deliberately not reported. The CDP connection is unaffected."
+    )
+
+
+def _guard_result(original: Callable) -> Callable:
+    def __call__(self: Transaction, **response: object) -> object:  # noqa: N807 - PERMANENT(the name IS the dunder we are replacing)
+        """Complete this CDP reply, or fail it — never the listener (F-902)."""
+        try:
+            return original(self, **response)
+        except Exception as exc:  # noqa: BLE001 - PERMANENT(the whole point: the listener may not die of this)
+            report = _describe(self, exc, response.get("result"))
+        # Outside the ``except``: an exception CONSTRUCTED while another is
+        # being handled would be raised later with that one as ``__context__``,
+        # and the original's text is the payload this must never carry out.
+        if self.done():
+            # Cancelled or already delivered: nobody is left to tell, and
+            # ``set_exception`` would raise the ``InvalidStateError`` that ends
+            # the listener — the exact shape half 1 exists to prevent.
+            return None
+        self.set_exception(CdpReplyError(report))
+        return None
+
+    setattr(__call__, _RESULT_MARKER, original)
+    return __call__
+
+
+# ---------------------------------------------------------------------------
+# Half 3 — a field Chrome has RETIRED still parses, with the value it meant.
+# ---------------------------------------------------------------------------
+
+#: Fields nodriver 0.47's generated ``Cookie.from_json`` reads unconditionally
+#: that Chrome no longer sends, mapped to the value the protocol gave them.
+#:
+#: ``sameParty``: MEASURED absent from every cookie in
+#: ``Network.getCookies`` / ``Network.getAllCookies`` / ``Storage.getCookies``
+#: on Chrome 153.0.8010.50 (raw websocket, no nodriver in the path), and absent
+#: ONLY it — every other field the parser requires is still sent. It carried
+#: First-Party Sets / SameParty, which Chrome removed; ``False`` is what it read
+#: for every cookie outside such a set, i.e. all of them.
+#:
+#: This table is a NAMED tolerance. A field is added here only with a measured
+#: reply showing Chrome has stopped sending it AND a defensible value; anything
+#: else is left to half 2, which reports it honestly instead of guessing.
+_RETIRED_COOKIE_FIELDS: dict[str, object] = {"sameParty": False}
+
+
+def _tolerate_retired(original: Callable) -> classmethod:
+    # ``_cls`` is unused on purpose: ``original`` is the classmethod ALREADY
+    # bound to ``Cookie`` at install time, so this wrapper has no use for the
+    # class it is handed — but the descriptor still passes one.
+    def from_json(_cls: type[Cookie], json: dict[str, object]) -> Cookie:
+        """Parse a cookie, supplying the fields Chrome has retired (F-902)."""
+        absent = {k: v for k, v in _RETIRED_COOKIE_FIELDS.items() if k not in json}
+        return original({**json, **absent} if absent else json)
+
+    setattr(from_json, _COOKIE_MARKER, original)
+    return classmethod(from_json)
+
+
+# ---------------------------------------------------------------------------
+
+
 def installed() -> bool:
-    """Is the protection in place on the class nodriver will construct?"""
-    return hasattr(Transaction.__await__, _MARKER)
+    """Are all three protections in place on the classes nodriver constructs?"""
+    return (
+        hasattr(Transaction.__await__, _MARKER)
+        and hasattr(Transaction.__call__, _RESULT_MARKER)
+        and hasattr(Cookie.from_json, _COOKIE_MARKER)
+    )
 
 
 def install() -> None:
-    """Make every CDP reply survive its caller's cancellation. Idempotent."""
-    if installed():
-        return
-    Transaction.__await__ = _protect(Transaction.__await__)
+    """Make no single CDP reply able to kill the connection. Idempotent."""
+    if not hasattr(Transaction.__await__, _MARKER):
+        Transaction.__await__ = _protect(Transaction.__await__)
+    if not hasattr(Transaction.__call__, _RESULT_MARKER):
+        Transaction.__call__ = _guard_result(Transaction.__call__)
+    if not hasattr(Cookie.from_json, _COOKIE_MARKER):
+        Cookie.from_json = _tolerate_retired(Cookie.from_json)
