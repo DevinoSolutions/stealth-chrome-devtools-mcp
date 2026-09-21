@@ -27,6 +27,13 @@ The three are the three shapes this finding has:
    and the take-over still has to work — including the cross-process claim, read
    back out of the record, and its refusal of a second take-over.
 
+Every spawn here names its profile by ``user_data_dir`` and that is DELIBERATE
+after F-896, not a spelling left behind: these profiles are absolute paths under
+the node's own tmp dir, and `session` takes a NAME and refuses a path precisely
+so a name and a directory cannot be the same argument. `user_data_dir` is the
+one door a path still comes in through, which makes this tier the real-Chrome
+witness that F-896 did not close it.
+
 The owner in node 1's record is a pid that is not a backend of ours, which is what
 the adoption rule needs to see. It is this process's own pid answered through a
 patched witness rather than a fabricated dead pid, because a fabricated one can

@@ -71,7 +71,9 @@ def empty_ring():
 def failing_spawn(monkeypatch, patched_server):
     """The reported outage, hermetically: every ``spawn_browser`` attempt fails.
 
-    ``profile_role`` is ``master`` so no clone dir is created or released, and
+    ``profile_role`` is ``default`` — F-896's word for the shared session, and
+    the value the resolver actually issues on that branch — so no clone dir is
+    created or released, and
     the retry is stubbed OFF so the first failure is final: this file's subject
     is what reaches the debug ring, and a three-attempt message would be about
     the retry protocol instead. Since F-834 stage 1 every role the resolver
@@ -82,7 +84,7 @@ def failing_spawn(monkeypatch, patched_server):
     """
 
     async def fake_resolve(user_data_dir, **kwargs):
-        return {"user_data_dir": "/fake/dir", "profile_role": "master"}
+        return {"user_data_dir": "/fake/dir", "profile_role": "default"}
 
     async def no_retry(previous_selection, attempt):
         return None

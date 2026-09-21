@@ -805,11 +805,11 @@ def space(tmp_path_factory):
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module", autouse=True)
 async def primed(launcher, space):
-    """Pay the backend cold start and create the master profile ONCE, then exit.
+    """Pay the cold start and create the shared ``default`` profile ONCE, then exit.
 
     Two things follow from doing it in a throwaway proxy that then goes away.
-    The master profile exists, so every node's NAMED profile can be cloned from
-    the snapshot. And the backend is no longer any later proxy's child, which is
+    The shared profile exists, so every node's NAMED session can be copied from
+    its seed. And the backend is no longer any later proxy's child, which is
     what makes the sibling-death node able to hard-kill a proxy without the kill
     being about the backend's parentage instead of about the policy under test.
     """

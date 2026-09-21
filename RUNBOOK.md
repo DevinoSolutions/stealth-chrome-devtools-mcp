@@ -292,7 +292,7 @@ browser has to pass both:
    is skipped. Browsers tracked by 2.0.3 or earlier carry no owner stamp, so they
    are orphans by construction and get reclaimed on upgrade.
 2. **It must not be on a persistent profile.** A browser a caller named with
-   `spawn_browser(user_data_dir=…)` is left RUNNING and left TRACKED, because that
+   `spawn_browser(session=…)` is left RUNNING and left TRACKED, because that
    is the login this tool exists not to lose — it is re-attached to instead, and
    the next section is how. Disposable auto-clones are reaped exactly as before.
 
@@ -315,8 +315,8 @@ option — and it is now the one verb that can still lose a login.
 
 ### Recover a stranded login
 
-A browser on a **persistent profile** — one a caller named with
-`spawn_browser(user_data_dir=…)` — is no longer killed when its backend goes away
+A browser on a **named session** — one a caller asked for with
+`spawn_browser(session=…)` — is no longer killed when its backend goes away
 (F-888). `stop`, `restart`, a proxy heal and a crash all now end with that Chrome
 still running, and **two paths re-attach to it over CDP**:
 
@@ -325,7 +325,7 @@ still running, and **two paths re-attach to it over CDP**:
    `instance_id`. Give it a moment — the pass runs off the first-serve path so it
    cannot delay the backend answering.
 2. **Spawning onto the profile re-attaches to whatever holds it.**
-   `spawn_browser(user_data_dir="<the same name or path>")` returns the RUNNING
+   `spawn_browser(session="<the same name>")` returns the RUNNING
    browser — same renderer, same open page, `spawn_diagnostics.reattached: true`
    — instead of walking to a sibling directory.
 
@@ -335,13 +335,13 @@ normal outcome of a backend dying and being replaced: the successor rewrites
 Measured on the real incident — the stranded Seller Central Chrome had **no entry
 at all** and **no `DevToolsActivePort` file**; its port was recovered from
 `--remote-debugging-port=` on the process command line. **So the general recipe is
-one call: spawn with the same `user_data_dir`.**
+one call: spawn with the same `session`.**
 
 From a shell that is one command, and since F-891 you do not need an MCP client
 to make it:
 
 ```console
-stealthy spawn --profile "C:\Users\me\AppData\Local\amazon-buy-bot\seller-central-profile" --headed
+stealthy spawn --session seller-central --headed
 ```
 
 It talks to the backend this shell would be served by (the one `status` reports),
@@ -409,7 +409,7 @@ Things worth knowing:
   dead** — the forwarder lived inside the backend that died. You get it back with
   `spawn_diagnostics.dead_egress_proxy` set and a WARNING in the log; page loads
   will fail at a closed local port. Read what you need off it, then close it and
-  spawn fresh with the same `proxy=` and `user_data_dir`.
+  spawn fresh with the same `proxy=` and `session`.
 - `kill-orphans --force` takes persistent-profile browsers too; that is what
   `--force` means, and it is now the only verb that still can.
 - A profile directory under the session root is **never** reclaimed by the
@@ -435,18 +435,26 @@ lists what is on disk first.
 `profiles` also prints, under each session, the seed it was copied from and when —
 plus `SEED CHANGED SINCE` when that seed has taken a login write since (F-895). A
 session created before 2.1.11 has no such record and reads `seeded from unknown`;
-that is the truth, not a fault, and nothing back-fills it. The master and the
-snapshot rows carry no seed line because they ARE the seed.
+that is the truth, not a fault, and nothing back-fills it. The `default` row and
+the `default-seed` row carry no seed line because they ARE the seed.
 
-**One-time job if you have a session directory named `master`, `master-snapshot` or
-`default`.** Those three names are reserved as of F-894: `spawn_browser` used to
-anchor a bare name under `sessions/`, so `user_data_dir="master"` silently opened
-`sessions/master` — a copy of the snapshot — instead of the master profile. Asking
-for one now raises `user_data_dir rejected: 'master' is a reserved profile name …`.
-Your directory is **not** touched, is still listed by `profiles`, and stays reachable
-two ways: open it by its **absolute path**, or rename it to a name that is not
-reserved and use that. To use the shared profile the sessions are seeded from, spawn
-with **no** `user_data_dir` at all.
+**One-time job if you have a session directory named `master` or
+`master-snapshot`.** Those two names are reserved (F-894): `spawn_browser` used
+to anchor a bare name under `sessions/`, so `user_data_dir="master"` silently
+opened `sessions/master` — a copy of the seed — instead of the shared profile.
+Asking for one now raises `profile request rejected: 'master' is a reserved
+profile name …`. Your directory is **not** touched, is still listed by
+`profiles`, and stays reachable two ways: open it by its **absolute path** with
+`user_data_dir`, or rename it to a name that is not reserved and use that with
+`session=`. To use the shared profile itself, pass `session="default"` — or no
+session at all.
+
+**And if you have one named `default`:** F-894 reserved that word too, as a
+placeholder; since F-896 it MEANS the shared profile, so `session="default"`
+opens `<root>/master` and never `sessions/default`. An existing
+`sessions/default` directory is untouched and still listed, and is reachable by
+its absolute path through `user_data_dir`; asking for it by NAME is refused,
+because one word may not name two profiles.
 
 `cleanup` also reports the `backend records:` line — how many backends `server.json`
 records and how many of those are **dead** (F-880: nothing is listening on the recorded

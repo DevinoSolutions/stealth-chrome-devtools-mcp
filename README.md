@@ -32,7 +32,7 @@ https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
 ## Key Features
 
 - **Undetectable by anti-bot systems** — Cloudflare, DataDome, PerimeterX, etc.
-- **Smart profile management** — master/snapshot/clone strategy preserves logins across sessions
+- **Named sessions** — a session keeps its cookies and logins; new ones are seeded from `default`
 - **Stealth arg filtering** — automatically strips 30+ detectable Chrome flags (Puppeteer/Playwright signatures, automation markers)
 - **Multi-instance support** — spawn and manage multiple browsers simultaneously
 - **Built for fleets of Claude Code sessions** — a session costs a thin stdio proxy
@@ -41,9 +41,9 @@ https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
   attached at once; simultaneous cold start is scale-tested at 50 concurrent
   sessions, all usable in seconds against one backend — see
   [Built for fleets](#built-for-fleets-50-claude-code-sessions-one-backend)
-- **Auto-suffix busy profiles** — `github-session` auto-becomes `github-session-2` when occupied
+- **A busy session re-attaches, and only then suffixes** — spawning with a `session` a live browser still holds joins THAT browser; `github-session` becomes `github-session-2` only when the re-attach declines
 - **Orphan recovery** — safely cleans up leaked browser processes without killing live ones
-- **Session persistence** — cloned profiles carry cookies, logins, and Web Data from master
+- **Session persistence** — a new session carries the cookies, logins and Web Data of `default`
 - **Zero idle timeout** — browsers stay alive until explicitly closed
 - **Full CDP access** — DOM manipulation, network interception, JavaScript execution, screenshots
 
@@ -169,22 +169,36 @@ around. The backend's own footprint depends on what the sessions do with it
 (captured network bodies, stored element clones, live tabs), so it is not quoted
 as a constant.
 
-### Browser Profile Strategy
+### Sessions
+
+A **session** is a named, persistent Chrome profile: `spawn_browser(session="acme")`,
+or `stealthy spawn --session acme`. Ask for the same name again and you get the
+same cookies and the same logins — and if a browser is still open on it, that
+browser, not a new one.
+
+**`default`** is the session you get when you name none. It is where a human
+logs in, and every new session starts as a copy of it. `session="default"` opens
+it explicitly. It is reserved: you cannot create a session of your own by that
+name (nor by `master` or `master-snapshot`, which are the mechanism's own
+directories).
 
 ```
 C:\stealth-mcp-browser-sessions\
-  master/              # Your primary Chrome profile (logins, cookies, extensions)
-  master-snapshot/     # Safe copy refreshed while master is closed
-  sessions/            # Cloned profiles for concurrent use
-    github-session/
-    github-session-2/  # Auto-suffixed when github-session is busy
+  master/              # the `default` session — your logins, cookies, extensions
+  master-snapshot/     # its seed: a safe copy, refreshed while `default` is closed
+  sessions/            # your named sessions, and disposable copies
+    acme/
+    acme-2/            # auto-suffixed when a browser already holds `acme`
 ```
 
-1. `spawn_browser()` uses the master profile when available
-2. Before opening master, the server refreshes `master-snapshot`
-3. When master is busy, a clone is created from the snapshot
-4. Clones carry all cookies, logins, and session data
-5. Stale snapshots are auto-refreshed when auth files change
+The directory names are historical and are what you will see in a path; the
+words you type and the words the tool answers with are `default` and the seed.
+
+1. An unnamed spawn opens `default` when it is free
+2. Before opening it, the server refreshes its seed
+3. When `default` is busy, a disposable copy is made from the seed
+4. Copies carry all cookies, logins, and session data
+5. A stale seed is auto-refreshed when auth files change
 
 Clones exclude regenerable Chrome caches, so each is a few MB rather than
 multiple GB. Disposable auto-clones are deleted on close, and a storage cap
@@ -251,14 +265,14 @@ spawns work from anywhere.
 ## Usage Examples
 
 ```python
-# Spawn with default master profile
+# The shared default session (what you get when you name none)
 spawn_browser()
 
-# Named session with login persistence
-spawn_browser(user_data_dir="github-session")
+# A named session, with login persistence
+spawn_browser(session="github-session")
 
-# Same name while first is open → auto-suffixes to github-session-2
-spawn_browser(user_data_dir="github-session")
+# Same name while a browser still holds it → re-attached to THAT browser
+spawn_browser(session="github-session")
 
 # Headless with stealth (bad args auto-stripped)
 spawn_browser(headless=True, browser_args=["--enable-automation"])
@@ -327,8 +341,8 @@ adopted that app's `PORT`, `DEBUG`, and `SENTRY_DSN` as the server's own.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `STEALTH_MCP_BROWSER_SESSION_ROOT` | `C:\stealth-mcp-browser-sessions` (Win) / `~/.stealth-mcp-browser-sessions` (Unix) | Base folder for profiles |
-| `BROWSER_MASTER_USER_DATA_DIR` | `<root>/master` | Master Chrome profile path |
-| `BROWSER_MASTER_SNAPSHOT_DIR` | `<root>/master-snapshot` | Snapshot clone source |
+| `BROWSER_MASTER_USER_DATA_DIR` | `<root>/master` | the `default` session's directory (name is historical) |
+| `BROWSER_MASTER_SNAPSHOT_DIR` | `<root>/master-snapshot` | its seed: what a new session is copied from |
 | `BROWSER_PROFILE_CLONE_ROOT` | `<root>/sessions` | Folder for profile copies |
 | `BROWSER_PROFILE_REFRESH_DAYS` | `7` | **Currently inert.** Its only reader was deleted as dead code in F-892 — nothing refreshes a copy after N days, and nothing has since the setting was introduced. The field is kept so an existing `.env` naming it still loads; see `audit/stage2/finding_F892_*.md` §6. |
 | `STEALTH_MCP_CLONE_STORAGE_CAP_GB` | `10` | Cap on total auto-clone storage; oldest **idle** clones are reclaimed when exceeded (`0` = disable). Named profiles and in-use clones are never touched. |
@@ -357,7 +371,7 @@ table on a terminal and JSON in a pipe:
 
 ```console
 stealthy ls                                          # browser instances
-stealthy spawn --profile seller-central --headed     # recover a stranded login
+stealthy spawn --session seller-central --headed     # recover a stranded login
 stealthy spawn --headed                              # whatever spawn_browser() picks
 stealthy nav e364 https://example.com --wait load    # ids resolve by prefix
 stealthy call get_cookies --arg instance_id=e364c31b --arg domain=example.com
@@ -370,11 +384,12 @@ values are JSON when they parse (`headless=false`, `viewport_width=1200`,
 `browser_args=["--x"]`) and plain strings when they do not; `--json '<object>'`
 passes the whole arguments object at once.
 
-`spawn --profile <name-or-path>` is the **stranded-login recovery**: if a browser
-is already holding that profile it is re-attached to over CDP — same window, same
+`spawn --session <name>` is the **stranded-login recovery**: if a browser is
+already holding that session it is re-attached to over CDP — same window, same
 open page — and the answer says `REATTACHED`. See RUNBOOK, *Recover a stranded
-login*. The name or path goes through as `user_data_dir` untouched; a `spawn`
-with no `--profile` is whatever `spawn_browser()` itself selects. Either way the
+login*. A session is a NAME; to open a directory by PATH use
+`stealthy call spawn_browser --arg user_data_dir=<path>`. A `spawn` with no
+`--session` is whatever `spawn_browser()` itself selects. Either way the
 answer prints the `profile_selection` the backend actually made — role and
 directory — so you can see what you got rather than infer it.
 
@@ -428,17 +443,18 @@ profiles down to their session state — **logins kept** — over the browser-se
 is a **dry run unless you pass `--apply`**, never touches in-use profiles, and
 uses the same selectors as the automatic sweep, so the preview matches `--apply`.
 
-## Preparing the Master Profile
+## Preparing the `default` session
 
 1. Start the MCP server
-2. Call `spawn_browser()` without `user_data_dir` — or, from a shell,
+2. Call `spawn_browser()` with no `session` — or, from a shell,
    `stealthy spawn --headed`
 3. Sign in to your accounts in the browser that opens
-4. Close it — future sessions use this profile or clone from it
+4. Close it — new sessions are seeded from it, and it is reused directly
 
-That reaches master **only while master is free**; once a browser holds it, the
-same call clones from the snapshot instead. The `profile_selection` in the answer
-(`profile_role` + the directory) says which of the two you got.
+That reaches `default` **only while `default` is free**; once a browser holds
+it, the same call gets a disposable copy of its seed instead. The
+`profile_selection` in the answer (`profile_role` + the directory) says which of
+the two you got — `default` or `clone`.
 
 ## Requirements
 

@@ -21,7 +21,7 @@ SAME page must come back BEFORE that ``load``, with the pre-load title. If both
 nodes passed while the tool simply waited for everything, this one would fail.
 
 Both pages are served by the session fixture app, so nothing here reaches the
-network. Both spawns are UNNAMED, which means the master profile itself — the
+network. Both spawns are UNNAMED, which means the shared default profile — the
 browser-session root is redirected for the whole session at
 ``tests/conftest.py`` import time, and these nodes deliberately do NOT declare
 ``tmp_empty_root``: an autouse ``_warmup`` spawns a browser before any

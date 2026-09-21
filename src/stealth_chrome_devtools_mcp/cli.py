@@ -91,6 +91,22 @@ def _role(cs, path: Path) -> str:
     return "unmarked"
 
 
+# The SEED's own role word in the `profiles` listing — "the copyable form of
+# `default`", never "snapshot", which named a mechanism a reader can neither
+# open nor act on (F-896). The SHARED session's word is not spelled here at
+# all: it is `profile_seed.DEFAULT_SESSION`, read at call time through the same
+# lazy import the rest of this block uses, so the CLI's role column and a
+# spawn's `profile_role` cannot drift apart.
+_SEED_ROLE = "default-seed"
+
+
+def _seed_roles() -> frozenset[str]:
+    """The two roles that ARE the seed, so nothing seeded them."""
+    from stealth_chrome_devtools_mcp.embedded import profile_seed
+
+    return frozenset({profile_seed.DEFAULT_SESSION, _SEED_ROLE})
+
+
 def _collect_profiles(cs) -> list[dict]:
     """Every profile under the session root with size, role, in-use flag and
     seed provenance (F-895). The provenance is ``profile_seed.provenance``'s —
@@ -114,9 +130,9 @@ def _collect_profiles(cs) -> list[dict]:
     master = cs.master_profile_dir()
     snapshot = cs.master_snapshot_dir()
     if master.exists():
-        rows.append(_row(master, "master"))
+        rows.append(_row(master, profile_seed.DEFAULT_SESSION))  # the shared session
     if snapshot.exists():
-        rows.append(_row(snapshot, "snapshot"))
+        rows.append(_row(snapshot, _SEED_ROLE))
 
     clone_root = cs.clone_root_dir()
     if clone_root.exists():
@@ -137,13 +153,13 @@ def _seed_line(row: dict[str, object]) -> str:
     reported as an unknown seed rather than as a fresh one, because a profile
     frozen since August reading "up to date" is the silence this finding closes.
 
-    The master and the snapshot ARE the seed, so asking what seeded them is a
-    category error; they carry no marker and reported "seeded from unknown"
+    The shared session and its seed ARE the seed, so asking what seeded them is
+    a category error; they carry no marker and reported "seeded from unknown"
     about themselves, on exactly the two rows an operator reads first (review
     m6). An unmarked SESSION directory still says unknown — there the answer is
     genuinely not known, which is the thing worth printing.
     """
-    if row.get("role") in {"master", "snapshot"}:
+    if row.get("role") in _seed_roles():
         return ""
     seeded_from = row.get("seeded_from") or "unknown"
     seeded_at = row.get("seeded_at")
