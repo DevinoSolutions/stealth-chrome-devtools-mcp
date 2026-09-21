@@ -24,7 +24,6 @@ import hashlib
 import itertools
 import os
 import re
-import shutil
 import threading
 import time
 import urllib.parse
@@ -217,7 +216,7 @@ def _trash_clone(entry: Path, clone_root: Path):
     try:
         os.replace(str(entry), str(target))
     except OSError:
-        _rmtree_robust(entry)
+        profile_copy.rmtree_robust(entry)
         return None
     try:
         # Stamp the trash time so retention is measured from eviction, not from
@@ -248,7 +247,7 @@ def _purge_expired_trash(clone_root: Path, max_age_seconds: float) -> int:
                 continue
         except OSError:
             continue
-        _rmtree_robust(entry)
+        profile_copy.rmtree_robust(entry)
         if not entry.exists():
             purged += 1
     return purged
@@ -390,7 +389,7 @@ def _trim_profile_regenerable(profile_dir: Path) -> int:
     freed = 0
     for directory in _regenerable_dirs_in_profile(profile_dir):
         size = _dir_size_bytes(directory)
-        _rmtree_robust(directory)
+        profile_copy.rmtree_robust(directory)
         if not directory.exists():
             freed += size
     return freed
@@ -530,51 +529,6 @@ def spawn_background_sweep(reason: str = "") -> None:
     task.add_done_callback(_BACKGROUND_SWEEPS.discard)
 
 
-def _rmtree_robust(path: Path, retries: int = 3) -> None:
-    """Remove a directory tree, handling Windows file-lock race conditions.
-
-    Chrome profile dirs may have cache files vanishing mid-traversal
-    (Chrome cleanup) or directories still locked by background processes.
-    Retries with backoff and falls back to best-effort removal so the
-    subsequent profile copy can proceed via overwrite.
-    """
-
-    def _on_rm_error(_func, fpath, exc_info):
-        exc = exc_info[1]
-        if isinstance(exc, FileNotFoundError):
-            return  # file already gone — Chrome or OS cleaned it
-        if isinstance(exc, PermissionError):
-            try:
-                os.chmod(fpath, 0o700)
-                _func(fpath)
-            except (OSError, FileNotFoundError):
-                pass
-            return
-        # OSError (e.g. directory not empty) — let rmtree continue
-        if isinstance(exc, OSError):
-            return
-
-    for attempt in range(retries):
-        try:
-            if not path.exists():
-                return
-            shutil.rmtree(path, onerror=_on_rm_error)
-            return
-        except Exception:
-            if attempt < retries - 1:
-                time.sleep(0.5)
-                continue
-            # Final attempt: remove whatever is possible
-            shutil.rmtree(path, ignore_errors=True)
-            if path.exists():
-                debug_logger.log_warning(
-                    "server",
-                    "_rmtree_robust",
-                    f"Could not fully remove {path} after {retries} retries, "
-                    f"proceeding with overwrite",
-                )
-
-
 # F-893: why a copy did not run — the copier is the one place that knows.
 TARGET_IN_USE = "target-in-use"
 SEED_IN_USE = "seed-in-use"
@@ -598,7 +552,7 @@ def _copy_profile_tree(
     if target.exists():
         if _profile_has_running_browser(target):
             return TARGET_IN_USE
-        _rmtree_robust(target)
+        profile_copy.rmtree_robust(target)
     target.mkdir(parents=True, exist_ok=True)
     profile_copy.copy_delta(source, target)
     time.sleep(0.2)
@@ -778,6 +732,19 @@ def _copy_clone_from_source(
     return selection
 
 
+def _roots() -> profile_seed.Roots:
+    """The four directories a profile request is decided against. This module
+    is the one thing that knows where they are, and ``profile_seed.Roots`` is
+    how it hands them over (F-896); F-897 gave that hand-over a second caller,
+    which is why it is a function rather than four arguments written twice."""
+    return profile_seed.Roots(
+        default_session_root(),
+        clone_root_dir(),
+        master_profile_dir(),
+        master_snapshot_dir(),
+    )
+
+
 def require_allowed_user_data_dir(
     user_data_dir: str | None, session: str | None = None
 ) -> str | None:
@@ -791,13 +758,60 @@ def require_allowed_user_data_dir(
     requested = profile_seed.profile_request(session, user_data_dir)
     if not requested:
         return None
-    roots = profile_seed.Roots(
-        default_session_root(),
-        clone_root_dir(),
-        master_profile_dir(),
-        master_snapshot_dir(),
+    return str(profile_seed.require_allowed(requested, _roots(), _is_relative_to))
+
+
+def require_allowed_seed_from(seed_from: str | None, landed: str | None) -> str | None:
+    """THE gate for a ``seed_from`` request (F-897): the name it may be, and
+    that there is a NEW session for it to apply to. None when none was given.
+
+    It takes *landed* — ``require_allowed_user_data_dir``'s answer, the
+    DIRECTORY the caller's session request means — rather than the raw string,
+    so "is this the shared session" and "does it already exist" are asked
+    about the directory a request MEANS rather than the string it was written
+    as. Both would otherwise be wrong for every relative spelling.
+
+    Asked TWICE on ``require_allowed``'s precedent, and for a sharper reason
+    than that one had: ``spawn_browser`` asks it in front of
+    ``browser_reattach.adopt_held_profile``, because a session whose browser is
+    still running is a session that EXISTS — so without the refusal in front,
+    ``spawn --session work --from other`` would be silently ADOPTED onto the
+    running ``work`` browser and the caller told nothing about the flag they
+    passed. The resolver asks again because it is public and has its own
+    callers. It costs one ``exists()``.
+
+    What a ``seed_from`` actually copies is NOT decided here — that is
+    ``_seed_source``, at the copy itself, because whether a source is open is
+    a fact with a lifetime and the only honest place to read it is the instant
+    before the copy.
+    """
+    requested = profile_seed.seed_request(seed_from)
+    if requested is None:
+        return None
+    target = None if landed is None else Path(landed)
+    profile_seed.require_new_session(
+        requested,
+        target,
+        shared=target is not None
+        and profile_seed.same_dir(target, master_profile_dir()),
     )
-    return str(profile_seed.require_allowed(requested, roots, _is_relative_to))
+    return requested
+
+
+def _seed_source(seed_from: str | None) -> profile_seed.SeedSource:
+    """Which directory this new session is copied from, bound to OUR four
+    directories and OUR liveness witness. The rule is ``profile_seed``'s.
+
+    The pre-copy freshen is asked only for the shared session, which is the
+    only source that HAS a seed to freshen; for any other the source is the
+    session directory itself and a refresh of the shared seed would be a whole
+    profile copy nobody asked for.
+    """
+    if seed_from is None or profile_seed.is_default_name(seed_from):
+        _refresh_snapshot_if_stale()
+    return profile_seed.seed_source(
+        seed_from, _roots(), _is_relative_to, held=_profile_has_running_browser
+    )
 
 
 def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, Any]:
@@ -815,11 +829,20 @@ def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, An
 async def resolve_profile_selection(
     user_data_dir: str | None,
     *,
+    seed_from: str | None = None,
     force_clone: bool = False,
-    source_override: Path | None = None,
-    source_kind: str | None = None,
+    override: profile_seed.SeedSource | None = None,
     clone_suffix: str | None = None,
 ) -> dict[str, Any]:
+    """Which directory this spawn drives, and how it got there.
+
+    ``override`` is ``_fallback_profile_selection``'s — the (source, kind) pair
+    a RETRY clones from. It was two parameters, ``source_override`` and
+    ``source_kind``, and folding them into the ``SeedSource`` F-897 already
+    needed is not tidying: a path and the word recorded for it are decided
+    together, and two parameters let a caller record a copy as having come
+    from somewhere it did not.
+    """
     master = master_profile_dir()
     clone_root = clone_root_dir()
     snapshot = master_snapshot_dir()
@@ -831,6 +854,11 @@ async def resolve_profile_selection(
     # makes `close_instance` refresh the seed — read off the ANCHORED path,
     # because only anchoring turns a name into a directory.
     landed = require_allowed_user_data_dir(user_data_dir)
+    # F-897: refused BEFORE the walk, because `--from` is about the session the
+    # caller NAMED. A target that is held is walked to `<name>-2`, which does
+    # not exist — so asking afterwards would seed a substitute directory under
+    # a flag the caller passed about theirs.
+    seed_from = require_allowed_seed_from(seed_from, landed)
     explicit = (
         None
         if landed is None or profile_seed.same_dir(Path(landed), master)
@@ -854,13 +882,9 @@ async def resolve_profile_selection(
                     "walk_reason": hold.reason,
                 }
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
-            _refresh_snapshot_if_stale()
-            source = snapshot if snapshot.exists() else master
-            source_kind = (
-                "explicit-default-seed" if source == snapshot else "explicit-default"
-            )
+            seed = _seed_source(seed_from)
             _require_copied(
-                _copy_profile_tree(source, explicit, clone_root, source_kind), explicit
+                _copy_profile_tree(seed.path, explicit, clone_root, seed.kind), explicit
             )
         explicit.parent.mkdir(parents=True, exist_ok=True)
         return {
@@ -896,20 +920,17 @@ async def resolve_profile_selection(
 
     _refresh_snapshot_if_stale()
 
-    if source_override is not None:
-        source = source_override
-        resolved_source_kind = source_kind or "default-seed"
+    if override is not None:
+        seed = override
     elif snapshot.exists():
-        source = snapshot
-        resolved_source_kind = source_kind or "default-seed"
+        seed = profile_seed.SeedSource(snapshot, "default-seed")
     elif master.exists():
         # No seed yet (first run, seed deleted, or the seed copy failed). Fall
         # back to copying directly from the live shared profile.
         # profile_copy.copy_delta skips locked files (PermissionError/OSError),
         # and _copy_profile_tree does a double-pass — cookies and login data
         # transfer successfully even while Chrome has it open.
-        source = master
-        resolved_source_kind = source_kind or "live-default-fallback"
+        seed = profile_seed.SeedSource(master, "live-default-fallback")
     else:
         raise RuntimeError(
             "No shared profile directory found — nothing to copy from. Spawn a "
@@ -923,7 +944,7 @@ async def resolve_profile_selection(
     # could delete it out from under the spawning browser. Released when the
     # instance closes (or when this spawn attempt fails).
     _protect_clone_dir(clone)
-    return _copy_clone_from_source(source, clone, clone_root, resolved_source_kind)
+    return _copy_clone_from_source(seed.path, clone, clone_root, seed.kind)
 
 
 async def _fallback_profile_selection(
@@ -952,7 +973,8 @@ async def _fallback_profile_selection(
     return await resolve_profile_selection(
         None,
         force_clone=True,
-        source_override=snapshot,
-        source_kind="default-seed-final" if final else "default-seed-retry",
+        override=profile_seed.SeedSource(
+            snapshot, "default-seed-final" if final else "default-seed-retry"
+        ),
         clone_suffix="seed" if final else "retry",
     )

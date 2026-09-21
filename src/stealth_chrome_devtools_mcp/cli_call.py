@@ -600,10 +600,16 @@ def cmd_ls(args: argparse.Namespace) -> int:
 def _spawn_arguments(args: argparse.Namespace) -> dict[str, object]:
     """``spawn_browser``'s arguments, from the sugar flags.
 
-    ``--session`` goes STRAIGHT THROUGH as ``session`` and ``--profile`` as
-    ``user_data_dir``, uninterpreted: what a name resolves to is the resolver's
-    answer and the verb PRINTS it back, so the CLI never claims a profile the
-    backend did not pick. ``--profile`` is DEPRECATED and undocumented (F-896),
+    ``--session`` goes STRAIGHT THROUGH as ``session``, ``--from`` as
+    ``seed_from`` and ``--profile`` as ``user_data_dir``, uninterpreted: what a
+    name resolves to is the resolver's answer and the verb PRINTS it back, so
+    the CLI never claims a profile the backend did not pick. **``--from``
+    carries no opinion of its own** (F-897) — whether that session exists, is
+    open, is the shared one, or names a session that already exists is decided
+    by ``profile_seed`` on the backend, which is the only place that can see
+    any of it, and a CLI-side pre-check would be a second answer that goes
+    stale between the check and the spawn. ``--profile`` is DEPRECATED and
+    undocumented (F-896),
     accepted for one release with a stderr line naming its replacement; the
     path door is ``stealthy call spawn_browser --arg user_data_dir=<path>``,
     which is what ``call`` is for, and a second sugar flag for one tool
@@ -617,6 +623,8 @@ def _spawn_arguments(args: argparse.Namespace) -> dict[str, object]:
     arguments: dict[str, object] = {}
     if args.session:
         arguments["session"] = args.session
+    if args.seed_from:
+        arguments["seed_from"] = args.seed_from
     if args.profile:
         print(
             "note: --profile is deprecated — use --session NAME, or `stealthy "
@@ -871,6 +879,15 @@ def add_parsers(sub: SubParsers) -> None:
         metavar="NAME",
         help="persistent session NAME, not a path: keeps its cookies and "
         "logins. `default` is the shared session new ones are copied from",
+    )
+    spawn.add_argument(
+        "--from",
+        dest="seed_from",
+        default=None,
+        metavar="SESSION",
+        help="when --session NAMES a session that does not exist yet, copy it "
+        "from this one instead of `default`; the source must exist and, "
+        "unless it is `default`, must not be open",
     )
     # F-896: accepted for one release, undocumented, and it says so on stderr.
     spawn.add_argument("--profile", default=None, help=argparse.SUPPRESS)

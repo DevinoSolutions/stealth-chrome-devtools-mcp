@@ -20,7 +20,10 @@ Nothing here reaches a backend, raises, or decides anything. Every function is
 pure: records in, strings out — which is what lets the F-874 discipline below
 be pinned without a Chrome, a socket or a process.
 
-A leaf: stdlib only.
+A leaf: stdlib, plus one LAZY ``profile_seed`` import inside
+:func:`spawn_lines` for the ONE spelling of a seed sentence — lazy because
+importing ``embedded`` fires that package's ``sys.path`` shim, and a ``tools``
+or ``ls`` invocation must not pay for it.
 """
 
 from __future__ import annotations
@@ -84,7 +87,20 @@ def spawn_lines(result: dict[str, object]) -> list[str]:
     ``reattached`` first and unmissable: it is the difference between a fresh
     Chrome and the one that still holds the login the caller came for, and F-888
     put that fact in ``spawn_diagnostics``, where nobody reads it.
+
+    The seed line is F-897's, and it is what makes ``--from`` checkable at the
+    shell: a caller who asked for a session copied from another one is told
+    which one, and when, in the SAME sentence ``stealthy profiles`` prints,
+    because both ask ``profile_seed.seed_sentence`` about the same three
+    marker fields. It is OMITTED rather than printed as unknown when the
+    marker cannot say — the shared session, its seed and a directory the
+    caller named by absolute path are nobody's copy, and a line claiming an
+    unknown seed for them is a category error (``cli._seed_line``'s review m6,
+    the same rule reached by the other route: that verb lists DIRECTORIES, so
+    an unmarked one is a finding; this one reports a spawn, so it is not).
     """
+    from stealth_chrome_devtools_mcp.embedded import profile_seed
+
     diagnostics = result.get("spawn_diagnostics")
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     selection = diagnostics.get("profile_selection")
@@ -99,6 +115,8 @@ def spawn_lines(result: dict[str, object]) -> list[str]:
         lines.append(f"reattach   : declined — {diagnostics['reattach_declined']}")
     lines.append(f"role       : {selection.get('profile_role', '-')}")
     lines.append(f"profile    : {selection.get('user_data_dir', '-')}")
+    if selection.get("seeded_from") not in (None, "", profile_seed.UNKNOWN_SEED):
+        lines.append(f"seeded     : {profile_seed.seed_sentence(selection)}")
     if selection.get("walked_to"):
         lines.append(
             f"walked to  : {selection['walked_to']} ({selection.get('walk_reason')})"

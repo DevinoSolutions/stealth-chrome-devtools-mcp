@@ -42,7 +42,8 @@ seeds or roles — every path arrives as an argument.
 import os
 import shutil
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import suppress
 from pathlib import Path
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -141,6 +142,62 @@ def copy_file(source: str, target: str) -> str:
                 f"Skipping locked profile file {source}: {last_error}",
             )
     return target
+
+
+def rmtree_robust(path: Path, retries: int = 3) -> None:
+    """Remove a directory tree, handling Windows file-lock race conditions.
+
+    Chrome profile dirs may have cache files vanishing mid-traversal
+    (Chrome cleanup) or directories still locked by background processes.
+    Retries with backoff and falls back to best-effort removal so the
+    subsequent profile copy can proceed via overwrite.
+
+    The same tolerance :func:`copy_file` has, in the opposite direction, which
+    is why it lives here: both answer "a file Chrome is holding" by making
+    progress anyway, and both therefore cannot say afterwards what they could
+    not touch. Its callers are ``clone_storage``'s — the copy that overwrites
+    a stale seed, the trash purge and the regenerable trim.
+    """
+
+    def _on_rm_error(
+        func: Callable[[str], object], fpath: str, exc_info: tuple
+    ) -> None:
+        exc = exc_info[1]
+        if isinstance(exc, FileNotFoundError):
+            return  # file already gone — Chrome or OS cleaned it
+        if isinstance(exc, PermissionError):
+            with suppress(OSError, FileNotFoundError):
+                Path(fpath).chmod(0o700)
+                func(fpath)
+            return
+        # OSError (e.g. directory not empty) — let rmtree continue
+        if isinstance(exc, OSError):
+            return
+
+    for attempt in range(retries):
+        try:
+            if not path.exists():
+                return
+            shutil.rmtree(path, onerror=_on_rm_error)
+        # The final attempt falls back to ignore_errors and LOGS what it could
+        # not remove, so nothing is swallowed silently; a narrower except would
+        # let one exotic error fail a whole profile copy, which is the thing
+        # this function exists to prevent.
+        except Exception:  # noqa: BLE001 — PERMANENT(best-effort, logged below)
+            if attempt < retries - 1:
+                time.sleep(0.5)
+                continue
+            # Final attempt: remove whatever is possible
+            shutil.rmtree(path, ignore_errors=True)
+            if path.exists():
+                debug_logger.log_warning(
+                    "server",
+                    "rmtree_robust",
+                    f"Could not fully remove {path} after {retries} retries, "
+                    f"proceeding with overwrite",
+                )
+        else:
+            return
 
 
 def copy_delta(source: Path, target: Path) -> None:

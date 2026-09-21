@@ -306,6 +306,35 @@ def provenance(profile: Path) -> dict[str, object]:
     }
 
 
+def seed_sentence(fields: dict[str, object]) -> str:
+    """:func:`provenance`'s three fields as ONE sentence (F-897).
+
+    It exists because two surfaces say this out loud — ``stealthy profiles``
+    lists every session's seed, and ``stealthy spawn --from X`` has to show
+    that the flag did something — and two phrasings of one marker would drift
+    the day a fourth field appears. It is PHRASING only: whether the question
+    arises at all is the caller's, because the two callers answer it
+    differently and both are right (``cli._seed_line`` prints an unmarked
+    SESSION directory as unknown, which is the finding worth reading in a
+    listing, while a spawn omits the line rather than claim a seed for the
+    shared profile, which is nobody's copy).
+
+    "seed changed since" is printed only when it is True: False is the
+    ordinary case and would be noise, and None means the marker could not say
+    — reported as an unknown WHEN rather than as a fresh seed, because a
+    profile frozen since August reading "up to date" is the silence F-895
+    closed.
+    """
+    seeded_from = fields.get("seeded_from") or UNKNOWN_SEED
+    seeded_at = fields.get("seeded_at")
+    if not seeded_at:
+        return f"seeded from {seeded_from} (when: unknown)"
+    sentence = f"seeded from {seeded_from} at {seeded_at}"
+    return sentence + (
+        "  SEED CHANGED SINCE" if fields.get("seed_changed_since") else ""
+    )
+
+
 def is_default_name(requested: str) -> bool:
     """Is this request the bare word ``default`` — the shared session?
 
@@ -364,6 +393,41 @@ def is_bare_name(value: str) -> bool:
     return "/" not in value and "\\" not in value and not PureWindowsPath(value).drive
 
 
+def require_name(field: str, value: str, *, empty_hint: str, path_hint: str) -> str:
+    """THE one refusal of a value that has to be a session NAME, and the one
+    strip that makes it one (F-896, generalised by F-897).
+
+    Two callers ask it about two different parameters — ``session``, which
+    says which profile to OPEN, and ``seed_from``, which says which one to
+    COPY — and a name is the same thing for both. The FIELD is data rather
+    than a second function, because the two messages must name the parameter
+    the caller actually typed: a caller told about ``session`` when they wrote
+    ``seed_from`` goes and edits the wrong argument, which is the class of
+    mistake this file's neighbours keep closing. What the field cannot supply
+    is the ESCAPE — ``session`` has a path door (``user_data_dir``) and
+    ``seed_from`` has none, because you cannot seed from a directory that is
+    not a session — so each caller hands in its own two hints.
+
+    "Has a path in it" is ``is_bare_name``'s, so the three sites that ask can
+    never answer differently; the three shapes added here are refusals rather
+    than shape — an absolute path with no separator or drive under some
+    flavour, a ``~`` this layer does not expand, and a name that is only dots.
+    """
+    name = value.strip()
+    if not name:
+        raise ToolError(f"{field} must be a name; it was empty. {empty_hint}")
+    if (
+        not is_bare_name(name)
+        or Path(name).is_absolute()
+        or name.startswith("~")
+        or set(name) == {"."}
+    ):
+        raise ToolError(
+            f"{field} takes a NAME, not a path, and {value!r} is a path. {path_hint}"
+        )
+    return name
+
+
 def profile_request(session: str | None, user_data_dir: str | None) -> str | None:
     """THE one reading of the two spellings a caller may use (F-896).
 
@@ -412,24 +476,16 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
             return None
         bare = user_data_dir.strip()
         return bare if bare and is_bare_name(bare) else user_data_dir
-    name = session.strip()
-    if not name:
-        raise ToolError(
-            "session must be a name; it was empty. Omit it to use the "
-            f"{DEFAULT_SESSION!r} session."
-        )
-    if (
-        not is_bare_name(name)
-        or Path(name).is_absolute()
-        or name.startswith("~")
-        or set(name) == {"."}
-    ):
-        raise ToolError(
-            f"session takes a NAME, not a path, and {session!r} is a path. "
+    name = require_name(
+        "session",
+        session,
+        empty_hint=f"Omit it to use the {DEFAULT_SESSION!r} session.",
+        path_hint=(
             "Pick a name (letters, digits, dashes), or open a directory by "
             "path with user_data_dir=<path> — `stealthy call spawn_browser "
             "--arg user_data_dir=<path>` from the CLI."
-        )
+        ),
+    )
     if user_data_dir and user_data_dir.strip() != name:
         raise ToolError(
             f"session={session!r} and user_data_dir={user_data_dir!r} name two "
@@ -597,3 +653,151 @@ def same_dir(left: Path, right: Path) -> bool:
         return left.resolve(strict=False) == right.resolve(strict=False)
     except OSError:
         return False
+
+
+# ── seed_from: which session a NEW session is copied from (F-897) ────────────
+
+
+class SeedSource(NamedTuple):
+    """The directory a new session is copied FROM, and what that copy is
+    called in the marker and in ``clone_source``. One tuple because the two
+    are decided together and a caller that could pick them apart would be able
+    to record a copy as having come from somewhere it did not."""
+
+    path: Path
+    kind: str
+
+
+def seed_request(seed_from: str | None) -> str | None:
+    """THE one reading of a ``seed_from`` / ``--from`` request (F-897).
+
+    A session NAME, through ``require_name`` — the same rule ``session``
+    passes, because they name the same kind of thing and a ``seed_from`` that
+    accepted a path would be a second way to reach a directory, one the
+    resolver could not anchor, reserve or record a name for. There is
+    deliberately no path door here at all: what ``--from`` copies has to be a
+    session, because the provenance it writes (``seeded_from``) is a word the
+    caller can pass back to ``session=``, and an arbitrary directory has no
+    such word.
+    """
+    if seed_from is None:
+        return None
+    return require_name(
+        "seed_from",
+        seed_from,
+        empty_hint=f"Omit it to copy the {DEFAULT_SESSION!r} session.",
+        path_hint=(
+            "Pick the name of a session to copy — `stealthy profiles` lists "
+            "them. There is no path form: a seed has to be a session, because "
+            "its name is what the new session records as `seeded_from`."
+        ),
+    )
+
+
+def require_new_session(requested: str, target: Path | None, *, shared: bool) -> None:
+    """Raise unless this ``seed_from`` has a NEW session of its own to apply to.
+
+    ``seed_from`` says where a session's contents come from at the moment it
+    is CREATED, so all three refusals here are one sentence read three ways:
+    there has to be a session, it has to be the caller's own, and it must not
+    already exist.
+
+    The third is the one with a choice in it, and the choice is deliberate.
+    The alternatives were a silent no-op — which tells a caller their login
+    came from ``work`` when it came from wherever the directory was seeded
+    weeks ago — and a RE-SEED, which overwrites a profile whose whole purpose
+    is to hold a login the user typed by hand. Refusing is the only answer
+    that is neither a lie nor a loss, and it can afford to be loud because the
+    remedy is one word: open the session (which is what a spawn without
+    ``seed_from`` does), or pick a name that is free. The refusal NAMES where
+    the existing session was actually seeded from, so a caller who expected a
+    fresh copy learns what they have instead.
+    """
+    if target is None:
+        raise ToolError(
+            f"seed_from={requested!r} says what a NEW session is copied from, "
+            "so it needs a session of its own: pass session=<name> beside it. "
+            "A spawn that names no session gets the "
+            f"{DEFAULT_SESSION!r} session or a disposable copy of it, and "
+            "neither is seeded from another session."
+        )
+    if shared:
+        raise ToolError(
+            f"seed_from={requested!r} cannot apply to the "
+            f"{DEFAULT_SESSION!r} session: {DEFAULT_SESSION!r} is the session "
+            "every other one is seeded FROM, and is nobody's copy. Pick a name "
+            "for a new session of your own."
+        )
+    if target.exists():
+        raise ToolError(
+            f"session {target.name!r} already exists, and seed_from only "
+            f"applies when a session is CREATED — it was "
+            f"{seed_sentence(provenance(target))}. Pass session="
+            f"{target.name!r} on its own to open it with the cookies and "
+            f"logins it already holds, or pick a free name for a fresh copy "
+            f"of {requested!r}."
+        )
+
+
+def seed_source(
+    requested: str | None,
+    roots: Roots,
+    inside: Callable[[Path, Path], bool],
+    *,
+    held: Callable[[Path], bool],
+) -> SeedSource:
+    """WHICH directory a new session is copied from, and what that copy is
+    called (F-897). ``None`` means the same thing as ``"default"``, so the two
+    cannot develop separate behaviour.
+
+    **The shared session is the one source that stays copyable while its own
+    browser runs, and that is a fact about the MECHANISM rather than a
+    privilege of the word.** The product keeps a separate, closed, copyable
+    form of it — the seed — refreshed whenever the shared profile is free
+    (F-892/F-893), so a copy taken from it is a copy of a directory nothing is
+    writing to. The fallback to the LIVE shared directory when no seed exists
+    yet (first run) is 2.1.11's behaviour and is kept deliberately rather than
+    widened into the refusal below: it is the path that CREATES the first
+    seed, and refusing it would make a fresh installation unable to make its
+    first named session. What it costs is named in ``profile_copy``'s
+    docstring — a locked file is skipped and nothing can say which.
+
+    **Every other session is refused while it is open, BY NAME.** It has no
+    seed, so the copy would be of the live directory itself, and
+    ``profile_copy.copy_file`` answers a locked file by skipping it with a
+    warning: on Windows that is every file Chrome holds, and everywhere it is
+    a WAL-mode cookie jar mid-transaction. The caller would be handed a
+    session that looks complete and is missing exactly the logins they wanted,
+    with no way for us to enumerate the gap. A refusal naming the session and
+    the remedy is worth more than a copy nobody can trust. F-898 is where a
+    RUNNING source becomes copyable — a CDP cookie hand-off out of the live
+    browser rather than a file copy — and is deliberately not built here.
+
+    Per-session seeds were the other candidate and are deliberately NOT built:
+    each costs ~0.47 GB, and each needs its own refresh trigger, its own
+    staleness witness and its own in-use rule — a second copy of the lifecycle
+    F-892 and F-893 spent two findings getting right for ONE seed, bought to
+    avoid a refusal whose remedy is closing a window.
+    """
+    if requested is None or is_default_name(requested):
+        if roots.seed.exists():
+            return SeedSource(roots.seed, "explicit-default-seed")
+        return SeedSource(roots.shared, "explicit-default")
+    source = require_allowed(requested, roots, inside)
+    if not source.exists():
+        raise ToolError(
+            f"seed_from={requested!r} is not a session: there is nothing at "
+            f"{source}. `stealthy profiles` lists the sessions you have; omit "
+            f"seed_from to copy the {DEFAULT_SESSION!r} session."
+        )
+    if held(source):
+        raise ToolError(
+            f"seed_from={requested!r} is open in a browser right now. Copying "
+            "a profile Chrome is writing to silently drops whatever it has "
+            "locked — which is where the logins are — and nothing can say "
+            f"afterwards what was lost. Close the {requested!r} session first "
+            f"(`stealthy close <instance>`), or seed from "
+            f"{DEFAULT_SESSION!r}, which the product keeps a separate "
+            "copyable form of."
+        )
+    return SeedSource(source, "explicit-session")
