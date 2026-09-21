@@ -26,6 +26,7 @@ import re
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -102,17 +103,6 @@ def clone_storage_cap_bytes() -> int:
     if gb <= 0:
         return 0
     return int(gb * (1024**3))
-
-
-def _dir_size_bytes(path: Path) -> int:
-    total = 0
-    for root, _dirs, files in os.walk(path):
-        for name in files:
-            try:
-                total += (Path(root) / name).stat().st_size
-            except OSError:
-                pass
-    return total
 
 
 def clone_is_auto(clone_dir: Path) -> bool:
@@ -276,7 +266,7 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
         try:
             if not entry.is_dir() or not clone_is_auto(entry):
                 continue
-            size = _dir_size_bytes(entry)
+            size = profile_copy.dir_size_bytes(entry)
             mtime = entry.stat().st_mtime
         except OSError:
             continue
@@ -316,7 +306,7 @@ def _enforce_clone_storage_cap_in(
             # Protection acquired between selection and eviction (a spawn started
             # mid-sweep) — respect it rather than evict a now-in-flight clone.
             continue
-        size = _dir_size_bytes(entry)
+        size = profile_copy.dir_size_bytes(entry)
         _trash_clone(entry, clone_root)
         if not entry.exists():
             removed += 1
@@ -340,59 +330,6 @@ def browser_session_storage_cap_bytes() -> int:
 def clone_is_named(clone_dir: Path) -> bool:
     """The persistent profiles — the marker's question, ``profile_seed``'s."""
     return profile_seed.is_named(clone_dir)
-
-
-def _regenerable_dirs_in_profile(profile_dir: Path) -> list[Path]:
-    """Regenerable cache/model directories in a profile — those named in
-    ``profile_copy.REGENERABLE_NAMES``, at the profile root and one level down
-    (``Default/``, ``Profile N/``), which is where Chrome keeps its caches and
-    on-device model stores. Never recurses deeper, so session-state dirs such as
-    ``Local Storage`` and ``IndexedDB`` are never included."""
-    found: list[Path] = []
-
-    def _scan(directory: Path) -> None:
-        try:
-            children = list(directory.iterdir())
-        except OSError:
-            return
-        for child in children:
-            try:
-                if child.is_dir() and child.name in profile_copy.REGENERABLE_NAMES:
-                    found.append(child)
-            except OSError:
-                continue
-
-    _scan(profile_dir)
-    try:
-        subdirs = [
-            c
-            for c in profile_dir.iterdir()
-            if c.is_dir() and c.name not in profile_copy.REGENERABLE_NAMES
-        ]
-    except OSError:
-        subdirs = []
-    for sub in subdirs:
-        _scan(sub)
-    return found
-
-
-def _regenerable_size(profile_dir: Path) -> int:
-    """Bytes a trim of ``profile_dir`` would reclaim (read-only)."""
-    return sum(_dir_size_bytes(d) for d in _regenerable_dirs_in_profile(profile_dir))
-
-
-def _trim_profile_regenerable(profile_dir: Path) -> int:
-    """Delete the regenerable cache/model dirs from a profile (see
-    ``_regenerable_dirs_in_profile``) while preserving every session-state file
-    (cookies, logins, Web Data, Local Storage, Preferences). Returns bytes freed.
-    """
-    freed = 0
-    for directory in _regenerable_dirs_in_profile(profile_dir):
-        size = _dir_size_bytes(directory)
-        profile_copy.rmtree_robust(directory)
-        if not directory.exists():
-            freed += size
-    return freed
 
 
 def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
@@ -419,7 +356,7 @@ def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> list[P
         try:
             if not entry.is_dir():
                 continue
-            size = _dir_size_bytes(entry)
+            size = profile_copy.dir_size_bytes(entry)
         except OSError:
             continue
         total += size
@@ -437,7 +374,9 @@ def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> list[P
         if not clone_is_named(entry) or _profile_has_running_browser(entry):
             continue  # autos -> clone-cap sweep; unmarked/in-use -> leave alone
         victims.append(entry)
-        total -= _regenerable_size(entry)  # a trim frees ~the regenerable portion
+        total -= profile_copy.regenerable_size(
+            entry
+        )  # a trim frees ~the regenerable portion
     return victims
 
 
@@ -450,7 +389,7 @@ def _enforce_named_profile_trim_in(
     """
     freed_total = 0
     for entry in _named_profiles_over_session_cap(clone_root, cap_bytes):
-        freed = _trim_profile_regenerable(entry)
+        freed = profile_copy.trim_regenerable(entry)
         if freed:
             freed_total += freed
             debug_logger.log_info(
@@ -762,7 +701,11 @@ def require_allowed_user_data_dir(
 
 
 def require_allowed_seed_from(
-    seed_from: str | None, landed: str | None, *, check_source: bool = True
+    seed_from: str | None,
+    landed: str | None,
+    *,
+    check_source: bool = True,
+    driven: Callable[[Path], bool] = profile_source.NOTHING_DRIVEN,
 ) -> str | None:
     """THE gate for a ``seed_from`` request (F-897): the name it may be, and
     that there is a NEW session for it to apply to. None when none was given.
@@ -794,7 +737,11 @@ def require_allowed_seed_from(
     a third walk of the process table decides nothing. A 1 s memo bought the
     same saving and is REPLACED by this flag — no process-global state, no
     clock, no reset hook, no answer that can go stale. What is left is one
-    ``exists()`` and a psutil walk only where the answer is used."""
+    ``exists()`` and a psutil walk only where the answer is used.
+
+    *driven* is F-898's witness — "does THIS backend hold a browser on that
+    directory" — and it is passed through to ``_seed_source``; the rule it feeds
+    and the reason its default answers NO are ``profile_source``'s."""
     requested = profile_source.seed_request(seed_from)
     if requested is None:
         return None
@@ -807,21 +754,36 @@ def require_allowed_seed_from(
         inside_root=target is not None and _is_relative_to(target, clone_root_dir()),
     )
     if check_source:
-        _seed_source(requested)
+        _seed_source(requested, driven)
     return requested
 
 
-def _seed_source(seed_from: str | None) -> profile_source.SeedSource:
+def _seed_source(
+    seed_from: str | None,
+    driven: Callable[[Path], bool] = profile_source.NOTHING_DRIVEN,
+) -> profile_source.SeedSource:
     """THE one binding of ``profile_source.seed_source`` to OUR four directories
-    and OUR witness. SIDE-EFFECT-FREE: it is asked TWICE (review S1) and only
-    one ask is about to copy, so the freshen is ``_seed_source_for_copy``'s
-    alone — taken twice it would copy a whole profile for a refused spawn."""
+    and OUR two witnesses. SIDE-EFFECT-FREE: it is asked TWICE (review S1) and
+    only one ask is about to copy, so the freshen is ``_seed_source_for_copy``'s
+    alone — taken twice it would copy a whole profile for a refused spawn.
+
+    ``driven`` is F-898's second witness and this module's to BIND, not to
+    answer: which browsers exist is ``browser_manager``'s, and importing it here
+    would put the disk subsystem downstream of the browser one, so the snapshot
+    arrives from ``spawn_browser`` as a plain predicate."""
     return profile_source.seed_source(
-        seed_from, _roots(), _is_relative_to, held=_profile_has_running_browser
+        seed_from,
+        _roots(),
+        _is_relative_to,
+        held=_profile_has_running_browser,
+        driven=driven,
     )
 
 
-def _seed_source_for_copy(seed_from: str | None) -> profile_source.SeedSource:
+def _seed_source_for_copy(
+    seed_from: str | None,
+    driven: Callable[[Path], bool] = profile_source.NOTHING_DRIVEN,
+) -> profile_source.SeedSource:
     """The AUTHORITATIVE read: the SAME question through the SAME binding
     (review N4 — one ``seed_source`` call site, not two that can drift), plus
     the freshen a copy from the SHARED session owes its seed first — the only
@@ -829,28 +791,42 @@ def _seed_source_for_copy(seed_from: str | None) -> profile_source.SeedSource:
     the copy, with no ``await`` between."""
     if seed_from is None or profile_seed.is_default_name(seed_from):
         _refresh_snapshot_if_stale()
-    return _seed_source(seed_from)
+    return _seed_source(seed_from, driven)
+
+
+#: The selection key F-898's cookie hand-off is driven from, and the ONE key
+#: :func:`_public_profile_selection` DROPS: it carries the live source's
+#: directory, which is an instruction to this process rather than a field a
+#: client reads. What the client is told afterwards is ``seeded_via``.
+LIVE_SEED_KEY = "seed_live_source"
 
 
 def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, Any]:
     """The selection as ``spawn_diagnostics.profile_selection`` reports it — the
     ONE site every role passes through, which is why F-895's seed provenance is
     stamped here. It is read from the marker on disk, so a directory that
-    already existed reports the seed it was actually made from."""
+    already existed reports the seed it was actually made from.
+
+    It is also where an INTERNAL key stops being one (F-898): this function's
+    whole job is the line between what the resolver decided and what a caller is
+    told, so :data:`LIVE_SEED_KEY` is dropped here rather than being copied into
+    diagnostics and hoped over."""
     public = dict(profile_selection)
+    public.pop(LIVE_SEED_KEY, None)
     selected = public.get("user_data_dir")
     if isinstance(selected, str) and selected:
         public.update(profile_seed.provenance(Path(selected)))
     return public
 
 
-async def resolve_profile_selection(
+async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per independent input to one selection)
     user_data_dir: str | None,
     *,
     seed_from: str | None = None,
     force_clone: bool = False,
     override: profile_source.SeedSource | None = None,
     clone_suffix: str | None = None,
+    driven: Callable[[Path], bool] = profile_source.NOTHING_DRIVEN,
 ) -> dict[str, Any]:
     """Which directory this spawn drives, and how it got there.
 
@@ -860,6 +836,12 @@ async def resolve_profile_selection(
     needed is not tidying: a path and the word recorded for it are decided
     together, and two parameters let a caller record a copy as having come
     from somewhere it did not.
+
+    ``driven`` is F-898's witness, passed through to ``_seed_source``. When the
+    seed it permits is a LIVE session the answer carries :data:`LIVE_SEED_KEY`,
+    the ONLY thing that drives the cookie hand-off afterwards — set by the
+    branch that actually COPIED, so a target that raced into existence between
+    the pre-flight and here is never handed another session's jar.
     """
     master = master_profile_dir()
     clone_root = clone_root_dir()
@@ -876,7 +858,9 @@ async def resolve_profile_selection(
     # caller NAMED. A target that is held is walked to `<name>-2`, which does
     # not exist — so asking afterwards would seed a substitute directory under
     # a flag the caller passed about theirs.
-    seed_from = require_allowed_seed_from(seed_from, landed, check_source=False)
+    seed_from = require_allowed_seed_from(
+        seed_from, landed, check_source=False, driven=driven
+    )
     explicit = (
         None
         if landed is None or profile_seed.same_dir(Path(landed), master)
@@ -899,19 +883,27 @@ async def resolve_profile_selection(
                     "walked_to": str(explicit),
                     "walk_reason": hold.reason,
                 }
+        live_seed: dict[str, Any] = {}
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
             # `_for_copy`, never `_seed_source`: this read owns the freshen and
             # is the AUTHORITATIVE hold check — the pre-flight skipped it (S).
-            seed = _seed_source_for_copy(seed_from)
+            seed = _seed_source_for_copy(seed_from, driven)
             _require_copied(
                 _copy_profile_tree(seed.path, explicit, clone_root, seed.kind), explicit
             )
+            # F-898: the copy above ran against a directory Chrome is writing
+            # to, so it carried no cookies — the jar is held open and skipped.
+            # Reported from INSIDE the branch that copied, because that is the
+            # only place that knows a copy happened at all.
+            if seed.kind == profile_source.LIVE_SESSION_KIND:
+                live_seed = {LIVE_SEED_KEY: str(seed.path)}
         explicit.parent.mkdir(parents=True, exist_ok=True)
         return {
             "user_data_dir": str(explicit),
             "profile_role": "explicit",
             "clone_source": None,
             **walk,
+            **live_seed,
         }
 
     master.parent.mkdir(parents=True, exist_ok=True)

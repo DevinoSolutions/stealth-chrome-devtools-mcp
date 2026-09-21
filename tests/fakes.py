@@ -2071,6 +2071,12 @@ class FakeBrowserManager:
     ``get_tab``/``get_browser``/``list_instances`` are async (the tools await
     them). ``list_instances`` returns the seeded instance objects verbatim; seed
     with :func:`fake_instance`.
+
+    ``get_instance`` answers the ENTRY — the dict the real manager keeps in
+    ``_instances``, whose ``"options"`` is the only place a live instance's
+    ``user_data_dir`` exists (F-898). ``BrowserInstance`` has no such field, so a
+    double that offered one on the instance would let a reader pass here and
+    find nothing in production; seed it with ``profiles=``.
     """
 
     def __init__(
@@ -2081,10 +2087,12 @@ class FakeBrowserManager:
         spawn_instance: Any = None,
         spawn_diagnostics: dict[str, Any] | None = None,
         navigate_result: Any = None,
+        profiles: dict[str, str] | None = None,
     ) -> None:
         self._instances = list(instances or [])
         self._tabs = dict(tabs or {})
         self._browsers = dict(browsers or {})
+        self._profiles = dict(profiles or {})
         self._spawn_instance = spawn_instance
         self._spawn_diagnostics = (
             spawn_diagnostics if spawn_diagnostics is not None else {}
@@ -2108,6 +2116,28 @@ class FakeBrowserManager:
 
     async def get_browser(self, instance_id: str) -> Any:
         return self._browsers.get(instance_id)
+
+    async def get_instance(self, instance_id: str) -> dict[str, Any] | None:
+        """The instance ENTRY, shaped like the real manager's (F-898).
+
+        Only the keys a reader of the entry actually needs are offered, and
+        ``"options"`` is present only for an instance seeded with a profile —
+        an under-specified double is worse than none, and a reader reaching for
+        a key the product does not put there should fail here rather than in
+        production (``test_extra_headers_cdp``'s rule, stated on its own
+        ``clone_storage`` double).
+        """
+        known = {instance.instance_id for instance in self._instances}
+        if instance_id not in known:
+            return None
+        entry: dict[str, Any] = {
+            "browser": self._browsers.get(instance_id),
+            "tab": self._tabs.get(instance_id),
+        }
+        directory = self._profiles.get(instance_id)
+        if directory is not None:
+            entry["options"] = SimpleNamespace(user_data_dir=directory)
+        return entry
 
     async def spawn_browser(self, options: Any) -> Any:
         """Record the ``BrowserOptions`` the tool built (to assert param

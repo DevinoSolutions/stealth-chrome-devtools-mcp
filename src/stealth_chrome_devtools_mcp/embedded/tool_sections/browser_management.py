@@ -33,6 +33,7 @@ is ``get_instance_state``'s ``# F-164 non-CDP`` marker comment, which
 """
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from stealth_chrome_devtools_mcp.embedded import tab_identity
@@ -155,14 +156,34 @@ async def spawn_browser(
             by hand is not something a flag should be able to do by accident.
             It needs a ``session`` of its own, so it is also an error with no
             ``session`` or with ``session="default"``.
-            The source must EXIST and must NOT be open in a browser: copying a
-            profile Chrome is writing to silently drops whatever it has locked
-            — which is where the logins are — so an open source is refused BY
-            NAME with the remedy, rather than copied and hoped for. The one
-            exception is ``default`` itself, whose copyable form the product
-            maintains separately, so seeding from it works whether or not it
-            is open (that copy can be as old as the last time ``default`` was
-            closed, which the answer reports as ``seed_changed_since``).
+            The source must EXIST. It MAY be open in a browser, but only one
+            THIS backend drives — a session you spawned through this tool, the
+            common case after ``spawn --session work --headed`` and a hand
+            login. Then its COOKIES are read out of the running browser over
+            CDP and written into the new session, and the answer says so:
+            ``seeded_via: "cdp-cookies"`` plus counts. A source held by a
+            browser this backend does not drive (another backend's, or a Chrome
+            nobody here launched) is refused BY NAME, because there is no
+            connection of ours to ask for its cookies and a file copy of a live
+            profile carries none at all — the jar is held open and skipped, and
+            nothing can say afterwards what was lost.
+            WHAT A HAND-OFF CARRIES IS COOKIES AND NOTHING ELSE: every kind
+            (session, persistent, HttpOnly, Secure, SameSite=None and
+            Partitioned), and the WHOLE jar — every site that session is logged
+            into, not just the one you had in mind. It does NOT carry
+            ``localStorage``, ``sessionStorage``, IndexedDB, Cache Storage, any
+            service-worker registration, or saved passwords/autofill. A site
+            that keeps its token in ``localStorage`` will NOT be logged in.
+            Those stores come across only from a source that is CLOSED, where
+            the file copy can read them — with the one exception that a session
+            cookie is never on disk at all and so only ever arrives this way.
+            If the hand-off fails the session is still created and still works;
+            the answer then says ``seeded_via: "copy"`` with
+            ``cookie_handoff_error``.
+            The other exception is ``default`` itself, whose copyable form the
+            product maintains separately, so seeding from it works whether or
+            not it is open (that copy can be as old as the last time ``default``
+            was closed, which the answer reports as ``seed_changed_since``).
             What the new session records is the source's NAME:
             ``spawn_diagnostics["profile_selection"]["seeded_from"]``, a word
             you can pass straight back as ``session=``.
@@ -217,6 +238,17 @@ async def spawn_browser(
         user_data_dir, session
     )
 
+    # F-898's witness, taken ONCE and handed to both asks below, so the
+    # pre-flight and the resolver cannot disagree about whether a live source
+    # is one of ours. It is the only thing that turns F-897's blanket refusal
+    # of a running source into a seed: a browser THIS backend drives can be
+    # asked for its cookies over CDP, and one it does not drive cannot be. Taken
+    # unconditionally because it is one lock-guarded read of the instance table
+    # (plus the liveness check `list_instances` already does, which is what
+    # keeps a dead browser from being offered as a source), and because a
+    # snapshot taken only sometimes is a second code path through the same gate.
+    driven = await rt.cookie_handoff.driven_profiles(rt.browser_manager)
+
     # F-897, and it has to be HERE rather than only in the resolver: a session
     # whose browser is still running is a session that EXISTS, and the
     # re-attach below would adopt that browser without the resolver ever
@@ -225,7 +257,9 @@ async def spawn_browser(
     # because "is this the shared session" and "does it already exist" are
     # questions about the directory a request MEANS. The resolver asks again;
     # it is public and has its own callers, and the cost is one `exists()`.
-    seed_from = rt.clone_storage.require_allowed_seed_from(seed_from, user_data_dir)
+    seed_from = rt.clone_storage.require_allowed_seed_from(
+        seed_from, user_data_dir, driven=driven.holds
+    )
 
     # Then the HOST-shaped guard, also outside the try so it is not re-wrapped
     # (F-808): a spawn nobody could ever see must not first clone a profile dir
@@ -286,7 +320,7 @@ async def spawn_browser(
                 return await _adopted_instance_record(held.instance_id, block_resources)
 
         profile_selection = await rt.clone_storage.resolve_profile_selection(
-            user_data_dir, seed_from=seed_from
+            user_data_dir, seed_from=seed_from, driven=driven.holds
         )
         spawn_errors = []
 
@@ -340,13 +374,21 @@ async def spawn_browser(
             await rt.network_interceptor.setup_interception(
                 tab, instance.instance_id, block_resources
             )
+        # F-898: the file copy that made this session ran against a directory
+        # Chrome is writing to and carried no cookies, so the jar comes across
+        # here instead — after the target exists, because the hand-off writes
+        # INTO it. It never raises: the session exists and works, and a failed
+        # hand-off is a session missing its cookies, not a spawn that failed.
+        cookie_seed = await _seed_cookies_over_cdp(profile_selection, instance)
+
         spawn_diagnostics = await rt.browser_manager.get_spawn_diagnostics(
             instance.instance_id
         )
         if isinstance(spawn_diagnostics, dict):
-            spawn_diagnostics["profile_selection"] = (
-                rt.clone_storage._public_profile_selection(profile_selection)
-            )
+            spawn_diagnostics["profile_selection"] = {
+                **rt.clone_storage._public_profile_selection(profile_selection),
+                **cookie_seed,
+            }
             if held.declined:
                 # A live browser held the directory and we spawned anyway: the
                 # caller is owed the reason, beside the walk it caused, because
@@ -398,6 +440,75 @@ async def spawn_browser(
                 else ""
             )
         )
+
+
+async def _seed_cookies_over_cdp(
+    profile_selection: dict[str, Any], instance: "BrowserInstance"
+) -> dict[str, Any]:
+    """Hand the live source's cookie jar to the session just spawned (F-898).
+
+    ``{}`` for every spawn but the one the resolver marked, which is the branch
+    that actually COPIED from a session whose browser THIS backend drives. The
+    selection key carries the source DIRECTORY and is dropped before the
+    caller ever sees it (``clone_storage._public_profile_selection``); what the
+    caller is told is ``seeded_via`` and counts.
+
+    **Why this is not a ``ToolError``.** The new session exists, its browser is
+    running and everything a file copy could carry is in it — what failed is an
+    augmentation. Raising would take a working session away from the caller and
+    leave a directory on disk that a retry would then refuse as "already
+    exists" (``profile_source.require_new_session``'s fourth refusal), i.e. the
+    worst of both. So the failure is REPORTED, in the one field a caller reads
+    about where this session came from, and the word is the mechanism that did
+    run: ``seeded_via: "copy"``, which is true and is exactly what 2.1.12 would
+    have refused to give them at all.
+
+    **The source is re-derived rather than reused** from the pre-flight
+    snapshot: a whole browser launch has happened since, and whether that
+    browser is still ours is a fact with a lifetime. A source that closed in
+    the meantime reports no instance and takes the same reported path as any
+    other failure.
+
+    **No cookie name or value reaches the log** — ``cookie_handoff.failure``
+    repeats the text of a ``HandoffError`` (which that module wrote, and which
+    is shape only) and reports anything else by its TYPE alone; and the warning
+    deliberately does NOT pass ``error=exc``: that forwards ``exc_info``, and
+    the exception behind a failed ``Storage.setCookies`` is Chrome's answer to a
+    command whose parameters were the jar itself. This is the one place in the
+    tree where F-869's convenience is declined on purpose, and it is declined
+    because the payload here is credentials rather than page shape.
+    """
+    source_dir = profile_selection.get(rt.clone_storage.LIVE_SEED_KEY)
+    if not source_dir:
+        return {}
+
+    failed = rt.cookie_handoff.HandoffError
+    try:
+        driven = await rt.cookie_handoff.driven_profiles(rt.browser_manager)
+        source_id = driven.instance(Path(source_dir))
+        if source_id is None:
+            raise failed("the source browser is no longer driven by this backend")
+        source = await rt.browser_manager.get_browser(source_id)
+        target = await rt.browser_manager.get_browser(instance.instance_id)
+        if source is None or target is None:
+            raise failed("a browser for the hand-off could not be resolved")
+        handoff = await rt._with_cdp_timeout(
+            rt.cookie_handoff.hand_off(source, target),
+            instance_id=instance.instance_id,
+        )
+    except Exception as exc:  # PERMANENT(F-898): reported, never raised — see above
+        reason = rt.cookie_handoff.failure(exc)
+        rt.debug_logger.log_warning(
+            "browser_management",
+            "_seed_cookies_over_cdp",
+            f"cookie hand-off did not complete ({reason}); the session was "
+            "created from the file copy alone",
+        )
+        return {
+            "seeded_via": rt.cookie_handoff.VIA_COPY,
+            "cookie_handoff_error": reason,
+        }
+    return handoff.record()
 
 
 def _launch_only_args(**passed: Any) -> list[str]:
