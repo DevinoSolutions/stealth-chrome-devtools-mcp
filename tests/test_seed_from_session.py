@@ -914,3 +914,100 @@ class TestNoRefusalSaysTheOldWords:
                 if word in message.casefold().replace("'master'", "")
             ]
             assert not said, f"{said} in: {message}"
+
+
+# ---------------------------------------------------------------------------
+# 9. What the advisory ask COSTS (review N2)
+# ---------------------------------------------------------------------------
+
+
+class TestTheAdvisoryAskCostsOneScan:
+    """`_profile_hold` is a full psutil cmdline walk, and on a machine that has
+    been running a Chrome fleet that is hundreds of processes. Review S1 bought
+    an unwrapped refusal by asking the SOURCE question in the pre-flight and
+    throwing the answer away — and the pre-flight is itself asked twice (the
+    tool's, then the resolver's own), so one seeded spawn walked the table
+    three times for one source where an unseeded named spawn walks it once.
+
+    The two ADVISORY asks share ONE scan; the AUTHORITATIVE read before the
+    copy is never served from that memo, because "is this source open" is a
+    fact with a lifetime and the statement before the copy is the one that has
+    to be true. That split is the whole point of `_seed_source` vs
+    `_seed_source_for_copy`, so it is pinned rather than described.
+
+    Counted at the COMPOSITION rather than through `call_tool`: the cost is a
+    property of the gate and the resolver, and the tool path adds F-888's own
+    `profile_lock.profile_hold` for the TARGET, which is a different question
+    on a different witness and would make the number say less, not more.
+    """
+
+    def _counted(self, monkeypatch) -> list[str]:
+        profile_source.forget_advisory_holds()
+        seen: list[str] = []
+        real = clone_storage._profile_hold
+
+        def counting(profile_dir):
+            seen.append(Path(profile_dir).name)
+            return real(profile_dir)
+
+        monkeypatch.setattr(clone_storage, "_profile_hold", counting)
+        return seen
+
+    async def test_a_seeded_spawn_walks_the_table_twice_for_its_source(
+        self, monkeypatch, tmp_session_root
+    ):
+        await _session_with_a_login("work", tmp_session_root)
+        seen = self._counted(monkeypatch)
+
+        await _selection(session="beta", seed_from="work")
+
+        assert seen.count("work") == 2, (
+            "one advisory scan shared by both pre-flight asks, plus the "
+            f"authoritative read before the copy — got {seen}"
+        )
+        assert seen.count("beta") == 1, f"the target is asked about once: {seen}"
+
+    async def test_an_unseeded_named_spawn_is_unchanged(
+        self, monkeypatch, tmp_session_root
+    ):
+        """A GUARD: the memo must not cost — or save — anything on the spawn
+        that never writes `seed_from`."""
+        seen = self._counted(monkeypatch)
+
+        await _selection(session="beta")
+
+        assert seen == ["beta"]
+
+    async def test_the_read_before_the_copy_is_never_served_from_the_memo(
+        self, monkeypatch, tmp_session_root
+    ):
+        """The one that would undo review S1's honesty. Two advisory asks cost
+        one walk; the pre-copy read walks again, every time."""
+        await _session_with_a_login("work", tmp_session_root)
+        seen = self._counted(monkeypatch)
+
+        clone_storage._seed_source("work")
+        clone_storage._seed_source("work")
+        assert seen.count("work") == 1, f"advisory asks share one walk: {seen}"
+
+        clone_storage._seed_source_for_copy("work")
+        assert seen.count("work") == 2, f"the pre-copy read is fresh: {seen}"
+
+        clone_storage._seed_source_for_copy("work")
+        assert seen.count("work") == 3, f"and fresh every time: {seen}"
+
+    async def test_a_source_that_opens_after_the_memo_is_still_refused(
+        self, monkeypatch, tmp_session_root
+    ):
+        """The memo's cost, named and bounded: a stale ADVISORY "not open" lets
+        the request through the gate, and the pre-copy read — the authoritative
+        one — refuses it. That is exactly the check-to-copy window review S1
+        already documented, not a new hole."""
+        source = await _session_with_a_login("work", tmp_session_root)
+        self._counted(monkeypatch)
+
+        clone_storage._seed_source("work")  # not held: memoised
+        held_profile(source)
+
+        with pytest.raises(ToolError, match="open in a browser right now"):
+            clone_storage._seed_source_for_copy("work")

@@ -766,30 +766,28 @@ def require_allowed_seed_from(seed_from: str | None, landed: str | None) -> str 
     that there is a NEW session for it to apply to. None when none was given.
 
     It takes *landed* — ``require_allowed_user_data_dir``'s answer, the
-    DIRECTORY the caller's session request means — rather than the raw string,
-    so "is this the shared session" and "does it already exist" are asked
-    about the directory a request MEANS rather than the string it was written
-    as. Both would otherwise be wrong for every relative spelling.
+    DIRECTORY the caller's session request means — so "is this the shared
+    session" and "does it already exist" are asked about the directory a
+    request MEANS. Both are wrong for a relative spelling otherwise.
 
-    Asked TWICE on ``require_allowed``'s precedent, and for a sharper reason
-    than that one had: ``spawn_browser`` asks it in front of
-    ``browser_reattach.adopt_held_profile``, because a session whose browser is
-    still running is a session that EXISTS — so without the refusal in front,
-    ``spawn --session work --from other`` would be silently ADOPTED onto the
-    running ``work`` browser and the caller told nothing about the flag they
-    passed. The resolver asks again because it is public and has its own
-    callers. It costs one ``exists()``.
+    Asked TWICE on ``require_allowed``'s precedent, and for a sharper reason:
+    ``spawn_browser`` asks it in front of ``browser_reattach.adopt_held_profile``,
+    because a session whose browser is still running is a session that EXISTS —
+    so without it ``spawn --session work --from other`` would be silently
+    ADOPTED onto the running ``work`` browser with nothing said about the flag.
+    The resolver asks again because it is public and has its own callers.
 
     The SOURCE question is asked here too and its answer DISCARDED (review S1;
     argument in finding §2.3). Its three refusals are raised inside
     ``profile_source.seed_source``, which the resolver calls from INSIDE
     ``spawn_browser``'s ``try``, so they reached the caller re-labelled
-    ``Failed to spawn browser: …`` — and an inner ``except ToolError: raise``
-    does not fix that, it still unwinds into the enclosing handler.
-    **Discarding is the point**: "is this source open" is a fact with a
-    LIFETIME, so the authoritative read stays the resolver's — the statement
-    before the copy, no ``await`` between — and this ask is ADVISORY. The
-    freshen is NOT taken here (``_seed_source_for_copy``)."""
+    ``Failed to spawn browser: …``; an inner ``except ToolError: raise`` does
+    not fix that. **Discarding is the point**: "is this source open" is a fact
+    with a LIFETIME, so the authoritative read stays ``_seed_source_for_copy``'s
+    — the statement before the copy, no ``await`` between — and this one is
+    ADVISORY, which is why it may be memoised and why the freshen is not here.
+
+    **What it costs** (N2): one ``exists()``, ONE psutil walk for BOTH asks."""
     requested = profile_source.seed_request(seed_from)
     if requested is None:
         return None
@@ -806,29 +804,31 @@ def require_allowed_seed_from(seed_from: str | None, landed: str | None) -> str 
 
 
 def _seed_source(seed_from: str | None) -> profile_source.SeedSource:
-    """Which directory this new session is copied from, bound to OUR four
-    directories and OUR liveness witness. The rule is ``profile_source``'s.
-
-    Deliberately SIDE-EFFECT-FREE, because it is asked TWICE (review S1) and
-    only one ask is about to copy: taken twice the freshen would copy a whole
-    profile for a spawn about to be refused, and taken here a gate whose job
-    is asking questions would write to disk.
-    """
-    return profile_source.seed_source(
-        seed_from, _roots(), _is_relative_to, held=_profile_has_running_browser
-    )
+    """The ADVISORY read: which directory this new session is copied from,
+    bound to OUR four directories and to OUR witness through ``advisory``,
+    which remembers that answer for the window review N2 argues at
+    ``profile_source.ADVISORY_HOLD_SECONDS``. Deliberately SIDE-EFFECT-FREE,
+    because it is asked TWICE (review S1) and only one ask is about to copy:
+    taken twice the freshen would copy a whole profile for a spawn about to be
+    refused, and taken here a gate whose job is asking questions would write
+    to disk."""
+    held = profile_source.advisory(_profile_has_running_browser)
+    return profile_source.seed_source(seed_from, _roots(), _is_relative_to, held=held)
 
 
 def _seed_source_for_copy(seed_from: str | None) -> profile_source.SeedSource:
-    """``_seed_source``, plus the freshen a copy from the SHARED session owes
-    its seed first — asked only for that session, the only source that HAS a
-    seed. The two may therefore answer differently on a first run (no seed yet
-    -> the live shared dir; after the freshen -> the seed), which is harmless
-    precisely because the pre-flight's answer is discarded.
-    """
+    """The AUTHORITATIVE read: the same question on a FRESH witness — never the
+    memo, because this is the statement before the copy and a remembered answer
+    would widen the microsecond window review S1 measured to the whole one
+    review N2 bought — plus the freshen a copy from the SHARED session owes its
+    seed first, asked only for that session, the only source that HAS one. The
+    two may answer differently on a first run (no seed yet -> the live shared
+    dir; after -> the seed), harmless because the advisory answer is dropped."""
     if seed_from is None or profile_seed.is_default_name(seed_from):
         _refresh_snapshot_if_stale()
-    return _seed_source(seed_from)
+    return profile_source.seed_source(
+        seed_from, _roots(), _is_relative_to, held=_profile_has_running_browser
+    )
 
 
 def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, Any]:

@@ -454,7 +454,8 @@ def _names_nothing(spelling: str, given: str) -> ToolError:
     spelling may reach a directory profiles are kept in, and that rule lives in
     ``reserved_reason``. What this one never covers is the exactly-EMPTY
     string, which is "not given" and is answered long before here — see
-    ``profile_request`` and ``seed_request``.
+    ``profile_request`` and ``profile_source.seed_request``, which is in the
+    other module and is why the second name is qualified (review N3).
 
     **Three fields ask it, not two** (F-897): ``session`` and its alias, and
     ``seed_from``, which reaches it through ``require_name``. The sentence is

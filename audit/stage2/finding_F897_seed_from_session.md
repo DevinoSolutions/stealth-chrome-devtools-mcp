@@ -200,9 +200,32 @@ before the copy, with no `await` between the two. The pre-flight ask is
 ADVISORY: it turns the common case into a clean refusal and narrows the window
 to microseconds rather than to zero. A source opened inside that window still
 refuses, one layer down and one label differently, which is strictly better
-than what it replaces. Cost: one `Path.resolve`, one `exists()` and one
-`profile_hold` for a spawn that passes `seed_from`, and nothing at all for one
-that does not.
+than what it replaces.
+
+**What it cost, measured, and what that cost is now** (delta review N2). The
+gate is itself asked twice — the tool's pre-flight, then the resolver's own —
+so a seeded spawn walked the process table THREE times for one source where an
+unseeded named spawn walks it once: counted at `clone_storage._profile_hold`,
+`['work', 'work', 'beta', 'work']`. `_profile_hold` is a full psutil cmdline
+scan, and on a machine that has been running a Chrome fleet that is hundreds of
+processes. The two ADVISORY asks now share ONE walk through
+`profile_source.advisory` / `ADVISORY_HOLD_SECONDS` (1.0 s), and the read
+before the copy is never served from it — `_seed_source_for_copy` takes the
+witness itself. So the count is `['work', 'beta', 'work']`, pinned as a count
+rather than described.
+
+Reusing an advisory answer is a WEAKER claim than the one the advisory ask
+already makes: that answer is discarded. Inside one spawn a remembered answer
+can only ever be NEGATIVE — a positive raises at the first ask, so nothing
+reaches the second. Across spawns a stale negative lands in exactly the
+check-to-copy window above and the authoritative read refuses it; a stale
+positive refuses a source closed less than a second ago, with the right
+sentence and the right remedy. Both are bounded by the window and by nothing
+else, which is why it is a second and not a minute. Cost now: one
+`Path.resolve`, one `exists()` and one `profile_hold` for a spawn that passes
+`seed_from`, and nothing at all for one that does not — which is what
+`require_allowed_seed_from`'s docstring says, where it used to say "one
+`exists()`".
 
 The freshen had to be split out to make that safe: `_seed_source` is now
 side-effect-free and `_seed_source_for_copy` is the one that refreshes a stale
@@ -437,8 +460,8 @@ It also kept the signature inside `PLR0913`.
 
 ## 4. Pins
 
-`tests/test_seed_from_session.py`, **62 nodes**, measured in three rounds
-because the file was written in three.
+`tests/test_seed_from_session.py`, **66 nodes**, measured in four rounds
+because the file was written in four.
 
 1. The original 43 against the tree with the two extractions committed and the
    feature reverted — **40 failed, 3 passed**.
@@ -449,6 +472,17 @@ because the file was written in three.
 3. The fourteen added for this review, against `c5accae` — **9 failed,
    4 passed** (the remaining node, `test_every_refusal_here_names_both
    _spellings`, was written after the M1 refusal existed and is stated below).
+4. The four added for the DELTA review's N2 (`TestTheAdvisoryAskCostsOneScan`),
+   against the merge commit `3da8572` — **2 failed, 2 passed**. The two REDs
+   are the count itself: `AssertionError: one advisory scan shared by both
+   pre-flight asks, plus the authoritative read before the copy — got
+   ['work', 'work', 'beta', 'work']`, and `advisory asks share one walk:
+   ['work', 'work']`. The two GREENs are guards and say so — an unseeded named
+   spawn must not change (`['beta']`), and a source opened after the memo must
+   still be refused by the pre-copy read, which is the memo's one named cost
+   rather than a new hole. They were run with the memo's own reset removed, so
+   the REDs are the behaviour and not an `AttributeError` on a helper that did
+   not exist yet.
 
 Round 3's REDs, by claim:
 
@@ -655,3 +689,31 @@ No SOFT golden file moved.
    marker), which is a schema decision this finding did not need to make.
    F-896's "the seed a session reports is a session you can open" still holds
    — it is simply a different session than the one that seeded it.
+10. **A JUNCTIONED existing session plus `--from` is refused with the WRONG
+    SENTENCE** (delta review N1, measured). With `<clones>\linked` a junction
+    to storage elsewhere, `session="linked", seed_from="work"` raises
+    *"`seed_from='work'` copies one SESSION into another, and
+    `'<clones>\linked'` is a directory named by path rather than a session"* —
+    to a caller who typed a bare session NAME. It still REFUSES (a `--from`
+    onto an existing session is refused either way, and nothing is created),
+    so what is wrong is only which of the two refusals speaks. The cause is
+    ORDER: `require_new_session` tests `inside_root` before `target.exists()`,
+    and `inside_root` is `clone_storage._is_relative_to`, which RESOLVES — so
+    the junction lands outside the clone root.
+
+    **Named rather than fixed, because both obvious fixes are worse.** Swapping
+    the two clauses hands an out-of-root target that happens to EXIST the
+    advice "pass `session='p'` on its own to open it", which is wrong for a
+    path — that request has no session to open. Switching `inside_root` to
+    F-901's `_inside_lexically` re-opens a hairline M1: a DANGLING junction
+    inside the clone root reads as non-existent AND lexically inside, passes
+    every gate, and then the resolver's own `_is_relative_to` says outside and
+    seeds nothing, silently — which is the exact defect M1 closed. The
+    resolving predicate is the right one HERE precisely because it has to
+    mirror the resolver's seeding condition (`clone_storage.py`'s
+    `_is_relative_to(explicit, clone_root)`) rather than F-901's containment
+    question; two predicates that sound alike answer two different questions,
+    and the gap between them is where the silence lives. Closing this properly
+    means the gate knowing the target is a session *by name* independently of
+    where it resolves, which is a `profile_request` change and not a
+    `seed_from` one.
