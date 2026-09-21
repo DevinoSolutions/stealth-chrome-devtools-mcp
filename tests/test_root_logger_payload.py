@@ -48,6 +48,8 @@ import contextlib
 import io
 import json
 import logging
+import os
+import posixpath
 from pathlib import Path
 
 import anyio
@@ -679,6 +681,36 @@ class TestTheKeyIsTheSiteAndNotTheText:
         assert REQUEST_MARK not in text
         assert f"{SDK_MODULE}:10" in text
 
+    def test_the_stem_is_read_off_the_normalised_path_not_record_module(
+        self, tmp_path, monkeypatch
+    ):
+        """``record.module`` is the HOST's reading of ``pathname`` and is not
+        used as the gate (F-911 gate run 35624857318).
+
+        ``LogRecord.__init__`` computes ``module`` with ``os.path.basename``,
+        which on POSIX does not split on a backslash — so for a Windows-shaped
+        pathname it yields the WHOLE string, and a gate on it refused the record
+        before the explicit ``\\`` → ``/`` normalisation ever ran. Every POSIX
+        cell went red on ``test_both_host_pathname_flavours_match`` while the
+        Windows pre-push lane was green: the same blind spot as
+        ``Windows-only verification misses POSIX``. This pin is red on EVERY
+        host: the record carries exactly the ``module`` POSIX would compute.
+        """
+        monkeypatch.setenv("STEALTH_MCP_LOG_DIR", str(tmp_path))
+        get_settings.cache_clear()
+        with contextlib.redirect_stderr(io.StringIO()):
+            logging_setup.configure_logging("backend")
+        # ``LogRecord.__init__`` reads ``os.path.basename`` at call time; the
+        # record factory (and so ``site_of``) runs INSIDE ``makeRecord``, so
+        # the host's reading of the pathname is what the gate sees. Give the
+        # constructor POSIX's reading on every host — a no-op on POSIX, and on
+        # Windows exactly what the gate run's Linux and macOS cells computed.
+        monkeypatch.setattr(os.path, "basename", posixpath.basename)
+        windows = r"C:\venv\Lib\site-packages\mcp\shared\session.py"
+        text = self._emitted_from(windows)
+        assert REQUEST_MARK not in text
+        assert f"{SDK_MODULE}:10" in text
+
 
 class TestTheShippedStderrPath:
     """The sink the production backend actually uses, which ``drive`` hides.
@@ -832,12 +864,17 @@ class TestWithholdingCannotBreakFormatting:
 
 class TestTheRuleIsDerivedAndIdempotent:
     def test_the_cheap_gate_is_derived_from_the_module_list(self):
-        """Two spellings of one fact is how a rule comes to cover nothing."""
+        """Two spellings of one fact is how a rule comes to cover nothing.
+
+        The gate is the site's FILENAME (``.py`` kept), because ``site_of``
+        reads it off the normalised pathname itself and never off
+        ``record.module`` — see ``_SITE_FILENAMES`` for why.
+        """
         expected = frozenset(
-            site.rpartition("/")[2].removesuffix(".py")
-            for site in payload_log_sites.PAYLOAD_LOG_SITES
+            site.rpartition("/")[2] for site in payload_log_sites.PAYLOAD_LOG_SITES
         )
-        assert expected == payload_log_sites._SITE_STEMS
+        assert expected == payload_log_sites._SITE_FILENAMES
+        assert all(name.endswith(".py") for name in expected)
 
     def test_installing_twice_chains_one_factory(self, tmp_path, monkeypatch):
         """``server.py`` is executed three times under runpy."""

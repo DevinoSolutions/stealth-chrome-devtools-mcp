@@ -321,6 +321,24 @@ Full related suite (every file importing `logging_setup`, 18 files):
 
 ---
 
+### 5.1 The gate run that the Windows lane could not have caught (run 35624857318)
+
+`8efde7e` went red on every Linux and macOS cell of the release gate on
+`test_both_host_pathname_flavours_match` while the Windows pre-push lane was
+green. `site_of`'s cheap first gate was `record.module`, a value
+`LogRecord.__init__` computes with the HOST's `os.path.basename` — which on
+POSIX does not split on a backslash, so a Windows-shaped pathname there yields
+the whole string as its "module" and the gate refused the record before the
+explicit `\` → `/` normalisation ever ran. The fix reads the FILENAME off the
+same normalised string (`_SITE_FILENAMES`), so both reads share one spelling
+and the host's path flavour cannot reach the decision. The pin
+`test_the_stem_is_read_off_the_normalised_path_not_record_module` gives the
+constructor POSIX's `basename` on every host (a no-op on POSIX; on Windows the
+exact reading those cells computed) and was measured RED against `8efde7e`
+before the change — a `record.module` override AFTER `makeRecord` is NOT a
+valid RED, because the record factory runs inside `makeRecord`. Same blind
+spot as F-903's Windows-green/POSIX-red round: a change to how a PATH is read
+must be driven under both flavours on the host that cannot produce the other.
 ## 6. Residuals — what this does NOT cover
 
 1. **`mcp/client/streamable_http.py`:240 — a tool RESULT in a Sentry EVENT, and

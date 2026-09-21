@@ -108,11 +108,15 @@ PAYLOAD_LOG_SITES = ("mcp/shared/session.py",)
 
 #: The cheap first gate, DERIVED from the table rather than typed beside it.
 #: Every record in the process is asked this question, so it must be one set
-#: lookup against a value ``LogRecord.__init__`` has already computed — and two
-#: spellings of one fact is how a rule comes to cover nothing.
-_SITE_STEMS = frozenset(
-    site.rpartition("/")[2].removesuffix(".py") for site in PAYLOAD_LOG_SITES
-)
+#: lookup — and two spellings of one fact is how a rule comes to cover nothing.
+#: It is the site's FILENAME, read off the normalised ``pathname`` in
+#: :func:`site_of`, and deliberately NOT ``record.module``: the stdlib computes
+#: that with the HOST's ``os.path.basename``, which on POSIX does not split on
+#: a backslash, so a Windows-shaped pathname there yields the whole string as
+#: its "module" and a gate on it refused the record before the normalisation
+#: ever ran — every Linux and macOS cell of gate run 35624857318 went red on
+#: exactly that while the Windows pre-push lane was green.
+_SITE_FILENAMES = frozenset(site.rpartition("/")[2] for site in PAYLOAD_LOG_SITES)
 
 #: What a withheld record says instead of its text. It keeps the MODULE and the
 #: LINE, which is the whole of what makes such a record actionable — an
@@ -131,12 +135,14 @@ WITHHELD_TEMPLATE = "<{site}:{line} message withheld: {measured}{extra}>"
 def site_of(record: logging.LogRecord) -> str | None:
     """Which entry in :data:`PAYLOAD_LOG_SITES` MADE this record, if any.
 
-    Two reads and no third. The stem first, because this runs for every record
-    in the process and ``record.module`` is a string the stdlib has already
-    computed — one frozenset lookup, False for everything. Only then the path,
-    which is the actual answer: several packages in a normal tree ship a
-    ``session.py``, and withholding a stranger's records because their file
-    happens to share a name would be silencing rather than redacting.
+    Two reads and no third. The filename first, because this runs for every
+    record in the process — one ``replace``, one ``rpartition`` and one
+    frozenset lookup, False for everything. Only then the path, which is the
+    actual answer: several packages in a normal tree ship a ``session.py``, and
+    withholding a stranger's records because their file happens to share a
+    name would be silencing rather than redacting. Both reads are off the
+    SAME normalised string, never off ``record.module`` — see
+    :data:`_SITE_FILENAMES` for the host-dependence that gate carried.
 
     **The path match is on a SEPARATOR BOUNDARY, and the boundary is the whole
     point of the second read** (F-911 review S1). A bare ``endswith(site)``
@@ -158,19 +164,18 @@ def site_of(record: logging.LogRecord) -> str | None:
     There is deliberately **no** ``except`` here, and that is a claim rather
     than an oversight. ``logging_setup._shape`` needs a total one because it
     calls into library code (``tag`` is a property, ``attrs`` answers a
-    ``ContraDict``); this function reads only attributes ``LogRecord.__init__``
-    computed itself. ``record.module`` is always a ``str`` — that constructor
-    sets ``"Unknown module"`` from its own handler when the split fails — so
-    the lookup cannot raise, and the one value a caller controls, ``pathname``,
-    is tested for ``str`` rather than coerced. A non-string pathname is nobody's
-    module path, so ``None`` is the right answer and not a swallowed failure.
+    ``ContraDict``); this function reads ONE attribute, and the one value a
+    caller controls, ``pathname``, is tested for ``str`` rather than coerced.
+    A non-string pathname is nobody's module path, so ``None`` is the right
+    answer and not a swallowed failure; on a ``str`` the three string
+    operations below cannot raise.
     """
-    if record.module not in _SITE_STEMS:
-        return None
     pathname = record.pathname
     if not isinstance(pathname, str):
         return None
     path = pathname.replace("\\", "/")
+    if path.rpartition("/")[2] not in _SITE_FILENAMES:
+        return None
     for site in PAYLOAD_LOG_SITES:
         if path == site or path.endswith("/" + site):
             return site
