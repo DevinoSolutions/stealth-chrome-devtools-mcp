@@ -241,7 +241,7 @@ def failing_spawn_server(patched_server, monkeypatch):
     prefix, and the test would pass over the open defect.
     """
 
-    async def failing_launch(self, options, browser_executable, launch_args):
+    async def failing_launch(self, options, browser_executable, launch_args, attempt):
         raise RuntimeError(INNER_FAILURE)
 
     monkeypatch.setattr(

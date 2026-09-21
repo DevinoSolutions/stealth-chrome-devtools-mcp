@@ -17,6 +17,7 @@ import psutil
 from stealth_chrome_devtools_mcp.embedded import (
     browser_pid_registry,
     browser_reattach,
+    reap_guard,
     serve_startup,
     singleton,
 )
@@ -309,11 +310,18 @@ class ProcessCleanup:
             owner_pid, owner_create_time
         )
 
+    def _skip_note(self, action: str, subject: str, instance_id: str, why: str) -> None:
+        """One INFO line for a pid the reap declined to use, and why."""
+        debug_logger.log_info(
+            "process_cleanup", action, f"Skipping {subject} for {instance_id}: {why}"
+        )
+
     def _kill_processes_for_metadata(  # noqa: C901,PLR0912  plan_M11a
         self,
         instance_id: str,
         metadata: dict[str, Any],
         recovery: bool = False,
+        protected_pids: frozenset[int] = frozenset(),
     ) -> bool:
         """Kill every browser process associated with *metadata*.
 
@@ -321,10 +329,29 @@ class ProcessCleanup:
         this server session are killed, because anything created after
         ``self._init_time`` belongs to the current run. True when all of them
         were killed or were already absent.
+
+        *protected_pids* is every pid the caller has already decided to SPARE,
+        and it exists because the two halves are matched differently: the kill
+        set is built by scanning the ``user_data_dir`` while the spare is
+        matched by ``instance_id``, so on a SHARED profile one stale entry's
+        reap reached a browser another entry had just protected (F-917).
         """
-        pids_to_kill = self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
+        # The DIRECTORY scan is for DISPOSABLE profiles only (F-922, owner
+        # ruling): a clone directory is ours by construction — a human never
+        # opens one by hand — while a NAMED profile is exactly what a human DOES
+        # open, and since F-888 a browser on one outlives its backend. There we
+        # may end only what the RECORD names. Same predicate F-888 and the
+        # delete guard ask, read the other way round.
+        pids_to_kill: set[int] = (
+            set()
+            if browser_pid_registry.on_persistent_profile(metadata)
+            else self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
+        )
         fallback_pid = metadata.get("pid")
         stored_create_time = metadata.get("create_time")
+        subject = f"fallback PID {fallback_pid}"
+        recycled = "create_time mismatch (recycled PID)"
+        late = "started after server init"
 
         if recovery:
             # Safety net: never kill processes that started after this server
@@ -336,12 +363,7 @@ class ProcessCleanup:
                     if pid_create_time < self._init_time:
                         safe_pids.add(pid)
                     else:
-                        debug_logger.log_info(
-                            "process_cleanup",
-                            "recovery",
-                            f"Skipping PID {pid} for {instance_id}: "
-                            f"started after server init",
-                        )
+                        self._skip_note("recovery", f"PID {pid}", instance_id, late)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass  # gone or inaccessible — skip conservatively
             pids_to_kill = safe_pids
@@ -354,31 +376,20 @@ class ProcessCleanup:
                         if psutil.Process(fallback_pid).create_time() < self._init_time:
                             pids_to_kill = {fallback_pid}
                         else:
-                            debug_logger.log_info(
-                                "process_cleanup",
-                                "recovery",
-                                f"Skipping fallback PID {fallback_pid} for "
-                                f"{instance_id}: started after server init",
-                            )
+                            self._skip_note("recovery", subject, instance_id, late)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
                 else:
-                    debug_logger.log_info(
-                        "process_cleanup",
-                        "recovery",
-                        f"Skipping fallback PID {fallback_pid} for {instance_id}: "
-                        "create_time mismatch (recycled PID)",
-                    )
+                    self._skip_note("recovery", subject, instance_id, recycled)
         elif not pids_to_kill and isinstance(fallback_pid, int):
             if self._fallback_pid_identity_ok(fallback_pid, stored_create_time):
                 pids_to_kill = {fallback_pid}
             else:
-                debug_logger.log_info(
-                    "process_cleanup",
-                    "kill_browser_process",
-                    f"Skipping fallback PID {fallback_pid} for {instance_id}: "
-                    "create_time mismatch (recycled PID)",
-                )
+                self._skip_note("kill_browser_process", subject, instance_id, recycled)
+
+        # THE one place the set is finally spent, so the subtraction happens
+        # once here rather than at each of the three ways a pid gets into it.
+        pids_to_kill = set(pids_to_kill) - protected_pids
 
         if not pids_to_kill:
             return True
@@ -591,11 +602,14 @@ class ProcessCleanup:
         # ``.spare``, not ``.adoptable``: an entry the classifier could not reason
         # about at all is spared too, and conflating "do not reap this" with
         # "attach to this" is how such an entry would be handed to the adopter.
-        spare = (
-            set()
-            if force
-            else browser_reattach.adoptable_for(self, saved_processes).spare
+        classified = (
+            None if force else browser_reattach.adoptable_for(self, saved_processes)
         )
+        spare = set() if classified is None else classified.spare
+        # The spared entries' PIDS travel with the spare, because the reap below
+        # builds its kill set from the entry's DIRECTORY and a shared profile is
+        # exactly where a stale entry's reap reached a live one's browser (F-917).
+        protected = reap_guard.spared_pids(saved_processes, spare)
         if spare:
             browser_reattach.report(
                 "recovery",
@@ -628,7 +642,9 @@ class ProcessCleanup:
                 # unconditional wipe did. Retries: _sweep_orphaned_temp_profiles
                 # (gettempdir) and clone_storage.enforce_session_storage.
                 reaped.add(instance_id)
-                if browser_reattach.reap_recorded(self, instance_id, metadata):
+                if browser_reattach.reap_recorded(
+                    self, instance_id, metadata, protected
+                ):
                     recovered_count += 1
             except Exception as error:
                 debug_logger.log_warning(
@@ -832,10 +848,22 @@ class ProcessCleanup:
 
         return finalized_count
 
-    def _kill_process_by_pid(self, pid: int, instance_id: str = "unknown") -> bool:  # noqa: PLR0911  plan_M11a
+    # The escalation, gentlest first: the psutil method, how long to wait for
+    # it, and what a success reads as in the log. ONE table rather than two
+    # near-identical blocks — which is what paid for F-917's and F-918's lines
+    # in a file at its cap. `process_exit._rung` is the CLOSE path's twin; the
+    # two stay apart because a reap has no shutdown in flight to wait for.
+    _KILL_RUNGS = (
+        ("terminate", 3, "terminated gracefully"),
+        ("kill", 2, "force killed"),
+    )
+
+    def _kill_process_by_pid(self, pid: int, instance_id: str = "unknown") -> bool:  # noqa: PLR0911  PERMANENT(seven DIFFERENT outcomes — absent, gone, unidentified, refused, a rung worked, none did, and the pass itself failed — and folding any two loses the distinction F-918 exists to draw)
         """Kill *pid* using escalating termination methods.
 
-        True when the process was killed or was already absent.
+        True when the process was killed or was already absent. A pid whose
+        IDENTITY could not be established is **never** killed and answers False
+        — ``reap_guard`` carries that rule and names what it costs (F-918).
         """
         try:
             if not psutil.pid_exists(pid):
@@ -846,81 +874,50 @@ class ProcessCleanup:
                 )
                 return True
 
-            try:
-                process = psutil.Process(pid)
-                process_name = process.name()
-                if not self._is_browser_process_name(process_name):
-                    debug_logger.log_warning(
-                        "process_cleanup",
-                        "kill_process",
-                        f"PID {pid} is not a browser process "
-                        f"({process_name}), skipping",
-                    )
-                    return False
-            except psutil.NoSuchProcess:
+            verdict = reap_guard.killable(
+                pid, instance_id, self._is_browser_process_name
+            )
+            if verdict.gone:
                 return True
-            except Exception as error:
+            if not verdict.may_kill:
                 debug_logger.log_warning(
-                    "process_cleanup",
-                    "kill_process",
-                    f"Could not verify process {pid}: {error}",
-                )
-
-            try:
-                process = psutil.Process(pid)
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                    debug_logger.log_info(
-                        "process_cleanup",
-                        "kill_process",
-                        f"Process {pid} for {instance_id} terminated gracefully",
-                    )
-                    return True
-                except psutil.TimeoutExpired:
-                    pass
-            except psutil.NoSuchProcess:
-                return True
-            except Exception as error:
-                debug_logger.log_warning(
-                    "process_cleanup",
-                    "kill_process",
-                    f"Failed to terminate process {pid} gracefully: {error}",
-                )
-
-            try:
-                process = psutil.Process(pid)
-                process.kill()
-                try:
-                    process.wait(timeout=2)
-                    debug_logger.log_info(
-                        "process_cleanup",
-                        "kill_process",
-                        f"Process {pid} for {instance_id} force killed",
-                    )
-                    return True
-                except psutil.TimeoutExpired:
-                    debug_logger.log_warning(
-                        "process_cleanup",
-                        "kill_process",
-                        f"Process {pid} for {instance_id} did not die after force kill",
-                    )
-                    return False
-            except psutil.NoSuchProcess:
-                return True
-            except Exception as error:
-                debug_logger.log_error(
-                    "process_cleanup",
-                    "kill_process",
-                    error,
+                    "process_cleanup", "kill_process", verdict.refusal or ""
                 )
                 return False
-        except Exception as error:
-            debug_logger.log_error(
+
+            for method, patience, outcome in self._KILL_RUNGS:
+                try:
+                    process = psutil.Process(pid)
+                    getattr(process, method)()
+                    process.wait(timeout=patience)
+                except psutil.NoSuchProcess:
+                    return True
+                except psutil.TimeoutExpired:
+                    continue
+                # A rung that cannot RUN is one we escalate past; the loop's
+                # own exhaustion below is the failure report.
+                except Exception as error:
+                    debug_logger.log_warning(
+                        "process_cleanup",
+                        "kill_process",
+                        f"Failed to {method} process {pid} for {instance_id}: {error}",
+                    )
+                    continue
+                debug_logger.log_info(
+                    "process_cleanup",
+                    "kill_process",
+                    f"Process {pid} for {instance_id} {outcome}",
+                )
+                return True
+
+            debug_logger.log_warning(
                 "process_cleanup",
                 "kill_process",
-                error,
+                f"Process {pid} for {instance_id} did not die after force kill",
             )
+            return False
+        except Exception as error:
+            debug_logger.log_error("process_cleanup", "kill_process", error)
             return False
 
     def _cleanup_all_tracked(self):
