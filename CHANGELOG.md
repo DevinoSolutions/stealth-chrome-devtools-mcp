@@ -135,6 +135,51 @@ already admitted, so one mechanism closes all four sinks at once — and
 `record.args` empty, so a filter could only pattern-match text the library is
 free to reword.
 
+### Fixed — F-907: a page's own form fields and text no longer reach our logs through nodriver
+
+F-906 held `nodriver` at WARNING because everything below that line quotes raw
+CDP. **This is the half above it, and unlike F-906 it leaked in the shipped
+configuration** — nothing had to be misconfigured.
+
+`nodriver/core/element.py` logs `"could not calculate box model for %s"` with a
+live `Element` at **WARNING**, in three places, and `Element.__repr__` renders
+the tag, **every attribute as `name="value"`**, and the element's **whole
+recursive text content**. So an `<input type=password>`'s `value=`, a `data-*`
+carrying a session token and a balance in a `<div>` all went into the line.
+`Tab.__repr__` does the same one object up with the tab's URL, query string
+included. Measured: all of it reached stderr — which for the backend is
+redirected into `backend-boot.log`, a durable file — **and** Sentry as a
+breadcrumb on the next event, in the plain shipped backend and proxy.
+
+It is reachable from ordinary use: `click_element` calls `Element.mouse_click`,
+and that line fires for any element with no box model — exactly the
+`display: none` case its own synthetic fallback exists for.
+
+The line still arrives and still names the element; what it loses is every
+VALUE and all of its text:
+
+```
+could not calculate box model for <input attrs=[type, value, data-session-token, class_]>
+```
+
+Anything else from nodriver — a `Tab`, a `Connection`, a CDP record — renders as
+its type alone, because no half of it has been measured safe. Our own
+`stealth.*` records are deliberately untouched (they keep their own redaction
+rules), and nodriver's one real diagnostic, `connection.py`:483, passes exactly
+as before — measured, all three of its arguments are builtins.
+
+A `logging` **record factory** rather than a filter, because both alternatives
+were measured and neither reaches: a `logging.Filter` on the `nodriver` family
+root never fires for a `nodriver.core.element` record (filters belong to the
+logger a call is made on; only handlers are inherited), and a filter on a
+handler is no use in the configuration that leaks, since there we do not own
+the handler. A factory sits upstream of handlers, stderr and Sentry alike,
+covers loggers created later — including a module a future nodriver adds — and
+survives `dictConfig(disable_existing_loggers=True)`. It is keyed on the
+argument's **type**, never on the message text, so nodriver may reword these
+lines freely; it chains to any factory already installed, and costs ~370 ns per
+log record.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in
