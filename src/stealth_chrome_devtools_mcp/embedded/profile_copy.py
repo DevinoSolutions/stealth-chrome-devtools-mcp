@@ -177,8 +177,12 @@ def rmtree_robust(path: Path, retries: int = 3) -> None:
     The same tolerance :func:`copy_file` has, in the opposite direction, which
     is why it lives here: both answer "a file Chrome is holding" by making
     progress anyway, and both therefore cannot say afterwards what they could
-    not touch. Its callers are ``clone_storage``'s — the copy that overwrites
-    a stale seed, the trash purge and the regenerable trim.
+    not touch. Its callers are ``clone_storage``'s trash purge and, in this
+    module, the regenerable trim plus the three sites :func:`replace_tree`
+    needs — discarding a half-built staging copy, clearing a superseded
+    previous generation, and reclaiming one a dead process left behind. The
+    "copy that overwrites a stale seed" this list used to name is GONE: F-925
+    replaced that overwrite with a rename, which is the whole point of it.
     """
 
     def _on_rm_error(

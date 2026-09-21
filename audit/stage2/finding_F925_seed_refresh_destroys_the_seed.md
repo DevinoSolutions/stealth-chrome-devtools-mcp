@@ -194,6 +194,30 @@ now.
   longer than `STALE_STAGING_SECONDS` (1 h, ~1000× a measured ~101 MB copy)
   could be reclaimed by a concurrent refresh. Chosen over ownership because the
   pid in the name belongs to a process that is gone.
+* **A staging-name collision is safe for the bytes and NOT safe for the
+  leftovers.** The name is `<target>.stealth-staging-<pid>-<seq>`, and neither
+  half is unique across processes: a pid is reused, and `_STAGING_SEQ` is
+  module-level, so a fresh process's first refresh of a given target reaches
+  for exactly the name a dead process's first refresh of that target used. If
+  that process was killed after `staging.mkdir`, its tree is still there
+  (`replace_tree`'s `finally` does not run through `os._exit` or a kill) and
+  younger than `_discard_stale_staging`'s hour, so `mkdir(exist_ok=True)`
+  succeeds onto it and `copy_delta` copies INTO a dead process's partial work.
+  Written down because a reader will ask and the reassuring answer — "pids do
+  not collide" — is not the true one.
+  **The bytes are fine, by construction.** `copy_file` is `shutil.copy2`, which
+  writes content and only then stamps the mtime, so a file the dead process was
+  killed inside is SHORTER than its source and `copy_delta`'s size test
+  re-copies it; a file it finished but had not stamped is byte-correct already,
+  so skipping it loses nothing whatever its mtime says. Each of the two places
+  it can die is covered by one of the two tests, and no wrong byte survives
+  either.
+  **What is NOT covered is the other direction**: `copy_delta` walks the SOURCE,
+  so a file present in the stale staging tree and absent from today's source is
+  never removed and is published by the rename. A shared profile gains and
+  rewrites files far more often than it drops one, so what this can carry is a
+  stale artefact and not a wrong login — but it is a real residual and pruning
+  the staging tree against the source is what would close it.
 * **`stealthy profiles` lists the clone root unfiltered**, so a transient
   staging directory can appear in it. Pre-existing shape — `.trash` already
   does — and cosmetic; not touched here.
