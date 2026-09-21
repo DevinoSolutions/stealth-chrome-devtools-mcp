@@ -51,18 +51,38 @@ This makes orphan recovery uniform with the places in the tree that already
 resolved an unreadable witness toward safety: `profile_lock._browser_pids`
 (`None` for "could not be asked", distinct from `()` for "asked, nothing
 running"), `backend_eviction`'s refusal to evict what it cannot prove is idle,
-and F-919's `spawn_leak.launched_pid`, which leaves a failed spawn's leftovers
-running rather than guess at them. It also interlocks with F-919 rather than
-overlapping it: that fence decides WHICH process a failed spawn may end, this
-guard decides whether a pid may be ended at all, and F-919's reap reaches its
-kill through this very function.
+and `spawn_leak._started_after`, which spares a pid whose start time it cannot
+read. `_kill_process_by_pid` is also what a failed spawn's reap kills THROUGH,
+so the two layers interlock: that fence decides WHICH process a failed spawn may
+end, this guard whether a pid may be ended at all.
+
+**Two more readings of the same sentence landed in review.** `browser_reattach.run`
+built its failed-adoption reap's protected set from the ADOPTABLE entries rather
+than the SPARED ones, so a browser this fix had just refused to reap could be
+ended by a sibling's failed attach, under the other entry's instance id — the
+same two-sites-disagree shape F-917 fixed, on the path F-916 added. And an entry
+recording NEITHER persistence key was treated as an established disposable and
+reaped: measured killing a LIVE Chrome on the shared profile, through the
+recorded-pid fallback that the directory-scope rule does not stand in front of.
+An absence is not an answer, so such an entry is spared — but only on a POSITIVE
+liveness witness, both halves of the pid's identity, so one whose Chrome is gone
+still leaves the record.
 
 **What it costs, stated rather than hidden:** a browser we can neither adopt nor
 reap is left running and left recorded, and an orphan whose pid we cannot
-identify is left alone. Both are bounded — the entry is re-classified on every
-later cold start and is reaped the moment its Chrome actually exits — and
-`kill-orphans --force` still skips the whole classification by design. A leaked
-Chrome is recoverable; a login is not.
+identify is left alone. **How long that lasts depends on which witness could not
+be read.** Where the answer comes after the liveness check — no recoverable
+endpoint, or unstated persistence — the entry is re-classified on every cold
+start and reaped the moment its Chrome exits. Where it comes BEFORE — an
+unreadable `pid`/`user_data_dir`, or a missing `create_time` — it can never
+become an established negative and the record entry is PERMANENT. That is the
+owner's ruling read literally rather than a defect: we do not kill what we
+cannot establish, so what we can never establish we can never reap. Bounding it
+would need a bare-pid liveness check, and `(pid, create_time)` is stamped on
+every entry precisely so a recycled pid cannot fool us. `browser_pids.json` has
+no age prune at all; that is filed as its own finding rather than fixed here.
+`kill-orphans --force` still skips the whole classification by design. A growing
+JSON file is recoverable; a killed login is not.
 
 New leaf `embedded/reap_guard.py` carries the rule and its three pieces
 (`UNDECIDED`, `spared_pids`, `killable`). Two files were at their LOC caps and

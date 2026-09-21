@@ -172,11 +172,23 @@ class TestUnclassifiableEntryIsSpared:
         assert "i-1" not in classified.adoptable
         assert "i-1" in classified.spare
 
-    def test_unreadable_entry_shape_is_spared(self, tmp_path, monkeypatch):
-        """A persistent entry whose pid is not an int tells us nothing at all."""
+    @pytest.mark.parametrize(
+        "profile_dir", [None, "", 17], ids=["absent", "empty", "not-a-str"]
+    )
+    def test_unreadable_entry_shape_is_spared(self, tmp_path, monkeypatch, profile_dir):
+        """A persistent entry whose DIRECTORY cannot be read tells us nothing.
+
+        The three shapes here are the ones the real reader can actually deliver
+        to this guard: all three survive `normalize_entries` as
+        `user_data_dir=None`. This pin used to set `pid = "not-a-pid"` instead,
+        which reaches the same guard's other arm only when `adoptable` is called
+        with a hand-built dict — `normalize_entries` DROPS an entry whose pid is
+        not an int, so no record on disk can produce it. Pinning an arm the
+        reader cannot deliver measures the test's own fixture.
+        """
         _unreachable(monkeypatch)
         entry = _entry(user_data_dir=str(tmp_path / "seller-central"))
-        entry["pid"] = "not-a-pid"
+        entry["user_data_dir"] = profile_dir
 
         classified = browser_reattach.adoptable(
             {"i-1": entry}, owner_alive=_owner_alive, browser_alive=_browser_alive

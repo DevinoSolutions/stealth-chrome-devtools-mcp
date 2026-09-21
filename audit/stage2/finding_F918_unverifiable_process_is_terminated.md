@@ -69,13 +69,17 @@ This makes the reaper uniform with the places in the same tree that already got
 it right. `profile_lock._browser_pids` returns `None` for "could not be asked" —
 deliberately distinct from `()` for "asked, nothing running" — and resolves
 toward HELD; `backend_eviction` refuses to evict a backend it cannot prove is
-idle. **Do not cite `spawn_leak._started_after` for this**, which an earlier
-draft of this section and the master-profile audit's own F-918 proposal both
-did: F-919 deleted that symbol along with `_CLOCK_TOLERANCE_SECONDS`, replacing
-the start-time fence with an identity one. The DIRECTION survives there under a
-new name — `spawn_leak.launched_pid` answers None for a launch it cannot name,
-and that spawn's leftovers are then left running — and F-919's own §6 records
-the deletion and where the citations land.
+idle; and `spawn_leak._started_after` spares a pid whose start time it cannot
+read. **That last citation is deliberately the symbol main has today.** An
+earlier draft of this section cited `spawn_leak.launched_pid` instead and
+asserted that F-919 had deleted `_started_after` along with
+`_CLOCK_TOLERANCE_SECONDS`. F-919 has not landed: verified against `origin/main`,
+`_started_after` is present and `launched_pid` exists nowhere, so the citation
+pointed at a symbol in neither this branch nor main. The swap belongs in the
+later merge that happens once F-919 is actually in main, gated on a grep for
+`launched_pid` in `origin/main`'s `spawn_leak.py` rather than on a plan — and in
+that same commit, `CLAUDE.md`'s start-time-fence sentence and F-919's §6
+cross-reference, so all three become true together.
 
 ### 3.1 What paid for the lines
 
@@ -174,18 +178,36 @@ decides WHICH process a failed spawn may end; this one decides whether a pid may
 be ended at all.** Its identity fence hands a pid down, and that pid now passes
 through a guard that refuses it if its `.name()` cannot be read.
 
-That makes one sentence in F-919's §6 false on the day this lands. It reads
-"**Not addressed here, and adjacent:** `process_cleanup._kill_process_by_pid`
-still terminates a pid whose `.name()` could not be read (the audit's D3 /
-F-918) — the same 'unreadable resolves toward killing' shape, one layer below
-this fix, reached by every caller including this one." F-919 merges FIRST by the
-lead's ordering, so that sentence is corrected in the merge commit that brings
-main into this branch, and nothing else of F-919's is touched. If you are
-reading this and that sentence still says "still terminates", the merge did not
-do its job.
+F-919 has a sentence in its §6 that goes false on the day this lands — it
+says `_kill_process_by_pid` "still terminates a pid whose `.name()` could not
+be read". Correcting it is the MERGE's job, not this branch's, and only once
+F-919 is actually in main; nothing here edits another lane's finding.
 
 **Residual:** the guard is about the NAME only. A process that is genuinely
 Chromium-family but belongs to someone else's browser — a real Chrome the
 operator started, sharing a profile directory with a stale entry — passes this
 check and is killed. That is F-917's surface, not this one's, and its own
 residual (a browser with no record entry at all) is recorded there.
+
+## 7. Residual — refused, but the entry is dropped anyway
+
+`recover_orphans` adds the instance id to `reaped` BEFORE the kill is attempted
+(`process_cleanup.py:645`), so a pid this guard REFUSES leaves the process
+running and its record entry gone. The state is pre-existing and is not what
+this finding changed — but **the population entering it does change meaning, and
+that asymmetry is the point**:
+
+* a process refused for having a NON-BROWSER name is known not to be ours, so
+  losing its entry costs nothing;
+* a process refused for being UNREADABLE **might be our Chrome holding a login**
+  — which is the entire argument for the refusal — and dropping its entry
+  removes the only thing that names it. `process_cleanup.py:634-638` argues
+  exactly that case for F-916's spare, one function away.
+
+Not fixed here: the two refusals share one return value (`False`), so telling
+them apart at the drop site means either a second verdict field or moving the
+`reaped.add` after the attempt, and the second changes what a partially
+successful pass records. Named rather than folded in, on F-916's own precedent.
+It is the same shape as F-924's "a live browser whose entry is gone can never be
+found again", reached from the other side.
+

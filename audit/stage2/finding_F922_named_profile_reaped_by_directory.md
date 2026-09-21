@@ -164,13 +164,27 @@ own rule: flip that one key to `auto_clone: True` and the scan runs again and
 reaches the spared pid, which is what shows the pins measure the rule rather
 than an empty answer. RED at `50c63fc`: the first.
 
-**Residual, named rather than fixed:** `candidate_pids` still carries only
-adoptable pids. Today nothing can reach a spared sibling through it, but that is
-a property of the metadata `run` happens to build; widening it to
-`reap_guard.spared_pids` was NOT done, because a second guard for a harm the
-scope rule already answers is the second-way-to-do-something this repo treats as
-a defect. If that dict ever stops declaring the profile persistent, this door
-reopens — which is why the pin asserts on the dict `run` actually builds.
+**This section originally closed here, and its conclusion was wrong.** It said
+`candidate_pids` should keep carrying only adoptable pids, on the grounds that
+widening it would be a second guard for a harm the scope rule already answers.
+That reasoning does not survive review, and the lead overruled it:
+
+* `run` already HAS a `protected_pids` argument. The question was never whether
+  to add a guard, only **which value to pass into the one that exists** — and
+  passing `.adoptable` where the tree's other caller passes `.spare` is not a
+  second guard, it is two answers to one question, which is what convention 4
+  actually forbids.
+* The line is **untested**, measured: mutating it to `frozenset()` — `run`
+  protecting nothing, F-917's plain defect restored on the adoption path —
+  survived all 217 tests of the branch. A door held shut by a rule in another
+  module, with nothing asserting either, is not closed.
+
+So `run` now asks `reap_guard.spared_pids` over the SAME entries dict it
+classified (one read, threaded through, so a record re-written in between cannot
+make the two disagree), and two pins cover it — one on the OUTCOME and one on
+the SET, because on this tree no outcome can witness the set: F-922's scope rule
+means the protected value does not change what is killed, measured identical for
+`frozenset()` and for the correct set. The set pin is what kills both mutations.
 
 ## 5. Verification
 
@@ -201,9 +215,13 @@ Two narrower consequences, stated rather than discovered later:
   the guard where two entries share one clone directory; on a named profile the
   scope rule gets there first. §4.1 has what that did to its pins.
 
-**Residual, unchanged and NOT this finding's:** what decides the KIND is
-`browser_pid_registry.on_persistent_profile`, which answers False for an entry
-carrying NEITHER key — so a hand-edited or cross-version record still gets the
-directory scan (the audit's A1). This finding narrowed the scope; it did not fix
-the predicate that classifies it. A pin states that shape rather than leaving it
-to be discovered.
+**Residual, and it has since been FIXED elsewhere in this branch.** What decides
+the KIND is `browser_pid_registry.on_persistent_profile`, which answers False for
+an entry carrying NEITHER key — so a hand-edited or cross-version record still
+gets the directory scan (the audit's A1), and the pin here still states that
+shape. What changed is one layer up: F-916's named residual (its §7) makes such
+an entry `UNDECIDED` during startup RECOVERY, so recovery no longer reaches this
+scan for it at all. The scan itself is unchanged and the pin below is unchanged
+with it — a direct call still scans the directory — which is the distinction
+worth keeping: this finding narrowed the SCOPE of a scan, and that one narrowed
+who is handed to it.

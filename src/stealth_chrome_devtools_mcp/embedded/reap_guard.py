@@ -25,18 +25,34 @@ Three pieces, one sentence:
 
 **What the rule costs, named rather than hidden.** Sparing what we could not
 classify means a browser we can neither adopt nor reap stays running and stays
-recorded. That is deliberate and it is bounded: the entry is re-classified on
-every later cold start, and the moment its Chrome actually exits the witness
-becomes readable, the entry is reaped and it leaves the record. An operator who
-wants it gone sooner has ``kill-orphans --force``, which skips this whole
-classification by design. The alternative — a leaked Chrome traded against a
-killed login — is the trade F-888 already made once, and it is the same trade
+recorded. That is deliberate, and **how long it lasts depends on WHICH witness
+could not be read** -- a claim this docstring got wrong until it was measured.
+
+Two of the four UNDECIDED shapes are re-asked on every cold start and end on
+their own: no recoverable ENDPOINT, and a profile whose persistence the record
+never stated. Both are decided AFTER ``browser_alive``, so the moment the Chrome
+exits the entry becomes an established negative, is reaped, and leaves the
+record. The other two -- an unreadable ``pid``/``user_data_dir``, and a missing
+``create_time`` -- answer before that witness is ever asked, so they can never
+become an established negative and **their entries are permanent**. That is not
+a defect in the fix; it is the owner's ruling read literally. We do not kill what
+we cannot establish, so an entry we can never establish is one we can never
+reap, exactly as a named profile's leaked browser is one we no longer reap
+automatically. Reordering to bound them is refused: for the missing
+``create_time`` shape it is impossible without a bare-pid liveness check, and
+``(pid, create_time)`` is stamped on every entry precisely so a recycled pid
+cannot fool us. A growing JSON file is recoverable; a killed login is not.
+``browser_pids.json`` has no age prune at all -- filed as its own finding rather
+than fixed here. An operator who wants any of them gone sooner has
+``kill-orphans --force``, which skips this whole classification by design.
+
+The alternative — a leaked Chrome traded against a killed login — is the trade
+F-888 already made once, and it is the same trade
 every ``resolves toward`` in this tree makes: ``profile_lock._browser_pids``
 reads an unaskable process table as HELD (``None`` for "could not be asked",
-distinct from ``()`` for "asked, nothing running"), ``spawn_leak.launched_pid``
-answers None for a launch it cannot name and that spawn's leftovers are left
-RUNNING (F-919), and ``backend_eviction`` refuses to evict a backend it cannot
-prove is idle.
+distinct from ``()`` for "asked, nothing running"), ``spawn_leak._started_after``
+spares a pid whose start time it cannot read, and ``backend_eviction`` refuses to
+evict a backend it cannot prove is idle.
 
 A leaf: ``psutil`` and stdlib only. The Chromium-family name test arrives as an
 ARGUMENT (``process_cleanup._is_browser_process_name``, the one home for what

@@ -140,13 +140,37 @@ non-integration suite.
 
 **The cost, named rather than hidden: a browser we can neither adopt nor reap is
 left running and left recorded.** That is the leak the old docstring warned
-about, accepted deliberately, and it is BOUNDED in a way "forever" is not:
+about, accepted deliberately. **How long it lasts depends on WHICH witness
+could not be read, and an earlier draft of this section claimed a bound for all
+of them. That was wrong.**
 
-* the entry is re-classified on every later cold start;
-* the moment its Chrome actually exits, `browser_alive` goes False, the entry
-  becomes an established negative, it is reaped and it leaves the record;
-* an operator who wants it gone sooner has `kill-orphans --force`, which skips
-  the whole classification by design (`process_cleanup.py:594`).
+Two shapes are BOUNDED, because they are decided after `browser_alive`:
+
+* no recoverable ENDPOINT;
+* a profile whose persistence the record never stated (the named residual, §7).
+
+For those the entry is re-classified on every later cold start, and the moment
+its Chrome exits `browser_alive` goes False, the entry becomes an established
+negative, it is reaped and it leaves the record.
+
+Two shapes are PERMANENT, because they answer BEFORE that witness is asked:
+
+* an unreadable `pid` or `user_data_dir`;
+* a missing `create_time`.
+
+Neither can ever become an established negative, so those entries stay in
+`browser_pids.json` for good. **That is the price of the owner's ruling, not a
+defect in this fix**: we do not kill what we cannot establish, so an entry we can
+never establish is one we can never reap — the same shape as the accepted cost
+already on record for named profiles (F-922 §6). Reordering the guards to bound
+them is refused: for the missing-`create_time` shape it is impossible without a
+bare-pid liveness check, and `(pid, create_time)` is stamped on every entry
+precisely so a recycled pid cannot fool us; taking it would put a second
+recycled-pid rule in this lane. The record growth itself is
+`finding_F924_browser_pid_record_never_pruned.md`, not this finding.
+
+An operator who wants any of them gone sooner has `kill-orphans --force`, which
+skips the whole classification by design (`process_cleanup.py:594`).
 
 So the unbounded case is a browser that runs forever — which is a browser the
 user is using.
@@ -157,3 +181,71 @@ cross-version record can still reach condition 2 and be reaped as disposable.
 That is the audit's A1 and it is latent — no current write path produces that
 shape (A2, refuted there) — but it is the one remaining way a persistent entry
 answers `None` without a witness having been read.
+
+---
+
+## 7. The named residual, taken — an entry whose persistence is UNKNOWN
+
+§6 filed this as "latent — no current write path produces that shape". **The
+claim about the WRITE path is right and the READ path falsifies it**, which is
+why the lead moved it in scope rather than leaving it: `normalize_entries` has a
+branch for the bare-int legacy record precisely because such records exist on
+disk, and an old dict entry needs no hand-editing to reach this.
+
+### 7.1 Measured, before the fix
+
+Driven through the real `recover_orphans` with the Chrome **ALIVE**:
+
+| entry | `on_persistent` | `is_reapable` | killed | still recorded |
+|---|---|---|---|---|
+| legacy bare-int | False | True | **`[7777]`** | no |
+| dict, no persistence keys, shared profile | False | True | **`[7777]`** | no |
+
+A live Chrome on the shared profile, killed on a plain backend cold start, its
+entry dropped. **Neither of this lane's other guards stands in front of it**: the
+kill arrives through the RECORDED-pid fallback rather than the directory scan
+F-922 narrowed, `_fallback_pid_identity_ok` waves a missing `create_time` through
+by design, and F-918's `killable` answers "may this pid be ended" — the process
+reads as `chrome.exe` — not "is this the right entry".
+
+It is the same harm class as F-916 itself (a persistent browser reaped because a
+witness was absent), on the same path, in the same function, left unfixed by the
+fix for it.
+
+### 7.2 The distinction, and the key it rests on
+
+An entry whose persistence cannot be ESTABLISHED is `UNDECIDED`, not
+"disposable". **`uses_custom_data_dir: False` is an ANSWER and still reaps** —
+collapsing the two would give the whole finding back.
+
+The discriminator is `browser_pid_registry.persistence_recorded`, i.e.
+`uses_custom_data_dir is None`, and reading ONE of the two keys is MEASURED
+rather than a simplification: `normalize_entries` writes that key through
+`recorded.get(...)`, so an absent one survives the read as `None`, while
+`auto_clone` goes through `bool(recorded.get(..., False))` and its absence is
+collapsed before any caller sees it. It is also the only one of the pair that
+could make an entry persistent, since `auto_clone` alone never can. Both reasons
+point at the same key, and the legacy bare-int branch writes `None` there too,
+so the 2.0.3 shape is covered by the same test.
+
+### 7.3 The spare is bought with a POSITIVE liveness witness
+
+The first draft returned `UNDECIDED` on unknown persistence alone. **Two existing
+pins in `tests/test_browser_pid_registry.py` caught it** — entries whose Chrome
+is long gone stopped leaving the record — and they were right to: with no age
+prune on `browser_pids.json`, every pre-2.0.4 entry would have become permanent.
+
+So the spare requires both halves of the pid's identity and a live browser. An
+entry whose Chrome is provably gone is reaped exactly as it is today. What this
+adds to the permanent-record population (§6) is therefore bounded to browsers
+that are still running — and those become reapable the moment they exit.
+
+### 7.4 Pins
+
+`tests/test_recovery_must_not_kill.py::TestUnknownPersistenceIsSpared`, four
+nodes: the live keyless browser survives through the real `recover_orphans` and
+keeps its entry; one whose Chrome is gone still leaves the record; and both
+ESTABLISHED shapes (`uses_custom_data_dir: False`, and an `auto_clone` that says
+so) are still reaped. Mutation-checked: removing the guard, making the predicate
+answer True unconditionally, and sparing without asking liveness are each RED.
+
