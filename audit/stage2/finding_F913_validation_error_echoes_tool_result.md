@@ -121,6 +121,25 @@ A pin driven without `include_local_variables=False` would have measured a leak
 production does not have, and would then have gone green on a fix that changed
 nothing. The pin passes it explicitly for that reason.
 
+**And "locals are not a leak path" is a claim with tests behind it, not a
+reading of today's config** — which is what makes it safe for this finding to
+rest on. Three pins hold that flag, in three different files, each for its own
+reason:
+
+* `tests/test_cdp_transport.py::test_the_pii_argument_depends_on_sentry_not_capturing_locals`
+  (F-902 review S2) — the link node, written precisely because `cdp_transport`'s
+  shape-only rule is defence in depth whose OUTERMOST layer belongs to another
+  module. Flipping the flag fails a test in the file that depends on it;
+* `tests/test_element_box_exception_repr.py::test_the_sentry_leg_depends_on_include_local_variables`
+  (F-912) — the same link for the element-repr leg;
+* `tests/test_observability.py` — asserts `sentry_init` really passes it, where
+  on its own it "reads as a preference".
+
+F-913 is the third finding to depend on that flag and it does not add a fourth
+pin: the two link nodes already fail if it flips, and a pin here would be a
+fourth spelling of one fact. What this finding adds is the reason it matters on
+THIS leg — the payload is `sse.data`, a local of the very frame that raises.
+
 ### 5.2 How much `input_value=` actually quotes — the finding's own §1 was wrong
 
 The stub said the middle truncation "loses neither end — a cookie jar's first
@@ -144,6 +163,29 @@ Measured on a 273-byte frame whose `id` was `{"tok": "F913_LEAF"}`:
 **9 errors, 9 echoes, 216 echoed characters**, and the short leaf rendered in
 full six times over. `JSONRPCMessage` is a 4-arm union, so one bad frame
 reports per arm.
+
+**Every byte count, in one place**, because the shape of this leak is easy to
+restate wrongly and the stub already did it once:
+
+| Frame driven | Bytes in | Errors | Echoes | Chars echoed |
+|---|---|---|---|---|
+| cut `get_cookies` answer (`json_invalid`) | 314 | 1 | 1 | 52 |
+| valid JSON, union mismatch on a short `id` | 273 | 9 | 9 | 216 |
+| valid JSON, no arm recognises it | 173 | 4 | 4 | 208 |
+| filler payloads at 50 / 55 / 65 / 75 / 85 / 95 / 105 / 125 / 165 / 445 | — | 1 | 1 | **52 each** |
+
+**There is no "a short result is rendered whole" case, and that phrasing should
+not survive into the next reading of this finding.** Above 49 bytes the echo is
+a flat 52 characters no matter how large the input — the fourth row is that
+measurement across a 9× range. Below 49 the echo is untruncated, but a JSON-RPC
+envelope alone is already 24 of those bytes, which leaves ~25 for the entire
+`result` object: no real tool answer fits. What IS rendered whole is a short
+**value** *inside* the frame — row 2 — because each union arm echoes the
+sub-value it tripped over and that sub-value is measured against the cap on its
+own. That is the distinction the fix is built on, and it is why the pins are
+`test_the_echo_is_capped_at_fifty_characters_of_the_input` (the frame) and
+`test_a_short_value_escapes_the_cap_and_is_echoed_whole` (the value) rather
+than one pin about "a short result".
 
 **This moves the finding's severity down and its sharpness up.** Down, because
 the volume is bounded at ~50 characters per error rather than "the jar"; up,
@@ -270,7 +312,48 @@ lines are byte-identical before and after
 
 ---
 
-## 6. Residuals — what this does NOT cover
+## 6. Scope, and residuals
+
+### 6.0 Which legs this closes — all three, and the reason is the key
+
+Said out loud rather than left for a reader to infer, because a fix that closed
+one leg of three would be a much weaker change than this one and the two read
+identically from the CHANGELOG.
+
+**`:240`, `:394` and `:574` are ALL in scope and all closed by one table entry.**
+The rule is keyed on the record's `pathname`, so its unit is the MODULE — F-911's
+reasoning, unchanged: a line-keyed rule goes silently inert on the next release,
+and one edit above `:240` moves every number below it. `mcp/client/streamable_http.py`
+appears once in `PAYLOAD_EXCEPTION_SITES` and that covers the SSE leg (`:240`),
+the non-SSE response leg (`:394`), the writer catch-all (`:574`) and any line the
+SDK adds to that file later. All three are the same shape — `logger.exception`
+with a static literal, no args, at ERROR — and `:574` is the broadest of the
+three because it catches whatever escaped the whole writer, including the other
+two.
+
+**Measured on all three, and each is load-bearing** — the claim is driven, not
+inferred from the key:
+
+| leg | shipped leaks the marker | fixed leaks the marker |
+|---|---|---|
+| `:240` SSE | yes | **no** |
+| `:394` JSON response | yes | **no** |
+| `:574` post_writer catch-all | yes | **no** |
+
+Run **without swapping any file**: a record factory is process-global, so only
+one can be live at a time. The shipped column is measured with the factory put
+back to `logging.LogRecord`, then ours is installed and the fixed column is
+measured — in that order, uninstall to the captured original afterwards. Nothing
+in the working copy is written, so there is no restore to get wrong (which
+matters here: `logging_setup.py` is at its budget, where a botched restore would
+not show up as a LOC change). Pinned as
+`test_all_three_legs_are_covered_by_the_one_table_entry`, parametrised over the
+three line numbers.
+
+`:198` is the one adjacent site that is NOT closed, and it is a different
+mechanism rather than a missed leg — see residual 2.
+
+### 6.1 Residuals — what this does NOT cover
 
 1. **The pydantic `msg` is dropped with the input, and `json_invalid`'s column
    number goes with it.** `"Invalid JSON: EOF while parsing a list at line 1

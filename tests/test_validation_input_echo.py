@@ -570,18 +570,51 @@ class TestRestatingIsNotSilencing:
 class TestTheKeyIsTheStructureAndNotTheText:
     @staticmethod
     def _record_from(
-        pathname: str, exc: BaseException, message: str = "boom"
+        pathname: str,
+        exc: BaseException,
+        message: str = "boom",
+        lineno: int = 240,
     ) -> logging.LogRecord:
         """One record built at ``pathname`` carrying ``exc``, through the factory."""
         return logging.getLogger(SDK_LOGGER).makeRecord(
             SDK_LOGGER,
             logging.ERROR,
             pathname,
-            240,
+            lineno,
             message,
             (),
             (type(exc), exc, exc.__traceback__),
         )
+
+    @pytest.mark.parametrize(
+        "lineno",
+        [
+            pytest.param(240, id="sse-leg"),
+            pytest.param(394, id="json-response-leg"),
+            pytest.param(574, id="post-writer-catch-all"),
+        ],
+    )
+    def test_all_three_legs_are_covered_by_the_one_table_entry(self, lineno):
+        """Finding §6.0 — the scope claim, driven rather than asserted.
+
+        The three sites are the same shape on three legs: the SSE leg, the
+        non-SSE response leg, and the catch-all around the whole writer. One
+        entry covers all of them because the unit is the MODULE — a line-keyed
+        rule would close one and go silently inert the next time an edit above
+        `:240` moved the other two.
+
+        A fix that closed one leg of three reads identically to this one from
+        the CHANGELOG, so the difference is pinned here.
+        """
+        with contextlib.redirect_stderr(io.StringIO()):
+            logging_setup.configure_logging("proxy")
+        import mcp.client.streamable_http as sdk
+
+        record = self._record_from(
+            sdk.__file__, self._validation_error(LEAF_MARK), lineno=lineno
+        )
+        assert LEAF_MARK not in str(record.exc_info[1]), lineno
+        assert "ValidationError" in str(record.exc_info[1]), lineno
 
     @staticmethod
     def _validation_error(text: str = LEAF_MARK) -> BaseException:
