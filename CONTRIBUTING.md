@@ -134,11 +134,22 @@ operator's directories unreachable; it does not give each node a clean record.
 Two nodes in one file that both write `server.json` still need `tmp_path`
 between them. The two answer different questions and the suite needs both.
 
-**Never import `stealth_chrome_devtools_mcp.__main__`.** It is three lines and
-the third is a bare `main()`, so importing it starts a stdio proxy and
-cold-starts a backend. Any `pkgutil.walk_packages` sweep must skip it —
-`operator_fence._NEVER_IMPORT` is the list, and it is how this finding was
-reproduced while being investigated.
+**No module body in `src/stealth_chrome_devtools_mcp/` may CALL anything.**
+Importing a module must only define things, so that a `pkgutil.walk_packages`
+sweep, a doc generator, an import linter or an IDE can walk the package without
+running the product. This is a rule because it was once broken:
+`__main__.py` called `main()` at module level, so importing it started a stdio
+proxy and cold-started a backend — which is how F-903 reproduced itself while
+being investigated. `tests/test_package_entrypoint.py::TestNoModuleBodyDoesWork`
+enforces it by AST and carries the single allowance
+(`tool_runtime`'s `cdp_transport.install()`); adding a second means writing down
+why. There is no exclusion list to add a module to — fix the module instead.
+
+**A bare `python -m stealth_chrome_devtools_mcp --help` cold-starts a backend**,
+so never reach for it to smoke-test the entrypoint. `server.main` parses with
+`add_help=False` + `parse_known_args`, so `--help` is unknown to it and the
+default `--transport stdio` carries it into `ensure_server_running`. Use
+`--transport http --help`, which reaches the backend parser that does answer it.
 
 Coverage is **intentionally not** in `addopts` (it would slow every single-file TDD run
 and trip `--cov-fail-under` on partial runs). CI turns it on explicitly.

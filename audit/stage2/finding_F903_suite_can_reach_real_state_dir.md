@@ -65,8 +65,9 @@ to this worktree's own `build_identity.source_fingerprint(singleton.SOURCE_ROOT)
 and the argv names this worktree's `server.py`. **The finding reproduced itself
 while being investigated**, which is the strongest available evidence that the
 route is reachable by ordinary means and not only by the one exotic node that
-opened it. It is also why `operator_fence._NEVER_IMPORT` is a deny-list rather
-than a comment asking the next author to be careful.
+opened it. It was first contained with a deny-list
+(`operator_fence._NEVER_IMPORT`) rather than a comment asking the next author to
+be careful; round 2 fixed the product instead and deleted the deny-list (§4.6).
 
 Cost: one stray backend and three added bytes-worth of record entry. It was not
 worse only because F-886 (shipped 2.1.9) refuses to evict a backend owning live
@@ -279,6 +280,51 @@ neither policy can be applied to the wrong root (pinned both ways).
 A root with no final path component (`C:\`, `/`) is dropped rather than obeyed —
 designating one would fence the suite off the whole disk.
 
+### 4.6 The product half: `__main__.py` (round 2)
+
+Rounds 1 and 2 of this finding differ in kind, and the difference is worth
+naming. Everything above fences the SUITE. This fences nothing — it removes the
+hazard.
+
+```python
+from stealth_chrome_devtools_mcp.server import main
+
+main()            # was: at module level
+```
+
+There is no `if __name__ == "__main__":`, so importing the module and running
+the product are the same act. Every tool that walks a package module by module —
+a doc generator, an import linter, a coverage sweep, an IDE indexer — is the
+census probe of §2, and gets the same backend. The fix is the guard.
+
+**Nothing depends on the import-time execution, verified rather than assumed:**
+
+| Route | Reaches `main()` how | Affected |
+|---|---|---|
+| `python -m stealth_chrome_devtools_mcp` | runs the file under the name `__main__` | no — the guard passes |
+| `[project.scripts]` (all three names) | `server:main` / `cli:main` directly | no — never touches this file |
+| `server.py`'s `runpy.run_path` | loads `embedded/server.py`, not the package `__main__` | no |
+| `singleton._server_process_cmd` / `backend_launch` | `-m stealth_chrome_devtools_mcp …` argv | no — that IS the `-m` route |
+| `import …__main__` (any sweep) | module body | **yes, and that is the fix** |
+
+`tests/test_package_entrypoint.py` is the one home for both halves. The `-m`
+contract is measured in-process through `runpy.run_module(..., run_name=
+"__main__")` — which is what `-m` IS — with `server.main` tripwired, so the node
+proves the guard lets the real door through without starting anything. The
+end-to-end node is a real child process with `HOME`/`USERPROFILE` redirected, and
+it takes `--transport http --help`, because **the bare spelling is not safe to
+run** (see §6.1).
+
+The deny-list that round 1 needed is **deleted, not emptied**. A standing
+exclusion list is a second defence for a hazard that no longer exists, and it
+rots — so what replaces it is a positive rule over the whole package:
+`TestNoModuleBodyDoesWork` AST-walks `src/stealth_chrome_devtools_mcp/` and
+refuses a bare module-level call. Measured, there is exactly one in the tree and
+it is allow-listed by name with its reason (`tool_runtime`'s
+`cdp_transport.install()`: idempotent, no I/O, CLAUDE.md's documented one call
+site, and a module body is the only place with its shape). A deny-list catches
+the module someone remembered; this catches the one nobody thought of.
+
 ## 5. What was NOT deleted, and why
 
 **Every per-file `isolated_state` fixture stays.** They answer a different
@@ -296,12 +342,19 @@ is the shape this finding is about.
 
 ## 6. Residuals
 
-1. **`__main__.py` still runs `main()` unguarded.** The fence's deny-list keeps
-   the suite's own sweep off it and a pin fails the day someone adds
-   `if __name__ == "__main__":`, at which point the entry can go. The product
-   defect — that importing the package's `__main__` starts a stdio proxy — is
-   NOT fixed here; it is a one-line product change with its own blast radius
-   (console-script behaviour) and belongs in its own PR.
+1. ~~**`__main__.py` still runs `main()` unguarded.**~~ **FIXED** in round 2 —
+   see §4.6. The deny-list it justified is deleted rather than emptied.
+
+   A NEW residual took its place and is smaller but real: **a bare `python -m
+   stealth_chrome_devtools_mcp --help` cold-starts a backend.** `server.main`
+   builds its parser with `add_help=False` and reads it with
+   `parse_known_args`, so `--help` is an unknown argument to it, and the default
+   `--transport stdio` carries it past the parser into `ensure_server_running`.
+   Asking for help starts a server. It is pinned
+   (`TestBareHelpFallsThroughToTheColdStart`, which proves it by tripwiring the
+   cold start rather than performing one) and deliberately not fixed here: the
+   parser's shape is `server.py`'s business and changing it moves what every
+   unrecognised flag does, which is a different finding's blast radius.
 2. **The write guard is per-process.** A test that spawns a CHILD gets no fence
    from it; children are covered by `release_gate_harness._isolated_env`'s HOME
    redirection, which is unchanged and separately correct.
@@ -312,9 +365,16 @@ is the shape this finding is about.
    at `~/.stealth_browser_pids_test.json`. Outside the state dir, so the fence
    does not cover it; no node in that class writes it. Left as found — changing
    it is unrelated to this finding.
-5. **`_NEVER_IMPORT` is a deny-list**, so a SECOND module that executes on import
-   would not be caught until it caused harm. There is exactly one today and the
-   sweep's own pin names it.
+5. ~~**`_NEVER_IMPORT` is a deny-list**, so a SECOND module that executes on
+   import would not be caught until it caused harm.~~ **RESOLVED** in round 2:
+   the deny-list is DELETED rather than emptied, and what replaces it is a
+   positive whole-package rule —
+   `test_package_entrypoint.py::TestNoModuleBodyDoesWork` refuses a bare
+   module-level call anywhere under `src/stealth_chrome_devtools_mcp/`, with one
+   named allowance (`tool_runtime`'s `cdp_transport.install()`, which is
+   idempotent, does no I/O and is CLAUDE.md's documented one call site). A
+   deny-list protects against the module someone remembered; this one fails on
+   the module nobody thought of.
 6. **CI itself was not exercised.** Pushing is out of scope for this task and this
    repo runs zero checks on a branch push without a PR, so "verify on CI" is not a
    thing this worktree can do. The warmup was verified locally against a tmp root
@@ -362,6 +422,31 @@ run made it.
 
 So the warmup does not merely avoid the real root — it still WORKS against a tmp
 one, which is the half a redirect can silently break.
+
+### The integration tier, run for real (round 2)
+
+`warmup_once()` on its own is the mechanism. Two whole E2E files were then run
+under the fence to exercise it the way CI does — chosen because the first is the
+one that spawns real Chrome on real named profiles and drives adoption:
+
+| | |
+|---|---|
+| files | `test_e2e_persistent_profile_reattach.py`, `test_e2e_load_milestone.py` |
+| result | **5 passed** in 16.1 s |
+| `sessions/e2e-warmup` written | in the TMP root, 03:31:44 |
+| the operator's real `sessions/` | 87 entries, mtime still 2026-09-20 20:46 |
+| Chrome processes before / after | 89 / 89 |
+| left behind by the run | **none** |
+
+The Chrome accounting is by PID SET and not by count, because the counts matching
+would have hidden exactly the thing worth checking: one pid did appear (119068)
+and one did vanish (101780). Both were identified rather than waved through — the
+new one is an `--type=renderer --extension-process` child of the operator's own
+browser (parent pid 4568, running since the previous morning), and the vanished
+one is ordinary renderer churn in that same browser. The two Chromes on the
+machine that DO match a test-profile pattern (`--headless=new`, a tmp
+`hsw-chrome-*` user-data-dir) were both started 2026-09-20 11:35, appear in the
+BEFORE snapshot, and belong to neither this repo's suite nor this run.
 
 The write guard wraps a primitive called on every import, so its cost was
 measured rather than assumed — 20 000 `open`+`read` cycles, this machine:

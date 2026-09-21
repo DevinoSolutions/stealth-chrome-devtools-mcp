@@ -510,21 +510,6 @@ def install(root: Path, *, session_root: Path, env: dict[str, str]) -> frozenset
     return live
 
 
-# Importing this module RUNS THE PRODUCT. ``__main__.py`` is three lines and the
-# third is a bare ``main()`` at module level -- correct for ``python -m``, and a
-# live grenade for any sweep that imports by name. MEASURED, 2026-09-21: the
-# census probe written for THIS finding walked every module in the package,
-# imported ``stealth_chrome_devtools_mcp.__main__``, and thereby started a real
-# stdio proxy which cold-started a real backend (proxy pid 188108 -> backend pid
-# 189088 on port 64986) into the operator's live ``~/.stealth-mcp`` -- F-886
-# correctly stepped aside from port 3881 rather than evicting the backend
-# holding two of the operator's logged-in browsers, which is the only reason
-# this cost a stray process and not a lost session. The probe ran before the
-# fence existed; it is the finding reproducing itself, and it is why this set is
-# a DENY-LIST rather than a comment telling the next author to be careful.
-_NEVER_IMPORT = frozenset({"stealth_chrome_devtools_mcp.__main__"})
-
-
 def derived_globals() -> dict[str, str]:
     """Every package global that is a ``Path``, by dotted name.
 
@@ -532,6 +517,18 @@ def derived_globals() -> dict[str, str]:
     thing that checks it cannot drift. ``tests/test_operator_fence.py`` calls it
     and compares against a DECOY root, so a NEW derived global fails a test
     instead of silently escaping the redirect.
+
+    It imports EVERY module, with no exclusions, and that is only safe because
+    no module body in this package does work. It carried a ``_NEVER_IMPORT``
+    deny-list until F-903 fixed the one module that did: ``__main__.py`` called
+    ``main()`` at module level, so this very sweep started a real stdio proxy
+    which cold-started a real backend (proxy pid 188108 -> backend pid 189088 on
+    port 64986) into the operator's live ``~/.stealth-mcp``. The deny-list is
+    deleted rather than emptied, because the hazard is fixed at its source and a
+    standing exclusion list is a second defence that rots; what replaces it is a
+    POSITIVE pin over the whole package --
+    ``tests/test_package_entrypoint.py::TestNoModuleBodyDoesWork`` -- which fails
+    on any new module-level call rather than on the one name someone remembered.
     """
     import importlib
     import pkgutil
@@ -540,8 +537,6 @@ def derived_globals() -> dict[str, str]:
     import stealth_chrome_devtools_mcp as pkg
 
     for found in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
-        if found.name in _NEVER_IMPORT:
-            continue
         importlib.import_module(found.name)
 
     out: dict[str, str] = {}

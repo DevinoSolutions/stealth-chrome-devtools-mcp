@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -137,24 +138,30 @@ class TestTheEnumerationCannotGoStale:
                 f"{dotted}.{attr} is in the fence table but no longer exists"
             )
 
-    def test_the_sweep_never_imports_dunder_main(self):
-        """``__main__.py`` RUNS the product; importing it starts a backend.
+    def test_the_sweep_covers_the_whole_package_with_no_exclusions(self):
+        """The census may not have a blind spot, and no longer does.
 
-        MEASURED 2026-09-21: the census probe for this finding imported it and
-        cold-started a real backend (pid 189088, port 64986) into the operator's
-        live record. If someone guards that call behind ``if __name__ ==
-        "__main__":`` this deny-list entry can go -- and this node is what will
-        tell them, by failing on the second assertion.
+        This node was the inverse until F-903's second round: the sweep carried a
+        ``_NEVER_IMPORT`` deny-list because ``__main__.py`` called ``main()`` at
+        module level, and importing it cold-started a real backend (pid 189088,
+        port 64986) into the operator's live record -- the finding reproducing
+        itself inside its own census. The product is guarded now, the deny-list
+        is deleted, and what this asserts is the property that made deleting it
+        safe: the sweep reaches EVERY module, ``__main__`` included, and reaching
+        it runs nothing.
+
+        The two halves live where they belong -- that importing it is inert is
+        ``tests/test_package_entrypoint.py``'s, and so is the whole-package rule
+        that keeps any other module body from becoming the next one.
         """
-        assert "stealth_chrome_devtools_mcp.__main__" in operator_fence._NEVER_IMPORT
-
-        import stealth_chrome_devtools_mcp as pkg
-
-        source = (Path(pkg.__file__).parent / "__main__.py").read_text(encoding="utf-8")
-        assert 'if __name__ == "__main__"' not in source, (
-            "__main__.py now guards its main() call, so importing it is safe "
-            "and operator_fence._NEVER_IMPORT no longer needs it"
+        assert not hasattr(operator_fence, "_NEVER_IMPORT"), (
+            "the deny-list is back; a census with an exclusion list is a census "
+            "with a blind spot -- fix the module that does work instead"
         )
+
+        operator_fence.derived_globals()
+
+        assert "stealth_chrome_devtools_mcp.__main__" in sys.modules
 
 
 class TestTheWriteGuardStopsAWriteTheRedirectMissed:

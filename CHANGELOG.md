@@ -76,9 +76,35 @@ release but is undocumented (`--help` does not list it) and prints a line on
 stderr naming its replacement; it will be removed. A path stays reachable
 through `stealthy call`.
 
+### Fixed — F-903: importing `stealth_chrome_devtools_mcp.__main__` started a server
+
+`__main__.py` called `main()` at module level, with no `if __name__ ==
+"__main__":` guard. That makes IMPORTING the module indistinguishable from
+RUNNING the product: any tool that walks the package module by module — a doc
+generator, an import linter, a coverage sweep, an IDE indexer — started a stdio
+proxy, which cold-started a backend. It is not hypothetical, and it was not
+found by reading: this finding's own census probe did it, into the operator's
+live `~/.stealth-mcp` (proxy pid 188108 → backend pid 189088 on port 64986).
+
+The guard is the whole fix. `python -m stealth_chrome_devtools_mcp` runs the
+file under the name `__main__` and is unchanged; so are both console scripts
+(they point at `server:main` and `cli:main`), `server.py`'s `runpy` load (it
+loads `embedded/server.py`, never the package `__main__`) and the `-m` argv the
+backend is spawned with. `tests/test_package_entrypoint.py` pins both halves and
+adds the rule that generalises it — **no module body in this package may CALL
+anything**, with one named allowance for `tool_runtime`'s
+`cdp_transport.install()`.
+
+One thing this does NOT fix, now pinned as a measured residual: `server.main`
+builds its parser with `add_help=False` and reads it with `parse_known_args`, so
+`--help` is an *unknown* argument to it and the default `--transport stdio`
+carries it into `ensure_server_running`. **A bare `python -m
+stealth_chrome_devtools_mcp --help` does not print help — it cold-starts a
+backend.**
+
 ### Fixed — F-903: the test suite could cold-start a real backend into the operator's state dir
 
-**Tests only — no product behaviour changes.**
+**The fence in this entry is tests-only** (the product half is the entry above).
 
 `tests/conftest.py` redirected the clone output dir and the browser-session root
 and nothing else. The third root — `~/.stealth-mcp`, the one that owns a live
