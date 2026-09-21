@@ -299,6 +299,63 @@ CALLER_DEBUG = [
 # --------------------------------------------------------------------------
 # The premise: the leak is still live in the INSTALLED nodriver
 # --------------------------------------------------------------------------
+class TestReachability:
+    """Whether the three box-model WARNINGs can fire AT ALL in nodriver 0.47.
+
+    The F-906 review reported them as a hot path — ``click_element`` →
+    ``Element.mouse_click`` → the warning "on exactly the zero-size /
+    not-rendered case". MEASURED, that is not so, and the correction matters
+    because it is the difference between an every-user leak and insurance:
+
+    * ``Position.center`` is ``(left + width/2, top + height/2)`` — a non-empty
+      2-tuple, so **always truthy**, even for a zero-size quad at the origin.
+      ``if not center:`` therefore cannot be reached through a real
+      ``Position``;
+    * and whichever branch ``get_position`` takes, the warning is not reached
+      anyway: ``if not quads: raise Exception(...)`` propagates straight past
+      ``mouse_click``'s ``except AttributeError``, and the ``except IndexError``
+      branch returns ``None``, which that same handler swallows with a bare
+      ``return`` BEFORE the warning line.
+
+    So the redaction is insurance against one nodriver change, not a patch for
+    a live every-user leak — and these pins go RED the day that change lands,
+    which is when the finding's severity really does rise.
+    """
+
+    @pytest.mark.parametrize(
+        ("label", "quad"),
+        [
+            ("zero-size at origin", [0, 0, 0, 0, 0, 0, 0, 0]),
+            ("zero-size offscreen", [10, 20, 10, 20, 10, 20, 10, 20]),
+            ("ordinary box", [0, 0, 100, 0, 100, 50, 0, 50]),
+            ("negative offscreen", [-500, -500, -400, -500, -400, -450, -500, -450]),
+        ],
+    )
+    def test_position_center_is_always_truthy(self, label, quad):
+        """The guard the three WARNINGs sit behind, and why it never opens."""
+        from nodriver.core.element import Position
+
+        assert Position(quad).center, (
+            f"{label}: a falsy center makes element.py:537/:624 REACHABLE — "
+            "F-907's severity rises and the finding's §1 must be rewritten"
+        )
+
+    def test_mouse_click_returns_before_the_warning_on_a_none_position(self):
+        """``except AttributeError: return`` sits between ``get_position``
+        answering ``None`` and the warning line."""
+        import inspect
+
+        import nodriver.core.element as nd_element
+
+        body = inspect.getsource(nd_element.Element.mouse_click)
+        guard = body.index("except AttributeError")
+        warning = body.index("could not calculate box model")
+        assert guard < warning, (
+            "the AttributeError guard no longer precedes the warning; "
+            "element.py:537 may now be reachable"
+        )
+
+
 class TestPremise:
     def test_element_repr_still_renders_values_and_text(self):
         """If this goes green on its own, nodriver fixed it and the redaction
@@ -390,6 +447,68 @@ class TestNoPageContentReachesAnySink:
             assert kept in reached, (
                 f"{kept!r} should survive redaction; got {reached!r}"
             )
+
+
+class TestLastResortSink:
+    """The sink the production backend actually uses, and the one the
+    all-sinks pins above could not see.
+
+    ``drive`` adds a ``_RootCapture`` to stand in for "whatever this process
+    has on root" — but installing ANY handler SUPPRESSES ``logging.lastResort``,
+    so that harness measures the caller-has-a-handler world and never the
+    shipped one. In production root carries **no** handler at all, so
+    ``callHandlers`` falls through to ``lastResort``: a ``_StderrHandler`` at
+    WARNING. And the backend's stderr is redirected into ``backend-boot.log``,
+    a durable file — which is what makes this the cell that matters.
+
+    The measurement is only possible because ``lastResort``'s stream is bound
+    at EMIT time (``_StderrHandler.stream`` is a property reading
+    ``sys.stderr``), the exact opposite of ``logging.basicConfig``, which binds
+    ``sys.stderr`` into its handler at CREATION — F-906's trap, and the reason
+    a ``redirect_stderr`` works here and reads as a false negative there. Both
+    halves are asserted, so a stdlib change cannot turn this pin green by
+    making it measure nothing.
+    """
+
+    @staticmethod
+    def _emit_with_no_handlers() -> str:
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+        assert root.handlers == [], (
+            "this pin measures the NO-handler world; a handler here suppresses "
+            "lastResort and the assertion below would prove nothing"
+        )
+        assert logging.lastResort is not None
+        assert logging.lastResort.level == logging.WARNING
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            emit_element_warnings()
+        return err.getvalue()
+
+    def test_without_configure_logging_the_page_content_does_reach_stderr(self):
+        """The other half of the pair, and the one that keeps the next one
+        honest: with ``configure_logging`` NOT called — so no redaction — the
+        record reaches stderr through ``lastResort`` carrying the page's own
+        content. If this ever goes green on its own, either nodriver stopped
+        rendering values or the stdlib stopped binding ``lastResort``'s stream
+        at emit time, and the pin below would be measuring nothing."""
+        text = self._emit_with_no_handlers()
+        assert "could not calculate box model for" in text, (
+            "lastResort did not carry the record; this pin now measures nothing"
+        )
+        assert ATTR_VALUE_MARK in text, "the unredacted leak is no longer visible"
+        assert TEXT_CONTENT_MARK in text
+
+    def test_no_page_content_reaches_lastresort(self, tmp_path, monkeypatch):
+        """The shipped backend's real stderr path, hence ``backend-boot.log``."""
+        monkeypatch.setenv("STEALTH_MCP_LOG_DIR", str(tmp_path))
+        get_settings.cache_clear()
+        logging_setup.configure_logging("backend")
+        text = self._emit_with_no_handlers()
+        for name, mark in SECRETS.items():
+            assert mark not in text, f"{name} reached stderr through lastResort"
+        assert "input" in text and "type" in text
 
 
 # --------------------------------------------------------------------------

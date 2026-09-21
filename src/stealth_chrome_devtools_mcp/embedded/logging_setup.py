@@ -230,11 +230,13 @@ def _clamped(name: object) -> str:
 def _shape(value: object) -> str:
     """What a payload-carrying argument is allowed to say about itself.
 
-    An ELEMENT keeps its tag and its attribute NAMES and loses every VALUE and
-    all of its text: redacting is not silencing, and "which control had no box
-    model" is the whole diagnostic value of the line this replaces. A name is
-    the page's vocabulary while a value is the user's secret — ``value=`` and
-    ``data-session-token=`` are exactly the pair that makes the distinction.
+    An ELEMENT keeps its tag, its attribute NAMES and its child COUNT, and
+    loses every attribute VALUE and all of its descendant TEXT: redacting is
+    not silencing, and "which control is this" is the whole diagnostic value of
+    the line it replaces. A name is the page's vocabulary while a value is the
+    user's secret — ``value=`` and ``data-session-token=`` are exactly the pair
+    that makes the distinction — and a count says how much text was dropped
+    without saying any of it.
 
     It is stricter than ``click_target.Shape``, which reports an id and a class
     list by VALUE, and the asymmetry is deliberate: that module reads a known
@@ -255,6 +257,12 @@ def _shape(value: object) -> str:
         tag = getattr(value, "tag", None)  # nodriver Element: node_name.lower()
         attrs = getattr(value, "attrs", None)  # nodriver Element: a ContraDict
         names = None if attrs is None else list(attrs.keys())
+        # The CHILD COUNT and never the children: `__repr__` renders descendant
+        # TEXT by recursing `str(child)`, and a text node's own `__repr__`
+        # answers its raw `node_value` -- so "$12,345.67" in a <div> is as much
+        # page content as an attribute value. A count says how much was dropped
+        # without saying any of it.
+        children = getattr(value, "child_node_count", None)
     except Exception as exc:  # noqa: BLE001  PERMANENT(F-907 — inside makeRecord)
         # It must be TOTAL, not narrow. Both reads run arbitrary library code
         # -- `tag` is a property and `attrs` answers a `ContraDict` -- and this
@@ -273,7 +281,8 @@ def _shape(value: object) -> str:
     shown = [_clamped(name) for name in names[:SHAPE_MAX_ATTRS]]
     if len(names) > SHAPE_MAX_ATTRS:
         shown.append(f"{SHAPE_OVERFLOW}+{len(names) - SHAPE_MAX_ATTRS}")
-    return f"<{_clamped(tag)} attrs=[{', '.join(shown)}]>"
+    counted = f" children={children}" if isinstance(children, int) else ""
+    return f"<{_clamped(tag)} attrs=[{', '.join(shown)}]{counted}>"
 
 
 def _redacted(args: tuple[object, ...]) -> tuple[object, ...]:

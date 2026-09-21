@@ -138,8 +138,9 @@ free to reword.
 ### Fixed — F-907: a page's own form fields and text no longer reach our logs through nodriver
 
 F-906 held `nodriver` at WARNING because everything below that line quotes raw
-CDP. **This is the half above it, and unlike F-906 it leaked in the shipped
-configuration** — nothing had to be misconfigured.
+CDP. **This is the half above it**, and unlike F-906 nothing has to be
+misconfigured for it to reach a sink: WARNING is the effective level every
+shipped configuration already has.
 
 `nodriver/core/element.py` logs `"could not calculate box model for %s"` with a
 live `Element` at **WARNING**, in three places, and `Element.__repr__` renders
@@ -151,15 +152,27 @@ included. Measured: all of it reached stderr — which for the backend is
 redirected into `backend-boot.log`, a durable file — **and** Sentry as a
 breadcrumb on the next event, in the plain shipped backend and proxy.
 
-It is reachable from ordinary use: `click_element` calls `Element.mouse_click`,
-and that line fires for any element with no box model — exactly the
-`display: none` case its own synthetic fallback exists for.
+It needs no handler of anyone's: in a fresh process the root logger has none,
+so the stdlib's own `logging.lastResort` carries a WARNING to stderr — and the
+backend's stderr IS `backend-boot.log`.
+
+**What it is not.** A first reading of this had the three lines firing on every
+`click_element` against a `display: none` target. Measured, they do not fire at
+all in nodriver 0.47: `Position.center` is a 2-tuple and therefore always
+truthy — even for a zero-size box at the origin, `(0.0, 0.0)` — so
+`if not center:` cannot open, and the other two paths out of `get_position()`
+(a raised `Exception`, or `None`) both leave `mouse_click` before the warning
+line. So this ships as insurance and as correctness for any future nodriver
+WARNING that renders an object, not as a patch for a live leak; the
+reachability premises are pinned, so the day a nodriver bump makes those sites
+live, CI says so.
 
 The line still arrives and still names the element; what it loses is every
 VALUE and all of its text:
 
 ```
-could not calculate box model for <input attrs=[type, value, data-session-token, class_]>
+could not calculate box model for
+  <input attrs=[type, value, data-session-token, class_] children=1>
 ```
 
 Anything else from nodriver — a `Tab`, a `Connection`, a CDP record — renders as

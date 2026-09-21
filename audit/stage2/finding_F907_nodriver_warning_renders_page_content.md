@@ -48,12 +48,81 @@ Measured, on an element built from nodriver's own constructors:
 `Tab.__repr__` (`tab.py`:1987-1992) is the same shape one object up — it
 renders `self.target.url`, and a URL carries tokens in its query string.
 
-**It is reachable from our own code.** `dom_handler.py`:273 calls
-`element.mouse_click()`, and site :537 fires whenever `get_position().center` is
-falsy — i.e. an element with no box model, which is exactly the `display: none`
-case `click_element`'s synthetic fallback exists for (`click_target`'s reason
-code `not-rendered`). So the line is not hypothetical library noise; it is on a
-path this product takes deliberately.
+### Reachability — the F-906 review said "hot path"; MEASURED, it is not
+
+The review reported these three as an every-user leak: `dom_handler.py`:273
+calls `element.mouse_click()` on every `click_element`, and the warning
+"fires on exactly the zero-size / not-rendered case". **The first half is true
+and the second is not**, and the correction is recorded here because it moves
+this finding's severity **down**, not up.
+
+`if not center:` cannot open through a real `Position`:
+
+```
+zero-size quad at origin   center=(0.0, 0.0)      truthy=True   w=0 h=0
+zero-size quad offscreen   center=(10.0, 20.0)    truthy=True   w=0 h=0
+ordinary box               center=(50.0, 25.0)    truthy=True
+negative/offscreen         center=(-450.0, -475.0) truthy=True
+```
+
+`Position.center` is `(left + width/2, top + height/2)` — a non-empty 2-tuple,
+so **always truthy**, however degenerate the box.
+
+And whichever branch `get_position` takes, the warning is not reached anyway:
+
+* `if not quads: raise Exception(...)` (`element.py`:499) — not an
+  `AttributeError`, so it propagates straight past `mouse_click`'s
+  `except AttributeError` and out of the call;
+* the `except IndexError` branch (`element.py`:509-513) DEBUG-logs and returns
+  `None`, and `mouse_click`'s `except AttributeError: return` swallows that
+  **before** the warning line.
+
+So **the three box-model WARNINGs are unreachable in nodriver 0.47**. This fix
+is insurance against one nodriver change, not a patch for a live every-user
+leak, and `tests/…::TestReachability` goes RED the day that change lands —
+which is when the severity really does rise.
+
+### What IS live on that same code path, and is not a log line
+
+`element.py`:499 raises `Exception("could not find position for %s " % self)`.
+Measured, the message carries the whole repr:
+
+```
+could not find position for <input type="password" value="SECRET-VALUE"></input>
+```
+
+That is an **exception**, not a `LogRecord` — it propagates out of
+`mouse_click` into `dom_handler.click_element`, where it becomes a `ToolError`
+reaching the client, the debug ring and Sentry as the exception itself. **No
+logging mechanism can reach it**, so it is out of scope here and is named as
+residual 7 rather than quietly folded in.
+
+### The census — every WARNING-or-above call in the installed sources
+
+Swept with `Select-String` over the venv's `site-packages` (ripgrep honours
+`.gitignore`, and `.venv` is ignored — a `Grep` sweep here answers "no matches"
+for files that do match). Every `logger.warning` / `.error` / `.critical` /
+`.exception` in `nodriver` 0.47.0, and the below-the-floor neighbours worth
+naming so a later reader does not re-derive them:
+
+| Site | Level | What it renders | Reaches |
+|---|---|---|---|
+| `element.py`:537 | WARNING | **`Element.__repr__`** — tag + every attribute VALUE + all recursive child TEXT | every sink the level reaches; **this finding** |
+| `element.py`:624 | WARNING | the same, the drag SOURCE | ditto |
+| `element.py`:633 | WARNING | the same, the drag TARGET | ditto |
+| `connection.py`:483 | WARNING | a callback's `repr`, the event CLASS NAME, and `str(exc)` + `exc_info` | passes through UNCHANGED — the callback is ours, and a class name is not payload. Deliberately not redacted |
+| `tab.py`:1702 | WARNING | a constant "install opencv-python" string, no args | nothing to redact |
+| `tab.py`:1750, :1757 | WARNING | constant "could not unlink …" strings, no args | nothing to redact |
+| `element.py`:499 | — | `Exception("could not find position for %s " % self)` — the whole repr | **not a `LogRecord`**; no logging mechanism reaches it → residual 7 |
+| `element.py`:510 | DEBUG | the repr again, but `%`-interpolated INTO the message | below F-906's floor, and `record.args` is empty, so an args rewrite could never have reached it either |
+| `util.py`:4599-4600, :4603 | INFO | the proxy URL — `socks5://user:pass@host`, i.e. **credentials** | below F-906's floor; closed by F-906, not by this |
+| `mcp/shared/session.py`:383 | WARNING | `f"Failed to validate request: {e}"` on the **root** logger | neither family, and pre-interpolated → residual 8 |
+| `mcp/shared/session.py`:384 | DEBUG | the whole JSON-RPC message root — i.e. a tool call's arguments | root logger; below its default level, but a caller at root DEBUG gets it → residual 8 |
+
+So in nodriver 0.47 the payload-rendering WARNING surface is exactly the three
+`element.py` lines, and they all pass the element through `record.args` — which
+is what makes a type-keyed args rewrite viable here where F-906 rejected a
+filter for `connection.py`'s pre-formatted string.
 
 ## 2. The matrix — MEASURED, not reasoned
 
@@ -66,6 +135,7 @@ refusing transport, and a capture handler on the root logger. `✗` = it arrived
 
 | Configuration | nodriver effective | (a) `backend-<pid>.log` | (b) debug ring | (c) Sentry | (d) root handler / stderr |
 |---|---|---|---|---|---|
+| **no handler anywhere** (a fresh process) | WARNING | — | — | **✗** | **✗** `logging.lastResort` |
 | shipped backend | WARNING | — | — | **✗** | **✗** |
 | shipped proxy | WARNING | — | — | **✗** | **✗** |
 | backend `--debug` | WARNING | — | — | **✗** | **✗** |
@@ -77,17 +147,49 @@ F-906's leak needed a caller to turn root DEBUG on. This one leaks in the
 **shipped backend configuration**, with nothing misconfigured, because WARNING
 is above the floor and the floor was all that stood there.
 
+### The first row is the one that matters, and it was nearly missed
+
+The F-906 reviewer's second correction: this needs **no caller `basicConfig` at
+all**. In a fresh process `nodriver.core.element` is effective WARNING by
+inheritance, the root logger has **no handlers**, and `Logger.callHandlers`
+then falls through to `logging.lastResort` — an `_StderrHandler` at WARNING
+that ships with the stdlib. Measured: root `handlers == []`,
+`lastResort.level == 30`, and the line arrives on stderr regardless. **The
+backend's stderr IS `backend-boot.log`** (`backend_launch` gives the child
+stdout and stderr, and the scheduler rung re-opens that file itself), so this
+path is not ephemeral — it is a durable file on disk.
+
+This row nearly went unwritten, and the reason is worth keeping: the first
+harness always installed a `_RootCapture` handler in order to observe anything
+— **and a root handler suppresses `lastResort`**, which only fires when the
+walk up the hierarchy finds no handler at all. So the measurement apparatus
+measured the caller-has-a-handler world exclusively and never the shipped one.
+`TestLastResortSink` strips the handlers first, asserts both preconditions, and
+then reads stderr.
+
+`lastResort` is also the one sink that CAN be pinned this way: its `stream` is
+a **property** returning `sys.stderr` at emit time, so
+`contextlib.redirect_stderr` captures it. `basicConfig`'s `StreamHandler` is
+the inverse — it binds `sys.stderr` into the handler at CREATION time, so a
+`redirect_stderr` around the emit captures nothing and a naive pin reads a
+leak as absent. Both facts are measured, and the second is a measurement trap
+this finding walked into once.
+
 (a) and (b) are unreachable by construction, before and after, for F-906's
 reasons: our file handler is on `stealth.<role>` with `propagate = False`, and
 the ring is a structure no library writes to.
 
 ### After
 
-Every payload cell `—`, in all five configurations. The LINE still arrives:
+Every payload cell `—`, in all six configurations. Measured, the same element
+before and after — the tag and the four attribute NAMES survive, the three
+values and the child's text do not:
 
 ```
-nodriver.core.element WARNING could not calculate box model for
-  <input attrs=[type, value, data-session-token, class_]>
+before: <input type="password" value="hunter2-SECRET"
+        data-session-token="eyJ.TOKEN" class="form-control">BALANCE-12345</input>
+after : could not calculate box model for
+        <input attrs=[type, value, data-session-token, class_] children=1>
 ```
 
 ## 3. The fix, and why this mechanism
@@ -140,10 +242,15 @@ resolving the class needs `import nodriver` and `configure_logging` runs in the
 measured cold-start paragraph).
 
 **What the replacement says.** Redacting is not silencing. An `Element` keeps
-its tag and its attribute **NAMES** and loses every VALUE and all of its text —
-"which control had no box model" is the entire diagnostic value of the line, and
-a name is the page's vocabulary while a value is the user's secret (`value=` and
-`data-session-token=` are exactly the pair that makes the point). Anything else
+its tag, its attribute **NAMES** and its **child COUNT**, and loses every VALUE
+and all of its text — "which control had no box model" is the entire diagnostic
+value of the line, and a name is the page's vocabulary while a value is the
+user's secret (`value=` and `data-session-token=` are exactly the pair that
+makes the point). The count is `Element.child_node_count`, an `int` the page
+cannot author into a string, and it is deliberately the ONLY thing said about
+the children: `__repr__`'s `content` half renders every descendant text node's
+`node_value` bare, which is page TEXT — a bank balance, a message body — and is
+the larger of the two surfaces here. Anything else
 — a `Tab`, a `Connection`, a generated CDP record — keeps its TYPE and nothing
 else, because there is no half of it measured to be safe.
 
@@ -188,13 +295,23 @@ measured ~370 ns, against ~1 485 ns to build the record itself.
 
 ## 4. Pins
 
-`tests/test_nodriver_element_repr_logging.py` — 26 nodes. RED-first: 20 failing
-(7 behavioural across all five configurations × the all-sinks assertion and the
-named stderr/Sentry assertion, plus 13 mechanism/bounds/surface), against 6
-already-green invariants.
+`tests/test_nodriver_element_repr_logging.py` — 33 nodes, all green. RED-first:
+20 of them failed against the unfixed tree (7 behavioural across the
+configurations × the all-sinks assertion and the named stderr/Sentry assertion,
+plus 13 mechanism/bounds/surface), against 6 already-green invariants; the
+seven added while folding in the review's premises are `TestReachability` (5)
+and `TestLastResortSink` (2).
 
 * every marker, every sink, every shipped config **and** caller root DEBUG in
   both orders;
+* the **no-handler** configuration, measured with the root handlers stripped and
+  both preconditions asserted (`root.handlers == []`,
+  `lastResort.level == WARNING`): one pin proves the unredacted element DOES
+  reach stderr, the other that after the install it does not;
+* the **reachability** premises — `Position.center` is truthy for all four quad
+  shapes including zero-size at the origin, and `mouse_click` returns on a
+  `None` position before the warning line — so the day a nodriver change makes
+  those three sites live, the finding's severity claim fails in CI;
 * the line still NAMES the element (tag + attribute names survive) — so a
   future "fix" that silences the logger fails;
 * nodriver's real `connection.py`:483 WARNING, websockets' WARNINGs, and our own
@@ -236,3 +353,23 @@ already-green invariants.
 6. **`_shape` duck-types `tag`/`attrs`.** Any nodriver object offering both
    renders as an element. That is the intended generosity — it is the shape we
    want for anything element-like — and everything else falls to the type name.
+7. **`element.py`:499's exception carries the whole repr** —
+   `Exception("could not find position for %s " % self)`, measured to render
+   `value="SECRET-VALUE"`. Unlike the three WARNINGs this one IS reachable: it
+   is the `not quads` branch, it propagates past `mouse_click`'s
+   `except AttributeError`, and `dom_handler.click_element` turns it into a
+   `ToolError` that reaches the client, the debug ring and Sentry as the
+   exception itself. **No logging mechanism can touch it** — there is no
+   `LogRecord` — so closing it means either an exception scrub in
+   `observability._scrub_event` (which would have to match on message text, the
+   thing §3 argues against) or not letting nodriver's message through
+   `dom_handler`. It is a different finding with a different mechanism and is
+   deliberately not folded in here.
+8. **`mcp/shared/session.py`:383-384 log on the ROOT logger** — a WARNING
+   rendering `str(e)` for a request that failed validation, and a DEBUG
+   rendering the whole JSON-RPC message root, i.e. a tool call's arguments.
+   Neither is in the `nodriver` or `websockets` family, both are f-string
+   pre-interpolated, and the logger is the root itself — so neither F-906's
+   floor nor this redaction reaches them, and a floor on the root logger is not
+   a thing a library may install. Out of scope for both findings; named so the
+   next census does not re-discover it.
