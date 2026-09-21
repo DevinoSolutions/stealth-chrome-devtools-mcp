@@ -343,12 +343,21 @@ belongs to the live shared profile. `clone_storage` therefore stamps
 kind is precisely what made this a no-op, and a pin now asserts the two
 directories differ.
 
-What it costs is one extra process-table walk per named spawn — the shared
-profile's liveness, which the unseeded path never asked before. Pinned
-EXACTLY (one `master`, not two) in `test_seed_from_session.py`, whose F-897
-guard asserted `["beta"]` and now asserts `["beta", "master"]` with the reason
-written into the node. It is one psutil scan against a path that is about to
-launch a whole Chrome, and it buys the hand-off on the commonest spawn there is.
+**What it costs is nothing on a spawn that could not receive a hand-off**, and
+that is a property of the ORDER the two witnesses are asked in (round-2 review).
+`_default_source` asks `driven(roots.shared) and held(roots.shared)`: `driven`
+is a lookup in a snapshot this spawn has already taken and `held` is a psutil
+walk of every process on the machine, so the free witness short-circuits and
+only a spawn this backend could actually hand a jar to pays for the walk. Asked
+the other way round — which is how it first shipped — EVERY named spawn paid it
+to discover the shared session is not one of ours. The conjunction is unchanged,
+so the ANSWER is byte-identical; only the cost moves.
+
+Both sides are pinned in `test_seed_from_session.py`, because an order is
+exactly the kind of thing a later edit reverses without noticing: F-897's guard
+still asserts `["beta"]` — the TARGET alone, unchanged by this finding — and a
+sibling node drives a spawn with `driven` true and asserts `["gamma", "master"]`,
+the shared session walked ONCE and only there.
 
 ### 10.2 The translation, and the two fields held out of it
 
@@ -540,6 +549,34 @@ neither was visible to a reading:
    real `get_instance` surface with a `profiles=` seed, and the absence is
    pinned.
 
+### 11.2 What the second review moved
+
+Three things, none of which changes an answer this finding gives:
+
+1. **The two witnesses of `_default_source` were asked in the wrong order** and
+   the reviewer measured the swap: `driven(...) and held(...)` leaves all of
+   `test_cookie_handoff.py` green — including the `held=False, driven=True`
+   case, which is the one that proves the conjunction is unchanged — while the
+   F-897 cost guard drops back to `["beta"]`. So the guard is ONE walk again
+   with the reason rewritten, and a sibling node pins the driven case at
+   `["gamma", "master"]` so the order cannot quietly come back. §10.1a carries
+   the argument.
+2. **`params(jar)` sat outside `_step`'s naming discipline.** It is the one step
+   of a hand-off that makes no CDP call, so a jar entry `CookieParam` will not
+   take was reported as a bare type with no step attached. `_translated` is its
+   sync sibling — it reuses `_failed`, so there is one phrasing of "which step,
+   which type" and not a second, and it raises outside the `except` for the same
+   chaining reason. `TestEveryReasonAHandOffCanReport` grew a fifth node, whose
+   double's own message carries a secret so the PII rule is asserted on this
+   path too.
+3. **The timeout's `raise … from None` now carries its argument** in
+   `_seed_cookies_over_cdp`'s docstring, beside the PII paragraph — because it
+   is the one such line in this finding that is NOT the PII discipline. What it
+   suppresses is a `ToolError` this tree wrote, naming a budget and an instance
+   id and never a cookie; it is written for the reader, so a chained
+   `HandoffError` among three does not invite the question of whether Chrome's
+   answer travels with it.
+
 ## 12. Residuals
 
 Everything in §9 still stands. In addition:
@@ -585,9 +622,10 @@ Everything in §9 still stands. In addition:
   the process table for a state that is nearly always fine — `check_source`
   exists to remove exactly that. The message itself is identical and
   self-explanatory either way; only the prefix differs.
-* **One extra process-table walk per named spawn** (§10.1a), the price of
-  `--from default`'s hand-off. Pinned exactly so a third ask cannot appear
-  unnoticed.
+* **A spawn this backend CAN hand a jar to pays one process-table walk**
+  (§10.1a) — the shared profile's liveness, asked behind the free `driven`
+  witness so no other spawn pays it. Pinned from both sides, so neither the
+  order nor a third ask can move unnoticed.
 * **The control node does not assert that the COPY carries the persistent
   cookie**, only that it cannot carry the session one. When Chrome commits a
   persistent cookie to the SQLite jar is Chrome's business — there is a lazy

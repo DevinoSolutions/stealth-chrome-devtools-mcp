@@ -491,6 +491,20 @@ async def _seed_cookies_over_cdp(
     command whose parameters were the jar itself. This is the one place in the
     tree where F-869's convenience is declined on purpose, and it is declined
     because the payload here is credentials rather than page shape.
+
+    **The timeout's ``raise … from None`` is the one place that discipline does
+    NOT apply, and it says so rather than being copied** (review N2). What it
+    suppresses is a ``ToolError`` THIS TREE wrote — ``rt._with_cdp_timeout``'s,
+    whose text names a budget and an instance id and can never name a cookie —
+    so unlike ``cookie_handoff._step``'s identical-looking line it is not
+    hiding a payload, and the reason is simply that the replacement says
+    strictly more than the thing it replaces. Keeping the chain would cost
+    nothing either: the ``HandoffError`` is caught by the handler two lines
+    below, which reads ``failure(exc)`` and never a ``__context__``, so no
+    traceback is built from it. ``from None`` is written for the READER — this
+    module raises three ``HandoffError``s here and a chained one among them
+    would invite exactly the question of whether Chrome's answer travels with
+    it.
     """
     source_dir = profile_selection.get(rt.clone_storage.LIVE_SEED_KEY)
     if not source_dir:

@@ -61,14 +61,22 @@ COOKIE_JAR = "Default/Network/Cookies"
 
 
 async def _selection(
-    *, session: str | None = None, seed_from: str | None = None
+    *,
+    session: str | None = None,
+    seed_from: str | None = None,
+    driven=profile_source.NOTHING_DRIVEN,
 ) -> dict:
     """What a spawn resolves to — composed exactly as ``spawn_browser`` does:
     the two gates first (the profile request, then the seed request against
-    its answer), then the ONE resolver."""
+    its answer), then the ONE resolver.
+
+    ``driven`` is F-898's witness and defaults to the fail-closed one, which is
+    what an un-updated caller gets in production too."""
     landed = clone_storage.require_allowed_user_data_dir(None, session)
-    seed = clone_storage.require_allowed_seed_from(seed_from, landed)
-    selection = await clone_storage.resolve_profile_selection(landed, seed_from=seed)
+    seed = clone_storage.require_allowed_seed_from(seed_from, landed, driven=driven)
+    selection = await clone_storage.resolve_profile_selection(
+        landed, seed_from=seed, driven=driven
+    )
     return clone_storage._public_profile_selection(selection)
 
 
@@ -969,32 +977,47 @@ class TestTheSourceAskIsPaidForTwice:
         )
         assert seen.count("beta") == 1, f"the target is asked about once: {seen}"
 
-    async def test_an_unseeded_named_spawn_walks_once_for_the_shared_session(
+    async def test_an_unseeded_named_spawn_is_unchanged(
         self, monkeypatch, tmp_session_root
     ):
-        """A GUARD, and its number CHANGED once with a reason (F-898 M1).
+        """A GUARD: the flag must not cost — or save — anything on the spawn
+        that never writes `seed_from`.
 
-        Under F-897 this was `["beta"]` — the flag cost the unseeded spawn
-        nothing, because an unset `seed_from` took an early return that asked no
-        witness at all. That early return is exactly what made `--from default`
-        a silent no-op: `default` is the session a human logs in to, its browser
-        normally survives (F-888), and while it runs the seed is never
-        refreshed, so the one source whose jar most needed handing over was the
-        one nothing ever asked about.
-
-        The price of fixing that is ONE extra walk on the shared profile per
-        named spawn, and it is asserted EXACTLY — one `master`, not two — so a
-        future change that asks the same question again has to come through
-        here. It buys the hand-off on the commonest spawn there is, against a
-        path that is about to launch a whole Chrome.
+        It survived F-898 with its number intact, but not for free and not by
+        accident. F-898 gave `default` a hand-off, which needs to know whether
+        the shared session is running AND whether we drive it — and asked in
+        that order, every named spawn paid a psutil walk of the whole process
+        table to discover that it is not ours. `_default_source` asks the
+        SNAPSHOT first (a lookup this spawn already has) and the walk only
+        behind it, so the cost lands on the spawn that can actually receive a
+        hand-off and nowhere else. This node is what keeps that order honest:
+        put the walk first and it reads `["beta", "master"]`.
         """
         seen = self._counted(monkeypatch)
 
         await _selection(session="beta")
 
-        assert seen == ["beta", "master"], (
-            "the target, then the shared session ONCE — the second is F-898's "
-            f"witness for a hand-off from `default`: {seen}"
+        assert seen == ["beta"], (
+            "the TARGET only — F-898's `default` witness must short-circuit on "
+            f"the free `driven` lookup before it walks the process table: {seen}"
+        )
+
+    async def test_a_spawn_that_can_receive_a_handoff_does_pay_the_walk(
+        self, monkeypatch, tmp_session_root
+    ):
+        """The other half of the node above, and it is not decoration.
+
+        A short-circuit that never reaches `held` would pass that assertion by
+        answering the question WRONG — the shared session's liveness would stop
+        being consulted at all. So this pins the conjunction from the other
+        side: once `driven` says yes, the walk happens, exactly once.
+        """
+        seen = self._counted(monkeypatch)
+
+        await _selection(session="gamma", driven=lambda _path: True)
+
+        assert seen == ["gamma", "master"], (
+            f"the target, then the shared session ONCE, and only here: {seen}"
         )
 
     async def test_the_resolvers_gate_call_skips_the_walk_the_preflight_makes(

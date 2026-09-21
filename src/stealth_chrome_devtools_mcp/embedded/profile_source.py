@@ -269,7 +269,14 @@ def _default_source(
     """
     default = profile_seed.DEFAULT_SESSION
     if roots.seed.exists():
-        live = roots.shared if held(roots.shared) and driven(roots.shared) else None
+        # ``driven`` FIRST, and the order is the whole cost of this branch
+        # (F-898 review round 2): ``driven`` is a lookup in a snapshot this
+        # spawn already took, while ``held`` is a psutil walk of every process
+        # on the machine. Asked the other way round, EVERY named spawn paid
+        # that walk to discover the shared session is not one of ours; asked
+        # this way, only a spawn that can actually receive a hand-off pays it.
+        # The conjunction is unchanged, so the answer is byte-identical.
+        live = roots.shared if driven(roots.shared) and held(roots.shared) else None
         return SeedSource(roots.seed, "explicit-default-seed", live)
     if held(roots.shared):
         raise ToolError(

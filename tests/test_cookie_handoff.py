@@ -804,13 +804,14 @@ class TestWhatTheSpawnReports:
 
 
 class TestEveryReasonAHandOffCanReport:
-    """The four failures that are REPORTED rather than raised, each named.
+    """The five failures that are REPORTED rather than raised, each named.
 
-    Every one of these was unreachable from the pins (review S1/S2/S3), and one
-    of them — the source no longer being driven — is the observable end of the
-    single design decision §11 flags for a reviewer: the snapshot is re-derived
-    at the moment of use precisely so a source that went away becomes a reported
-    degradation. The report was the untested half.
+    Four of them were unreachable from the pins (review S1/S2/S3) and the fifth
+    is review N1's, the step that makes no CDP call. One — the source no longer
+    being driven — is the observable end of the single design decision §11 flags
+    for a reviewer: the snapshot is re-derived at the moment of use precisely so
+    a source that went away becomes a reported degradation. The report was the
+    untested half.
 
     Each node asserts the SENTENCE, because the value of these is entirely in
     what an operator is told; `NOT carried (ToolError)` is a correct field and a
@@ -877,7 +878,29 @@ class TestEveryReasonAHandOffCanReport:
         assert reason == "the hand-off did not finish inside the CDP timeout"
         assert "ToolError" not in reason
 
-    async def test_e_no_reported_reason_ever_carries_a_cookie(
+    async def test_e_a_translation_failure_names_the_step_that_is_no_round_trip(
+        self, call_tool, patched_server, monkeypatch
+    ):
+        """Review N1. The one step of a hand-off that makes no CDP call is the
+        one whose failure had no step on it: a jar entry nodriver's
+        ``CookieParam`` will not take fails BETWEEN ``Storage.getCookies`` and
+        ``Storage.setCookies``, and the operator was told a bare type name.
+        ``_translated`` gives it the same "which step, which type" shape the two
+        round trips already had — and the entry it choked on still never
+        appears, which is why the double's own message carries a secret."""
+
+        class _Untranslatable:
+            def __getattr__(self, name):
+                raise AttributeError(f"no {name} on {SESSION_COOKIE['value']}")
+
+        result = await _spawn_with_live_seed(
+            call_tool, patched_server, monkeypatch, jar=[_Untranslatable()]
+        )
+        assert self._reason(result) == "AttributeError from CookieParam translation"
+        _no_secret_in(result)
+        _no_secret_in(debug_logger.get_debug_view())
+
+    async def test_f_no_reported_reason_ever_carries_a_cookie(
         self, call_tool, patched_server, monkeypatch
     ):
         """The PII rule over the four new paths at once — a reason is composed

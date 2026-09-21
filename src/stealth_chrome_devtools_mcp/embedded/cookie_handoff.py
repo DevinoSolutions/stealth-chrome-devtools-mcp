@@ -94,6 +94,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 READ_METHOD = "Storage.getCookies"
 WRITE_METHOD = "Storage.setCookies"
 
+#: The one step of a hand-off that is NOT a CDP round trip, named in the same
+#: breath as the two that are — see :func:`_translated` (review N1).
+TRANSLATE_STEP = "CookieParam translation"
+
 #: The word recorded for a seed taken this way, and the value
 #: ``spawn_diagnostics.profile_selection.seeded_via`` reports on success.
 VIA_CDP = "cdp-cookies"
@@ -259,6 +263,32 @@ async def _step(method: str, awaitable: Awaitable[_T]) -> _T:
     raise failure_to_raise from None
 
 
+def _translated(jar: Sequence["Cookie"]) -> list["CookieParam"]:
+    """:func:`params`, under ``_step``'s naming discipline and without an await.
+
+    The translation is the one step of a hand-off that is not a round trip, and
+    it was the one step with no name on its failure (review N1): a cookie whose
+    field nodriver's ``CookieParam`` will not take raises HERE, between the two
+    CDP calls, and the caller reported it as a bare type — the same diagnostic
+    gap ``_step`` exists to close, one statement away from it. It reuses
+    ``_failed``, so there is ONE phrasing of "which step, which type" and not a
+    second one, and raises OUTSIDE the ``except`` for ``_failed``'s own reason:
+    a chained ``__context__`` is a second door onto whatever the failing cookie
+    put in the original message.
+
+    A sync sibling rather than a third argument to ``_step``, which takes an
+    awaitable: wrapping this in a coroutine to reach that function would add a
+    round trip's shape to something that makes none.
+    """
+    failure_to_raise: HandoffError | None = None
+    try:
+        return params(jar)
+    except Exception as error:  # noqa: BLE001  PERMANENT(F-898): every failure becomes one shape-only report
+        failure_to_raise = _failed(TRANSLATE_STEP, error)
+        del error
+    raise failure_to_raise from None
+
+
 class Handoff(NamedTuple):
     """What the hand-off moved, in counts and nothing else.
 
@@ -297,7 +327,7 @@ async def hand_off(source: "Browser", target: "Browser") -> Handoff:
     rather than of something sent.
     """
     jar = await _step(READ_METHOD, read_jar(source))
-    outgoing = params(jar)
+    outgoing = _translated(jar)
     await _step(WRITE_METHOD, write_jar(target, outgoing))
     landed = await _step(READ_METHOD, read_jar(target))
     return Handoff(
