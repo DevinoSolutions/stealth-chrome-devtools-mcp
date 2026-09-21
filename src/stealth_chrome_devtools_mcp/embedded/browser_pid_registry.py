@@ -138,7 +138,7 @@ def new_entry(  # noqa: PLR0913  PERMANENT(one parameter per recorded field; fol
     spawned, and nothing else on disk necessarily has it: it lives in
     ``browser.config.port``, in memory, in the process that dies. It defaults to
     None so a caller that cannot learn it records the absence rather than a lie —
-    ``browser_reattach.endpoint`` then falls back to the holder's command line
+    ``cdp_attach.endpoint`` then falls back to the holder's command line
     and, after that, to Chrome's own ``DevToolsActivePort``, which is also what
     serves every entry written before this release.
 

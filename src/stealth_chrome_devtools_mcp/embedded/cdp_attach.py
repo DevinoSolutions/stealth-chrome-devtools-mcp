@@ -16,6 +16,29 @@ launches Chrome; with both set it takes ``connect_existing`` and never reaches
 ``create_subprocess_exec``. A pin reads ``desktop_launch``'s source and fails if
 ``config.host =`` or ``uc.start(`` comes back into it.
 
+**The address, three witnesses in order of trust** (:func:`endpoint`, moved here
+from ``browser_reattach`` by F-916):
+
+* the port the RECORD carries (``cdp_port``, written at track time since 2.1.10);
+* ``--remote-debugging-port=`` on that pid's command line, which is what nodriver
+  passed it (``Config.__call__`` appends the flag from ``config.port``);
+* ``<user_data_dir>/DevToolsActivePort``, whose first line is the port Chrome
+  actually bound.
+
+The last two exist for entries — and processes — that name no port themselves:
+2.1.8/2.1.9 recorded none at all, and those are precisely the browsers carrying
+today's stranded logins. The recorded port leads because a record WE wrote is
+about THIS instance. The command line comes next because it is definitionally
+the live process's, while ``DevToolsActivePort`` is a file that outlives the
+browser that wrote it — and measured on the stranded Seller Central Chrome
+(pid 115652, ``--remote-debugging-port=9223``) the file was **absent** while the
+browser ran, so a file-first ladder would have found nothing. The file still
+earns its rung: ``--remote-debugging-port=0`` gives a command line
+:func:`browser_pid_registry.valid_port` rejects as "not bound yet", and the file
+is where Chrome wrote the port it resolved that to. It lives beside the door
+rather than beside the classifier because a door nobody can address is not a
+door, and both of ``browser_reattach``'s entry points ask for it.
+
 ``CDP_HOST`` is a constant rather than an argument because both launch paths
 already fix ``127.0.0.1``: nodriver hard-codes it when it spawns, and the
 delegated path spelled the same literal. A browser reachable on some other
@@ -31,8 +54,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from stealth_chrome_devtools_mcp.embedded import browser_cmdline, browser_pid_registry
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -42,6 +67,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # on the spawn path, the literal ``desktop_launch.launch_and_attach`` used to
 # carry on the delegated one), so the endpoint is a port and the host is a fact.
 CDP_HOST = "127.0.0.1"
+
+# Chrome writes the port it actually bound here, first line, inside the profile
+# it was launched on. The second line is the browser websocket path, which we do
+# not use — nodriver builds its own from host and port.
+DEVTOOLS_PORT_FILE = "DevToolsActivePort"
 
 # Strong references to the closers `_close_late` starts; see there.
 _late_closers: set[asyncio.Task] = set()
@@ -180,3 +210,39 @@ def _tabs(browser: Browser) -> tuple:
             f"closing the browser connection only",
         )
         return ()
+
+
+def endpoint(entry: browser_pid_registry.Entry) -> int | None:
+    """The CDP port of the browser *entry* describes, or None.
+
+    Three witnesses, most trusted first (see the module docstring). Each one is
+    re-checked as an int in range rather than trusted: the record tolerates a
+    hand edit, a command line is whatever the process says it is, and
+    ``DevToolsActivePort`` survives the browser that wrote it.
+    """
+    recorded = browser_pid_registry.recorded_port(entry)
+    if recorded is not None:
+        return recorded
+
+    profile_dir = entry.get("user_data_dir")
+    expect = profile_dir if isinstance(profile_dir, str) and profile_dir else None
+
+    pid = entry.get("pid")
+    if isinstance(pid, int):
+        from_cmdline = browser_cmdline.debug_port(pid, expect)
+        if from_cmdline is not None:
+            return from_cmdline
+
+    if expect is not None:
+        return _port_from_profile(Path(expect))
+    return None
+
+
+def _port_from_profile(profile_dir: Path) -> int | None:
+    """Chrome's own ``DevToolsActivePort``, first line, or None."""
+    try:
+        first = (profile_dir / DEVTOOLS_PORT_FILE).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    lines = first.splitlines()
+    return browser_pid_registry.valid_port(lines[0] if lines else "")

@@ -1,0 +1,476 @@
+"""Pins for F-916 / F-917 / F-918 — one sentence, read three ways.
+
+**An answer we could not establish must resolve toward NOT KILLING.** Startup
+orphan recovery runs on every backend cold start and the thing it is deciding
+about may be a human's logged-in Chrome, so each of the three places this lane
+touches had the same shape: a witness that could not be read, and a fall-through
+to the kill.
+
+* **F-916** — the CLASSIFICATION. ``browser_reattach._adoptable_entry`` answered
+  a bare ``None`` both for "this is not adoptable" and for "we could not
+  establish whether it is", so a persistent entry we merely could not reach fell
+  outside ``Classified.spare`` and was reaped.
+* **F-917** — the KILL SET. The reap is matched by ``user_data_dir`` while the
+  spare is matched by ``instance_id``, so one stale entry's reap killed a browser
+  another entry had just protected.
+* **F-918** — the ACT. ``_kill_process_by_pid`` logged "Could not verify process"
+  from a blanket ``except`` and then terminated the pid anyway.
+
+Hermetic throughout: the record is a ``tmp_path`` file, both liveness witnesses
+are injected, psutil is patched, and **nothing here may terminate a real
+process** — every pin that reaches the kill path asserts on a recorded call, not
+on a dead pid. ``_sweep_orphaned_temp_profiles`` is patched out wherever
+``recover_orphans`` is driven: its glob reaches the real ``%TEMP%``, which on
+this machine holds other agents' Chrome profiles.
+"""
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import psutil
+import pytest
+
+from stealth_chrome_devtools_mcp.embedded import browser_cmdline, browser_reattach
+from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
+
+DEAD_OWNER = 9001
+LIVE_CHROME = 7777
+DEAD_CHROME = 7778
+PORT = 51234
+
+
+def _entry(
+    *,
+    pid=LIVE_CHROME,
+    owner_pid=DEAD_OWNER,
+    user_data_dir=r"C:\profiles\seller-central",
+    auto_clone=False,
+    uses_custom_data_dir=True,
+    cdp_port=PORT,
+    create_time=1700000000.0,
+):
+    """One recorded browser, in the shape ``normalize_entries`` yields.
+
+    ``cdp_port=None`` is the 2.1.8/2.1.9 record shape — the population the audit
+    names as carrying today's stranded logins.
+    """
+    return {
+        "pid": pid,
+        "create_time": create_time,
+        "user_data_dir": user_data_dir,
+        "uses_custom_data_dir": uses_custom_data_dir,
+        "auto_clone": auto_clone,
+        "cdp_port": cdp_port,
+        "timestamp": 0,
+        "owner_pid": owner_pid,
+        "owner_create_time": 1699999000.0,
+    }
+
+
+def _owner_alive(_pid, _create_time):
+    """No backend of ours is alive — every entry here is an orphan to recover."""
+    return False
+
+
+def _browser_alive(pid, _create_time):
+    """Only LIVE_CHROME is still the Chrome its entry recorded."""
+    return pid == LIVE_CHROME
+
+
+def _recorded_browser_alive(_cleanup, pid, _create_time):
+    """``browser_reattach.recorded_browser_alive``'s shape: cleanup comes first."""
+    return pid == LIVE_CHROME
+
+
+def _cleanup(tmp_path: Path) -> ProcessCleanup:
+    """A ProcessCleanup whose record is in tmp_path, built without __init__."""
+    pc = ProcessCleanup.__new__(ProcessCleanup)
+    pc.pid_file = tmp_path / "browser_pids.json"
+    pc.tracked_pids = set()
+    pc.browser_processes = {}
+    pc.orphan_profile_max_age_seconds = 0
+    pc._init_time = 1700000100.0
+    return pc
+
+
+def _seed(path: Path, entries: dict) -> None:
+    path.write_text(json.dumps({"browser_processes": entries, "timestamp": 0}))
+
+
+def _read(path: Path) -> dict:
+    return json.loads(path.read_text())["browser_processes"]
+
+
+def _unreachable(monkeypatch) -> None:
+    """No CDP endpoint is recoverable for any pid — the F-916 population.
+
+    Both live rungs of the endpoint ladder are closed: the command line answers
+    nothing (what a psutil ``AccessDenied`` on ``cmdline()`` leaves), and the
+    ``DevToolsActivePort`` rung reads a directory with no such file in it.
+    """
+    monkeypatch.setattr(browser_cmdline, "debug_port", lambda _pid, _expect=None: None)
+
+
+# ---------------------------------------------------------------------------
+# F-916 — an entry we could not CLASSIFY is reaped
+# ---------------------------------------------------------------------------
+
+
+class TestUnclassifiableEntryIsSpared:
+    """A persistent entry that is merely UNREACHABLE must land in ``.spare``.
+
+    ``.spare`` is what startup recovery skips. The three conditions pinned here
+    are the three ways ``_adoptable_entry`` can fail to ESTABLISH an answer for
+    an entry it has already agreed is persistent; each used to answer the same
+    bare ``None`` a disposable auto-clone answers, which is the one shape that
+    means "reap me".
+    """
+
+    def test_no_recoverable_endpoint_is_spared(self, tmp_path, monkeypatch):
+        """F-916's measured population: a 2.1.8/2.1.9 record with no ``cdp_port``.
+
+        The browser is ALIVE and on a persistent profile — it is exactly the
+        stranded login F-888 exists to hand over — and the only thing we could
+        not do is find a door into it.
+        """
+        _unreachable(monkeypatch)
+        entry = _entry(cdp_port=None, user_data_dir=str(tmp_path / "seller-central"))
+
+        classified = browser_reattach.adoptable(
+            {"i-1": entry}, owner_alive=_owner_alive, browser_alive=_browser_alive
+        )
+
+        assert "i-1" not in classified.adoptable, "unreachable is not adoptable"
+        assert "i-1" in classified.spare, "but it must not be reaped either"
+
+    def test_missing_create_time_is_spared(self, tmp_path, monkeypatch):
+        """An entry too old to carry a ``create_time`` cannot prove its pid.
+
+        Adoption refuses it deliberately (taking over a stranger's chrome.exe on
+        a recycled pid is worse than not adopting), but "we cannot prove whose
+        pid this is" is not a licence to END it.
+        """
+        _unreachable(monkeypatch)
+        entry = _entry(create_time=None, user_data_dir=str(tmp_path / "seller-central"))
+
+        classified = browser_reattach.adoptable(
+            {"i-1": entry}, owner_alive=_owner_alive, browser_alive=_browser_alive
+        )
+
+        assert "i-1" not in classified.adoptable
+        assert "i-1" in classified.spare
+
+    def test_unreadable_entry_shape_is_spared(self, tmp_path, monkeypatch):
+        """A persistent entry whose pid is not an int tells us nothing at all."""
+        _unreachable(monkeypatch)
+        entry = _entry(user_data_dir=str(tmp_path / "seller-central"))
+        entry["pid"] = "not-a-pid"
+
+        classified = browser_reattach.adoptable(
+            {"i-1": entry}, owner_alive=_owner_alive, browser_alive=_browser_alive
+        )
+
+        assert "i-1" not in classified.adoptable
+        assert "i-1" in classified.spare
+
+    def test_a_disposable_auto_clone_is_still_reaped(self, tmp_path, monkeypatch):
+        """The other direction, and it is what keeps the record from growing.
+
+        "Not persistent" is an answer we DID establish, so it stays outside
+        ``.spare``. Without this the fix would spare everything and startup
+        recovery would never reap anything again.
+        """
+        _unreachable(monkeypatch)
+        entry = _entry(
+            auto_clone=True,
+            uses_custom_data_dir=True,
+            user_data_dir=str(tmp_path / "uc_throwaway"),
+        )
+
+        classified = browser_reattach.adoptable(
+            {"i-1": entry}, owner_alive=_owner_alive, browser_alive=_browser_alive
+        )
+
+        assert "i-1" not in classified.spare
+
+    def test_a_dead_browser_is_still_reaped(self, tmp_path, monkeypatch):
+        """So is an entry whose Chrome is provably gone — also an ESTABLISHED
+        answer, and the one that lets a dead entry leave the record at all."""
+        _unreachable(monkeypatch)
+        entry = _entry(pid=DEAD_CHROME, user_data_dir=str(tmp_path / "seller-central"))
+
+        classified = browser_reattach.adoptable(
+            {"i-1": entry}, owner_alive=_owner_alive, browser_alive=_browser_alive
+        )
+
+        assert "i-1" not in classified.spare
+
+    def test_recovery_does_not_kill_the_unreachable_browser(
+        self, tmp_path, monkeypatch
+    ):
+        """The harm itself, at the one call site: ``recover_orphans``.
+
+        Not a classification assertion — the browser's pid must not reach the
+        kill path on a plain backend cold start.
+        """
+        _unreachable(monkeypatch)
+        profile = tmp_path / "seller-central"
+        profile.mkdir()
+        pc = _cleanup(tmp_path)
+        _seed(pc.pid_file, {"i-1": _entry(cdp_port=None, user_data_dir=str(profile))})
+
+        killed: list[int] = []
+        with (
+            patch.object(pc, "_owner_backend_alive", _owner_alive),
+            patch.object(
+                browser_reattach, "recorded_browser_alive", _recorded_browser_alive
+            ),
+            patch.object(pc, "_sweep_orphaned_temp_profiles"),
+            patch.object(
+                pc, "_get_browser_pids_for_profile", return_value={LIVE_CHROME}
+            ),
+            patch.object(
+                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+            ),
+        ):
+            pc.recover_orphans()
+
+        assert killed == [], "a browser we could not reach must be left running"
+        assert "i-1" in _read(pc.pid_file), "and left recorded, or nothing names it"
+
+
+# ---------------------------------------------------------------------------
+# F-917 — the reap is DIRECTORY-matched while the spare is INSTANCE-ID-matched
+# ---------------------------------------------------------------------------
+
+
+class TestReapDoesNotCrossTheSpare:
+    """One stale entry's reap must not kill a browser another entry protected."""
+
+    def test_stale_entry_does_not_kill_a_spared_siblings_browser(self, tmp_path):
+        """Two entries, ONE directory — the shared profile, i.e. the master.
+
+        ``i-live`` is adoptable and therefore spared. ``i-stale`` names a Chrome
+        that is gone, so it is reaped — and its kill set is built by scanning the
+        DIRECTORY, which finds ``i-live``'s browser. Before F-917 the reap of the
+        dead entry ended the live one.
+
+        The recovery start-time fence is deliberately let THROUGH (the patched
+        ``create_time`` predates ``_init_time``): that fence is what hides this
+        on a machine where the pid happens to be absent, and a pin it satisfies
+        would read green without the fix.
+        """
+        profile = tmp_path / "master"
+        profile.mkdir()
+        pc = _cleanup(tmp_path)
+        _seed(
+            pc.pid_file,
+            {
+                "i-live": _entry(pid=LIVE_CHROME, user_data_dir=str(profile)),
+                "i-stale": _entry(pid=DEAD_CHROME, user_data_dir=str(profile)),
+            },
+        )
+        before_init = MagicMock()
+        before_init.create_time.return_value = pc._init_time - 50.0
+
+        killed: list[int] = []
+        with (
+            patch.object(pc, "_owner_backend_alive", _owner_alive),
+            patch.object(
+                browser_reattach, "recorded_browser_alive", _recorded_browser_alive
+            ),
+            patch.object(pc, "_sweep_orphaned_temp_profiles"),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process",
+                return_value=before_init,
+            ),
+            # The directory scan is what the defect is about: it answers with
+            # every browser on that profile, the spared one included.
+            patch.object(
+                pc, "_get_browser_pids_for_profile", return_value={LIVE_CHROME}
+            ),
+            patch.object(
+                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+            ),
+        ):
+            pc.recover_orphans()
+
+        assert LIVE_CHROME not in killed, (
+            "the spared entry's browser was killed by its stale sibling's reap"
+        )
+        assert "i-live" in _read(pc.pid_file), "and the spared entry stays recorded"
+
+    def test_protected_pids_are_filtered_from_every_kill_path(self, tmp_path):
+        """The filter sits at the ONE place the kill set is finally spent.
+
+        Both ways a pid can get into that set — the directory scan and the
+        recorded fallback pid — pass through it, so neither can grow a second
+        answer to "is this one protected".
+        """
+        pc = _cleanup(tmp_path)
+        metadata = _entry(pid=LIVE_CHROME, user_data_dir=str(tmp_path / "master"))
+
+        killed: list[int] = []
+        with (
+            patch.object(
+                pc, "_get_browser_pids_for_profile", return_value={LIVE_CHROME}
+            ),
+            patch.object(
+                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+            ),
+        ):
+            pc._kill_processes_for_metadata(
+                "i-stale",
+                metadata,
+                recovery=False,
+                protected_pids=frozenset({LIVE_CHROME}),
+            )
+
+        assert killed == []
+
+    def test_an_unprotected_pid_on_the_directory_is_still_killed(self, tmp_path):
+        """The filter is a subtraction, not a switch — everything else still goes."""
+        pc = _cleanup(tmp_path)
+        metadata = _entry(pid=DEAD_CHROME, user_data_dir=str(tmp_path / "master"))
+
+        killed: list[int] = []
+        with (
+            patch.object(
+                pc,
+                "_get_browser_pids_for_profile",
+                return_value={LIVE_CHROME, DEAD_CHROME},
+            ),
+            patch.object(
+                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+            ),
+        ):
+            pc._kill_processes_for_metadata(
+                "i-stale",
+                metadata,
+                recovery=False,
+                protected_pids=frozenset({LIVE_CHROME}),
+            )
+
+        assert killed == [DEAD_CHROME]
+
+
+# ---------------------------------------------------------------------------
+# F-918 — an UNVERIFIABLE process is terminated
+# ---------------------------------------------------------------------------
+
+
+class TestUnverifiableProcessIsNotKilled:
+    """``_kill_process_by_pid`` must refuse a pid it could not identify."""
+
+    @staticmethod
+    def _proc(*, name_raises=None, name="chrome.exe"):
+        proc = MagicMock()
+        if name_raises is not None:
+            proc.name.side_effect = name_raises
+        else:
+            proc.name.return_value = name
+        return proc
+
+    @pytest.mark.parametrize(
+        "unreadable",
+        [
+            psutil.AccessDenied(1234),
+            OSError("handle is invalid"),
+        ],
+        ids=["access-denied", "oserror"],
+    )
+    def test_an_unreadable_name_refuses_the_kill(self, tmp_path, unreadable):
+        """Windows answers ``AccessDenied`` on ``.name()`` for a process we may
+        not open. Before F-918 that log line was followed by ``terminate()``."""
+        pc = _cleanup(tmp_path)
+        proc = self._proc(name_raises=unreadable)
+
+        with (
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.pid_exists",
+                return_value=True,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process",
+                return_value=proc,
+            ),
+        ):
+            killed = pc._kill_process_by_pid(1234, "i-unknown")
+
+        assert killed is False, "an unidentified pid must not count as reaped"
+        proc.terminate.assert_not_called()
+        proc.kill.assert_not_called()
+
+    def test_a_zombie_reads_as_gone_rather_than_as_unreadable(self, tmp_path):
+        """A zombie is an EXITED process, not an unreadable one.
+
+        ``psutil.ZombieProcess`` subclasses ``NoSuchProcess``, so it lands on
+        the "gone" rung — which is the right answer and not an accident:
+        ``process_exit`` carries the measured argument that such a process has
+        already closed its files and committed its cookie store. Nothing to
+        kill, and the reap counts as done.
+
+        This one is UNCHANGED by F-918 and is pinned because it looks like it
+        should have changed: measured on the pre-fix source, a zombie already
+        reached ``except psutil.NoSuchProcess`` — which is listed BEFORE the
+        blanket handler — and answered True without terminating. Only
+        ``AccessDenied`` and a plain ``OSError`` fell through to the kill.
+        """
+        pc = _cleanup(tmp_path)
+        proc = self._proc(name_raises=psutil.ZombieProcess(1234))
+
+        with (
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.pid_exists",
+                return_value=True,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process",
+                return_value=proc,
+            ),
+        ):
+            killed = pc._kill_process_by_pid(1234, "i-zombie")
+
+        assert killed is True
+        proc.terminate.assert_not_called()
+
+    def test_a_verified_browser_is_still_killed(self, tmp_path):
+        """The refusal is about the UNREADABLE answer only."""
+        pc = _cleanup(tmp_path)
+        proc = self._proc(name="chrome.exe")
+
+        with (
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.pid_exists",
+                return_value=True,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process",
+                return_value=proc,
+            ),
+        ):
+            killed = pc._kill_process_by_pid(1234, "i-known")
+
+        assert killed is True
+        proc.terminate.assert_called_once()
+
+    def test_a_non_browser_name_is_still_refused(self, tmp_path):
+        """And the guard that already worked keeps working."""
+        pc = _cleanup(tmp_path)
+        proc = self._proc(name="explorer.exe")
+
+        with (
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.pid_exists",
+                return_value=True,
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process",
+                return_value=proc,
+            ),
+        ):
+            killed = pc._kill_process_by_pid(1234, "i-stranger")
+
+        assert killed is False
+        proc.terminate.assert_not_called()

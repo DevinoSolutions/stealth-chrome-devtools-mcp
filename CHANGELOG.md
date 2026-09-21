@@ -578,6 +578,75 @@ out of nothing.
 Known gaps and the one defect these pins caught in the fix itself are in
 `audit/stage2/finding_F910_cookie_lost_on_close.md` §5.1 and §7.
 
+### Fixed — F-916 / F-917 / F-918: startup recovery no longer kills what it could not establish
+
+Three defects on one path, and one sentence holds them: **an answer we could not
+establish must resolve toward NOT killing.** Startup orphan recovery runs on
+every backend cold start, and what it decides about may be a human's logged-in
+Chrome — the one piece of state reconnecting cannot rebuild, because a killed
+browser does not flush its session.
+
+**F-916 — an entry we could not CLASSIFY was reaped.**
+`browser_reattach._adoptable_entry` answered a bare `None` both for "this is not
+one to adopt" and for "we could not establish whether it is", so an entry that
+is alive, ours and on a PERSISTENT profile fell outside `Classified.spare` and
+was killed. Measured on the pre-fix source, five different entries produced one
+verdict: a 2.1.8/2.1.9 record carrying no `cdp_port`, one with no `create_time`
+and one with an unreadable `pid` were all `REAPED`, indistinguishable from a
+disposable auto-clone and from a Chrome that is provably gone. The first of
+those is not hypothetical — 2.1.8/2.1.9 recorded no port at all, and those are
+the records holding today's stranded logins. Those three now answer
+`reap_guard.UNDECIDED` and land in `.spare`: not adopted, and not ended.
+"The Chrome this entry names is gone" stays a DECISION, so a dead entry can
+still leave the record and `browser_pids.json` cannot grow without bound.
+
+**F-917 — the reap was DIRECTORY-matched while the spare was INSTANCE-ID-matched.**
+Recovery skips by `instance_id` and the reap it then performs kills every
+browser on the entry's `user_data_dir`, so on a SHARED profile — which is what
+the master is — one stale entry's reap reached a browser another entry had just
+been spared for. Measured: with `i-live` (pid 7777, adoptable, spared) and
+`i-stale` (pid 7778, Chrome gone) on one directory, the reap of `i-stale` called
+the kill path **with pid 7777**, and the record still listed `i-live`
+afterwards — so the record claimed a live adoptable browser whose process had
+just been ended. The spared entries' pids now travel with the spare and are
+subtracted at the one place the kill set is spent. The same filter is applied to
+`browser_reattach.run`'s failed-adoption reap, which had the shape from the
+other door.
+
+**F-918 — an UNVERIFIABLE process was terminated.** `_kill_process_by_pid`
+logged "Could not verify process {pid}" from a blanket `except` and then fell
+through to `terminate()`. Measured: a `psutil.AccessDenied` on `.name()` — what
+Windows answers for a process this account may not open — and a plain `OSError`
+both terminated the pid and returned `True`, so the caller counted an
+unidentified process as successfully reaped and dropped its record entry. Both
+now refuse and answer `False`, with a line that states the decision. A zombie
+was already correct (`ZombieProcess` subclasses `NoSuchProcess`) and is
+unchanged; it is pinned because it looks like it should have changed.
+
+This makes orphan recovery uniform with the two places in the tree that already
+resolved an unreadable witness toward safety — `spawn_leak._started_after` and
+`profile_lock._browser_pids`.
+
+**What it costs, stated rather than hidden:** a browser we can neither adopt nor
+reap is left running and left recorded, and an orphan whose pid we cannot
+identify is left alone. Both are bounded — the entry is re-classified on every
+later cold start and is reaped the moment its Chrome actually exits — and
+`kill-orphans --force` still skips the whole classification by design. A leaked
+Chrome is recoverable; a login is not.
+
+New leaf `embedded/reap_guard.py` carries the rule and its three pieces
+(`UNDECIDED`, `spared_pids`, `killable`). Two files were at their LOC caps and
+caps ratchet down only, so each fix paid for itself: the CDP **endpoint ladder**
+moved out of `browser_reattach` into `cdp_attach` — beside the door that spends
+it — taking that file 999 → 988, and `_kill_process_by_pid`'s two near-identical
+escalation rungs became one table, taking `process_cleanup` 1009 → 1007 with its
+grandfather row ratcheted to match. No behaviour changed in either move.
+
+Full measurements, the before/after tables and the residuals are in
+`audit/stage2/finding_F916_unclassifiable_entry_is_reaped.md`,
+`…finding_F917_reap_matches_directory_while_spare_matches_instance.md` and
+`…finding_F918_unverifiable_process_is_terminated.md`.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in

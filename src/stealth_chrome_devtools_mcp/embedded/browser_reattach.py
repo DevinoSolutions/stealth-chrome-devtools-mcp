@@ -34,30 +34,20 @@ all four hold, asked in cheapest-first order:
    the recorded tolerance, and a Chromium-family process name. Supplied as
    ``browser_alive`` rather than re-implemented, so the recycled-pid tolerance
    has one home (``process_cleanup``).
-4. A CDP endpoint is recoverable for it (:func:`endpoint`). Without a port there
-   is nothing to attach to, and a candidate we cannot reach must be classified
-   as un-adoptable BEFORE the reaper is told to skip it — otherwise a browser we
-   can neither adopt nor reap leaks forever.
+4. A CDP endpoint is recoverable for it (:func:`cdp_attach.endpoint`). Without
+   a port there is nothing to attach to.
 
-**The endpoint ladder** (:func:`endpoint`), three witnesses in order of trust:
+Conditions 1 and 2 are DECISIONS — a live sibling owns it, or its profile is
+disposable — and an entry failing either is the reaper's. Conditions 3 and 4 can
+fail because a witness could not be READ, and for an entry already agreed to be
+PERSISTENT that is not a decision at all: those answer
+:data:`reap_guard.UNDECIDED`, which spares the entry without adopting it
+(F-916). :mod:`reap_guard` carries the rule and names what sparing costs.
 
-* the port this record CARRIES (``cdp_port``, written at track time since 2.1.10);
-* ``--remote-debugging-port=`` on that pid's command line, which is what nodriver
-  passed it (``Config.__call__`` appends the flag from ``config.port``);
-* ``<user_data_dir>/DevToolsActivePort``, whose first line is the port Chrome
-  actually bound.
-
-The last two exist for entries — and processes — that name no port themselves:
-2.1.8/2.1.9 recorded none at all, and those are precisely the browsers carrying
-today's stranded logins. The recorded port leads because a record WE wrote is
-about THIS instance. The command line comes next because it is definitionally
-the live process's, while ``DevToolsActivePort`` is a file that outlives the
-browser that wrote it — and measured on the stranded Seller Central Chrome
-(pid 115652, ``--remote-debugging-port=9223``) the file was **absent** while the
-browser ran, so a file-first ladder would have found nothing. The file still
-earns its rung: ``--remote-debugging-port=0`` gives a command line
-:func:`browser_pid_registry.valid_port` rejects as "not bound yet", and the file
-is where Chrome wrote the port it resolved that to.
+**The address is not here either.** Which PORT to knock on is
+:func:`cdp_attach.endpoint`'s, beside the door that spends it — the
+three-witness ladder this file gave up when F-916 needed a third answer in it
+and the file was at its 1000-LOC cap.
 
 **The door is not here.** Entering a browser that is already running is a
 question ``desktop_launch.launch_and_attach`` had too, so it is ONE leaf with two
@@ -91,6 +81,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_pid_registry,
     cdp_attach,
     desktop_launch,
+    reap_guard,
     tab_identity,
     tool_errors,
     window_sizing,
@@ -107,11 +98,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
     from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
     from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
-
-# Chrome writes the port it actually bound here, first line, inside the profile
-# it was launched on. The second line is the browser websocket path, which we do
-# not use — nodriver builds its own from host and port.
-DEVTOOLS_PORT_FILE = "DevToolsActivePort"
 
 # One adoption's whole CDP budget: the websocket connect plus nodriver's initial
 # target discovery. A browser that has stopped answering must cost this once and
@@ -141,6 +127,10 @@ class Classified:
     Two sets, because "do not reap this" and "attach to this" are different
     answers and conflating them is how an entry we could not classify would be
     handed to the adopter as though we understood it.
+
+    ``unclassifiable`` has two sources meaning the same thing: an entry that
+    made the pass RAISE, and one :data:`reap_guard.UNDECIDED` named because a
+    witness could not be read (F-916).
     """
 
     adoptable: dict[str, Adoptable]
@@ -197,8 +187,12 @@ def adoptable(
             )
             unclassifiable.add(instance_id)
             continue
-        if candidate is not None:
+        if isinstance(candidate, Adoptable):
             found[instance_id] = candidate
+        elif candidate is not None:
+            # UNDECIDED: spared exactly like a raising entry, and for the same
+            # reason — we do not know what this is, and it may be a login.
+            unclassifiable.add(instance_id)
     return Classified(adoptable=found, unclassifiable=unclassifiable)
 
 
@@ -208,17 +202,24 @@ def _adoptable_entry(  # noqa: PLR0911  PERMANENT(one early return per condition
     *,
     owner_alive: Callable[[int, float | None], bool],
     browser_alive: Callable[[int, float | None], bool],
-) -> Adoptable | None:
-    """The four conditions, in the order the module docstring states them."""
+) -> Adoptable | reap_guard.Undecided | None:
+    """The four conditions, in the order the module docstring states them.
+
+    ``None`` is a DECISION: this entry is not one to adopt and the reaper may
+    have it. ``UNDECIDED`` is the absence of one, and the reaper may not.
+    """
     if not browser_pid_registry.is_reapable(entry, owner_alive):
         return None
     if not browser_pid_registry.on_persistent_profile(entry):
         return None
 
+    # Past here the entry IS persistent — a named profile or the shared one,
+    # which is where a human's login lives — so a condition that fails because
+    # a witness could not be READ answers UNDECIDED rather than "reap it".
     pid = entry.get("pid")
     profile_dir = entry.get("user_data_dir")
     if not isinstance(pid, int) or not isinstance(profile_dir, str) or not profile_dir:
-        return None
+        return reap_guard.UNDECIDED
     create_time = browser_pid_registry.recorded_time(entry, "create_time")
     if create_time is None:
         # ADOPTION requires both halves of a pid's identity, where REAPING is
@@ -228,14 +229,23 @@ def _adoptable_entry(  # noqa: PLR0911  PERMANENT(one early return per condition
         # tolerance would let us take over a STRANGER's chrome.exe that happens
         # to hold a recycled pid, stamp our ownership on it and kill it at
         # `close_instance`. An entry too old to carry one is left to the holder
-        # path, which proves identity by the directory instead.
-        return None
+        # path, which proves identity by the directory instead — and, since
+        # F-916, left ALIVE: not adopting it is a decision, ending it is not.
+        return reap_guard.UNDECIDED
     if not browser_alive(pid, create_time):
+        # The one ESTABLISHED negative left, and the one that lets a dead entry
+        # leave the record at all: this pid is not the Chrome the record names,
+        # so there is no browser here to spare. `recorded_browser_alive` does
+        # fold a psutil AccessDenied into this False; what catches THAT is
+        # F-918's guard at the kill itself, which refuses a pid it cannot read.
         return None
 
-    port = endpoint(entry)
+    port = cdp_attach.endpoint(entry)
     if port is None:
-        return None
+        # Alive, ours, persistent — and no door into it. F-916's measured
+        # population: 2.1.8/2.1.9 recorded no `cdp_port`, and those are the
+        # records holding the stranded logins. Un-adoptable, never reapable.
+        return reap_guard.UNDECIDED
     return Adoptable(
         instance_id=instance_id,
         pid=pid,
@@ -243,42 +253,6 @@ def _adoptable_entry(  # noqa: PLR0911  PERMANENT(one early return per condition
         port=port,
         dead_egress=browser_cmdline.dead_local_proxy(pid),
     )
-
-
-def endpoint(entry: browser_pid_registry.Entry) -> int | None:
-    """The CDP port of the browser *entry* describes, or None.
-
-    Three witnesses, most trusted first (see the module docstring). Each one is
-    re-checked as an int in range rather than trusted: the record tolerates a
-    hand edit, a command line is whatever the process says it is, and
-    ``DevToolsActivePort`` survives the browser that wrote it.
-    """
-    recorded = browser_pid_registry.recorded_port(entry)
-    if recorded is not None:
-        return recorded
-
-    profile_dir = entry.get("user_data_dir")
-    expect = profile_dir if isinstance(profile_dir, str) and profile_dir else None
-
-    pid = entry.get("pid")
-    if isinstance(pid, int):
-        from_cmdline = browser_cmdline.debug_port(pid, expect)
-        if from_cmdline is not None:
-            return from_cmdline
-
-    if expect is not None:
-        return _port_from_profile(Path(expect))
-    return None
-
-
-def _port_from_profile(profile_dir: Path) -> int | None:
-    """Chrome's own ``DevToolsActivePort``, first line, or None."""
-    try:
-        first = (profile_dir / DEVTOOLS_PORT_FILE).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    lines = first.splitlines()
-    return browser_pid_registry.valid_port(lines[0] if lines else "")
 
 
 def report(action: str, message: str) -> None:
@@ -333,7 +307,10 @@ def adoptable_for(
 
 
 def reap_recorded(
-    cleanup: ProcessCleanup, instance_id: str, metadata: dict[str, object]
+    cleanup: ProcessCleanup,
+    instance_id: str,
+    metadata: dict[str, object],
+    protected_pids: frozenset[int] = frozenset(),
 ) -> bool:
     """Kill one recorded browser and remove its profile if it is disposable.
 
@@ -343,9 +320,16 @@ def reap_recorded(
     because a new code path spared it. Dropping the ENTRY is the caller's,
     because recovery drops a whole pass in one merge-write.
 
+    *protected_pids* is every pid the caller has already decided to spare. The
+    kill set is built by scanning this entry's DIRECTORY and two entries may
+    legitimately share one, so without it a reap reaches browsers its own caller
+    protected a line earlier (F-917).
+
     Returns True when a process was actually killed.
     """
-    killed = cleanup._kill_processes_for_metadata(instance_id, metadata, recovery=True)
+    killed = cleanup._kill_processes_for_metadata(
+        instance_id, metadata, recovery=True, protected_pids=protected_pids
+    )
     cleanup._cleanup_profile_for_metadata(instance_id, metadata)
     return killed
 
@@ -456,7 +440,7 @@ def held_by(
         if recorded_id is not None
         else {"pid": holder, "user_data_dir": user_data_dir}
     )
-    port = endpoint(entry_for_port)
+    port = cdp_attach.endpoint(entry_for_port)
     if port is None:
         # A holder was FOUND and we still cannot get in — the one outcome that
         # must not read as "an ordinary spawn, nothing to say". The browser is
@@ -713,6 +697,10 @@ async def run(manager: BrowserManager, cleanup: ProcessCleanup) -> list[str]:
     """
     async with _pass_lock:
         classified = await asyncio.to_thread(adoptable_for, cleanup)
+        # Every candidate's browser, for the reap below: these entries can share
+        # one directory, so a failed adoption's reap would otherwise end the
+        # sibling this same pass is about to adopt (F-917).
+        candidate_pids = frozenset(c.pid for c in classified.adoptable.values())
         adopted: list[str] = []
         failed: set[str] = set()
         for instance_id, candidate in classified.adoptable.items():
@@ -779,6 +767,7 @@ async def run(manager: BrowserManager, cleanup: ProcessCleanup) -> list[str]:
                         "uses_custom_data_dir": True,
                         "auto_clone": False,
                     },
+                    candidate_pids - {candidate.pid},
                 )
             else:
                 adopted.append(instance_id)
