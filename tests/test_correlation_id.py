@@ -31,6 +31,12 @@ from stealth_chrome_devtools_mcp.embedded.logging_setup import (
 # name + inputSchema per section (11 sections). See M3-5's commit message for
 # the capture method. A structural change here means section_tool's wrapper
 # altered what a real MCP client sees in tools/list.
+#
+# F-896 adds ONE property, ``session``, to spawn_browser — a deliberate surface
+# change landing in the same PR as the parameter, per CONTRIBUTING's golden
+# discipline, and the same one property that moved in the HARD
+# ``tests/goldens/tool_surface.json``. Nothing else in this snapshot moves,
+# which is the thing it exists to say about a change of this shape.
 _GOLDEN_SCHEMA_JSON = r"""
 {
   "browser-management": {
@@ -44,6 +50,7 @@ _GOLDEN_SCHEMA_JSON = r"""
         "idle_timeout_seconds": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Idle Timeout Seconds"},
         "proxy": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Proxy"},
         "sandbox": {"anyOf": [{}, {"type": "null"}], "default": null, "title": "Sandbox"},
+        "session": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Session"},
         "timezone_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Timezone Id"},
         "user_agent": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "User Agent"},
         "user_data_dir": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "User Data Dir"},

@@ -139,8 +139,8 @@ class BrowserOptions(BaseModel):
     auto_clone: bool = Field(
         default=False,
         description=(
-            "Internal: profile is a disposable auto-clone of master and is "
-            "deleted when the browser closes. Set by the server from the "
+            "Internal: profile is a disposable copy of the default session and "
+            "is deleted when the browser closes. Set by the server from the "
             "resolved profile role, never by callers."
         ),
     )

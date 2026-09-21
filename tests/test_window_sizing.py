@@ -169,7 +169,7 @@ async def _spawn(tmp_path, *, headless: bool, width: int, height: int) -> dict:
     """Spawn through the real tool, on a throwaway absolute profile dir.
 
     An absolute ``user_data_dir`` outside the clone root is the one spawn shape
-    that never reads or copies the master profile, so these tests cost a Chrome
+    that never reads or copies the shared default profile, so these tests cost a Chrome
     launch and nothing else.
     """
     spawn = get_fn("spawn_browser")

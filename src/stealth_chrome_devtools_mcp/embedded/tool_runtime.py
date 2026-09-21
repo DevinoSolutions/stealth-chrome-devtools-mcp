@@ -42,6 +42,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     cdp_transport,
     clone_storage,
     display_context,
+    profile_seed,
     session_hygiene,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
@@ -94,6 +95,7 @@ __all__ = [
     "in_memory_storage",
     "network_interceptor",
     "process_cleanup",
+    "profile_seed",
     "progressive_element_cloner",
     "response_handler",
     "session_hygiene",
