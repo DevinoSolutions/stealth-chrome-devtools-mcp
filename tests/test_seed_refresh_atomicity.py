@@ -38,6 +38,8 @@ Pure filesystem tests: no browser, no Chrome, no sockets.
 
 import json
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -190,6 +192,59 @@ class TestADeathMidRefreshLeavesTheSeedUsable:
         assert refused is None
         assert _login(session) == SEED_LOGIN, (
             "a session created after the interrupted refresh came up logged out"
+        )
+
+
+#: Run a seed refresh in a CHILD interpreter and kill it, un-unwound, at the
+#: first copy pass. ``os._exit`` runs no ``finally``, no ``atexit`` and no
+#: handler — which is the difference between this and the in-process pins
+#: above, where the interruption is an exception and cleanup still happens.
+_SUICIDE_CHILD = """
+import os, sys
+from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_copy
+
+def die(source, target):
+    open(os.environ["F925_TOMBSTONE"], "wb").write(b"reached")
+    os._exit(9)
+
+profile_copy.copy_delta = die
+clone_storage._refresh_master_snapshot_if_safe("suicide")
+sys.exit("the child was supposed to die inside the copy")
+"""
+
+
+class TestARealProcessDeath:
+    """The pins above interrupt with an exception, so every ``finally`` still
+    runs. This one kills the interpreter outright at the same point, which is
+    what a crash, ``stealthy stop``, an eviction or a power cut actually do."""
+
+    def test_the_seed_survives_a_killed_interpreter(self, seed_layout):
+        tombstone = seed_layout["root"] / "tombstone"
+        env = {
+            **os.environ,
+            "STEALTH_MCP_BROWSER_SESSION_ROOT": str(seed_layout["root"]),
+            "BROWSER_MASTER_USER_DATA_DIR": str(seed_layout["master"]),
+            "BROWSER_MASTER_SNAPSHOT_DIR": str(seed_layout["snapshot"]),
+            "BROWSER_PROFILE_CLONE_ROOT": str(seed_layout["sessions"]),
+            "F925_TOMBSTONE": str(tombstone),
+        }
+        done = subprocess.run(
+            [sys.executable, "-c", _SUICIDE_CHILD],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        assert tombstone.exists(), f"the child never reached the copy: {done.stderr}"
+        assert done.returncode == 9, f"the child did not die un-unwound: {done!r}"
+        assert _login(seed_layout["snapshot"]) == SEED_LOGIN, (
+            "a killed interpreter left the seed gutted"
+        )
+        assert (seed_layout["snapshot"] / MARKER).exists()
+        assert _scratch_in(seed_layout["root"]), (
+            "no staging copy was left behind, so the process did not die where "
+            "this pin claims it did — a `finally` must have run"
         )
 
 

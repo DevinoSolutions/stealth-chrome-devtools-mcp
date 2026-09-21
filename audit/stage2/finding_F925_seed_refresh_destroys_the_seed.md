@@ -80,6 +80,17 @@ The last row is worth reading twice: the second pass sees the *new* jar, which
 is what proves the hole is real and bounded by the copy rather than by the
 whole call.
 
+**An exception is not a process death**, and the distinction is load-bearing
+here because every `finally` still runs for one. `TestARealProcessDeath` runs a
+refresh in a CHILD interpreter and `os._exit(9)`s it at the first copy pass —
+no `finally`, no `atexit`, no handler, which is what a crash, `stealthy stop`,
+an eviction or a power cut actually do. On the unfixed code it fails with the
+same `assert None == b'seed-login-...'`: a killed interpreter leaves the seed
+gutted. It asserts a tombstone (the child really reached the copy), the exit
+code (it really died un-unwound) and that a staging copy was left behind —
+which is the positive proof that no cleanup ran, and is also the one leftover
+`_discard_stale_staging` exists for.
+
 ## 4. The fix, and the shape that was rejected
 
 `profile_copy.replace_tree` builds the copy in a **sibling staging directory**,
@@ -142,7 +153,7 @@ enough that an ordinary session is still selected.
 
 ## 5. The pins, and what each one's RED is worth
 
-21 pins in `tests/test_seed_refresh_atomicity.py`, all hermetic — no Chrome, no
+22 pins in `tests/test_seed_refresh_atomicity.py`, all hermetic — no Chrome, no
 socket, no process. A mutation probe restored eight halves of the defect in the
 production source, clearing every `__pycache__` verifiably between runs
 (`assert left == 0`, since a same-length edit is invisible to `.pyc`
@@ -198,7 +209,7 @@ now.
 
 ## 7. Verification
 
-* `tests/test_seed_refresh_atomicity.py` — 21 passed.
+* `tests/test_seed_refresh_atomicity.py` — 22 passed.
 * Adjacent suites, unchanged and green (329 passed): `test_profile_resolution`,
   `test_profile_seed_truth`, `test_clone_trash_recovery`, `test_clone_storage`,
   `test_clone_sweep_race`, `test_clone_storage_cap`, `test_close_instance_offload`,
