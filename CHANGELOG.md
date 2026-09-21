@@ -12,8 +12,13 @@ the backend sends no SSE keepalive, so the stream timed out, was retried the
 SDK's two times, and was then abandoned for good at DEBUG after ~601 s of quiet.
 That is exactly the discriminator F-862's session sweep uses to decide a client
 has gone, whose docstring promises a live proxy idle for hours is never touched —
-so a healthy idle session was eventually reaped, surfacing as a 404 and a
-re-bridge on the next tool call.
+so after ~15 min of continuous idleness a healthy session was reaped. The next
+tool call is answered `Session terminated`, and it does not recover: the SDK
+answers a 404 by pushing that JSON-RPC error into the read stream and returning
+without raising, without closing the stream and without clearing the dead
+session id, so the bridge never ends, nothing heals or re-bridges, and every
+later call in that Claude Code session answers the same error until the client
+is restarted.
 
 The bridge now uses `streamable_http_client` (no more `DeprecationWarning` from
 our own call sites, pinned by AST) through `backend_client.http_client`, the one

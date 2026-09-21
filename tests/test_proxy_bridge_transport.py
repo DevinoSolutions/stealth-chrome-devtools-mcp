@@ -91,8 +91,18 @@ class FakeBackend:
             self.deleted_session = request.headers.get("mcp-session-id")
             return httpx.Response(200)
         if request.method == "GET":
-            # What our backend answers a client opening the standing event
-            # stream it does not need; the SDK reads it as "no stream".
+            # The fake DECLINES the standing stream. This fixture is about the
+            # handshake; the stream itself is measured against a real socket
+            # below. Deliberately not described as what our backend does — it
+            # answers a valid GET with 200 + SSE and registers GET_STREAM_KEY
+            # (mcp/server/streamable_http.py:659-728), which is this file's
+            # whole subject — nor as something the SDK reads as "no stream":
+            # `handle_get_stream`'s `raise_for_status` raises on a 405 and
+            # burns both reconnection attempts. The branch is not reached today
+            # (the fixture sends no `notifications/initialized`, so the SDK
+            # never calls `start_get_stream`); it answers at all so that a
+            # change which DOES open the stream fails loudly rather than
+            # hanging on an unanswered request.
             return httpx.Response(405)
         message = json.loads(request.content)
         method = message.get("method", "")
@@ -134,6 +144,21 @@ def _init_msg(req_id):
     return SessionMessage(message=JSONRPCMessage(req))
 
 
+class _RealStartupReached(BaseException):
+    """A test reached ``singleton.ensure_server_running``, the real startup path.
+
+    **Deliberately a `BaseException` and not an `AssertionError`** (review M2).
+    ``proxy_selfheal.heal_backend`` drives ``ensure_running`` inside
+    ``except Exception:  # PERMANENT(a backstop must not raise)``
+    (``proxy_selfheal.py:325``), and an ``AssertionError`` is an ``Exception``:
+    the first version of this tripwire was swallowed there, logged as "heal
+    attempt 1/3 failed", retried twice, and the node passed — with a real
+    backend already cold-started. A tripwire a backstop can eat is decoration.
+    :meth:`TestTheFence.test_the_tripwire_ends_the_run_when_the_heal_path_is_reached`
+    proves this one is not.
+    """
+
+
 @pytest.fixture()
 def bridged(monkeypatch, tmp_path):
     """Drive the REAL :func:`singleton._proxy_streams` against a fake socket.
@@ -151,6 +176,11 @@ def bridged(monkeypatch, tmp_path):
     F-886 spared the two live siblings, so nothing was evicted; that was the
     rule working, not the test being safe. A hermetic proxy test must make the
     real startup path unreachable rather than merely unlikely.
+
+    Two things make it unreachable, and they are not redundant: the
+    ``heal_backend`` stub means the path is never walked, and
+    :class:`_RealStartupReached` means that if a later change re-points that
+    stub the run ENDS instead of quietly cold-starting a backend.
     """
     import httpx
 
@@ -158,6 +188,7 @@ def bridged(monkeypatch, tmp_path):
 
     backend = FakeBackend()
     asked: list[float | None] = []
+    real_heal = proxy_selfheal.heal_backend
 
     def seam(read_seconds):
         asked.append(read_seconds)
@@ -175,7 +206,7 @@ def bridged(monkeypatch, tmp_path):
     monkeypatch.setattr(singleton, "_watch_backend_liveness", never_returns)
 
     def _must_not_start(*_a, **_kw):
-        raise AssertionError(
+        raise _RealStartupReached(
             "a hermetic bridge test must never reach the real startup path"
         )
 
@@ -205,7 +236,22 @@ def bridged(monkeypatch, tmp_path):
                     await anyio.sleep(0.01)
             tg.cancel_scope.cancel()
 
-    return {"backend": backend, "asked": asked, "run": run}
+    return {
+        "backend": backend,
+        "asked": asked,
+        "run": run,
+        "monkeypatch": monkeypatch,
+        "real_heal": real_heal,
+        "proxy_selfheal": proxy_selfheal,
+    }
+
+
+def _flatten(error: BaseException) -> list[BaseException]:
+    """Every exception in a (possibly nested) group, the group included."""
+    found = [error]
+    for child in getattr(error, "exceptions", ()):
+        found.extend(_flatten(child))
+    return found
 
 
 # --------------------------------------------------------------------------
@@ -285,6 +331,60 @@ class TestTheBridgeUsesTheCurrentClient:
         assert "terminate_on_close" in params
         assert getattr(sdk.streamablehttp_client, "__deprecated__", None), (
             "the deprecated alias lost its marker; re-read why the bridge moved"
+        )
+
+
+# --------------------------------------------------------------------------
+# the fence itself
+# --------------------------------------------------------------------------
+class TestTheFence:
+    @pytest.mark.timeout(60)
+    async def test_the_tripwire_ends_the_run_when_the_heal_path_is_reached(
+        self, bridged
+    ):
+        """The fence is load-bearing, so it is PROVEN rather than asserted.
+
+        This node removes the ``heal_backend`` stub — the thing that actually
+        keeps the real startup path out of reach today — and breaks the bridge,
+        which is exactly what a RED run of this file looks like. What must
+        happen is that :class:`_RealStartupReached` ENDS the run.
+
+        Before review M2 it did not. The tripwire raised ``AssertionError``, so
+        ``heal_backend``'s ``except Exception`` backstop (``proxy_selfheal.py``
+        :325) swallowed it, logged "heal attempt n/3 failed" three times and let
+        the node pass — after ``ensure_server_running`` had already been
+        entered. On 2026-09-21 that path cold-started pid 55240 on port 21770
+        into the real ``~/.stealth-mcp``. Nothing here reaches a real backend:
+        the tripwire replaces ``ensure_server_running`` itself, so it raises
+        before that function's first statement.
+        """
+        import httpx
+
+        mp = bridged["monkeypatch"]
+        proxy_selfheal = bridged["proxy_selfheal"]
+
+        def dead_socket(_request):
+            raise httpx.ConnectError("there is no backend on this port")
+
+        def broken_seam(_read_seconds):
+            return httpx.AsyncClient(
+                transport=httpx.MockTransport(dead_socket), follow_redirects=True
+            )
+
+        mp.setattr(backend_client, "http_client", broken_seam)
+        mp.setattr(proxy_selfheal, "heal_backend", bridged["real_heal"])
+
+        with pytest.raises(BaseException) as excinfo:  # noqa: B017, PT011  PERMANENT(F-900: the group's SHAPE is anyio's, the member is the contract)
+            await bridged["run"]()
+
+        reached = [
+            error
+            for error in _flatten(excinfo.value)
+            if isinstance(error, _RealStartupReached)
+        ]
+        assert reached, (
+            "the heal path reached the real startup path and the run did NOT "
+            f"end — the tripwire is being swallowed again: {excinfo.value!r}"
         )
 
 

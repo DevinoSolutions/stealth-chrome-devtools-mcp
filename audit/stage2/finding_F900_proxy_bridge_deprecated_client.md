@@ -71,10 +71,33 @@ and its module docstring states the promise this defeats: *"a live proxy — eve
 one idle for hours — is never touched"*. It is touched. After ~601 s the live
 proxy holds no GET stream; after `ABANDONED_AFTER_SECONDS` more of no tool call
 it looks exactly like the population the sweep exists to reap, and its session is
-terminated. The watchdog's 2 s `initialize` probes do not save it — those open
-their own throwaway sessions (`backend_probe`) and never touch the bridge
-session's `last_seen`. The user meets it as a 404 on the next tool call, a bridge
-death, and an F-838 re-bridge, on a backend that was healthy the whole time.
+terminated. `last_seen` is refreshed to `now` on every sweep while the stream is
+present, so that second clock only starts once the stream is gone: **≈ 601 + 300
+≈ 900 s (~15 min) of continuous idleness**, which is a Claude Code session left
+alone over lunch. The watchdog's 2 s `initialize` probes do not save it — those
+open their own throwaway sessions (`backend_probe`) and never touch the bridge
+session's `last_seen`.
+
+**And it does not heal.** The user meets it as a 404 on the next tool call,
+answered to the client as a `Session terminated` JSON-RPC error — and that is
+where it stays. Traced in the installed SDK (review M1, re-verified here):
+`_handle_post_request` answers a 404 by sending a `JSONRPCError(32600,
+"Session terminated")` into the read stream and then **returning** (`:350-356`),
+*before* `raise_for_status()` at `:358`. No exception is raised, no stream is
+closed, and `self.session_id` is never cleared — it is assigned in exactly two
+places, `__init__` and `_maybe_extract_session_id_from_response` (`:145`,
+`:180`), neither reachable from the 404 branch. So nothing unwinds the
+`async with` at the bridge, `_one_generation` never ends, `proxy_selfheal` never
+heals and never re-bridges, and the watchdog is probing a backend that is
+perfectly healthy so it never condemns. The transport keeps stamping the dead id
+on every later POST: **every subsequent tool call for the rest of that Claude
+Code session answers the same error.** This is not a self-healing blip — it is a
+permanently dead MCP session under a live, healthy proxy and a live, healthy
+backend, unrecoverable without restarting the client.
+
+An earlier draft of this finding said "a bridge death, and an F-838 re-bridge".
+That was wrong in the direction that matters: it sized the defect as one failed
+call, which is a reason to deprioritise it.
 
 Note that (b) is not caused by (a). The deprecated function honours the two
 numbers it is given — it builds `httpx.Timeout(timeout, read=sse_read_timeout)`
@@ -161,13 +184,23 @@ larger number would move the failure past most sessions and leave it in place fo
 the long-lived ones, which are precisely the sessions a proxy exists to serve.
 
 *Why an unbounded read is safe here.* Nothing about the bridge's liveness was
-ever the transport's job. A backend that stops answering is condemned by the
-F-820 watchdog and healed by `proxy_selfheal`; an individual tool call is bounded
-by `tool_runtime._clamp_timeout` + `_with_cdp_timeout` at the tool body; F-889's
-heartbeat is the backend's own witness. A transport read timeout is a **second
-answer to "is the backend still there"** — convention 4 — and it is the worse
-one, because it cannot tell an idle session from a dead backend and the other
-mechanism can.
+ever the transport's job. The UNIVERSAL bound is the watchdog: a backend that
+stops answering is condemned by F-820 in ≈12 s (≤ ≈242 s with F-889's heartbeat
+veto fully engaged — still tighter than the 300 s it replaces), `proxy_selfheal`
+ends the generation and `PendingCalls` answers whatever was in flight; F-889's
+heartbeat is the backend's own witness. A tool call's own CDP work is bounded on
+top of that by `tool_runtime._clamp_timeout` + `_with_cdp_timeout` at the tool
+body — which covers anything that awaits CDP, **not** every way a body can
+block, so it is named second and never alone (review N2). A transport read
+timeout is a **second answer to "is the backend still there"** — convention 4 —
+and it is the worse one, because it cannot tell an idle session from a dead
+backend and the other mechanism can.
+
+It was not a per-call deadline in the first place, which makes the replacement
+strictly better rather than merely equivalent: `_handle_post_request` has no
+`except`, so a `ReadTimeout` escaped `tg.start_soon(handle_request_async)` into
+`streamable_http_client`'s own task group and tore down the **whole bridge
+generation** — killing every other in-flight call and forcing a full re-bridge.
 
 *Why extend `backend_client.http_client` rather than add a second policy
 function.* The seam is documented as THE one transport and the one place the two
@@ -202,8 +235,11 @@ depended on, and a default is a value a dependency bump can change silently.
 
 ## 5. Tests
 
-`tests/test_proxy_bridge_transport.py` (9 nodes, hermetic, ~10 s). RED first:
-6 failed / 3 passed against the shipped bridge.
+`tests/test_proxy_bridge_transport.py` (10 nodes, hermetic, ~7 s). RED first:
+6 failed / 3 passed against the shipped bridge. Three of those six are red by
+`AttributeError` on a constant that did not exist rather than by behaviour —
+inherent to introducing a constant, and named so the "6/9" is read for what it
+is (review N1).
 
 | Node | Pins |
 |---|---|
@@ -215,7 +251,8 @@ depended on, and a default is a value a dependency bump can change silently.
 | `test_the_cli_budget_is_still_bounded_on_the_same_seam` | the seam's first consumer kept its contract |
 | `test_the_bridge_read_clock_is_unbounded_and_the_constant_says_why` | the policy VALUE, because the value is the decision |
 | `test_the_sdk_gives_an_abandoned_event_stream_up_for_good` | `MAX_RECONNECTION_ATTEMPTS == 2`, read from the SDK rather than restated — the reason the policy cannot be a large number |
-| `test_a_bounded_read_permanently_abandons_an_idle_event_stream` | MEASURED against a real loopback socket on an OS-assigned port: bounded → 2 opens then gone, `BRIDGE_READ_TIMEOUT` → 1 held |
+| `test_a_bounded_read_permanently_abandons_an_idle_event_stream` | MEASURED against a real loopback socket on an OS-assigned port: bounded → 2 opens then gone, `BRIDGE_READ_TIMEOUT` → 1 held. Only the second half pins OUR decision; the first is an SDK fact true with or without the fix |
+| `test_the_tripwire_ends_the_run_when_the_heal_path_is_reached` | the fence itself, proven rather than asserted — see below |
 
 **The fixture fences off the heal path, and that fence was bought.** The first
 RED run of this file reached `proxy_selfheal.drive` → `heal_backend` →
@@ -225,10 +262,23 @@ developer's machine** (pid 55240, port 21770, written into the real
 nothing was evicted and no browser died — that was the rule working, not the test
 being safe. The stray backend was killed and its entry dropped through the one
 writer (`backend_registry.forget_entries`, matched on context+port+pid), and the
-fixture now makes `ensure_server_running` an `AssertionError` tripwire, stubs
-`heal_backend`, and redirects `STATE_DIR`/`SERVER_STATE_FILE`/`PORT_FILE` into
-`tmp_path`. A hermetic proxy test must make the real startup path unreachable
-rather than merely unlikely.
+fixture stubs `heal_backend`, redirects `STATE_DIR`/`SERVER_STATE_FILE`/
+`PORT_FILE` into `tmp_path`, and makes `ensure_server_running` a tripwire.
+
+**The tripwire raises a `BaseException` subclass, and that is not a stylistic
+choice** (review M2). It was an `AssertionError` at `50420b9`, and
+`heal_backend` drives `ensure_running` inside
+`except Exception:  # PERMANENT(a backstop must not raise)`
+(`proxy_selfheal.py:325`) — so the fence that the fixture docstring and this
+section both present as the guard the incident bought **could not fire**.
+Measured by mutating `_RealStartupReached` back to `Exception`: the node fails,
+and the captured log reads `heal attempt 1/2 failed` / `2/2 failed` across NINE
+retry rounds in ten seconds — nine entries into the real startup path, each one
+swallowed and none of them reported. Restored to `BaseException`, the run ends
+at the first entry. Only the `heal_backend` stub was actually keeping the path
+out of reach, and a later agent who re-points that stub trusting the tripwire
+would have got the incident back. A hermetic proxy test must make the real
+startup path unreachable rather than merely unlikely — and must prove it.
 
 Lanes run (all green): the 7 `test_proxy_*` files + the new one (126 + 9),
 the 9 `test_singleton_*` files (103), `test_stealthy_cli.py` +
@@ -260,3 +310,24 @@ the 9 `test_singleton_*` files (103), `test_stealthy_cli.py` +
    `mcp` bump adds an SSE keepalive or makes the GET stream reconnect
    indefinitely, that node still passes while the REASON for `None` weakens —
    the constant's comment is where to re-read, not the pin.
+5. **`tests/test_singleton_fast_handshake.py` has the same unfenced shape, and
+   it is NOT fixed here — it wants its own finding.** Pre-existing, not
+   introduced by F-900, and deliberately not run during this work. It drives
+   `singleton._proxy_streams` at `:70`, `:205` and `:292` with no stub of
+   `ensure_server_running`, no stub of `proxy_selfheal.heal_backend` and no
+   redirection of `STATE_DIR`/`SERVER_STATE_FILE`/`PORT_FILE` in the pytest
+   process — its `_isolated_subprocess_env` guards only the CHILD and says so.
+   Two of the four nodes are structurally reachable rather than merely
+   unfenced: `TestFastHandshakeEndToEnd::test_initialize_local_then_tools_list_
+   forwarded` (`:174`) and `TestProxyExitsOnClientDisconnect::test_proxy_
+   returns_when_client_stream_closes` (`:259`), because a real backend
+   subprocess passes the readiness gate so a bridge break is confirmed in
+   seconds — the same fast path that cold-started pid 55240. The other two are
+   saved only by a 120 s `BACKEND_READY_TIMEOUT` losing a race to their own 5 s
+   `fail_after`, which is luck, not a fence. **`tests/conftest.py` is decisive
+   here**: its only two autouse fixtures are `_stealth_logger_hygiene` and
+   `_reset_settings_cache`, neither of which redirects `HOME`/`USERPROFILE` or
+   blocks spawning, and `backend_registry.STATE_DIR` derives from
+   `Path.home()` — so **every fence in this repo must be per-file**, and the
+   remedy is ~5 lines per file (`tests/test_proxy_backend_death.py:249-253`
+   plus `:260`), not one shared fixture. Worth its own finding number.

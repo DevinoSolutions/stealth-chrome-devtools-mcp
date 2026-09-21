@@ -96,12 +96,18 @@ CONNECT_TIMEOUT_SECONDS = 30.0
 #: touched". A finite-but-larger number only moves that clock; ``None`` removes
 #: it.
 #:
-#: What bounds the bridge instead is what already did: the F-820 watchdog
-#: decides the backend is dead and ``proxy_selfheal`` heals, and an individual
-#: tool call is bounded by ``tool_runtime._clamp_timeout`` + ``_with_cdp_
-#: timeout`` at the tool body. A transport read timeout would be a SECOND answer
-#: to "is the backend still there" — and it answers wrong, because an idle
-#: session is not a dead backend.
+#: What bounds the bridge instead is what already did, and the UNIVERSAL bound
+#: is the first one: the F-820 watchdog decides the backend is dead,
+#: ``proxy_selfheal`` ends the generation and ``PendingCalls`` answers whatever
+#: was in flight. A tool call's own CDP work is bounded on top of that by
+#: ``tool_runtime._clamp_timeout`` + ``_with_cdp_timeout`` at the tool body —
+#: that one covers anything that awaits CDP, not every way a body can block,
+#: which is why it is named second and not alone. A transport read timeout
+#: would be a SECOND answer to "is the backend still there" — and it answers
+#: wrong, because an idle session is not a dead backend. It was never a
+#: per-call deadline either: ``_handle_post_request`` has no ``except``, so a
+#: ``ReadTimeout`` escaped into the SDK's task group and tore down the WHOLE
+#: bridge generation, killing every other in-flight call with it.
 BRIDGE_READ_TIMEOUT: float | None = None
 
 
