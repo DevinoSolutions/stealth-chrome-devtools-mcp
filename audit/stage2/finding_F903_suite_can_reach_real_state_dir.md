@@ -276,12 +276,17 @@ the 8.3 short name (`.stealth-mcp` → `STEALT~1`,
 `stealth-mcp-browser-sessions` → `STEALT~2`, neither of which contains its
 mark), the `\\?\` prefix, UNC `\\localhost\C$\…`, and a trailing dot on the root
 component — every one confirmed with `samefile()`. `_root_spellings` therefore
-puts the `realpath`, the `GetShortPathName` form and the `\\?\` form of each
-root in the table as extra rows, once per table rebuild, for zero per-open cost.
-What stays open is a junction used MID-PATH in the TARGET: that is a spelling of
-a fenced file no root string is a prefix of, and closing it needs a `realpath`
-per call — the cost this guard exists to avoid. The redirect covers it; §6 lists
-it.
+puts the `realpath`, the `GetShortPathName` form, the two local admin-share UNC
+forms and the `\\?\` form of each root in the table as extra rows, once per table
+rebuild, for zero per-open cost.
+
+Two things stay open and are named rather than papered over. A junction used
+MID-PATH in the TARGET is a spelling of a fenced file that no root string is a
+prefix of, and closing it needs a `realpath` per call — the cost this guard
+exists to avoid. And the UNC family cannot be enumerated: any name resolving to
+this machine works, as would a remote host's share of the same volume, so the
+two spellings the reviewer actually reached are covered and the shape is
+recorded. The redirect covers both; §6 lists them.
 
 ### 4.3 The kill guard
 
@@ -492,11 +497,13 @@ is the shape this finding is about.
    import-bound `scandir`, `os.chmod`/`link`/`symlink`, `sqlite3`, subprocesses,
    and any fd opened before install. The redirect covers them; the claim has
    been narrowed everywhere it was made (review M2).
-10. **A junction used MID-PATH in a target still reaches a fenced file.** The
-    roots are designated by every spelling the OS answers to for THEM (§4.2,
-    review S1), which closes the 8.3, `\\?\` and root-level-link cases for zero
-    per-open cost. A link somewhere in the middle of the target is a different
-    shape and would need a `realpath` per call.
+10. **A junction used MID-PATH in a target still reaches a fenced file**, and so
+    does a UNC spelling through a host name the table does not carry. The roots
+    are designated by every spelling the OS answers to for THEM (§4.2, review
+    S1/N3), which closes the 8.3, `\\?\`, root-level-link and local-admin-share
+    cases for zero per-open cost. A link in the middle of the target would need
+    a `realpath` per call, and the set of names that resolve to this machine is
+    not enumerable.
 11. **`tests/test_backend_escapes_client_job.py`'s helper child** ran real
     backend-spawn code with the operator's real `HOME` (review S7). Nothing
     landed, because the child hand-stubs its one writer — but it was one

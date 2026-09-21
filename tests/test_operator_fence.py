@@ -450,6 +450,16 @@ class TestEverySpellingOfARootIsFenced:
         with pytest.raises(operator_fence.RealStateDirWrite):
             (short / "server.json").write_text("{}", encoding="utf-8")
 
+    @pytest.mark.skipif(os.name != "nt", reason="UNC admin shares are Windows'")
+    def test_the_local_admin_share_spelling_is_refused(self, decoy):
+        """No I/O is attempted, so this needs no privilege: the guard refuses
+        on the STRING, before the original primitive is called."""
+        if decoy.drive[1:2] != ":":
+            pytest.skip("not a drive-letter path")
+        unc = f"\\\\localhost\\{decoy.drive[0]}$" + str(decoy)[2:]
+        with pytest.raises(operator_fence.RealStateDirWrite):
+            Path(unc + "\\server.json").write_text("{}", encoding="utf-8")
+
     @pytest.mark.skipif(os.name != "nt", reason=r"\\?\ is Windows'")
     def test_the_extended_length_spelling_is_refused(self, decoy):
         with pytest.raises(operator_fence.RealStateDirWrite):

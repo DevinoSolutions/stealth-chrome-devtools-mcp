@@ -310,6 +310,17 @@ def _root_spellings(path: Path) -> list[str]:
             # here -- an absent root has no short name to be reached by.
             if ctypes.windll.kernel32.GetShortPathNameW(spelling, buffer, 32768):
                 spellings.append(buffer.value)
+        # The two LOCAL admin-share spellings, for the same reason. This is the
+        # one family that cannot be enumerated -- any name that resolves to this
+        # machine works, and a remote host's share of the same volume would too
+        # -- so the two the reviewer actually reached are covered and the rest is
+        # named as a residual rather than pretended away (review N3).
+        for host in ("localhost", "127.0.0.1"):
+            spellings += [
+                f"\\\\{host}\\{s[0]}$" + s[2:]
+                for s in tuple(spellings)
+                if len(s) > 2 and s[1] == ":"
+            ]
         # The extended-length prefix is a spelling of every one of the above and
         # `normpath` keeps it verbatim, so `\\?\C:\…\server.json` is a fenced
         # file no bare-drive root string is a prefix of.
