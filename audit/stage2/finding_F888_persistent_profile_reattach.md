@@ -227,7 +227,8 @@ already exited) and not the port (a renderer has it too). Where no member
 qualifies, the caller is told rather than left with silence.
 
 **The endpoint has three witnesses**, most trusted first
-(`browser_reattach.endpoint`):
+(`cdp_endpoint.endpoint` — `browser_reattach.endpoint` when this was written;
+F-916 moved the ladder to its own leaf):
 
 | Witness | Why it is where it is |
 |---|---|

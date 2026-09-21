@@ -284,6 +284,99 @@ in the **same commit** as whatever changed those:
 
 ---
 
+## CHANGELOG placement (F-923)
+
+An entry under a heading for a release that does not contain it is a false
+statement about a shipped artefact. It has happened: between 2.1.7 and 2.1.8,
+four entries reached `main` under `## 2.1.7` and stayed there across five
+merged PRs. The `v2.1.7` tag ships two sections; at the worst point that
+heading held six, and none of the four extra ones was in the release.
+
+**It happens on a CLEAN merge, which is why it is easy to miss.** A release
+commit renames `## Unreleased` to `## <version>` and adds no replacement — so a
+branch that appended its section inside that block merges afterwards with the
+surrounding context unchanged, and git places the section by context, under the
+RELEASE heading. Nothing conflicts, so no resolver runs.
+
+`tests/test_doc_claims.py::TestChangelogIntegrity` now fails on three shapes of
+this — a queue below a shipped heading, a second queue, and release headings
+that are duplicated, out of order or malformed — plus a `pyproject.toml` bump
+that moved without its heading. **It cannot catch the shape above**, because a
+file whose entries were absorbed into the shipped section and whose queue is
+gone is byte-indistinguishable from a legitimate release commit. That one needs
+a base ref, so it is this procedure:
+
+### After every merge of `main` into a branch
+
+    git diff origin/main --numstat -- CHANGELOG.md
+
+Insertions, and **0 deletions**. A nonzero right-hand column means `main` has
+content your branch does not — its blocks were overwritten rather than appended
+to. Run it on *every* merge, not only conflicting ones; the conflicting merges
+are the safe case, because a human reads those.
+
+**It is a CLOBBER check and it cannot see PLACEMENT.** Your own block is not in
+`origin/main`, so wherever the merge puts it — under `## Unreleased` or under a
+shipped release heading — it is purely an INSERTION and the deletion count
+stays 0. Measured on the F-913 lane's own 2.1.13 merge: the misplaced file
+reported `57  0` and the corrected one `58  0`. So run it for the clobber, and
+check placement the other two ways — `TestChangelogIntegrity` catches the two
+shapes a rule can see, and for the third (your block absorbed into the release
+section with no queue left) the only control is reading the file, which is what
+the next section is for.
+
+**The word _after_ is load-bearing.** `git diff origin/main` is not symmetric:
+deletions are lines `origin/main` has that your branch lacks. Run it *before*
+merging and a perfectly healthy branch reports every entry `main` has gained
+since the merge-base as a deletion. This is not hypothetical — as of 2026-09-21
+`fix/F916-…`, `fix/F919-…` and `fix/F921-…` each report `132` deletions, which
+are F-903/F-904/F-905's blocks, and all three branches are fine: they simply
+have not merged `main`. That reading was taken for a data-loss incident once
+already. The discriminator:
+
+    git log --oneline origin/main..HEAD
+
+No merge of `main` on the branch means the deletions are `main`'s lead, not
+your loss. Do not "restore" them — merge `main` and re-run the `--numstat`.
+
+### Merging `main` after a release has landed
+
+`main` will lead with `## <version>` and carry **no `## Unreleased` at all**.
+Do not put your entry under the release heading:
+
+0. **BEFORE the merge, copy your own `### ` block to a scratch file.** Not
+   optional. After the merge, diff it byte-for-byte against what is in the
+   file. This is the ONLY control for the likeliest failure of a multi-lane
+   union — losing your own block — and no automated check sees it: your block
+   is not in `origin/main`, so its absence is an insertion count that never
+   happened rather than a deletion, and F-923's rules read headings, not
+   blocks. The full matrix of which resolutions each control catches is
+   `audit/stage2/finding_F923_changelog_placement_is_unguarded.md` §6.1.1;
+   two of the five bad shapes are caught by nothing automated.
+1. create a new `## Unreleased` heading **above** the release heading;
+2. put your block under that;
+3. check: exactly one `## Unreleased`, it is the first `## ` heading, the
+   release heading is immediately below with its contents untouched, and your
+   block matches the copy from step 0;
+4. check the `--numstat` above shows 0 deletions — a CLOBBER check, and a
+   separate question from step 3. When several lanes queue behind one release
+   it also catches a dropped SIBLING's block, but only once that sibling has
+   merged: the cover accumulates down the merge order, and the lane merging
+   FIRST behind a release has none of it.
+
+Cheapest option of all: **do not merge `main` while a release lane is in
+flight.** Merging before it lands just means doing it twice.
+
+### Before a release bump
+
+Diff the `### ` headings under the previous release heading against the tag:
+
+    git show v<prev>:CHANGELOG.md
+
+Anything extra belongs back under `## Unreleased`.
+
+---
+
 ## Golden discipline (two-tier)
 
 Schema/shape tests compare against goldens in `tests/goldens/`. Two tiers:

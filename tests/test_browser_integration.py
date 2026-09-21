@@ -35,6 +35,7 @@ import pytest
 # their own module object in every lane; what this import changed is that it now
 # also happens when this file runs alone.
 from e2e_helpers import await_visible_window, instance_entry, runtime
+from stealth_chrome_devtools_mcp.embedded import clone_trash
 
 # We need to import server.py as a module (it uses bare imports internally)
 _spec = importlib.util.spec_from_file_location(
@@ -687,7 +688,9 @@ class TestOverCapSweepPreservesLiveAndLegacyProfiles:
             # Recoverable, not destroyed: the reclaimed clone must be retrievable
             # from .trash within the retention window, so a wrong eviction is
             # never irreversible data loss (defense-in-depth for Bug A/C).
-            trashed = _get_fn("_clone_trash_dir")(sessions) / "stealth-idle-clone"
+            # `clone_trash` since F-914: what an eviction MEANS left
+            # `clone_storage`, which decides only WHICH clones exceed the cap.
+            trashed = clone_trash.trash_dir(sessions) / "stealth-idle-clone"
             assert trashed.exists() and (trashed / "data.bin").exists(), (
                 "evicted auto-clone must be recoverable from trash, not deleted"
             )

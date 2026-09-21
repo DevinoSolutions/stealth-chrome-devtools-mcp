@@ -138,7 +138,7 @@ def new_entry(  # noqa: PLR0913  PERMANENT(one parameter per recorded field; fol
     spawned, and nothing else on disk necessarily has it: it lives in
     ``browser.config.port``, in memory, in the process that dies. It defaults to
     None so a caller that cannot learn it records the absence rather than a lie —
-    ``browser_reattach.endpoint`` then falls back to the holder's command line
+    ``cdp_endpoint.endpoint`` then falls back to the holder's command line
     and, after that, to Chrome's own ``DevToolsActivePort``, which is also what
     serves every entry written before this release.
 
@@ -409,6 +409,42 @@ def on_persistent_profile(entry: Entry) -> bool:
     return bool(
         entry.get("uses_custom_data_dir") is True and not entry.get("auto_clone")
     )
+
+
+def persistence_recorded(entry: Entry) -> bool:
+    """Does *entry* record enough for :func:`on_persistent_profile` to MEAN anything.
+
+    The companion question, here rather than anywhere else because it reads the
+    same two keys and a second reader of them is a second place they drift. With
+    NEITHER key present, that function's False is the reader's default for a
+    record shape that predates them -- not a finding about the profile -- and
+    the two are worth telling apart exactly where an answer decides whether a
+    browser lives: `browser_reattach._adoptable_entry` answers
+    `reap_guard.UNDECIDED` for this shape instead of handing the entry to the
+    reaper (F-916 named residual, measured killing a live Chrome on the shared
+    profile).
+
+    **It reads ONE of the two keys and that is measured, not a simplification.**
+    :func:`normalize_entries` writes `uses_custom_data_dir` through
+    `recorded.get(...)`, so an absent one survives the read as `None`, while
+    `auto_clone` goes through `bool(recorded.get(..., False))` and its absence is
+    collapsed to `False` before any caller sees it. So `uses_custom_data_dir` is
+    the only one of the pair whose ABSENCE is still legible downstream -- and it
+    is also the only one that could make an entry persistent, since `auto_clone`
+    alone never can. Both reasons point at the same key. A `None` here is what
+    the legacy bare-int branch writes too, so the 2.0.3 record shape this exists
+    for is covered by the same test.
+
+    `False` is an ANSWER and reads as known: the record says this profile is not
+    the caller's own, and such an entry is still reaped.
+
+    It is deliberately NOT consulted by `on_persistent_profile`'s other callers.
+    For them the safe direction is the one that function already documents -- a
+    temp profile reclaimed, never a named profile deleted -- and an unknown
+    shape reading as disposable is what keeps the profile-delete guard and the
+    F-922 directory-scan gate behaving exactly as 2.0.3 did.
+    """
+    return entry.get("uses_custom_data_dir") is not None
 
 
 # One past the highest TCP port. Chrome never binds 0 for DevTools — it resolves
