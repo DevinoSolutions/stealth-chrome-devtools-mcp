@@ -205,13 +205,22 @@ now.
   succeeds onto it and `copy_delta` copies INTO a dead process's partial work.
   Written down because a reader will ask and the reassuring answer — "pids do
   not collide" — is not the true one.
-  **The bytes are fine, by construction.** `copy_file` is `shutil.copy2`, which
-  writes content and only then stamps the mtime, so a file the dead process was
-  killed inside is SHORTER than its source and `copy_delta`'s size test
-  re-copies it; a file it finished but had not stamped is byte-correct already,
-  so skipping it loses nothing whatever its mtime says. Each of the two places
-  it can die is covered by one of the two tests, and no wrong byte survives
-  either.
+  **The bytes are fine, by construction, and it is the SIZE test that carries
+  it.** `copy_file` is `shutil.copy2`, which writes content and only then stamps
+  the mtime, so a file the dead process was killed inside is SHORTER than its
+  source and `copy_delta`'s size test re-copies it; a file it finished but had
+  not stamped is byte-correct already, so skipping it loses nothing whatever its
+  mtime says. Each of the two places it can die is covered by one of the two
+  tests, and no wrong byte survives either.
+  **The mtime half is COARSE and must not be credited with that work.**
+  `copy_delta` compares `int(source.st_mtime) != int(target.st_mtime)` — whole
+  SECONDS, truncated — so it cannot distinguish a copy made in the same second
+  as the source's last write from a file that is genuinely identical, and
+  against a shared profile Chrome is writing continuously that coincidence is
+  ordinary rather than exotic. A reader who assumes float precision concludes
+  the mtime comparison alone catches every partial, which is the opposite of
+  true. Stated because the integer truncation is the whole reason the size
+  comparison has to be the one doing the work.
   **What is NOT covered is the other direction**: `copy_delta` walks the SOURCE,
   so a file present in the stale staging tree and absent from today's source is
   never removed and is published by the rename. A shared profile gains and
