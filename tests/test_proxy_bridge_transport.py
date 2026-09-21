@@ -151,9 +151,10 @@ class _RealStartupReached(BaseException):
     ``proxy_selfheal.heal_backend`` drives ``ensure_running`` inside
     ``except Exception:  # PERMANENT(a backstop must not raise)``
     (``proxy_selfheal.py:325``), and an ``AssertionError`` is an ``Exception``:
-    the first version of this tripwire was swallowed there, logged as "heal
-    attempt 1/3 failed", retried twice, and the node passed — with a real
-    backend already cold-started. A tripwire a backstop can eat is decoration.
+    the first version of this tripwire was swallowed there, logged once per
+    attempt as ``heal attempt <n>/HEAL_ATTEMPTS failed``, retried for the rest
+    of that budget, and the node passed — with a real backend already
+    cold-started. A tripwire a backstop can eat is decoration.
     :meth:`TestTheFence.test_the_tripwire_ends_the_run_when_the_heal_path_is_reached`
     proves this one is not.
     """
@@ -351,9 +352,9 @@ class TestTheFence:
 
         Before review M2 it did not. The tripwire raised ``AssertionError``, so
         ``heal_backend``'s ``except Exception`` backstop (``proxy_selfheal.py``
-        :325) swallowed it, logged "heal attempt n/3 failed" three times and let
-        the node pass — after ``ensure_server_running`` had already been
-        entered. On 2026-09-21 that path cold-started pid 55240 on port 21770
+        :325) swallowed it, logging ``heal attempt <n>/HEAL_ATTEMPTS failed``
+        once per attempt of every heal round, and let the node pass — after
+        ``ensure_server_running`` had already been entered. On 2026-09-21 that path cold-started pid 55240 on port 21770
         into the real ``~/.stealth-mcp``. Nothing here reaches a real backend:
         the tripwire replaces ``ensure_server_running`` itself, so it raises
         before that function's first statement.
