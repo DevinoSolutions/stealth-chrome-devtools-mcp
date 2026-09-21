@@ -1,11 +1,13 @@
 """F-180 pinning tests: close_instance must offload the synchronous kill to a
 worker thread under a real timeout so the event loop stays responsive.
 
-Four scenarios:
+Scenarios:
 1. Loop-stays-responsive: a 30s-stuck kill must NOT freeze the event loop.
 2. Double-close: second sequential close returns False, kill invoked once.
 3. Concurrent close: exactly one of two concurrent closes claims.
 4. Happy path: fast kill returns True, instance removed, storage cleaned.
+5. A wedged tab's close is bounded, so teardown still completes.
+6. The kill ladder reports the rung that ended the browser (F-910).
 """
 
 import asyncio
@@ -15,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from stealth_chrome_devtools_mcp.embedded import process_exit
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserState
@@ -303,3 +306,42 @@ async def test_happy_path_fast_kill(monkeypatch):
     assert result is True
     assert "happy-1" not in manager._instances
     storage_mock.assert_called_once_with("happy-1")
+
+
+# ---------------------------------------------------------------------------
+# 6. The kill ladder reports what it did, and reporting cannot break it (F-910)
+# ---------------------------------------------------------------------------
+
+
+def test_the_kill_ladder_logs_the_rung_that_ended_the_browser():
+    """A rung that WORKS must log and return, and the log must not raise.
+
+    Every other node in this file hands the teardown a process whose
+    ``returncode`` is already set, so the ladder returns at its guard and its
+    logging is never executed. That gap shipped a real defect: ``process_exit``
+    imported the debug_logger MODULE instead of the singleton, so the line
+    written after a successful terminate was an ``AttributeError`` — swallowed
+    where the close-diagnostics are written, but NOT here, where it would
+    escape the ladder that had just killed a browser. So this node drives a
+    process that is still running.
+    """
+    process = SimpleNamespace(
+        returncode=None,
+        pid=4242,
+        terminate=MagicMock(),
+        kill=MagicMock(),
+    )
+    before = len(debug_logger.get_debug_view_paginated().get("all_info") or [])
+
+    process_exit.terminate("ladder-1", process, None, 2)
+
+    process.terminate.assert_called_once_with()
+    process.kill.assert_not_called()
+    written = (debug_logger.get_debug_view_paginated().get("all_info") or [])[before:]
+    assert [
+        entry
+        for entry in written
+        if entry.get("component") == "process_exit"
+        and entry.get("method") == "terminate_process"
+        and "ladder-1" in entry.get("message", "")
+    ], f"the rung that ended the browser wrote nothing: {written!r}"

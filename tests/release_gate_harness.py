@@ -163,8 +163,22 @@ class _FixtureHandler(SimpleHTTPRequestHandler):
         """Silence per-request stderr logging (keeps test output clean)."""
 
     def handle_one_request(self):
-        """Record the request line, then serve normally (stdlib override)."""
-        super().handle_one_request()
+        """Record the request line, then serve normally (stdlib override).
+
+        A browser closing a keep-alive socket while this thread sits in
+        ``readline`` raises ``ConnectionResetError`` (WinError 10054) out of
+        the stdlib handler, and pytest prints the whole traceback into the
+        node's captured output — where it masks the output a failure is read
+        from (it did exactly that on PR #151's cookie-node failure). The reset
+        is the client going away on a connection this request never used, so
+        it is nothing to report: return, and record no request line, because
+        there was no request.
+        """
+        try:
+            super().handle_one_request()
+        except ConnectionResetError:
+            self.close_connection = True
+            return
         line = getattr(self, "raw_requestline", b"") or b""
         if line and len(_FIXTURE_HITS) < _FIXTURE_HITS_CAP:
             _FIXTURE_HITS.append(

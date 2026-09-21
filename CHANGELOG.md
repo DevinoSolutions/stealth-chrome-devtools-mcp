@@ -96,6 +96,56 @@ a caller may SAY on every spawn, while nothing in the new one runs unless a
 caller wrote `seed_from`. All three are internal moves with no behaviour
 change.
 
+### Fixed — F-910: closing a session could lose the login you just made
+
+`close_instance` sent Chrome the graceful `Browser.close` and then terminated
+it **immediately** — and `Browser.close` is the START of Chrome's shutdown, not
+the end of it. The shutdown is what writes the cookie store, so the terminate
+landed mid-flush and a `max-age` cookie set shortly before the close could be
+gone when the session was re-opened. Measured: **Chrome's process was still
+`running` at the kill site on 20 closes out of 20**, exiting on its own
+0.129–0.165 s later; the cookie was lost about once in thirty closes on an idle
+machine and on both Windows CI runs that saw it on 2026-09-21, across two
+unrelated branches and on the same Chrome build as the green run before them.
+
+Now the browser gets a bounded grace to leave on its own before anything kills
+it — `embedded/process_exit.py`, the new one home for ending a browser's
+process, which also took in the terminate → kill → SIGTERM ladder so the wait
+and the kill it gates sit together. The grace is `EXIT_GRACE_SECONDS` = 5.0,
+~30× the slowest exit measured, and it is a ceiling rather than a wait: a
+browser that has already gone costs one process read. A **wedged** Chrome makes
+one close up to 5 s slower and is then killed exactly as it was before. No
+knob, no platform branch; `browser_manager.py`'s LOC cap ratchets 1485 → 1452.
+
+`close_instance` also writes one close-diagnostics line saying whether Chrome
+left unaided and how long it took, so a post-mortem can read it.
+
+**The same defect was silently disabling the seed refresh.** Closing the
+`default` session refreshes the seed every later session is copied from, and
+that refresh refuses to copy a profile a live browser holds — so with the close
+returning while Chrome was still running, it refused **every time**, reporting
+`seed_error: default-in-use` into an answer `close_instance` discards. A
+session created after a login would therefore be copied from a seed that had
+never been updated since the shared profile was last genuinely idle. It works
+now, and both halves are pinned against a redirected session root with a
+synthetic profile: the refreshed seed carries the cookie set before the close,
+and the copy skips no locked file.
+
+**Attribution, measured rather than assumed.** The CI node
+(`test_storage_and_cookies_survive_one_profile_and_no_other`) spawns into the
+suite's own fenced session root, whose profiles carry real cookie databases —
+so the 18-byte placeholder stores found in the `tmp_session_root` fixture are
+absent from its chain and cannot be the cause. The node passes 10× on this fix
+and fails 5× out of 5 — with the fix in place — the moment the graceful close
+is suppressed, in the CI failure's own words. That fixture is fixed anyway
+(`tests/conftest.py` now writes real empty SQLite databases, pinned in
+`tests/test_profile_seed_truth.py`): a real browser opened on an unreadable
+store keeps its cookie jar in memory, which manufactures this finding's symptom
+out of nothing.
+
+Known gaps and the one defect these pins caught in the fix itself are in
+`audit/stage2/finding_F910_cookie_lost_on_close.md` §5.1 and §7.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in

@@ -3,7 +3,6 @@
 import asyncio
 import contextlib
 import json
-import os
 import time
 import uuid
 from collections.abc import Coroutine
@@ -19,6 +18,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     desktop_launch,
     navigation_milestone,
     page_storage,
+    process_exit,
     spawn_contention,
     spawn_exhaustion,
     spawn_leak,
@@ -221,7 +221,7 @@ class BrowserManager:
             return
         await proxy_forwarder.close()
 
-    def _blocking_teardown(self, instance_id: str, browser: Browser) -> object | None:  # noqa: C901,PLR0912  DEBT(F-702)
+    def _blocking_teardown(self, instance_id: str, browser: Browser) -> object | None:
         """Synchronous kill work, run in a worker thread via asyncio.to_thread.
 
         Returns an awaitable if browser.stop() produced a coroutine (nodriver
@@ -248,61 +248,12 @@ class BrowserManager:
                 f"browser.stop() failed for {instance_id}: {stop_err}",
             )
 
-        if (
-            hasattr(browser, "_process")
-            and browser._process
-            and browser._process.returncode is None
-        ):
-            for attempt in range(self._KILL_RETRIES):
-                try:
-                    browser._process.terminate()
-                    debug_logger.log_info(
-                        "browser_manager",
-                        "terminate_process",
-                        f"terminated browser with pid "
-                        f"{browser._process.pid} successfully on attempt "
-                        f"{attempt + 1}",
-                    )
-                    break
-                except Exception:
-                    try:
-                        browser._process.kill()
-                        debug_logger.log_info(
-                            "browser_manager",
-                            "kill_process",
-                            f"killed browser with pid "
-                            f"{browser._process.pid} successfully on "
-                            f"attempt {attempt + 1}",
-                        )
-                        break
-                    except Exception:
-                        try:
-                            if (
-                                hasattr(browser, "_process_pid")
-                                and browser._process_pid
-                            ):
-                                os.kill(browser._process_pid, 15)
-                                debug_logger.log_info(
-                                    "browser_manager",
-                                    "kill_process",
-                                    f"killed browser with pid "
-                                    f"{browser._process_pid} using signal 15 "
-                                    f"successfully on attempt {attempt + 1}",
-                                )
-                                break
-                        except (PermissionError, ProcessLookupError) as e:
-                            debug_logger.log_info(
-                                "browser_manager",
-                                "kill_process",
-                                f"browser already stopped or no "
-                                f"permission to kill: {e}",
-                            )
-                            break
-                        except Exception as e:
-                            if attempt == self._KILL_RETRIES - 1:
-                                debug_logger.log_error(
-                                    "browser_manager", "kill_process", e
-                                )
+        process_exit.terminate(
+            instance_id,
+            getattr(browser, "_process", None),
+            getattr(browser, "_process_pid", None),
+            self._KILL_RETRIES,
+        )
 
         try:
             if hasattr(browser, "_process"):
@@ -935,6 +886,22 @@ class BrowserManager:
                     "close_instance",
                     f"Proxy forwarder close failed for {instance_id}: {proxy_err}",
                 )
+
+            # -- Phase 2b: let Chrome finish leaving (F-910) -------------------
+            # The graceful close above is the START of Chrome's shutdown, not
+            # the end of it: the cookie store is committed on the way out, and
+            # terminating mid-flush loses the login the caller just made. So
+            # the browser gets a bounded grace to go on its own BEFORE Phase 3
+            # touches it — the argument and the measurement are at
+            # `process_exit.EXIT_GRACE_SECONDS`. Phase 3 is unchanged and still
+            # gets its whole budget, because this wait is its own await.
+            waited = await process_exit.wait_for_exit_async(
+                process_exit.browser_pid(
+                    getattr(browser, "_process", None),
+                    getattr(browser, "_process_pid", None),
+                )
+            )
+            process_exit.report(instance_id, waited)
 
             # -- Phase 3: blocking kill (off the loop, real timeout) ----------
             stop_coro = None
