@@ -1592,6 +1592,27 @@ window.w16Register = () => {
       window.__w16p.scope = registration.scope;
       await navigator.serviceWorker.ready;
       window.__w16p.state = 'ready';
+      // F-909. `ready` resolves on an ACTIVE registration and says nothing
+      // about THIS document: `clients.claim()` reaches a page as its own task,
+      // and this worker awaits a network round trip to the ledger before it
+      // calls claim at all. So `ready` is the wrong promise to read
+      // `controller` after -- measured, by putting 1500 ms in front of the
+      // claim: state `ready`, controller `uncontrolled`, which is exactly the
+      // shape a slow CI runner produced. `controllerchange` is the event that
+      // says the claim has landed here, and `controlled` is the state that
+      // reports it. A worker that never claims leaves the state at `ready`,
+      // which the poll's own failure then names.
+      if (!navigator.serviceWorker.controller) {
+        await new Promise((resolve) => {
+          navigator.serviceWorker.addEventListener(
+            'controllerchange', resolve, {once: true});
+          // Armed AFTER the check above, so check again: a claim landing
+          // between the two would otherwise leave this waiting forever for an
+          // event that has already fired.
+          if (navigator.serviceWorker.controller) { resolve(); }
+        });
+      }
+      window.__w16p.state = 'controlled';
     })
     .catch((error) => {
       window.__w16p.state = 'error';

@@ -96,6 +96,39 @@ a caller may SAY on every spawn, while nothing in the new one runs unless a
 caller wrote `seed_from`. All three are internal moves with no behaviour
 change.
 
+### Fixed — F-909: two pins raced a wall clock and a loaded Windows runner won
+
+Two tests asserted truthfully about things that had never happened, and both
+only on Windows cells under load. No product code changed.
+
+`test_the_adoption_path_goes_through_the_reclaiming_attach` patched the
+adoption budget to 250 ms and then spent it on a REAL locked
+`browser_pids.json` claim before the attach door was ever reached — measured at
+~3 ms locally, but the budget was racing that write as well as the door's own
+sleep. When the claim won, nothing was ever opened and the node reported an
+open connection that had never existed. The claim is now stubbed (and, for the
+first time, ASSERTED — taken, and handed back), the door parks on an
+`asyncio.Event` instead of sleeping, the thread pool is warmed before the call,
+and reaching the door is its own assertion with its own message. The budget
+stays 250 ms: widening it would hide the race rather than remove it.
+
+`test_service_worker_installs_activates_controls_and_unregisters` gated on
+`navigator.serviceWorker.ready`, which resolves on an ACTIVE REGISTRATION and
+says nothing about whether THIS document is controlled — and the fixture's
+worker awaits a network round trip before `clients.claim()`, so the node read
+`controller` in that gap. `tests/fixture_routes.py`'s `w16Register` now reports
+a distinct `controlled` state, reached by awaiting `controllerchange` with a
+re-check of `controller` after arming the listener; the node polls for it.
+Nothing sleeps, and a worker that activates but never claims now stops at
+`ready`, so the poll's own failure names that state instead of answering with
+`uncontrolled`.
+
+Both were reproduced causally first — a stalled claim for one, 1500 ms in front
+of `clients.claim()` for the other — and both fixes pass under the same stall
+that breaks the old pins.
+`audit/stage2/finding_F909_windows_latent_pin_races.md` carries the
+measurements.
+
 ### Added — F-898: `--from` a session that is still OPEN
 
 F-897 refuses `--from work` while `work`'s browser is running, and it is right
