@@ -113,6 +113,21 @@ it and the pop, so the window is closed rather than narrowed. The cancellation s
 propagates. `close_instance` keeps exactly one removal site and
 `browser_manager.py` stays at its 1485-LOC cap.
 
+### Fixed — F-904: importing `__main__` by name started a backend
+
+`src/stealth_chrome_devtools_mcp/__main__.py` was three lines and the third was a
+bare `main()` — no `if __name__ == "__main__":` guard. `python -m
+stealth_chrome_devtools_mcp` works either way (it runs the module as `__main__`
+regardless), but anything that imports the module BY NAME —
+`importlib.import_module`, `pkgutil.walk_packages` walking the package, a stray
+`import stealth_chrome_devtools_mcp.__main__` — ran `main()` as an ordinary import
+side effect. `main()` cold-starts a real backend into the operator's
+`~/.stealth-mcp`; measured on 2026-09-21 from nothing more than an import (pid
+189088, port 64986). Fixed with the guard the module always should have had.
+`tests/test_package_entrypoints.py` pins both directions: importing by name is now
+inert, and `runpy.run_module(..., run_name="__main__")` — the same mechanism
+`python -m` uses — still reaches `main()`.
+
 ## 2.1.11
 
 ### Fixed — F-892: the snapshot staleness witness stated a file Chrome stopped writing in v96
