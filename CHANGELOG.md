@@ -135,6 +135,52 @@ already admitted, so one mechanism closes all four sinks at once — and
 `record.args` empty, so a filter could only pattern-match text the library is
 free to reword.
 
+### Fixed — F-908: the same door, from the other end — the SSE transport logged every tool RESULT
+
+F-906 closed what **Chrome said to us**. This closes what **we said back**.
+`sse_starlette/sse.py`:362 is `logger.debug("chunk: %s", chunk)`, and for this
+backend that chunk is the whole serialised answer to a `tools/call` —
+`get_cookies`' jar, `get_page_content`'s HTML, `get_instance_state`'s
+localStorage. Measured by driving the real `EventSourceResponse`, not read off
+the call:
+
+```
+sse_starlette.sse DEBUG chunk: b'event: message\r\ndata: {"jsonrpc":"2.0","id":3,
+  "result":{"structuredContent":{"cookies":[{"name":"SID","value":"…"}]}}}'
+```
+
+The SSE frame is what carries every answer, because the SDK and FastMCP both
+default `json_response` to `False`, nothing here passes it, and an inherited
+`FASTMCP_JSON_RESPONSE` cannot reach fastmcp either (F-890 drops the prefix).
+
+Identical premise, identical mechanism: the logger carries no level of its own,
+so one caller-side `logging.basicConfig(level=DEBUG)` opened it — **measured,
+both orders**. `sse_starlette` joins `PAYLOAD_LOG_FAMILIES`, and that is the
+whole change. WARNING is again the effective level every shipped configuration
+already had, and here the floor costs even less than it did for nodriver:
+`sse_starlette` has no call at WARNING or above anywhere in the package, so
+there is not one diagnostic for it to stand in front of.
+
+**The families deliberately left OUT are measured too, and pinned**, because
+"why is `mcp` not in that list" is the next person's question: `starlette` and
+`anyio` log nothing below WARNING at all; `uvicorn`'s whole-ASGI-message logger
+replaces bodies with a `<N bytes>` placeholder by construction and logs below
+what `basicConfig(DEBUG)` admits; `httpcore`'s body traces carry no return
+value, so their message is the trace name; `fastmcp`'s tool-ARGUMENT line is
+already shielded by the library's own `FastMCP` root level plus
+`propagate=False`; and `mcp`'s whole-incoming-message line renders a
+`RequestResponder`, which defines neither `__repr__` nor `__str__`, so no
+argument escapes it. Capping `mcp` or `fastmcp` wholesale would have silenced
+those SDKs' own diagnostics and closed no door.
+
+One line a level cannot reach is **recorded rather than fixed**:
+`mcp/shared/session.py`:383-384 use module-level `logging.warning` /
+`logging.debug`, i.e. the **root** logger, so no family cap reaches them — and
+:383 is at WARNING, therefore reachable as shipped, carrying pydantic's
+middle-truncated `input_value=` echo of a caller's arguments on the
+validation-failure path. It needs a different mechanism and is named in
+`audit/stage2/finding_F908_sse_starlette_logs_tool_result.md` §6.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in

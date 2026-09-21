@@ -126,7 +126,9 @@ claim the evidence does not support. Pinned.
 
 ## 4. Pins
 
-`tests/test_nodriver_payload_logging.py` — 22 nodes. RED-first: 4 behavioural
+`tests/test_nodriver_payload_logging.py` (renamed `tests/test_payload_log_floor.py`
+by F-908, which added a third family to the same floor and so would otherwise
+have opened a second home for one function's evidence) — 22 nodes. RED-first: 4 behavioural
 failures (both `basicConfig` orders × the all-sinks assertion and the named
 stderr/Sentry assertion) plus 5 mechanism/surface failures, against 13 already-
 green invariants. They drive the real stdlib level machinery, a real
