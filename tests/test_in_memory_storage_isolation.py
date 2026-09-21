@@ -1,4 +1,10 @@
-"""F-899: no test may leave an entry in the process-global ``in_memory_storage``.
+"""F-899: nothing may leave an entry stranded in ``in_memory_storage``.
+
+One subject, two halves — a test that leaks into the process-global store, and a
+``close_instance`` that strands an entry it has already claimed. Sections 1 and 2
+below. The store is the same object in both, which is why both pins live here.
+
+## 1. The reported leak — a test writing the process-global store
 
 Measured on main ``f18ecc5``::
 
@@ -26,28 +32,57 @@ file incidentally wiping the leak on its way past. Nothing holds that in place:
 drop that file, rename it, or mark it integration, and the two symptom files go
 red again in a different pair.
 
-So the fix is the harness's, at its one home — ``conftest.py``'s autouse
+So THAT fix is the harness's, at its one home — ``conftest.py``'s autouse
 ``_in_memory_storage_hygiene``, a sibling of ``_stealth_logger_hygiene``, which
-restores the store's contents after every test. The product is unchanged: a
-backend process gets one store, writes it on spawn/adopt, clears it on
-``close_instance`` and on lifespan shutdown, and that is symmetric.
+restores the store's contents after every test. The write it isolates is the
+product working correctly: ``adopt`` writes as the last statement of its ``try``,
+so no abort path can strand it.
 
-This file is the order-independent pin the mask could hide. It is deliberately a
-two-step NODE PAIR in ONE file — pytest runs a file's tests in declared order, so
-step 2 always follows step 1 no matter which other files are collected, and it
-needs no sibling file to stay adjacent. Step 1 writes through the same public
-call the two production writers use; step 2 asserts both what the store holds and
-what ``list_instances`` answers, because the reported defect was the second one.
+The pin below is the order-independent one the mask could hide. It is
+deliberately a two-step NODE PAIR in ONE file — pytest runs a file's tests in
+declared order, so step 2 always follows step 1 no matter which other files are
+collected, and it needs no sibling file to stay adjacent. Step 1 writes through
+the same public call the two production writers use; step 2 asserts both what the
+store holds and what ``list_instances`` answers, because the reported defect was
+the second one.
+
+## 2. The half that WAS a product defect — a cancelled close
+
+Reviewing the above traced every write and removal, and ``close_instance`` did not
+match the rest: it popped ``_instances`` in Phase 1 and dropped the store entry in
+Phase 4, six awaits later, inside a ``try`` whose ``except Exception`` a
+``CancelledError`` walks straight past. A client disconnecting mid-close therefore
+left the manager without the instance and the store with its entry — a
+``source: "stored"`` row in ``list_instances``, about a browser already being torn
+down, for the life of the backend. The removal is Phase 1's now, under the same
+lock as the pop with no ``await`` between them.
+
+Its pin is the third node here and not in ``test_close_instance_offload.py``,
+whose autouse fixture replaces ``in_memory_storage.remove_instance`` with a
+``MagicMock`` — against that double this defect is invisible.
 """
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
 from fakes import FakeBrowserManager, FakeTab, call_tool
+from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.in_memory_storage import in_memory_storage
+from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserState
 
 # The id step 1 leaves behind. Named for this file so a failure in step 2 says
 # which test wrote the entry it is complaining about.
 LEAKED_ID = "f899-leaked-instance"
+
+# Step 1 ran. Without this, ``-k``, a single-node selection and — the one that
+# matters — ``--lf`` after a step-2 failure all rerun step 2 ALONE, where it
+# passes about nothing: the store is empty because nobody filled it. A pin that
+# goes green when its own premise was skipped is worse than no pin (review S3).
+_WROTE_THE_STORE = False
 
 
 def test_a_test_may_write_the_process_global_store():
@@ -58,6 +93,8 @@ def test_a_test_may_write_the_process_global_store():
     ``tool_runtime``, which is why a fixture and not a fake is what isolates it.
     Nothing is cleaned up here on purpose — that is the point of the pin.
     """
+    global _WROTE_THE_STORE
+
     in_memory_storage.store_instance(
         LEAKED_ID,
         {
@@ -68,6 +105,7 @@ def test_a_test_may_write_the_process_global_store():
         },
     )
     assert in_memory_storage.get_instance(LEAKED_ID) is not None
+    _WROTE_THE_STORE = True
 
 
 async def test_the_next_test_does_not_inherit_it(patched_server):
@@ -77,9 +115,74 @@ async def test_the_next_test_does_not_inherit_it(patched_server):
     the entry, and ``list_instances`` reported it to a caller as a ``stored``
     record about a browser that never existed in this test.
     """
+    assert _WROTE_THE_STORE, "run the whole file — step 1 is this pin's other half"
     assert LEAKED_ID not in in_memory_storage.list_instances().get("instances", {})
 
     server = patched_server(
         browser_manager=FakeBrowserManager(tabs={"i1": FakeTab()}),
     )
     assert await call_tool(server, "list_instances") == []
+
+
+# ---------------------------------------------------------------------------
+# 2. the product half — a cancelled close must not strand its entry either
+# ---------------------------------------------------------------------------
+
+CLOSED_ID = "f899-cancelled-close"
+
+
+def _blocking_browser(entered: asyncio.Event) -> SimpleNamespace:
+    """A browser whose first Phase-2 CDP send never returns.
+
+    ``close_instance`` reaches it after Phase 1 has already popped the instance,
+    which is the window the pin is about. ``tabs`` is empty so the tab loop above
+    it is skipped and there is exactly ONE place the coroutine can be suspended.
+    """
+
+    async def _never(*_args, **_kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    return SimpleNamespace(
+        tabs=[],
+        connection=SimpleNamespace(closed=False, send=_never, disconnect=_never),
+        _process=SimpleNamespace(returncode=0, pid=0),
+        _process_pid=0,
+        stop=lambda: None,
+    )
+
+
+async def test_a_cancelled_close_does_not_strand_its_store_entry():
+    """A client that disconnects mid-``close_instance`` leaves no ghost row.
+
+    The removal used to live in Phase 4, six awaits past the Phase-1 pop and
+    inside a ``try`` whose handler is ``except Exception`` — which a
+    ``CancelledError`` walks straight past, because it is a ``BaseException``.
+    So the manager lost the instance and the store kept its entry, and
+    ``list_instances`` reported it as a ``source: "stored"`` record for the life
+    of the backend: nothing but lifespan shutdown clears it, and the browser it
+    names is already being torn down. Phase 1 drops it under the same lock, with
+    no ``await`` in between, so the two cannot be separated.
+
+    The cancellation must still PROPAGATE — this is a client that went away, not
+    a close that succeeded, and swallowing it would make the caller's task look
+    like it finished.
+    """
+    manager = BrowserManager()
+    entered = asyncio.Event()
+    manager._instances[CLOSED_ID] = {
+        "browser": _blocking_browser(entered),
+        "instance": BrowserInstance(instance_id=CLOSED_ID, state=BrowserState.READY),
+    }
+    in_memory_storage.store_instance(
+        CLOSED_ID, {"instance_id": CLOSED_ID, "state": "active"}
+    )
+
+    task = asyncio.create_task(manager.close_instance(CLOSED_ID))
+    await asyncio.wait_for(entered.wait(), timeout=5.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert CLOSED_ID not in manager._instances  # Phase 1 did claim it
+    assert CLOSED_ID not in in_memory_storage.list_instances().get("instances", {})
