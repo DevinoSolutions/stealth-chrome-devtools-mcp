@@ -248,8 +248,13 @@ def _shape(value: object) -> str:
     """
     kind = f"{type(value).__module__}.{type(value).__qualname__}"
     try:
-        tag = value.tag  # nodriver Element: node_name.lower()
-        names = list(value.attrs.keys())  # nodriver Element: a ContraDict
+        # `getattr` with a default, so "this object is not element-shaped" is
+        # an ordinary answer rather than an exception to classify. It suppresses
+        # `AttributeError` ONLY, so a property that raises anything else still
+        # reaches the handler below — which is the case that matters.
+        tag = getattr(value, "tag", None)  # nodriver Element: node_name.lower()
+        attrs = getattr(value, "attrs", None)  # nodriver Element: a ContraDict
+        names = None if attrs is None else list(attrs.keys())
     except Exception as exc:  # noqa: BLE001  PERMANENT(F-907 — inside makeRecord)
         # It must be TOTAL, not narrow. Both reads run arbitrary library code
         # -- `tag` is a property and `attrs` answers a `ContraDict` -- and this
@@ -365,7 +370,10 @@ def install_payload_arg_redaction() -> None:
             record.args = _redacted(record.args)
         return record
 
-    factory._stealth_payload_arg_redaction = True  # type: ignore[attr-defined]
+    # Through the CONSTANT, never a literal: the mark is read one function up
+    # by the same name, and two spellings of it would make a rename silently
+    # turn this install non-idempotent.
+    setattr(factory, _REDACTION_MARK, True)
     logging.setLogRecordFactory(factory)
 
 
