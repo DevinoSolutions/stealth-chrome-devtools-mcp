@@ -182,6 +182,20 @@ uv run python -m pytest tests/test_in_memory_storage_isolation.py \
 106 passed in 10.15s
 ```
 
+That the pin cannot be masked by the accident in §2 is measured, not asserted.
+With the fixture temporarily switched to `autouse=False` and the masking file
+collected alongside the pin, it fails **in both orders**:
+
+```
+pytest tests/test_in_memory_storage_isolation.py tests/test_mcp_protocol_surface.py
+  -> 1 failed, 7 passed
+pytest tests/test_mcp_protocol_surface.py tests/test_in_memory_storage_isolation.py
+  -> 1 failed, 7 passed
+```
+
+Neither placement helps, because the mask clears the store between FILES while
+the pin's two nodes are adjacent inside one.
+
 ## 7. The sibling sweep
 
 131 hermetic test files were swept in eleven batches with a `pytest_runtest_call`
