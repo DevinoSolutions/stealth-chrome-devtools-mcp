@@ -32,9 +32,11 @@ wants it gone sooner has ``kill-orphans --force``, which skips this whole
 classification by design. The alternative — a leaked Chrome traded against a
 killed login — is the trade F-888 already made once, and it is the same trade
 every ``resolves toward`` in this tree makes: ``profile_lock._browser_pids``
-reads an unaskable process table as HELD, ``spawn_leak._started_after`` spares
-a pid whose start time it cannot read, and ``backend_eviction`` refuses to
-evict a backend it cannot prove is idle.
+reads an unaskable process table as HELD (``None`` for "could not be asked",
+distinct from ``()`` for "asked, nothing running"), ``spawn_leak.launched_pid``
+answers None for a launch it cannot name and that spawn's leftovers are left
+RUNNING (F-919), and ``backend_eviction`` refuses to evict a backend it cannot
+prove is idle.
 
 A leaf: ``psutil`` and stdlib only. The Chromium-family name test arrives as an
 ARGUMENT (``process_cleanup._is_browser_process_name``, the one home for what

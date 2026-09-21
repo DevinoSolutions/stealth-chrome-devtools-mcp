@@ -623,9 +623,15 @@ now refuse and answer `False`, with a line that states the decision. A zombie
 was already correct (`ZombieProcess` subclasses `NoSuchProcess`) and is
 unchanged; it is pinned because it looks like it should have changed.
 
-This makes orphan recovery uniform with the two places in the tree that already
-resolved an unreadable witness toward safety — `spawn_leak._started_after` and
-`profile_lock._browser_pids`.
+This makes orphan recovery uniform with the places in the tree that already
+resolved an unreadable witness toward safety: `profile_lock._browser_pids`
+(`None` for "could not be asked", distinct from `()` for "asked, nothing
+running"), `backend_eviction`'s refusal to evict what it cannot prove is idle,
+and F-919's `spawn_leak.launched_pid`, which leaves a failed spawn's leftovers
+running rather than guess at them. It also interlocks with F-919 rather than
+overlapping it: that fence decides WHICH process a failed spawn may end, this
+guard decides whether a pid may be ended at all, and F-919's reap reaches its
+kill through this very function.
 
 **What it costs, stated rather than hidden:** a browser we can neither adopt nor
 reap is left running and left recorded, and an orphan whose pid we cannot

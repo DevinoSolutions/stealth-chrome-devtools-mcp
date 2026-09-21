@@ -65,10 +65,17 @@ one home; the Chromium-family test arrives as an ARGUMENT
 (`self._is_browser_process_name`), so `reap_guard` adds no second answer to
 "what counts as a browser we launch".
 
-This makes the reaper uniform with the two places in the same tree that already
-got it right — `spawn_leak._started_after` spares a pid whose start time it
-cannot read, and `profile_lock._browser_pids` returns `None` for "could not be
-asked" and resolves toward HELD.
+This makes the reaper uniform with the places in the same tree that already got
+it right. `profile_lock._browser_pids` returns `None` for "could not be asked" —
+deliberately distinct from `()` for "asked, nothing running" — and resolves
+toward HELD; `backend_eviction` refuses to evict a backend it cannot prove is
+idle. **Do not cite `spawn_leak._started_after` for this**, which an earlier
+draft of this section and the master-profile audit's own F-918 proposal both
+did: F-919 deleted that symbol along with `_CLOCK_TOLERANCE_SECONDS`, replacing
+the start-time fence with an identity one. The DIRECTION survives there under a
+new name — `spawn_leak.launched_pid` answers None for a launch it cannot name,
+and that spawn's leftovers are then left running — and F-919's own §6 records
+the deletion and where the citations land.
 
 ### 3.1 What paid for the lines
 
@@ -132,6 +139,24 @@ That is deliberate and it is the narrower risk of the two: a pid we cannot read
 may be a browser holding a login, and it may equally be a process that has
 nothing to do with this tool — a recycled pid belonging to something the
 operator is running. The old code would have terminated that too.
+
+**What this gives F-919 for free, and the cross-reference that has to move.**
+F-919's reap calls this function — `process_cleanup._kill_process_by_pid` is the
+third of the three witnesses its docstring lists, "the escalating kill,
+unchanged" — so the two fixes interlock rather than overlap: **F-919's fence
+decides WHICH process a failed spawn may end; this one decides whether a pid may
+be ended at all.** Its identity fence hands a pid down, and that pid now passes
+through a guard that refuses it if its `.name()` cannot be read.
+
+That makes one sentence in F-919's §6 false on the day this lands. It reads
+"**Not addressed here, and adjacent:** `process_cleanup._kill_process_by_pid`
+still terminates a pid whose `.name()` could not be read (the audit's D3 /
+F-918) — the same 'unreadable resolves toward killing' shape, one layer below
+this fix, reached by every caller including this one." F-919 merges FIRST by the
+lead's ordering, so that sentence is corrected in the merge commit that brings
+main into this branch, and nothing else of F-919's is touched. If you are
+reading this and that sentence still says "still terminates", the merge did not
+do its job.
 
 **Residual:** the guard is about the NAME only. A process that is genuinely
 Chromium-family but belongs to someone else's browser — a real Chrome the
