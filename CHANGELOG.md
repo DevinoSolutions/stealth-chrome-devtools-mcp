@@ -135,6 +135,13 @@ already admitted, so one mechanism closes all four sinks at once — and
 `record.args` empty, so a filter could only pattern-match text the library is
 free to reword.
 
+**It is a floor, not a census**, and what sits above it is named rather than
+implied: `element.py`:537/:624/:633 interpolate an element at WARNING, and
+nodriver's `Element.__repr__` renders that element's descendant TEXT. That one
+needs no `basicConfig` at all and is tracked as **F-907**; raising this floor
+over it would silence nodriver's real diagnostics, which is the trade this
+change deliberately refuses.
+
 ### Fixed — F-908: the same door, from the other end — the SSE transport logged every tool RESULT
 
 F-906 closed what **Chrome said to us**. This closes what **we said back**.
@@ -179,7 +186,8 @@ One line a level cannot reach is **recorded rather than fixed**:
 :383 is at WARNING, therefore reachable as shipped, carrying pydantic's
 middle-truncated `input_value=` echo of a caller's arguments on the
 validation-failure path. It needs a different mechanism and is named in
-`audit/stage2/finding_F908_sse_starlette_logs_tool_result.md` §6.
+`audit/stage2/finding_F908_sse_starlette_logs_tool_result.md` §6 — beside
+F-907, the other line this floor sits below.
 
 ## 2.1.12
 

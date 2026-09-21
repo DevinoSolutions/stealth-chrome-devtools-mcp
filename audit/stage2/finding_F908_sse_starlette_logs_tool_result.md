@@ -81,6 +81,12 @@ logger. `✗` = the payload arrived.
 | `STEALTH_MCP_LOG_LEVEL=DEBUG` | WARNING | — | — | — | — |
 | caller `basicConfig(DEBUG)` **before** our init | DEBUG | — | — | — | **✗ sse.py:362** |
 | caller `basicConfig(DEBUG)` **after** our init | DEBUG | — | — | — | **✗ sse.py:362** |
+| caller `basicConfig(DEBUG)` **+ `--debug`** | DEBUG | — | — | — | **✗ sse.py:362** |
+
+The last row is F-906's review S3 cell, added by `96d7876`: it is the only one
+that puts a record through the debug-ring column while records are actually
+flowing, and this finding's line is measured in it for free because the sse
+marker joined `PAYLOAD_MARKS` rather than getting its own parametrisation.
 
 ### After
 
@@ -207,9 +213,13 @@ re-opens the family question.
 `apply_payload_log_floor`; a third family would otherwise have opened a second
 home for one mechanism's evidence.
 
+**35 nodes** after merging F-906's review round (`96d7876`, which brought that
+file from 22 to 25 and is where the `reset_logging` docstring and the
+seventh matrix cell come from).
+
 Extended, never duplicated:
 
-* the sse line joins `PAYLOAD_MARKS`, so all five configuration cells and the
+* the sse line joins `PAYLOAD_MARKS`, so all **six** configuration cells and the
   diagnostics-survive pins cover it without a new parametrisation;
 * `emit_real_sse_tool_result` drives the **real** `EventSourceResponse` rather
   than copying `sse.py`:362's call the way the nodriver lines are copied —
@@ -217,11 +227,16 @@ Extended, never duplicated:
   plain async generator, so the pin can afford the library's own code path.
   It also asserts the frame really went out on the wire, so the absence of a
   marker can never be the absence of a frame (a vacuous pass);
-* **F-906's Sentry premise grew its negative half.** The premise is not "the
+* **F-906's Sentry premise grew its negative half**, and F-908 and F-906's own
+  review round reached that conclusion independently. The premise is not "the
   SDK patches `callHandlers`" but "the SDK patches **nothing upstream of**
-  `isEnabledFor`". A presence-only assertion stays green if a bump keeps that
-  patch and adds a `Logger.handle` / `_log` / `makeRecord` hook beside it —
-  exactly the case that would invalidate the whole mechanism;
+  `isEnabledFor`": a presence-only assertion stays green if a bump keeps that
+  patch and adds a `Logger.handle` / `_log` / `makeRecord` hook beside it.
+  `96d7876`'s wording is the one kept — it is already under review and it also
+  states exclusivity **positively**, asserting `setup_once` binds exactly one
+  name — and this finding's duplicate was dropped rather than merged, because
+  it asserted nothing the surviving pin does not. The pin is SHARED across both
+  findings: one mechanism, one place its foundation is measured;
 * `test_the_families_named_are_the_families_that_exist` now walks all three
   families and asserts each is `__name__`-derived.
 
@@ -276,7 +291,24 @@ premise, and the end-to-end render) and `TestTheFamiliesDeliberatelyLeftOut`
    client of ours ever talks to a third party.
 
 5. **`reset_logging()` in the pin file is still a global mutation with no
-   restore** (F-906 review N2). Unchanged by this work, and the slice was run
-   with the mutating file both **first** (537 passed) and **last** (339 passed)
-   to confirm order-independence. `pytest-randomly` is not installed in this
-   venv, so this remains latent rather than live.
+   restore** (F-906 review N2, whose `96d7876` gave it a docstring saying so).
+   Unchanged by this work, and the slice was run with the mutating file both
+   **first** and **last** to confirm order-independence. `pytest-randomly` is
+   not installed in this venv, so this remains latent rather than live.
+
+   F-908 does add one interaction worth naming: `reset_logging` wipes the
+   `FastMCP` root that `fastmcp/__init__.py` configures at import, so
+   `test_the_fastmcp_argument_line_is_unreachable_from_root` re-runs the
+   library's **own** configurator before asserting. That is the honest shape —
+   the premise under test is "fastmcp still shields its own family", not "this
+   process happened to be configured" — but it is a second reason to replace
+   the reset with a snapshot-and-restore if random ordering ever arrives.
+
+6. **F-907 is the third line this floor sits below**, and the three are
+   deliberately separate findings rather than one widened cap: F-907's
+   `element.py` WARNINGs and `mcp/shared/session.py`:383 are both **above** the
+   floor and reachable as shipped, and each needs a mechanism this one does not
+   provide — an args-side filter for F-907 (its records carry the element in
+   `record.args`), a root-logger rule for `session.py`. Raising
+   `PAYLOAD_LOG_FLOOR` over either would silence real diagnostics, which is the
+   trade all three findings refuse.

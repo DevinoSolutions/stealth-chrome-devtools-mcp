@@ -222,7 +222,16 @@ class Sinks:
 
 def reset_logging() -> None:
     """Every library logger back to NOTSET, every handler gone. The pins set
-    global process state, so each one starts from the same floor."""
+    global process state, so each one starts from the same floor.
+
+    It RESETS and does not RESTORE, and that is worth knowing rather than
+    hiding (F-906 review N2): anything an earlier test module configured on a
+    logger is destroyed here, not put back. It is safe in this suite because
+    the only cross-module logging state is `stealth.<role>`'s handler, which
+    `configure_logging` reinstalls on demand — and it was verified by running
+    the whole logging/observability slice with this file placed FIRST. If
+    random test ordering is ever introduced, snapshot-and-restore instead.
+    """
     for name in list(logging.Logger.manager.loggerDict):
         logger = logging.getLogger(name)
         for handler in list(logger.handlers):
@@ -331,6 +340,17 @@ SHIPPED = [
 CALLER_DEBUG = [
     pytest.param({"role": "backend", "basicconfig": "before"}, id="basicConfig-before"),
     pytest.param({"role": "backend", "basicconfig": "after"}, id="basicConfig-after"),
+    # The two knobs TOGETHER. Without this cell the debug-ring column is only
+    # ever asserted where no record was flowing in the first place: `SHIPPED`
+    # turns the ring on but admits nothing, `CALLER_DEBUG` admits everything
+    # but leaves the ring off. The ring is unreachable by construction —
+    # `debug_logger.enable()` sets a flag and echoes to stderr, and registers
+    # no handler anywhere — but "unreachable by construction" is worth
+    # DEMONSTRATING under flowing records rather than asserting.
+    pytest.param(
+        {"role": "backend", "basicconfig": "before", "debug_ring": True},
+        id="basicConfig-before-and---debug",
+    ),
 ]
 
 
@@ -512,12 +532,20 @@ class TestPremises:
         admitted. That is why the LEVEL is upstream of Sentry and a
         ``before_breadcrumb`` rule would be a second home for one decision.
 
-        The premise is not "the SDK patches ``callHandlers``" but "the SDK
-        patches NOTHING upstream of ``isEnabledFor``" — so both halves are
-        asserted. A bump that keeps this patch and ADDS a ``Logger.handle`` or
-        ``_log`` hook would leave a presence-only pin green while the premise
-        was gone.
+        The premise is not "the SDK patches ``callHandlers``" — it is **"the
+        SDK patches nothing UPSTREAM of ``isEnabledFor``"**, so the pin needs
+        both halves (F-906 review S1). A bump that kept the ``callHandlers``
+        patch and ADDED a ``Logger.handle`` / ``_log`` / ``makeRecord`` hook
+        would leave a presence-only assertion green while the premise it
+        stands for was gone. At 2.64.0 exclusivity holds: ``setup_once`` binds
+        exactly one name (measured).
+
+        F-908 rests on the identical premise for a third family, so this pin
+        is SHARED rather than restated — there is one mechanism and one place
+        its foundation is measured.
         """
+        import re
+
         from sentry_sdk.integrations import logging as sentry_logging
 
         source = inspect.getsource(sentry_logging.LoggingIntegration.setup_once)
@@ -527,9 +555,16 @@ class TestPremises:
         )
         for upstream in ("logging.Logger.handle", "logging.Logger._log", "makeRecord"):
             assert upstream not in source, (
-                f"the SDK now also patches {upstream}, which runs upstream of "
-                "isEnabledFor — re-measure whether a level still covers Sentry"
+                f"the SDK now also patches {upstream}, which runs UPSTREAM of "
+                "isEnabledFor — re-measure whether a level still covers Sentry "
+                "before trusting F-906's 'one mechanism closes all four sinks'"
             )
+        # Exclusivity stated positively too: one bound name, and it is ours.
+        bound = re.findall(r"^\s*(logging\.[\w.]+)\s*=", source, re.MULTILINE)
+        assert bound == ["logging.Logger.callHandlers"], (
+            f"setup_once now binds {bound}; F-906 rests on it binding exactly "
+            "logging.Logger.callHandlers and nothing else"
+        )
 
     def test_the_families_named_are_the_families_that_exist(self):
         """Every family is named by its ROOT, and every root is one a logger
