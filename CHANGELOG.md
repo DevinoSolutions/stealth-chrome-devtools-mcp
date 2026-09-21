@@ -25,6 +25,14 @@ returned byte-for-byte. `sub/../acme` is accepted and canonicalised to
 `sessions/acme` — the directory it already meant — rather than refused.
 `session=` refused all of these before and still does: a session is a name.
 
+**A session directory that is a symlink or a junction to storage elsewhere
+still opens**, through either spelling. The walk test reads the path the caller
+composed and never where it resolves to, precisely so that configuration keeps
+working; the two roots are still compared by resolving, which is what catches a
+link pointing AT one. And a refusal that reached a directory through a link now
+names the directory it really opens, instead of naming a path inside the clone
+root while explaining that it is the clone root.
+
 ### Changed — F-896: sessions have a name, and it is never "master"
 
 `spawn_browser` gains **`session`**, the one documented way to ask for a

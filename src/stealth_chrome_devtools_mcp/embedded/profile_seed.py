@@ -531,15 +531,13 @@ def require_allowed(
     right outcome.
     """
     resolved = anchor(requested, roots, inside)
-    refusal = reserved_reason(requested, resolved, roots, inside)
+    refusal = reserved_reason(requested, resolved, roots)
     if refusal is not None:
         raise ToolError(f"profile request rejected: {refusal}")
     return resolved
 
 
-def reserved_reason(
-    requested: str, resolved: Path, roots: Roots, inside: Callable[[Path, Path], bool]
-) -> str | None:
+def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
     """Why this profile request may not be honoured, or None (F-894, F-896,
     F-901).
 
@@ -608,11 +606,20 @@ def reserved_reason(
     leaves it is not naming a session. The shared profile is exempt by
     landing, not by spelling, since `anchor` answers it for the bare word.
 
-    Both are asked of the NORMALISED landing `anchor` now returns, and both
-    compare through ``same_dir`` / ``inside``, which RESOLVE — so a symlinked
-    root compares equal to itself, and a component the OS folds away (``...``
-    on Windows, measured to resolve onto the clone root) is caught here even
-    though ``normpath`` cannot see it.
+    Both are asked of the NORMALISED landing ``anchor`` now returns, and they
+    ask it in two different ways ON PURPOSE (review S1). The sixth compares
+    through ``same_dir``, which RESOLVES both sides — so a symlinked root
+    compares equal to itself, a LINK pointing at a root is caught, and so is a
+    component the OS folds away (``...`` on Windows, measured to resolve onto
+    the clone root) which ``normpath`` cannot see. The seventh is LEXICAL
+    (``_inside_lexically``), because a session directory that is a symlink or
+    a junction to storage elsewhere RESOLVES outside the clone root: asking
+    that one by resolving read a configuration 2.1.11 honoured as a walk out of
+    the tree and refused it through both spellings. Every escape this finding
+    closes is folded by ``normpath`` before either is asked, so the lexical
+    question costs the rule nothing — see ``_inside_lexically`` for what it
+    gives up, and ``_landing_words`` for why a refusal that reaches a directory
+    through a link has to name the one it really opens.
 
     The SHARED profile itself is deliberately NOT refused: driving it directly
     is how a human logs in, and the caller who names it (by path, or by
@@ -622,12 +629,26 @@ def reserved_reason(
     It is composed of two halves and they are two QUESTIONS, not a split for
     length: ``_name_refusal`` is about the string the caller typed — is this
     word one they may use — and ``_landing_refusal`` is about the directory it
-    MEANS, which is why F-901's pair live there and why only that half needs
-    ``inside``. Either half answering is a refusal; this function stays THE one
-    home a caller asks.
+    MEANS, which is why F-901's pair live there. Either half answering is a
+    refusal; this function stays THE one home a caller asks.
     """
     return _name_refusal(requested, resolved, roots) or _landing_refusal(
-        requested, resolved, roots, inside
+        requested, resolved, roots
+    )
+
+
+def _about(requested: str, name: str) -> str:
+    """How a refusal that is about a NAME opens (review N2).
+
+    These two rules key on ``Path(requested).name``, so ``../master`` is
+    refused for its basename and the message quoted back ``'master'`` — a
+    string the caller never wrote. The request is named alongside it when the
+    two differ, and the message is byte-identical when they do not, which is
+    the overwhelmingly common case (a bare name) and the one the F-896 pins
+    read.
+    """
+    return (
+        f"{name!r} " if requested == name else f"{requested!r} names {name!r}, which "
     )
 
 
@@ -649,10 +670,11 @@ def _name_refusal(requested: str, resolved: Path, roots: Roots) -> str | None:
     folded = name.rstrip(". ")
     if not asked.is_absolute() and folded != name and folded in FOLDED_NAMES:
         return (
-            f"{name!r} is {folded!r} once the filesystem has had it: Windows "
-            "strips a trailing dot or space from a path component, so this "
-            f"would reach {folded!r} rather than a session of its own name. "
-            "Drop the trailing dot or space, or pick a different name."
+            f"{_about(requested, name)}is {folded!r} once the filesystem has "
+            "had it: Windows strips a trailing dot or space from a path "
+            f"component, so this would reach {folded!r} rather than a session "
+            "of its own name. Drop the trailing dot or space, or pick a "
+            "different name."
         )
     # Past that clause `folded == name` always, since it returns for every
     # spelling where they differ and lands in `FOLDED_NAMES`. The two rules
@@ -670,10 +692,10 @@ def _name_refusal(requested: str, resolved: Path, roots: Roots) -> str | None:
             else ""
         )
         return (
-            f"{name!r} is a reserved profile name and never means a session of "
-            f"that name. Pass session={DEFAULT_SESSION!r} (or no session at "
-            "all) for the shared profile every session is seeded from; pick "
-            f"another name for a session of your own.{existing}"
+            f"{_about(requested, name)}is a reserved profile name and never "
+            f"means a session of that name. Pass session={DEFAULT_SESSION!r} "
+            "(or no session at all) for the shared profile every session is "
+            f"seeded from; pick another name for a session of your own.{existing}"
         )
     if (
         not asked.is_absolute()
@@ -689,9 +711,7 @@ def _name_refusal(requested: str, resolved: Path, roots: Roots) -> str | None:
     return None
 
 
-def _landing_refusal(
-    requested: str, resolved: Path, roots: Roots, inside: Callable[[Path, Path], bool]
-) -> str | None:
+def _landing_refusal(requested: str, resolved: Path, roots: Roots) -> str | None:
     """The refusals about the DIRECTORY a request means (F-893, F-901)."""
     asked = Path(requested)
     if same_dir(resolved, roots.seed):
@@ -702,23 +722,88 @@ def _landing_refusal(
         )
     if same_dir(resolved, roots.clones) or same_dir(resolved, roots.session):
         return (
-            f"{requested!r} names a directory profiles are KEPT in ({resolved}), "
-            "which is not itself a profile — a browser opened there writes its "
-            "own profile files in among every session's. Pass a session name, "
-            "or an absolute path to a directory of your own."
+            f"{requested!r} names a directory profiles are KEPT in rather than "
+            f"a profile: {_landing_words(resolved)}. A browser opened there "
+            "writes its own profile files in among every session's. Pass a "
+            "session name, or an absolute path to a directory of your own."
         )
     if (
         not asked.is_absolute()
         and not same_dir(resolved, roots.shared)
-        and not inside(resolved, roots.clones)
+        and not _inside_lexically(resolved, roots.clones)
     ):
         return (
             f"{requested!r} walks out of the session storage and lands at "
-            f"{resolved}. A session name is anchored under the clone root and "
-            "has to stay inside it. Pass a session name, or an absolute path "
-            "if you mean a directory of your own."
+            f"{_landing_words(resolved)}. A session name is anchored under the "
+            "clone root and has to stay inside it. Pass a session name, or an "
+            "absolute path if you mean a directory of your own."
         )
     return None
+
+
+def _inside_lexically(path: Path, parent: Path) -> bool:
+    """Is *path*, AS WRITTEN, under *parent* — asked of the strings alone.
+
+    The RESOLVING twin is ``clone_storage._is_relative_to``, which ``anchor``
+    takes as ``inside``, and the two are not a second way to do one thing: they
+    answer two different questions and F-901 needs one of each. "Which root did
+    the caller already name" is about the directories these paths BECOME, so it
+    resolves. "Did this request walk out of the clone root" is about the path
+    the caller composed, so it must NOT — a session directory that is a
+    symlink or a junction to storage elsewhere resolves outside the clone root,
+    and a resolving test reads that legal configuration as an escape and refuses
+    a request 2.1.11 honoured (review S1), with a message naming a path visibly
+    inside the root.
+
+    It costs the rule nothing, because every escape F-901 closes is folded by
+    ``normpath`` BEFORE this is asked: `..`, `../..` and `sub/..` are already
+    the directory they mean by the time they arrive. What a LEXICAL test cannot
+    see — a component the OS itself folds away, `...` on Windows, or a link
+    pointing AT a root — is caught one clause above by ``same_dir``, which does
+    resolve, on both sides.
+
+    What it gives up is named rather than hidden: a link INSIDE the clone root
+    pointing outside it is the caller's own business again, which is exactly
+    what 2.1.11 said and what an operator who made that link meant.
+
+    It is spelled on ``os.path`` and deliberately NOT on this module's ``Path``
+    name: both arguments are CONCRETE directories on this host — one of them is
+    a root ``clone_storage`` handed us — so the host's own rules for separators
+    and case are the right ones, and the flavour screening that matters is on
+    the caller's STRING, one line above, where ``Path(requested).is_absolute()``
+    still reads whatever flavour is in play. Normalising both sides puts them in
+    one form; ``normcase`` is what makes two spellings of one Windows directory
+    compare equal and is the identity on POSIX. The separator on the end is what
+    makes it STRICTLY inside — landing ON the root is the clause above's answer,
+    with its own message.
+    """
+    try:
+        base = os.path.normcase(os.path.normpath(str(parent)))
+        landed = os.path.normcase(os.path.normpath(str(path)))
+    except (OSError, ValueError):
+        return False
+    return landed.startswith(base + os.sep)
+
+
+def _landing_words(resolved: Path) -> str:
+    """How a refusal NAMES the directory a request landed on (review S1).
+
+    The landing is the lexical path — that is what the caller composed and what
+    the answer would have been — but a refusal that reaches a directory through
+    a link has to say which one, or it contradicts itself: the shipped message
+    told an operator that ``<clones>\\self`` "is a directory profiles are KEPT
+    in", naming a path visibly inside the clone root as though it were the root.
+    So the real target is added when, and only when, the two differ; case-only
+    differences are not a difference, because Windows spells one directory both
+    ways.
+    """
+    try:
+        real = resolved.resolve(strict=False)
+    except OSError:
+        return str(resolved)
+    if os.path.normcase(str(real)) == os.path.normcase(str(resolved)):
+        return str(resolved)
+    return f"{resolved}, which really is {real}"
 
 
 def same_dir(left: Path, right: Path) -> bool:
