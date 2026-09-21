@@ -108,10 +108,46 @@ correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
 #:   this is the same payload one layer down. Capping ``nodriver`` alone would
 #:   have left that door open.
 #:
+#: * ``sse_starlette`` — F-908. ``sse/sse.py``:362 is
+#:   ``logger.debug("chunk: %s", chunk)``, and for THIS backend that chunk is
+#:   the answer to a ``tools/call``, whole: ``get_cookies``' jar,
+#:   ``get_page_content``'s HTML, ``get_instance_state``'s localStorage. The
+#:   SSE frame is what carries every answer because FastMCP leaves
+#:   ``json_response`` at its ``False`` default and nothing here asks
+#:   otherwise (an inherited ``FASTMCP_JSON_RESPONSE`` cannot either —
+#:   ``backend_env.scrub`` drops the prefix, F-890). Measured by driving the
+#:   real ``EventSourceResponse``, not read off the call.
+#:
 #: Deliberately NOT ``uc``: that is only the local alias this codebase imports
 #: ``nodriver`` under, and no logger is ever named by it — capping a name that
 #: does not exist would be a claim the evidence does not support.
-PAYLOAD_LOG_FAMILIES = ("nodriver", "websockets")
+#:
+#: Deliberately NOT ``mcp`` or ``fastmcp``, and the census that looked at them
+#: is pinned rather than summarised (``TestTheFamiliesDeliberatelyLeftOut``).
+#: ``fastmcp``'s tool-ARGUMENT line (``server/server.py``:672) is real, and the
+#: library already shields it: its loggers hang under a ``FastMCP`` root
+#: carrying its own level and ``propagate = False``, so a caller's root DEBUG
+#: never reaches them — and the bare ``fastmcp`` family, which DOES inherit
+#: root, holds no payload line, so capping it would be the ``uc`` mistake
+#: spelled differently. ``mcp``'s whole-message line
+#: (``server/lowlevel/server.py``:676) IS admitted at DEBUG but renders a
+#: ``RequestResponder``, which defines neither ``__repr__`` nor ``__str__``, so
+#: ``%s`` yields ``<… object at 0x…>`` and no argument escapes. The one line
+#: that does render arguments — ``mcp/shared/session.py``:384 — uses
+#: module-level ``logging.debug``, i.e. the ROOT logger, which no family cap
+#: can reach however this tuple grows; it is named in the finding, not fixed
+#: here. Capping either family would therefore silence the SDK's own INFO
+#: diagnostics and buy nothing.
+#:
+#: Deliberately NOT ``starlette``, ``anyio`` (neither logs anything below
+#: WARNING at all — an AST census, so "nothing" is measured rather than
+#: grepped), ``uvicorn`` (its whole-ASGI-message logger replaces bodies with a
+#: ``<N bytes>`` placeholder BY CONSTRUCTION and logs at TRACE, which
+#: ``basicConfig(DEBUG)`` does not admit; the access log is already off, F-830)
+#: or ``httpcore``/``httpx`` (the body traces set no ``return_value``, so their
+#: message is the trace NAME alone — response HEADERS can appear, a tool result
+#: cannot).
+PAYLOAD_LOG_FAMILIES = ("nodriver", "websockets", "sse_starlette")
 
 #: The floor those families are held at. WARNING is not a new policy — it is
 #: the effective level every shipped configuration of this product already had
@@ -120,7 +156,9 @@ PAYLOAD_LOG_FAMILIES = ("nodriver", "websockets")
 #: nothing an operator sees and only closes the one door that was open. It is
 #: also the level at which those libraries stop quoting payloads and start
 #: reporting faults: ``connection.py``:483's callback WARNING names the callback
-#: and the event CLASS, never the message.
+#: and the event CLASS, never the message. For ``sse_starlette`` the floor
+#: costs even less — it has no call at WARNING or above anywhere in the package
+#: (measured), so there is nothing there for a floor to stand in front of.
 PAYLOAD_LOG_FLOOR = logging.WARNING
 
 
@@ -133,13 +171,20 @@ def apply_payload_log_floor() -> None:
     ``backend-boot.log``, a durable file — and, for the one line that sits at
     INFO, away from a Sentry breadcrumb on the next event.
 
+    F-908 added the third family under the identical premise, from the other
+    end of the same request: ``sse_starlette`` logs the SSE chunk, and the
+    chunk is the whole serialised answer to a ``tools/call``. Where F-906's
+    lines quote what CHROME said, this one quotes what WE said back — so the
+    two together close both directions of one round trip, which is why this is
+    one list and one mechanism rather than a second floor beside the first.
+
     Until this, the only thing stopping them was that those loggers carry no
     level of their own and INHERIT root's. That is a real protection and it was
     measured to hold for every configuration this product ships — but it is
     root's to give away, and one ``logging.basicConfig(level=DEBUG)`` in a
     caller that embeds this backend, a notebook or a test gives it away for the
-    whole process. MEASURED both ways round: all four payload lines reached a
-    root handler and ``connection.py``:451 reached Sentry, whether the
+    whole process. MEASURED both ways round: every payload line reached a root
+    handler and ``connection.py``:451 reached Sentry, whether the
     ``basicConfig`` came before or after our own setup.
 
     So the level is set EXPLICITLY on the family root. ``getEffectiveLevel``
@@ -164,10 +209,12 @@ def apply_payload_log_floor() -> None:
     Called from :func:`configure_logging`, before anything that can fail: a
     process whose log directory could not be created still has stderr and
     Sentry, so it still needs the floor. It honours that caller's never-raises
-    contract BY CONSTRUCTION rather than with a handler — these two statements
-    are a dict lookup and an integer assignment on a stdlib logger, with no
-    I/O and nothing to fail — so there is no ``except`` here that could only
-    ever hide a bug of ours.
+    contract BY CONSTRUCTION rather than with a handler — these statements are
+    a dict lookup and an integer assignment on a stdlib logger, with no I/O and
+    nothing to fail — so there is no ``except`` here that could only ever hide
+    a bug of ours. Adding a family costs one more of each, which is the other
+    reason the list is the extension point and a per-library helper would not
+    be.
     """
     for family in PAYLOAD_LOG_FAMILIES:
         logging.getLogger(family).setLevel(PAYLOAD_LOG_FLOOR)
