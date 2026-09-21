@@ -314,7 +314,11 @@ premise, and the end-to-end render) and `TestTheFamiliesDeliberatelyLeftOut`
   `StreamableHTTPTransport._handle_sse_event`, the reviewer's own probe shape,
   and its marker joins `PAYLOAD_MARKS`, so all seven configuration cells cover
   it with no new parametrisation. It was **RED in the three caller-DEBUG cells
-  before the fix and green after** — the leak, not a restatement of it.
+  before the fix and green after** — the leak, not a restatement of it. The
+  full RED was **7 failed / 33 passed**: those three cells in each of the two
+  matrix pins (six), plus the family-set premise, which named the missing entry
+  directly. Both counts are stated because "six cells" is the leak and "seven
+  nodes" is what the runner printed.
   `TestTheProxySideOfTheSameRoundTrip` adds that this transport is what the
   stdio proxy actually runs, that :218 and :547 are one capped logger (so the
   argument side is covered by the same entry), and that the `:198` WARNING
