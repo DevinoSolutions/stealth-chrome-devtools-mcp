@@ -16,6 +16,13 @@ precedence you cannot see; passing both with the same value is fine.
 `C:\Users\me\profile`" is not a sentence — and says where the path door is:
 `user_data_dir`, or `stealthy call spawn_browser --arg user_data_dir=<path>`.
 
+Whitespace around a NAME is not part of it through either spelling, while a
+PATH keeps its own characters; and a value that is empty once stripped (`""`,
+`"   "`) now **raises** through either spelling instead of being honoured as a
+profile request. On Windows `user_data_dir="   "` resolved to the session root
+itself — the directory that holds every session — so it was never a profile
+anyone meant. Omit the argument entirely for the `default` session.
+
 **`default` is now a session you can open.** F-894 reserved the word as a
 refusal, explicitly as a placeholder for this release; it now MEANS the shared
 profile every session is seeded from and the one a human logs in to.

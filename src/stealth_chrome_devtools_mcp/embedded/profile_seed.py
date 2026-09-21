@@ -364,6 +364,27 @@ def is_bare_name(value: str) -> bool:
     return "/" not in value and "\\" not in value and not PureWindowsPath(value).drive
 
 
+def _names_nothing(spelling: str, given: str) -> ToolError:
+    """The ONE sentence both spellings get for a request that names no profile.
+
+    One function, because the two spellings answering an empty request
+    differently is the asymmetry this module exists to remove — and they did:
+    ``session="   "`` raised while ``user_data_dir="   "`` was ANCHORED, which
+    on Windows resolves to the clone root itself (the trailing spaces are
+    stripped from the component), so Chrome would have been handed the
+    directory that holds every session as its profile.
+
+    It raises rather than falling back to an unnamed spawn: silently turning a
+    malformed request into the shared session is a substitution, which is the
+    thing this vocabulary exists to stop. ``None`` stays the one way to say
+    "no profile argument at all".
+    """
+    return ToolError(
+        f"{spelling} must be a name and {given!r} names no profile. Omit it "
+        f"entirely to use the {DEFAULT_SESSION!r} session."
+    )
+
+
 def profile_request(session: str | None, user_data_dir: str | None) -> str | None:
     """THE one reading of the two spellings a caller may use (F-896).
 
@@ -388,8 +409,11 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
     directories on POSIX — and turned ``" /tmp/x"``, whose parts are
     ``(' ', 'tmp', 'x')`` and which 2.1.11 anchored inside the clone root, into
     a ROOTED string that ``roots.session / asked`` resets to the drive root, so
-    the request left the session tree. Both measured. A value that is only
-    whitespace is left exactly as it arrived, which is 2.1.11's answer for it.
+    the request left the session tree. Both measured.
+
+    A value that is EMPTY once stripped is neither — it names no profile — and
+    both spellings raise for it through ``_names_nothing``; a string that short
+    cannot have held a separator, so that rule can never divert a path.
 
     Two rules, and each exists because its absence is a silence:
 
@@ -408,16 +432,15 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
       layer does not expand, and a name that is only dots.
     """
     if session is None:
-        if not user_data_dir:
+        if user_data_dir is None:
             return None
         bare = user_data_dir.strip()
-        return bare if bare and is_bare_name(bare) else user_data_dir
+        if not bare:
+            raise _names_nothing("user_data_dir", user_data_dir)
+        return bare if is_bare_name(bare) else user_data_dir
     name = session.strip()
     if not name:
-        raise ToolError(
-            "session must be a name; it was empty. Omit it to use the "
-            f"{DEFAULT_SESSION!r} session."
-        )
+        raise _names_nothing("session", session)
     if (
         not is_bare_name(name)
         or Path(name).is_absolute()
@@ -534,7 +557,12 @@ def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
     ``roots.shared`` is read here only to tell those two apart.
     """
     asked = Path(requested)
-    if PureWindowsPath(requested).drive and not asked.is_absolute():
+    # `.strip()` here is a TEST and never a normalisation — `asked`, and so
+    # every answer about where the request LANDS, still reads the string as it
+    # arrived. Without it one leading space hid the drive from this rule:
+    # `"C:foo"` was refused while `" C:foo"` was anchored as a session name,
+    # which is F-894's own shape wearing a space (delta review N).
+    if PureWindowsPath(requested.strip()).drive and not asked.is_absolute():
         return (
             f"{requested!r} names a drive but is not an absolute path, so it "
             "would be created as a session name rather than opened. Pass a "

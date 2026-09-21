@@ -81,6 +81,33 @@ class TestOneRequest:
     def test_neither_given_is_no_request_at_all(self, tmp_session_root):
         assert clone_storage.require_allowed_user_data_dir(None, None) is None
 
+    @pytest.mark.parametrize("given", ["", "   ", "\t"])
+    def test_a_request_that_names_nothing_is_refused_through_either_spelling(
+        self, given, tmp_session_root
+    ):
+        """A value that is empty once its whitespace is off names no profile,
+        and both spellings have to say so — this function's whole job is that
+        the two cannot answer one request differently.
+
+        ``session`` already raised. The alias ANCHORED, and on Windows that is
+        a measured hazard rather than an oddity: the trailing spaces are
+        stripped from the path component, so ``<root>/sessions/"   "``
+        RESOLVES TO ``<root>/sessions`` itself and
+        ``spawn_browser(user_data_dir="   ")`` hands Chrome the directory that
+        holds every session as its profile. No refusal could see it either —
+        ``rstrip(". ")`` of ``"   "`` is ``""``, which is in no rule's set, and
+        ``same_dir`` compares against the shared profile, not the clone root.
+
+        It raises rather than falling back to an unnamed spawn: turning a
+        malformed request into the shared ``default`` profile is a substitution,
+        which is the one thing this vocabulary exists to stop. ``None`` remains
+        the one way to say "no profile argument at all".
+        """
+        with pytest.raises(ToolError, match="name"):
+            clone_storage.require_allowed_user_data_dir(given, None)  # the alias
+        with pytest.raises(ToolError, match="name"):
+            clone_storage.require_allowed_user_data_dir(None, given)  # `session`
+
     def test_a_path_keeps_the_whitespace_that_is_part_of_it(
         self, tmp_path, tmp_session_root
     ):
@@ -152,6 +179,24 @@ class TestSessionRefusesAPath:
         assert flavour("C:profile").name  # the string is a name under either
         with pytest.raises(ToolError):
             clone_storage.require_allowed_user_data_dir(None, "C:profile")
+
+    @pytest.mark.parametrize("flavour", [PurePosixPath, PureWindowsPath])
+    def test_a_drive_hidden_behind_a_space_is_still_refused(
+        self, flavour, tmp_session_root
+    ):
+        """F-894's drive refusal reads the string a caller typed, and one
+        leading space hid the drive from it: ``" C:foo"`` was anchored as
+        ``<root>/sessions/ C:foo`` while ``"C:foo"`` was refused — the F-894
+        shape itself, a drive-qualified path silently made into a session name.
+
+        The fix is a TEST and not a normalisation (`.strip()` inside the drive
+        read), so nothing about where a request LANDS changes; only whether the
+        existing refusal can see it. Both flavours agree the string is not
+        absolute, which is what keeps the refusal identical on every cell.
+        """
+        assert not flavour(" C:foo").is_absolute()
+        with pytest.raises(ToolError, match="drive"):
+            clone_storage.require_allowed_user_data_dir(" C:foo", None)
 
     def test_a_path_is_still_reachable_through_the_alias(self, tmp_session_root):
         """The path door is ``user_data_dir`` / ``stealthy call``, and it stays
