@@ -264,8 +264,56 @@ mode of this finding is a future reader assuming F-923 closed the incident and
 dropping the manual step. The node exists so that reader is contradicted by a
 test rather than by a paragraph.
 
-**What actually controls that shape** is the `--numstat` procedure in §5, and
-the pre-bump heading diff against `git show v<prev>:CHANGELOG.md`.
+**What actually controls that shape** — and this paragraph said something
+different until 2026-09-21, which is the correction: **nothing automated does,
+at merge time.** It named the `--numstat` procedure of §5, contradicting the
+measurement four paragraphs above it, where the misplaced file and the corrected
+one both report zero deletions. `--numstat` is a CLOBBER check; your own block is
+not in `origin/main`, so wherever the merge puts it the diff is an insertion. The
+two real controls are a HUMAN reading the headings after the merge, and — as a
+backstop that catches the shape before a release ships rather than before it
+lands — the pre-bump heading diff against `git show v<prev>:CHANGELOG.md`.
+
+### 6.1.1 The same question for a MULTI-LANE union, measured
+
+§6.1 is about one branch merging a release. The 2.1.13 line puts five lanes
+behind that release in a fixed merge order, so each lane after the first merges
+a `main` whose `## Unreleased` already holds one or more siblings' blocks and
+resolves a genuine conflict by union. Measured 2026-09-21 against the real rule
+functions, with hermetic string fixtures (the live CHANGELOG was not touched),
+for a three-lane union — F-919, F-916 and this one:
+
+| resolution | F-923's rules | `--numstat` |
+|---|---|---|
+| **GOOD** — one `## Unreleased`, all three blocks under it, the twelve untouched | no rule fires (correct: no cry-wolf) | `0` deletions |
+| **A** — two `## Unreleased` headings, both sides kept | **CAUGHT** (`_unreleased_problem`) | blind |
+| **B** — `## Unreleased` below `## 2.1.13` | **CAUGHT** (`_unreleased_problem`) | blind |
+| **C** — blocks absorbed into `## 2.1.13`, no queue left | blind | blind |
+| **D** — a SIBLING lane's block dropped in the union | blind | **CAUGHT** |
+| **E** — YOUR OWN block dropped in the union | blind | blind |
+
+**The rules catch the two HEADING shapes and neither BLOCK shape.** That
+boundary is not a gap to be closed later: a rule reading one file cannot know
+that a `### ` section which is absent ought to be present, for exactly §6.1's
+reason. It is written down because "F-923 will catch a bad resolution" is a
+natural thing to believe and is true of half the cases.
+
+**D's protection is POSITION-DEPENDENT, and it accumulates down the merge
+order.** `--numstat` sees a dropped sibling block only once that sibling has
+merged to `main`, because only then is the block a line `origin/main` has and
+the branch lacks. So the lane merging LAST is covered against every sibling, the
+second lane against one, and **the lane merging FIRST behind a release has no
+`--numstat` protection against a dropped block at all** — nothing else is in
+`main` yet. Stated explicitly because the matrix reads as a property of the
+RULES, and this row is a property of the ORDER: merging first is the least
+protected position, not the safest.
+
+**E is the shape with no automated control in any position**, and it is the most
+likely failure of a mechanical union — three `### Fixed — F-9xx` blocks look
+alike, and losing your own is purely an insertion-count change with nothing to
+compare it against. Its one control is procedural and does not depend on merge
+position: **capture your block to a temp file BEFORE the merge and diff it
+byte-for-byte after**. §5's procedure carries that step for that reason.
 
 ### 6.2 A git-aware node was considered and declined
 
