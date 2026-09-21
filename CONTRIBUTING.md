@@ -310,10 +310,20 @@ a base ref, so it is this procedure:
 
     git diff origin/main --numstat -- CHANGELOG.md
 
-Insertions, and **0 deletions**. A nonzero right-hand column means git moved
-something — an entry relocated into a shipped section shows up as deletions
-elsewhere in the file. Run it on *every* merge, not only conflicting ones; the
-conflicting merges are the safe case, because a human reads those.
+Insertions, and **0 deletions**. A nonzero right-hand column means `main` has
+content your branch does not — its blocks were overwritten rather than appended
+to. Run it on *every* merge, not only conflicting ones; the conflicting merges
+are the safe case, because a human reads those.
+
+**It is a CLOBBER check and it cannot see PLACEMENT.** Your own block is not in
+`origin/main`, so wherever the merge puts it — under `## Unreleased` or under a
+shipped release heading — it is purely an INSERTION and the deletion count
+stays 0. Measured on the F-913 lane's own 2.1.13 merge: the misplaced file
+reported `57  0` and the corrected one `58  0`. So run it for the clobber, and
+check placement the other two ways — `TestChangelogIntegrity` catches the two
+shapes a rule can see, and for the third (your block absorbed into the release
+section with no queue left) the only control is reading the file, which is what
+the next section is for.
 
 **The word _after_ is load-bearing.** `git diff origin/main` is not symmetric:
 deletions are lines `origin/main` has that your branch lacks. Run it *before*

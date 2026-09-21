@@ -216,9 +216,15 @@ steps: **after** every merge of `main`,
 git diff origin/main --numstat -- CHANGELOG.md
 ```
 
-must show insertions and **0 deletions**. An entry git relocated into a shipped
-section shows up as deletions elsewhere in the file, so a nonzero right-hand
-column is the signal whichever of the three shapes caused it.
+must show insertions and **0 deletions**. A nonzero right-hand column means
+`main` has content the branch does not, i.e. its blocks were overwritten.
+
+**Corrected 2026-09-21, measured on this branch's own 2.1.13 merge:** this
+catches the CLOBBER shape and **not** the relocation one. An earlier draft of
+this section said a relocated entry "shows up as deletions elsewhere in the
+file", and it does not — the branch's own block is not in `origin/main`, so
+wherever it lands it is purely an insertion. The misplaced file reported
+`57  0`; the corrected one reported `58  0`. Same zero, both states.
 
 The word *after* is load-bearing and is §1.2's second half: run **before** the
 merge, the same command reports every entry `main` has gained since the
@@ -240,6 +246,17 @@ legitimate release commit**, and all three rules accept it (§4.1, row 2).
 No rule reading only this file could do otherwise. Knowing that a `### ` section
 does not belong under `## 2.1.7` requires knowing what 2.1.7 shipped, which
 lives in the tag, not the file.
+
+**This stopped being a fixture argument on 2026-09-21.** Merging the released
+2.1.13 into this very branch reproduced the incident exactly: `main` led with
+`## 2.1.13` and carried no queue, the branch's own `## Unreleased` block merged
+CLEANLY — `CHANGELOG.md | 2 +-`, one heading line, no conflict — and the F-913
+block landed under `## 2.1.13`, a release that does not contain it. Run against
+that real file, all three rules answered `None`, byte-for-byte as they do for
+the corrected one; so did the `--numstat` (§5). **Neither automated control
+sees this shape**, which is why the merge procedure spells out "create a new
+`## Unreleased` ABOVE the release heading and move your block under it" as a
+step a human performs and verifies.
 
 This is stated three times on purpose — here, in the class docstring, and as
 `test_the_incident_shape_is_not_caught_and_that_is_stated` — because the failure

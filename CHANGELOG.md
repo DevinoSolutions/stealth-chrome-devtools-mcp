@@ -1,5 +1,63 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — F-913: a tool answer no longer rides a validation error into Sentry
+
+When the stdio proxy cannot parse a frame the backend sent it, the MCP SDK logs
+`logger.exception("Error parsing SSE message")`
+(`mcp/client/streamable_http.py`:240, and the same shape at `:394` and `:574`).
+The message is static and carries no arguments — but the exception it logs is a
+pydantic `ValidationError`, whose text quotes the input it refused. On that leg
+the input is the serialised answer to a `tools/call`, so a piece of a
+`get_cookies` jar or a `get_page_content` document travelled out as a **full
+Sentry event**.
+
+All three of the mechanisms this tree already had are blind to it by
+construction: F-908's WARNING floor on `mcp.client` sits *below* ERROR,
+F-907's rule finds no argument to shape, and F-911's would withhold the one
+part of the record that is safe — the static message — while leaving the
+payload exactly where it was.
+
+**What now happens.** A record made by a site that renders a payload into its
+exception has that exception replaced by a restatement that quotes none of the
+input and keeps everything else:
+
+```
+<pydantic_core._pydantic_core.ValidationError for JSONRPCMessage: 1 error(s),
+ text withheld: 283 chars; json_invalid at <root>>
+```
+
+The pydantic error type, the model, the error count and every field path
+survive — they are what an operator acts on, and they are read from pydantic's
+own `errors(include_input=False, …)` accessor rather than cut out of its
+rendered sentence. The traceback is handed through unchanged, so every frame
+(and Sentry's grouping) is exactly as before, and the live exception is never
+touched: the SDK still sends the object it caught downstream.
+
+**How much was actually leaking, measured.** pydantic caps each echo at 50
+characters of the input — the first 24 and the last 23 — so a whole JSON-RPC
+frame's head is always the envelope. What escaped was the frame's **last 23
+characters**, which is the end of the tool answer; **any value shorter than 50
+characters, whole**, which is the sharp edge because a cookie value or a
+session id frequently is; and one echo **per union arm**, measured at 9 errors
+and 216 echoed characters for a single 273-byte frame. The finding's original
+claim that "a cookie jar's first entries and its last are both rendered" was
+wrong and is corrected in place.
+
+Three things were deliberately not done, each for a measured reason. pydantic's
+own `hide_input_in_errors` works, and is rejected because it changes what the
+SDK sends downstream, covers only the models we enumerate, and costs a schema
+rebuild in the proxy's cold start. The rule is gated on the SITE as well as the
+exception's structure, because `expected_events` recognises that same exception
+type on FastMCP's own records and an ungated rule would have re-opened the
+`caller-input` noise class. And no second record factory or `before_send` hook
+was added — a factory chain is ordered by install time, so two installs make
+the outcome depend on call order.
+
+Details, including the SDK's adjacent `Raw result:` pair and why it is out of
+scope, in `audit/stage2/finding_F913_validation_error_echoes_tool_result.md`.
+
 ## 2.1.13
 
 ### Added — F-897: a new session can start from an existing one
@@ -709,63 +767,6 @@ prevent, and would not have fenced the session root on Windows at all.
 Per-file `isolated_state` fixtures are kept, not deleted: they give each NODE a
 clean record while the fence gives the SESSION one directory — per-test
 isolation and operator safety are different questions.
-
-### Fixed — F-913: a tool answer no longer rides a validation error into Sentry
-
-When the stdio proxy cannot parse a frame the backend sent it, the MCP SDK logs
-`logger.exception("Error parsing SSE message")`
-(`mcp/client/streamable_http.py`:240, and the same shape at `:394` and `:574`).
-The message is static and carries no arguments — but the exception it logs is a
-pydantic `ValidationError`, whose text quotes the input it refused. On that leg
-the input is the serialised answer to a `tools/call`, so a piece of a
-`get_cookies` jar or a `get_page_content` document travelled out as a **full
-Sentry event**.
-
-All three of the mechanisms this tree already had are blind to it by
-construction: F-908's WARNING floor on `mcp.client` sits *below* ERROR,
-F-907's rule finds no argument to shape, and F-911's would withhold the one
-part of the record that is safe — the static message — while leaving the
-payload exactly where it was.
-
-**What now happens.** A record made by a site that renders a payload into its
-exception has that exception replaced by a restatement that quotes none of the
-input and keeps everything else:
-
-```
-<pydantic_core._pydantic_core.ValidationError for JSONRPCMessage: 1 error(s),
- text withheld: 283 chars; json_invalid at <root>>
-```
-
-The pydantic error type, the model, the error count and every field path
-survive — they are what an operator acts on, and they are read from pydantic's
-own `errors(include_input=False, …)` accessor rather than cut out of its
-rendered sentence. The traceback is handed through unchanged, so every frame
-(and Sentry's grouping) is exactly as before, and the live exception is never
-touched: the SDK still sends the object it caught downstream.
-
-**How much was actually leaking, measured.** pydantic caps each echo at 50
-characters of the input — the first 24 and the last 23 — so a whole JSON-RPC
-frame's head is always the envelope. What escaped was the frame's **last 23
-characters**, which is the end of the tool answer; **any value shorter than 50
-characters, whole**, which is the sharp edge because a cookie value or a
-session id frequently is; and one echo **per union arm**, measured at 9 errors
-and 216 echoed characters for a single 273-byte frame. The finding's original
-claim that "a cookie jar's first entries and its last are both rendered" was
-wrong and is corrected in place.
-
-Three things were deliberately not done, each for a measured reason. pydantic's
-own `hide_input_in_errors` works, and is rejected because it changes what the
-SDK sends downstream, covers only the models we enumerate, and costs a schema
-rebuild in the proxy's cold start. The rule is gated on the SITE as well as the
-exception's structure, because `expected_events` recognises that same exception
-type on FastMCP's own records and an ungated rule would have re-opened the
-`caller-input` noise class. And no second record factory or `before_send` hook
-was added — a factory chain is ordered by install time, so two installs make
-the outcome depend on call order.
-
-Details, including the SDK's adjacent `Raw result:` pair and why it is out of
-scope, in `audit/stage2/finding_F913_validation_error_echoes_tool_result.md`.
-
 
 ## 2.1.12
 
