@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — F-925: refreshing the seed could destroy the seed
+
+The directory every new session is copied from — `master-snapshot`, the
+`default` session's copyable form — was refreshed by deleting it and rebuilding
+it in place. For the whole of a ~101 MB copy it was absent, then partial, and
+it carried no marker until the last statement. Anything that killed the process
+in that window — a crash, `stealthy stop`, an eviction, a reboot — left it that
+way.
+
+That window is entered on **every open and every close of `default`**, and it
+does not heal: the repair is another refresh, and a refresh is refused while
+the `default` browser is open (`default-in-use`), while every consumer asks
+`snapshot.exists()` — which an empty directory passes. So the seed stayed
+broken and every session created afterwards was copied from it and came up
+logged out.
+
+Measured on the unfixed code, interrupting the real copy: the seed directory
+exists and its cookie jar is already gone, and a session spawned afterwards has
+no jar at all.
+
+The copy is built in a sibling directory now and published with a single
+rename, so the seed is only ever the old copy or the new one, complete. The
+marker is written into the staged copy before the swap, so a complete profile
+can never appear without one. The displaced copy is kept as a single previous
+generation (`master-snapshot.stealth-previous`) rather than deleted — insurance
+against a copy that silently skipped a file Chrome held open. That costs one
+extra profile on disk, and `.trash` was deliberately not reused for it: the
+seed is not in the clone root, so a trashed seed would land where the storage
+sweep never looks.
+
+No new setting, and nothing about how a session is selected or named changes.
+
 ## 2.1.13
 
 ### Added — F-897: a new session can start from an existing one
