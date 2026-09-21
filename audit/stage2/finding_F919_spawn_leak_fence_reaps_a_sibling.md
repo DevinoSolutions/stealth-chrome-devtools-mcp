@@ -142,8 +142,12 @@ spawn onto that profile is seeded from `master-snapshot`, i.e. logged out.
   source-and-measurement finding, not a post-mortem.
 * **F-860's leak is real and is not being reverted.** The reap still runs; only its fence
   changes.
-* **Not a claim that the delegated (F-810) path leaked.** `desktop_launch.launch_and_attach`
-  already kills a Chrome it started but could not attach to.
+* **The delegated (F-810) path is read, not run.** An earlier version of this bullet said
+  `launch_and_attach` "already kills a Chrome it started but could not attach to" and
+  concluded that path could not leak. §6 refutes it from source: that kill is conditional
+  and has three named refusals. Everything claimed about the delegated path here is read
+  off `desktop_launch.py`; no delegated launch was driven for this finding, and the
+  successor that would close it is F-922.
 
 ---
 
@@ -244,13 +248,28 @@ is **provably** still None when the reap reads it — not "might be". **In that 
 `(pid, create_time)` pair would have spared a recycled pid and this guard does not.**
 Outside it both hops have completed, `returncode` is set, and the reap correctly declines.
 
-**What stands in the window is the second witness — and the window is real.** For harm the
-pid freed at `:1443` would have to be recycled, inside that window, onto a Chromium-family
-process on OUR `--user-data-dir`; `_get_browser_pids_for_profile` admits nothing else.
-Linux and macOS allocate pids sequentially and wrap the whole pid space before reissuing
-one, so an immediate reuse is not a reachable event. That is why the window is tolerable.
-It is not a reason the window does not exist. Not measured: the claim is about the
-kernel's allocation policy, not a timing run.
+**Two things stand in that window, and they fail differently — which is the point.** For
+harm the pid freed at `:1443` would have to be recycled, inside that window, onto a
+Chromium-family process on OUR `--user-data-dir`.
+
+*Primary, and falsifiable by deployment: the pid space.* Linux allocates pids sequentially
+from `last_pid` and wraps at `pid_max` before reissuing a number; macOS wraps at 99999,
+skipping numbers already in use. Reissuing the pid we just freed therefore takes on the
+order of **10⁵-10⁶ process creations**, and all of them would have to land inside a
+sub-millisecond window. That is a magnitude, not an absolute — and it is
+**configuration-dependent**: `pid_max` is tunable and a container can run with a small one,
+which shortens the cycle. That deployment is where this argument is attacked, and the
+argument does not survive it. Not measured: the claim is about the kernel's allocation
+policy, not a timing run.
+
+*Secondary, and configuration-independent: the directory witness.*
+`_get_browser_pids_for_profile` admits only a Chromium-family process on the directory we
+launched on, and no `pid_max` moves that. Taken alone it is the weaker exclusion — a
+recycled pid could in principle land on such a process — but it is what still holds when
+the primary assumption is taken away.
+
+Primary but falsifiable, plus secondary but robust. That is why the window is tolerable. It
+is not a reason the window does not exist.
 
 **An answer that cannot be established resolves toward NOT killing** — uniformly with
 `profile_lock._browser_pids`, with the deleted `_started_after`, and with the direction
@@ -320,33 +339,68 @@ away with "`launch_and_attach` already kills a Chrome it started but could not a
 so no known path both leaks and is unnameable today". **That was false, and this fence is a
 real regression against the old one in one case.**
 
-`launch_and_attach`'s kill is CONDITIONAL: `if not attached and delegated.pid is not None`
-(`desktop_launch.py:560-561`), and `delegated.pid` is stamped at exactly one place —
-`_run_task:466` — only once the pid file has been read AND the process confirmed live. That
-covers every failure after the pid is known, which is the common set: DevTools never opens
-(`:470`), `cdp_attach.attach` raises (`:550`), a cancellation mid-poll. It does NOT cover a
-Chrome that starts and whose pid never becomes readable inside `PORT_READY_TIMEOUT`: the
-loop then exits at `:470` with `delegated.pid` still None and the kill is skipped.
+`launch_and_attach`'s kill is CONDITIONAL — `if not attached and delegated.pid is not None`
+(`desktop_launch.py:560-561`) — and `delegated.pid` is stamped at exactly one place,
+`_run_task:466`, after the pid file is read AND `_process_create_time` returns a number.
+**Three paths reach the `finally` with a live delegated Chrome and no kill.** A first
+version of this paragraph named only the first of them:
 
-**The old fence caught that case and this one does not.** `launch_started_at` was stamped
-before `_launch_browser` on the delegated path too, and a delegated Chrome starts seconds
-after it, so the profile-and-time scan included it. We are accepting the loss of that
-coverage, and the reason is the whole of §1: the only thing that ever caught this case was
-the guess, and the guess is what killed a user's logged-in browser. Reinstating it to cover
-a residual would reinstate the defect. Nothing cheaper closes it either — the pid was never
-learned by ANYONE, so handing `_Delegated` into `Attempt` adds nothing: whenever
-`delegated.pid` is set, `_kill_delegated` has already run.
+1. **The deadline expires before the pid file is readable** (`:449-473`). `PORT_READY_TIMEOUT`
+   is 20.0 s (`:78`), polled every 0.25 s (`:79`); if no poll reads a pid, `:466` is never
+   reached, the loop raises at `:470`, and `delegated.pid` is still None.
+2. **The pid IS read but `_process_create_time` answers None** (`:459-465`), which raises at
+   `:461` *before* the stamp at `:466`. The branch is correct for the case it was written
+   for — a Chrome that handed off to a running instance and exited, where the live browser
+   on that desktop is the USER'S and killing it would be us tidying up with their browser.
+   But the helper catches **`psutil.Error`** wholesale (`:326-329`) and `AccessDenied` is a
+   subclass, so "ours, momentarily unreadable" is indistinguishable from "gone" and takes
+   the same exit. The helper's own docstring says "or None if there is no such process"
+   (`:320`) — narrower than its `except`.
+3. **`_kill_delegated` runs and refuses** — on a `create_time` mismatch beyond
+   `PID_IDENTITY_TOLERANCE` = 0.5 s (`:371-378`) or on any `psutil.Error` (`:383-388`).
+   (Its third refusal, `create_time is None` at `:362-368`, is unreachable from here:
+   `:466` assigns pid and create_time together.)
 
-How reachable that residual is, in the finding's own vocabulary: **not demonstrated, not
-excluded.** It needs the launcher script to start Chrome and then fail to leave a readable
-pid file for the whole window; the common slow case is the opposite — the pid file lands
-fast and it is DevTools that lags, which stamps at `:466` and is covered. That the
-delegated launcher can fail to leave a readable pid file at all is an **F-810 reliability
-question and belongs in its own finding**, not this one.
+In all three the Chrome is untracked by `process_cleanup` — `_apply_post_launch` never ran,
+so `track_browser_process` was never called — invisible to `list_instances`, and ends only
+at the next backend start's orphan sweep.
 
-Where it does leak, the leak survives until the next backend start's orphan reap — which is
-the state F-860 found and fixed, reached here only for a process nobody can prove is ours.
-The alternative is killing on a guess, which is this finding.
+**The old fence caught all three, and this one catches none of them.** `launch_started_at`
+was stamped before `_launch_browser` on the delegated path too, and a delegated Chrome
+starts seconds after it, so the profile-and-time scan included it. That loss is accepted,
+for four reasons, and they are stronger than "the guess was bad":
+
+* **The removed behaviour was unsafe in exactly the way this finding is about, and WORSE on
+  this path.** The delegated reap was directory-plus-time with no upper bound, over a launch
+  that takes seconds — schtasks create, schtasks run, then up to 20 s of polling. Every
+  sibling Chrome that started at any point in those seconds was inside the window.
+  Restoring the coverage restores the kill-the-operator's-browser defect at a *wider*
+  aperture than the one §1 measured.
+* **Path 2 is a refusal the tree already argues is CORRECT.** For the hand-off case,
+  declining is right and the old code's reap was the bug, not the fix.
+* **The residual is bounded.** It is Windows-only — `should_delegate` requires
+  `desktop_launch.available()` and a HEADED request (`:161`) — it needs a launcher that
+  started Chrome together with one of the three conditions above, and it ends at the next
+  backend start's reap rather than persisting.
+* **A proper fix exists, is cheap, and is strictly better than F-860's.** `:466` already
+  computes the `(pid, create_time)` pair; a successor can stamp `Attempt` from there and
+  reuse this fence instead of a window. Filed as **F-922**
+  (`audit/stage2/finding_F922_delegated_launch_leaks_an_unnameable_chrome.md`), not fixed
+  here.
+
+**And "nothing cheaper closes it" — which this paragraph said — was a fourth absolute of
+the author's, and it is withdrawn too.** It was true only of path 1. The pid IS known in
+path 2 (read at `:451`, before the gate that raises) and IS stamped in path 3, so an
+identity handed out of those two points closes them. What no stamp reaches is path 1, where
+nobody ever learned the pid; that one is closed by a guess or not at all. F-922 carries the
+design, including that a stamp at `:466` alone reaches path 3 only — path 2 needs it one
+branch earlier.
+
+How reachable the residual is, in this finding's own vocabulary: **not demonstrated, not
+excluded.** The common slow case is the opposite of path 1 — the pid file lands fast and it
+is DevTools that lags, which stamps at `:466` and is covered. That the delegated launcher
+can fail to leave a readable pid file at all is an F-810 reliability question and is F-922's,
+not this finding's.
 
 **A wrapper-process platform would under-reap.** The fence assumes the pid
 `create_subprocess_exec` returns IS the browser process. That holds for `chrome.exe` on

@@ -632,9 +632,27 @@ is why the finding is now written in magnitudes.
 **What it costs is stated rather than implied.** A Chrome that genuinely leaked
 but whose launch cannot be named is left RUNNING until the next backend start's
 orphan reap. That is the direction `profile_lock` and F-886/F-888 all chose, and
-the alternative is killing a process on a guess, which is this defect. The
-finding's §6 enumerates every path that declines and why none of them is known
-to leave a real process behind today.
+the alternative is killing a process on a guess, which is this defect.
+
+**A first version of this entry added that no path is known to leave a real
+process behind today. That was wrong and is withdrawn.** The **delegated**
+(F-810) headed launch is a real regression against the old fence. Its own
+cleanup is conditional — it kills only when it managed to stamp a `(pid,
+create_time)` pair — and the finding's §6 names three paths that reach it with a
+live Chrome and no kill: the 20 s pid-file deadline expiring, the create-time
+probe answering `None` (its `except psutil.Error` swallows `AccessDenied`
+alongside the exited process it was written for), and the kill itself refusing on
+an identity mismatch or a psutil error. In all three the Chrome is untracked,
+invisible to `list_instances`, and ends only at the next backend start's orphan
+sweep.
+
+The old fence did cover them, by guessing, at a **wider** aperture than the one
+this entry closes: a delegated launch takes seconds, so every sibling Chrome that
+started in that span sat inside its window. Restoring the coverage would restore
+this defect on that path, so it is given up rather than reinstated. The residual
+is Windows-only, needs a launcher that started Chrome plus one of those three
+conditions, and ends at the next backend start. **F-922** carries the cheap fix:
+`desktop_launch` already computes the pair this fence wants.
 
 `audit/stage2/finding_F919_spawn_leak_fence_reaps_a_sibling.md` has the
 measurements, the run against the shipped code, and the open items.

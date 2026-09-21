@@ -349,8 +349,8 @@ async def test_the_launch_path_installs_the_patience_before_it_launches(
     )
 
     assert calls == ["install", "launch"]
-    # The DELEGATED launch leaves the attempt unstamped: it kills its own Chrome
-    # on failure, so a reap fenced on our pid has nothing to do there (F-919).
+    # The DELEGATED launch leaves the attempt unstamped: its own cleanup is
+    # best-effort, so this fence reaches nothing there (F-919 §6, F-922).
     assert attempt.config is None
 
 

@@ -71,12 +71,18 @@ answer, reused rather than re-spelled:
   a step cannot run before the next iteration; and the reap has no suspension
   point in front of it (``browser_manager``:583-586 reaches it synchronously).
   So a ``waitpid`` landing inside that band leaves ``returncode`` provably None
-  at the reap, and there a stored pair would have done BETTER. What stands in
-  the band is the second witness below: the freed pid would have to be recycled,
-  within it, onto a Chromium-family process on OUR ``--user-data-dir``. Linux
-  and macOS allocate pids sequentially and wrap the whole space before reissuing
-  one, so that is not a reachable event — which is why the band is tolerable,
-  not a reason it does not exist.
+  at the reap, and there a stored pair would have done BETTER. For harm the
+  freed pid would have to be recycled, within the band, onto a Chromium-family
+  process on OUR ``--user-data-dir`` — and two things stand in the way of that,
+  which fail differently. PRIMARY, and falsifiable by deployment: the pid space.
+  Linux allocates sequentially from ``last_pid`` and wraps at ``pid_max``; macOS
+  wraps at 99999, skipping numbers in use. Reissuing the pid just freed is then
+  on the order of 10^5-10^6 process creations inside a sub-millisecond window —
+  a magnitude, not an absolute, and one a container with a small ``pid_max``
+  shortens. SECONDARY, and configuration-independent: the directory witness
+  below, which no ``pid_max`` moves, and which is what still holds when the
+  first assumption is attacked. That is why the band is tolerable; it is not a
+  reason the band does not exist.
 * ``process_cleanup._get_browser_pids_for_profile`` is the second witness: the
   pid must still be a Chromium-family process on the directory we launched it
   on, or it is not the thing we came for.
@@ -125,8 +131,13 @@ class Attempt:
     returned from there goes with the exception.
 
     ``config`` is the ``uc.Config`` object ``_launch_browser`` built, or None
-    when the launch never reached nodriver — a delegated headed launch, which
-    kills its own Chrome on failure, or a raise before Chrome could exist.
+    when the launch never reached nodriver — a raise before Chrome could exist,
+    or a delegated headed launch (F-810). The delegated path cleans up after
+    itself only BEST-EFFORT, with three named refusals that leave a live Chrome
+    nothing here can name; an earlier draft of this line said it "kills its own
+    Chrome on failure", which is not what that code does. F-919 §6 enumerates
+    the three, and F-922 is the successor that would let this fence reach two
+    of them.
     """
 
     config: object | None = None
