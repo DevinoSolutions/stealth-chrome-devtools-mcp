@@ -3,17 +3,25 @@ NOT carry, and what it does about a file Chrome is holding open (F-897).
 
 One subject, two halves that only mean anything together.
 
-**What a copy leaves behind** — ``REGENERABLE_NAMES`` and ``ignore_names``.
-Caches and on-device model stores are typically ~98 % of a Chrome profile by
-size (the on-device model alone can be ~4 GB) and Chrome rebuilds every one of
-them on the next launch, so a copy that carried them would be slower, larger
-and no more useful. The list has exactly one home because two paths read it and
-must never drift: the copy below excludes these names, and
-``clone_storage._trim_profile_regenerable`` deletes them from an idle profile
-under storage pressure — the same names, for the same reason, in opposite
-directions. ``profile_lock`` names three of them too, for the DIFFERENT
-question of what Chrome's process singleton MEANS; that module's docstring says
-so, and this list stays about bytes on disk.
+**What a copy leaves behind** — ``REGENERABLE_NAMES``, ``ignore_names``, and
+since F-898 the DELETING half as well (``regenerable_dirs``,
+``regenerable_size``, ``trim_regenerable``, ``dir_size_bytes``). Caches and
+on-device model stores are typically ~98 % of a Chrome profile by size (the
+on-device model alone can be ~4 GB) and Chrome rebuilds every one of them on
+the next launch, so a copy that carried them would be slower, larger and no
+more useful. Two paths read that list in OPPOSITE directions — the copy below
+excludes these names, a trim under storage pressure deletes them — and they
+lived in two modules, which is one import apart from drifting. They are one
+module now: what a copy may leave behind and what a trim may take away are the
+same sentence read twice, and the finding that moved them is the one that
+needed ``clone_storage``'s last line of budget (that file stood at exactly
+1000/1000, a cap which ratchets DOWN only, so the answer is an extraction and
+never a raise). The POLICY stays where it was — WHEN a profile is trimmed, and
+which profiles are idle enough to trim, are ``clone_storage``'s storage-cap
+question and are not about bytes in a directory. ``profile_lock`` names three
+of these entries too, for the DIFFERENT question of what Chrome's process
+singleton MEANS; that module's docstring says so, and this list stays about
+bytes on disk.
 
 **What a copy does about a locked file** — ``copy_file``'s three attempts and
 ``copy_delta``'s two ``except`` clauses. A profile being copied may be a
@@ -50,9 +58,9 @@ from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 # Regenerable Chrome profile subdirectories — caches and on-device model stores
 # that Chrome rebuilds on next launch. Single source of truth: these are both
-# excluded when copying a profile (``ignore_names``) and trimmed from idle
-# profiles under storage pressure (``clone_storage._trim_profile_regenerable``),
-# so the copy path and the trim path can never drift apart.
+# excluded when copying a profile (``ignore_names``) and deleted from an idle
+# profile under storage pressure (``trim_regenerable``), so the copy path and
+# the trim path can never drift apart.
 REGENERABLE_NAMES = frozenset(
     {
         "BrowserMetrics",
@@ -229,3 +237,73 @@ def copy_delta(source: Path, target: Path) -> None:
                     copy_file(str(source_file), str(target_file))
             except (PermissionError, OSError):
                 continue
+
+
+def dir_size_bytes(path: Path) -> int:
+    """Bytes under *path*, an entry that cannot be stat'ed counted as nothing.
+
+    Moved here from ``clone_storage`` with the three functions above it (F-898),
+    and the ``try``/``except``/``pass`` it arrived with is spelled as a
+    ``suppress`` rather than carried over with that file's blanket ``SIM105``
+    exemption: a suppression is a permission, and one does not travel with the
+    code it was written around.
+    """
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            with suppress(OSError):
+                total += (Path(root) / name).stat().st_size
+    return total
+
+
+def regenerable_dirs(profile_dir: Path) -> list[Path]:
+    """Regenerable cache/model directories in a profile — those named in
+    :data:`REGENERABLE_NAMES`, at the profile root and one level down
+    (``Default/``, ``Profile N/``), which is where Chrome keeps its caches and
+    on-device model stores. Never recurses deeper, so session-state dirs such as
+    ``Local Storage`` and ``IndexedDB`` are never included."""
+    found: list[Path] = []
+
+    def _scan(directory: Path) -> None:
+        try:
+            children = list(directory.iterdir())
+        except OSError:
+            return
+        for child in children:
+            try:
+                if child.is_dir() and child.name in REGENERABLE_NAMES:
+                    found.append(child)
+            except OSError:
+                continue
+
+    _scan(profile_dir)
+    try:
+        subdirs = [
+            c
+            for c in profile_dir.iterdir()
+            if c.is_dir() and c.name not in REGENERABLE_NAMES
+        ]
+    except OSError:
+        subdirs = []
+    for sub in subdirs:
+        _scan(sub)
+    return found
+
+
+def regenerable_size(profile_dir: Path) -> int:
+    """Bytes a trim of *profile_dir* would reclaim (read-only)."""
+    return sum(dir_size_bytes(d) for d in regenerable_dirs(profile_dir))
+
+
+def trim_regenerable(profile_dir: Path) -> int:
+    """Delete the regenerable cache/model dirs from a profile (see
+    :func:`regenerable_dirs`) while preserving every session-state file
+    (cookies, logins, Web Data, Local Storage, Preferences). Returns bytes freed.
+    """
+    freed = 0
+    for directory in regenerable_dirs(profile_dir):
+        size = dir_size_bytes(directory)
+        rmtree_robust(directory)
+        if not directory.exists():
+            freed += size
+    return freed

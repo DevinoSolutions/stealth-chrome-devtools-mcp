@@ -81,6 +81,34 @@ def instance_rows(records: Sequence[dict[str, object]]) -> list[str]:
     return rows
 
 
+def _cookie_lines(selection: dict[str, object]) -> list[str]:
+    """What the cookie hand-off did, when there was one (F-898).
+
+    Printed ONLY when a hand-off was attempted — i.e. when the session was
+    seeded from a source whose browser this backend drives — because that is
+    the only spawn where "did the cookies come across" is a live question; for
+    every other one the ``seeded`` line above already says everything there is.
+
+    The success line carries a COUNT and never a name: a cookie name identifies
+    on its own, and this function prints to a terminal, a pipe and whatever the
+    operator pastes into an issue. The failure line says the session is fine,
+    because the commonest reaction to a red word is to throw the session away
+    and make another — which here would lose nothing and cost a Chrome launch.
+    """
+    via = selection.get("seeded_via")
+    if not via:
+        return []
+    if via == "cdp-cookies":
+        return [
+            f"cookies    : {selection.get('cookies_carried', '?')} handed over "
+            f"from the running source"
+        ]
+    return [
+        f"cookies    : NOT carried ({selection.get('cookie_handoff_error', 'unknown')})"
+        f" — the session was created and works, minus the source's cookies"
+    ]
+
+
 def spawn_lines(result: dict[str, object]) -> list[str]:
     """What a human needs to see about the browser they just got.
 
@@ -117,6 +145,7 @@ def spawn_lines(result: dict[str, object]) -> list[str]:
     lines.append(f"profile    : {selection.get('user_data_dir', '-')}")
     if selection.get("seeded_from") not in (None, "", profile_seed.UNKNOWN_SEED):
         lines.append(f"seeded     : {profile_seed.seed_sentence(selection)}")
+    lines.extend(_cookie_lines(selection))
     if selection.get("walked_to"):
         lines.append(
             f"walked to  : {selection['walked_to']} ({selection.get('walk_reason')})"
