@@ -117,5 +117,35 @@ stealth_chrome_devtools_mcp`, and `runpy`:
 
 ## 7. Residual
 
-None expected. The guard is the same shape every other entrypoint module in this
-tree already carries; `__main__.py` was the one omission.
+None expected in the PRODUCT. The guard is the same shape every other entrypoint
+module in this tree already carries; `__main__.py` was the one omission.
+
+One was found in the PINS, by the pre-push lane, and is fixed here.
+`TestRunningAsMainStillRuns` popped `stealth_chrome_devtools_mcp` from
+`sys.modules` to force a fresh `runpy` execution, and left it popped. Popping a
+PACKAGE while its submodules stay cached is unsound: the next
+`import stealth_chrome_devtools_mcp` builds a NEW module object, and
+`import stealth_chrome_devtools_mcp.embedded` is a `sys.modules` HIT that never
+re-binds `embedded` as an attribute of that new parent — not even an explicit
+`importlib.import_module` repairs it (measured). The package is then permanently
+un-walkable by attribute, which is exactly how pytest resolves a dotted
+monkeypatch target (`__import__`, then a `getattr` walk), so
+`tests/test_python_exec_timeout.py` failed two nodes with
+`module 'stealth_chrome_devtools_mcp' has no attribute 'embedded'` — 2 failed /
+3413 passed, and only in a full lane, because this file sorts before that one
+and either file alone re-imports the package cleanly.
+
+The pops are kept (they are what forces the fresh execution) and wrapped in
+`_pristine_package_modules`, which restores the `sys.modules` mapping for the
+package exactly. Three pins at the end of the file assert the invariant this
+file is uniquely able to break: the two named subpackages resolve by attribute
+after an import, no cached submodule is unnamed by its own parent, and a real
+dotted `monkeypatch.setattr` resolves. They go red on all three without the
+restore, so the failure is now reported in the file that causes it rather than
+in whichever file happens to sort next.
+
+Their reach is this file and everything sorted before it, which is where the
+mechanism lives — no other test file pops or reloads a real package module
+(`test_element_cloner_output_dir` and `test_tool_module_reload` both restore
+what they take, verified). Covering the whole session would mean a per-test
+teardown hook, which is not worth its cost for one file.

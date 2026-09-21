@@ -35,6 +35,7 @@ node to observe (or safely tolerate) a call.
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib
 import os
 import runpy
@@ -54,23 +55,62 @@ MAIN_SOURCE = (
 )
 
 
+PACKAGE = "stealth_chrome_devtools_mcp"
+
+
 def _unload(name: str) -> None:
     sys.modules.pop(name, None)
+
+
+def _cached_package_modules() -> dict[str, object]:
+    return {
+        name: module
+        for name, module in sys.modules.items()
+        if name == PACKAGE or name.startswith(PACKAGE + ".")
+    }
+
+
+@contextlib.contextmanager
+def _pristine_package_modules():
+    """Put ``sys.modules`` back exactly as it was, whatever the body did.
+
+    **Popping a PACKAGE while its submodules stay cached is unsound**, and this
+    is the one file that has reason to do it. The next ``import
+    stealth_chrome_devtools_mcp`` builds a NEW module object, while ``import
+    stealth_chrome_devtools_mcp.embedded`` is a ``sys.modules`` HIT that never
+    re-binds ``embedded`` as an attribute of that new parent -- not even an
+    explicit ``importlib.import_module`` repairs it (measured). The package is
+    then permanently un-walkable by attribute, which is how
+    ``monkeypatch.setattr("stealth_chrome_devtools_mcp.embedded.<x>.<y>", …)``
+    -- pytest resolves a dotted target by ``__import__`` plus a ``getattr``
+    walk -- came to fail in ``tests/test_python_exec_timeout.py`` with
+    ``module 'stealth_chrome_devtools_mcp' has no attribute 'embedded'``.
+
+    It only ever showed up in a FULL lane: this file sorts before that one, and
+    each file alone re-imports the package cleanly. Restoring the mapping here
+    is what makes the pops below local to the node that needs them.
+    """
+    saved = _cached_package_modules()
+    try:
+        yield
+    finally:
+        for name in tuple(_cached_package_modules()):
+            if name not in saved:
+                del sys.modules[name]
+        sys.modules.update(saved)
 
 
 class TestImportingDoesNotRun:
     def test_importing_by_name_never_calls_main(self):
         """A bare import must be inert: no backend, no side effect."""
         calls: list[None] = []
-        _unload(MODULE_NAME)
-        try:
+        with _pristine_package_modules():
+            _unload(MODULE_NAME)
             with patch(
                 "stealth_chrome_devtools_mcp.server.main",
                 side_effect=lambda: calls.append(None),
             ):
                 importlib.import_module(MODULE_NAME)
-        finally:
-            _unload(MODULE_NAME)
         assert calls == [], (
             "importing stealth_chrome_devtools_mcp.__main__ by name called "
             "main() — an import started a real backend (F-904)"
@@ -84,19 +124,21 @@ class TestRunningAsMainStillRuns:
         ``runpy.run_module(pkg, run_name="__main__")`` is the same mechanism
         ``python -m stealth_chrome_devtools_mcp`` uses to resolve and execute
         the package's ``__main__`` submodule.
+
+        The pops are what force a fresh execution, and
+        :func:`_pristine_package_modules` is what keeps them from outliving
+        this node -- popping the PACKAGE leaves every later attribute walk over
+        it broken, for the whole session.
         """
         calls: list[None] = []
-        _unload(MODULE_NAME)
-        _unload("stealth_chrome_devtools_mcp")
-        try:
+        with _pristine_package_modules():
+            _unload(MODULE_NAME)
+            _unload(PACKAGE)
             with patch(
                 "stealth_chrome_devtools_mcp.server.main",
                 side_effect=lambda: calls.append(None),
             ):
-                runpy.run_module("stealth_chrome_devtools_mcp", run_name="__main__")
-        finally:
-            _unload(MODULE_NAME)
-            _unload("stealth_chrome_devtools_mcp")
+                runpy.run_module(PACKAGE, run_name="__main__")
         assert calls == [None], (
             "running the package as __main__ must call main() exactly once"
         )
@@ -133,6 +175,69 @@ class TestGuardShape:
             isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
             for stmt in guards[0].body
         ), f"{MAIN_SOURCE}'s __name__ guard has no call in its body"
+
+
+class TestTheImportTreeSurvivesTheseNodes:
+    """Nothing above may leave the package un-walkable by ATTRIBUTE.
+
+    This is the only file in the suite that pops a package module, and it is
+    placed here rather than at the top because these nodes must run AFTER the
+    two that do it. What it catches is not hypothetical: the pre-push lane went
+    red on ``tests/test_python_exec_timeout.py`` with ``module
+    'stealth_chrome_devtools_mcp' has no attribute 'embedded'``, from a
+    ``monkeypatch.setattr`` on a dotted string, because this file had left a
+    fresh package object in ``sys.modules`` that named none of its submodules.
+
+    A pin here covers this file and every file sorted before it, which is where
+    the mechanism lives -- the cost of covering the whole session would be a
+    per-test teardown hook, and no other file in the tree pops or reloads a
+    real package module (``test_element_cloner_output_dir`` and
+    ``test_tool_module_reload`` both restore what they take).
+    """
+
+    def test_the_named_subpackages_resolve_by_attribute(self):
+        """The exact walk pytest does for a dotted monkeypatch target.
+
+        Each target is IMPORTED first and then walked by attribute, which is
+        ``monkeypatch.setattr``'s own two steps. Importing is what makes the
+        walk mean something: a subpackage nothing has loaded yet is absent for
+        an innocent reason, and asserting on it would fail wherever this file
+        runs alone.
+        """
+        for dotted in ("embedded", "embedded.tool_sections"):
+            importlib.import_module(f"{PACKAGE}.{dotted}")
+            walked = importlib.import_module(PACKAGE)
+            for part in dotted.split("."):
+                walked = getattr(walked, part, None)
+                assert walked is not None, (
+                    f"{PACKAGE}.{dotted} is imported but its parent no longer "
+                    "names it -- something popped a package module and left "
+                    "its submodules cached"
+                )
+
+    def test_every_cached_submodule_is_still_named_by_its_parent(self):
+        """The general invariant, not just the two spellings above."""
+        orphans = []
+        for name, module in sorted(_cached_package_modules().items()):
+            parent_name, _, leaf = name.rpartition(".")
+            if not parent_name:
+                continue
+            parent = sys.modules.get(parent_name)
+            if parent is not None and getattr(parent, leaf, None) is not module:
+                orphans.append(name)
+        assert not orphans, (
+            "cached submodules their own parent no longer names: "
+            f"{orphans}. Popping a package from sys.modules while its "
+            "submodules stay cached is what does this; restore the mapping "
+            "instead (see _pristine_package_modules)."
+        )
+
+    def test_a_dotted_monkeypatch_target_still_resolves(self, monkeypatch):
+        """The failing operation itself, on the module that reported it."""
+        monkeypatch.setattr(
+            "stealth_chrome_devtools_mcp.embedded.singleton.DEFAULT_PORT",
+            19999,
+        )
 
 
 class TestNoModuleBodyDoesWork:
