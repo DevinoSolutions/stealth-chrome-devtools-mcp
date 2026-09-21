@@ -1,5 +1,90 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — F-903: importing `stealth_chrome_devtools_mcp.__main__` started a server
+
+`__main__.py` called `main()` at module level, with no `if __name__ ==
+"__main__":` guard. That makes IMPORTING the module indistinguishable from
+RUNNING the product: any tool that walks the package module by module — a doc
+generator, an import linter, a coverage sweep, an IDE indexer — started a stdio
+proxy, which cold-started a backend. It is not hypothetical, and it was not
+found by reading: this finding's own census probe did it, into the operator's
+live `~/.stealth-mcp` (proxy pid 188108 → backend pid 189088 on port 64986).
+
+The guard is the whole fix. `python -m stealth_chrome_devtools_mcp` runs the
+file under the name `__main__` and is unchanged; so are both console scripts
+(they point at `server:main` and `cli:main`), `server.py`'s `runpy` load (it
+loads `embedded/server.py`, never the package `__main__`) and the `-m` argv the
+backend is spawned with. `tests/test_package_entrypoint.py` pins both halves and
+adds the rule that generalises it — **no module body in this package may CALL
+anything**, with one named allowance for `tool_runtime`'s
+`cdp_transport.install()`.
+
+One thing this does NOT fix, now pinned as a measured residual: `server.main`
+builds its parser with `add_help=False` and reads it with `parse_known_args`, so
+`--help` is an *unknown* argument to it and the default `--transport stdio`
+carries it into `ensure_server_running`. **A bare `python -m
+stealth_chrome_devtools_mcp --help` does not print help — it cold-starts a
+backend.**
+
+### Fixed — F-903: the test suite could cold-start a real backend into the operator's state dir
+
+**The fence in this entry is tests-only** (the product half is the entry above).
+
+`tests/conftest.py` redirected the clone output dir and the browser-session root
+and nothing else. The third root — `~/.stealth-mcp`, the one that owns a live
+PROCESS — was never fenced, so every fence was per-file: ~30 test files each
+carried their own `isolated_state` copy and the files with none were safe by
+which collaborator a node happened to mock. Two measured consequences, three
+days apart: a hermetic node drove the proxy's heal path into the real
+`ensure_server_running` and cold-started a backend (pid 55240, port 21770) into
+the operator's live record; and this finding's own census probe imported
+`stealth_chrome_devtools_mcp.__main__` — three lines, the third a bare `main()`
+— which started a stdio proxy and cold-started another (pid 189088, port 64986).
+Neither was worse only because F-886 refuses to evict a backend holding live
+browsers; before 2.1.9 the same route terminated one.
+
+**The browser-session root was reachable too** — the operator's `master` profile
+and every named session copied from it. `conftest.py` redirected it with
+`os.environ.setdefault`, which cannot tell the release gate redirecting the
+suite from the operator's own root arriving in an INHERITED environment, and on
+Windows the product default is the hardcoded `C:\stealth-mcp-browser-sessions`
+regardless. The residue is still on the machine that found this:
+`e2e-warmup`, `ci-warmup`, `ci-cycle-0/1/2`, `tree-kill-test`,
+`integration-test-profile` and `ci-basic-test` sitting in the real `sessions/`
+beside 87 real ones.
+
+The fence has one home (`tests/operator_fence.py`) and one caller
+(`tests/conftest.py`, at import time, because an autouse function-scoped fixture
+is ordered after the E2E modules' module-scoped `_warmup`, which both starts a
+backend and resolves the session root during module setup). Both roots live in
+one module because they share ONE filesystem tripwire. Four parts: the session
+root FORCED rather than `setdefault`-ed, with the three derived env names
+(`BROWSER_MASTER_USER_DATA_DIR`, `BROWSER_PROFILE_CLONE_ROOT`,
+`BROWSER_MASTER_SNAPSHOT_DIR`) cleared so they derive from it; the ten
+state-dir bindings across five modules re-pointed at a per-process tmp root
+(four modules FROM-import the path, so one `setattr` reaches none of the others;
+pydantic's `model_config["env_file"]` needs its own, or a hermetic run absorbs
+the operator's `.env`); a tripwire on every filesystem primitive raising a
+`BaseException` — the product is fail-open by design, so an `Exception` is
+swallowed at the first handler; and a kill guard refusing to terminate a pid the
+real record names. Bindings are measured by a probe, not grepped, and that probe
+is a pin, so a new derived global fails a test instead of escaping.
+
+Two deliberate asymmetries. The state dir forbids WRITES only — 
+`release_gate_harness._reserved_ports()` must read the operator's own
+`server.json` through `Path.home()` so an isolated backend never binds a port a
+LIVE backend holds — while the session root forbids READS as well, because
+nothing in the harness reads a profile and copying one is how a test would take
+the operator's logged-in cookies into a clone. And `HOME` is deliberately not
+redirected: it would have created the port collision the fence exists to
+prevent, and would not have fenced the session root on Windows at all.
+
+Per-file `isolated_state` fixtures are kept, not deleted: they give each NODE a
+clean record while the fence gives the SESSION one directory — per-test
+isolation and operator safety are different questions.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in
@@ -106,89 +191,6 @@ their old `source_kind`, and are still read correctly.
 release but is undocumented (`--help` does not list it) and prints a line on
 stderr naming its replacement; it will be removed. A path stays reachable
 through `stealthy call`.
-
-### Fixed — F-903: importing `stealth_chrome_devtools_mcp.__main__` started a server
-
-`__main__.py` called `main()` at module level, with no `if __name__ ==
-"__main__":` guard. That makes IMPORTING the module indistinguishable from
-RUNNING the product: any tool that walks the package module by module — a doc
-generator, an import linter, a coverage sweep, an IDE indexer — started a stdio
-proxy, which cold-started a backend. It is not hypothetical, and it was not
-found by reading: this finding's own census probe did it, into the operator's
-live `~/.stealth-mcp` (proxy pid 188108 → backend pid 189088 on port 64986).
-
-The guard is the whole fix. `python -m stealth_chrome_devtools_mcp` runs the
-file under the name `__main__` and is unchanged; so are both console scripts
-(they point at `server:main` and `cli:main`), `server.py`'s `runpy` load (it
-loads `embedded/server.py`, never the package `__main__`) and the `-m` argv the
-backend is spawned with. `tests/test_package_entrypoint.py` pins both halves and
-adds the rule that generalises it — **no module body in this package may CALL
-anything**, with one named allowance for `tool_runtime`'s
-`cdp_transport.install()`.
-
-One thing this does NOT fix, now pinned as a measured residual: `server.main`
-builds its parser with `add_help=False` and reads it with `parse_known_args`, so
-`--help` is an *unknown* argument to it and the default `--transport stdio`
-carries it into `ensure_server_running`. **A bare `python -m
-stealth_chrome_devtools_mcp --help` does not print help — it cold-starts a
-backend.**
-
-### Fixed — F-903: the test suite could cold-start a real backend into the operator's state dir
-
-**The fence in this entry is tests-only** (the product half is the entry above).
-
-`tests/conftest.py` redirected the clone output dir and the browser-session root
-and nothing else. The third root — `~/.stealth-mcp`, the one that owns a live
-PROCESS — was never fenced, so every fence was per-file: ~30 test files each
-carried their own `isolated_state` copy and the files with none were safe by
-which collaborator a node happened to mock. Two measured consequences, three
-days apart: a hermetic node drove the proxy's heal path into the real
-`ensure_server_running` and cold-started a backend (pid 55240, port 21770) into
-the operator's live record; and this finding's own census probe imported
-`stealth_chrome_devtools_mcp.__main__` — three lines, the third a bare `main()`
-— which started a stdio proxy and cold-started another (pid 189088, port 64986).
-Neither was worse only because F-886 refuses to evict a backend holding live
-browsers; before 2.1.9 the same route terminated one.
-
-**The browser-session root was reachable too** — the operator's `master` profile
-and every named session copied from it. `conftest.py` redirected it with
-`os.environ.setdefault`, which cannot tell the release gate redirecting the
-suite from the operator's own root arriving in an INHERITED environment, and on
-Windows the product default is the hardcoded `C:\stealth-mcp-browser-sessions`
-regardless. The residue is still on the machine that found this:
-`e2e-warmup`, `ci-warmup`, `ci-cycle-0/1/2`, `tree-kill-test`,
-`integration-test-profile` and `ci-basic-test` sitting in the real `sessions/`
-beside 87 real ones.
-
-The fence has one home (`tests/operator_fence.py`) and one caller
-(`tests/conftest.py`, at import time, because an autouse function-scoped fixture
-is ordered after the E2E modules' module-scoped `_warmup`, which both starts a
-backend and resolves the session root during module setup). Both roots live in
-one module because they share ONE filesystem tripwire. Four parts: the session
-root FORCED rather than `setdefault`-ed, with the three derived env names
-(`BROWSER_MASTER_USER_DATA_DIR`, `BROWSER_PROFILE_CLONE_ROOT`,
-`BROWSER_MASTER_SNAPSHOT_DIR`) cleared so they derive from it; the ten
-state-dir bindings across five modules re-pointed at a per-process tmp root
-(four modules FROM-import the path, so one `setattr` reaches none of the others;
-pydantic's `model_config["env_file"]` needs its own, or a hermetic run absorbs
-the operator's `.env`); a tripwire on every filesystem primitive raising a
-`BaseException` — the product is fail-open by design, so an `Exception` is
-swallowed at the first handler; and a kill guard refusing to terminate a pid the
-real record names. Bindings are measured by a probe, not grepped, and that probe
-is a pin, so a new derived global fails a test instead of escaping.
-
-Two deliberate asymmetries. The state dir forbids WRITES only — 
-`release_gate_harness._reserved_ports()` must read the operator's own
-`server.json` through `Path.home()` so an isolated backend never binds a port a
-LIVE backend holds — while the session root forbids READS as well, because
-nothing in the harness reads a profile and copying one is how a test would take
-the operator's logged-in cookies into a clone. And `HOME` is deliberately not
-redirected: it would have created the port collision the fence exists to
-prevent, and would not have fenced the session root on Windows at all.
-
-Per-file `isolated_state` fixtures are kept, not deleted: they give each NODE a
-clean record while the fence gives the SESSION one directory — per-test
-isolation and operator safety are different questions.
 
 ### Fixed — F-899: adopted instances leaked between test files through a process-global store
 

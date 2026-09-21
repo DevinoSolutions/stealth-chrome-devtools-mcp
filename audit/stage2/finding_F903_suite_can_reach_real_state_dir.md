@@ -375,13 +375,29 @@ is the shape this finding is about.
    idempotent, does no I/O and is CLAUDE.md's documented one call site). A
    deny-list protects against the module someone remembered; this one fails on
    the module nobody thought of.
-6. **CI itself was not exercised.** Pushing is out of scope for this task and this
+6. **The fence has no suite-wide guard on the real STARTUP path** — only on
+   writes and on terminate. `ensure_server_running` leaves no filesystem trace
+   until a backend is already coming up, so the write guard cannot see it; it
+   needs a tripwire on the FUNCTION. F-900 landed exactly such a tripwire in
+   `tests/test_proxy_bridge_transport.py`, per-file, which is the pattern this
+   finding exists to remove.
+
+   Round 3 took the half that is safe: the EXCEPTION is now one symbol in one
+   home (`operator_fence.RealStartupReached`, carrying F-900 review M2's
+   `BaseException` argument, which is the same argument the fence's other three
+   tripwires are built on), and the bridge test binds it instead of declaring a
+   twin. The INSTALL deliberately stays per-file, because refusing a spawn
+   suite-wide decides for the integration tier and the herd test, which cold
+   start legitimately — and that cannot be discharged without running the
+   integration tier wholesale. Making it default-on, with the same opt-in shape
+   the kill guard has, is the named follow-up.
+7. **CI itself was not exercised.** Pushing is out of scope for this task and this
    repo runs zero checks on a branch push without a PR, so "verify on CI" is not a
    thing this worktree can do. The warmup was verified locally against a tmp root
    instead (§7). The residual CI-specific risk is a runner whose `TEMP` differs in
    shape, which the fence handles by construction: it assumes no path, only that
    `tempfile.gettempdir()` is writable.
-7. **The session-root leak is structural, with historical residue — not a live
+8. **The session-root leak is structural, with historical residue — not a live
    leak.** Measured today: under pytest all four roots already resolved into a tmp
    dir before this change, because the inherited env happened to be unset.
    `setdefault` remains the wrong instrument, since it cannot tell a deliberate

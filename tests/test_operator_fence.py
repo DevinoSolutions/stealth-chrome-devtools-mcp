@@ -164,6 +164,47 @@ class TestTheEnumerationCannotGoStale:
         assert "stealth_chrome_devtools_mcp.__main__" in sys.modules
 
 
+class TestEveryTripwireIsUnswallowable:
+    """The one property all four share, and the one home they share it in.
+
+    A tripwire that a ``except Exception`` backstop can eat is decoration, and
+    this codebase is fail-open by design -- ``proxy_selfheal.heal_backend`` has
+    a ``PERMANENT`` one. So the ``BaseException`` base is asserted for EVERY
+    tripwire rather than for the one someone remembered, and ``Exception`` is
+    excluded explicitly, because inheriting it is the exact regression.
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "RealStateDirWrite",
+            "RealSessionRootAccess",
+            "RealBackendTerminated",
+            "RealStartupReached",
+        ],
+    )
+    def test_the_tripwire_is_a_baseexception_and_not_an_exception(self, name):
+        tripwire = getattr(operator_fence, name)
+
+        assert issubclass(tripwire, BaseException)
+        assert not issubclass(tripwire, Exception), (
+            f"{name} inherits Exception, so the product's fail-open handlers "
+            "will swallow it -- that is the bug F-900 review M2 measured"
+        )
+
+    def test_the_bridge_test_uses_the_shared_tripwire(self):
+        """F-900 declared its own; F-903 made it one symbol in one home.
+
+        Asserted by IDENTITY rather than by reading the source, because two
+        classes that merely look alike is the state this replaced -- and an
+        ``except operator_fence.RealStartupReached`` elsewhere would not catch a
+        locally redeclared twin.
+        """
+        import test_proxy_bridge_transport as bridge
+
+        assert bridge._RealStartupReached is operator_fence.RealStartupReached
+
+
 class TestTheWriteGuardStopsAWriteTheRedirectMissed:
     """RED/GREEN against a decoy: the guard is what stops the write.
 

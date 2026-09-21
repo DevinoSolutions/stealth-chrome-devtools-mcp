@@ -205,6 +205,35 @@ class RealBackendTerminated(BaseException):
     """A test tried to terminate a pid the operator's real record names."""
 
 
+class RealStartupReached(BaseException):
+    """A test reached ``singleton.ensure_server_running``, the real startup path.
+
+    The ACT with no filesystem trace. The write guard cannot see this one: by the
+    time anything is written a backend is already coming up, so the tripwire has
+    to sit on the function. It says something none of the three above do -- a
+    write, a profile read and a terminate are each a different event -- which is
+    why this is a fourth class and not one of them reused under a wrong name.
+
+    **Deliberately a ``BaseException`` and not an ``AssertionError``** (F-900
+    review M2, whose wording this keeps). ``proxy_selfheal.heal_backend`` drives
+    ``ensure_running`` inside ``except Exception:  # PERMANENT(a backstop must
+    not raise)`` (``proxy_selfheal.py``:325), and an ``AssertionError`` IS an
+    ``Exception``: the first version of that tripwire was swallowed there, logged
+    once per attempt as ``heal attempt <n>/HEAL_ATTEMPTS failed``, retried for the
+    rest of the budget, and the node PASSED -- with a real backend already
+    cold-started (pid 55240, port 21770, in the real ``~/.stealth-mcp``). A
+    tripwire a backstop can eat is decoration. That is the same argument the rest
+    of this module's tripwires are built on, which is why they share a home.
+
+    **This module does not INSTALL a guard for it** -- unlike the write and kill
+    guards, which are suite-wide. A spawn cannot be refused by default without
+    deciding for the integration tier and the herd test, which legitimately cold
+    start; so the SYMBOL is shared and the INSTALL stays the arming test's
+    (``tests/test_proxy_bridge_transport.py`` patches ``ensure_server_running``
+    itself). Making it suite-wide is the named follow-up in F-903's finding.
+    """
+
+
 # One designated root: where it is, how a path under it is recognised, whether
 # READS are forbidden too, and which exception says so.
 _Designated = tuple[str, str, bool, type[BaseException]]
