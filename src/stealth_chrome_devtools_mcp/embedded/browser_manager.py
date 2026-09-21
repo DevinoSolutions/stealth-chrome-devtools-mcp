@@ -856,11 +856,11 @@ class BrowserManager:
         """
         Close and remove a browser instance.
 
-        Four-phase teardown that keeps the event loop responsive:
-        Phase 1 (claim) — pop shared state under lock.
+        Three-phase teardown that keeps the event loop responsive:
+        Phase 1 (claim) — pop shared state under lock, the in-memory-storage
+            entry included (F-899: it must not outlive the pop).
         Phase 2 (graceful CDP) — close tabs/connection on the loop (bounded).
         Phase 3 (blocking kill) — synchronous kill in a worker thread.
-        Phase 4 (finalize) — bookkeeping, no lock needed.
         """
         # -- Phase 1: claim (under lock, O(microseconds)) --------------------
         async with self._lock:
@@ -869,6 +869,10 @@ class BrowserManager:
             data = self._instances.pop(instance_id)
             self._spawn_diagnostics.pop(instance_id, None)
             proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
+            # F-899: the store cross-checks `_instances`, so no `await` may
+            # separate the two — six awaits later it stranded a `stored` row.
+            with contextlib.suppress(KeyError):
+                in_memory_storage.remove_instance(instance_id)
 
         browser = data["browser"]
         instance = data["instance"]
@@ -963,10 +967,6 @@ class BrowserManager:
                         "close_instance",
                         f"browser.stop() coroutine failed for {instance_id}: {e}",
                     )
-
-            # -- Phase 4: finalize bookkeeping --------------------------------
-            with contextlib.suppress(KeyError):
-                in_memory_storage.remove_instance(instance_id)
 
             return True
         except Exception as e:
