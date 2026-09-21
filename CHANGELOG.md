@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in
 
