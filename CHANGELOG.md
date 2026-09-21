@@ -76,6 +76,52 @@ release but is undocumented (`--help` does not list it) and prints a line on
 stderr naming its replacement; it will be removed. A path stays reachable
 through `stealthy call`.
 
+### Fixed — F-902: reading a cookie no longer kills the tab (CRITICAL)
+
+On **Chrome 153**, `get_cookies` on a page holding a single cookie never
+returned AND left that tab's CDP connection dead: every later call hung to its
+own deadline and reported *"the browser may have crashed or the connection
+dropped"* about a browser that was fine. `get_instance_state` and
+`clear_cookies(url=…)` did the same, because both read the cookie jar — the
+first is the widest, since it is the tool you call to find out whether anything
+is wrong, and on any logged-in page it degraded and then killed the tab it was
+asked about.
+
+Chrome 153 stopped sending `Network.Cookie.sameParty` (the removed First-Party
+Sets field), and it is the ONLY field it stopped sending — measured off a raw
+websocket. nodriver 0.47's generated `Cookie.from_json` reads it
+unconditionally, and `Connection._listener` guards its EVENT path but not its
+RESULT path, so the `KeyError` ended the listener: the one task that resolves
+every future on that connection. This is F-883's failure shape reached by a
+parse error rather than a cancellation, so `cdp_transport`'s shield did nothing
+for it.
+
+`cdp_transport`'s sentence widens from "awaiting a CDP reply must never be able
+to cancel it" to **"no single CDP reply may kill the connection"**, and gains
+two halves beside the existing shield: `Transaction.__call__` now completes the
+one unreadable transaction with an error instead of propagating into the
+listener — so that command fails, every other pending call still resolves, and
+the connection lives — and `Cookie.from_json` supplies retired fields from a
+NAMED table carrying its measurement. The first is the general rule (nodriver
+0.47 has **1199** unconditional required field reads across its generated
+classes; cookies are simply the one Chrome retired first); the second is what
+makes `get_cookies` actually work rather than merely fail honestly. Both are
+deleted by the nodriver bump that fixes either, and the docstring says which.
+
+**Cookie names and values no longer reach the error path.** nodriver's own
+re-raise interpolates the whole reply into its message, so the exception that
+killed the listener carried every cookie name and value on the page, and it
+escaped as an unretrieved task exception — the asyncio handler, the durable log
+and Sentry at once. The replacement reports shape only: the CDP method, the
+exception type, the reply's field count, and the missing protocol field when
+that is provably all the failure named. Pinned, hermetically and against a real
+browser.
+
+One named cost: `Cookie.to_json` still writes the field, so a cookie read on
+Chrome 153 reports `sameParty: false` — a value Chrome never sent. It is
+synthesised, `False` is what it meant for every cookie outside a First-Party
+Set, and the feature no longer exists.
+
 ## 2.1.11
 
 ### Fixed — F-892: the snapshot staleness witness stated a file Chrome stopped writing in v96
