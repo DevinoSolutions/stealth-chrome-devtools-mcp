@@ -467,7 +467,11 @@ def _chain(exc: BaseException) -> list[BaseException]:
     deliberately and in one direction: this one is strictly wider. Widening
     the other is NOT an implied follow-up of this change — it decides which
     Sentry events ``expected_events.classify`` DROPS, a different question with
-    a different blast radius — so it is named here and left alone.
+    a different blast radius — so it is left alone and FILED as **F-929**
+    (``audit/stage2/finding_F929_exception_group_bypasses_expected_events.md``),
+    where the cost is measured: a ``ToolError`` inside a task group classifies
+    as ``None`` on both paths and SHIPS, where the bare form is
+    ``error-convention`` and is dropped.
 
     Why the arm exists when no site in :data:`PAYLOAD_EXCEPTION_SITES` reaches
     it today: an ``ExceptionGroup``'s own ``str()`` carries NONE of its leaves

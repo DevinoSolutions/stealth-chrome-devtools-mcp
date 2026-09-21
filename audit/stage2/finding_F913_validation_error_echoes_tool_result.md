@@ -458,7 +458,11 @@ mechanism rather than a missed leg — see residual 2.
    decides which Sentry events `expected_events.classify` DROPS, so widening it
    changes a drop rule rather than a redaction rule — a different question with
    a different blast radius, and not an implied follow-up of this change. It is
-   named here so the divergence is a decision on the record and not a drift.
+   **filed as F-929**
+   (`audit/stage2/finding_F929_exception_group_bypasses_expected_events.md`),
+   with the measurement: a `ToolError` inside a task group is classified `None`
+   on both paths and SHIPS, where the bare form is `error-convention` and is
+   dropped. So the divergence is a decision on the record and not a drift.
 5. **The Sentry issue's exception TYPE and VALUE both change**, from
    `ValidationError` to `WithheldInputError`. What was MEASURED is the frame
    list, which is byte-identical before and after; Sentry's default grouping is
