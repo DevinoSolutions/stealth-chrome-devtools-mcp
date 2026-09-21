@@ -167,6 +167,20 @@ async def spawn_browser(
             connection of ours to ask for its cookies and a file copy of a live
             profile carries none at all — the jar is held open and skipped, and
             nothing can say afterwards what was lost.
+            ``default`` — the value an UNSET ``seed_from`` means — has its own
+            three outcomes, because it is the session a human logs in to and
+            its window is normally still open. The copy always comes from the
+            seed, a separate closed copy of it, and never from the live
+            directory. If this backend is driving that window, the live jar is
+            handed over on top of that copy, exactly as for a named source
+            (``seeded_via: "cdp-cookies"``) — which matters because the seed is
+            NOT refreshed while ``default`` is open, so the copy alone can be
+            days old. If a Chrome we do not drive holds it, the copy happens
+            anyway and nothing is refused; the answer's ``seed_changed_since``
+            says the seed is behind. The only refusal is a machine with no seed
+            yet AND ``default`` open, where the only available copy would be of
+            the live directory: nothing is created, and closing that window
+            once writes the seed.
             WHAT A HAND-OFF CARRIES IS COOKIES AND NOTHING ELSE: every kind
             (session, persistent, HttpOnly, Secure, SameSite=None and
             Partitioned), and the WHOLE jar — every site that session is logged
@@ -492,10 +506,20 @@ async def _seed_cookies_over_cdp(
         target = await rt.browser_manager.get_browser(instance.instance_id)
         if source is None or target is None:
             raise failed("a browser for the hand-off could not be resolved")
-        handoff = await rt._with_cdp_timeout(
-            rt.cookie_handoff.hand_off(source, target),
-            instance_id=instance.instance_id,
-        )
+        try:
+            handoff = await rt._with_cdp_timeout(
+                rt.cookie_handoff.hand_off(source, target),
+                instance_id=instance.instance_id,
+            )
+        except ToolError:
+            # The budget expired (review S3). `_with_cdp_timeout` is the only
+            # thing under this `await` that speaks the error convention —
+            # `hand_off` raises `HandoffError` and nothing else — so a
+            # `ToolError` here is the timeout and can be named as one. Left
+            # alone it reached the operator as `NOT carried (ToolError)`, which
+            # names neither the mechanism nor the half that failed, for what is
+            # the likeliest real failure of all: a wedged source browser.
+            raise failed("the hand-off did not finish inside the CDP timeout") from None
     except Exception as exc:  # PERMANENT(F-898): reported, never raised — see above
         reason = rt.cookie_handoff.failure(exc)
         rt.debug_logger.log_warning(

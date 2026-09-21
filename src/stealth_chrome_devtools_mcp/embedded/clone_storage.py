@@ -739,9 +739,9 @@ def require_allowed_seed_from(
     clock, no reset hook, no answer that can go stale. What is left is one
     ``exists()`` and a psutil walk only where the answer is used.
 
-    *driven* is F-898's witness — "does THIS backend hold a browser on that
-    directory" — and it is passed through to ``_seed_source``; the rule it feeds
-    and the reason its default answers NO are ``profile_source``'s."""
+    *driven* is F-898's witness — "does THIS backend hold a browser there" —
+    passed to ``_seed_source``; its rule and its NO default are
+    ``profile_source``'s."""
     requested = profile_source.seed_request(seed_from)
     if requested is None:
         return None
@@ -796,8 +796,7 @@ def _seed_source_for_copy(
 
 #: The selection key F-898's cookie hand-off is driven from, and the ONE key
 #: :func:`_public_profile_selection` DROPS: it carries the live source's
-#: directory, which is an instruction to this process rather than a field a
-#: client reads. What the client is told afterwards is ``seeded_via``.
+#: directory, an instruction to this process rather than a field a client reads.
 LIVE_SEED_KEY = "seed_live_source"
 
 
@@ -809,8 +808,7 @@ def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, An
 
     It is also where an INTERNAL key stops being one (F-898): this function's
     whole job is the line between what the resolver decided and what a caller is
-    told, so :data:`LIVE_SEED_KEY` is dropped here rather than being copied into
-    diagnostics and hoped over."""
+    told, so :data:`LIVE_SEED_KEY` is dropped HERE and nowhere else."""
     public = dict(profile_selection)
     public.pop(LIVE_SEED_KEY, None)
     selected = public.get("user_data_dir")
@@ -837,9 +835,8 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
     together, and two parameters let a caller record a copy as having come
     from somewhere it did not.
 
-    ``driven`` is F-898's witness, passed through to ``_seed_source``. When the
-    seed it permits is a LIVE session the answer carries :data:`LIVE_SEED_KEY`,
-    the ONLY thing that drives the cookie hand-off afterwards — set by the
+    ``driven`` is F-898's witness, passed through to ``_seed_source``. A seed
+    with a LIVE source makes the answer carry :data:`LIVE_SEED_KEY` — set by the
     branch that actually COPIED, so a target that raced into existence between
     the pre-flight and here is never handed another session's jar.
     """
@@ -858,6 +855,8 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
     # caller NAMED. A target that is held is walked to `<name>-2`, which does
     # not exist — so asking afterwards would seed a substitute directory under
     # a flag the caller passed about theirs.
+    # `driven` is INERT here — `check_source=False` gates its only reader — and
+    # is passed for symmetry, so a future True cannot fail closed (review S5).
     seed_from = require_allowed_seed_from(
         seed_from, landed, check_source=False, driven=driven
     )
@@ -891,12 +890,14 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
             _require_copied(
                 _copy_profile_tree(seed.path, explicit, clone_root, seed.kind), explicit
             )
-            # F-898: the copy above ran against a directory Chrome is writing
-            # to, so it carried no cookies — the jar is held open and skipped.
-            # Reported from INSIDE the branch that copied, because that is the
-            # only place that knows a copy happened at all.
-            if seed.kind == profile_source.LIVE_SESSION_KIND:
-                live_seed = {LIVE_SEED_KEY: str(seed.path)}
+            # F-898: the copy could not reach a jar Chrome holds open.
+            # `seed.live` and NOT `seed.kind` — for `default` the copy source
+            # (the seed) and the live source (the shared profile) are different
+            # directories, and reading the kind is how `--from default` got no
+            # hand-off at all (review M1). Stamped inside the branch that
+            # copied, the only place that knows a copy happened.
+            if seed.live is not None:
+                live_seed = {LIVE_SEED_KEY: str(seed.live)}
         explicit.parent.mkdir(parents=True, exist_ok=True)
         return {
             "user_data_dir": str(explicit),

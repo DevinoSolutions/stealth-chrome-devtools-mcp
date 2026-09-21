@@ -495,10 +495,36 @@ close <instance>`), or spawn it through this backend (`stealthy spawn --session
 work`) and seed from it while it runs, or seed from 'default', …
 ```
 
-`stealthy ls` names the instance to close. `--from default` never refuses,
-because the seed (`master-snapshot`) is a separate closed copyable form — which
-also means the copy can be as old as the last time `default` was closed;
-`profiles` prints `SEED CHANGED SINCE` when it is stale.
+`stealthy ls` names the instance to close.
+
+**`--from default` has three outcomes and is worth knowing separately**, because
+`default` is the session a human logs in to and — since a named session's
+browser survives its backend (F-888) — its window is normally still open. It is
+also the default for an unset `--from`, so `stealthy spawn --session NAME` takes
+the same three paths.
+
+| `default`'s window | what happens |
+|---|---|
+| open, driven by this backend (`stealthy ls` lists it) | the seed is copied **and** the live jar is handed over — `cookies : N handed over from the running source`. This is the common case and it is what F-898 added |
+| open in a Chrome we do not drive | the seed is copied and nothing is refused. The seed is only as fresh as the last close, which is what `SEED CHANGED SINCE` on the `seeded` line means |
+| closed | the seed is copied, exactly as in 2.1.12 |
+
+The copy always comes from the seed (`master-snapshot`) and never from the live
+`default` directory — that is what makes it safe — and while `default` is open
+the seed is not refreshed, which is why the hand-off matters: it puts the
+current jar on top of a copy that may be days old.
+
+The one refusal here is a machine with **no seed yet AND `default` open**:
+
+```
+the 'default' session has no copyable form yet and its browser is open, so
+there is nothing safe to seed from: … Close the 'default' session once
+(`stealthy close <instance>`); the seed every later session is copied from is
+written when it closes, …
+```
+
+Nothing is created on disk when that happens. Closing the `default` window once
+writes the seed and the refusal is gone for good, open or closed.
 
 **One-time job if you have a session directory named `master` or
 `master-snapshot`.** Those two names are reserved (F-894): `spawn_browser` used

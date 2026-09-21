@@ -177,10 +177,17 @@ def _connection(browser: "Browser") -> Connection:
     ``getattr`` rather than an attribute read because nodriver sets
     ``Browser.connection`` to ``None`` in ``__init__`` and fills it during
     ``start``; a browser that never got there has nothing to ask.
+
+    A ``HandoffError`` and not a bare ``RuntimeError`` (review S2): ``failure``
+    repeats the text of this class and of nothing else, so a ``RuntimeError``
+    here was reported as ``RuntimeError from Storage.getCookies`` — telling an
+    operator a CDP call failed when the truth is that there was no connection
+    to make one on. The text is ours and carries no payload, which is exactly
+    the condition under which repeating it is allowed.
     """
     connection = getattr(browser, "connection", None)
     if connection is None:
-        raise RuntimeError("browser has no CDP connection")
+        raise HandoffError("browser has no CDP connection")
     return connection
 
 
@@ -232,10 +239,20 @@ async def _step(method: str, awaitable: Awaitable[_T]) -> _T:
     a method before the call attributed a failed READ to ``Storage.setCookies``
     (caught by ``tests/test_cookie_handoff.py``) — a diagnostic pointing at the
     wrong half of the mechanism is worse than none.
+
+    A ``HandoffError`` from INSIDE the step is re-raised untouched (review S2).
+    It is the one exception class this module writes, so its text is already
+    shape-only AND already more specific than anything that could be wrapped
+    around it — ``browser has no CDP connection`` says what happened, while
+    ``HandoffError from Storage.getCookies`` says a CDP call failed, which is
+    not what happened at all. A bare ``raise`` re-raises the SAME object, so it
+    chains to nothing and the PII argument below is untouched.
     """
     failure_to_raise: HandoffError | None = None
     try:
         return await awaitable
+    except HandoffError:
+        raise
     except Exception as error:  # noqa: BLE001  PERMANENT(F-898): every CDP failure becomes one shape-only report
         failure_to_raise = _failed(method, error)
         del error

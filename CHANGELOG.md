@@ -132,9 +132,22 @@ registration or saved passwords, so a site that keeps its token in
 session is logged into, not just the one you had in mind — which is what a copy
 of a closed session already does.
 
-A running source this backend does NOT drive (another backend's, or a Chrome
-nobody here launched) is still refused by name, and the refusal now says which
-half is missing: there is no CDP connection of ours to ask for its cookies.
+**`--from default` gets the same hand-off, and that is the case most spawns
+take** — an unset `--from` means `default`, so this is `stealthy spawn --session
+NAME`. `default` is the session you log in to by hand, its browser normally
+stays open, and while it is open its seed is never refreshed — so the copy alone
+could be days old. The copy still comes from the seed (a closed, safe copy) and
+the live jar is now written on top of it. Two things follow that are worth
+stating: a `default` held by a Chrome this backend does NOT drive is copied and
+never refused, because the seed exists and is exactly what 2.1.12 promised; and
+a machine with no seed yet AND `default` open is now refused by name instead of
+silently copying the live directory, which carries no cookies at all. Closing
+that window once writes the seed and the refusal is gone for good.
+
+A running NAMED source this backend does NOT drive (another backend's, or a
+Chrome nobody here launched) is still refused by name, and the refusal now says
+which half is missing: there is no CDP connection of ours to ask for its
+cookies.
 
 A hand-off that fails does not fail the spawn — the session exists and works
 without the source's cookies, and the answer says

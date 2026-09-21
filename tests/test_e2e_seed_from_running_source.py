@@ -236,7 +236,78 @@ async def test_a_running_source_hands_its_jar_over_and_keeps_running(
                 await released(directory)
 
 
-async def test_a_closed_source_seeds_by_copy_and_loses_the_session_cookie(
+async def test_b_the_default_session_hands_its_jar_over_while_it_is_open(
+    fixture_app_server, tmp_empty_root
+):
+    """``--from default`` — the source that matters most, through the real tool.
+
+    ``default`` is the session a human logs in to; since F-888 its browser
+    survives its backend, and while it runs the seed is never refreshed. So the
+    copy comes from a seed that may be days old and the hand-off is the only
+    thing carrying the current jar — which the first draft of this feature did
+    not do at all, because the ``default`` branch returned before the driven
+    split (review M1).
+
+    The two directories are DIFFERENT here, which is what makes this node worth
+    a real Chrome: the copy source is the seed, the live source is the shared
+    profile, and the hermetic pins can only show the resolver stamping them
+    apart. This one shows the cookie arriving at a server.
+    """
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+    sessions = tmp_empty_root["sessions"]
+
+    session_value = uuid.uuid4().hex[:12]
+    persist_value = uuid.uuid4().hex[:12]
+
+    # Open the SHARED session itself, log in, and leave it running. Opening it
+    # is also what writes the seed (`before-default-open`), so the third
+    # outcome — no seed at all — is not the state under test here.
+    shared = (await spawn(session="default", headless=True, **sandbox_kwargs()))[
+        "instance_id"
+    ]
+    target = None
+    target_dir = None
+    try:
+        await navigate_and_settle(shared, f"{fixture_app_server}/index.html")
+        await _log_in(shared, session_value, persist_value)
+
+        result = await spawn(
+            session=_unique("f898-off-default"),
+            seed_from="default",
+            headless=True,
+            **sandbox_kwargs(),
+        )
+        target = result["instance_id"]
+        target_dir = _directory(result, sessions)
+        selection = _selection(result)
+
+        assert selection["seeded_via"] == cookie_handoff.VIA_CDP, selection
+        assert "cookie_handoff_error" not in selection, selection
+        assert selection["cookies_carried"] >= 2, selection
+        # The copy came from the SEED, not from the live shared directory —
+        # the point of the whole arrangement, and the reason `SeedSource`
+        # carries the two paths separately.
+        assert selection["seeded_from"] == "default", selection
+
+        await navigate_and_settle(target, f"{fixture_app_server}/index.html")
+        header = await _cookie_header(target)
+        assert f"f898_session={session_value}" in header, header
+        assert f"f898_persist={persist_value}" in header, header
+
+        # The shared session is untouched and still open.
+        assert f"f898_session={session_value}" in await _cookie_header(shared)
+    finally:
+        for iid in (target, shared):
+            if iid is not None:
+                with contextlib.suppress(Exception):
+                    await close(instance_id=iid)
+        if target_dir is not None:
+            await released(target_dir)
+        await released(tmp_empty_root["master"])
+
+
+async def test_c_a_closed_source_seeds_by_copy_and_loses_the_session_cookie(
     fixture_app_server, tmp_empty_root
 ):
     """The control, and the reason the hand-off exists.

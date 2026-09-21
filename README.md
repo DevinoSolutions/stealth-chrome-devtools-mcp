@@ -216,8 +216,24 @@ still works — the answer then says `cookies : NOT carried (…)`.
 A source open in a browser this backend does NOT drive — another backend's, or a
 Chrome you started yourself — is refused by name, because there is no connection
 of ours to ask it for its cookies and a file copy of a live profile carries none
-at all. `default` is never refused, because the product keeps a separate,
-closed, copyable form of it (the seed below).
+at all.
+
+**`--from default` — and an unset `--from`, which means the same thing — has
+three outcomes**, because `default` is the session you log in to by hand and its
+window is usually still open:
+
+| the `default` window is | what you get |
+|---|---|
+| open, and this backend is driving it | the seed is copied **and** the live jar is handed over — `cookies : N handed over from the running source` |
+| open in a Chrome we do not drive | the seed is copied, and nothing is refused. The seed is only as fresh as the last time that window was closed, which the `seeded` line tells you (`SEED CHANGED SINCE`) |
+| closed | the seed is copied, as it always was |
+
+The seed is a separate, closed, copyable form of `default` (below) and it is
+refreshed when that window closes. The one case that IS refused is a machine
+where no seed exists yet **and** `default` is open: there is nothing safe to
+copy, and copying the live directory would hand you a session missing exactly
+the logins you wanted. Close the `default` window once — that writes the seed —
+and it works from then on, open or not.
 
 ```
 C:\stealth-mcp-browser-sessions\

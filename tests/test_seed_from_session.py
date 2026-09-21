@@ -969,16 +969,33 @@ class TestTheSourceAskIsPaidForTwice:
         )
         assert seen.count("beta") == 1, f"the target is asked about once: {seen}"
 
-    async def test_an_unseeded_named_spawn_is_unchanged(
+    async def test_an_unseeded_named_spawn_walks_once_for_the_shared_session(
         self, monkeypatch, tmp_session_root
     ):
-        """A GUARD: the flag must not cost — or save — anything on the spawn
-        that never writes `seed_from`."""
+        """A GUARD, and its number CHANGED once with a reason (F-898 M1).
+
+        Under F-897 this was `["beta"]` — the flag cost the unseeded spawn
+        nothing, because an unset `seed_from` took an early return that asked no
+        witness at all. That early return is exactly what made `--from default`
+        a silent no-op: `default` is the session a human logs in to, its browser
+        normally survives (F-888), and while it runs the seed is never
+        refreshed, so the one source whose jar most needed handing over was the
+        one nothing ever asked about.
+
+        The price of fixing that is ONE extra walk on the shared profile per
+        named spawn, and it is asserted EXACTLY — one `master`, not two — so a
+        future change that asks the same question again has to come through
+        here. It buys the hand-off on the commonest spawn there is, against a
+        path that is about to launch a whole Chrome.
+        """
         seen = self._counted(monkeypatch)
 
         await _selection(session="beta")
 
-        assert seen == ["beta"]
+        assert seen == ["beta", "master"], (
+            "the target, then the shared session ONCE — the second is F-898's "
+            f"witness for a hand-off from `default`: {seen}"
+        )
 
     async def test_the_resolvers_gate_call_skips_the_walk_the_preflight_makes(
         self, monkeypatch, tmp_session_root

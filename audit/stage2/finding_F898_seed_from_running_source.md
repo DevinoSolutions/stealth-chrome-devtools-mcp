@@ -297,6 +297,59 @@ should acquire by accident.
 that does not hand in a witness gets 2.1.12's refusal. Reading a browser's
 cookie jar is not something an omitted argument may authorise.
 
+### 10.1a `default` is a fourth shape, and the first draft missed it
+
+The table above is about a source the caller NAMED. `default` — and an unset
+`seed_from`, which means the same thing on the same code path — returned before
+that split ever ran, so `--from default` got no hand-off at all. Review M1
+found it, and it is the case that matters most:
+
+* `default` is, by the glossary's own words, the session a human logs in to.
+* Since F-888 a named session's browser survives its backend and is re-attached
+  to, so `default`'s browser is normally RUNNING and normally driven by us —
+  which is the exact state this finding exists to make usable.
+* While it runs, the seed is **never refreshed**:
+  `clone_storage._refresh_master_snapshot_if_safe` returns early with
+  `seed_error: "default-in-use"`. So `--from default` copied a snapshot as old
+  as the last time `default` was closed, with a live CDP connection to the real
+  jar open in this very process, unused.
+* And under it sat a **silent zero-cookie path**: with no seed yet, the
+  fallback was a file copy of the LIVE shared directory — which §2 measures at
+  zero cookies — with no `seeded_via`, no `cookie_handoff_error` and no
+  refusal. F-898's own harm, in the default path, reported as an ordinary
+  successful spawn.
+
+`_default_source` now gives it three outcomes:
+
+| `default`'s browser | copy source | hand-off |
+|---|---|---|
+| running, driven by us | the SEED | yes — `cdp-cookies` |
+| running, a Chrome we do not drive | the SEED | no, and **not refused** |
+| closed | the SEED | no |
+| *(no seed at all)* + running | — | **refused by name**, nothing created |
+| *(no seed at all)* + closed | the live shared dir | no (2.1.11's first-run path) |
+
+Row 2 is deliberately NOT the named branch's refusal: the closed copyable form
+EXISTS and is exactly what F-897 promised, `seed_changed_since` already says it
+is behind, and refusing would break `--from default` for the one person this
+product is for on the machine state that is most normal — the human's own
+Chrome holding the shared profile.
+
+**Row 1 is why `SeedSource` grew a third field.** For every named source the
+copy source and the live source are one directory; for `default` they are two —
+the copy must come from the closed seed (F-893's whole argument) while the jar
+belongs to the live shared profile. `clone_storage` therefore stamps
+`LIVE_SEED_KEY` from `seed.live` and **never from `seed.kind`**; reading the
+kind is precisely what made this a no-op, and a pin now asserts the two
+directories differ.
+
+What it costs is one extra process-table walk per named spawn — the shared
+profile's liveness, which the unseeded path never asked before. Pinned
+EXACTLY (one `master`, not two) in `test_seed_from_session.py`, whose F-897
+guard asserted `["beta"]` and now asserts `["beta", "master"]` with the reason
+written into the node. It is one psutil scan against a path that is about to
+launch a whole Chrome, and it buys the hand-off on the commonest spawn there is.
+
 ### 10.2 The translation, and the two fields held out of it
 
 `Cookie` → `CookieParam` is a verbatim pass-through over a set **derived** from
@@ -392,6 +445,33 @@ compare the mapping to itself; every case starts from Chrome 153's own measured
 WIRE JSON through `Cookie.from_json` and asserts on `CookieParam.to_json`. That
 is `fixtures-from-the-same-serializer-cannot-fail` applied to the one place here
 where a wrong field is silent.
+
+### 11.0b The review round's pins
+
+Review M1 and S1–S3 each named a branch the first draft could not reach. The
+nodes that now reach them, with the RED taken the same way (mutate, re-run,
+bytecode writing off):
+
+| what it pins | node | RED when |
+|---|---|---|
+| `--from default` and an unset `--from` hand the jar over | `TestWhereTheDefaultSessionIsSeededFrom::test_a_…` (both spellings) | the `default` branch returns before the driven split, i.e. the shipped first draft |
+| the copy source and the live source are DIFFERENT directories | `TestTheResolverStampsTheLiveSourceAndNotTheCopySource` | `clone_storage` reads `seed.kind` instead of `seed.live` |
+| a `default` we do not drive is copied and never refused | `…::test_b_…` | the named branch's refusal is widened to cover `default` |
+| no seed + running `default` is refused, nothing created | `…::test_d_…` | the 2.1.11 live-directory fallback is kept |
+| the source stopped being ours between pre-flight and hand-off | `TestEveryReasonAHandOffCanReport::test_a_…` | `browser_management.py`'s `source_id is None` guard |
+| no browser handle for either side | `…::test_b_…` | its sibling guard |
+| a browser with no CDP connection keeps its own words | `…::test_c_…` | `_connection` raises a bare `RuntimeError` |
+| a timeout is named as one | `…::test_d_…` | `_with_cdp_timeout`'s `ToolError` is reported by type |
+| none of the four new reasons carries a cookie | `…::test_e_…` | any of them interpolates the jar |
+| nothing in the package makes a second browser context | `TestTheWholeJarPremise` | a `create_browser_context` / `browser_context_id` / `--incognito` appears |
+
+The last one is an ABSENCE and is scanned as TOKENS rather than text, so prose
+explaining the premise cannot trip it, and it carries a floor (≥ 60 package
+files) on `source_scan.MIN_TOOL_SOURCE_FILES`' discipline — a scan whose file
+set collapses passes over nothing at all. "The whole jar" is true only because
+this product never creates a non-default context and never launches incognito;
+that was verified by absence during the review, and an absence verified once is
+a belief. Now it is a pin.
 
 ### 11.1 The integration pin: two real Chromes and a real server
 
@@ -490,6 +570,24 @@ Everything in §9 still stands. In addition:
   reports what it SENT and what the target's jar held afterwards, and does not
   claim the two are the same number — Chrome's own startup fetches put cookies
   in a seconds-old profile (§6).
+* **A CANCELLED hand-off can under-claim** (review N1). `_with_cdp_timeout`
+  cancels, and cancelling an await never un-sends a command Chrome already has
+  — `cdp_transport`'s own first sentence. So a hand-off cancelled during
+  `Storage.setCookies` may leave the cookies IN the target while reporting
+  `seeded_via: "copy"` and a reason. That is the safe direction (under-claiming
+  beats over-claiming) and needs no code change; it is recorded so nobody
+  later reads the `copy` verdict as proof the jar did not land.
+* **The refusal for "no seed yet AND `default` running" reaches an UNSET
+  `--from` through the resolver, so it is prefixed `Failed to spawn browser:`.**
+  The explicitly-named spelling (`--from default`) is refused by the pre-flight
+  and gets the clean sentence. Closing that gap would mean asking the source
+  question on every named spawn with an unset `--from`, i.e. a second walk of
+  the process table for a state that is nearly always fine — `check_source`
+  exists to remove exactly that. The message itself is identical and
+  self-explanatory either way; only the prefix differs.
+* **One extra process-table walk per named spawn** (§10.1a), the price of
+  `--from default`'s hand-off. Pinned exactly so a third ask cannot appear
+  unnoticed.
 * **The control node does not assert that the COPY carries the persistent
   cookie**, only that it cannot carry the session one. When Chrome commits a
   persistent cookie to the SQLite jar is Chrome's business — there is a lazy
