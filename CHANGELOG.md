@@ -317,6 +317,131 @@ pydantic's middle-truncated `input_value=` echo of a caller's arguments; and
 validation-failure paths, both need a different mechanism, and they are named in
 `audit/stage2/finding_F908_sse_starlette_logs_tool_result.md` §6 — beside
 F-907, the other line this floor sits below.
+### Added — F-898: `--from` a session that is still OPEN
+
+F-897 refuses `--from work` while `work`'s browser is running, and it is right
+about the mechanism it had: measured on Chrome 153, a file copy of a running
+profile carries **zero** cookies — the SQLite jar is held open and skipped — and
+nothing can say afterwards what was lost. Since F-888 a named session's browser
+survives its backend, so "close it first" stopped being a remedy anyone takes.
+
+A source whose browser **this backend drives** is now seeded anyway: the file
+copy runs for everything it can still carry, and the COOKIES are handed over the
+two browsers' CDP connections (`Storage.getCookies` → `Storage.setCookies`)
+after the new browser launches.
+
+```console
+stealthy spawn --session work --headed          # log in by hand — and leave it open
+stealthy spawn --session work2 --from work      # already logged in
+```
+
+```
+instance   : 4f0c…
+role       : explicit
+profile    : C:\stealth-mcp-browser-sessions\sessions\work2
+seeded     : seeded from work at 2026-09-21 14:02
+cookies    : 14 handed over from the running source
+```
+
+**What it carries is cookies, and the whole jar.** Every kind measured — session,
+persistent, `HttpOnly`, `Secure`, `SameSite=None`, `Partitioned`/CHIPS — with
+every shared field round-tripping exactly, including a session cookie, which a
+file copy can never carry because it is never written to disk. It carries **no**
+`localStorage`, `sessionStorage`, IndexedDB, Cache Storage, service-worker
+registration or saved passwords, so a site that keeps its token in
+`localStorage` will NOT be logged in. And it carries every site the source
+session is logged into, not just the one you had in mind — which is what a copy
+of a closed session already does.
+
+**`--from default` gets the same hand-off, and that is the case most spawns
+take** — an unset `--from` means `default`, so this is `stealthy spawn --session
+NAME`. `default` is the session you log in to by hand, its browser normally
+stays open, and while it is open its seed is never refreshed — so the copy alone
+could be days old. The copy still comes from the seed (a closed, safe copy) and
+the live jar is now written on top of it. Two things follow that are worth
+stating: a `default` held by a Chrome this backend does NOT drive is copied and
+never refused, because the seed exists and is exactly what 2.1.12 promised; and
+a machine with no seed yet AND `default` open is now refused by name instead of
+silently copying the live directory, which carries no cookies at all. Closing
+that window once writes the seed and the refusal is gone for good.
+
+A running NAMED source this backend does NOT drive (another backend's, or a
+Chrome nobody here launched) is still refused by name, and the refusal now says
+which half is missing: there is no CDP connection of ours to ask for its
+cookies.
+
+A hand-off that fails does not fail the spawn — the session exists and works
+without the source's cookies, and the answer says
+`seeded_via: "copy"` with a shape-only `cookie_handoff_error`.
+
+**No cookie name or value reaches a log line, a message, the returned record or
+Sentry** — counts, the CDP method and an exception type only. A cookie name
+identifies on its own and a value is the session itself.
+
+Internals: the new `embedded/cookie_handoff.py` is the one home for the jar
+transfer and for which profile directories this backend drives; the regenerable
+profile trim moved from `clone_storage` to `profile_copy`, beside the list it
+reads, which took `clone_storage` from 1000 to 993 lines.
+
+### Fixed — F-912: a hidden password field's value no longer leaves the machine in an error message
+
+`get_element_state` on an element that lays out no box answered with the
+element rendered in full — tag, **every attribute as `name="value"`**, and all
+of its descendant text:
+
+```
+Failed to get element state: could not find position for <input id="pwhidden"
+  type="password" value="SECRET-VALUE" style="display:none"></input>
+```
+
+That text is nodriver's, not ours: `element.py`:499 raises
+`Exception("could not find position for %s " % self)`, and every `except` block
+that relays `str(exc)` carries the whole element with it.
+
+**What was new is that the content LEFT THE PROCESS.** `get_element_state`
+already returns `attributes` (including `value`), `text` and `text_all` to the
+caller on the success path by design — a caller asking for an element's state is
+entitled to the field's value, and this changes the SHAPE of a failed call's
+error text rather than making the tool more secretive. The exposure is the two
+sinks nobody asked for: `click_element` wrote the same rendering to the backend
+log at DEBUG (then clicked the element synthetically and succeeded), and the
+`ToolError` reached **Sentry** — not dropped as a tool failure, because
+`get_element_state` raises it from inside an `except` and `expected_events`'
+error-convention rule tolerates only a timeout or a cancellation behind ours.
+
+**It is reachable by three ordinary shapes**, which is what separates this from
+F-907's insurance: measured on Chrome 153, `DOM.getContentQuads` answers an
+EMPTY LIST — not an error — for a `display:none` element and for an `<option>`
+inside a `<select>`, and by construction for a detached node, while
+`visibility:hidden`, a zero-size box, an empty inline and
+`content-visibility:hidden` all answer one quad and never reach it.
+
+The fix is at the **raise**, which is the one moment the element is still an
+OBJECT: `embedded/element_box.py` wraps `Element.get_position` and, for the one
+exception type that line produces — the bare builtin `Exception`, keyed on the
+TYPE and never on the message, because a library may reword its own sentences —
+replaces the text with F-907's shape:
+
+```
+The element has no layout box, so its position cannot be read:
+<input attrs=[type, value, data-session-token] children=1>.
+display:none, an <option> and a detached node all render nothing.
+```
+
+Redacting is not silencing: which control had no box is the whole diagnostic
+value of the line, and the new `ElementBoxError` names a condition a bare
+`Exception` named not at all. Everything that is **not** that exact type passes
+through untouched — a `ProtocolException` keeps Chrome's own words, an
+`AttributeError` still reaches `mouse_click`'s handler, a cancellation still
+cancels. The replacement is raised OUTSIDE the `except` block rather than with
+`raise … from None`: both keep nodriver's message out of a traceback and out of
+Sentry's chain (every reader measured honours `__suppress_context__`), but
+leaving the handler first makes the `__context__` ABSENT rather than suppressed,
+which nothing downstream can opt out of. One shaper — F-907's
+`logging_setup._shape` — and no second one; no change to any of the three call
+sites, because all three are correct once what they relay is shape-only.
+Measured cost: +0.113 µs per `get_position`, against 430.9 µs median for the
+same call over real CDP.
 
 ### Fixed — F-911: the MCP SDK logged a caller's arguments on the ROOT logger, where no floor could reach them
 

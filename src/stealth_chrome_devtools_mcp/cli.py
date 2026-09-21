@@ -113,7 +113,7 @@ def _collect_profiles(cs) -> list[dict]:
     the same three fields ``spawn_diagnostics.profile_selection`` reports, read
     from the same marker, so the CLI and a spawn can never disagree about where
     a session came from."""
-    from stealth_chrome_devtools_mcp.embedded import profile_seed
+    from stealth_chrome_devtools_mcp.embedded import profile_copy, profile_seed
 
     rows: list[dict] = []
 
@@ -122,7 +122,7 @@ def _collect_profiles(cs) -> list[dict]:
             "name": path.name,
             "path": path,
             "role": role,
-            "size": cs._dir_size_bytes(path),
+            "size": profile_copy.dir_size_bytes(path),
             "in_use": cs._profile_has_running_browser(path),
             **profile_seed.provenance(path),
         }
@@ -517,6 +517,8 @@ def _cleanup_backend_records(apply: bool) -> None:
 
 
 def _cmd_cleanup(args) -> int:
+    from stealth_chrome_devtools_mcp.embedded import profile_copy
+
     cs = _clone_storage()
     clone_root = cs.clone_root_dir()
     clone_cap = _gb_to_bytes(args.clone_cap_gb, cs.clone_storage_cap_bytes())
@@ -527,8 +529,8 @@ def _cmd_cleanup(args) -> int:
     # Same selectors the live sweep uses — dry-run and apply can't disagree.
     to_delete = cs._idle_autoclones_over_cap(clone_root, clone_cap)
     to_trim = cs._named_profiles_over_session_cap(clone_root, session_cap)
-    delete_bytes = sum(cs._dir_size_bytes(p) for p in to_delete)
-    trim_bytes = sum(cs._regenerable_size(p) for p in to_trim)
+    delete_bytes = sum(profile_copy.dir_size_bytes(p) for p in to_delete)
+    trim_bytes = sum(profile_copy.regenerable_size(p) for p in to_trim)
 
     print(f"clone root  : {clone_root}")
     print(
@@ -548,16 +550,16 @@ def _cmd_cleanup(args) -> int:
             f"{_human(delete_bytes)}:"
         )
         for path in to_delete:
-            print(f"   - {path.name[:50]:50s} {_human(cs._dir_size_bytes(path)):>10s}")
+            size = _human(profile_copy.dir_size_bytes(path))
+            print(f"   - {path.name[:50]:50s} {size:>10s}")
     if to_trim:
         print(
             f"\ntrim {len(to_trim)} idle named profile(s) - frees "
             f"~{_human(trim_bytes)} (logins kept):"
         )
         for path in to_trim:
-            print(
-                f"   - {path.name[:50]:50s} ~{_human(cs._regenerable_size(path)):>10s}"
-            )
+            size = _human(profile_copy.regenerable_size(path))
+            print(f"   - {path.name[:50]:50s} ~{size:>10s}")
     print(f"\ntotal reclaimable: ~{_human(delete_bytes + trim_bytes)}")
 
     if not args.apply:

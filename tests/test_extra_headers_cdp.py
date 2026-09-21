@@ -266,7 +266,7 @@ def failing_spawn_server(patched_server, monkeypatch):
             named."""
             return session or user_data_dir
 
-        def require_allowed_seed_from(self, seed_from, landed):
+        def require_allowed_seed_from(self, seed_from, landed, *, driven=None):
             """F-897: the SECOND pre-flight guard, asked between the reservation
             above and the F-888 re-attach — so a double of this module has to
             offer it too, with the real arity (the request AND the directory the
@@ -279,10 +279,18 @@ def failing_spawn_server(patched_server, monkeypatch):
             raised `AttributeError` INSIDE its own `try` and the node above read
             that as the spawn failure whose prefix it is pinning — a double that
             offers less than the real surface turns a renamed call into a pass,
-            or into a red about something else entirely."""
+            or into a red about something else entirely.
+
+            ``driven`` is F-898's witness — "does this backend hold a browser on
+            that directory" — and it is named here rather than swallowed by a
+            ``**kwargs`` for the same reason the two arguments above are: a
+            double that tolerates whatever it is handed cannot fail when the
+            real surface changes."""
             return seed_from or None
 
-        async def resolve_profile_selection(self, user_data_dir, *, seed_from=None):
+        async def resolve_profile_selection(
+            self, user_data_dir, *, seed_from=None, driven=None
+        ):
             return {"user_data_dir": None, "profile_role": "none"}
 
         async def _fallback_profile_selection(self, selection, attempt):

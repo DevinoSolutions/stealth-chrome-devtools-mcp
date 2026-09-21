@@ -56,6 +56,7 @@ from e2e_helpers import (
     instance_entry,
     integration_pytestmark,
     navigate_and_settle,
+    released,
     sandbox_kwargs,
     warmup_once,
 )
@@ -118,38 +119,6 @@ def _cleanup_on(pid_file) -> ProcessCleanup:
     cleanup.orphan_profile_max_age_seconds = 0
     cleanup._init_time = 0.0
     return cleanup
-
-
-def _browsers_on(profile) -> bool:
-    """Is any Chromium process still running on *profile*?"""
-    target = str(profile).lower()
-    for proc in psutil.process_iter(["name", "cmdline"]):
-        with contextlib.suppress(Exception):
-            if "chrome" not in (proc.info["name"] or "").lower():
-                continue
-            if any(target in (arg or "").lower() for arg in proc.info["cmdline"] or ()):
-                return True
-    return False
-
-
-async def _released(profile, *, budget: float = 30.0) -> None:
-    """Wait for a torn-down node's Chrome to actually EXIT before the next runs.
-
-    ``close_instance`` offloads its teardown, so it returns while the process
-    tree is still dying — and each node here deliberately leaves a browser
-    RUNNING mid-test, so without this barrier three real Chromes launch over the
-    top of three dying ones. That is how this file failed as a FILE on a loaded
-    machine while every node passed alone: nodriver's connect deadline is a fixed
-    ≈2.75 s and it loses that race, which surfaces as "Failed to connect to
-    browser" and a retry onto a DIFFERENT directory — i.e. as an adoption that
-    was never attempted. Bounded, and deliberately silent on expiry: a browser
-    that outlives the budget is the next node's capacity problem to report, not
-    a failure of the node that just passed.
-    """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + budget
-    while loop.time() < deadline and _browsers_on(profile):
-        await asyncio.sleep(0.2)
 
 
 async def test_a_live_page_survives_its_backend_and_is_re_attached(
@@ -257,7 +226,7 @@ async def test_a_live_page_survives_its_backend_and_is_re_attached(
             # than leaving a real browser behind on the runner.
             with contextlib.suppress(Exception):
                 psutil.Process(chrome_pid).kill()
-        await _released(profile)
+        await released(profile)
 
     # The profile directory outlives the browser, which is guarantee (a).
     assert profile.exists()
@@ -350,7 +319,7 @@ async def test_spawn_re_attaches_to_a_holder_with_no_record_entry(
         if second is None and chrome_pid is not None:
             with contextlib.suppress(Exception):
                 psutil.Process(chrome_pid).kill()
-        await _released(profile)
+        await released(profile)
 
 
 async def test_a_second_manager_built_first_takes_over_the_live_browser(
@@ -447,4 +416,4 @@ async def test_a_second_manager_built_first_takes_over_the_live_browser(
         if adopted is None and chrome_pid is not None:
             with contextlib.suppress(Exception):
                 psutil.Process(chrome_pid).kill()
-        await _released(profile)
+        await released(profile)
