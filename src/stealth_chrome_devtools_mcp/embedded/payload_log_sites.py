@@ -324,9 +324,17 @@ INPUT_QUOTING_MODULE_ROOTS = frozenset({"pydantic", "pydantic_core"})
 #: How many of an error list's entries the restatement names. A union reports
 #: one error per arm per field — ``ClientRequest`` reported 31 in F-911's
 #: measurement and ``JSONRPCMessage`` 9 in this one — and an unbounded join
-#: would put a page-sized string where a diagnostic belongs. Entries are
-#: DEDUPLICATED first, which is what makes a small cap enough: the 9 measured
-#: errors are 3 distinct ``type``/``loc`` pairs.
+#: would put a page-sized string where a diagnostic belongs.
+#:
+#: **The cap is what bounds that list, and** :data:`RESTATED_OVERFLOW` **is how
+#: a reader learns it bound something.** Deduplication is a SEPARATE mechanism
+#: that collapses a genuinely repeated ``type``/``loc`` pair; it is not what
+#: makes the cap enough, and on the measured frame it collapses nothing at all
+#: — those 9 errors are 9 DISTINCT pairs, so the restatement really does
+#: overflow and end ``…+1`` (measured; pinned by
+#: ``test_the_restatement_overflows_its_cap_and_says_so``). An earlier version
+#: of this comment claimed 3 distinct pairs and offered that as the
+#: justification; the number was wrong and so was the argument.
 MAX_RESTATED_ERRORS = 8
 
 #: One ``loc`` path, bounded. A ``loc`` is normally schema-derived (a field
@@ -518,14 +526,22 @@ def _count(exc: BaseException) -> str:
     and a module ROOT, never a class, precisely so the stdio proxy never has to
     ``import pydantic``. Writing ``exc.error_count()`` would claim a static
     guarantee the match does not give.
+
+    The failure is reported in the one channel available here -- the line
+    itself -- by TYPE only and never by text, exactly as :func:`_detail` and
+    :func:`_restated_link` do. A log call is not an option: this runs inside
+    ``Logger.makeRecord``, so logging the failure would re-enter the factory
+    that is reporting it. That is also why the answer carries the type rather
+    than staying a bare ``?`` -- a truly silent handler in ``embedded/`` is
+    what ``tests/test_no_silent_excepts.py`` forbids, and this one was one.
     """
     counter = getattr(exc, "error_count", None)
     if not callable(counter):
         return "?"
     try:
         return str(counter())
-    except Exception:  # noqa: BLE001  PERMANENT(F-913 — inside makeRecord)
-        return "?"
+    except Exception as failure:  # noqa: BLE001  PERMANENT(F-913 — inside makeRecord)
+        return f"?({type(failure).__name__})"
 
 
 def _detail(exc: BaseException) -> str:

@@ -34,8 +34,11 @@ whole JSON-RPC frame the head is always the envelope ``{"jsonrpc": "2.0",
 * **any input value SHORTER than 50 characters, echoed WHOLE** — which is the
   sharp edge, because a cookie value, a session id or a short token is
   frequently under 50; and
-* **once per union arm**: ``JSONRPCMessage`` is a 4-arm union, so one frame
-  produced 9 errors and 216 echoed characters (measured).
+* **once per union arm**: ``JSONRPCMessage`` is a 4-arm union, so
+  :data:`LEAF_FRAME` produced 9 errors and **276** echoed characters —
+  3 whole-frame echoes of 52 plus 6 short-leaf echoes of 20. Measured on that
+  fixture, and the fixture is named because a bare "measured" with no subject
+  is what let the previous number (216) survive a rewrite of the frame.
 
 And it lands in the harshest of the four sinks: ``LoggingIntegration`` ships an
 ERROR as a full Sentry **EVENT**, not a breadcrumb, and ``expected_events``
@@ -222,6 +225,32 @@ class Sinks:
             for value in self.exception_values
             for frame in ((value.get("stacktrace") or {}).get("frames") or [])
         ]
+
+    @property
+    def restatement(self) -> str:
+        """What the record carries INSTEAD of the quoting exception.
+
+        Read from the :class:`WithheldInputError` value specifically, never
+        from everything this run rendered. That distinction is the whole point
+        of the property: the SDK's own traceback frames name ``JSONRPCMessage``
+        and ``pydantic_core`` on their own, so an assertion over
+        ``sentry + downstream`` passes off the NEIGHBOURING text and pins
+        nothing about the restatement at all.
+
+        Measured before this existed: dropping :func:`payload_log_sites._title`,
+        dropping :func:`payload_log_sites._count`, and reducing the chain walk
+        to ``exc_info[1]`` alone each left all 38 nodes in this file GREEN.
+
+        The type name is DERIVED from the class rather than typed, so a rename
+        makes this empty — and an empty restatement fails every assertion that
+        reads it, which is the right direction.
+        """
+        wanted = payload_log_sites.WithheldInputError.__name__
+        return "\n".join(
+            value.get("value") or ""
+            for value in self.exception_values
+            if (value.get("type") or "") == wanted
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -526,13 +555,55 @@ class TestRestatingIsNotSilencing:
         F-911 kept the module and the line for exactly this reason. Here the
         equivalent is the error ``type`` slug and the ``loc`` path, both read
         from the library's own ``errors()`` and neither derived from the input.
+
+        Asserted against :attr:`Sinks.restatement` and NOT against everything
+        rendered: this node read ``sentry + downstream`` until the F-913 review,
+        where ``"JSONRPCMessage" in rendered`` was satisfied by the SDK's own
+        traceback frames, so dropping the model name from the restatement left
+        it green.
         """
         sinks = drive(tmp_path)
-        rendered = sinks.sentry + sinks.downstream
-        assert "ValidationError" in rendered, "the pydantic type was lost"
-        assert "pydantic_core" in rendered, "the defining module was lost"
-        assert "JSONRPCMessage" in rendered, "the model being validated was lost"
-        assert "json_invalid" in rendered, "the pydantic error TYPE was lost"
+        restated = sinks.restatement
+        assert restated, "no WithheldInputError was serialized; the drive is broken"
+        assert "ValidationError" in restated, "the pydantic type was lost"
+        assert "pydantic_core" in restated, "the defining module was lost"
+        assert "JSONRPCMessage" in restated, "the model being validated was lost"
+        assert "json_invalid" in restated, "the pydantic error TYPE was lost"
+
+    def test_the_restatement_names_the_error_count(self, tmp_path):
+        """The COUNT survives — and it is the library's, not a literal.
+
+        ``_count`` is the one field of the four this class claims that nothing
+        read until the F-913 review: blanking it left 38/38 green. The expected
+        number is taken from pydantic itself for the same frame, so a version
+        that reports a different number moves the pin with it instead of
+        pinning a stale 9.
+        """
+        from mcp.types import JSONRPCMessage
+
+        with pytest.raises(Exception) as caught:  # noqa: PT011  PERMANENT(F-913 - the exception TYPE is the subject)
+            JSONRPCMessage.model_validate_json(LEAF_FRAME)
+        expected = caught.value.error_count()
+        assert expected > 1, "the union no longer reports per arm; re-measure"
+
+        sinks = drive(tmp_path, data=LEAF_FRAME)
+        restated = sinks.restatement
+        assert restated, "no WithheldInputError was serialized; the drive is broken"
+        assert f"{expected} error(s)" in restated, restated
+
+    def test_the_restatement_overflows_its_cap_and_says_so(self, tmp_path):
+        """``MAX_RESTATED_ERRORS`` bounds a real list, visibly.
+
+        The nine errors of :data:`LEAF_FRAME` are NINE distinct ``type``/``loc``
+        pairs — the dedup collapses none of them — so the restatement really
+        does exceed the cap and ends with the overflow marker. Pinned because
+        the constant's docstring claimed the opposite until the F-913 review,
+        and a cap nobody has watched bind anything is a cap nobody can trust.
+        """
+        sinks = drive(tmp_path, data=LEAF_FRAME)
+        restated = sinks.restatement
+        assert restated, "no WithheldInputError was serialized; the drive is broken"
+        assert payload_log_sites.RESTATED_OVERFLOW in restated, restated
 
     def test_the_record_still_arrives_at_its_own_level_and_logger(self, tmp_path):
         sinks = drive(tmp_path)
@@ -635,6 +706,37 @@ class TestTheKeyIsTheStructureAndNotTheText:
         except Exception as exc:  # noqa: BLE001  PERMANENT(F-913 - the exception TYPE is the subject)
             return exc
         raise AssertionError("the frame parsed after all")
+
+    def test_a_wrapper_that_quotes_its_cause_is_restated_too(self):
+        """The chain is WALKED, and reading only ``exc_info[1]`` is not enough.
+
+        A wrapper commonly interpolates what it wrapped (``f"...: {e}"``), so
+        the payload rides out in the WRAPPER's own text while ``exc_info[1]``
+        is an ordinary ``RuntimeError`` that quotes nobody. A rule reading the
+        head alone answers "nothing to do" and every formatting sink then
+        renders the cause — which is exactly what ``restated_exc_info``'s
+        docstring promises it does not do.
+
+        Measured before this pin existed: reducing the walk to the head left
+        all 38 nodes in this file GREEN, so the promise was unguarded.
+        """
+        with contextlib.redirect_stderr(io.StringIO()):
+            logging_setup.configure_logging("proxy")
+        import mcp.client.streamable_http as sdk
+
+        quoting = self._validation_error(LEAF_MARK)
+        wrapped = f"re-raised while parsing: {quoting}"
+        try:
+            raise RuntimeError(wrapped) from quoting  # noqa: TRY301  PERMANENT(F-913 - a real __cause__ is only set by a real raise-from)
+        except RuntimeError as wrapper:
+            caught = wrapper
+        assert LEAF_MARK in str(caught), "the wrapper does not carry the payload"
+
+        record = self._record_from(sdk.__file__, caught)
+        restated = str(record.exc_info[1])
+        assert LEAF_MARK not in restated, restated
+        assert "RuntimeError" in restated, "the wrapper's own TYPE was lost"
+        assert "ValidationError" in restated, "the quoting cause was not restated"
 
     def test_a_reworded_sdk_message_is_still_covered(self):
         """Keyed on the SITE and the EXCEPTION's structure, never on wording —

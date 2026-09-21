@@ -159,9 +159,10 @@ leaks is:
 | any input value **shorter than 50 characters** | **the whole value**, untruncated |
 | a union mismatch | **one echo per arm**, each of the sub-value it tripped over |
 
-Measured on a 273-byte frame whose `id` was `{"tok": "F913_LEAF"}`:
-**9 errors, 9 echoes, 216 echoed characters**, and the short leaf rendered in
-full six times over. `JSONRPCMessage` is a 4-arm union, so one bad frame
+Measured on a 273-byte frame whose `id` was `{"tok": "F913_LEAF"}` — the
+shipped `LEAF_FRAME` fixture, named so this number has a subject:
+**9 errors, 9 echoes, 276 echoed characters** (3 whole-frame echoes of 52 plus
+6 short-leaf echoes of 20), and the short leaf rendered in full six times over. `JSONRPCMessage` is a 4-arm union, so one bad frame
 reports per arm.
 
 **Every byte count, in one place**, because the shape of this leak is easy to
@@ -170,7 +171,7 @@ restate wrongly and the stub already did it once:
 | Frame driven | Bytes in | Errors | Echoes | Chars echoed |
 |---|---|---|---|---|
 | cut `get_cookies` answer (`json_invalid`) | 314 | 1 | 1 | 52 |
-| valid JSON, union mismatch on a short `id` | 273 | 9 | 9 | 216 |
+| valid JSON, union mismatch on a short `id` (`LEAF_FRAME`) | 273 | 9 | 9 | 276 |
 | valid JSON, no arm recognises it | 173 | 4 | 4 | 208 |
 | filler payloads at 50 / 55 / 65 / 75 / 85 / 95 / 105 / 125 / 165 / 445 | — | 1 | 1 | **52 each** |
 
