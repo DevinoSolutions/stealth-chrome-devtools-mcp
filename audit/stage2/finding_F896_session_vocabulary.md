@@ -261,7 +261,14 @@ commit — nine and six were two ways of miscounting that set.
   `explicit` prefix, which both old and new values keep, so an existing named
   profile is still read as named. Pinned by leaving the legacy literals in the
   fixtures of `test_clone_storage_cap.py`, `test_clone_legacy_marker_classification.py`
-  and `test_profile_trim.py` exactly as they were.
+  and `test_profile_trim.py` exactly as they were — and by one WRITER kept with
+  them: `tests/test_browser_integration.py:619`'s
+  `_seed(..., source_kind="master-snapshot")`, which authors a marker as it
+  exists on disk today for every profile created before this release. It is the
+  one place the integration sweep deliberately did NOT rename (review N7), and
+  the reason is in the helper's own comment: renaming it would delete the
+  back-compatibility evidence and leave the suite testing only the markers this
+  release writes.
 
 ---
 
