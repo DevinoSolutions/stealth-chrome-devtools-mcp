@@ -187,19 +187,37 @@ from `default`:
 
 ```console
 stealthy spawn --session work --headed          # log in by hand in this window
-stealthy close <instance>                       # …then close it
 stealthy spawn --session work2 --from work      # a second session, already logged in
 ```
 
 It applies only when the session is CREATED. Passing it for a session that
 already exists is an error that names where that session actually came from —
-never a silent no-op, and never a re-seed over a login you typed by hand. The
-source must exist and, unless it is `default`, must not be open in a browser:
-copying a profile Chrome is writing to silently drops whatever it has locked,
-which is exactly where the logins are, so an open source is refused by name
-with the remedy rather than copied and hoped for. `default` is the exception
-because the product keeps a separate, closed, copyable form of it (the seed
-below).
+never a silent no-op, and never a re-seed over a login you typed by hand.
+
+**The source may be open**, as long as its browser is one this backend is
+driving — which it is if you spawned it (the example above leaves the `work`
+window up). Its cookies are then read out of the running browser and written
+into the new session, and the spawn says so:
+
+```
+seeded     : seeded from work at 2026-09-21 14:02
+cookies    : 14 handed over from the running source
+```
+
+**That hand-off carries cookies and nothing else.** Every kind — session,
+persistent, `HttpOnly`, `Secure`, `SameSite=None`, `Partitioned` — and it
+carries every site the source is logged into, not only the one you meant. It
+does NOT carry `localStorage`, `sessionStorage`, IndexedDB, Cache Storage,
+service workers or saved passwords, so a site that keeps its token in
+`localStorage` will not be logged in; for those, close the source first so the
+file copy can read them. If the hand-off fails the session is still created and
+still works — the answer then says `cookies : NOT carried (…)`.
+
+A source open in a browser this backend does NOT drive — another backend's, or a
+Chrome you started yourself — is refused by name, because there is no connection
+of ours to ask it for its cookies and a file copy of a live profile carries none
+at all. `default` is never refused, because the product keeps a separate,
+closed, copyable form of it (the seed below).
 
 ```
 C:\stealth-mcp-browser-sessions\

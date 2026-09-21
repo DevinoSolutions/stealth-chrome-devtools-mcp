@@ -96,6 +96,59 @@ a caller may SAY on every spawn, while nothing in the new one runs unless a
 caller wrote `seed_from`. All three are internal moves with no behaviour
 change.
 
+### Added — F-898: `--from` a session that is still OPEN
+
+F-897 refuses `--from work` while `work`'s browser is running, and it is right
+about the mechanism it had: measured on Chrome 153, a file copy of a running
+profile carries **zero** cookies — the SQLite jar is held open and skipped — and
+nothing can say afterwards what was lost. Since F-888 a named session's browser
+survives its backend, so "close it first" stopped being a remedy anyone takes.
+
+A source whose browser **this backend drives** is now seeded anyway: the file
+copy runs for everything it can still carry, and the COOKIES are handed over the
+two browsers' CDP connections (`Storage.getCookies` → `Storage.setCookies`)
+after the new browser launches.
+
+```console
+stealthy spawn --session work --headed          # log in by hand — and leave it open
+stealthy spawn --session work2 --from work      # already logged in
+```
+
+```
+instance   : 4f0c…
+role       : explicit
+profile    : C:\stealth-mcp-browser-sessions\sessions\work2
+seeded     : seeded from work at 2026-09-21 14:02
+cookies    : 14 handed over from the running source
+```
+
+**What it carries is cookies, and the whole jar.** Every kind measured — session,
+persistent, `HttpOnly`, `Secure`, `SameSite=None`, `Partitioned`/CHIPS — with
+every shared field round-tripping exactly, including a session cookie, which a
+file copy can never carry because it is never written to disk. It carries **no**
+`localStorage`, `sessionStorage`, IndexedDB, Cache Storage, service-worker
+registration or saved passwords, so a site that keeps its token in
+`localStorage` will NOT be logged in. And it carries every site the source
+session is logged into, not just the one you had in mind — which is what a copy
+of a closed session already does.
+
+A running source this backend does NOT drive (another backend's, or a Chrome
+nobody here launched) is still refused by name, and the refusal now says which
+half is missing: there is no CDP connection of ours to ask for its cookies.
+
+A hand-off that fails does not fail the spawn — the session exists and works
+without the source's cookies, and the answer says
+`seeded_via: "copy"` with a shape-only `cookie_handoff_error`.
+
+**No cookie name or value reaches a log line, a message, the returned record or
+Sentry** — counts, the CDP method and an exception type only. A cookie name
+identifies on its own and a value is the session itself.
+
+Internals: the new `embedded/cookie_handoff.py` is the one home for the jar
+transfer and for which profile directories this backend drives; the regenerable
+profile trim moved from `clone_storage` to `profile_copy`, beside the list it
+reads, which took `clone_storage` from 1000 to 993 lines.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in

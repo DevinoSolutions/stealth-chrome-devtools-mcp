@@ -577,6 +577,46 @@ class TestWhatTheSpawnReports:
 # ---------------------------------------------------------------------------
 
 
+class TestWhatTheCliPrints:
+    """``stealthy spawn``'s cookie line — counts only, and only when there was
+    a hand-off to report."""
+
+    @staticmethod
+    def _lines(selection: dict) -> list[str]:
+        from stealth_chrome_devtools_mcp import cli_render
+
+        return cli_render.spawn_lines(
+            {
+                "instance_id": "i1",
+                "spawn_diagnostics": {"profile_selection": selection},
+            }
+        )
+
+    def test_a_a_successful_hand_off_prints_the_count(self):
+        lines = self._lines(
+            {
+                "seeded_via": "cdp-cookies",
+                "cookies_carried": 7,
+                "profile_role": "explicit",
+            }
+        )
+        assert any("cookies    : 7 handed over" in line for line in lines)
+
+    def test_b_a_failure_says_the_session_still_works(self):
+        """The commonest reaction to a red word is to throw the session away
+        and make another — which here loses nothing and costs a Chrome."""
+        lines = self._lines(
+            {"seeded_via": "copy", "cookie_handoff_error": "RuntimeError"}
+        )
+        line = next(line for line in lines if line.startswith("cookies"))
+        assert "NOT carried (RuntimeError)" in line
+        assert "works" in line
+
+    def test_c_an_ordinary_spawn_prints_no_cookie_line(self):
+        lines = self._lines({"profile_role": "clone"})
+        assert not any(line.startswith("cookies") for line in lines)
+
+
 class TestWhichProfilesThisBackendDrives:
     def test_a_a_directory_we_drive_names_its_instance(self, tmp_path):
         driven = cookie_handoff.Driven([(tmp_path / "work", "i-1")])

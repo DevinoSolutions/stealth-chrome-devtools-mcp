@@ -361,6 +361,21 @@ without the sugar.
 > browser is spared (F-886). If you are diagnosing a wedged backend and want it
 > left exactly as it is, add `--no-start` — the command then exits 3 instead.
 
+**Once you have it back, you can branch off it without closing it** (F-898).
+A recovered session is a session this backend drives, so it is a legal `--from`
+source while its window stays open:
+
+```console
+stealthy spawn --session seller-central --headed        # recover it
+stealthy spawn --session seller-staging --from seller-central
+```
+
+The second call copies the profile for everything the copier can read and hands
+the COOKIES over CDP out of the running browser, which is the half a file copy
+of a live profile loses entirely. The first window is untouched. Cookies only —
+see "Start a new session from an existing one" below for what does not come
+across, and close the source first if you need `localStorage`.
+
 Two cases still need a hand.
 
 **The owner backend is still ALIVE (wedged, or just unreachable because every
@@ -450,22 +465,40 @@ CREATION only — for a session that already exists it is an error naming where
 that session actually came from, never a silent no-op and never a re-seed over
 a login somebody typed by hand.
 
-**The source must not be open.** Copying a profile Chrome is writing to
-silently drops whatever it has locked — the cookie jar above all — and nothing
-can say afterwards what was lost, so an open source is refused by name:
+**The source may be open, if this backend is driving it** (F-898) — which it is
+if `stealthy ls` lists it. A file copy of a live profile carries ZERO cookies
+(measured: the SQLite jar is held open and skipped, and nothing can say
+afterwards what was lost), so the COOKIES are handed over the two browsers' CDP
+connections instead, after the new one launches. The spawn reports it:
 
 ```
-seed_from='work' is open in a browser right now. …
-Close the 'work' session first (`stealthy close <instance>`), or seed from
-'default', which the product keeps a separate copyable form of.
+seeded     : seeded from work at 2026-09-21 14:02
+cookies    : 14 handed over from the running source
 ```
 
-`stealthy ls` names the instance to close. `--from default` is the one source
-that works while open, because the seed (`master-snapshot`) is that separate
-copyable form — which also means the copy can be as old as the last time
-`default` was closed; `profiles` prints `SEED CHANGED SINCE` when it is stale.
-Carrying a login out of a browser that is still RUNNING needs a CDP hand-off
-rather than a file copy, and that is F-898, not this.
+That hand-off carries **cookies only** — every kind, including the session
+cookies a file copy can never carry, and every site the source is logged into.
+It does NOT carry `localStorage`, `sessionStorage`, IndexedDB, Cache Storage,
+service workers or saved passwords. If a site keeps its token in `localStorage`,
+close the source first so the file copy can read it. A hand-off that fails does
+not fail the spawn — the session works minus the cookies, and the line reads
+`cookies : NOT carried (<type> from <CDP method>)`; the reason is shape only,
+because a cookie name identifies on its own.
+
+**A source open in a browser this backend does NOT drive is still refused by
+name** — another backend's, or a Chrome someone started by hand:
+
+```
+seed_from='work' is open in a browser this backend does not drive, so its
+cookies cannot be handed over: … Close the 'work' session first (`stealthy
+close <instance>`), or spawn it through this backend (`stealthy spawn --session
+work`) and seed from it while it runs, or seed from 'default', …
+```
+
+`stealthy ls` names the instance to close. `--from default` never refuses,
+because the seed (`master-snapshot`) is a separate closed copyable form — which
+also means the copy can be as old as the last time `default` was closed;
+`profiles` prints `SEED CHANGED SINCE` when it is stale.
 
 **One-time job if you have a session directory named `master` or
 `master-snapshot`.** Those two names are reserved (F-894): `spawn_browser` used
