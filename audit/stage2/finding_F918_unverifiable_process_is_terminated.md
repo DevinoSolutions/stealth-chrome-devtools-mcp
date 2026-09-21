@@ -208,6 +208,6 @@ Not fixed here: the two refusals share one return value (`False`), so telling
 them apart at the drop site means either a second verdict field or moving the
 `reaped.add` after the attempt, and the second changes what a partially
 successful pass records. Named rather than folded in, on F-916's own precedent.
-It is the same shape as F-924's "a live browser whose entry is gone can never be
+It is the same shape as F-928's "a live browser whose entry is gone can never be
 found again", reached from the other side.
 

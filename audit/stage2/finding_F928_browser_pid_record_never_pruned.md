@@ -1,4 +1,4 @@
-# F-924 — `browser_pids.json` has no age prune, and some entries are now permanent
+# F-928 — `browser_pids.json` has no age prune, and some entries are now permanent
 
 **Status:** open (filed by F-916's review; not fixed in that lane)
 **Found by:** the F-916 review, arbitrating a boundedness claim that turned out

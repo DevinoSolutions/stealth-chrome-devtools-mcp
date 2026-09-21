@@ -167,7 +167,7 @@ them is refused: for the missing-`create_time` shape it is impossible without a
 bare-pid liveness check, and `(pid, create_time)` is stamped on every entry
 precisely so a recycled pid cannot fool us; taking it would put a second
 recycled-pid rule in this lane. The record growth itself is
-`finding_F924_browser_pid_record_never_pruned.md`, not this finding.
+`finding_F928_browser_pid_record_never_pruned.md`, not this finding.
 
 An operator who wants any of them gone sooner has `kill-orphans --force`, which
 skips the whole classification by design (`process_cleanup.py:594`).
