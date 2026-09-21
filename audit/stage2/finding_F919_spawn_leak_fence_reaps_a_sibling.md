@@ -147,7 +147,7 @@ spawn onto that profile is seeded from `master-snapshot`, i.e. logged out.
   concluded that path could not leak. §6 refutes it from source: that kill is conditional
   and has three named refusals. Everything claimed about the delegated path here is read
   off `desktop_launch.py`; no delegated launch was driven for this finding, and the
-  successor that would close it is F-922.
+  successor that would close it is F-924.
 
 ---
 
@@ -444,22 +444,22 @@ for four reasons, and they are stronger than "the guess was bad":
   backend start's reap rather than persisting.
 * **A proper fix exists, is cheap, and is strictly better than F-860's.** `:466` already
   computes the `(pid, create_time)` pair; a successor can stamp `Attempt` from there and
-  reuse this fence instead of a window. Filed as **F-922**
-  (`audit/stage2/finding_F922_delegated_launch_leaks_an_unnameable_chrome.md`), not fixed
+  reuse this fence instead of a window. Filed as **F-924**
+  (`audit/stage2/finding_F924_delegated_launch_leaks_an_unnameable_chrome.md`), not fixed
   here.
 
 **And "nothing cheaper closes it" — which this paragraph said — was a fourth absolute of
 the author's, and it is withdrawn too.** It was true only of path 1. The pid IS known in
 path 2 (read at `:451`, before the gate that raises) and IS stamped in path 3, so an
 identity handed out of those two points closes them. What no stamp reaches is path 1, where
-nobody ever learned the pid; that one is closed by a guess or not at all. F-922 carries the
+nobody ever learned the pid; that one is closed by a guess or not at all. F-924 carries the
 design, including that a stamp at `:466` alone reaches path 3 only — path 2 needs it one
 branch earlier.
 
 How reachable the residual is, in this finding's own vocabulary: **not demonstrated, not
 excluded.** The common slow case is the opposite of path 1 — the pid file lands fast and it
 is DevTools that lags, which stamps at `:466` and is covered. That the delegated launcher
-can fail to leave a readable pid file at all is an F-810 reliability question and is F-922's,
+can fail to leave a readable pid file at all is an F-810 reliability question and is F-924's,
 not this finding's.
 
 **A wrapper-process platform would under-reap.** The fence assumes the pid

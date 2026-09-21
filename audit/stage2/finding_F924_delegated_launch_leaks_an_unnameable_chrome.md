@@ -1,4 +1,4 @@
-# F-922 — a delegated (F-810) headed launch can leave a live Chrome nothing can name
+# F-924 — a delegated (F-810) headed launch can leave a live Chrome nothing can name
 
 **Severity: moderate.** It strands a visible, untracked Chrome on the user's desktop until
 the next backend start. No data is lost and no browser of the operator's is killed — the
@@ -241,5 +241,5 @@ already faked in the suite, and nothing here needs Chrome:
   here.
 * **F-918 / the master-profile audit's D3** — `process_cleanup._kill_process_by_pid` still
   terminates a pid whose `.name()` could not be read. That is one layer below this fix and
-  is reached by every caller including the reap proposed here; it is not addressed by F-922.
+  is reached by every caller including the reap proposed here; it is not addressed by F-924.
 * **F-810** owns question (1) of §3, the launcher's own reliability, which no stamp closes.

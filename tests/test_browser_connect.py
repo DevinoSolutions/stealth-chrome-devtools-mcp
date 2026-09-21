@@ -350,7 +350,7 @@ async def test_the_launch_path_installs_the_patience_before_it_launches(
 
     assert calls == ["install", "launch"]
     # The DELEGATED launch leaves the attempt unstamped: its own cleanup is
-    # best-effort, so this fence reaches nothing there (F-919 §6, F-922).
+    # best-effort, so this fence reaches nothing there (F-919 §6, F-924).
     assert attempt.config is None
 
 

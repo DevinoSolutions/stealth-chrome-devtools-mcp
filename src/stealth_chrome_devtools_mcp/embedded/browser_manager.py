@@ -479,7 +479,7 @@ class BrowserManager:
         misses, and ours is the budget that decides (F-834 stage 2). *attempt* is
         stamped BEFORE the fallible await and never returned, because the failure
         it identifies the launched Chrome for is that await's (F-919); the
-        delegated branch leaves it unstamped; its own kill is best-effort (F-922)."""
+        delegated branch leaves it unstamped; its own kill is best-effort (F-924)."""
         browser_connect.install()
         if desktop_launch.should_delegate(options.headless):
             browser, _pid = await desktop_launch.launch_and_attach(

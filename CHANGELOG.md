@@ -75,7 +75,7 @@ this entry closes: a delegated launch takes seconds, so every sibling Chrome tha
 started in that span sat inside its window. Restoring the coverage would restore
 this defect on that path, so it is given up rather than reinstated. The residual
 is Windows-only, needs a launcher that started Chrome plus one of those three
-conditions, and ends at the next backend start. **F-922** carries the cheap fix:
+conditions, and ends at the next backend start. **F-924** carries the cheap fix:
 `desktop_launch` already computes the pair this fence wants.
 
 `audit/stage2/finding_F919_spawn_leak_fence_reaps_a_sibling.md` has the

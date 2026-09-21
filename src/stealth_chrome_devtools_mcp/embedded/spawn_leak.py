@@ -136,7 +136,7 @@ class Attempt:
     itself only BEST-EFFORT, with three named refusals that leave a live Chrome
     nothing here can name; an earlier draft of this line said it "kills its own
     Chrome on failure", which is not what that code does. F-919 §6 enumerates
-    the three, and F-922 is the successor that would let this fence reach two
+    the three, and F-924 is the successor that would let this fence reach two
     of them.
     """
 
