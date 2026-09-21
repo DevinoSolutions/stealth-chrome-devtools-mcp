@@ -14,6 +14,16 @@ its own ``stealth.<role>`` logger writing to ``<logdir>/<role>-<pid>.log`` —
 per-pid filenames sidestep Windows ``RotatingFileHandler`` rename contention
 between two backends briefly coexisting (plan_M3 §2.2, rejected alternative 3).
 
+Owning log-WRITING means owning what the DEPENDENCIES may write too, so this
+is also the one place third-party logger LEVELS are set:
+:func:`apply_payload_log_floor` (F-906) holds ``nodriver`` and ``websockets``
+at WARNING, because both interpolate a raw CDP message — cookie names and
+values included — into DEBUG/INFO text that one caller-side
+``logging.basicConfig(level=DEBUG)`` is enough to route to our stderr and to a
+Sentry breadcrumb. It belongs HERE and not at the seam that patches nodriver
+(``cdp_transport``, which owns what nodriver may DO with a reply): a level is
+log configuration, and log configuration has one home.
+
 ``singleton.py`` also needs this module (the boot-log redirect and the
 ``configure_logging("proxy")`` call), while :func:`resolve_log_dir` reuses
 ``singleton.STATE_DIR``. Importing ``singleton`` here at module top level
@@ -79,6 +89,88 @@ _BACKEND_LOG_RE = re.compile(r"^backend-(\d+)(?:-fault)?\.log")
 _GRACEFUL_SHUTDOWN_SECONDS = 2.0
 
 correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
+
+#: F-906. The logger families that interpolate a RAW CDP message into their own
+#: log text, and so carry whatever the page holds — cookie names and values
+#: included. Named by family ROOT, because both libraries build their loggers
+#: from ``__name__`` (measured: ``nodriver.core.connection.logger.name`` IS
+#: ``nodriver.core.connection``), so one explicit level on the root covers every
+#: module under it, present and future.
+#:
+#: What each one does, measured against nodriver 0.47.0 / websockets 16.0:
+#:
+#: * ``nodriver`` — ``core/connection.py``:445 DEBUG-logs the whole reply
+#:   (``"got answer for (message_id:%d) => %s"``, the parsed ``message`` dict),
+#:   :451 INFO-logs the whole EVENT message when a field will not parse, and
+#:   ``core/browser.py``:824/:869 DEBUG-log a cookie's name and value outright;
+#: * ``websockets`` — ``protocol.py``:609 DEBUG-logs the frame, and a frame
+#:   short enough is printed whole (truncation starts past ~75 characters), so
+#:   this is the same payload one layer down. Capping ``nodriver`` alone would
+#:   have left that door open.
+#:
+#: Deliberately NOT ``uc``: that is only the local alias this codebase imports
+#: ``nodriver`` under, and no logger is ever named by it — capping a name that
+#: does not exist would be a claim the evidence does not support.
+PAYLOAD_LOG_FAMILIES = ("nodriver", "websockets")
+
+#: The floor those families are held at. WARNING is not a new policy — it is
+#: the effective level every shipped configuration of this product already had
+#: (measured across backend, proxy, ``--debug`` and
+#: ``STEALTH_MCP_LOG_LEVEL=DEBUG``), which is exactly why setting it changes
+#: nothing an operator sees and only closes the one door that was open. It is
+#: also the level at which those libraries stop quoting payloads and start
+#: reporting faults: ``connection.py``:483's callback WARNING names the callback
+#: and the event CLASS, never the message.
+PAYLOAD_LOG_FLOOR = logging.WARNING
+
+
+def apply_payload_log_floor() -> None:
+    """Hold the payload-carrying library loggers at :data:`PAYLOAD_LOG_FLOOR`.
+
+    F-906. ``nodriver`` logs every raw CDP reply verbatim and ``websockets``
+    logs the frame under it, so a page's cookies are one enabled DEBUG record
+    away from our stderr — which for the backend is redirected into
+    ``backend-boot.log``, a durable file — and, for the one line that sits at
+    INFO, away from a Sentry breadcrumb on the next event.
+
+    Until this, the only thing stopping them was that those loggers carry no
+    level of their own and INHERIT root's. That is a real protection and it was
+    measured to hold for every configuration this product ships — but it is
+    root's to give away, and one ``logging.basicConfig(level=DEBUG)`` in a
+    caller that embeds this backend, a notebook or a test gives it away for the
+    whole process. MEASURED both ways round: all four payload lines reached a
+    root handler and ``connection.py``:451 reached Sentry, whether the
+    ``basicConfig`` came before or after our own setup.
+
+    So the level is set EXPLICITLY on the family root. ``getEffectiveLevel``
+    stops at the first ancestor carrying a non-``NOTSET`` level, and
+    ``basicConfig`` only ever sets ROOT's — so ours wins in either order, and
+    keeps winning. That is also why this is the whole fix and there is no
+    filter and no ``before_breadcrumb`` rule beside it: Sentry's
+    ``LoggingIntegration`` patches ``logging.Logger.callHandlers``, which
+    ``Logger.handle`` only reaches for a record ``isEnabledFor`` has already
+    admitted, so a level is upstream of every sink at once. A second mechanism
+    would be a second home for one decision (convention 4), and a filter keyed
+    on a library's message strings would be a pattern-match against text that
+    library is free to reword.
+
+    It never SILENCES: WARNING and above pass exactly as they did, because
+    those are nodriver's real diagnostics and losing them would be this fix
+    costing more than it saves. The residual is named rather than hidden — a
+    caller who writes ``logging.getLogger("nodriver").setLevel(DEBUG)`` still
+    gets DEBUG, because that is them asking for this library's payloads by
+    name, which is a different act from turning DEBUG on globally.
+
+    Called from :func:`configure_logging`, before anything that can fail: a
+    process whose log directory could not be created still has stderr and
+    Sentry, so it still needs the floor. It honours that caller's never-raises
+    contract BY CONSTRUCTION rather than with a handler — these two statements
+    are a dict lookup and an integer assignment on a stdlib logger, with no
+    I/O and nothing to fail — so there is no ``except`` here that could only
+    ever hide a bug of ours.
+    """
+    for family in PAYLOAD_LOG_FAMILIES:
+        logging.getLogger(family).setLevel(PAYLOAD_LOG_FLOOR)
 
 
 def backend_uvicorn_config() -> dict[str, object]:
@@ -233,7 +325,15 @@ def configure_logging(role: str) -> Path:
     Returns the log file path regardless of whether setup succeeded. Never
     raises — a logging-setup failure must not take down the backend/proxy
     (plan_M3 risk #7); on failure this degrades to a no-op.
+
+    It is also where the payload-carrying library loggers are held down
+    (:func:`apply_payload_log_floor`, F-906). That call is FIRST — ahead of the
+    idempotency guard and ahead of everything that can raise ``OSError`` —
+    because the floor is about what may leave the process, and a process that
+    failed to open its log file still has stderr and still has Sentry.
     """
+    apply_payload_log_floor()
+
     log_dir = resolve_log_dir()
     log_path = log_dir / f"{role}-{os.getpid()}.log"
     logger = logging.getLogger(f"stealth.{role}")

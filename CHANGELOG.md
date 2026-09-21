@@ -96,6 +96,45 @@ a caller may SAY on every spawn, while nothing in the new one runs unless a
 caller wrote `seed_from`. All three are internal moves with no behaviour
 change.
 
+### Fixed — F-906: a caller's `basicConfig(level=DEBUG)` could route cookies into our logs
+
+`nodriver` writes the **whole raw CDP reply** into its own log text
+(`connection.py`:445, DEBUG) and the **whole event message** when a field will
+not parse (`connection.py`:451, INFO); `browser.py`:824/:869 log a cookie's name
+and value outright, and `websockets` logs the frame underneath (a short one is
+printed whole). Cookie names and values ride in all of them.
+
+None of that could reach a handler in any configuration this product ships —
+F-902 measured that, and it is re-measured here across backend, proxy,
+`--debug` and `STEALTH_MCP_LOG_LEVEL=DEBUG`. But the only thing stopping it was
+the log LEVEL, and those loggers carry none of their own, so the level was
+**root's to give away**. One `logging.basicConfig(level=DEBUG)` — a test, a
+notebook, a caller embedding this backend — gave it away for the whole process:
+**measured, both orders**, all four payload lines then reached a root handler
+(and so stderr, which for the backend is redirected into `backend-boot.log`, a
+durable file), and the INFO one additionally reached Sentry as a breadcrumb,
+because `LoggingIntegration`'s breadcrumb handler sits at INFO.
+
+`logging_setup.apply_payload_log_floor()` now holds `nodriver` and `websockets`
+at WARNING with an **explicit** level on the family root, set as the first
+statement of `configure_logging`. `basicConfig` only ever sets ROOT's level and
+`getEffectiveLevel` stops at the first ancestor that has one, so ours wins
+whichever way round the two calls happen.
+
+Nothing an operator sees changes: **WARNING is the effective level every
+shipped configuration already had**, which is the point — it closes the one door
+that was open and no other. nodriver's real diagnostics are untouched
+(`connection.py`:483 names the callback and the event *class*, never the
+payload), and our own `stealth.*` levels, including `STEALTH_MCP_LOG_LEVEL`, are
+not touched at all.
+
+A level rather than a filter or a Sentry `before_breadcrumb`: Sentry patches
+`logging.Logger.callHandlers`, which is only reached for a record the level
+already admitted, so one mechanism closes all four sinks at once — and
+`connection.py`:451 pre-interpolates its payload with `%`, leaving
+`record.args` empty, so a filter could only pattern-match text the library is
+free to reword.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in
