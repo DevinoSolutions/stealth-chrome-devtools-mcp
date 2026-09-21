@@ -43,6 +43,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     clone_storage,
     cookie_handoff,
     display_context,
+    element_box,
     profile_seed,
     session_hygiene,
 )
@@ -216,6 +217,16 @@ async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
 # class it patches, ours and nodriver's own alike; ``cdp_transport``'s docstring
 # argues why that class is the only possible home for it.
 cdp_transport.install()
+
+# THE one call site for F-912's element-box protection, here for the same three
+# reasons and not as a fourth half of the line above: nodriver's
+# ``Element.get_position`` renders the whole element — every attribute VALUE and
+# all of its text — into the bare ``Exception`` it raises when the element lays
+# out no box, and that text reaches the client, the debug ring and the backend
+# log through whichever handler relays it. ``element_box``'s docstring argues
+# why the raise is the only home a TYPE-keyed rule can be applied at, and why
+# this is a separate seam from the connection's.
+element_box.install()
 
 browser_manager = BrowserManager()
 network_interceptor = NetworkInterceptor()
