@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Fixed — F-901: a profile request can no longer name the directory profiles live in
+
+`user_data_dir="."` opened the **clone root** — the directory that holds every
+session — and `user_data_dir=".."` opened the **browser-session root**, which
+holds that plus the shared profile and its seed. `"./"`, `".\"` and `"..."`
+reached the clone root too (Windows folds those components away), and an
+absolute path to either root was honoured as though it were a profile. Chrome
+was then handed the storage as its own user-data-dir and wrote its profile
+files in among every session's.
+
+`anchor` had an `inside(...)` check, but it decides WHICH root to anchor under
+— it was never a guard on the answer, and `Path("..").name` is `""`, so no
+refusal could see one of these either. A relative request now lands on the
+normalised path and must be strictly INSIDE the clone root; the clone root and
+the browser-session root are refused through either spelling; and both refusals
+name what to pass instead.
+
+Unchanged: every ordinary request (`acme`, `sessions/acme`, `default`, any
+other absolute path) lands exactly where it did, and an absolute path is still
+returned byte-for-byte. `sub/../acme` is accepted and canonicalised to
+`sessions/acme` — the directory it already meant — rather than refused.
+`session=` refused all of these before and still does: a session is a name.
+
+**A session directory that is a symlink or a junction to storage elsewhere
+still opens**, through either spelling. The walk test reads the path the caller
+composed and never where it resolves to, precisely so that configuration keeps
+working; the two roots are still compared by resolving, which is what catches a
+link pointing AT one. And a refusal that reached a directory through a link now
+names the directory it really opens, instead of naming a path inside the clone
+root while explaining that it is the clone root.
+
 ### Changed — F-896: sessions have a name, and it is never "master"
 
 `spawn_browser` gains **`session`**, the one documented way to ask for a
@@ -20,7 +51,7 @@ Whitespace around a NAME is not part of it through either spelling, while a
 PATH keeps its own characters. A non-empty value that is empty once stripped
 (`"   "`, `"\t"`) now **raises** through either spelling instead of being
 honoured as a profile request: on Windows `user_data_dir="   "` resolved to the
-session root itself — the directory that holds every session — so it was never
+clone root itself — the directory that holds every session — so it was never
 a profile anyone meant. An **empty string is unchanged and still means "not
 given"** through either spelling, so a client that sends `""` for an optional
 argument gets the ordinary unnamed spawn exactly as it does today.
@@ -112,6 +143,83 @@ The removal now happens in Phase 1, under the same lock and with no `await` betw
 it and the pop, so the window is closed rather than narrowed. The cancellation still
 propagates. `close_instance` keeps exactly one removal site and
 `browser_manager.py` stays at its 1485-LOC cap.
+
+### Fixed — F-900: the proxy bridge's inherited read timeout silently dropped its event stream
+
+The stdio proxy's bridge opened `streamablehttp_client(url)` — the mcp SDK's
+deprecated client, with no arguments — so it inherited
+`Timeout(connect=30, read=300, ...)`. A `read` deadline is a deadline on being
+IDLE: the standing GET event stream carries nothing while a session is quiet and
+the backend sends no SSE keepalive, so the stream timed out, was retried the
+SDK's two times, and was then abandoned for good at DEBUG after ~601 s of quiet.
+That is exactly the discriminator F-862's session sweep uses to decide a client
+has gone, whose docstring promises a live proxy idle for hours is never touched —
+so after ~15 min of continuous idleness a healthy session was reaped. The next
+tool call is answered `Session terminated`, and it does not recover: the SDK
+answers a 404 by pushing that JSON-RPC error into the read stream and returning
+without raising, without closing the stream and without clearing the dead
+session id, so the bridge never ends, nothing heals or re-bridges, and every
+later call in that Claude Code session answers the same error until the client
+is restarted.
+
+The bridge now uses `streamable_http_client` (no more `DeprecationWarning` from
+our own call sites, pinned by AST) through `backend_client.http_client`, the one
+transport seam, with `BRIDGE_READ_TIMEOUT = None`. What bounds a bridge is left
+where it already lives: the F-820 watchdog, `proxy_selfheal`, and each tool
+call's own CDP budget. Measured against a real loopback socket: a bounded read
+opens the stream twice and then loses it; the new policy holds one.
+
+### Fixed — F-902: reading a cookie no longer kills the tab (CRITICAL)
+
+On **Chrome 153**, `get_cookies` on a page holding a single cookie never
+returned AND left that tab's CDP connection dead: every later call hung to its
+own deadline and reported *"the browser may have crashed or the connection
+dropped"* about a browser that was fine. `get_instance_state` and
+`clear_cookies(url=…)` did the same, because both read the cookie jar — the
+first is the widest, since it is the tool you call to find out whether anything
+is wrong, and on any logged-in page it degraded and then killed the tab it was
+asked about.
+
+Chrome 153 stopped sending `Network.Cookie.sameParty` (the removed First-Party
+Sets field), and it is the ONLY field it stopped sending — measured off a raw
+websocket. nodriver 0.47's generated `Cookie.from_json` reads it
+unconditionally, and `Connection._listener` guards its EVENT path but not its
+RESULT path, so the `KeyError` ended the listener: the one task that resolves
+every future on that connection. This is F-883's failure shape reached by a
+parse error rather than a cancellation, so `cdp_transport`'s shield did nothing
+for it.
+
+`cdp_transport`'s sentence widens from "awaiting a CDP reply must never be able
+to cancel it" to **"DELIVERING a CDP reply must not be able to kill the
+listener"**, and gains two halves beside the existing shield:
+`Transaction.__call__` now completes the
+one unreadable transaction with an error instead of propagating into the
+listener — so that command fails, every other pending call still resolves, and
+the connection lives — and `Cookie.from_json` supplies retired fields from a
+NAMED table carrying its measurement. The first is the general rule (nodriver
+0.47 has **1199** unconditional required field reads across its generated
+classes; cookies are simply the one Chrome retired first); the second is what
+makes `get_cookies` actually work rather than merely fail honestly. Both are
+deleted by the nodriver bump that fixes either, and the docstring says which.
+
+**Cookie names and values no longer reach the error path.** nodriver's own
+re-raise interpolates the whole reply into its message, so the exception that
+killed the listener carried every cookie name and value on the page, and it
+escaped as an unretrieved task exception — the asyncio handler, the durable log
+and Sentry at once. The replacement reports shape only: the CDP method, the
+exception type, the reply's field count, and the missing protocol field when
+that is provably all the failure named. Pinned, hermetically and against a real
+browser.
+
+Two named limits. `Cookie.to_json` still writes the field, so a cookie read on
+Chrome 153 reports `sameParty: false` — a value Chrome never sent. It is
+synthesised, `False` is what it meant for every cookie outside a First-Party
+Set, and the feature no longer exists. And "delivering" is the exact scope: two
+raises upstream of any `Transaction` — `json.loads` and the `mapper.pop` for an
+unknown id — still end the listener, are unreachable from this seam (nodriver's
+`Connection` metaclass refuses every class-level assignment) and are unreachable
+from a real Chrome. Both are named in the module docstring and the finding
+rather than covered by a wider claim.
 
 ## 2.1.11
 
