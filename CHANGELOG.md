@@ -578,6 +578,59 @@ out of nothing.
 Known gaps and the one defect these pins caught in the fix itself are in
 `audit/stage2/finding_F910_cookie_lost_on_close.md` §5.1 and §7.
 
+### Fixed — F-921: `kill-orphans --force` could end a logged-in browser and said nothing
+
+`--force` overrides two guards, not one. The documented one is the live-backend
+refusal; the undocumented one is F-888's persistent-profile spare, which is what
+keeps a human's logged-in Chrome alive through every other reap in the tree. So
+`--force` was the one verb left that could end a browser holding a profile with
+logins in it — and it said so **only in `cli.py`'s source docstring**. The
+`--help` text read "override the live-backend guard and reap anyway": true, and
+not the harm. There was no summary, no count and no dry run.
+
+Measured on the developer machine the day this was written, through the
+product's own readers and without running the verb: **six browsers recorded,
+three of them on persistent profiles resolving to two directories — `master`
+(the shared logged-in session) and `nvidia-nim-signup` — both open in a live
+Chrome.** `--force` would have ended both, and neither name appeared anywhere in
+the command's output or help.
+
+Now the verb says what it is about to do, before it does it:
+
+```
+$ stealthy kill-orphans --force
+profiles    : 2 persistent profile(s) tracked, 2 open now (master, nvidia-nim-signup)
+              each keeps logins that must be re-entered BY HAND; --force ENDS these browsers
+orphan recovery triggered: reaped any browsers left over from a dead backend.
+```
+
+and without `--force` the same line ends "only --force ends them", because
+F-888 spares them — a pre-flight that overstates is one nobody reads twice.
+`--help` now names both overrides and the cost in the operator's vocabulary, and
+there is a new **`--dry-run`** that prints the set and reaps nothing
+(`--force --dry-run` previews a forced reap).
+
+**A printed line, deliberately not a prompt.** This CLI is driven by agents as
+well as humans, and a blocking `input()` on a non-tty hangs them — a `y/N`
+confirmation would trade a loud destruction for a silent stall. `--force` is
+already the explicit opt-in, the same argument `backend_eviction` makes for its
+own ungated act; what was missing was never the consent but the disclosure.
+
+Both readers are the reap's own, so the warning cannot drift from what the reap
+does: persistent-vs-clone is `browser_pid_registry.on_persistent_profile`, the
+very predicate `--force` skips, and whether a profile is OPEN is
+`profile_lock.profile_hold` through `clone_storage`'s established adapter —
+never a presence test (F-871). One record read, no new probe pass, counted by
+DIRECTORY because the reap is directory-matched too. No message names a path:
+counts and session names only.
+
+`cli.py` 952 → 999 LOC against the 1000-LOC default; no cap padded, no golden
+moved (`dump_tool_surface.py --check` reports the tool surface identical).
+Nine hermetic pins in `tests/test_cli.py::TestKillOrphansForceWarning`, eight of
+which fail on the pre-fix source. Full reasoning, the measurements and the
+residuals — including why the count is a floor and not an exact death toll — are
+in `audit/stage2/finding_F921_kill_orphans_force_warns_nobody.md`.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in
