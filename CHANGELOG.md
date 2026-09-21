@@ -2,6 +2,102 @@
 
 ## Unreleased
 
+### Added — F-897: a new session can start from an existing one
+
+`spawn_browser` gains **`seed_from`**, and the CLI **`stealthy spawn --session
+NAME --from SOURCE`**: when `session` names a session that does not exist yet,
+it is created as a copy of `seed_from` instead of a copy of `default`. Leave it
+unset and nothing changes — unset means `default`, which is what every session
+has always been seeded from, and the two are ONE code path rather than two that
+agree today.
+
+```console
+stealthy spawn --session work --headed        # log in by hand
+stealthy close <instance>
+stealthy spawn --session work2 --from work    # already logged in
+```
+
+`seed_from` takes a session NAME through the same reader and the same gate as
+`session` (`profile_seed.require_name` → `require_allowed`), so a path, a
+reserved word (`master`, `master-snapshot`) and a spelling the filesystem folds
+onto one of them (`default.`) are all refused there and not by a second
+resolver. The refusal says `seed_from`, because a caller told about `session`
+goes and edits the wrong argument.
+
+It follows F-896's rules for a name-shaped argument exactly, because it now
+shares the code that makes them: **`seed_from=""` means "not given"** and seeds
+from `default` like an unset `--from`, while a NON-empty value that is empty
+once stripped (`"   "`, `"\t"`) **raises** — with the same sentence `session`
+and `user_data_dir` raise, differing only in the field name it opens with. A
+drive hidden behind a space (`" C:profile"`) is refused too.
+
+**It applies at CREATION and nowhere else.** For a `session` that already
+exists it RAISES, naming where that session was actually seeded from. The two
+alternatives were rejected deliberately: a silent no-op tells a caller their
+session came from `work` when it did not, and a re-seed overwrites a login
+somebody typed by hand.
+
+**It also raises when the target is not a session at all** — a `user_data_dir`
+naming a directory outside the session root is opened exactly as it is, so
+there is nothing for `seed_from` to apply to and it would have been silently
+ignored. Reachable only through the deprecated path spellings
+(`--arg user_data_dir=<path>`, `stealthy spawn --profile`), and refused there
+rather than dropped.
+
+**Every one of these refusals reaches you as a refusal**, not as
+`Failed to spawn browser: …`. A source that is open, a source that does not
+exist and a source naming a reserved word used to be raised from inside the
+spawn's own error handler and came back labelled as a spawn that had failed —
+about a spawn that never started.
+
+**A source that is open in a browser is refused BY NAME, and nothing is created
+on disk.** This is the safety argument the feature rests on: a profile copy
+answers a file Chrome holds by skipping it with a warning, so copying a live
+profile yields a session that looks complete and is missing exactly the logins
+that were asked for, with no way to enumerate the gap. The message names the
+session and the remedy. `default` is the one exception, and for a mechanical
+reason rather than a privilege of the word: the product maintains a separate,
+closed, copyable form of it (the seed), so seeding from `default` works whether
+or not it is open — at the cost that the copy can be as old as the last time
+`default` was closed, which `seed_changed_since` reports. Carrying a login out
+of a RUNNING source needs a CDP hand-off rather than a file copy; that is
+F-898.
+
+**Per-session seeds are deliberately not built.** Each would cost ~0.47 GB plus
+its own refresh trigger, staleness witness and in-use rule — a second copy of
+the lifecycle F-892/F-893 spent two findings getting right for one seed, bought
+to avoid a refusal whose remedy is closing a window.
+
+**Provenance.** The new session's marker records the source's NAME, so
+`spawn_diagnostics.profile_selection.seeded_from` is now any session's name
+rather than only `default` — and still a word you can pass straight back as
+`session=`. `stealthy spawn` prints the same `seeded from <name> at <when>`
+sentence `stealthy profiles` does; both phrase it through
+`profile_seed.seed_sentence`, so they cannot drift.
+
+That sentence also stops reporting an **unreadable** source as an unchanged
+one. `seed_changed_since` is `None` whenever no login witness can be read in
+the recorded source — which a deleted or renamed source guarantees — and until
+now that rendered byte-identically to "read it, nothing has moved". It reads
+`(source unreadable)` instead: lowercase and parenthetical, because it is a
+caveat about what could be read and not the alert `SEED CHANGED SINCE` is.
+
+**Three files were cut to pay for it, because caps ratchet down only.**
+`embedded/profile_copy.py` is the new home for copying a Chrome profile
+directory — what such a copy leaves behind and what it does about a locked file
+— which took `clone_storage.py` from its grandfathered 1054 to under the
+1000-LOC default, so its `GRANDFATHER` row is deleted rather than ratcheted.
+`cli_render.py` is the new home for the `ls`, `spawn` and `tools` renderings,
+which took `cli_call.py` from exactly 1000 to 911. `embedded/profile_source.py`
+is the new home for `seed_from` itself — which session a new one is copied
+from, and whether there is a new session for that copy to apply to — which took
+`profile_seed.py` from 1112 to 917: that module answers what a seed IS and what
+a caller may SAY on every spawn, while nothing in the new one runs unless a
+caller wrote `seed_from`. All three are internal moves with no behaviour
+change.
+
+## 2.1.12
+
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in
 
 `user_data_dir="."` opened the **clone root** — the directory that holds every
@@ -220,100 +316,6 @@ unknown id — still end the listener, are unreachable from this seam (nodriver'
 `Connection` metaclass refuses every class-level assignment) and are unreachable
 from a real Chrome. Both are named in the module docstring and the finding
 rather than covered by a wider claim.
-
-### Added — F-897: a new session can start from an existing one
-
-`spawn_browser` gains **`seed_from`**, and the CLI **`stealthy spawn --session
-NAME --from SOURCE`**: when `session` names a session that does not exist yet,
-it is created as a copy of `seed_from` instead of a copy of `default`. Leave it
-unset and nothing changes — unset means `default`, which is what every session
-has always been seeded from, and the two are ONE code path rather than two that
-agree today.
-
-```console
-stealthy spawn --session work --headed        # log in by hand
-stealthy close <instance>
-stealthy spawn --session work2 --from work    # already logged in
-```
-
-`seed_from` takes a session NAME through the same reader and the same gate as
-`session` (`profile_seed.require_name` → `require_allowed`), so a path, a
-reserved word (`master`, `master-snapshot`) and a spelling the filesystem folds
-onto one of them (`default.`) are all refused there and not by a second
-resolver. The refusal says `seed_from`, because a caller told about `session`
-goes and edits the wrong argument.
-
-It follows F-896's rules for a name-shaped argument exactly, because it now
-shares the code that makes them: **`seed_from=""` means "not given"** and seeds
-from `default` like an unset `--from`, while a NON-empty value that is empty
-once stripped (`"   "`, `"\t"`) **raises** — with the same sentence `session`
-and `user_data_dir` raise, differing only in the field name it opens with. A
-drive hidden behind a space (`" C:profile"`) is refused too.
-
-**It applies at CREATION and nowhere else.** For a `session` that already
-exists it RAISES, naming where that session was actually seeded from. The two
-alternatives were rejected deliberately: a silent no-op tells a caller their
-session came from `work` when it did not, and a re-seed overwrites a login
-somebody typed by hand.
-
-**It also raises when the target is not a session at all** — a `user_data_dir`
-naming a directory outside the session root is opened exactly as it is, so
-there is nothing for `seed_from` to apply to and it would have been silently
-ignored. Reachable only through the deprecated path spellings
-(`--arg user_data_dir=<path>`, `stealthy spawn --profile`), and refused there
-rather than dropped.
-
-**Every one of these refusals reaches you as a refusal**, not as
-`Failed to spawn browser: …`. A source that is open, a source that does not
-exist and a source naming a reserved word used to be raised from inside the
-spawn's own error handler and came back labelled as a spawn that had failed —
-about a spawn that never started.
-
-**A source that is open in a browser is refused BY NAME, and nothing is created
-on disk.** This is the safety argument the feature rests on: a profile copy
-answers a file Chrome holds by skipping it with a warning, so copying a live
-profile yields a session that looks complete and is missing exactly the logins
-that were asked for, with no way to enumerate the gap. The message names the
-session and the remedy. `default` is the one exception, and for a mechanical
-reason rather than a privilege of the word: the product maintains a separate,
-closed, copyable form of it (the seed), so seeding from `default` works whether
-or not it is open — at the cost that the copy can be as old as the last time
-`default` was closed, which `seed_changed_since` reports. Carrying a login out
-of a RUNNING source needs a CDP hand-off rather than a file copy; that is
-F-898.
-
-**Per-session seeds are deliberately not built.** Each would cost ~0.47 GB plus
-its own refresh trigger, staleness witness and in-use rule — a second copy of
-the lifecycle F-892/F-893 spent two findings getting right for one seed, bought
-to avoid a refusal whose remedy is closing a window.
-
-**Provenance.** The new session's marker records the source's NAME, so
-`spawn_diagnostics.profile_selection.seeded_from` is now any session's name
-rather than only `default` — and still a word you can pass straight back as
-`session=`. `stealthy spawn` prints the same `seeded from <name> at <when>`
-sentence `stealthy profiles` does; both phrase it through
-`profile_seed.seed_sentence`, so they cannot drift.
-
-That sentence also stops reporting an **unreadable** source as an unchanged
-one. `seed_changed_since` is `None` whenever no login witness can be read in
-the recorded source — which a deleted or renamed source guarantees — and until
-now that rendered byte-identically to "read it, nothing has moved". It reads
-`(source unreadable)` instead: lowercase and parenthetical, because it is a
-caveat about what could be read and not the alert `SEED CHANGED SINCE` is.
-
-**Three files were cut to pay for it, because caps ratchet down only.**
-`embedded/profile_copy.py` is the new home for copying a Chrome profile
-directory — what such a copy leaves behind and what it does about a locked file
-— which took `clone_storage.py` from its grandfathered 1054 to under the
-1000-LOC default, so its `GRANDFATHER` row is deleted rather than ratcheted.
-`cli_render.py` is the new home for the `ls`, `spawn` and `tools` renderings,
-which took `cli_call.py` from exactly 1000 to 911. `embedded/profile_source.py`
-is the new home for `seed_from` itself — which session a new one is copied
-from, and whether there is a new session for that copy to apply to — which took
-`profile_seed.py` from 1112 to 917: that module answers what a seed IS and what
-a caller may SAY on every spawn, while nothing in the new one runs unless a
-caller wrote `seed_from`. All three are internal moves with no behaviour
-change.
 
 ## 2.1.11
 
