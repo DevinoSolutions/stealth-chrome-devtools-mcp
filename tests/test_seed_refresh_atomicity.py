@@ -201,10 +201,25 @@ class TestADeathMidRefreshLeavesTheSeedUsable:
 #: above, where the interruption is an exception and cleanup still happens.
 _SUICIDE_CHILD = """
 import os, sys
+from pathlib import Path
 from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_copy
 
+# This child runs WITHOUT conftest, so `tests/operator_fence.py` is not
+# installed and nothing else would stop it writing into the operator's real
+# browser-session root if the env below failed to apply. It fences itself:
+# every directory it is about to touch must resolve under the tmp root the
+# parent passed, and it refuses to run at all otherwise. `staging.mkdir`
+# happens before the copy is patched out, so "it would have written nothing"
+# is not true and this guard is not decorative.
+allowed = Path(os.environ["F925_TMP_ROOT"]).resolve()
+for resolved in (clone_storage.master_profile_dir(),
+                 clone_storage.master_snapshot_dir(),
+                 clone_storage.clone_root_dir()):
+    if allowed not in resolved.resolve().parents:
+        sys.exit(f"refusing to run outside {allowed}: {resolved}")
+
 def die(source, target):
-    open(os.environ["F925_TOMBSTONE"], "wb").write(b"reached")
+    Path(os.environ["F925_TOMBSTONE"]).write_bytes(b"reached")
     os._exit(9)
 
 profile_copy.copy_delta = die
@@ -227,6 +242,7 @@ class TestARealProcessDeath:
             "BROWSER_MASTER_SNAPSHOT_DIR": str(seed_layout["snapshot"]),
             "BROWSER_PROFILE_CLONE_ROOT": str(seed_layout["sessions"]),
             "F925_TOMBSTONE": str(tombstone),
+            "F925_TMP_ROOT": str(seed_layout["root"]),
         }
         done = subprocess.run(
             [sys.executable, "-c", _SUICIDE_CHILD],
