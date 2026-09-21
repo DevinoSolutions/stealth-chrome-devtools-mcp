@@ -79,6 +79,117 @@ mock, and they run on every push. Use `release_gate_harness._isolated_env` +
 with no env override, so redirecting the child's `HOME`/`USERPROFILE` *before* it starts
 is the only way a test can touch a backend record without touching yours.
 
+### Test isolation: the three roots, and what fences each (F-903)
+
+A test run can reach three directories that are not its own. Know which one you
+are near before you write a fixture.
+
+| Root | What lives there | Fenced by |
+|---|---|---|
+| clone / large-response output | screenshots, clone artifacts | `STEALTH_MCP_CLONE_OUTPUT_DIR`, set in `tests/conftest.py` at import |
+| **browser-session root** | the `default`/`master` profile **a human is logged into**, and every named session copied from it | `tests/operator_fence.py` — env **forced**, plus a read+write tripwire |
+| **backend state dir** (`~/.stealth-mcp`) | `server.json`, the lock, heartbeats, `browser_pids.json`, logs — **and the live backends they name** | `tests/operator_fence.py` — ten rebound globals, plus a write tripwire and a kill guard |
+
+The last two are one module because they share one tripwire. **You get all of it
+for free — do not re-implement any of it**:
+
+1. **The state-dir redirect.** Ten module globals across five modules are
+   re-pointed at a per-process tmp root. Ten because `singleton`,
+   `process_cleanup` and `response_handler` each FROM-import the path — a
+   `setattr` on `backend_registry.STATE_DIR` alone reaches *none* of them — and
+   because pydantic copied its value into `Settings.model_config["env_file"]` at
+   class creation. If you add a global derived from the state dir, add it to
+   `operator_fence.STATE_DIR_BINDINGS`; `tests/test_operator_fence.py` measures
+   the package and will fail until you do.
+2. **The session root is FORCED, not `setdefault`-ed** — along with the three
+   derived names (`BROWSER_MASTER_USER_DATA_DIR`, `BROWSER_PROFILE_CLONE_ROOT`,
+   `BROWSER_MASTER_SNAPSHOT_DIR`), which are cleared so they derive from it.
+   `setdefault` could not tell the release gate redirecting the suite from the
+   operator's own root arriving in an inherited environment; on Windows the
+   product default is the hardcoded `C:\stealth-mcp-browser-sessions`, and test
+   directories (`e2e-warmup`, `ci-warmup`, `ci-cycle-*`) are still sitting in
+   the real one beside 87 real sessions.
+3. **The tripwire.** A write under the real state dir, or a **read or write**
+   under the real session root, raises a **`BaseException`**
+   (`operator_fence.RealStateDirWrite` / `RealSessionRootAccess`) — the product
+   is fail-open by design (`backend_registry` is a never-raise cache,
+   `proxy_selfheal` never raises), so an `Exception` would be swallowed at the
+   first handler and your node would go green over a real write. If you see one,
+   a path escaped a redirect; **fix the path, never the guard.**
+   It wraps **every door the product goes through**, which is not the same as
+   every filesystem primitive and is not advertised as one: `shutil.copy2`'s
+   Win32 fast path, `Path.glob`/`rglob` (their `scandir` is bound inside `glob`
+   at import), `os.chmod`/`link`/`symlink`, `sqlite3`, any subprocess and any fd
+   opened before the fence installed all reach a designated root without
+   raising. The **redirect** is what covers those; the tripwire is the backstop
+   for what the redirect misses.
+4. **A kill guard.** `psutil.Process.terminate`/`kill`/`send_signal` and
+   `os.kill` refuse a pid the operator's real `server.json` names — the
+   primitives, so it sees the number the OS is about to act on rather than an
+   argument some caller happened to be passed.
+
+   A collection-time fence hit reads as `Interrupted: 1 error during collection`
+   with **0 tests run and exit code 2**, not as a failing node. If a selection
+   that used to run reports no tests at all, read the error above the summary
+   before assuming your `-k` is wrong.
+
+Two asymmetries, both deliberate. **Reads of the real state dir are allowed**
+(`release_gate_harness._reserved_ports()` must read the real `server.json` so an
+isolated backend never binds a live backend's port) while **reads of the real
+session root are not** (nothing in the harness reads a profile, and copying one
+is how a test would take the operator's logged-in cookies into a clone). And
+`HOME` is deliberately **not** redirected in the pytest process — it would break
+`_reserved_ports()` and would not fence the session root on Windows anyway.
+Child processes still redirect `HOME`/`USERPROFILE`; that is the paragraph
+above, a different mechanism for a different process.
+
+**Keep writing per-file `isolated_state` fixtures.** The fence makes the
+operator's directories unreachable; it does not give each node a clean record.
+Two nodes in one file that both write `server.json` still need `tmp_path`
+between them. The two answer different questions and the suite needs both.
+
+**Never move a module in `sys.modules` by hand — use `tests/module_cache.py`.**
+A module's identity lives in TWO places: the `sys.modules` mapping and the
+attribute its parent package carries (`import a.b` writes both). Move one half
+and the other is left naming the wrong object, which is **not local to your
+file**: pytest resolves a dotted `monkeypatch.setattr("a.b.c.d", …)` target by
+`__import__` plus a `getattr` walk, so the next file in the lane that patches
+through that attribute fails — green in every single-file run, red only under
+the full alphabetical order. Both directions have now been measured here: a
+popped PARENT left `tests/test_python_exec_timeout.py` with `module
+'stealth_chrome_devtools_mcp' has no attribute 'embedded'`, and a popped CHILD
+restored into the mapping alone orphaned
+`embedded.file_based_element_cloner`. `module_cache.bind` / `absent` /
+`pristine_package` are the one home for the rule (move the pair, never one
+half); `tests/test_package_entrypoints.py::TestTheImportTreeSurvivesTheseNodes`
+pins it for this file and everything sorted before it.
+
+**No module body in `src/stealth_chrome_devtools_mcp/` may CALL anything.**
+Importing a module must only define things, so that a `pkgutil.walk_packages`
+sweep, a doc generator, an import linter or an IDE can walk the package without
+running the product. This is a rule because it was once broken (F-904):
+`__main__.py` called `main()` at module level, so importing it started a stdio
+proxy and cold-started a backend — which is how F-903 reproduced itself while
+being investigated. It has the `if __name__ == "__main__":` guard now.
+`tests/test_package_entrypoints.py::TestNoModuleBodyDoesWork`
+enforces the general rule by AST and carries the single allowance
+(`tool_runtime`'s `cdp_transport.install()`); adding a second means writing down
+why. There is no exclusion list to add a module to — fix the module instead.
+
+**`--help` and `--list-sections` used to cold-start a backend** (F-905, fixed on
+this branch). `server.main` parses with `add_help=False` + `parse_known_args` —
+deliberately, because it decides one thing from three flags and every other
+argument belongs to `embedded/server.py`'s full parser — so both were *unknown*
+to it and the default `--transport stdio` carried them into
+`ensure_server_running`. They take the `runpy` branch now, which is the one that
+can answer them. `server._ANSWER_AND_EXIT` is the set and the rule is "does
+`build_arg_parser()` print and exit on it" — `--minimal`/`--debug`/
+`--xpool-safe` are outside it, because they configure a backend that then
+serves. **If you add a printing flag to the backend's parser, add it to that
+set**; nothing derives it, because the shim may not import the backend's parser.
+`tests/test_package_entrypoints.py::TestAskingAQuestionStartsNothing`
+parametrises every member.
+
 Coverage is **intentionally not** in `addopts` (it would slow every single-file TDD run
 and trip `--cov-fail-under` on partial runs). CI turns it on explicitly.
 
