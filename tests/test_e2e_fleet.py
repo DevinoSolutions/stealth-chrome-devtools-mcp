@@ -10,9 +10,10 @@ run did which no committed node did are what this module reproduces:
 * **several browsers at once**, so an answer that is really about "whichever
   instance the manager looked at last" cannot hide behind there being only one;
 * **the ADVERTISED profile path as well as the named one.** The manual run was
-  one master plus nine auto-clones, because `user_data_dir` is documented as
-  "leave UNSET for normal use". Half this fleet is unnamed for that reason, and
-  it is also the only half that can assert the disposable-profile promise;
+  one `default` session plus nine disposable copies, because `session` is
+  documented as "leave UNSET for normal use". Half this fleet is unnamed for
+  that reason, and it is also the only half that can assert the
+  disposable-profile promise;
 * **a mix of page shapes in one run** — a plain page, a page whose ``load`` is
   held open, an app shell whose document cannot scroll, and a form — so a tool
   that quietly assumes the ordinary shape is visible next to one that does not;
@@ -28,8 +29,9 @@ and two on the 2-vCPU Linux and Windows ones — all six navigated in ONE
 ``list_instances`` can still name what each one is showing. Split into six
 nodes it would cost six fleets and stop being the shape that found the defects.
 
-The lead is the one deliberate serialization, and it is there because master
-carries no spawn reservation — measured, and the argument is at the spawn call
+The lead is the one deliberate serialization, and it is there because the
+shared `default` profile carries no spawn reservation — measured, and the
+argument is at the spawn call
 below. The five that follow it spawn together, in as many lanes as the CELL can
 carry (``_spawn_lanes``): a developer box starts all five at once, a 3-vCPU
 runner three at a time, because nodriver 0.47 gives Chrome a fixed ≈2.75 s to
@@ -51,7 +53,7 @@ the ``tabswitch`` member ends up on a tab it opened afterwards (§1 row 4).
 Sizing. Six members, measured locally (Windows 11, Chrome 152): ``spawn 3.6s,
 navigate 1.3s, actions 1.7s, total 6.7s`` on a quiet machine and ``spawn 5.2s,
 navigate 1.3s, actions 2.3s, total 9.0s`` beside other agents' browsers, over
-``roles ['clone', 'explicit', 'master']`` — all three profile kinds in one run,
+``roles ['clone', 'default', 'explicit']`` — all three profile kinds in one run,
 which is the manual fleet's own shape. Six rather than four because each
 member owns exactly ONE of the six (page shape, tool) pairs the finding set
 needs, and folding two onto one member would make those two serial. The phase
@@ -225,6 +227,32 @@ def _selection(spawn_result: dict) -> dict:
     return spawn_result["spawn_diagnostics"]["profile_selection"]
 
 
+#: The one named member that still asks through the DEPRECATED spelling.
+ALIAS_MEMBER = "tabswitch"
+
+
+def _profile_kwargs(kind: str) -> dict:
+    """How a NAMED member asks for its profile: F-896's word, and its alias.
+
+    `session=` is the one documented spelling since F-896 and is what the other
+    two named members use. `user_data_dir=` is the alias kept for one release;
+    it resolves to the SAME request through `profile_seed.profile_request`, so
+    the two must land on the same kind of directory in the same place.
+
+    That equivalence is pinned hermetically in
+    `tests/test_session_vocabulary.py`, but this tier is the only place either
+    spelling reaches a real Chrome on a real directory — and F-896 moved where
+    a bare NAME anchors before the F-888 re-attach sees it. So one member keeps
+    the alias: an alias that stopped anchoring where `session=` anchors would
+    show up in the per-member directory assertions below rather than in a
+    release.
+    """
+    name = f"fleet-{kind}"
+    if kind == ALIAS_MEMBER:
+        return {"user_data_dir": name}
+    return {"session": name}
+
+
 async def _drive_shell(iid):
     """F-875 + F-878 inside the fleet: the nested scroller, truthfully."""
     scroll_page = get_fn("scroll_page")
@@ -308,7 +336,7 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
 
     #: (page, what to do with it, whether the profile is NAMED). Three of each:
     #: the unnamed half is the advertised path and the only half whose profile
-    #: is disposable; the named half is what an explicit `user_data_dir` does.
+    #: is disposable; the named half is what an explicit `session` does.
     plan = [
         ("/cov/app_shell.html", "shell", False),
         ("/cov/form.html", "type", True),
@@ -325,7 +353,7 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
         _, kind, named = row
         return spawn(
             headless=True,
-            **({"user_data_dir": f"fleet-{kind}"} if named else {}),
+            **(_profile_kwargs(kind) if named else {}),
             **sandbox_kwargs(),
         )
 
@@ -338,19 +366,21 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     #
     # Measured here afterwards, with the product's own functions and no Chrome
     # at all: three concurrent `resolve_profile_selection(None)` calls against a
-    # free master return the SAME directory, 3 of 3, every time. It is not a
-    # narrow race — the master branch asks `_profile_has_running_browser(master)`,
+    # free `default` profile return the SAME directory, 3 of 3, every time. It
+    # is not a narrow race — that branch asks
+    # `_profile_has_running_browser(master)`,
     # which `_dir_unavailable`'s own docstring calls "a LIVENESS check, NOT a
     # reservation … every concurrent spawn is pre-launch when it asks". The clone
     # path was given a reservation for exactly that reason (`_protect_clone_dir`,
-    # F-834 Layer 1); master deliberately was not, and still is not — F-834
+    # F-834 Layer 1); the shared profile deliberately was not, and still is
+    # not — F-834
     # §"Stage 1 shipped" records that the release problem a reservation would
     # bring still stands. Windows and Linux passed the same commit because the
     # window is timing-dependent; a two-core runner opens it.
     #
     # What HAS changed since this paragraph was written is the loser's fate.
     # F-834 stage 1 shipped: `_fallback_profile_selection` now answers every
-    # role, so a master-role spawn that loses retries — onto the same directory
+    # role, so a `default`-role spawn that loses retries — onto the same directory
     # when nobody holds it, onto a reserved clone when a sibling does. The
     # collision is therefore survivable, not fatal, and this serialization is no
     # longer what stands between the node and a red. It stays because provoking
@@ -360,8 +390,9 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     # able to spare it. Cheaper not to start the race.
     #
     # So the fleet spawns its first unnamed member on its own, lets that Chrome
-    # take master, and only then launches the other five. That is the manual
-    # fleet's real shape (one master, the rest clones) and it keeps every
+    # take the `default` profile, and only then launches the other five. That is
+    # the manual fleet's real shape (one `default`, the rest clones) and it keeps
+    # every
     # concurrency the product promises: unnamed CLONE spawns beside named ones,
     # in one `gather`.
     #
@@ -382,7 +413,7 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     # unchanged); on a 3-vCPU runner it is three at a time. The lane count is
     # printed below, so every run says what this machine allowed rather than
     # leaving it assumed.
-    assert plan[0][2] is False, "the lead member must be the unnamed master-taker"
+    assert plan[0][2] is False, "the lead member must be the unnamed default-taker"
     lane_count = _spawn_lanes(len(plan) - 1)
     lanes = asyncio.Semaphore(lane_count)
 
@@ -410,7 +441,7 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
         # for. Two unnamed spawns resolving to ONE directory would be six
         # browsers on five profiles, and every disk claim below would be about
         # something other than what ran. The lead spawns alone precisely so this
-        # cannot happen through the master branch (see above); if it fails
+        # cannot happen through the `default` branch (see above); if it fails
         # anyway, the two CLONE members collided, and that IS a product finding
         # — `_protect_clone_dir` reserves a clone directory with no await
         # between the choice and the reserve, so two of them cannot legitimately
@@ -431,14 +462,18 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
             len(selection.get("spawn_retries") or ()) for selection in selections
         )
         assert len(set(used_dirs.values())) == FLEET_SIZE, used_dirs
+        # The role words are F-896's: the shared profile reports itself as
+        # `default` — the name a caller can pass back to `session=` — and not
+        # as the directory it happens to live in. `explicit` and `clone` are
+        # unchanged, which is why only one of these three lines moved.
         for _, kind, named in plan:
             if named:
                 assert roles[kind] == "explicit", (kind, roles[kind])
             else:
-                assert roles[kind] in {"master", "clone"}, (kind, roles[kind])
+                assert roles[kind] in {"default", "clone"}, (kind, roles[kind])
         # The advertised path really is exercised: at least one disposable clone.
-        # (The FIRST unnamed spawn takes the master profile when it is free,
-        # which is exactly the manual run's one-master-plus-clones shape.)
+        # (The FIRST unnamed spawn takes the `default` session when it is free,
+        # which is exactly the manual run's one-default-plus-clones shape.)
         assert "clone" in set(roles.values()), roles
 
         nav_started = time.monotonic()
@@ -608,9 +643,9 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     assert still_live.isdisjoint(ids), still_live
 
     # ── The disposable-profile promise, on the path that makes it ───────────
-    # `spawn_browser`'s docstring says an unset `user_data_dir` "automatically
-    # clones a disposable session from the master profile and deletes it when
-    # the instance closes", and the same docstring says a NAMED profile "is NOT
+    # `spawn_browser`'s docstring says an unset `session` gets "a disposable
+    # copy of the shared ``default`` session" and "deletes it as soon as the
+    # browser closes", and the same docstring says a named session "is NOT
     # auto-cleaned and persists on disk indefinitely". Both halves are asserted,
     # because a fleet of only named profiles could not have caught a broken
     # reclaim and a fleet of only unnamed ones could not have caught a named
@@ -640,7 +675,7 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
     # shared pid record (`browser_pids.json`, read through
     # `process_cleanup._load_tracked_pids`) keeps an instance until the product
     # itself has seen its Chrome die: `kill_browser_process` untracks a
-    # named/master entry only after its kill succeeded, and `finalize` /
+    # named/shared-profile entry only after its kill succeeded, and `finalize` /
     # `cleanup_deferred_profiles` untrack a clone entry only once
     # `psutil.pid_exists` is False AND its directory is gone. A reclaimed clone
     # directory already implies a dead Chrome (Windows will not `rmtree` a

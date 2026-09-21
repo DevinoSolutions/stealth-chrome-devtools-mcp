@@ -530,7 +530,7 @@ class TestFileUpload:
 
 class TestAutoCloneDeletion:
     """End-to-end: disposable auto-clones are deleted on close, while the
-    master profile and explicit named profiles are always preserved.
+    shared default profile and explicit named sessions are always preserved.
     """
 
     @pytest.mark.asyncio
@@ -543,14 +543,15 @@ class TestAutoCloneDeletion:
         close = _get_fn("close_instance")
         dirs = tmp_session_root
 
-        # First spawn with no user_data_dir takes the master profile directly.
+        # First spawn naming no session takes the shared `default` profile
+        # directly — `profile_role: "default"` since F-896, `"master"` before.
         master_inst = await spawn(headless=True, **_sandbox_kwargs())
         master_iid = master_inst["instance_id"]
         try:
             master_sel = master_inst["spawn_diagnostics"]["profile_selection"]
             assert master_sel["profile_role"] == "default", master_sel
 
-            # Master is busy now → a second spawn must clone from the snapshot.
+            # The shared profile is busy now → a second spawn must copy its seed.
             clone_inst = await spawn(headless=True, **_sandbox_kwargs())
             clone_iid = clone_inst["instance_id"]
             sel = clone_inst["spawn_diagnostics"]["profile_selection"]
@@ -569,12 +570,12 @@ class TestAutoCloneDeletion:
                 await asyncio.sleep(0.25)
             assert not clone_dir.exists(), f"auto-clone not cleaned: {clone_dir}"
 
-            # Master directory is never auto-deleted, even while in use.
+            # The shared profile's directory is never auto-deleted, even in use.
             assert dirs["master"].exists()
         finally:
             await close(instance_id=master_iid)
 
-        # Master survives its own close too (only the snapshot is refreshed).
+        # It survives its own close too (only its seed is refreshed).
         assert dirs["master"].exists()
 
     @pytest.mark.asyncio
@@ -618,6 +619,12 @@ class TestOverCapSweepPreservesLiveAndLegacyProfiles:
     def _seed(
         self, sessions, name, *, auto_clean, mtime, source_kind="master-snapshot"
     ):
+        # The PRE-F-896 source kind, on purpose. This writes a marker as it
+        # exists on disk today for every profile created before this release,
+        # and the classifier has to keep reading it: `is_auto`/`is_named` key
+        # on the `explicit` prefix, which the old and new values both carry.
+        # Renaming it here would delete the back-compatibility evidence and
+        # leave the suite testing only markers this release writes.
         import json as _json
 
         d = sessions / name
@@ -655,7 +662,7 @@ class TestOverCapSweepPreservesLiveAndLegacyProfiles:
         master_iid = master_inst["instance_id"]
         clone_iid = None
         try:
-            # Master is busy now → this second spawn clones, and that clone is in
+            # The shared profile is busy now → this second spawn copies, and that copy is in
             # active use by a real, running browser.
             clone_inst = await spawn(headless=True, **_sandbox_kwargs())
             clone_iid = clone_inst["instance_id"]
@@ -870,7 +877,7 @@ class TestHeadedSpawnIsSeenOrRefused:
         """Branch A — a window-capable context must produce a window we can SEE.
 
         An absolute ``user_data_dir`` outside the clone root is the one spawn
-        shape that never copies the master profile, so this costs a Chrome launch
+        shape that never copies the shared default profile, so this costs a Chrome launch
         and nothing else.
         """
         import psutil
