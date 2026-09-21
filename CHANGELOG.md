@@ -1,5 +1,108 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — F-914/F-915: a session that is already open hands its cookies over, or refuses
+
+**This is the whole of "the master profile was erased / I have to set up the
+credentials again", and on disk it was never a deletion — it was
+SUBSTITUTION.** Ask for the shared session while anything held it and 2.1.12
+handed back a fresh clone of the seed; ask for a NAMED session while anything
+held it and it handed back `<name>-2`, seeded from that same seed. Both reported
+success, both were logged out, and `profile_role` / `walk_reason` were the only
+tells — fields a caller has to go looking for before trusting a login.
+
+**The rule now has exactly two outcomes.** When the profile you asked for is
+open in a browser **this backend drives**, the new session is seeded from that
+browser's LIVE cookie jar over CDP (F-898's `cookie_handoff`) and the answer
+says which holder it came from. When it is open in a browser we cannot reach —
+another backend's Chrome, or your own — the spawn is **REFUSED BY NAME** and
+nothing is created. There is no third answer: substituting a different profile
+and reporting it was considered and rejected.
+
+The refusal names the session and the holder's pid, never a path (a profile path
+names the operating user, and that message reaches the client, the durable log
+and Sentry at once), and it carries both remedies — close that browser and spawn
+again to get that session, or pass `session=<a free name>` for a new one.
+
+**Measured, which is why this was ranked first.** On the reporting machine the
+shared profile's cookie jar was written at 1:17 PM and the seed every substitute
+was copied from at 7:42 AM — the seed is refreshed only while the shared session
+is CLOSED, so a machine whose browser stays open freezes it at the last clean
+close. And seventeen directories carried a numeric walk suffix, one of them
+`-22`: one session name substituted at least twenty-two times.
+
+**Those seventeen directories are left exactly where they are** — not deleted,
+not merged, not renamed. Some may hold a login typed by hand into a walked
+directory, deleting profile directories is the act this whole family of findings
+exists to stop, and `stealthy profiles` still lists them. What changed is that
+no eighteenth one is created.
+
+**What a walk MEANS changed with it.** A walk to `<name>-N` now happens only
+when we drive the holder, and the new directory is copied FROM that holder with
+its jar handed over — so `spawn_browser`'s `warning` no longer says the walked
+profile holds "none of the cookies or logins the requested one holds", which was
+true of the old unconditional walk and false of this one. It says what is still
+true: a separate directory from here on, and that whatever the original keeps
+outside its cookie jar (localStorage, IndexedDB, service workers) did not come
+with the cookies.
+
+**`spawn_diagnostics.profile_selection` gains `handed_over_from`** — the NAME of
+the session whose jar came over, a word you can pass straight back as
+`session=`, beside `seeded_via` and its counts. That key is not a schema change:
+it lives inside the free-form diagnostics dict.
+
+**The SOFT tool-surface golden IS updated here, by one line, deliberately.**
+`spawn_browser`'s own description promised that a session held by another live
+backend's browser costs you "a normal spawn plus `reattach_declined`" — which
+this finding makes false, since that spawn is now refused. A tool description
+that survives a change to what the tool DOES is this same defect one layer up, so
+`tests/goldens/tool_surface.json` was regenerated (`tools/dump_tool_surface.py
+--write`) in this commit and the diff is that sentence and nothing else. The two
+other operator-facing sentences that said it were corrected with it:
+`browser_reattach`'s no-endpoint refusal used to end "and a new browser was
+started instead", which would now be glued to a refusal reading "Nothing was
+created", and RUNBOOK's "Recover a stranded login" said you land on a different
+directory.
+
+**The retry door answers the same way.** F-834 widened
+`_fallback_profile_selection` to all three roles, so it is the second way into
+the same substitution — left alone it would have answered a held shared session
+with exactly the clone the resolver now refuses, one spawn failure later. It
+asks the same rule, and it carries a hand-off the previous attempt was making
+onto the retry, dropping it when that source is no longer ours.
+
+**What this costs is named rather than hidden.** A concurrent unnamed spawn that
+loses Chrome's profile singleton to a browser we do NOT drive now fails with
+that refusal, where 2.1.12 gave it a disposable clone of a stale seed. When the
+winner of that race is a sibling spawn of this backend — the common case — the
+loser still gets its clone, now with the shared jar handed over.
+
+**F-920 is folded in**, because it is the same branch: the no-seed
+`live-default-fallback` path carried a comment asserting cookies "transfer
+successfully even while Chrome has it open", which `profile_copy.copy_file`'s
+own docstring contradicts — a held file is skipped and the gap cannot be
+enumerated afterwards. That branch is now reachable with the shared session open
+only once the hand-off has been allowed, so the jar arrives over CDP; with it
+closed it is a copy of a directory at rest.
+
+**Two files were cut to pay for it, because caps ratchet down only.**
+`embedded/profile_target.py` is the new home for the rule itself — the
+target-side twin of `profile_source`, which answers the same question about the
+session a spawn copies FROM; it is a policy where `profile_lock` is a fact, and
+the two sat welded together until the rule was needed in two branches at once.
+`embedded/clone_trash.py` is the new home for what an EVICTION means — an
+over-cap auto-clone is moved aside and purged only after a retention window —
+which left because the rule alone did not pay for itself against
+`clone_storage.py`'s 1000-LOC budget. Both are internal moves with no behaviour
+change; `clone_storage.py` keeps the policy around a copy and its
+`PTH105`/`SIM105` suppressions SHRANK by exactly the two codes that went with
+the trash mechanism.
+
+Full detail, including the measurements and every residual, is in
+`audit/stage2/finding_F914_unnamed_spawn_substitutes_seed_clone.md` and
+`audit/stage2/finding_F915_held_named_session_walks_and_reseeds.md`.
+
 ## 2.1.13
 
 ### Added — F-897: a new session can start from an existing one
@@ -709,107 +812,6 @@ prevent, and would not have fenced the session root on Windows at all.
 Per-file `isolated_state` fixtures are kept, not deleted: they give each NODE a
 clean record while the fence gives the SESSION one directory — per-test
 isolation and operator safety are different questions.
-
-### Fixed — F-914/F-915: a session that is already open hands its cookies over, or refuses
-
-**This is the whole of "the master profile was erased / I have to set up the
-credentials again", and on disk it was never a deletion — it was
-SUBSTITUTION.** Ask for the shared session while anything held it and 2.1.12
-handed back a fresh clone of the seed; ask for a NAMED session while anything
-held it and it handed back `<name>-2`, seeded from that same seed. Both reported
-success, both were logged out, and `profile_role` / `walk_reason` were the only
-tells — fields a caller has to go looking for before trusting a login.
-
-**The rule now has exactly two outcomes.** When the profile you asked for is
-open in a browser **this backend drives**, the new session is seeded from that
-browser's LIVE cookie jar over CDP (F-898's `cookie_handoff`) and the answer
-says which holder it came from. When it is open in a browser we cannot reach —
-another backend's Chrome, or your own — the spawn is **REFUSED BY NAME** and
-nothing is created. There is no third answer: substituting a different profile
-and reporting it was considered and rejected.
-
-The refusal names the session and the holder's pid, never a path (a profile path
-names the operating user, and that message reaches the client, the durable log
-and Sentry at once), and it carries both remedies — close that browser and spawn
-again to get that session, or pass `session=<a free name>` for a new one.
-
-**Measured, which is why this was ranked first.** On the reporting machine the
-shared profile's cookie jar was written at 1:17 PM and the seed every substitute
-was copied from at 7:42 AM — the seed is refreshed only while the shared session
-is CLOSED, so a machine whose browser stays open freezes it at the last clean
-close. And seventeen directories carried a numeric walk suffix, one of them
-`-22`: one session name substituted at least twenty-two times.
-
-**Those seventeen directories are left exactly where they are** — not deleted,
-not merged, not renamed. Some may hold a login typed by hand into a walked
-directory, deleting profile directories is the act this whole family of findings
-exists to stop, and `stealthy profiles` still lists them. What changed is that
-no eighteenth one is created.
-
-**What a walk MEANS changed with it.** A walk to `<name>-N` now happens only
-when we drive the holder, and the new directory is copied FROM that holder with
-its jar handed over — so `spawn_browser`'s `warning` no longer says the walked
-profile holds "none of the cookies or logins the requested one holds", which was
-true of the old unconditional walk and false of this one. It says what is still
-true: a separate directory from here on, and that whatever the original keeps
-outside its cookie jar (localStorage, IndexedDB, service workers) did not come
-with the cookies.
-
-**`spawn_diagnostics.profile_selection` gains `handed_over_from`** — the NAME of
-the session whose jar came over, a word you can pass straight back as
-`session=`, beside `seeded_via` and its counts. That key is not a schema change:
-it lives inside the free-form diagnostics dict.
-
-**The SOFT tool-surface golden IS updated here, by one line, deliberately.**
-`spawn_browser`'s own description promised that a session held by another live
-backend's browser costs you "a normal spawn plus `reattach_declined`" — which
-this finding makes false, since that spawn is now refused. A tool description
-that survives a change to what the tool DOES is this same defect one layer up, so
-`tests/goldens/tool_surface.json` was regenerated (`tools/dump_tool_surface.py
---write`) in this commit and the diff is that sentence and nothing else. The two
-other operator-facing sentences that said it were corrected with it:
-`browser_reattach`'s no-endpoint refusal used to end "and a new browser was
-started instead", which would now be glued to a refusal reading "Nothing was
-created", and RUNBOOK's "Recover a stranded login" said you land on a different
-directory.
-
-**The retry door answers the same way.** F-834 widened
-`_fallback_profile_selection` to all three roles, so it is the second way into
-the same substitution — left alone it would have answered a held shared session
-with exactly the clone the resolver now refuses, one spawn failure later. It
-asks the same rule, and it carries a hand-off the previous attempt was making
-onto the retry, dropping it when that source is no longer ours.
-
-**What this costs is named rather than hidden.** A concurrent unnamed spawn that
-loses Chrome's profile singleton to a browser we do NOT drive now fails with
-that refusal, where 2.1.12 gave it a disposable clone of a stale seed. When the
-winner of that race is a sibling spawn of this backend — the common case — the
-loser still gets its clone, now with the shared jar handed over.
-
-**F-920 is folded in**, because it is the same branch: the no-seed
-`live-default-fallback` path carried a comment asserting cookies "transfer
-successfully even while Chrome has it open", which `profile_copy.copy_file`'s
-own docstring contradicts — a held file is skipped and the gap cannot be
-enumerated afterwards. That branch is now reachable with the shared session open
-only once the hand-off has been allowed, so the jar arrives over CDP; with it
-closed it is a copy of a directory at rest.
-
-**Two files were cut to pay for it, because caps ratchet down only.**
-`embedded/profile_target.py` is the new home for the rule itself — the
-target-side twin of `profile_source`, which answers the same question about the
-session a spawn copies FROM; it is a policy where `profile_lock` is a fact, and
-the two sat welded together until the rule was needed in two branches at once.
-`embedded/clone_trash.py` is the new home for what an EVICTION means — an
-over-cap auto-clone is moved aside and purged only after a retention window —
-which left because the rule alone did not pay for itself against
-`clone_storage.py`'s 1000-LOC budget. Both are internal moves with no behaviour
-change; `clone_storage.py` keeps the policy around a copy and its
-`PTH105`/`SIM105` suppressions SHRANK by exactly the two codes that went with
-the trash mechanism.
-
-Full detail, including the measurements and every residual, is in
-`audit/stage2/finding_F914_unnamed_spawn_substitutes_seed_clone.md` and
-`audit/stage2/finding_F915_held_named_session_walks_and_reseeds.md`.
 
 ## 2.1.12
 
