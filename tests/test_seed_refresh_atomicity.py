@@ -159,6 +159,22 @@ class TestADeathMidRefreshLeavesTheSeedUsable:
         assert _login(seed_layout["snapshot"]) == SEED_LOGIN
         assert (seed_layout["snapshot"] / MARKER).exists(), "the seed lost provenance"
 
+    def test_a_death_between_the_copy_and_the_marker_publishes_nothing(
+        self, seed_layout, monkeypatch
+    ):
+        """The marker is written INTO the staged copy, so nothing is published
+        until the tree is complete AND stamped. Stamping after the swap would
+        put a complete profile with no marker on disk if the process died
+        between the two — and an unmarked seed reads as provenance ``unknown``
+        forever, which is this finding's own shape one step smaller."""
+        monkeypatch.setattr(profile_seed, "write_marker", _dies_mid_copy)
+
+        result = clone_storage._refresh_master_snapshot_if_safe("test")
+
+        assert result["seed_refreshed"] is False
+        assert _login(seed_layout["snapshot"]) == SEED_LOGIN, "an unstamped copy landed"
+        assert (seed_layout["snapshot"] / MARKER).exists()
+
     def test_a_later_session_still_gets_the_logins(self, seed_layout, monkeypatch):
         """The harm as the owner meets it: not "the seed is empty" but "the
         session I just spawned is logged out"."""
@@ -226,6 +242,36 @@ class TestTheDisplacedGenerationIsKept:
         assert _scratch_in(seed_layout["root"]) == [
             seed_layout["snapshot"].name + profile_copy.PREVIOUS_SUFFIX
         ]
+
+
+class TestAFailedDisplaceChangesNothing:
+    def test_a_target_that_cannot_be_moved_aside_is_refused(
+        self, seed_layout, monkeypatch
+    ):
+        """``replace_tree`` answers False — and ``_copy_profile_tree`` turns
+        that into ``TARGET_IN_USE`` — when the tree already in place cannot be
+        moved out of the way. The alternative is a HALF-SWAP: a new copy
+        published over a target we failed to displace, which is this finding
+        again by another route.
+
+        Driven through the real path rather than by stubbing the verdict: a
+        previous generation that is still there and cannot be removed — the
+        Windows lock ``rmtree_robust`` exists to tolerate — makes the rename
+        onto it fail, which is exactly how this branch is reached in
+        production.
+        """
+        previous = seed_layout["snapshot"].with_name(
+            seed_layout["snapshot"].name + profile_copy.PREVIOUS_SUFFIX
+        )
+        (previous / "Default").mkdir(parents=True)
+        (previous / "Default" / "stuck").write_bytes(b"locked")
+        monkeypatch.setattr(profile_copy, "rmtree_robust", lambda *a, **k: None)
+
+        result = clone_storage._refresh_master_snapshot_if_safe("test")
+
+        assert result["seed_refreshed"] is False
+        assert result["seed_error"] == clone_storage.SEED_IN_USE
+        assert _login(seed_layout["snapshot"]) == SEED_LOGIN, "the seed moved anyway"
 
 
 class TestScratchIsInvisibleToEveryCloneRootScan:
