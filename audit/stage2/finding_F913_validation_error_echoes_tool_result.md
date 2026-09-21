@@ -184,7 +184,7 @@ envelope alone is already 24 of those bytes, which leaves ~25 for the entire
 **value** *inside* the frame — row 2 — because each union arm echoes the
 sub-value it tripped over and that sub-value is measured against the cap on its
 own. That is the distinction the fix is built on, and it is why the pins are
-`test_the_echo_is_capped_at_fifty_characters_of_the_input` (the frame) and
+`test_the_echo_is_capped_at_the_measured_number_of_characters` (the frame) and
 `test_a_short_value_escapes_the_cap_and_is_echoed_whole` (the value) rather
 than one pin about "a short result".
 
@@ -192,10 +192,21 @@ than one pin about "a short result".
 the volume is bounded at ~50 characters per error rather than "the jar"; up,
 because the things that matter are frequently *under* the cap — a cookie value,
 a session id, a short bearer token — and those are echoed whole. The two pins
-`test_the_echo_is_capped_at_fifty_characters_of_the_input` and
+`test_the_echo_is_capped_at_the_measured_number_of_characters` and
 `test_a_short_value_escapes_the_cap_and_is_echoed_whole` carry both halves, so
 a pydantic release that changes the number goes RED rather than quietly
 changing what this finding claims.
+
+**That last sentence was not true of the pin it named until the F-913 review,
+and the correction is worth recording because the claim is the whole reason
+this section survives a dependency bump.** The first pin asserted `"..." in
+echoed[0]` — the PRESENCE of a truncation, not its size. Measured against
+synthesised renderings at seven caps, that assertion passes at 52, 80, 100, 200
+and 314 and fails only at 20 and 40: it was blind to every cap that leaks MORE
+and could only ever have caught one that leaks less, which is the direction
+nobody needs protecting from. It asserts the numbers now — the rendering's 52
+and, for a `str` input, the 50 characters of the input inside it — so a release
+moving pydantic's cap in either direction is RED.
 
 ### 5.3 Reach, before the fix
 
