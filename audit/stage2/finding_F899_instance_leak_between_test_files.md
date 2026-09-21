@@ -48,7 +48,7 @@ bound at import time in another module does not follow it. A hermetic test that
 drives `browser_reattach.adopt` against a fake manager therefore writes the **real**
 singleton.
 
-The reader is `tool_sections/browser_management.py:505-524`. `list_instances` merges
+The reader is `tool_sections/browser_management.py:528-548`. `list_instances` merges
 what the manager holds with what the store holds, and reports any store entry the
 manager does not know about as a `source: "stored"` record. So one file's leftover
 adoption becomes another file's phantom browser.
@@ -116,7 +116,7 @@ check and find false.
 | adoption write | `browser_reattach.py:994` | last statement of the `try`; `except BaseException` re-raises with nothing in between |
 | stale-instance discard | `browser_manager.py:207-208` | removal present, unconditional |
 | lifespan shutdown | `server.py:203-210` | `clear_all()` |
-| **close** | `browser_manager.py:869` vs `:968-969` | **ASYMMETRIC under cancellation — the defect below** |
+| **close** | `browser_manager.py:869` vs `:968-969` **as it was before this PR** | **ASYMMETRIC under cancellation — the defect below** |
 
 **The reported leak is still test-only.** `i-kept` and `i-held` come from `adopt`,
 which is symmetric: it writes at `:994`, the LAST statement of its `try`, after the
@@ -126,14 +126,15 @@ manager._instances`) wrote nothing to the store in the probe run above — that
 argument measured rather than read.
 
 **The close path was not.** `close_instance` popped `_instances` in Phase 1 (`:869`)
-and removed the store entry in Phase 4 (`:968-969`) — but Phase 4 sat inside the
-`try` whose handler is `except Exception` (`:971`). Every inner step of Phases 2-3
+and removed the store entry in Phase 4 (`:968-969` in the pre-fix file; every line
+number in this paragraph is that file, not today's) — but Phase 4 sat inside the
+`try` whose handler is `except Exception`. Every inner step of Phases 2-3
 has its own handler, so that outer `except` is effectively unreachable for ordinary
 errors; what it cannot catch is `asyncio.CancelledError`, a `BaseException`, which
 walks straight past it. **Six `await`s separate the pop from the removal**
 (`close_target`, `cdp_browser.close()`, `connection.disconnect()`,
 `_close_proxy_forwarder_ref`, `to_thread(_blocking_teardown)`, `stop_coro`), and the
-tool body at `tool_sections/browser_management.py:544` carries no
+tool body at `tool_sections/browser_management.py:569` carries no
 `_with_cdp_timeout`, so a cancellation there comes from the REQUEST TASK — a client
 that disconnects mid-close.
 
@@ -165,8 +166,9 @@ them bounded at `CLOSE_KILL_TIMEOUT`.
 **Chosen: move the removal into Phase 1, under `self._lock`, beside the pop.** The
 store is a cross-check of `_instances`; the two are one fact and now move together.
 There is **no `await` between them**, so there is no window at all — not a narrower
-one. `close_instance` keeps exactly ONE removal site (`:877` after the move; the
-other `in_memory_storage.remove_instance` in the file, `:208`, is the unrelated
+one. `close_instance` keeps exactly ONE removal site (`:875` after the move, under
+the `contextlib.suppress(KeyError)` at `:874`; the other
+`in_memory_storage.remove_instance` in the file, `:208`, is the unrelated
 stale-instance discard path and is untouched), so nothing can double-remove, and
 `InMemoryStorage.remove_instance` is idempotent anyway — it guards on membership.
 
@@ -176,11 +178,31 @@ the unwind, and a second cancellation or a crash inside the handler can still sk
 it. It also leaves the removal far from the pop, which is the arrangement that
 produced the defect. The lock costs microseconds and closes the window to nothing.
 
-One behaviour changes and is stated rather than hidden: an exception from
-`remove_instance` that is NOT `KeyError` used to be swallowed by
-`except Exception: return False` and now propagates. The real implementation raises
-neither, the `contextlib.suppress(KeyError)` moved with the call so that shape is
-unchanged, and propagating is convention 2's direction.
+**TWO behaviours change and both are stated rather than hidden.**
+
+*First*, an exception from `remove_instance` that is NOT `KeyError` used to be
+swallowed by `except Exception: return False` and now propagates. The real
+implementation raises neither, the `contextlib.suppress(KeyError)` moved with the
+call so that shape is unchanged, and propagating is convention 2's direction.
+
+*Second — and it is the more interesting one — the timing is visible in a tool's
+output.* During an IN-FLIGHT close, a concurrent `list_instances` used to show the
+instance as a `source: "stored"` row for the whole teardown (up to
+`CLOSE_KILL_TIMEOUT` plus the CDP waits); it now shows nothing from the moment
+Phase 1 returns. That is the better answer — the manager has disowned the instance
+and its browser is being killed — but it is a change a caller can see.
+
+Its consequence is worth recording: **the `stored` record shape (F-874's third, at
+`tool_sections/browser_management.py:537-546`) loses its last routine producer in a
+real backend.** After this fix every path that takes an instance out of `_instances`
+drops the store entry in the same breath — `_discard_instance_unlocked`
+(`:191`/`:208`), the spawn-failure pops (`:770`, where the store was never written
+in the first place), and close (`:869`/`:875`) — while adoption writes `_instances`
+first (`browser_reattach.py:980`) and the store last (`:994`). **The branch stays.**
+It is the safety net for exactly the class of bug this finding is: a future path that
+pops one and forgets the other, or an entry written by a door not yet built. Deleting
+a shape because its only remaining producer was the defect just fixed would mean the
+next such leak has nowhere to surface.
 
 `browser_manager.py` is **grandfathered at 1485/1485 LOC with zero headroom**, so
 this was done LOC-neutral and measured at each step: the Phase-4 block (comment,
@@ -197,9 +219,14 @@ direct sibling of the `_stealth_logger_hygiene` fixture immediately above it, wh
 answers the same question for `stealth.*` logger state, and it lives at the one
 fixture home rather than in the two symptom files — neither of which is at fault.
 
-The snapshot is two levels deep because that is every mutation the class offers:
-`store_instance`/`remove_instance` write inside `_data["instances"]`, `set` writes a
-top-level key, `clear_all` replaces the whole dict.
+The snapshot is two levels deep because that is every mutation the class's own
+METHODS make: `store_instance`/`remove_instance` write inside `_data["instances"]`,
+`set` writes a top-level key, `clear_all` replaces the whole dict. It is NOT every
+mutation reachable through the class — `get`/`get_instance` hand back the live
+nested object — and the fixture's own docstring is the one home for that
+qualification, the measurement that makes it unreachable today (0 of 222 nodes start
+with a non-empty store) and `copy.deepcopy` as the answer if it stops being. Read it
+there rather than trusting a second copy here.
 
 **Rejected: an autouse assert-and-fail guard** that reds the test which leaked.
 It names the culprit, which is genuinely better diagnostics, and it was rejected
@@ -324,7 +351,7 @@ post-teardown leak at all.
    `patched_server(in_memory_storage=...)` cannot reach those two writers. Do not
    "fix" that by re-pointing them at `rt.in_memory_storage`: **`tool_runtime.py`
    imports both writers at its own module scope** — `browser_reattach` at `:41`,
-   `BrowserManager` at `:47` — so a module-scope `rt` import in either closes a
+   `BrowserManager` at `:48` — so a module-scope `rt` import in either closes a
    cycle. It would survive only if `tool_runtime` were always imported first, and it
    is not; measured:
 
@@ -334,7 +361,7 @@ post-teardown leak at all.
    ```
 
    Import `browser_manager` first — which the suite does constantly — and
-   `tool_runtime:47` reaches back into a module executed only as far as `:32`, where
+   `tool_runtime:48` reaches back into a module executed only as far as `:32`, where
    `BrowserManager` does not exist yet: `ImportError`. A function-LOCAL `rt` import
    at the four call sites would work and buys patchability at the price of a third
    way to reach one store (`rt.` here, module-global in
@@ -354,7 +381,7 @@ post-teardown leak at all.
    would pass in a process where step 1 never ran — the `_WROTE_THE_STORE` witness
    catches exactly that and turns it into a red with a message, which is the right
    failure but still a reason to revisit the shape rather than silence it.
-5. **The `except Exception` at `browser_manager.py:971` is now demonstrably
+5. **The `except Exception` at `browser_manager.py:972` is now demonstrably
    unreachable** for its own body: every inner step of Phases 2-3 has its own
    handler and Phase 4 no longer exists. It is left in place — deleting a blanket
    handler from a four-phase teardown is a separate decision with its own blast
