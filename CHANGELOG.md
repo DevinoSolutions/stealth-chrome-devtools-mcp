@@ -17,11 +17,13 @@ precedence you cannot see; passing both with the same value is fine.
 `user_data_dir`, or `stealthy call spawn_browser --arg user_data_dir=<path>`.
 
 Whitespace around a NAME is not part of it through either spelling, while a
-PATH keeps its own characters; and a value that is empty once stripped (`""`,
-`"   "`) now **raises** through either spelling instead of being honoured as a
-profile request. On Windows `user_data_dir="   "` resolved to the session root
-itself — the directory that holds every session — so it was never a profile
-anyone meant. Omit the argument entirely for the `default` session.
+PATH keeps its own characters. A non-empty value that is empty once stripped
+(`"   "`, `"\t"`) now **raises** through either spelling instead of being
+honoured as a profile request: on Windows `user_data_dir="   "` resolved to the
+session root itself — the directory that holds every session — so it was never
+a profile anyone meant. An **empty string is unchanged and still means "not
+given"** through either spelling, so a client that sends `""` for an optional
+argument gets the ordinary unnamed spawn exactly as it does today.
 
 **`default` is now a session you can open.** F-894 reserved the word as a
 refusal, explicitly as a placeholder for this release; it now MEANS the shared

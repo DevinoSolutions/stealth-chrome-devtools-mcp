@@ -376,8 +376,9 @@ def _names_nothing(spelling: str, given: str) -> ToolError:
 
     It raises rather than falling back to an unnamed spawn: silently turning a
     malformed request into the shared session is a substitution, which is the
-    thing this vocabulary exists to stop. ``None`` stays the one way to say
-    "no profile argument at all".
+    thing this vocabulary exists to stop. What it never covers is the
+    exactly-EMPTY string, which is "not given" and is answered long before
+    here — see ``profile_request``.
     """
     return ToolError(
         f"{spelling} must be a name and {given!r} names no profile. Omit it "
@@ -411,9 +412,20 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
     a ROOTED string that ``roots.session / asked`` resets to the drive root, so
     the request left the session tree. Both measured.
 
-    A value that is EMPTY once stripped is neither — it names no profile — and
-    both spellings raise for it through ``_names_nothing``; a string that short
-    cannot have held a separator, so that rule can never divert a path.
+    A NON-EMPTY value that is empty once stripped is neither — it names no
+    profile — and both spellings raise for it through ``_names_nothing``; a
+    string that short cannot have held a separator, so that rule can never
+    divert a path.
+
+    **The exactly-empty string is NOT GIVEN, through either spelling**, which
+    is why both tests here are falsy rather than ``is None``. An MCP client is
+    a language model and ``""`` for an optional string is one of the commonest
+    shapes it sends; 2.1.11 honours it as "nothing asked for", and refusing it
+    would break spawns that work today for a caller who asked for nothing. It
+    cannot reach the hazard ``_names_nothing`` exists for either — that needs a
+    non-empty string the filesystem folds away — so the two rules do not
+    overlap. An empty ``session`` therefore leaves the decision to the alias
+    beside it, exactly as an absent one does.
 
     Two rules, and each exists because its absence is a silence:
 
@@ -431,8 +443,8 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
       absolute path with no separator or drive under some flavour, a ``~`` this
       layer does not expand, and a name that is only dots.
     """
-    if session is None:
-        if user_data_dir is None:
+    if not session:
+        if not user_data_dir:
             return None
         bare = user_data_dir.strip()
         if not bare:
