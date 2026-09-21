@@ -610,23 +610,24 @@ needed is the moment that call raised. `spawn_leak.launched_pid` then reads the
 pid off the `Browser` nodriver registered for that exact object (identity, never
 a field match: two concurrent spawns build configs equal in every field),
 through `process_exit.browser_pid`, which already owns "which member of the tree
-is the browser" and refuses a handle asyncio has already collected. A stored
-`(pid, create_time)` pair is not the alternative: the pid is unknown until reap
-time, because nodriver creates the process inside `uc.start` and hands nothing
-back when it fails, so there is no launch-time moment at which a create_time
-could be captured. `_CLOCK_TOLERANCE_SECONDS` and `_started_after` are deleted.
+is the browser" and refuses a handle asyncio has already collected.
+`_CLOCK_TOLERANCE_SECONDS` and `_started_after` are deleted.
 
-**A claim in the first version of this entry was wrong and is corrected here.**
-It said that `returncode` refusal is a *stronger* recycled-pid guard than that
-pair. On Windows the pid is indeed pinned — but by the open PROCESS handle
-(`subprocess.py:1575`), not by `returncode`. On POSIX there is a
-sub-millisecond window: `os.waitpid` frees the pid at
-`asyncio/unix_events.py:1443` while `returncode` is set later from a loop
-callback at `:1461`, and in that window a stored pair would have done better.
-What stands in it is the second witness — a recycled pid must be a
-Chromium-family process on OUR `--user-data-dir` to be killed — and sequential
-pid allocation wrapping the whole space is why that is not reachable. F-919
-§4.1 carries the source lines.
+**Two claims in the first version of this entry were wrong and are corrected
+here.** It said the `returncode` refusal is a *stronger* recycled-pid guard than
+a stored `(pid, create_time)` pair, and then that such a pair is not obtainable
+at all. Neither holds. On Windows the pid is pinned, but by the open PROCESS
+handle (`subprocess.py:1575`) rather than by `returncode`. On POSIX the guard is
+open for two loop iterations and open deterministically: `os.waitpid` frees the
+pid on the watcher thread (`asyncio/unix_events.py:1443`) while `returncode`
+lands two `call_soon_threadsafe` hops later, and `base_events._run_once` drains
+a fixed `ntodo` (`:2033-2034`) so a callback queued mid-step cannot run before
+the next iteration — in that band a stored pair would have done better. The pair
+is ruled out on WORTH, not on impossibility: it would differ only inside that
+band and only for a recycled pid already carrying our own `--user-data-dir`,
+which the second witness excludes. F-919 §4 and §4.1 carry the source lines, and
+§4 records that three absolute claims here have been refuted in sequence — which
+is why the finding is now written in magnitudes.
 
 **What it costs is stated rather than implied.** A Chrome that genuinely leaked
 but whose launch cannot be named is left RUNNING until the next backend start's

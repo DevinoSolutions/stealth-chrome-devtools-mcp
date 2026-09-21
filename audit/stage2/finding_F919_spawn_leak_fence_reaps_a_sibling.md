@@ -184,13 +184,26 @@ asyncio has not collected the child the OS cannot hand its pid to anybody else �
 is no window to compare across". **That is false on POSIX**, and the case it misses is one
 where the pair would have done better. §4.1 has it.
 
-The argument that does hold is that the pair is **not obtainable on this path at all**.
-The pid is not known until reap time: nodriver creates the process inside `uc.start` and
-hands nothing back when it fails, so there is no launch-time moment at which a
-`create_time` could be captured to compare against, and reading one at reap time is
-circular. The pair was never the alternative — `process_exit.browser_pid` was reused
-because it is the only witness this path has, not because it beats a witness this path
-could have had.
+A second version of this section then answered that the pair is **not obtainable** here.
+That is refuted too: `browser_connect._patient`'s wrapper on `HTTPApi.get` runs INSIDE a
+failing launch with `_process` already set, and on the first `/json/version` (nodriver
+`browser.py:416`, after the 0.25 s lead at `:413`) it already resolves that very `Browser`
+— so a launch-time stamp has somewhere to live. A pair IS obtainable.
+
+**So the argument is WORTH, which needs no absolute.** A stored pair would differ from the
+guard we have in ONE band: the two loop iterations of §4.1, and then only if a recycled pid
+had landed on a Chromium-family process carrying our own `--user-data-dir`, which the
+second witness already excludes. Against that, obtaining it costs a second responsibility
+inside a seam whose one job is "how long may a launch take", a blind spot for every failure
+that precedes the first `/json/version`, and a second recycled-pid rule beside
+`process_exit.browser_pid`'s. What survives from both withdrawn versions is the one claim
+that is not an absolute and not arguable: reading a `create_time` at REAP time is circular,
+because it tells you what the pid is now, not what it was.
+
+**Three absolute claims in this finding have now been refuted in sequence** — "stronger
+than the pair", "no ordering guarantee in the ready queue", and "not obtainable". Two were
+the author's and one was the reviewer's. An absolute invites exactly one counterexample and
+a magnitude argument does not, so the rest of this finding is written in magnitudes.
 
 ### 4.1 What the `returncode` refusal actually buys, per platform
 
@@ -200,18 +213,36 @@ Handle(hp)`; only the THREAD handle is closed, `:1577`), and Windows does not re
 while a handle to the process is open. The right conclusion was reached here for the wrong
 reason: the pid is pinned by that handle, whatever `returncode` says.
 
-**POSIX — a real sub-millisecond window.** `ThreadedChildWatcher._do_waitpid`
-(CPython 3.13.11, `asyncio/unix_events.py`):
+**POSIX — a band two loop iterations wide, and the guard is open in it
+DETERMINISTICALLY.** All line numbers below were read from CPython 3.13.11 in this
+worktree's interpreter. `ThreadedChildWatcher._do_waitpid` reaps on a thread:
 
 ```
-:1443   pid, status = os.waitpid(expected_pid, 0)               # the kernel frees the pid HERE
-:1461   loop.call_soon_threadsafe(callback, pid, returncode, …) # returncode is set LATER, on the loop
+unix_events.py:1443   pid, status = os.waitpid(expected_pid, 0)      # the kernel frees the pid HERE
+unix_events.py:1461   loop.call_soon_threadsafe(callback, …)         # hop 1, onto the loop
+unix_events.py:230    def _child_watcher_callback(self, pid, returncode, transp)
+unix_events.py:231        self.call_soon_threadsafe(transp._process_exited, returncode)   # hop 2
+base_subprocess.py:232  def _process_exited(self, returncode)
+base_subprocess.py:237      self._returncode = returncode           # what our guard finally reads
 ```
 
-Between those two the pid is reusable while `returncode` is still None. The reap runs as a
-coroutine on that same loop, so it and the queued `_process_exited` callback (`:231`) sit
-in the ready queue with no ordering guarantee between them. **In that window a stored
+(`callback` is `_child_watcher_callback`, registered at `unix_events.py:217-218`. The
+`PidfdChildWatcher` path has the same shape with one hop fewer: its `_do_wait` runs as a
+reader callback ON the loop, `:984`/`:986`, and reaps at `:990`.)
+
+"No ordering guarantee" — the first draft's phrasing — was wrong, and wrong in the
+comforting direction. There IS a guarantee and it runs against us:
+`base_events._run_once` takes `ntodo = len(self._ready)` and drains exactly that many
+(`:2033-2034`), so anything appended during a step runs no earlier than the NEXT iteration.
+And the reap has no suspension point in front of it: `_teardown_failed_spawn` reaches
+`reap_launched_browsers` synchronously on its `elif` branch (`browser_manager.py:583-586`;
+the method's only `await` before it, `:580`, is on the mutually exclusive
+`browser is not None` branch), and the reap itself is a plain function.
+
+So if the watcher's `waitpid` lands within two loop iterations of the failure, `returncode`
+is **provably** still None when the reap reads it — not "might be". **In that band a stored
 `(pid, create_time)` pair would have spared a recycled pid and this guard does not.**
+Outside it both hops have completed, `returncode` is set, and the reap correctly declines.
 
 **What stands in the window is the second witness — and the window is real.** For harm the
 pid freed at `:1443` would have to be recycled, inside that window, onto a Chromium-family
@@ -284,11 +315,38 @@ launch raised before `:412` — a missing executable, a `create_subprocess_exec`
 in all of those nothing was launched, so the cost is zero), the handle's `returncode` is
 already set (Chrome has exited — again nothing to kill), the pid carries `--type=`, or the
 launch was **delegated** (F-810), which leaves `Attempt.config` unstamped. Only the last
-of those can leave a real process behind, and `desktop_launch.launch_and_attach` already
-kills a Chrome it started but could not attach to, so no known path both leaks and is
-unnameable today. If one appears, the leak survives until the next backend start's orphan
-reap — which is the state F-860 found and fixed, reached here only for a process we cannot
-prove is ours. The alternative is killing on a guess, which is this finding.
+of those can leave a real process behind, and an earlier version of this paragraph waved it
+away with "`launch_and_attach` already kills a Chrome it started but could not attach to,
+so no known path both leaks and is unnameable today". **That was false, and this fence is a
+real regression against the old one in one case.**
+
+`launch_and_attach`'s kill is CONDITIONAL: `if not attached and delegated.pid is not None`
+(`desktop_launch.py:560-561`), and `delegated.pid` is stamped at exactly one place —
+`_run_task:466` — only once the pid file has been read AND the process confirmed live. That
+covers every failure after the pid is known, which is the common set: DevTools never opens
+(`:470`), `cdp_attach.attach` raises (`:550`), a cancellation mid-poll. It does NOT cover a
+Chrome that starts and whose pid never becomes readable inside `PORT_READY_TIMEOUT`: the
+loop then exits at `:470` with `delegated.pid` still None and the kill is skipped.
+
+**The old fence caught that case and this one does not.** `launch_started_at` was stamped
+before `_launch_browser` on the delegated path too, and a delegated Chrome starts seconds
+after it, so the profile-and-time scan included it. We are accepting the loss of that
+coverage, and the reason is the whole of §1: the only thing that ever caught this case was
+the guess, and the guess is what killed a user's logged-in browser. Reinstating it to cover
+a residual would reinstate the defect. Nothing cheaper closes it either — the pid was never
+learned by ANYONE, so handing `_Delegated` into `Attempt` adds nothing: whenever
+`delegated.pid` is set, `_kill_delegated` has already run.
+
+How reachable that residual is, in the finding's own vocabulary: **not demonstrated, not
+excluded.** It needs the launcher script to start Chrome and then fail to leave a readable
+pid file for the whole window; the common slow case is the opposite — the pid file lands
+fast and it is DevTools that lags, which stamps at `:466` and is covered. That the
+delegated launcher can fail to leave a readable pid file at all is an **F-810 reliability
+question and belongs in its own finding**, not this one.
+
+Where it does leak, the leak survives until the next backend start's orphan reap — which is
+the state F-860 found and fixed, reached here only for a process nobody can prove is ours.
+The alternative is killing on a guess, which is this finding.
 
 **A wrapper-process platform would under-reap.** The fence assumes the pid
 `create_subprocess_exec` returns IS the browser process. That holds for `chrome.exe` on
