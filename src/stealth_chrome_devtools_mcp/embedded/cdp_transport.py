@@ -1,9 +1,9 @@
-"""THE one home for "no single CDP reply may kill the connection".
+"""THE one home for "DELIVERING a CDP reply must not be able to kill the listener".
 
 F-883 B1 (with F-788 and F-794) and F-902. One sentence holds the module:
 **the listener task is the only thing that resolves every future and dispatches
-every event on a connection, so nothing that happens to ONE reply may be allowed
-to end it.** Two ways in were found, two years apart, and both land here:
+every event on a connection, so handing it a reply must not end it.** Two ways
+in were found, two years apart, and both land here:
 
 * F-883 — the reply's own AWAIT owned it, so cancelling the caller cancelled a
   future still registered in ``mapper`` and the late answer's ``set_result``
@@ -16,6 +16,31 @@ both are a monkeypatch of one nodriver class applied once per process before
 any tool body runs, and splitting them would put two answers to "patch nodriver
 at startup" one import apart. The three halves are named separately below and
 each says when to DELETE it.
+
+**The scope is DELIVERY, and the word is exact rather than modest.** What is
+covered is everything from the moment ``_listener`` has a ``Transaction`` in
+hand — ``tx(**message)`` and the ``await`` that receives it. TWO raises remain
+on that same result path, upstream of any Transaction, and they still end the
+listener (measured, F-902 review S1)::
+
+    message = json.loads(raw)                              # :440  <- unguarded
+    if "id" in message:
+        tx: Transaction = self.mapper.pop(message["id"])   # :443  <- unguarded
+        tx(**message)                                      # :444  guarded here
+
+They are named rather than fixed because **this seam cannot reach them**: both
+run before a ``Transaction`` exists, and there is no seam on ``Connection`` at
+all — its ``CantTouchThis`` metaclass raises
+``SettingClassVarNotAllowedException`` for any class-level assignment (the same
+fact that put half 1 on ``Transaction.__await__`` rather than on
+``Connection.send``). Guarding them would mean replacing ``_listener`` itself,
+i.e. a double of the library's own dispatch loop in the hot path of every
+message — the thing every half here is written to avoid. Neither is reachable
+from a real Chrome: ``json.loads`` fails only on a frame the websocket layer
+delivered malformed, and ``mapper.pop`` fails only on a reply for an id we
+never sent or already popped. An earlier version of this docstring claimed "no
+single CDP reply may kill the connection", which was wider than the code; the
+headline is the narrower true statement.
 
 --------------------------------------------------------------------------
 Half 1 (F-883 B1) — awaiting a reply must never be able to cancel it
@@ -170,6 +195,24 @@ out. ``CdpReplyError`` is deliberately NOT a ``ToolError``: convention 2's class
 is what ``expected_events`` DROPS from Sentry as the product working as designed,
 and a reply we cannot read is the opposite of that — it must ship.
 
+**The message is not the only way a payload can travel, and the other two are
+pinned rather than assumed** (F-902 review S2). The whole reply is a local of
+THIS function at the moment the error is built, so:
+
+* the error is STORED with ``set_exception``, never raised here — so this frame
+  contributes no traceback entry at all, and there is no frame for a serialiser
+  to read locals off. MEASURED: the only frame in a delivered
+  ``CdpReplyError``'s traceback is the awaiting caller's. That is a property of
+  construct-and-store, and a refactor to ``raise`` here would silently end it,
+  which is why ``tests/test_cdp_transport.py`` pins the frame's ABSENCE;
+* ``response`` is deleted before the error is constructed, so the local is not
+  merely unreachable-in-practice but gone;
+* and ``observability.py``'s ``sentry_sdk.init`` sets
+  ``include_local_variables=False``. That belongs to another module, so this
+  module's PII argument DEPENDS on a setting it does not own — pinned here too,
+  so flipping that flag fails a test in this file rather than quietly widening
+  what a parse failure can ship.
+
 Delete half 2 on a nodriver release whose ``_listener`` guards its result path
 the way it already guards its event path.
 
@@ -269,6 +312,17 @@ def _missing_field(exc: BaseException) -> str | None:
     the generated parser actually raised passes it. Anything else — a
     ``ValueError`` from an enum, a ``TypeError`` — answers ``None`` rather than
     risking a message built out of a VALUE.
+
+    **The shape test proves "identifier", and the step from there to "protocol
+    field" is a PREMISE about nodriver, not something the regex establishes**
+    (F-902 review S3): a cookie NAME is frequently identifier-shaped too, so if
+    a generated parser ever indexed a payload dict with a page-controlled key,
+    that key could be echoed. The premise is that every ``KeyError`` a generated
+    ``from_json`` can raise names a LITERAL protocol field. MEASURED true of
+    nodriver 0.47 — 810 generated ``from_json`` methods, **zero** subscripts
+    with a non-literal key — and pinned by an AST scan in
+    ``tests/test_cdp_transport.py``, so a release that introduces a computed
+    lookup fails there instead of turning this into a leak.
     """
     seen: set[int] = set()
     cursor: BaseException | None = exc
@@ -305,6 +359,7 @@ def _guard_result(original: Callable) -> Callable:
         # Outside the ``except``: an exception CONSTRUCTED while another is
         # being handled would be raised later with that one as ``__context__``,
         # and the original's text is the payload this must never carry out.
+        del response  # the reply is not a live local while the error is built
         if self.done():
             # Cancelled or already delivered: nobody is left to tell, and
             # ``set_exception`` would raise the ``InvalidStateError`` that ends

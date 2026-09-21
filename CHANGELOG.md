@@ -97,8 +97,9 @@ parse error rather than a cancellation, so `cdp_transport`'s shield did nothing
 for it.
 
 `cdp_transport`'s sentence widens from "awaiting a CDP reply must never be able
-to cancel it" to **"no single CDP reply may kill the connection"**, and gains
-two halves beside the existing shield: `Transaction.__call__` now completes the
+to cancel it" to **"DELIVERING a CDP reply must not be able to kill the
+listener"**, and gains two halves beside the existing shield:
+`Transaction.__call__` now completes the
 one unreadable transaction with an error instead of propagating into the
 listener — so that command fails, every other pending call still resolves, and
 the connection lives — and `Cookie.from_json` supplies retired fields from a
@@ -117,10 +118,15 @@ exception type, the reply's field count, and the missing protocol field when
 that is provably all the failure named. Pinned, hermetically and against a real
 browser.
 
-One named cost: `Cookie.to_json` still writes the field, so a cookie read on
+Two named limits. `Cookie.to_json` still writes the field, so a cookie read on
 Chrome 153 reports `sameParty: false` — a value Chrome never sent. It is
 synthesised, `False` is what it meant for every cookie outside a First-Party
-Set, and the feature no longer exists.
+Set, and the feature no longer exists. And "delivering" is the exact scope: two
+raises upstream of any `Transaction` — `json.loads` and the `mapper.pop` for an
+unknown id — still end the listener, are unreachable from this seam (nodriver's
+`Connection` metaclass refuses every class-level assignment) and are unreachable
+from a real Chrome. Both are named in the module docstring and the finding
+rather than covered by a wider claim.
 
 ## 2.1.11
 

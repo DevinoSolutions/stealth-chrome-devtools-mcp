@@ -24,12 +24,16 @@ frames). The last node here is the sensitivity control — without the patch, th
 same cancellation kills the listener's own code path.
 """
 
+import ast
 import asyncio
+import traceback
+from pathlib import Path
 
 import pytest
 from nodriver import cdp
 from nodriver.core.connection import EventTransaction, Transaction
 
+from stealth_chrome_devtools_mcp import observability
 from stealth_chrome_devtools_mcp.embedded import cdp_transport
 
 pytestmark = pytest.mark.asyncio
@@ -74,13 +78,26 @@ async def test_the_patch_is_on_the_class_every_send_resolves():
 
 async def test_install_is_idempotent_because_server_py_is_executed_three_times():
     """``embedded/server.py`` is executed three times under runpy. A second wrap
-    would nest a shield in a shield — harmless today, and exactly the kind of
-    silent accumulation plan_SERVERSPLIT §7 R4 found as 282 = 3 x 94."""
+    would nest a shield in a shield, a guard in a guard (double reporting) or a
+    ``from_json`` wrapper in a wrapper — harmless today, and exactly the kind of
+    silent accumulation plan_SERVERSPLIT §7 R4 found as 282 = 3 x 94.
+
+    **All THREE halves, because the marker check is per-half** (F-902 review
+    S4): asserting only ``__await__`` would pass for a version that re-wrapped
+    the other two on every call. The cookie one is compared through
+    ``__func__``, because attribute access on a classmethod builds a NEW bound
+    method object each time and ``is`` on those is always False.
+    """
     cdp_transport.install()
-    once = Transaction.__await__
+    once_await = Transaction.__await__
+    once_call = Transaction.__call__
+    once_from_json = cdp.network.Cookie.from_json.__func__
     cdp_transport.install()
     cdp_transport.install()
-    assert Transaction.__await__ is once
+    assert Transaction.__await__ is once_await
+    assert Transaction.__call__ is once_call
+    assert cdp.network.Cookie.from_json.__func__ is once_from_json
+    assert cdp_transport.installed()
 
 
 async def test_a_cancelled_caller_leaves_the_reply_deliverable():
@@ -407,6 +424,96 @@ async def test_no_cookie_name_or_value_reaches_the_report(caplog):
     # And nothing smuggles it out through a chained exception either.
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+
+
+async def test_the_guarded_frame_is_absent_from_the_delivered_traceback():
+    """F-902 review S2, first half. The whole reply is a local named
+    ``response`` in the guarded ``__call__``, so what keeps it out of a
+    serialised event is that the error is STORED and never RAISED there — a
+    stored exception contributes no traceback frame, so there is no frame for a
+    serialiser to read locals off.
+
+    MEASURED: the only frame is the awaiting caller's. It is pinned because it
+    is a property of construct-and-store that a refactor to ``raise`` here would
+    silently end, and because the module's PII paragraph now claims it.
+    """
+    cdp_transport.install()
+    mapper: dict[int, Transaction] = {}
+    unreadable = {k: v for k, v in CHROME_153_COOKIE.items() if k != "sourcePort"}
+    tx = _cookie_transaction()
+    mapper[tx.id] = tx
+
+    _listener_delivers(mapper, {"id": tx.id, "result": {"cookies": [unreadable]}})
+    with pytest.raises(cdp_transport.CdpReplyError) as caught:
+        await tx
+
+    frames = traceback.extract_tb(caught.value.__traceback__)
+    assert frames, "no traceback at all would make this node vacuous"
+    assert "__call__" not in [f.name for f in frames], (
+        "the guarded frame is in the traceback — the raw reply is a local there"
+    )
+    # Compared against the module's OWN path, never a filename suffix:
+    # "test_cdp_transport.py".endswith("cdp_transport.py") is True, which made
+    # the first version of this node fail on its own frame.
+    guarded = Path(cdp_transport.__file__).resolve()
+    offenders = [f for f in frames if Path(f.filename).resolve() == guarded]
+    assert not offenders, (
+        "no frame of this module may appear in a delivered reply's traceback — "
+        f"the raw reply is a local there: {[(f.lineno, f.name) for f in offenders]}"
+    )
+
+
+def test_the_pii_argument_depends_on_sentry_not_capturing_locals():
+    """F-902 review S2, second half.
+
+    ``cdp_transport``'s shape-only rule is defence in depth, and the outermost
+    layer belongs to ANOTHER module: if ``sentry_sdk.init`` ever captured frame
+    locals, a payload sitting in a local would travel regardless of how careful
+    the message is. Nothing linked the two homes, so this node is the link —
+    flipping that flag fails a test in the file that depends on it, not only in
+    ``tests/test_observability.py`` where it reads as a preference.
+    """
+    source = Path(observability.__file__).read_text(encoding="utf-8").replace(" ", "")
+    assert "include_local_variables=False" in source, (
+        "cdp_transport's PII argument assumes Sentry does not serialise frame "
+        "locals; see half 2's docstring"
+    )
+
+
+def test_every_generated_parser_indexes_with_a_literal_field_name():
+    """F-902 review S3. ``_missing_field``'s regex proves IDENTIFIER-shaped, and
+    a cookie name is frequently exactly that shape — so echoing the key is safe
+    only under a premise about nodriver: every ``KeyError`` a generated
+    ``from_json`` can raise names a LITERAL protocol field, never a
+    page-controlled one.
+
+    MEASURED here rather than asserted in prose, so a nodriver release that
+    introduces a computed lookup fails this node instead of quietly turning a
+    diagnostic into a leak.
+    """
+    root = Path(cdp.__file__).parent
+    offenders: list[str] = []
+    parsers = 0
+
+    for path in sorted(root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.FunctionDef) and node.name == "from_json"):
+                continue
+            parsers += 1
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Subscript) and isinstance(sub.value, ast.Name):
+                    key = sub.slice
+                    if not (
+                        isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    ):
+                        offenders.append(f"{path.name}:{sub.lineno}")
+
+    assert parsers > 100, f"only {parsers} parsers found — the scan missed them"
+    assert not offenders, (
+        "a generated from_json indexes with a NON-literal key, so a KeyError "
+        f"could name page data: {offenders[:10]}"
+    )
 
 
 async def test_a_reply_for_a_cancelled_transaction_is_dropped_not_re_raised():
