@@ -28,12 +28,18 @@ input and keeps everything else:
  text withheld: 283 chars; json_invalid at <root>>
 ```
 
-The pydantic error type, the model, the error count and every field path
-survive — they are what an operator acts on, and they are read from pydantic's
-own `errors(include_input=False, …)` accessor rather than cut out of its
-rendered sentence. The traceback is handed through unchanged, so every frame
-(and Sentry's grouping) is exactly as before, and the live exception is never
-touched: the SDK still sends the object it caught downstream.
+The pydantic error type, the model, the error count and up to eight distinct
+field paths survive — with a count of how many more there were, because the cap
+is a bound and a 4-arm union overflows it by one. They are what an operator acts
+on, and they are read from pydantic's own `errors(include_input=False, …)`
+accessor rather than cut out of its rendered sentence. The traceback is handed
+through unchanged, so every frame is exactly as before and Sentry's default
+stacktrace-first grouping does not move; the exception's type and value do
+change, which is named in the finding. The live exception is never touched: the
+SDK still sends the object it caught downstream. The chain is walked through
+`__cause__`, `__context__` **and a group's own `exceptions`**, so a quoting
+error inside an `ExceptionGroup` — which carries none of its leaves in its own
+text, while Sentry serialises every one of them — is restated too.
 
 **How much was actually leaking, measured.** pydantic caps each echo at 50
 characters of the input — the first 24 and the last 23 — so a whole JSON-RPC
@@ -41,14 +47,15 @@ frame's head is always the envelope. What escaped was the frame's **last 23
 characters**, which is the end of the tool answer; **any value shorter than 50
 characters, whole**, which is the sharp edge because a cookie value or a
 session id frequently is; and one echo **per union arm**, measured at 9 errors
-and 216 echoed characters for a single 273-byte frame. The finding's original
+and **276** echoed characters for a single 273-byte frame. The finding's original
 claim that "a cookie jar's first entries and its last are both rendered" was
 wrong and is corrected in place.
 
 Three things were deliberately not done, each for a measured reason. pydantic's
 own `hide_input_in_errors` works, and is rejected because it changes what the
-SDK sends downstream, covers only the models we enumerate, and costs a schema
-rebuild in the proxy's cold start. The rule is gated on the SITE as well as the
+SDK sends downstream and covers only the models we enumerate — not on cost, a
+third ground that was offered and is withdrawn, because the rebuild measures
+0.298 ms. The rule is gated on the SITE as well as the
 exception's structure, because `expected_events` recognises that same exception
 type on FastMCP's own records and an ungated rule would have re-opened the
 `caller-input` noise class. And no second record factory or `before_send` hook

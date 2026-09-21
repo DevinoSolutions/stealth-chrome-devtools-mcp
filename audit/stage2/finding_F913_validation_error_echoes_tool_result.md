@@ -231,8 +231,14 @@ weight:
 2. **It covers only the models we enumerate** — `JSONRPCMessage` today,
    `InitializeResult` at `:191`, and every one a future SDK adds. A rule keyed
    on the exception covers them all and any other library's pydantic model.
-3. **It costs a schema rebuild in the stdio proxy's cold start**, the process
-   whose whole cost argument is that it imports as little as possible.
+A third ground was offered — that it costs a schema rebuild in the stdio proxy's
+cold start, the process whose whole cost argument is that it imports as little as
+possible — and it is **withdrawn**, because it was never measured and does not
+survive being measured. `JSONRPCMessage.model_rebuild(force=True)` costs
+**0.298 ms** median in a fresh interpreter (n=5, min 0.270, max 0.358; 0.149 ms
+median warm, n=20). That is noise against a cold start, and a ground that cannot
+carry its own number does not belong beside two structural ones. It is recorded
+here rather than deleted so nobody re-offers it.
 
 ### 5.5 The fix
 
@@ -288,8 +294,9 @@ pins hold that door (`TestExpectedEventsIsUnaffected`).
 ### What survives, and what does not
 
 The restatement keeps the exception's TYPE and defining MODULE, the MODEL being
-validated, the error COUNT, the length of the rendering it replaced, and each
-error's `type` slug and `loc` path:
+validated, the error COUNT, the length of the rendering it replaced, and **up to
+`MAX_RESTATED_ERRORS` distinct `type`/`loc` pairs, with a count of how many more
+there were**:
 
 ```
 <pydantic_core._pydantic_core.ValidationError for JSONRPCMessage: 1 error(s),
@@ -304,10 +311,28 @@ F-907's measured safe half (`value=` is the secret, `name=` is the vocabulary);
 it is bounded anyway because an `extra_forbidden` error's last segment is a key
 the input supplied.
 
+**It is "up to", and the union shape this finding is about OVERFLOWS.** This
+section said "each error's `type` slug and `loc` path" until the F-913 review,
+full stop, and that sentence was false for the very fixture the finding is built
+on. Measured on `LEAF_FRAME`, the 4-arm `JSONRPCMessage` union: 9 errors and
+**9 DISTINCT** `type`/`loc` pairs — the dedup collapses none of them — against a
+cap of 8, so the shipped restatement really does end `…+1` and one field path is
+dropped.
+
+The cap is deliberately **not** raised to fit that fixture. A bound raised to
+make a sentence true is raised again for the next fixture, and this tree already
+has the precedent for the other answer: `control_state.MAX_OPTIONS` keeps its cap
+and gives an `index=` beyond it its OWN message rather than a silence.
+`RESTATED_OVERFLOW` is that message here — the loss is visible in the line
+itself, to the reader who needs it — so what was wrong was the sentence, and the
+sentence is what changed.
+
 The **traceback is handed through unchanged**, so every frame survives.
 Measured: the serialized Sentry frame list and the formatted traceback's file
 lines are byte-identical before and after
-(`test_the_traceback_frames_are_unchanged`).
+(`test_the_traceback_frames_are_unchanged`). The frame list is the whole of what
+that measurement covers — the exception's type and value change by construction,
+which is residual 5.
 
 `msg` and `ctx` are dropped, and that cost is §6.
 
@@ -400,12 +425,40 @@ mechanism rather than a missed leg — see residual 2.
    mean a `RuntimeError("could not reach the backend")` wrapping a
    `ValidationError` loses its own sentence. At all three measured sites the
    quoting error IS the outermost exception, so the cost is theoretical today.
-5. **The Sentry issue's exception TYPE changes** from `ValidationError` to
-   `WithheldInputError`. Grouping is essentially unaffected — Sentry groups on
-   the stacktrace, which is byte-identical (measured) — and the pydantic type
-   is the first thing in the new message. Named because a maintainer searching
-   Sentry for `ValidationError` will not find these, and the events were
-   previously titled that way.
+
+   **The walk covers `ExceptionGroup` as of the F-913 review, and that was a
+   real hole rather than a completeness flourish.** A group's own `str()`
+   carries NONE of its leaves (measured), so the cause/context walk answered
+   "nothing quotes its input" and the rule did not fire — while
+   `sentry_sdk.utils.exceptions_from_error_tuple` branches on
+   `isinstance(exc_value, BaseExceptionGroup)` and serialises every leaf as its
+   own `exception.values` entry carrying the whole `input_value=` echo
+   (measured, and pinned as
+   `test_a_group_that_carries_a_quoting_leaf_is_restated_too`). No site in
+   `PAYLOAD_EXCEPTION_SITES` reaches it today — `:240` catches the
+   `ValidationError` itself — so it ships as insurance on `element_box`'s
+   precedent, where F-907's three sites were measured unreachable and the
+   closure shipped anyway; the SDK does run under anyio task groups.
+
+   **`observability._exception_chain` has the identical limitation and is
+   deliberately NOT changed.** Until this review, the two walks agreeing was
+   `_chain`'s stated reason for being a re-spelling rather than an import; they
+   now differ, in one direction, and `_chain`'s docstring says so. That function
+   decides which Sentry events `expected_events.classify` DROPS, so widening it
+   changes a drop rule rather than a redaction rule — a different question with
+   a different blast radius, and not an implied follow-up of this change. It is
+   named here so the divergence is a decision on the record and not a drift.
+5. **The Sentry issue's exception TYPE and VALUE both change**, from
+   `ValidationError` to `WithheldInputError`. What was MEASURED is the frame
+   list, which is byte-identical before and after; Sentry's default grouping is
+   stacktrace-first, so on that strategy the fingerprint does not move. That is
+   as far as the measurement reaches, and the earlier "grouping is essentially
+   unaffected" overstated it: a project configured with a grouping strategy or
+   a fingerprint rule that reads the exception type or message WILL see these
+   events group differently, and nothing here measured that case. The pydantic
+   type is the first thing in the new message, so the events remain findable by
+   text. Named because a maintainer searching Sentry for `ValidationError` will
+   not find these by type, and they were previously titled that way.
 6. **F-906's factory residual is unchanged**: a caller who installs their own
    record factory *after* ours replaces it.
 7. **The rule costs one `getattr` per record** — `exception_site_of`'s filename

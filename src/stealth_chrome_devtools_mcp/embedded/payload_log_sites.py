@@ -414,19 +414,25 @@ def restated_exc_info(
     its text, because its text is the diagnostic and it quotes nobody — F-907's
     exception clause, which still stands for every exception but this one shape.
 
-    **The TRACEBACK is handed through unchanged**, so every frame survives and
-    Sentry's grouping is unaffected (measured: the serialized frame list is
-    byte-identical before and after). What changes is only what the exception
-    RENDERS AS.
+    **The TRACEBACK is handed through unchanged**, so every frame survives:
+    measured, the serialized Sentry FRAME LIST is byte-identical before and
+    after. That is the whole of what was measured, and it is stated that way
+    deliberately — the exception's TYPE and VALUE both change here by
+    construction, so any Sentry grouping strategy keyed on those rather than on
+    the stack sees a different fingerprint, and §6.1 residual 5 is where that
+    cost is named. What changes is only what the exception RENDERS AS.
 
-    The chain is walked rather than only its head. At the three measured sites
-    the quoting error IS the outermost exception, but a wrapper that re-raised
-    one would put it a link down, and a rule that only read ``exc_info[1]``
-    would answer "nothing to do" while every formatting sink rendered the
-    ``__cause__``. When any link quotes its input the WHOLE chain is replaced,
-    and the non-quoting links contribute their TYPE only: a wrapper's own text
-    commonly interpolates the exception it wrapped (``f"...: {e}"``), and a
-    pre-rendered string has no half we have measured to be safe (F-911).
+    The chain is WALKED rather than only its head, and :func:`_chain` walks
+    three edges: ``__cause__``, ``__context__``, and a group's own
+    ``exceptions``. At the three measured sites the quoting error IS the
+    outermost exception, but a wrapper that re-raised one would put it a link
+    down and an anyio task group would put it a leaf across, and a rule reading
+    only ``exc_info[1]`` would answer "nothing to do" while every formatting
+    sink — and Sentry's own group-aware serialiser — rendered it. When any link
+    quotes its input the WHOLE chain is replaced, and the non-quoting links
+    contribute their TYPE only: a wrapper's own text commonly interpolates the
+    exception it wrapped (``f"...: {e}"``), and a pre-rendered string has no
+    half we have measured to be safe (F-911).
     """
     if exception_site_of(record) is None:
         return None
@@ -443,24 +449,67 @@ def restated_exc_info(
 
 
 def _chain(exc: BaseException) -> list[BaseException]:
-    """``exc`` and everything it was raised from, outermost first.
+    """``exc``, everything it was raised from, and everything it GROUPS.
 
-    Bounded and cycle-safe for :data:`_MAX_CHAIN`'s reason. Mirrors
-    ``observability._exception_chain``'s walk (``__cause__``, else
-    ``__context__`` unless ``raise ... from None`` suppressed it) so the two
-    modules judge the same set; it is re-spelled rather than imported because
-    that module imports ``settings`` and this one may import nothing.
+    Outermost first, breadth-first, bounded and cycle-safe for
+    :data:`_MAX_CHAIN`'s reason. For a plain ``__cause__``/``__context__``
+    spine the membership AND the order are exactly what the previous walk
+    produced — the queue holds one element at a time — so the group arm adds a
+    case rather than changing one.
+
+    **The group arm is why this no longer merely MIRRORS**
+    ``observability._exception_chain``. That function follows ``__cause__``,
+    else ``__context__`` unless ``raise ... from None`` suppressed it, and
+    stops; it has the identical blind spot this arm closes, and the two walks
+    agreeing used to be the argument for re-spelling one here rather than
+    importing it (that module imports ``settings`` and this one may import
+    nothing, which is still why it is re-spelled). They now DIFFER,
+    deliberately and in one direction: this one is strictly wider. Widening
+    the other is NOT an implied follow-up of this change — it decides which
+    Sentry events ``expected_events.classify`` DROPS, a different question with
+    a different blast radius — so it is named here and left alone.
+
+    Why the arm exists when no site in :data:`PAYLOAD_EXCEPTION_SITES` reaches
+    it today: an ``ExceptionGroup``'s own ``str()`` carries NONE of its leaves
+    (measured), so a head-only walk answers "nothing quotes its input" and this
+    rule does not fire — while ``sentry_sdk.utils.exceptions_from_error_tuple``
+    branches on ``isinstance(exc_value, BaseExceptionGroup)`` and serialises
+    every leaf as its own ``exception.values`` entry, carrying its whole
+    ``input_value=`` echo (measured). A blind spot named and left open in a
+    rule whose entire job is that no payload escapes is the shape F-908 was;
+    ``element_box`` is the precedent for closing one over sites measured
+    unreachable, and the SDK does run under anyio task groups.
+
+    ``isinstance(BaseExceptionGroup)`` and not ``getattr(exc, "exceptions",
+    ())``, which reads as the cheaper spelling and is not: a duck-typed read
+    admits any object whose ``exceptions`` attribute is not a tuple of
+    exceptions, and iterating one raises ``TypeError`` inside
+    ``Logger.makeRecord`` — the failure :func:`_detail`'s total ``except``
+    exists for, in the one function in this module that deliberately has none.
+    It is also the one place an ``isinstance`` is right here:
+    :func:`_quotes_input` avoids one because matching pydantic by CLASS would
+    cost the stdio proxy an ``import pydantic``, while ``BaseExceptionGroup``
+    is a builtin costing nothing and the thing asked about genuinely IS a class
+    (``expected_events._is_ours``' reasoning).
     """
     chain: list[BaseException] = []
     seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen and len(chain) < _MAX_CHAIN:
+    pending: list[BaseException] = [exc]
+    cursor = 0
+    while cursor < len(pending) and len(chain) < _MAX_CHAIN:
+        current = pending[cursor]
+        cursor += 1
+        if id(current) in seen:
+            continue
         seen.add(id(current))
         chain.append(current)
         following = current.__cause__
         if following is None and not current.__suppress_context__:
             following = current.__context__
-        current = following
+        if following is not None:
+            pending.append(following)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
     return chain
 
 

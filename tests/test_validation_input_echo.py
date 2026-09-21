@@ -25,8 +25,12 @@ answer to a ``tools/call``, so what ``input_value=`` quotes is a tool RESULT.
 **How much it quotes was measured rather than taken from the finding, and the
 finding's sentence was wrong.** F-913 §1 said the middle truncation "loses
 neither end — a cookie jar's first entries and its last are both rendered".
-pydantic caps EACH echo at a fixed **50 characters of the input**: the first
-24 and the last 23, joined by ``...`` (truncation begins at 49). So for a
+pydantic caps each echo by RENDERING length: over 50 characters it becomes the
+first 25, ``...`` and the last 24, i.e. **52 characters of the rendering** for
+every input type. For a ``str`` two of those are the repr's own quotes, so what
+survives is **50 characters of the input** — the first 24 and the last 23, with
+truncation beginning at 49 (all measured; see :data:`ECHO_RENDERED_CHARS`). So
+for a
 whole JSON-RPC frame the head is always the envelope ``{"jsonrpc": "2.0",
 "id":`` — never the jar's first entries — and what actually leaks is:
 
@@ -115,6 +119,30 @@ TAIL_FRAME = json.dumps(
 LEAF_FRAME = json.dumps(
     {"jsonrpc": "2.0", "id": {"tok": LEAF_MARK}, "result": {"cookies": "y" * 200}}
 )
+
+#: pydantic 2.11.7's middle truncation, MEASURED rather than taken from the
+#: finding: when the RENDERING of an input exceeds 50 characters it becomes the
+#: first 25 characters, ``...``, and the last 24 — :data:`ECHO_RENDERED_CHARS`
+#: in all, and that is the rule for every input type, because it is applied to
+#: the rendering. A ``dict`` input renders as its ``repr`` and keeps 25 + 24 of
+#: it; a ``str`` input's rendering carries two quote characters, so a
+#: whole-frame echo keeps :data:`ECHO_INPUT_CHARS` characters of the INPUT.
+#:
+#: They are NUMBERS and not the presence of an ellipsis on purpose, and the
+#: direction of the old assertion's blindness was MEASURED rather than assumed:
+#: synthesising the rendering each cap would have produced, the shipped
+#: ``"..." in echoed[0]`` plus its envelope-head check PASSES for every cap at
+#: or above today's 52, up to the fixture's whole 314 bytes, and fails only for
+#: caps SHORTER than the head it looks for. It was blind in exactly the
+#: direction that increases the leak — a release moving pydantic's cap to 200
+#: would have quadrupled what escapes and left the node green. These numbers
+#: are what makes the module docstring's "50 characters of the input" a claim
+#: this file can fail on.
+ECHO_ELLIPSIS = "..."
+ECHO_RENDERED_CHARS = 52
+ECHO_INPUT_HEAD_CHARS = 24
+ECHO_INPUT_TAIL_CHARS = 23
+ECHO_INPUT_CHARS = ECHO_INPUT_HEAD_CHARS + len(ECHO_ELLIPSIS) + ECHO_INPUT_TAIL_CHARS
 
 
 def _sdk_source() -> tuple[str, ast.Module]:
@@ -428,26 +456,70 @@ class TestTheExceptionDoorIsReal:
             JSONRPCMessage.model_validate_json(TAIL_FRAME)
         assert TAIL_MARK in str(caught.value)
 
-    def test_the_echo_is_capped_at_fifty_characters_of_the_input(self):
-        """The finding's §1 sentence, corrected by measurement.
+    @staticmethod
+    def _echoed(frame: str) -> list[str]:
+        """Every ``input_value=`` rendering in the error, as pydantic wrote it.
 
-        F-913 said the truncation "loses neither end — a cookie jar's first
-        entries and its last are both rendered". It does not: the cap is a
-        fixed 50 characters (24 + 23 + ``...``), so a whole-frame echo's head
-        is always the JSON-RPC envelope. The leak is the frame's TAIL and any
-        value short enough to escape the cap, and this pin is what keeps that
-        claim honest if pydantic ever changes the number.
+        Cut at ``, input_type=``, pydantic's own next field, so the token
+        measured is the rendering and nothing around it. A LENGTH assertion is
+        only worth making against exactly those bytes — measured against the
+        whole line it would be an assertion about the field names either side.
         """
         from mcp.types import JSONRPCMessage
 
         with pytest.raises(Exception) as caught:  # noqa: PT011  PERMANENT(F-913 - the exception TYPE is the subject)
-            JSONRPCMessage.model_validate_json(TAIL_FRAME)
-        echoed = [
-            line for line in str(caught.value).splitlines() if "input_value=" in line
+            JSONRPCMessage.model_validate_json(frame)
+        return [
+            line.split("input_value=", 1)[1].split(", input_type=", 1)[0]
+            for line in str(caught.value).splitlines()
+            if "input_value=" in line
         ]
+
+    def test_the_echo_is_capped_at_the_measured_number_of_characters(self):
+        """The finding's §1 sentence, corrected by measurement — and MEASURED.
+
+        F-913 said the truncation "loses neither end — a cookie jar's first
+        entries and its last are both rendered". It does not: the rendering is
+        cut to :data:`ECHO_RENDERED_CHARS`, so a whole-frame echo's head is
+        always the JSON-RPC envelope. The leak is the frame's TAIL and any
+        value short enough to escape the cap.
+
+        **This asserts the LENGTH, and that is the whole point of the node.**
+        Measured against synthesised renderings at seven caps, the assertion it
+        replaces — ``"..." in echoed[0]`` with the envelope-head check — passes
+        at 52, 80, 100, 200 and 314 and fails only at 20 and 40, i.e. it was
+        blind to every cap that leaks MORE and could only ever have caught one
+        that leaked less. A release moving pydantic's cap to 200 would have
+        quadrupled what escapes and left the node green.
+
+        Both numbers are asserted because the docstring makes both claims — the
+        RENDERING is 52 characters for every input type, and for a ``str`` two
+        of those are the repr's own quotes, so 50 characters of the INPUT
+        survive, split 24 / 23 around the ellipsis.
+        """
+        echoed = self._echoed(TAIL_FRAME)
         assert echoed, "pydantic stopped echoing its input; F-913 may be moot"
-        assert "..." in echoed[0], "the echo is no longer truncated at all"
-        assert '{"jsonrpc": "2.0", "id":' in echoed[0], (
+        rendered = echoed[0]
+        assert len(rendered) == ECHO_RENDERED_CHARS, (
+            f"the cap moved: {len(rendered)} characters rendered, expected "
+            f"{ECHO_RENDERED_CHARS}. Re-measure before editing this number — "
+            f"what leaks moved with it. Got {rendered!r}"
+        )
+        assert rendered[:1] == "'" and rendered[-1:] == "'", (
+            f"a whole-frame echo is a quoted STRING rendering; got {rendered!r}"
+        )
+        inner = rendered[1:-1]
+        assert len(inner) == ECHO_INPUT_CHARS, (
+            f"{len(inner)} characters of the INPUT survive, "
+            f"not {ECHO_INPUT_CHARS}: {inner!r}"
+        )
+        head, ellipsis, tail = inner.partition(ECHO_ELLIPSIS)
+        assert ellipsis == ECHO_ELLIPSIS, f"no middle truncation at all: {inner!r}"
+        assert (len(head), len(tail)) == (
+            ECHO_INPUT_HEAD_CHARS,
+            ECHO_INPUT_TAIL_CHARS,
+        ), f"the split moved: head={len(head)} tail={len(tail)} in {inner!r}"
+        assert head == '{"jsonrpc": "2.0", "id":', (
             "the head of a whole-frame echo is the envelope, not the payload"
         )
 
@@ -737,6 +809,60 @@ class TestTheKeyIsTheStructureAndNotTheText:
         assert LEAF_MARK not in restated, restated
         assert "RuntimeError" in restated, "the wrapper's own TYPE was lost"
         assert "ValidationError" in restated, "the quoting cause was not restated"
+
+    def test_a_group_that_carries_a_quoting_leaf_is_restated_too(self):
+        """The walk covers ``ExceptionGroup``, and the head alone is not enough.
+
+        An ``ExceptionGroup``'s own ``str()`` carries NONE of its leaves
+        (measured: the marker is absent from it), so a chain walk that follows
+        only ``__cause__``/``__context__`` answers "nothing quotes its input"
+        and the rule does not fire — while every sink that formats the
+        exception renders each leaf IN FULL. Both halves are measured here
+        rather than argued, because the first makes the second surprising.
+
+        Sentry is the sink that matters and it is asked directly:
+        ``exceptions_from_error_tuple`` — the SDK's own serialiser, the one
+        ``event_from_exception`` calls — branches on ``isinstance(exc_value,
+        BaseExceptionGroup)`` and walks ``.exceptions``, so the leaf becomes
+        its own ``exception.values`` entry carrying its whole ``input_value=``
+        echo. That is F-913's harm arriving through a door the head-only walk
+        left open.
+
+        Not reachable from the three sites TODAY — ``:240``'s ``logger
+        .exception`` catches the ``ValidationError`` itself — so this is
+        insurance, on ``element_box``'s precedent, where F-907's three sites
+        were measured unreachable and the fix shipped anyway. The SDK runs
+        under anyio task groups, and a rule whose blind spot is named but left
+        open is the shape F-908 was.
+        """
+        import traceback
+
+        from sentry_sdk.utils import exceptions_from_error_tuple
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            logging_setup.configure_logging("proxy")
+        import mcp.client.streamable_http as sdk
+
+        leaf = self._validation_error(LEAF_MARK)
+        group = ExceptionGroup("anyio task group", [RuntimeError("sibling"), leaf])
+        assert LEAF_MARK not in str(group), (
+            "the group began carrying its leaves in its own str(); this node's "
+            "premise has changed and the head-only walk would now suffice"
+        )
+        assert LEAF_MARK in "".join(traceback.format_exception(group)), (
+            "a formatting sink no longer renders the leaves; re-measure"
+        )
+        before = exceptions_from_error_tuple((type(group), group, group.__traceback__))
+        assert any(LEAF_MARK in (v.get("value") or "") for v in before), (
+            "Sentry stopped serialising a group's leaves; the premise moved"
+        )
+
+        record = self._record_from(sdk.__file__, group)
+        after = exceptions_from_error_tuple(record.exc_info)
+        rendered = "\n".join((v.get("value") or "") for v in after)
+        assert LEAF_MARK not in rendered, rendered
+        assert "ValidationError" in rendered, "the quoting leaf was not restated at all"
+        assert "ExceptionGroup" in rendered, "the group's own TYPE was lost"
 
     def test_a_reworded_sdk_message_is_still_covered(self):
         """Keyed on the SITE and the EXCEPTION's structure, never on wording —
