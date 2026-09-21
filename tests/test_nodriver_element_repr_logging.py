@@ -56,6 +56,7 @@ from nodriver.core.connection import ProtocolException
 from nodriver.core.element import Element
 from sentry_sdk.integrations.logging import LoggingIntegration
 
+import logging_state
 from stealth_chrome_devtools_mcp.embedded import logging_setup
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -204,36 +205,43 @@ class Sinks:
         return {name for name, mark in SECRETS.items() if mark in self.everything}
 
 
-_PRISTINE_FACTORY = logging.getLogRecordFactory()
-
-
-def reset_logging() -> None:
-    for name in list(logging.Logger.manager.loggerDict):
-        logger = logging.getLogger(name)
-        for handler in list(logger.handlers):
-            logger.removeHandler(handler)
-            with contextlib.suppress(Exception):
-                handler.close()
-        logger.setLevel(logging.NOTSET)
-        logger.propagate = True
-        logger.filters = []
-        logger.disabled = False
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        root.removeHandler(handler)
-        with contextlib.suppress(Exception):
-            handler.close()
-    root.setLevel(logging.WARNING)
-    logging.setLogRecordFactory(_PRISTINE_FACTORY)
+#: Re-exported so the drive helpers below can start a fresh configuration
+#: mid-test; the OWNERSHIP of the process's logging is the fixture's.
+reset_logging = logging_state.reset
 
 
 @pytest.fixture(autouse=True)
 def _isolated_logging():
-    reset_logging()
-    get_settings.cache_clear()
-    yield
-    reset_logging()
-    get_settings.cache_clear()
+    """Own every process-global this file mutates, and hand them all back.
+
+    MEASURED: this file followed by ``tests/test_observability.py`` was 2
+    failed / 91 passed, reversed 93 passed, and the second failure is labelled
+    RELEASE BLOCKER in its own assertion — three canaries "disclosed via
+    stderr".
+
+    **Two different globals, and the obvious one was not the cause.** The
+    teardown used to call `reset_logging()` instead of restoring, so root was
+    left with no handlers; that is a real defect and `logging_state` closes it.
+    But fixing it alone did NOT fix the canaries (measured: still 2 failed,
+    and the product's logging state afterwards was byte-identical to a run of
+    `test_observability` alone). The actual mechanism is the DEBUG RING:
+    `drive(debug_ring=True)` calls `debug_logger.enable()`, nothing turned it
+    off, and `debug_logger._emit_stderr` prints every later tool failure to
+    **real stderr** precisely when the ring is enabled — so the canaries
+    another module's failures carried went out through our own echo.
+
+    So the rule is the general one rather than a patch for either: a pin that
+    flips a process-global puts it back, and the ring is restored to whatever
+    it was, not to `disable()`.
+    """
+    ring_was_enabled = debug_logger._enabled
+    with logging_state.owned():
+        get_settings.cache_clear()
+        try:
+            yield
+        finally:
+            debug_logger.enable() if ring_was_enabled else debug_logger.disable()
+            get_settings.cache_clear()
 
 
 def emit_element_warnings() -> None:
@@ -314,6 +322,30 @@ CALLER_DEBUG = [
     pytest.param({"role": "backend", "basicconfig": "before"}, id="basicConfig-before"),
     pytest.param({"role": "backend", "basicconfig": "after"}, id="basicConfig-after"),
 ]
+
+
+# --------------------------------------------------------------------------
+# This file must leave the process exactly as it found it
+# --------------------------------------------------------------------------
+#: Root's handlers as the FIRST node in this file found them, captured by a
+#: MODULE-scoped fixture and read by the last class in the file.
+#:
+#: Import time is deliberately NOT the baseline: pytest's logging plugin runs
+#: each item inside ``catching_logs``, so the handler set at COLLECTION differs
+#: from the set during a node, and comparing against it fails for a reason that
+#: has nothing to do with this file (measured — index 0 differed). Module-scoped
+#: setup runs inside the first item's setup phase, the same regime every node
+#: sees; and pytest keeps the same four handler OBJECTS across items (measured),
+#: which is what makes an IDENTITY comparison the right strength rather than a
+#: count or a type list.
+_BASELINE: dict[str, object] = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _baseline_logging_state():
+    """Record what the first node saw, for the last class to check against."""
+    _BASELINE["ring"] = debug_logger._enabled
+    yield
 
 
 # --------------------------------------------------------------------------
@@ -840,3 +872,103 @@ class TestBounds:
         assert "Logging error" not in text
         assert "could not calculate" not in text  # this pin emits a bare "%s"
         assert "input" in text
+
+
+# --------------------------------------------------------------------------
+# And then it put everything back — LAST in the file on purpose
+# --------------------------------------------------------------------------
+class TestLeavesLoggingAsItFoundIt:
+    """The order-dependence this file caused, pinned so it cannot come back.
+
+    The autouse fixture used to RESET on teardown rather than restore, so root
+    was left with no handler at all. A later module's WARNING then found none,
+    fell through to ``logging.lastResort`` — an ``_StderrHandler`` at WARNING —
+    and landed on the real stderr, where ``tests/test_observability.py``'s
+    secret-canary pin read it as a disclosure. MEASURED: this file followed by
+    that one was **2 failed / 91 passed**; reversed, **93 passed**.
+
+    These nodes are last in the file, so pytest runs them after every class
+    that could disturb the state. They are deliberately about IDENTITY and not
+    about emptiness: root holding no handlers is the right answer under a bare
+    ``pytest`` and the wrong one after a module that installed one, and only a
+    comparison against what was actually there can tell those apart.
+    """
+
+    def test_a_block_that_mutates_everything_still_hands_it_all_back(self):
+        """The logging half, driven end to end.
+
+        It is asserted HERE rather than by reading root inside an ordinary node
+        because every node in this file runs inside ``logging_state.owned()``,
+        where `reset` has put everything on the floor — a node comparing root
+        against a baseline measures the floor, and is green only when the
+        baseline happened to BE the floor. That version passed in natural order
+        and failed reversed, which is a pin measuring nothing rather than a pin
+        failing. The per-test claim is `owned()`'s own post-restore check; this
+        node is the mechanism behind it, with every field mutated on purpose.
+        """
+        root = logging.getLogger()
+        named = logging.getLogger("stealth.probe.f907")
+        sentinel = _RootCapture()
+        root.addHandler(sentinel)
+        root.setLevel(logging.ERROR)
+        named.setLevel(logging.CRITICAL)
+        named.propagate = False
+        try:
+            before = logging_state.snapshot()
+            logging_state.reset()
+            logging.setLogRecordFactory(lambda *a, **k: logging.LogRecord(*a, **k))
+            root.addHandler(_RootCapture())
+            root.setLevel(logging.DEBUG)
+            named.setLevel(logging.DEBUG)
+            logging_state.restore(before)
+
+            assert logging_state.drift(before) == []
+            assert sentinel in root.handlers, "a pre-existing handler comes back"
+            assert root.level == logging.ERROR
+            assert named.level == logging.CRITICAL
+            assert named.propagate is False
+            root.handle(
+                logging.LogRecord("t", logging.ERROR, "f.py", 1, "still on", (), None)
+            )
+            assert "still on" in sentinel.text, "and it must still be OPEN"
+        finally:
+            root.removeHandler(sentinel)
+            root.setLevel(logging.WARNING)
+            named.setLevel(logging.NOTSET)
+            named.propagate = True
+
+    def test_the_debug_ring_is_left_as_it_was(self):
+        """The one that actually disclosed the canaries.
+
+        ``drive(debug_ring=True)`` enables the ring, and
+        ``debug_logger._emit_stderr`` prints to REAL stderr exactly while it is
+        enabled — so a later module's tool failures went out through our echo,
+        carrying whatever was in them. Restoring root's handlers did NOT fix
+        that (measured: still 2 failed, with the product's logging state
+        byte-identical to a clean run), which is why this node exists beside
+        that one rather than instead of it.
+        """
+        assert debug_logger._enabled == _BASELINE["ring"], (
+            "the debug ring was left in a different state; while it is on, "
+            "every later tool failure in the process echoes to real stderr"
+        )
+
+    def test_restore_puts_a_removed_handler_back_and_leaves_it_open(self):
+        """The mechanism driven rather than inferred. A handler that pre-dates
+        the block must survive the reset AND still work afterwards: closing
+        another module's ``RotatingFileHandler`` is not undone by putting the
+        object back, which is why ``reset`` never closes and ``restore``
+        decides by identity against the snapshot."""
+        root = logging.getLogger()
+        sentinel = _RootCapture()
+        root.addHandler(sentinel)
+        try:
+            with logging_state.owned():
+                assert sentinel not in root.handlers, "reset must clear the floor"
+            assert sentinel in root.handlers, "restore must put it back"
+            root.handle(
+                logging.LogRecord("t", logging.WARNING, "f.py", 1, "still on", (), None)
+            )
+            assert "still on" in sentinel.text, "and it must still be OPEN"
+        finally:
+            root.removeHandler(sentinel)

@@ -33,6 +33,7 @@ import pytest
 import sentry_sdk
 from sentry_sdk.integrations.logging import LoggingIntegration
 
+import logging_state
 from stealth_chrome_devtools_mcp.embedded import logging_setup
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -151,41 +152,38 @@ class Sinks:
         return self.durable | self.ring | self.sentry | self.downstream
 
 
-def reset_logging() -> None:
-    """Every library logger back to NOTSET, every handler gone. The pins set
-    global process state, so each one starts from the same floor.
-
-    It RESETS and does not RESTORE, and that is worth knowing rather than
-    hiding (F-906 review N2): anything an earlier test module configured on a
-    logger is destroyed here, not put back. It is safe in this suite because
-    the only cross-module logging state is `stealth.<role>`'s handler, which
-    `configure_logging` reinstalls on demand — and it was verified by running
-    the whole logging/observability slice with this file placed FIRST. If
-    random test ordering is ever introduced, snapshot-and-restore instead.
-    """
-    for name in list(logging.Logger.manager.loggerDict):
-        logger = logging.getLogger(name)
-        for handler in list(logger.handlers):
-            logger.removeHandler(handler)
-            with contextlib.suppress(Exception):
-                handler.close()
-        logger.setLevel(logging.NOTSET)
-        logger.propagate = True
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        root.removeHandler(handler)
-        with contextlib.suppress(Exception):
-            handler.close()
-    root.setLevel(logging.WARNING)
+#: Every library logger back to NOTSET, every handler gone — the floor each pin
+#: starts from. Re-exported so a pin can re-floor mid-test; OWNING the process's
+#: logging is the fixture's job, below.
+reset_logging = logging_state.reset
 
 
 @pytest.fixture(autouse=True)
 def _isolated_logging():
-    reset_logging()
-    get_settings.cache_clear()
-    yield
-    reset_logging()
-    get_settings.cache_clear()
+    """Own the process's logging for this test and hand it back unchanged.
+
+    This file's review named the reset-without-restore as residual N2 and said
+    "if random test ordering is ever introduced, snapshot-and-restore instead".
+    No ordering plugin was needed to make it matter: F-907's pin file has the
+    same fixture, and run ahead of `tests/test_observability.py` it turned that
+    file's RELEASE-BLOCKER canary pin red. The restore is `logging_state`'s,
+    shared by both files so the two cannot drift.
+
+    The DEBUG RING is restored here too, and it is the one that actually
+    disclosed the canaries: `drive(debug_ring=True)` calls
+    `debug_logger.enable()`, and `debug_logger._emit_stderr` prints every later
+    tool failure to real stderr exactly while the ring is enabled. Restored to
+    what it WAS rather than to `disable()`, because a pin that flips a global
+    puts it back rather than picking a value.
+    """
+    ring_was_enabled = debug_logger._enabled
+    with logging_state.owned():
+        get_settings.cache_clear()
+        try:
+            yield
+        finally:
+            debug_logger.enable() if ring_was_enabled else debug_logger.disable()
+            get_settings.cache_clear()
 
 
 def drive(
