@@ -124,10 +124,20 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # lives — one home for "end this browser's process", rather than a wait in
     # one file and the kill it gates in another. Caps ratchet DOWN only; this
     # one is the merged file measured, as every number in this row has been.
+    # F-919 RATCHETS this row 1452 -> 1447. A failed spawn's reap is fenced on
+    # the pid nodriver launched now, not on a one-second start-time window that
+    # a concurrent sibling's Chrome fell inside 11x over. What this file gained
+    # is the handle that carries the identity across the fallible await —
+    # `spawn_leak.Attempt`, stamped inside `_launch_browser` and held by the
+    # orchestrator, because a value RETURNED from that call goes with the
+    # exception. The row had zero headroom, so the six lines were paid for by
+    # collapsing `start_idle_reaper`'s and `stop_idle_reaper`'s `Returns: None`
+    # blocks, which restated `-> None` twice over (the plan_F856 mechanism).
+    # Cap == actual.
     "embedded/browser_manager.py": (
-        1452,
+        1447,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
-        " + F-882 + F-888 + F-834b - F-910",
+        " + F-882 + F-888 + F-834b - F-910 - F-919",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
@@ -169,9 +179,29 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # those three lines was paid for by collapsing five Args:/Returns: blocks
     # that only restated their own signatures (the plan_F856 mechanism).
     # Cap == actual.
+    # F-917/F-918 RATCHET this row 1009 -> 1007. The fix needed a `protected_pids`
+    # filter on the kill set and a REFUSAL where an unreadable process used to
+    # fall through to terminate(), and the file was at exactly its cap, so the
+    # cut came first: `_kill_process_by_pid`'s two escalation rungs were
+    # near-identical 20-line blocks and are now ONE table (`_KILL_RUNGS`) and one
+    # loop. Behaviour unchanged — terminate, wait 3 s, kill, wait 2 s, same
+    # exhaustion warning. Caps ratchet DOWN only; this one is the ruff-clean
+    # merged file measured, as every number in this row has been.
+    # F-922 RATCHETS this row 1007 -> 1006. Narrowing the directory scan to
+    # DISPOSABLE profiles is one conditional at the one place the kill set is
+    # BUILT, and the file was at exactly its cap, so the change paid for itself:
+    # the four sites that logged "Skipping <pid> for <id>: <reason>" in four
+    # spellings became one `_skip_note`. That is a deduplication and not a
+    # compression -- a reap that DECLINES is exactly what an operator goes
+    # looking for, and one helper is where its wording lives now. An extraction
+    # of the two recorded-pid branches into a `_recorded_kill_pid` helper was
+    # tried FIRST and reverted: measured, it took the file to 1036, because two
+    # signatures and two docstrings cost more than the duplication they removed.
+    # Caps ratchet DOWN only; this one is the ruff-clean file measured.
     "embedded/process_cleanup.py": (
-        1009,
-        "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809 + plan_F856 + F-888",
+        1006,
+        "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809 + plan_F856 + F-888"
+        " - F-917/F-918 - F-922",
     ),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
     # + honest message + debug_logger.log_info on failure) + 1 (plan_M4ph1

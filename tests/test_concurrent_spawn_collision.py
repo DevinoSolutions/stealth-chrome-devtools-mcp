@@ -272,7 +272,7 @@ def doomed_manager(monkeypatch, tmp_path):
     read the contention paragraph alone.
     """
 
-    async def failing_launch(self, options, browser_executable, launch_args):
+    async def failing_launch(self, options, browser_executable, launch_args, attempt):
         await asyncio.sleep(0.02)  # overlap the sibling spawn's in-flight window
         raise RuntimeError(INNER_FAILURE)
 

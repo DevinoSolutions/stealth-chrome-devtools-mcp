@@ -2,6 +2,300 @@
 
 ## Unreleased
 
+### Fixed — F-919: a failed spawn no longer reaps a sibling spawn's browser
+
+A spawn that fails after Chrome launched reaps what it left running (F-860), and
+it used to decide what that was from a **start time**: everything on the
+attempt's `--user-data-dir` that started within one second of it. Concurrent
+unnamed spawns all select the shared profile by design (F-834), so when one
+loses Chrome's process singleton and fails **because** the other holds it — the
+exact case that reap promised to spare — the winner's Chrome was inside the
+loser's window and was terminated. On the shared profile that browser is the one
+the operator is logged into, and the kill arrives from another call's failure
+handler, so nothing in the surviving caller's answer says it happened.
+
+Measured on this machine: two concurrent `spawn_browser` calls stamp their
+launches **9.9-86.4 ms apart** (10 rounds through the real orchestrator), and
+the shipped fence terminates the sibling at **every** one of those separations —
+driven directly against the code as it shipped, which logs the winner as a leak
+while killing it. It spares the sibling only past 1001 ms.
+
+**Shrinking the window was rejected and the arithmetic is why.** The tolerance
+exists to absorb the kernel's rounding of a process start time, which its own
+comment puts at 10 ms on Linux and ~16 ms on Windows; sparing the sibling needs
+it below 9.9 ms. No value does both — the two quantities are the same size — so
+a smaller window is the same guess with a smaller blast radius.
+
+The fence is an **identity** now. `spawn_leak.Attempt` is a handle the
+orchestrator creates before the fallible launch and passes **into**
+`_launch_browser`, which stamps the `uc.Config` object it built onto it before
+awaiting `uc.start` — passed in rather than returned, because the moment it is
+needed is the moment that call raised. `spawn_leak.launched_pid` then reads the
+pid off the `Browser` nodriver registered for that exact object (identity, never
+a field match: two concurrent spawns build configs equal in every field),
+through `process_exit.browser_pid`, which already owns "which member of the tree
+is the browser" and refuses a handle asyncio has already collected.
+`_CLOCK_TOLERANCE_SECONDS` and `_started_after` are deleted.
+
+**Two claims in the first version of this entry were wrong and are corrected
+here.** It said the `returncode` refusal is a *stronger* recycled-pid guard than
+a stored `(pid, create_time)` pair, and then that such a pair is not obtainable
+at all. Neither holds. On Windows the pid is pinned, but by the open PROCESS
+handle (`subprocess.py:1575`) rather than by `returncode`. On POSIX the guard is
+open for two loop iterations and open deterministically: `os.waitpid` frees the
+pid on the watcher thread (`asyncio/unix_events.py:1443`) while `returncode`
+lands two `call_soon_threadsafe` hops later, and `base_events._run_once` drains
+a fixed `ntodo` (`:2033-2034`) so a callback queued mid-step cannot run before
+the next iteration — in that band a stored pair would have done better. The pair
+is ruled out on WORTH, not on impossibility: it would differ only inside that
+band and only for a recycled pid already carrying our own `--user-data-dir`,
+which the second witness excludes. F-919 §4 and §4.1 carry the source lines, and
+§4 records that three absolute claims here have been refuted in sequence — which
+is why the finding is now written in magnitudes.
+
+**What it costs is stated rather than implied.** A Chrome that genuinely leaked
+but whose launch cannot be named is left RUNNING until the next backend start's
+orphan reap. That is the direction `profile_lock` and F-886/F-888 all chose, and
+the alternative is killing a process on a guess, which is this defect.
+
+**A first version of this entry added that no path is known to leave a real
+process behind today. That was wrong and is withdrawn.** The **delegated**
+(F-810) headed launch is a real regression against the old fence. Its own
+cleanup is conditional — it kills only when it managed to stamp a `(pid,
+create_time)` pair — and the finding's §6 names three paths that reach it with a
+live Chrome and no kill: the 20 s pid-file deadline expiring, the create-time
+probe answering `None` (its `except psutil.Error` swallows `AccessDenied`
+alongside the exited process it was written for), and the kill itself refusing on
+an identity mismatch or a psutil error. In all three the Chrome is untracked,
+invisible to `list_instances`, and ends only at the next backend start's orphan
+sweep.
+
+The old fence did cover them, by guessing, at a **wider** aperture than the one
+this entry closes: a delegated launch takes seconds, so every sibling Chrome that
+started in that span sat inside its window. Restoring the coverage would restore
+this defect on that path, so it is given up rather than reinstated. The residual
+is Windows-only, needs a launcher that started Chrome plus one of those three
+conditions, and ends at the next backend start. **F-924** carries the cheap fix:
+`desktop_launch` already computes the pair this fence wants.
+
+`audit/stage2/finding_F919_spawn_leak_fence_reaps_a_sibling.md` has the
+measurements, the run against the shipped code, and the open items.
+
+### Fixed — F-916 / F-917 / F-918: startup recovery no longer kills what it could not establish
+
+Three defects on one path, and one sentence holds them: **an answer we could not
+establish must resolve toward NOT killing.** Startup orphan recovery runs on
+every backend cold start, and what it decides about may be a human's logged-in
+Chrome — the one piece of state reconnecting cannot rebuild, because a killed
+browser does not flush its session.
+
+**F-916 — an entry we could not CLASSIFY was reaped.**
+`browser_reattach._adoptable_entry` answered a bare `None` both for "this is not
+one to adopt" and for "we could not establish whether it is", so an entry that
+is alive, ours and on a PERSISTENT profile fell outside `Classified.spare` and
+was killed. Measured on the pre-fix source, five different entries produced one
+verdict: a 2.1.8/2.1.9 record carrying no `cdp_port`, one with no `create_time`
+and one with an unreadable `pid` were all `REAPED`, indistinguishable from a
+disposable auto-clone and from a Chrome that is provably gone. The first of
+those is not hypothetical — 2.1.8/2.1.9 recorded no port at all, and those are
+the records holding today's stranded logins. Those three now answer
+`reap_guard.UNDECIDED` and land in `.spare`: not adopted, and not ended.
+"The Chrome this entry names is gone" stays a DECISION, so a dead entry can
+still leave the record and `browser_pids.json` cannot grow without bound.
+
+**F-917 — the reap was DIRECTORY-matched while the spare was INSTANCE-ID-matched.**
+Recovery skips by `instance_id` and the reap it then performs kills every
+browser on the entry's `user_data_dir`, so on a SHARED profile — which is what
+the master is — one stale entry's reap reached a browser another entry had just
+been spared for. Measured: with `i-live` (pid 7777, adoptable, spared) and
+`i-stale` (pid 7778, Chrome gone) on one directory, the reap of `i-stale` called
+the kill path **with pid 7777**, and the record still listed `i-live`
+afterwards — so the record claimed a live adoptable browser whose process had
+just been ended. The spared entries' pids now travel with the spare and are
+subtracted at the one place the kill set is spent. The same filter is applied to
+`browser_reattach.run`'s failed-adoption reap, which had the shape from the
+other door.
+
+**F-918 — an UNVERIFIABLE process was terminated.** `_kill_process_by_pid`
+logged "Could not verify process {pid}" from a blanket `except` and then fell
+through to `terminate()`. Measured: a `psutil.AccessDenied` on `.name()` — what
+Windows answers for a process this account may not open — and a plain `OSError`
+both terminated the pid and returned `True`, so the caller counted an
+unidentified process as successfully reaped and dropped its record entry. Both
+now refuse and answer `False`, with a line that states the decision. A zombie
+was already correct (`ZombieProcess` subclasses `NoSuchProcess`) and is
+unchanged; it is pinned because it looks like it should have changed.
+
+This makes orphan recovery uniform with the places in the tree that already
+resolved an unreadable witness toward safety: `profile_lock._browser_pids`
+(`None` for "could not be asked", distinct from `()` for "asked, nothing
+running"), `backend_eviction`'s refusal to evict what it cannot prove is idle,
+and `spawn_leak._started_after`, which spares a pid whose start time it cannot
+read. `_kill_process_by_pid` is also what a failed spawn's reap kills THROUGH,
+so the two layers interlock: that fence decides WHICH process a failed spawn may
+end, this guard whether a pid may be ended at all.
+
+**Two more readings of the same sentence landed in review.** `browser_reattach.run`
+built its failed-adoption reap's protected set from the ADOPTABLE entries rather
+than the SPARED ones, so a browser this fix had just refused to reap could be
+ended by a sibling's failed attach, under the other entry's instance id — the
+same two-sites-disagree shape F-917 fixed, on the path F-916 added. And an entry
+recording NEITHER persistence key was treated as an established disposable and
+reaped: measured killing a LIVE Chrome on the shared profile, through the
+recorded-pid fallback that the directory-scope rule does not stand in front of.
+An absence is not an answer, so such an entry is spared — but only on a POSITIVE
+liveness witness, both halves of the pid's identity, so one whose Chrome is gone
+still leaves the record.
+
+**What it costs, stated rather than hidden:** a browser we can neither adopt nor
+reap is left running and left recorded, and an orphan whose pid we cannot
+identify is left alone. **How long that lasts depends on which witness could not
+be read.** Where the answer comes after the liveness check — no recoverable
+endpoint, or unstated persistence — the entry is re-classified on every cold
+start and reaped the moment its Chrome exits. Where it comes BEFORE — an
+unreadable `pid`/`user_data_dir`, or a missing `create_time` — it can never
+become an established negative and the record entry is PERMANENT. That is the
+owner's ruling read literally rather than a defect: we do not kill what we
+cannot establish, so what we can never establish we can never reap. Bounding it
+would need a bare-pid liveness check, and `(pid, create_time)` is stamped on
+every entry precisely so a recycled pid cannot fool us. `browser_pids.json` has
+no age prune at all; that is filed as its own finding rather than fixed here.
+`kill-orphans --force` still skips the whole classification by design. A growing
+JSON file is recoverable; a killed login is not.
+
+New leaf `embedded/reap_guard.py` carries the rule and its three pieces
+(`UNDECIDED`, `spared_pids`, `killable`). Two files were at their LOC caps and
+caps ratchet down only, so each fix paid for itself: the CDP **endpoint ladder**
+moved out of `browser_reattach` into a new leaf named for the question it
+answers, `embedded/cdp_endpoint.py` — "where is the CDP endpoint of the browser
+this RECORD ENTRY describes" — taking that file 999 → 991, and
+`_kill_process_by_pid`'s two near-identical escalation rungs became one table,
+taking `process_cleanup` 1009 → 1007 with its grandfather row ratcheted to
+match. No behaviour changed in either move. `cdp_attach` is untouched and
+remains a leaf: it owns the DOOR, and it never calls the ladder — both callers
+are `browser_reattach`'s.
+
+Full measurements, the before/after tables and the residuals are in
+`audit/stage2/finding_F916_unclassifiable_entry_is_reaped.md`,
+`…finding_F917_reap_matches_directory_while_spare_matches_instance.md` and
+`…finding_F918_unverifiable_process_is_terminated.md`.
+
+### Fixed — F-922: a named profile is reaped by the RECORD, never by its directory
+
+The fourth reading of the same sentence, and an owner ruling rather than a
+judgement call. Orphan recovery built its kill set by scanning the entry's
+`user_data_dir` whatever KIND of profile it was — so a Chrome the owner had
+started **by hand** on one of their own named sessions was killed by a stale
+entry's reap. No record entry names such a browser, so no spare can reach it:
+F-916's classification and F-917's `protected_pids` both protect RECORDED pids,
+and this one is not recorded at all.
+
+Measured before the fix: a stale entry on a named profile killed the owner's
+unrecorded Chrome, through recovery **and** through the close path; and even a
+fully justified reap — the entry's own browser, correctly identified — took the
+bystander with it, because both were on the directory.
+
+**The ruling:** directory-wide reaping stays only for DISPOSABLE auto-clone
+directories; on a named or shared profile a reap may end only pids the record
+actually names. The asymmetry is the point. An auto-clone directory is ours by
+construction — a human never opens one by hand — while a named profile is
+exactly what a human does open, and since F-888 a browser on one is meant to
+outlive its backend. Explicitly not chosen: "record-only everywhere", which
+would let orphaned clone browsers accumulate forever.
+
+It is one conditional on the one line that BUILDS the kill set, reading
+`browser_pid_registry.on_persistent_profile` the other way round — the same
+predicate F-888's adoption rule and the profile-deletion guard already ask, with
+no second notion of "ours". The recorded pid then supplies the kill, identity-
+checked and start-time fenced exactly as it always was. It applies to the close
+path as well as to recovery, because a named profile is a named profile
+whichever caller arrived.
+
+**What it costs, and the owner chose it:** a leaked Chrome on a named profile
+whose record entry was lost is never reaped automatically. It stays visible in
+`stealthy profiles` and is cleared deliberately. The alternative is a scan that
+cannot tell a leaked browser of ours from the one the operator is logged into,
+ending both.
+
+It also closes F-917's defect through a **second door**, which F-917's own
+filter could not reach. When an adoption fails, `browser_reattach.run` falls
+back to a reap that protects its ADOPTABLE candidates' pids — and an entry
+F-916 SPARED is by construction not one of them, so a spared browser sharing
+that profile was ended. Measured: `[6666, 7777]` before, `[7777]` after. What
+closes it is the scope rule rather than a second subtraction, because `run`
+hands that reap a metadata dict that must declare the profile persistent — the
+profile-delete guard reads those same two keys.
+
+`process_cleanup.py` was at 1007/1007 — this lane's own ratchet — so the change
+paid for itself: four sites that logged a declined pid in four spellings became
+one `_skip_note`. 1007 → 1006.
+
+Details, the before/after table and the defect this fix created in F-917's own
+pins are in `audit/stage2/finding_F922_named_profile_reaped_by_directory.md`.
+
+### Fixed — F-913: a tool answer no longer rides a validation error into Sentry
+
+When the stdio proxy cannot parse a frame the backend sent it, the MCP SDK logs
+`logger.exception("Error parsing SSE message")`
+(`mcp/client/streamable_http.py`:240, and the same shape at `:394` and `:574`).
+The message is static and carries no arguments — but the exception it logs is a
+pydantic `ValidationError`, whose text quotes the input it refused. On that leg
+the input is the serialised answer to a `tools/call`, so a piece of a
+`get_cookies` jar or a `get_page_content` document travelled out as a **full
+Sentry event**.
+
+All three of the mechanisms this tree already had are blind to it by
+construction: F-908's WARNING floor on `mcp.client` sits *below* ERROR,
+F-907's rule finds no argument to shape, and F-911's would withhold the one
+part of the record that is safe — the static message — while leaving the
+payload exactly where it was.
+
+**What now happens.** A record made by a site that renders a payload into its
+exception has that exception replaced by a restatement that quotes none of the
+input and keeps everything else:
+
+```
+<pydantic_core._pydantic_core.ValidationError for JSONRPCMessage: 1 error(s),
+ text withheld: 283 chars; json_invalid at <root>>
+```
+
+The pydantic error type, the model, the error count and up to eight distinct
+field paths survive — with a count of how many more there were, because the cap
+is a bound and a 4-arm union overflows it by one. They are what an operator acts
+on, and they are read from pydantic's own `errors(include_input=False, …)`
+accessor rather than cut out of its rendered sentence. The traceback is handed
+through unchanged, so every frame is exactly as before and Sentry's default
+stacktrace-first grouping does not move; the exception's type and value do
+change, which is named in the finding. The live exception is never touched: the
+SDK still sends the object it caught downstream. The chain is walked through
+`__cause__`, `__context__` **and a group's own `exceptions`**, so a quoting
+error inside an `ExceptionGroup` — which carries none of its leaves in its own
+text, while Sentry serialises every one of them — is restated too.
+
+**How much was actually leaking, measured.** pydantic caps each echo at 50
+characters of the input — the first 24 and the last 23 — so a whole JSON-RPC
+frame's head is always the envelope. What escaped was the frame's **last 23
+characters**, which is the end of the tool answer; **any value shorter than 50
+characters, whole**, which is the sharp edge because a cookie value or a
+session id frequently is; and one echo **per union arm**, measured at 9 errors
+and **276** echoed characters for a single 273-byte frame. The finding's original
+claim that "a cookie jar's first entries and its last are both rendered" was
+wrong and is corrected in place.
+
+Three things were deliberately not done, each for a measured reason. pydantic's
+own `hide_input_in_errors` works, and is rejected because it changes what the
+SDK sends downstream and covers only the models we enumerate — not on cost, a
+third ground that was offered and is withdrawn, because the rebuild measures
+0.298 ms. The rule is gated on the SITE as well as the
+exception's structure, because `expected_events` recognises that same exception
+type on FastMCP's own records and an ungated rule would have re-opened the
+`caller-input` noise class. And no second record factory or `before_send` hook
+was added — a factory chain is ordered by install time, so two installs make
+the outcome depend on call order.
+
+Details, including the SDK's adjacent `Raw result:` pair and why it is out of
+scope, in `audit/stage2/finding_F913_validation_error_echoes_tool_result.md`.
+
 ### Fixed — F-914/F-915: a session that is already open hands its cookies over, or refuses
 
 **This is the whole of "the master profile was erased / I have to set up the
