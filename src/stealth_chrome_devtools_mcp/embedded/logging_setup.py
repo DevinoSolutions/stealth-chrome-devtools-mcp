@@ -173,6 +173,272 @@ def apply_payload_log_floor() -> None:
         logging.getLogger(family).setLevel(PAYLOAD_LOG_FLOOR)
 
 
+#: F-907. The package whose INSTANCES render page content out of their own
+#: ``__repr__``, so a log line that interpolates one carries whatever the page
+#: holds. Measured on nodriver 0.47.0:
+#:
+#: * ``Element.__repr__`` renders the tag, **every attribute as
+#:   ``name="value"``** and the element's whole recursive **text content** — so
+#:   an ``<input type=password>``'s ``value=``, a ``data-*`` bearing a session
+#:   token and a balance in a ``<div>`` all ride in it;
+#: * ``Tab.__repr__`` renders ``target.url``, and a URL carries tokens in its
+#:   query string.
+#:
+#: ``element.py``:537/:624/:633 log ``"could not calculate box model for %s"``
+#: with a live ``Element`` at **WARNING** — above :data:`PAYLOAD_LOG_FLOOR`, so
+#: F-906's level does not reach it, and no handler of anyone's is needed for
+#: such a record to land: production root carries none and ``logging.lastResort``
+#: (an ``_StderrHandler`` at WARNING) carries it to stderr, which for the backend
+#: IS ``backend-boot.log``.
+#:
+#: Those three sites are NOT reachable in nodriver 0.47 — measured, and it moves
+#: this finding's severity DOWN rather than up. ``Position.center`` is a
+#: non-empty 2-tuple and therefore always truthy, even for a zero-size box at the
+#: origin, so ``if not center:`` cannot open; the other two ways out of
+#: ``get_position()`` (``element.py``:499's raised ``Exception`` and the
+#: ``except IndexError`` branch's ``None``) both leave ``mouse_click`` before the
+#: warning line. This is therefore insurance, plus correctness for any FUTURE
+#: nodriver WARNING that renders an object, and the reachability premises are
+#: pinned so a bump that makes them live is a RED test rather than a Sentry
+#: event.
+#:
+#: Named as a PACKAGE and matched against ``type(arg).__module__`` rather than
+#: with ``isinstance``, because resolving the class needs ``import nodriver``
+#: and :func:`configure_logging` runs in the **stdio proxy**, which must never
+#: import the browser stack (``desktop_launch``'s measured cold-start
+#: paragraph). Deliberately NOT paired with ``websockets`` the way
+#: :data:`PAYLOAD_LOG_FAMILIES` is: measured across websockets 16.0, every one
+#: of its WARNING-and-above sites logs a static message or a ``str``, so there
+#: is nothing there to redact and claiming otherwise would be a claim the
+#: evidence does not support (F-906's "no ``uc`` entry" reasoning).
+PAYLOAD_ARG_PACKAGE = "nodriver"
+
+#: Bounds on the shape rendered in place of a redacted argument. An element's
+#: tag and its attribute NAMES are page-authored, so their count and their
+#: length are the page's — the same reasoning, and deliberately its own numbers,
+#: as ``click_target.MAX_CLASSES`` and ``scroll_position.SCROLLER_CLASSES``
+#: (``tool_errors.JS_ERROR_CHARS``' three-homes precedent: three bounds, three
+#: questions, three homes).
+SHAPE_MAX_ATTRS = 12
+SHAPE_MAX_NAME_CHARS = 32
+SHAPE_OVERFLOW = "…"
+
+#: Set on our own factory so :func:`install_payload_arg_redaction` can see that
+#: it is already the one installed. An attribute on the function, not a module
+#: global, because what must be idempotent is the FACTORY CHAIN and that lives
+#: in ``logging``, not here — a module flag would read "installed" in a process
+#: whose factory a caller had since replaced.
+_REDACTION_MARK = "_stealth_payload_arg_redaction"
+
+
+def _clamped(name: object) -> str:
+    """One page-authored name, bounded."""
+    text = str(name)
+    if len(text) <= SHAPE_MAX_NAME_CHARS:
+        return text
+    return text[:SHAPE_MAX_NAME_CHARS] + SHAPE_OVERFLOW
+
+
+def _shape(value: object) -> str:
+    """What a payload-carrying argument is allowed to say about itself.
+
+    An ELEMENT keeps its tag, its attribute NAMES and its child COUNT, and
+    loses every attribute VALUE and all of its descendant TEXT: redacting is
+    not silencing, and "which control is this" is the whole diagnostic value of
+    the line it replaces. A name is the page's vocabulary while a value is the
+    user's secret — ``value=`` and ``data-session-token=`` are exactly the pair
+    that makes the distinction — and a count says how much text was dropped
+    without saying any of it.
+
+    It is stricter than ``click_target.Shape``, which reports an id and a class
+    list by VALUE, and the asymmetry is deliberate: that module reads a known
+    element through our own code with its own bounds, this one is handed an
+    arbitrary object on a third-party line we do not control, and "never a
+    value" is a rule with no edge cases to get wrong.
+
+    Anything else — a ``Tab``, a ``Connection``, a generated CDP record — keeps
+    its TYPE and nothing else, because there is no half of it we have measured
+    to be safe.
+    """
+    kind = f"{type(value).__module__}.{type(value).__qualname__}"
+    try:
+        # `getattr` with a default, so "this object is not element-shaped" is
+        # an ordinary answer rather than an exception to classify. It suppresses
+        # `AttributeError` ONLY, so a property that raises anything else still
+        # reaches the handler below — which is the case that matters.
+        tag = getattr(value, "tag", None)  # nodriver Element: node_name.lower()
+        attrs = getattr(value, "attrs", None)  # nodriver Element: a ContraDict
+        names = None if attrs is None else list(attrs.keys())
+        # The CHILD COUNT and never the children: `__repr__` renders descendant
+        # TEXT by recursing `str(child)`, and a text node's own `__repr__`
+        # answers its raw `node_value` -- so "$12,345.67" in a <div> is as much
+        # page content as an attribute value. A count says how much was dropped
+        # without saying any of it.
+        children = getattr(value, "child_node_count", None)
+    except Exception as exc:  # noqa: BLE001  PERMANENT(F-907 — inside makeRecord)
+        # It must be TOTAL, not narrow. Both reads run arbitrary library code
+        # -- `tag` is a property and `attrs` answers a `ContraDict` -- and this
+        # function runs inside `Logger.makeRecord`, so anything escaping breaks
+        # every log call in the process, including the one reporting it. A
+        # narrow tuple was written first and a `RuntimeError` from a property
+        # walked straight through it (pinned).
+        #
+        # It is not a SWALLOW: the failure is reported in the one channel
+        # available here, the line itself, because logging about it would
+        # recurse. The exception's TYPE only -- never `str(exc)`, which on a
+        # page-derived object is page-authored, which is the whole subject.
+        return f"<{kind} shape-unreadable={type(exc).__name__}>"
+    if not isinstance(tag, str) or not isinstance(names, list):
+        return f"<{kind}>"
+    shown = [_clamped(name) for name in names[:SHAPE_MAX_ATTRS]]
+    if len(names) > SHAPE_MAX_ATTRS:
+        shown.append(f"{SHAPE_OVERFLOW}+{len(names) - SHAPE_MAX_ATTRS}")
+    counted = f" children={children}" if isinstance(children, int) else ""
+    return f"<{_clamped(tag)} attrs=[{', '.join(shown)}]{counted}>"
+
+
+def _carries_payload(value: object) -> bool:
+    """Is THIS argument one whose rendering can carry a page's own content?
+
+    Two clauses, and the order is the argument. An **exception is never one**,
+    whatever package defined it: its ``str()`` is a diagnostic about a failure,
+    and the one site that logs one — ``connection.py``:483, nodriver's only
+    genuine WARNING — passes ``exc_info=True`` beside it, so every sink that
+    formats a traceback renders that text ANYWAY. Redacting the ``%s`` while
+    ``exc_info`` carries it through withholds nothing and costs the Sentry
+    breadcrumb its whole diagnostic: measured, a
+    ``nodriver.core.connection.ProtocolException`` — the commonest thing a
+    CDP-touching event handler raises, and a nodriver TYPE — rendered as
+    ``<nodriver.core.connection.ProtocolException>``, losing Chrome's own
+    ``Inspected target navigated [code: -32000]``.
+
+    Otherwise it is the argument's package, matched on ``type(value).__module__``
+    and never with ``isinstance``, for :data:`PAYLOAD_ARG_PACKAGE`'s reason.
+
+    Read of the ARGUMENT alone and never of ``record.name``: whether a rendering
+    carries page content is a property of the object, not of the logger someone
+    passed it to. A gate on the logger's package left a ``stealth.*`` record
+    carrying an ``Element`` leaking (measured), which is the one shape the rule
+    exists for, in exchange for skipping a loop over arguments no record of ours
+    has — and it made this module's stated key false in the navigation map,
+    which is how the next change to it would go wrong.
+    """
+    if isinstance(value, BaseException):
+        return False
+    return type(value).__module__.partition(".")[0] == PAYLOAD_ARG_PACKAGE
+
+
+def _redacted(args: tuple[object, ...]) -> tuple[object, ...]:
+    """Replace every payload-carrying argument with its shape.
+
+    EAGERLY, and with a plain ``str``: a lazy wrapper would keep the element
+    alive for the life of the record and would still have to render for any
+    sink that formats, while a ``str`` leaves nothing downstream — Sentry, the
+    debug ring, a handler's ``getMessage()`` — able to re-derive the payload.
+    It costs nothing extra, because a ``LogRecord`` only exists at all once
+    ``isEnabledFor`` has admitted it: under F-906's floor nodriver's DEBUG and
+    INFO payload lines never reach this function, and the two findings compose
+    exactly along that line.
+    """
+    # The scan is separate from the rewrite so the overwhelmingly common record
+    # -- every one in the process that carries no nodriver object -- gets its
+    # OWN tuple back rather than an equal copy, which is what lets a pin assert
+    # IDENTITY: a stronger statement of "untouched" than equality is.
+    if not any(_carries_payload(arg) for arg in args):
+        return args
+    return tuple(_shape(arg) if _carries_payload(arg) else arg for arg in args)
+
+
+def install_payload_arg_redaction() -> None:
+    """Stop a page's own content reaching a sink through a library's ``%s``.
+
+    F-907. F-906 held ``nodriver`` and ``websockets`` at WARNING because
+    everything below it quoted raw CDP. This is the half ABOVE that floor:
+    ``element.py``'s three box-model WARNINGs interpolate a live ``Element``,
+    whose ``__repr__`` renders every attribute VALUE and all of its text.
+    MEASURED, in the **shipped backend configuration** and not merely under a
+    caller's ``basicConfig``: a password field's ``value=``, a ``data-*``
+    session token, the element's text and a tab's URL all reached a root
+    handler — hence stderr, hence ``backend-boot.log``, a durable file — and all
+    of them reached Sentry as breadcrumbs on the next event, because
+    ``LoggingIntegration``'s breadcrumb handler sits at INFO and these are
+    WARNINGs. And with **no handler anywhere**, which is the shipped shape,
+    ``logging.lastResort`` carries it to stderr regardless. Whether those three
+    nodriver lines can FIRE is a separate question with a separate answer —
+    see :data:`PAYLOAD_ARG_PACKAGE`.
+
+    **Why a record FACTORY and not a ``logging.Filter``.** Both were measured.
+    ``Logger.handle`` consults only the filters of the logger the call was made
+    ON, and ``callHandlers`` then walks ancestors for HANDLERS, never for their
+    filters — so a filter on the family root ``nodriver`` never fires for a
+    ``nodriver.core.element`` record (pinned, because a fix written that way
+    passes a test that emits on the family root and leaks every real line).
+    Filtering each descendant instead cannot work either: at
+    :func:`configure_logging` time not one ``nodriver.*`` logger exists, since
+    the proxy never imports nodriver and the backend imports it later, so an
+    enumeration would cover nothing and would need a SECOND install site after
+    the import — two homes for one decision. And a filter on a HANDLER is no
+    use in the configuration this finding is about, because we do not own the
+    handler: production root carries none (``logging.lastResort``) and under a
+    caller's ``basicConfig`` it is theirs.
+
+    A factory runs inside ``Logger.makeRecord``, which is upstream of filters,
+    of handlers, of ``lastResort`` and of Sentry's ``callHandlers`` patch —
+    MEASURED against all four — and it covers a logger created after it is
+    installed, including a module a future nodriver adds. It also survives
+    ``logging.config.dictConfig(disable_existing_loggers=True)``, which is not
+    true of anything attached to a logger.
+
+    **Why no ``before_breadcrumb`` beside it.** For F-906's reason exactly: one
+    mechanism upstream of every sink closes all four at once, and a rule in
+    ``observability`` would be a second home for one decision (convention 4)
+    that could only ever matter if this one were removed.
+
+    Keyed on the ARGUMENT's type — never on the message text, so a nodriver
+    release is free to reword these lines, and never on ``record.name``, because
+    whether a rendering carries page content is a property of the object rather
+    than of the logger it was passed to (see :func:`_carries_payload`).
+
+    **Cost, measured** (min of 7 x 200 000, against ~1.7 us to build a record):
+    ~350 ns for the chained factory CALL itself, paid by every record in the
+    process, plus ~80 ns per argument for the scan. Reading the argument rather
+    than the logger name is that per-argument half only — the 350 ns is the
+    price of installing any factory at all.
+
+    Called from :func:`configure_logging` beside
+    :func:`apply_payload_log_floor`, ahead of the idempotency guard and of
+    everything that can raise ``OSError``, for that function's reason: a
+    process whose log directory could not be created still has stderr and
+    Sentry. Idempotent, on ``session_hygiene.install()``'s precedent, and it
+    CHAINS rather than replaces, so a caller's own factory keeps running.
+
+    The residual is F-906's, named rather than hidden: a caller who installs
+    their own record factory AFTER this one replaces it.
+    """
+    previous = logging.getLogRecordFactory()
+    if getattr(previous, _REDACTION_MARK, False):
+        return
+
+    def factory(*args: object, **kwargs: object) -> logging.LogRecord:
+        record = previous(*args, **kwargs)
+        # `record.args` is a TUPLE unless the caller passed a single mapping,
+        # logging's own `%(name)s` special case -- which no measured nodriver
+        # line uses, and which we leave alone rather than guess a rewrite for.
+        #
+        # Deliberately NOT gated on `record.name`: `_carries_payload` asks about
+        # the ARGUMENT, so one of our own records carrying a nodriver object is
+        # redacted exactly as nodriver's own is. See that function.
+        if isinstance(record.args, tuple) and record.args:
+            record.args = _redacted(record.args)
+        return record
+
+    # Through the CONSTANT, never a literal: the mark is read one function up
+    # by the same name, and two spellings of it would make a rename silently
+    # turn this install non-idempotent.
+    setattr(factory, _REDACTION_MARK, True)
+    logging.setLogRecordFactory(factory)
+
+
 def backend_uvicorn_config() -> dict[str, object]:
     """The ``uvicorn_config`` the backend's ``mcp.run(transport="http", …)``
     passes — the one home for how the backend's HTTP server logs and stops.
@@ -333,6 +599,7 @@ def configure_logging(role: str) -> Path:
     failed to open its log file still has stderr and still has Sentry.
     """
     apply_payload_log_floor()
+    install_payload_arg_redaction()
 
     log_dir = resolve_log_dir()
     log_path = log_dir / f"{role}-{os.getpid()}.log"

@@ -175,6 +175,83 @@ needs no `basicConfig` at all and is tracked as **F-907**; raising this floor
 over it would silence nodriver's real diagnostics, which is the trade this
 change deliberately refuses.
 
+### Fixed — F-907: a page's own form fields and text no longer reach our logs through nodriver
+
+F-906 held `nodriver` at WARNING because everything below that line quotes raw
+CDP. **This is the half above it**, and unlike F-906 nothing has to be
+misconfigured for it to reach a sink: WARNING is the effective level every
+shipped configuration already has.
+
+`nodriver/core/element.py` logs `"could not calculate box model for %s"` with a
+live `Element` at **WARNING**, in three places, and `Element.__repr__` renders
+the tag, **every attribute as `name="value"`**, and the element's **whole
+recursive text content**. So an `<input type=password>`'s `value=`, a `data-*`
+carrying a session token and a balance in a `<div>` all went into the line.
+`Tab.__repr__` does the same one object up with the tab's URL, query string
+included. Measured, an emitted record at that level reaches stderr — which for
+the backend is redirected into `backend-boot.log`, a durable file — **and**
+Sentry as a breadcrumb on the next event, in the plain shipped backend and
+proxy. It needs no handler of anyone's either: in a fresh process the root
+logger has none, so the stdlib's own `logging.lastResort` carries a WARNING to
+stderr regardless.
+
+**What it is not.** A first reading of this had the three lines firing on every
+`click_element` against a `display: none` target. Measured, they do not fire at
+all in nodriver 0.47: `Position.center` is a 2-tuple and therefore always
+truthy — even for a zero-size box at the origin, `(0.0, 0.0)` — so
+`if not center:` cannot open, and the other two paths out of `get_position()`
+(a raised `Exception`, or `None`) both leave `mouse_click` before the warning
+line. So this ships as insurance and as correctness for any future nodriver
+WARNING that renders an object, not as a patch for a live leak; the
+reachability premises are pinned, so the day a nodriver bump makes those sites
+live, CI says so.
+
+The line still arrives and still names the element; what it loses is every
+VALUE and all of its text:
+
+```
+could not calculate box model for
+  <input attrs=[type, value, data-session-token, class_] children=1>
+```
+
+Anything else from nodriver — a `Tab`, a `Connection`, a CDP record — renders as
+its type alone, because no half of it has been measured safe. **An exception is
+never shaped**, whatever package defined it: its `str()` is a diagnostic, and at
+`connection.py`:483 — nodriver's one real WARNING — `exc_info=True` rides beside
+it, so every sink that formats a traceback renders the text anyway and shaping
+the `%s` would cost only the Sentry breadcrumb its meaning. A
+`nodriver.core.connection.ProtocolException` is a nodriver type and the
+commonest thing a CDP-touching handler raises, so that line kept reading
+`=> Inspected target navigated [code: -32000]` rather than
+`=> <nodriver.core.connection.ProtocolException>`.
+
+The rule reads the **argument** and deliberately not the logger's name, so one
+of our OWN records carrying a nodriver object is redacted exactly as nodriver's
+is — whether a rendering carries page content is a property of the object, not
+of the logger it was handed to. Our `stealth.*` sites keep their own redaction
+rules (F-869 and its successors); this is the floor under them.
+
+A `logging` **record factory** rather than a filter, because both alternatives
+were measured and neither reaches: a `logging.Filter` on the `nodriver` family
+root never fires for a `nodriver.core.element` record (filters belong to the
+logger a call is made on; only handlers are inherited), and a filter on a
+handler is no use in the configuration that leaks, since there we do not own
+the handler. A factory sits upstream of handlers, stderr and Sentry alike,
+covers loggers created later — including a module a future nodriver adds — and
+survives `dictConfig(disable_existing_loggers=True)`. It is keyed on the
+argument's **type**, never on the message text, so nodriver may reword these
+lines freely; and it chains to any factory already installed. Measured cost:
+~350 ns per record for the chained factory call — the price of installing any
+factory at all — plus ~80 ns per argument for the scan, against ~1.7 µs to
+build a record. Nothing here is on a per-request path; uvicorn access logging
+is off.
+
+One thing this does **not** close, and it is now the larger half: `element.py`
+:499 raises `Exception("could not find position for %s " % self)` with the same
+repr, on the branch that *is* live, and an exception is not a log record — no
+logging mechanism reaches it. It is filed as **F-912** rather than left as a
+note under a closed finding.
+
 
 ## 2.1.12
 
