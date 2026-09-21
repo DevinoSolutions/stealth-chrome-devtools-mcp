@@ -330,12 +330,7 @@ class BrowserManager:
             raise
 
     async def start_idle_reaper(self) -> None:
-        """
-        Start the background idle reaper task when globally enabled.
-
-        Returns:
-            None
-        """
+        """Start the background idle reaper task when globally enabled."""
         if self._idle_timeout_seconds_default == 0:
             debug_logger.log_info(
                 "browser_manager",
@@ -355,12 +350,7 @@ class BrowserManager:
         )
 
     async def stop_idle_reaper(self) -> None:
-        """
-        Stop the background idle reaper task if it is running.
-
-        Returns:
-            None
-        """
+        """Stop the background idle reaper task if it is running."""
         if not self._idle_reaper_task:
             return
         if self._idle_reaper_task.done():
@@ -477,6 +467,7 @@ class BrowserManager:
         options: BrowserOptions,
         browser_executable: str,
         launch_args: list[str],
+        attempt: spawn_leak.Attempt,
     ) -> Browser:
         """Start the browser and return the live ``Browser``: normally by building
         the ``uc.Config`` here, but when this backend cannot show windows a headed
@@ -485,7 +476,10 @@ class BrowserManager:
         the handle immediately and can tear it down if a later phase raises. Both
         starts below are nodriver's ``Browser.start``, so the seam goes in ahead
         of the branch: its 2.75 s connect window is a loop count Chrome routinely
-        misses, and ours is the budget that decides (F-834 stage 2)."""
+        misses, and ours is the budget that decides (F-834 stage 2). *attempt* is
+        stamped BEFORE the fallible await and never returned, because the failure
+        it identifies the launched Chrome for is that await's (F-919); the
+        delegated branch leaves it unstamped; its own kill is best-effort (F-924)."""
         browser_connect.install()
         if desktop_launch.should_delegate(options.headless):
             browser, _pid = await desktop_launch.launch_and_attach(
@@ -499,6 +493,7 @@ class BrowserManager:
             browser_executable_path=browser_executable,
             browser_args=launch_args,
         )
+        attempt.config = config
         return await uc.start(config=config)
 
     async def _apply_post_launch(  # noqa: PLR0913  PERMANENT(function interface)
@@ -571,24 +566,24 @@ class BrowserManager:
         browser: Browser | None,
         proxy_forwarder: AuthenticatedProxyForwarder | None,
         options: BrowserOptions,
-        launch_started_at: float | None,
+        attempt: spawn_leak.Attempt | None,
     ) -> None:
         """Release what a failed spawn had already created, on cancel or error.
 
         A ``Browser`` we hold is stopped through nodriver. With NO handle but a
         launch that STARTED, the failure landed inside ``_launch_browser`` —
         after nodriver spawned Chrome and before it handed the object back — and
-        the only thing that still identifies that process is the profile it was
-        launched on (F-860). ``None`` means the launch was never reached.
+        what still identifies that process is the pid *attempt* leads to
+        (F-860, F-919). ``None`` means the launch was never reached.
         """
         if browser is not None:
             try:
                 await self._stop_browser(browser)
             except (OSError, RuntimeError, ConnectionError) as err:
                 self._warn_spawn_cleanup("browser.stop()", phase, instance_id, err)
-        elif launch_started_at is not None:
+        elif attempt is not None:
             spawn_leak.reap_launched_browsers(
-                process_cleanup, options.user_data_dir, launch_started_at, instance_id
+                process_cleanup, options.user_data_dir, attempt, instance_id
             )
         if proxy_forwarder is not None:
             try:
@@ -615,7 +610,7 @@ class BrowserManager:
 
         browser: Browser | None = None
         proxy_forwarder: AuthenticatedProxyForwarder | None = None
-        launch_started_at: float | None = None
+        launch_attempt: spawn_leak.Attempt | None = None
         try:
             platform_info = get_platform_info()
             idle_timeout_seconds = self._resolve_idle_timeout_seconds(
@@ -632,9 +627,9 @@ class BrowserManager:
                 self._resolve_launch_args(options, launch_proxy_server, platform_info)
             )
 
-            launch_started_at = time.time()
+            launch_attempt = spawn_leak.Attempt()
             browser = await self._launch_browser(
-                options, browser_executable, launch_args
+                options, browser_executable, launch_args, launch_attempt
             )
             tab = browser.main_tab
             config_obj = getattr(browser, "config", None)
@@ -709,7 +704,7 @@ class BrowserManager:
                 browser,
                 proxy_forwarder,
                 options,
-                launch_started_at,
+                launch_attempt,
             )
             try:
                 process_cleanup.kill_browser_process(instance_id)
@@ -730,7 +725,7 @@ class BrowserManager:
                 browser,
                 proxy_forwarder,
                 options,
-                launch_started_at,
+                launch_attempt,
             )
             try:
                 process_cleanup.kill_browser_process(instance_id)
