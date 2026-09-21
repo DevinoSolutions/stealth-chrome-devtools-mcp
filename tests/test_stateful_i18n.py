@@ -157,10 +157,13 @@ class _Instances:
         return instance_id
 
     async def close(self, instance_id: str) -> bool:
-        closed = await get_fn("close_instance")(instance_id=instance_id)
+        # F-910: the tool answers a record; `closed` is the boolean it used to
+        # return. Read strictly — a shape change should fail here by name
+        # rather than become a truthy dict every assertion below accepts.
+        answer = await get_fn("close_instance")(instance_id=instance_id)
         with contextlib.suppress(ValueError):
             self.instance_ids.remove(instance_id)
-        return closed
+        return answer["closed"]
 
     async def await_profile_free(self, profile: str) -> bool:
         """Block until the product itself considers *profile* not in use.

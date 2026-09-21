@@ -1230,6 +1230,42 @@ class TestNavAndCloseVerbs:
             {"instance_id": "e364c31b-1111"},
         )
 
+    def test_close_reports_a_seed_the_backend_could_not_refresh(
+        self, responsive, recorder, capsys, monkeypatch
+    ):
+        """F-910: a close that succeeded while the SEED did not move says both.
+
+        The seed is what every new session is copied from, so this is the
+        caller's business even though nothing failed. It is also why the verb
+        no longer prints "closed" on truthiness: the answer is a RECORD now,
+        and a record is always truthy — see the `closed: False` node below.
+        """
+        monkeypatch.setattr(cli_call, "wants_json", lambda *a, **k: False)
+        recorder.answers["list_instances"] = self.RECORDS
+        recorder.answers["close_instance"] = {
+            "closed": True,
+            "seed_refreshed": False,
+            "seed_error": "default-in-use",
+        }
+        assert cli.main(["close", "e364"]) == 0
+        printed = capsys.readouterr().out
+        assert "closed e364c31b-1111" in printed, printed
+        assert "seed not refreshed: default-in-use" in printed, printed
+
+    def test_a_close_that_failed_is_not_printed_as_closed(
+        self, responsive, recorder, capsys, monkeypatch
+    ):
+        """The record is truthy, so the verb has to read the KEY.
+
+        RED against the shipped `if result` line, which answered "closed" for
+        every record it was ever handed.
+        """
+        monkeypatch.setattr(cli_call, "wants_json", lambda *a, **k: False)
+        recorder.answers["list_instances"] = self.RECORDS
+        recorder.answers["close_instance"] = {"closed": False, "seed_refreshed": None}
+        assert cli.main(["close", "e364"]) == 0
+        assert "was not closed" in capsys.readouterr().out
+
     def test_an_ambiguous_prefix_exits_2_and_never_closes_anything(
         self, responsive, recorder, capsys
     ):

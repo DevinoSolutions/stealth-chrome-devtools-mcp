@@ -28,8 +28,16 @@ It is not ``profile_copy`` either, and the difference there is sharper: that
 module owns the MECHANICS of copying a profile directory and knows nothing
 about sessions, while everything here is policy about which session may be
 named. The two are joined by one measured fact — ``profile_copy.copy_file``
-answers a file Chrome holds open by skipping it — which is the whole reason
-``seed_source`` refuses a live source BY NAME.
+answers a file Chrome holds open by skipping it, so a copy of a RUNNING source
+carries no cookies at all — which is the whole reason ``seed_source`` refused a
+live source BY NAME.
+
+F-898 splits that refusal in two rather than lifting it: a running source THIS
+backend drives is seeded, because its cookies can be read out of the browser
+over CDP (``cookie_handoff``) instead of off the disk, and everything else is
+still refused by name. This module still owns only the DECISION — which session,
+and when — while the CDP half is ``cookie_handoff``'s and the two meet at one
+callable, ``driven``.
 
 A leaf, and it keeps ``profile_seed``'s invariant unchanged rather than
 inheriting a weakened one: the four directories arrive as a ``Roots``, the
@@ -47,13 +55,53 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 
 class SeedSource(NamedTuple):
-    """The directory a new session is copied FROM, and what that copy is
-    called in the marker and in ``clone_source``. One tuple because the two
-    are decided together and a caller that could pick them apart would be able
-    to record a copy as having come from somewhere it did not."""
+    """The directory a new session is copied FROM, what that copy is called in
+    the marker and in ``clone_source``, and — since F-898 — the RUNNING
+    directory whose cookie jar is handed over afterwards.
+
+    The first two are one tuple because they are decided together and a caller
+    that could pick them apart would be able to record a copy as having come
+    from somewhere it did not.
+
+    ``live`` is a THIRD fact and not a flag on the first, because for the
+    `default` session **the two are different directories**: the copy is taken
+    from the closed seed (F-893's whole point — a directory nothing is writing
+    to) while the jar belongs to the shared profile's live browser. Reading
+    "is there a hand-off" off ``kind`` worked only while those coincided, which
+    is exactly why `--from default` — the one source a human actually logs in
+    to — silently got no hand-off at all (F-898 review M1). ``None`` means
+    there is nothing running to hand anything over, which is every ordinary
+    spawn.
+    """
 
     path: Path
     kind: str
+    live: Path | None = None
+
+
+#: The kind recorded for a seed taken from a session whose browser is RUNNING
+#: under THIS backend (F-898). It is its own word rather than ``explicit-
+#: session`` with a flag beside it because what a copy from a live directory
+#: CONTAINS is different — the file half loses whatever Chrome holds open, and
+#: the cookies arrive afterwards over CDP — and the marker is the only place a
+#: session ever says where it came from.
+LIVE_SESSION_KIND = "explicit-session-live"
+
+
+def _nothing_driven(_profile: Path) -> bool:
+    """The fail-closed witness: this backend drives no browser anywhere.
+
+    Every caller that omits the real one gets 2.1.12's refusal for a live
+    source, because reading a browser's cookie jar is not something a DEFAULT
+    may authorise. ``cookie_handoff.NOTHING_DRIVEN`` is the same answer wearing
+    that module's type; this one exists so nothing in ``clone_storage`` has to
+    import it to state a default.
+    """
+    return False
+
+
+#: See :func:`_nothing_driven`.
+NOTHING_DRIVEN: Callable[[Path], bool] = _nothing_driven
 
 
 def seed_request(seed_from: str | None) -> str | None:
@@ -176,12 +224,82 @@ def require_new_session(
         )
 
 
+def _default_source(
+    roots: profile_seed.Roots,
+    *,
+    held: Callable[[Path], bool],
+    driven: Callable[[Path], bool],
+) -> SeedSource:
+    """Where an unset ``seed_from`` — and the word ``default`` — copies from.
+
+    THREE outcomes, and until F-898's review there was one (F-898 review M1).
+    The shared profile is the session a human logs in to; since F-888 its
+    browser survives its backend and is re-attached to, so the ordinary state
+    of this machine is that it is RUNNING and driven by us — and while it runs
+    ``clone_storage._refresh_master_snapshot_if_safe`` refuses to refresh
+    (``seed_error: "default-in-use"``), so the seed is as old as the last time
+    that window was closed. A hand-off was available the whole time, over a
+    connection this process already held, and was not taken.
+
+    1. **Seed present, shared profile running under US.** Copy the SEED, as
+       ever — F-893's argument is untouched, a copy must come from a directory
+       nothing is writing to — and hand the LIVE jar over afterwards. The two
+       are different directories, which is why ``SeedSource`` carries both. A
+       stale seed plus a current jar is strictly better than a stale seed, and
+       the ordering is what makes it true: the hand-off writes last.
+    2. **Seed present, shared profile running under a browser we do NOT
+       drive** (the human's own Chrome, or another backend's). Copy the seed
+       and say nothing new. Deliberately NOT the refusal the NAMED branch
+       raises, because here the closed copyable form EXISTS and is exactly
+       what F-897 promised — the caller gets the session they asked for, and
+       ``seed_changed_since`` in the answer already says the seed is behind.
+       Refusing would break ``--from default`` for the one person this product
+       is for, on the machine state that is most normal.
+    3. **No seed at all AND the shared profile running.** REFUSED, by name.
+       This was a silent copy of the LIVE shared directory, which this
+       finding's own measurement says carries ZERO cookies, skipping locked
+       files with no way to enumerate what was lost — F-898's exact harm, in
+       the default path, reported as an ordinary successful spawn. Nothing is
+       created on disk. The remedy is one action and the message says it:
+       close that window once and the seed is written.
+
+    A shared profile nobody is running still copies the live directory when
+    there is no seed — that is 2.1.11's first-run path and it is copying a
+    directory at rest, which is fine.
+    """
+    default = profile_seed.DEFAULT_SESSION
+    if roots.seed.exists():
+        # ``driven`` FIRST, and the order is the whole cost of this branch
+        # (F-898 review round 2): ``driven`` is a lookup in a snapshot this
+        # spawn already took, while ``held`` is a psutil walk of every process
+        # on the machine. Asked the other way round, EVERY named spawn paid
+        # that walk to discover the shared session is not one of ours; asked
+        # this way, only a spawn that can actually receive a hand-off pays it.
+        # The conjunction is unchanged, so the answer is byte-identical.
+        live = roots.shared if driven(roots.shared) and held(roots.shared) else None
+        return SeedSource(roots.seed, "explicit-default-seed", live)
+    if held(roots.shared):
+        raise ToolError(
+            f"the {default!r} session has no copyable form yet and its browser "
+            "is open, so there is nothing safe to seed from: the only copy "
+            "available would be of the live profile directory itself, which "
+            "carries no cookies at all — the jar is held open and skipped, and "
+            "nothing can say afterwards what was lost. Close the "
+            f"{default!r} session once (`stealthy close <instance>`); the seed "
+            "every later session is copied from is written when it closes, and "
+            f"`stealthy spawn --session NAME` will work from then on, whether "
+            f"{default!r} is open or not."
+        )
+    return SeedSource(roots.shared, "explicit-default")
+
+
 def seed_source(
     requested: str | None,
     roots: profile_seed.Roots,
     inside: Callable[[Path, Path], bool],
     *,
     held: Callable[[Path], bool],
+    driven: Callable[[Path], bool],
 ) -> SeedSource:
     """WHICH directory a new session is copied from, and what that copy is
     called (F-897). ``None`` means the same thing as ``"default"``, so the two
@@ -192,23 +310,36 @@ def seed_source(
     privilege of the word.** The product keeps a separate, closed, copyable
     form of it — the seed — refreshed whenever the shared profile is free
     (F-892/F-893), so a copy taken from it is a copy of a directory nothing is
-    writing to. The fallback to the LIVE shared directory when no seed exists
-    yet (first run) is 2.1.11's behaviour and is kept deliberately rather than
-    widened into the refusal below: it is the path that CREATES the first
-    seed, and refusing it would make a fresh installation unable to make its
-    first named session. What it costs is named in ``profile_copy``'s
-    docstring — a locked file is skipped and nothing can say which.
+    writing to. **It does NOT follow that `--from default` needs no hand-off,
+    and assuming it did was the gap F-898 review M1 found**: see
+    :func:`_default_source`, which now asks the same two questions about the
+    shared profile that every other source is asked.
 
-    **Every other session is refused while it is open, BY NAME.** It has no
+    **Every other RUNNING session splits on one question: do WE drive it**
+    (F-898). ``driven`` is that witness — a browser this backend holds an
+    instance for — and it is the only thing that makes a live source usable,
+    because the cookies then come out of the browser over CDP
+    (``cookie_handoff``) instead of off a disk Chrome is writing to. The FILE
+    copy still runs and still loses whatever is locked; what the hand-off adds
+    is the half that was always the point, and the two together are what
+    ``LIVE_SESSION_KIND`` names.
+
+    **A running source we do NOT drive is still refused, BY NAME.** It has no
     seed, so the copy would be of the live directory itself, and
     ``profile_copy.copy_file`` answers a locked file by skipping it with a
     warning: on Windows that is every file Chrome holds, and everywhere it is
-    a WAL-mode cookie jar mid-transaction. The caller would be handed a
-    session that looks complete and is missing exactly the logins they wanted,
-    with no way for us to enumerate the gap. A refusal naming the session and
-    the remedy is worth more than a copy nobody can trust. F-898 is where a
-    RUNNING source becomes copyable — a CDP cookie hand-off out of the live
-    browser rather than a file copy — and is deliberately not built here.
+    a WAL-mode cookie jar mid-transaction — measured, a file copy of a running
+    source carries ZERO cookies. The caller would be handed a session that
+    looks complete and is missing exactly the logins they wanted, with no way
+    for us to enumerate the gap. The refusal now SAYS which half is missing:
+    we cannot ask that browser for its cookies, because it is another
+    backend's or a Chrome nobody here launched, and there is no CDP connection
+    of ours to read the jar through.
+
+    **``driven`` is asked only when ``held`` is true**, which is what keeps the
+    ordinary spawn's cost at today's one process-table walk: a source nothing
+    holds is copied exactly as it was in 2.1.12 and never consults the
+    snapshot.
 
     Per-session seeds were the other candidate and are deliberately NOT built:
     each costs ~0.47 GB, and each needs its own refresh trigger, its own
@@ -218,9 +349,7 @@ def seed_source(
     """
     default = profile_seed.DEFAULT_SESSION
     if requested is None or profile_seed.is_default_name(requested):
-        if roots.seed.exists():
-            return SeedSource(roots.seed, "explicit-default-seed")
-        return SeedSource(roots.shared, "explicit-default")
+        return _default_source(roots, held=held, driven=driven)
     source = profile_seed.require_allowed(requested, roots, inside)
     if not source.exists():
         raise ToolError(
@@ -229,13 +358,18 @@ def seed_source(
             f"seed_from to copy the {default!r} session."
         )
     if held(source):
+        if driven(source):
+            return SeedSource(source, LIVE_SESSION_KIND, source)
         raise ToolError(
-            f"seed_from={requested!r} is open in a browser right now. Copying "
-            "a profile Chrome is writing to silently drops whatever it has "
-            "locked — which is where the logins are — and nothing can say "
-            f"afterwards what was lost. Close the {requested!r} session first "
-            f"(`stealthy close <instance>`), or seed from "
-            f"{default!r}, which the product keeps a separate "
-            "copyable form of."
+            f"seed_from={requested!r} is open in a browser this backend does "
+            "not drive, so its cookies cannot be handed over: there is no CDP "
+            "connection of ours to read them through, and copying a profile "
+            "Chrome is writing to carries no cookies at all — the jar is held "
+            "open and skipped, and nothing can say afterwards what was lost. "
+            f"Close the {requested!r} session first (`stealthy close "
+            "<instance>`), or spawn it through this backend "
+            f"(`stealthy spawn --session {requested}`) and seed from it while "
+            f"it runs, or seed from {default!r}, which the product keeps a "
+            "separate copyable form of."
         )
     return SeedSource(source, "explicit-session")
