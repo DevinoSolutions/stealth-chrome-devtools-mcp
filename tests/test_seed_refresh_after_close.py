@@ -65,7 +65,7 @@ from e2e_helpers import (
     sandbox_kwargs,
     warmup_once,
 )
-from stealth_chrome_devtools_mcp.embedded import clone_storage
+from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_seed
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.settings import get_settings
 
@@ -203,8 +203,29 @@ async def _close_the_default_session(app_base, monkeypatch) -> _Close:
 
 
 def _seed_files(seed: Path) -> list[Path]:
-    network = seed / "Default" / "Network"
-    return [path for path in network.glob("*") if path.is_file()]
+    """Every file in *seed* that could hold a login, wherever Chrome keeps it.
+
+    The list is the PRODUCT's — `profile_seed.LOGIN_WITNESSES`, the one home
+    for "which files witness a login" (F-892) — plus each one's SQLite journal,
+    where a jar that has not checkpointed yet keeps its newest rows. A pin does
+    not get to spell a second list.
+
+    Covering BOTH jar locations is measured, not defensive. Chrome >= 96
+    migrates `Default/Cookies` into `Default/Network/`, and whether it has done
+    so by the time a profile is copied is the BROWSER's business: on gate run
+    35638134072 the Linux and macOS runners kept the jar at `Default/Cookies`
+    with no `Default/Network` in the profile at all, while Windows had migrated
+    it — and the seed carried the login on all three. The first draft of this
+    helper globbed `Default/Network/*` alone, so it failed both POSIX cells
+    about a profile that was correct, which is a pin stating one host's layout
+    as though it were the product's contract.
+    """
+    candidates: list[Path] = []
+    for rel in profile_seed.LOGIN_WITNESSES:
+        witness = seed / rel
+        candidates.append(witness)
+        candidates.append(witness.with_name(f"{witness.name}-journal"))
+    return [path for path in candidates if path.is_file()]
 
 
 #: A file this big is not a cookie jar, and reading it to find out costs the
@@ -300,14 +321,33 @@ async def test_the_seed_refresh_after_a_default_close_carries_the_login(
     carrying = [path.name for path in _seed_files(seed) if needle in path.read_bytes()]
     assert carrying, (
         "the refreshed seed does not carry the cookie set before the close — "
-        f"searched {[p.name for p in _seed_files(seed)]} under {seed}. Every "
-        "session created from here inherits a profile missing that login\n"
+        f"searched {[str(p.relative_to(seed)) for p in _seed_files(seed)]} "
+        f"under {seed}. Every session created from here inherits a profile "
+        "missing that login\n"
         f"  {_tree_evidence('SOURCE (shared profile)', master)}\n"
         f"  {_tree_evidence('SEED (snapshot)', seed)}\n"
         f"  cookie bytes under source: {_needle_locations(master, needle)}\n"
         f"  cookie bytes under seed:   {_needle_locations(seed, needle)}\n"
         f"  refresh={observed.refresh!r} copy_skips={observed.skips}"
     )
+
+
+def test_the_seed_search_covers_every_jar_location_chrome_uses(tmp_path):
+    """`_seed_files` may not encode one host's cookie-jar layout.
+
+    Gate run 35638134072 cost two rounds to this: the helper globbed
+    `Default/Network/*` alone, which is where Chrome puts the jar AFTER its
+    >= 96 migration, so both POSIX cells failed about a seed that carried the
+    login at the pre-migration `Default/Cookies`. Driven off the product's own
+    `LOGIN_WITNESSES` so the two cannot drift apart again.
+    """
+    for rel in profile_seed.LOGIN_WITNESSES:
+        seed = tmp_path / rel.replace("/", "_").replace(" ", "_")
+        (seed / Path(rel).parent).mkdir(parents=True)
+        (seed / rel).write_bytes(b"jar")
+        assert [str(p.relative_to(seed)) for p in _seed_files(seed)] == [
+            str(Path(rel))
+        ], f"{rel} is a login witness the seed search does not look at"
 
 
 async def test_the_seed_refresh_after_a_default_close_skips_no_file(
