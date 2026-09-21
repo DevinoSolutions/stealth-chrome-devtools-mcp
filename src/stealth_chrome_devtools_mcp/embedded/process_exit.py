@@ -202,7 +202,21 @@ def _has_exited(proc: psutil.Process) -> bool:
     616-641), so a pid recycled inside the grace reads as gone instead of
     restarting the wait against a stranger — which is why the ``Process``
     object is built ONCE, before the loop, and the identity it captured is
-    what every poll is about. And it answers True for a ZOMBIE (documented,
+    what every poll is about.
+
+    **What that leaves open is a recycle BEFORE the build, and on the ADOPTED
+    path nothing closes it** (S4). The identity this compares against is
+    whatever the pid named at construction time, so a pid already recycled by
+    then makes every poll agree with the stranger and the wait runs to the
+    ceiling — a ≤ ``EXIT_GRACE_SECONDS`` stall, never data loss, since the
+    browser we meant is gone either way and Phase 3 still follows. For a
+    browser we LAUNCHED the window is shut one function up: ``_process`` has a
+    ``returncode``, and a set one declines to wait at all. For one we ADOPTED
+    (F-888: ``_process`` is ``None``, so the pid is ``Browser._process_pid``
+    alone) there is no ``returncode`` to read and nothing here joins the pid
+    to the profile the way ``browser_cmdline.debug_port`` does on the adoption
+    side — so this is narrower than round-1's S1 but not empty, and it is
+    stated rather than implied. And it answers True for a ZOMBIE (documented,
     and line 635-638 says so), which on POSIX is exactly the state a browser
     we waited for is in: it has exited and is waiting only for its parent's
     ``waitpid``, and that parent is asyncio, not us.

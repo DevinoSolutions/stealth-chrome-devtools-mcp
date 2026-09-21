@@ -611,7 +611,10 @@ async def close_instance(instance_id: str) -> dict[str, bool | str | None]:
     success = await rt.browser_manager.close_instance(instance_id)
     # F-910: `seed_refreshed` is tri-state and every value is a statement — the
     # None is "not asked", on `profile_seed.seed_changed_since`'s precedent, so
-    # there is ONE answer shape and no key that appears only sometimes.
+    # "nothing to report" cannot read as "nothing reported". `seed_error` IS
+    # conditional, and deliberately: it is present exactly when there is a
+    # refusal to quote, which is a fact about that refusal and not a third
+    # value of `seed_refreshed`.
     answer: dict[str, bool | str | None] = {"closed": success, "seed_refreshed": None}
     if success:
         await rt.network_interceptor.clear_instance_data(instance_id)
