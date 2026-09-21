@@ -135,6 +135,13 @@ already admitted, so one mechanism closes all four sinks at once — and
 `record.args` empty, so a filter could only pattern-match text the library is
 free to reword.
 
+**It is a floor, not a census**, and what sits above it is named rather than
+implied: `element.py`:537/:624/:633 interpolate an element at WARNING, and
+nodriver's `Element.__repr__` renders that element's descendant TEXT. That one
+needs no `basicConfig` at all and is tracked as **F-907**; raising this floor
+over it would silence nodriver's real diagnostics, which is the trade this
+change deliberately refuses.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in
