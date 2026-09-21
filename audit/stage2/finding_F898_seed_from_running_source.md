@@ -393,6 +393,55 @@ WIRE JSON through `Cookie.from_json` and asserts on `CookieParam.to_json`. That
 is `fixtures-from-the-same-serializer-cannot-fail` applied to the one place here
 where a wrong field is silent.
 
+### 11.1 The integration pin: two real Chromes and a real server
+
+`tests/test_e2e_seed_from_running_source.py`, 2 nodes, real headless Chrome,
+real named sessions under the node's own tmp session root, the fixture app's own
+HTTP origin. It exists because the hermetic tier cannot reach either fact this
+finding is about — that the two CDP calls across two real browsers put a cookie
+into the target's jar **the target then sends to a server**, and that the source
+is still running, and still ours, afterwards.
+
+The oracle is deliberately **not** a cookie API of ours. `get_cookies` reading
+back what `set_cookies` was handed proves only that CDP echoes; what a login
+needs is that the SERVER sees the cookie. So the page POSTs to `/api/echo` and
+the assertion is made against the `Cookie` header the fixture server reflects —
+the one reading a jar entry Chrome declines to send cannot satisfy.
+
+The two nodes differ in ONE thing and disagree about one cookie, which is this
+finding stated as an experiment. Each source is given a SESSION cookie and a
+PERSISTENT one through `document.cookie` — the state a human's login leaves, not
+a cookie this backend placed by CDP, which is the one shape that could
+conceivably be special.
+
+| | node 1: source RUNNING | node 2: source CLOSED (control) |
+|---|---|---|
+| `seeded_via` | `cdp-cookies`, counts line up, no `cookie_handoff_error` | absent — no hand-off, none attempted |
+| the copy | ran, and skipped the locked jar | ran, `seeded_from` names the source |
+| session cookie at the server | **present** | **absent** |
+| persistent cookie at the server | present | not asserted (Chrome's flush timing is its own) |
+| `LIVE_SEED_KEY` in the answer | absent | — |
+| cookie names/values anywhere in the answer | none | — |
+| the source afterwards | same renderer, same in-page value, still logged in | closed by the node itself |
+
+The control is what makes node 1 a statement about the CDP path rather than
+about copying: a session cookie is never written to disk, so the copy provably
+cannot carry it and the hand-off provably can.
+
+RED was taken by suppressing the send inside `write_jar` and re-running. Node 1
+failed with `cookies_carried: 3, cookies_in_target: 0` — and the captured log
+carried this finding's own premise, observed live on the machine rather than
+quoted from §2:
+
+```
+profile.copy_skip: Skipping locked profile file
+  …\sessions\f898-src-f0a2c21d\Default\Network\Cookies: [WinError 32]
+  The process cannot access the file because it is being used by another process
+```
+
+That line is the whole reason the mechanism exists, printed by the product,
+during the test that proves the mechanism works.
+
 Two defects the process caught in the first draft, both worth recording because
 neither was visible to a reading:
 
@@ -441,3 +490,11 @@ Everything in §9 still stands. In addition:
   reports what it SENT and what the target's jar held afterwards, and does not
   claim the two are the same number — Chrome's own startup fetches put cookies
   in a seconds-old profile (§6).
+* **The control node does not assert that the COPY carries the persistent
+  cookie**, only that it cannot carry the session one. When Chrome commits a
+  persistent cookie to the SQLite jar is Chrome's business — there is a lazy
+  write and a flush on graceful shutdown — and an assertion on it would be a
+  pin on the browser's flush timing wearing our name. What the control needs is
+  that the two mechanisms disagree about the cookie only one of them can carry,
+  and that is asserted. If a future node wants the positive half it should read
+  the jar file, not the header.
