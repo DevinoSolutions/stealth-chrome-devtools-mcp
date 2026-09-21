@@ -16,10 +16,12 @@ import json
 from stealth_chrome_devtools_mcp.embedded import clone_storage
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     _enforce_named_profile_trim_in,
-    _trim_profile_regenerable,
 )
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     clone_is_named as _clone_is_named,
+)
+from stealth_chrome_devtools_mcp.embedded.profile_copy import (
+    trim_regenerable as _trim_profile_regenerable,
 )
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"

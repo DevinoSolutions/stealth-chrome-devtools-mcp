@@ -129,6 +129,320 @@ that breaks the old pins.
 `audit/stage2/finding_F909_windows_latent_pin_races.md` carries the
 measurements.
 
+### Fixed — F-906: a caller's `basicConfig(level=DEBUG)` could route cookies into our logs
+
+`nodriver` writes the **whole raw CDP reply** into its own log text
+(`connection.py`:445, DEBUG) and the **whole event message** when a field will
+not parse (`connection.py`:451, INFO); `browser.py`:824/:869 log a cookie's name
+and value outright, and `websockets` logs the frame underneath (a short one is
+printed whole). Cookie names and values ride in all of them.
+
+None of that could reach a handler in any configuration this product ships —
+F-902 measured that, and it is re-measured here across backend, proxy,
+`--debug` and `STEALTH_MCP_LOG_LEVEL=DEBUG`. But the only thing stopping it was
+the log LEVEL, and those loggers carry none of their own, so the level was
+**root's to give away**. One `logging.basicConfig(level=DEBUG)` — a test, a
+notebook, a caller embedding this backend — gave it away for the whole process:
+**measured, both orders**, all four payload lines then reached a root handler
+(and so stderr, which for the backend is redirected into `backend-boot.log`, a
+durable file), and the INFO one additionally reached Sentry as a breadcrumb,
+because `LoggingIntegration`'s breadcrumb handler sits at INFO.
+
+`logging_setup.apply_payload_log_floor()` now holds `nodriver` and `websockets`
+at WARNING with an **explicit** level on the family root, set as the first
+statement of `configure_logging`. `basicConfig` only ever sets ROOT's level and
+`getEffectiveLevel` stops at the first ancestor that has one, so ours wins
+whichever way round the two calls happen.
+
+Nothing an operator sees changes: **WARNING is the effective level every
+shipped configuration already had**, which is the point — it closes the one door
+that was open and no other. nodriver's real diagnostics are untouched
+(`connection.py`:483 names the callback and the event *class*, never the
+payload), and our own `stealth.*` levels, including `STEALTH_MCP_LOG_LEVEL`, are
+not touched at all.
+
+A level rather than a filter or a Sentry `before_breadcrumb`: Sentry patches
+`logging.Logger.callHandlers`, which is only reached for a record the level
+already admitted, so one mechanism closes all four sinks at once — and
+`connection.py`:451 pre-interpolates its payload with `%`, leaving
+`record.args` empty, so a filter could only pattern-match text the library is
+free to reword.
+
+**It is a floor, not a census**, and what sits above it is named rather than
+implied: `element.py`:537/:624/:633 interpolate an element at WARNING, and
+nodriver's `Element.__repr__` renders that element's descendant TEXT. That one
+needs no `basicConfig` at all and is tracked as **F-907**; raising this floor
+over it would silence nodriver's real diagnostics, which is the trade this
+change deliberately refuses.
+
+### Fixed — F-907: a page's own form fields and text no longer reach our logs through nodriver
+
+F-906 held `nodriver` at WARNING because everything below that line quotes raw
+CDP. **This is the half above it**, and unlike F-906 nothing has to be
+misconfigured for it to reach a sink: WARNING is the effective level every
+shipped configuration already has.
+
+`nodriver/core/element.py` logs `"could not calculate box model for %s"` with a
+live `Element` at **WARNING**, in three places, and `Element.__repr__` renders
+the tag, **every attribute as `name="value"`**, and the element's **whole
+recursive text content**. So an `<input type=password>`'s `value=`, a `data-*`
+carrying a session token and a balance in a `<div>` all went into the line.
+`Tab.__repr__` does the same one object up with the tab's URL, query string
+included. Measured, an emitted record at that level reaches stderr — which for
+the backend is redirected into `backend-boot.log`, a durable file — **and**
+Sentry as a breadcrumb on the next event, in the plain shipped backend and
+proxy. It needs no handler of anyone's either: in a fresh process the root
+logger has none, so the stdlib's own `logging.lastResort` carries a WARNING to
+stderr regardless.
+
+**What it is not.** A first reading of this had the three lines firing on every
+`click_element` against a `display: none` target. Measured, they do not fire at
+all in nodriver 0.47: `Position.center` is a 2-tuple and therefore always
+truthy — even for a zero-size box at the origin, `(0.0, 0.0)` — so
+`if not center:` cannot open, and the other two paths out of `get_position()`
+(a raised `Exception`, or `None`) both leave `mouse_click` before the warning
+line. So this ships as insurance and as correctness for any future nodriver
+WARNING that renders an object, not as a patch for a live leak; the
+reachability premises are pinned, so the day a nodriver bump makes those sites
+live, CI says so.
+
+The line still arrives and still names the element; what it loses is every
+VALUE and all of its text:
+
+```
+could not calculate box model for
+  <input attrs=[type, value, data-session-token, class_] children=1>
+```
+
+Anything else from nodriver — a `Tab`, a `Connection`, a CDP record — renders as
+its type alone, because no half of it has been measured safe. **An exception is
+never shaped**, whatever package defined it: its `str()` is a diagnostic, and at
+`connection.py`:483 — nodriver's one real WARNING — `exc_info=True` rides beside
+it, so every sink that formats a traceback renders the text anyway and shaping
+the `%s` would cost only the Sentry breadcrumb its meaning. A
+`nodriver.core.connection.ProtocolException` is a nodriver type and the
+commonest thing a CDP-touching handler raises, so that line kept reading
+`=> Inspected target navigated [code: -32000]` rather than
+`=> <nodriver.core.connection.ProtocolException>`.
+
+The rule reads the **argument** and deliberately not the logger's name, so one
+of our OWN records carrying a nodriver object is redacted exactly as nodriver's
+is — whether a rendering carries page content is a property of the object, not
+of the logger it was handed to. Our `stealth.*` sites keep their own redaction
+rules (F-869 and its successors); this is the floor under them.
+
+A `logging` **record factory** rather than a filter, because both alternatives
+were measured and neither reaches: a `logging.Filter` on the `nodriver` family
+root never fires for a `nodriver.core.element` record (filters belong to the
+logger a call is made on; only handlers are inherited), and a filter on a
+handler is no use in the configuration that leaks, since there we do not own
+the handler. A factory sits upstream of handlers, stderr and Sentry alike,
+covers loggers created later — including a module a future nodriver adds — and
+survives `dictConfig(disable_existing_loggers=True)`. It is keyed on the
+argument's **type**, never on the message text, so nodriver may reword these
+lines freely; and it chains to any factory already installed. Measured cost:
+~350 ns per record for the chained factory call — the price of installing any
+factory at all — plus ~80 ns per argument for the scan, against ~1.7 µs to
+build a record. Nothing here is on a per-request path; uvicorn access logging
+is off.
+
+One thing this does **not** close, and it is now the larger half: `element.py`
+:499 raises `Exception("could not find position for %s " % self)` with the same
+repr, on the branch that *is* live, and an exception is not a log record — no
+logging mechanism reaches it. It is filed as **F-912** rather than left as a
+note under a closed finding.
+
+### Fixed — F-908: the same door, from the other end — the SSE transport logged every tool RESULT
+
+F-906 closed what **Chrome said to us**. This closes what **we said back**.
+`sse_starlette/sse.py`:362 is `logger.debug("chunk: %s", chunk)`, and for this
+backend that chunk is the whole serialised answer to a `tools/call` —
+`get_cookies`' jar, `get_page_content`'s HTML, `get_instance_state`'s
+localStorage. Measured by driving the real `EventSourceResponse`, not read off
+the call:
+
+```
+sse_starlette.sse DEBUG chunk: b'event: message\r\ndata: {"jsonrpc":"2.0","id":3,
+  "result":{"structuredContent":{"cookies":[{"name":"SID","value":"…"}]}}}'
+```
+
+The SSE frame is what carries every answer, because the SDK and FastMCP both
+default `json_response` to `False`, nothing here passes it, and an inherited
+`FASTMCP_JSON_RESPONSE` cannot reach fastmcp either (F-890 drops the prefix).
+
+**A tool answer has two ends, and both are logged.** The backend logs the SSE
+chunk it sends; the **stdio proxy** re-parses the identical bytes and logs the
+message — `mcp/client/streamable_http.py`:218 is `logger.debug(f"SSE message:
+{message}")`, the whole `JSONRPCResponse`, with :547 as its argument-side twin.
+Both processes call `configure_logging`, so capping one end was half a fix:
+with `sse_starlette` already held down, the same cookie jar still reached a
+root handler in the proxy (measured). So `mcp.client` joins the list too.
+
+It is `mcp.client` and not the `mcp` family: the **server** tree renders
+nothing for a request (its whole-message line hands `%s` a `RequestResponder`,
+which defines neither `__repr__` nor `__str__`), and capping it would silence
+the server SDK's own diagnostics for no gain. It is `mcp.client` and not the
+single logger, because a full census of the client package found a **second**
+renderer of the same shape in `client/sse.py`.
+
+Identical premise, identical mechanism: these loggers carry no level of their
+own, so one caller-side `logging.basicConfig(level=DEBUG)` opened them —
+**measured, both orders**. `sse_starlette` and `mcp.client` join
+`PAYLOAD_LOG_FAMILIES`, and that is the whole change. WARNING is again the
+effective level every shipped configuration
+already had, and here the floor costs even less than it did for nodriver:
+`sse_starlette` has no call at WARNING or above anywhere in the package, so
+there is not one diagnostic for it to stand in front of.
+
+**The families deliberately left OUT are measured too, and pinned**, because
+"why is `mcp` not in that list" is the next person's question: `starlette` and
+`anyio` log nothing below WARNING at all; `uvicorn`'s whole-ASGI-message logger
+replaces bodies with a `<N bytes>` placeholder by construction and logs below
+what `basicConfig(DEBUG)` admits; `httpcore`'s body traces carry no return
+value, so their message is the trace name; `fastmcp`'s tool-ARGUMENT line is
+already shielded by the library's own `FastMCP` root level plus
+`propagate=False`; and the `mcp` **server** tree's whole-incoming-message line
+renders a `RequestResponder` for a request, while its notification arm — which
+does render in full — can carry none of the five client notifications' payload
+(enumerated from the SDK's own union, pinned, so a sixth goes RED). Capping the
+server family or `fastmcp` wholesale would have silenced those SDKs' own
+diagnostics and closed no door.
+
+Two sites a level cannot reach are **recorded rather than fixed**:
+`mcp/shared/session.py`:383-384 and :430-432 use module-level
+`logging.warning` / `logging.debug`, i.e. the **root** logger, so no family cap
+reaches them. :383 is at WARNING, therefore reachable as shipped, carrying
+pydantic's middle-truncated `input_value=` echo of a caller's arguments; and
+:430-432 renders the **whole message** at WARNING in one line. Both are on
+validation-failure paths, both need a different mechanism, and they are named in
+`audit/stage2/finding_F908_sse_starlette_logs_tool_result.md` §6 — beside
+F-907, the other line this floor sits below.
+### Added — F-898: `--from` a session that is still OPEN
+
+F-897 refuses `--from work` while `work`'s browser is running, and it is right
+about the mechanism it had: measured on Chrome 153, a file copy of a running
+profile carries **zero** cookies — the SQLite jar is held open and skipped — and
+nothing can say afterwards what was lost. Since F-888 a named session's browser
+survives its backend, so "close it first" stopped being a remedy anyone takes.
+
+A source whose browser **this backend drives** is now seeded anyway: the file
+copy runs for everything it can still carry, and the COOKIES are handed over the
+two browsers' CDP connections (`Storage.getCookies` → `Storage.setCookies`)
+after the new browser launches.
+
+```console
+stealthy spawn --session work --headed          # log in by hand — and leave it open
+stealthy spawn --session work2 --from work      # already logged in
+```
+
+```
+instance   : 4f0c…
+role       : explicit
+profile    : C:\stealth-mcp-browser-sessions\sessions\work2
+seeded     : seeded from work at 2026-09-21 14:02
+cookies    : 14 handed over from the running source
+```
+
+**What it carries is cookies, and the whole jar.** Every kind measured — session,
+persistent, `HttpOnly`, `Secure`, `SameSite=None`, `Partitioned`/CHIPS — with
+every shared field round-tripping exactly, including a session cookie, which a
+file copy can never carry because it is never written to disk. It carries **no**
+`localStorage`, `sessionStorage`, IndexedDB, Cache Storage, service-worker
+registration or saved passwords, so a site that keeps its token in
+`localStorage` will NOT be logged in. And it carries every site the source
+session is logged into, not just the one you had in mind — which is what a copy
+of a closed session already does.
+
+**`--from default` gets the same hand-off, and that is the case most spawns
+take** — an unset `--from` means `default`, so this is `stealthy spawn --session
+NAME`. `default` is the session you log in to by hand, its browser normally
+stays open, and while it is open its seed is never refreshed — so the copy alone
+could be days old. The copy still comes from the seed (a closed, safe copy) and
+the live jar is now written on top of it. Two things follow that are worth
+stating: a `default` held by a Chrome this backend does NOT drive is copied and
+never refused, because the seed exists and is exactly what 2.1.12 promised; and
+a machine with no seed yet AND `default` open is now refused by name instead of
+silently copying the live directory, which carries no cookies at all. Closing
+that window once writes the seed and the refusal is gone for good.
+
+A running NAMED source this backend does NOT drive (another backend's, or a
+Chrome nobody here launched) is still refused by name, and the refusal now says
+which half is missing: there is no CDP connection of ours to ask for its
+cookies.
+
+A hand-off that fails does not fail the spawn — the session exists and works
+without the source's cookies, and the answer says
+`seeded_via: "copy"` with a shape-only `cookie_handoff_error`.
+
+**No cookie name or value reaches a log line, a message, the returned record or
+Sentry** — counts, the CDP method and an exception type only. A cookie name
+identifies on its own and a value is the session itself.
+
+Internals: the new `embedded/cookie_handoff.py` is the one home for the jar
+transfer and for which profile directories this backend drives; the regenerable
+profile trim moved from `clone_storage` to `profile_copy`, beside the list it
+reads, which took `clone_storage` from 1000 to 993 lines.
+
+### Fixed — F-912: a hidden password field's value no longer leaves the machine in an error message
+
+`get_element_state` on an element that lays out no box answered with the
+element rendered in full — tag, **every attribute as `name="value"`**, and all
+of its descendant text:
+
+```
+Failed to get element state: could not find position for <input id="pwhidden"
+  type="password" value="SECRET-VALUE" style="display:none"></input>
+```
+
+That text is nodriver's, not ours: `element.py`:499 raises
+`Exception("could not find position for %s " % self)`, and every `except` block
+that relays `str(exc)` carries the whole element with it.
+
+**What was new is that the content LEFT THE PROCESS.** `get_element_state`
+already returns `attributes` (including `value`), `text` and `text_all` to the
+caller on the success path by design — a caller asking for an element's state is
+entitled to the field's value, and this changes the SHAPE of a failed call's
+error text rather than making the tool more secretive. The exposure is the two
+sinks nobody asked for: `click_element` wrote the same rendering to the backend
+log at DEBUG (then clicked the element synthetically and succeeded), and the
+`ToolError` reached **Sentry** — not dropped as a tool failure, because
+`get_element_state` raises it from inside an `except` and `expected_events`'
+error-convention rule tolerates only a timeout or a cancellation behind ours.
+
+**It is reachable by three ordinary shapes**, which is what separates this from
+F-907's insurance: measured on Chrome 153, `DOM.getContentQuads` answers an
+EMPTY LIST — not an error — for a `display:none` element and for an `<option>`
+inside a `<select>`, and by construction for a detached node, while
+`visibility:hidden`, a zero-size box, an empty inline and
+`content-visibility:hidden` all answer one quad and never reach it.
+
+The fix is at the **raise**, which is the one moment the element is still an
+OBJECT: `embedded/element_box.py` wraps `Element.get_position` and, for the one
+exception type that line produces — the bare builtin `Exception`, keyed on the
+TYPE and never on the message, because a library may reword its own sentences —
+replaces the text with F-907's shape:
+
+```
+The element has no layout box, so its position cannot be read:
+<input attrs=[type, value, data-session-token] children=1>.
+display:none, an <option> and a detached node all render nothing.
+```
+
+Redacting is not silencing: which control had no box is the whole diagnostic
+value of the line, and the new `ElementBoxError` names a condition a bare
+`Exception` named not at all. Everything that is **not** that exact type passes
+through untouched — a `ProtocolException` keeps Chrome's own words, an
+`AttributeError` still reaches `mouse_click`'s handler, a cancellation still
+cancels. The replacement is raised OUTSIDE the `except` block rather than with
+`raise … from None`: both keep nodriver's message out of a traceback and out of
+Sentry's chain (every reader measured honours `__suppress_context__`), but
+leaving the handler first makes the `__context__` ABSENT rather than suppressed,
+which nothing downstream can opt out of. One shaper — F-907's
+`logging_setup._shape` — and no second one; no change to any of the three call
+sites, because all three are correct once what they relay is shape-only.
+Measured cost: +0.113 µs per `get_position`, against 430.9 µs median for the
+same call over real CDP.
+
 ### Fixed — F-910: closing a session could lose the login you just made
 
 `close_instance` sent Chrome the graceful `Browser.close` and then terminated
