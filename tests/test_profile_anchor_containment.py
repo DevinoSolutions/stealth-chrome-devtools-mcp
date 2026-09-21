@@ -68,6 +68,12 @@ DOT_SHAPES = [
 #: not merely the containment — is the same answer on all seven CI cells.
 UNIFORM_SHAPES = [".", "./", "..", "../..", "sub/..", "sessions/.."]
 
+#: How THIS host spells a filesystem root, in every separator it has. The list
+#: is built per-platform rather than parametrized across both flavours because
+#: `D:\` is a root on Windows and an ordinary relative filename on POSIX, so one
+#: list would be asserting two different things under one name.
+ROOT_SPELLINGS = ["D:\\", "D:/"] if os.name == "nt" else ["/"]
+
 
 def _roots() -> tuple[Path, Path]:
     """The two directories that HOLD profiles, as the product resolves them."""
@@ -305,3 +311,46 @@ class TestASessionDirectoryMayBeALink:
         `<clones>`."""
         with pytest.raises(ToolError):
             clone_storage.require_allowed_user_data_dir("...", None)
+
+
+class TestACloneRootAtAFilesystemRoot:
+    """`_inside_lexically` has to survive a clone root with no parent above it
+    (review N1).
+
+    `normpath` KEEPS the trailing separator on a filesystem root — `D:\\` stays
+    `D:\\`, `/` stays `/` — so appending one more doubled it and matched
+    nothing: an operator whose `STEALTH_MCP_BROWSER_SESSION_ROOT` sits at a
+    drive root had EVERY relative request refused with "walks out of the
+    session storage". No shipped configuration does this, which is why it is a
+    nit and not an outage; it is pinned because the doubling is invisible by
+    reading and the resolving twin answers the opposite.
+
+    These call the predicate directly. It is pure and touches no filesystem, so
+    the drive need not exist — and going through the gate would need the whole
+    session root moved to `D:\\`, which is a fixture that cannot run on a CI
+    box and would be measuring the fixture rather than the rule.
+    """
+
+    @pytest.mark.parametrize("spelling", ROOT_SPELLINGS)
+    def test_a_session_under_a_root_clone_root_is_inside_it(self, spelling):
+        root = Path(spelling)
+        assert profile_seed._inside_lexically(root / "acme", root), spelling
+        assert profile_seed._inside_lexically(root / "sub" / "acme", root), spelling
+
+    @pytest.mark.parametrize("spelling", ROOT_SPELLINGS)
+    def test_the_root_itself_is_not_inside_itself(self, spelling):
+        """Still STRICTLY inside: landing ON the clone root is the clause above
+        this one, and it has its own message."""
+        root = Path(spelling)
+        assert not profile_seed._inside_lexically(root, root), spelling
+
+    def test_an_ordinary_clone_root_is_unchanged(self, tmp_path):
+        """The guard on the fix: stripping the separator before adding one back
+        is the identity for every parent that is not a filesystem root, and the
+        prefix trap a bare `startswith` would open stays shut."""
+        clones = tmp_path / "sessions"
+        assert profile_seed._inside_lexically(clones / "acme", clones)
+        assert not profile_seed._inside_lexically(clones, clones)
+        assert not profile_seed._inside_lexically(
+            tmp_path / "sessions2" / "acme", clones
+        )
