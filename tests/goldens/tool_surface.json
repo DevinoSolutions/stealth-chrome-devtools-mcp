@@ -303,7 +303,7 @@
     "tags": []
   },
   "close_instance": {
-    "description": "Close a browser instance.\n\nArgs:\n    instance_id (str): Browser instance ID.\n\nReturns:\n    bool: True if closed successfully.",
+    "description": "Close a browser instance.\n\nArgs:\n    instance_id (str): Browser instance ID.\n\nReturns:\n    Dict[str, Union[bool, str, None]]: ``closed`` is the old boolean — True\n    when the instance was closed. ``seed_refreshed`` reports what closing\n    the `default` session did to the SEED every later session is copied\n    from: True refreshed it, False refused (and ``seed_error`` then carries\n    the refusal in ``clone_storage``'s own words), and None means no\n    refresh was due because this was not the `default` session. The refusal\n    used to go into a dict this tool discarded, which is how F-910 hid a\n    seed that had silently stopped moving.",
     "enabled": true,
     "input_schema": {
       "properties": {
@@ -318,18 +318,20 @@
       "type": "object"
     },
     "output_schema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "boolean"
-        }
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
-      "required": [
-        "result"
-      ],
-      "title": "_WrappedResult",
-      "type": "object",
-      "x-fastmcp-wrap-result": true
+      "type": "object"
     },
     "tags": []
   },

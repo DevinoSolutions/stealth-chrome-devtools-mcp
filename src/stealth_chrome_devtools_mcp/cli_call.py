@@ -717,7 +717,20 @@ def cmd_close(args: argparse.Namespace) -> int:
         if wants_json(sys.stdout, explicit=args.json):
             _emit_json(result)
             return
-        print(f"closed {instance_id}" if result else f"{instance_id} was not closed")
+        # F-910: the tool answers a RECORD (`closed` + `seed_refreshed`), and a
+        # record is always truthy — so `if result` would have printed "closed"
+        # for a close that failed. A bare bool is still accepted because this
+        # CLI adopts whichever backend answers, including an older build's.
+        record = result if isinstance(result, dict) else {"closed": result}
+        print(
+            f"closed {instance_id}"
+            if record.get("closed")
+            else f"{instance_id} was not closed"
+        )
+        if record.get("seed_refreshed") is False:
+            # The seed is what every new session is copied from, so a refusal
+            # here is the caller's business even though the close succeeded.
+            print(f"seed not refreshed: {record.get('seed_error')}")
 
     return _run(args, body)
 

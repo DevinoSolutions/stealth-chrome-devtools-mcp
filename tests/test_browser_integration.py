@@ -166,9 +166,8 @@ class TestBrowserSpawnAndClose:
         iid = result["instance_id"]
 
         closed = await close(instance_id=iid)
-        assert closed is True or (
-            isinstance(closed, dict) and closed.get("result") is True
-        )
+        # F-910: `close_instance` answers a record, so the boolean is a key.
+        assert closed["closed"] is True, closed
 
     @pytest.mark.asyncio
     async def test_spawn_with_relative_user_data_dir(self, tmp_path):
@@ -724,9 +723,8 @@ class TestRepeatedSpawnClose:
             iid = result["instance_id"]
             assert iid
             closed = await close(instance_id=iid)
-            assert closed is True or (
-                isinstance(closed, dict) and closed.get("result") is True
-            )
+            # F-910: `close_instance` answers a record, so the boolean is a key.
+            assert closed["closed"] is True, closed
             live_ids = {
                 inst.get("instance_id")
                 for inst in await list_instances()

@@ -3,26 +3,35 @@
 Closing the `default` session does not only close a browser — `close_instance`
 runs `_refresh_master_snapshot_if_safe("after-default-close")` in the same
 breath, so the SEED every later session is copied from is rewritten from the
-profile that close has just finished with. Before F-910 that close returned
-while Chrome was still shutting down, which reaches the seed by two separate
-routes:
+profile that close has just finished with. Two things therefore have to be true
+of every close of the shared session, and this module states both:
 
-* the refresh asks `_profile_has_running_browser(default)` first, sees the
-  browser we just asked to leave STILL RUNNING, and refuses — so the whole
-  refresh-on-close feature did nothing at all, silently, on every close; and
-* were it not refused, it would copy a profile Chrome still holds files in,
-  and `profile_copy.copy_file` answers a locked file by SKIPPING it, which is
-  a login missing from the seed that nothing afterwards can enumerate.
+* the refresh RAN and refreshed — it asks `_profile_has_running_browser` first
+  and refuses a profile a live browser holds; and
+* the copy it made found nothing locked — `profile_copy.copy_file` answers a
+  locked file by SKIPPING it, which is a login missing from the seed that
+  nothing afterwards can enumerate.
 
-Both are pinned here, and the first one's RED is deterministic on the shipped
-code: Chrome was still running at that point on every close measured (20/20),
-so the refusal is not a race, it is the behaviour.
+**These are CONTRACT pins and not F-910 REDs — measured, not assumed.** With
+Phase 2b neutralised (the reviewer's own plugin, which replaces
+`process_exit.wait_for_exit_async` with a no-op, restoring the pre-fix
+ordering), both nodes pass: 10 runs, 20/20 node passes, 2026-09-21. The reason
+is upstream of the refresh and was missed in the first draft of this module:
+the refresh runs after `browser_manager.close_instance` RETURNS, and the last
+thing that call does is Phase 3's `_blocking_teardown`, whose FIRST statement
+is `process_cleanup.kill_browser_process` — a `terminate()` plus a blocking
+`process.wait(timeout=3)` for every browser pid on the profile. So the profile
+was already free when the refresh asked, and the seed refresh was NOT silently
+disabled before F-910. What F-910 changes for the seed is the CONTENT of the
+profile that gets copied, not whether the copy happens: the wait is what makes
+Chrome's own shutdown — and therefore its cookie commit — land BEFORE the
+copy, rather than being cut short by that terminate.
 
 **Not under the stalled harness.** The brief asked for these under the arm that
 suppresses `Browser.close`, and they cannot be: with nothing asking Chrome to
-leave, no wait can make it leave, so the refusal and the skips stand after the
-fix exactly as before it. That arm proves the CAUSE and is recorded in the
-finding; what proves the FIX is a real close, which is what runs here.
+leave, no wait can make it leave, so the skips stand after the fix exactly as
+before it. That arm proves the CAUSE and is recorded in the finding; what
+proves the FIX is a real close, which is what runs here.
 
 **The fixture's own stores had to be fixed before any of this could be
 measured**: `tmp_session_root` wrote 18-byte placeholders where a Chrome
@@ -116,6 +125,7 @@ class _Close:
 
     def __init__(self):
         self.refreshes: list[dict] = []
+        self.answer: dict = {}
         self.skips_before = 0
         self.skips_after = 0
 
@@ -182,9 +192,9 @@ async def _close_the_default_session(app_base, monkeypatch) -> _Close:
             "the probe cookie was never set, so this node would measure nothing"
         )
         observed.skips_before = _copy_skips()
-        closed = await get_fn("close_instance")(instance_id=instance_id)
+        observed.answer = await get_fn("close_instance")(instance_id=instance_id)
         observed.skips_after = _copy_skips()
-        assert closed is True
+        assert observed.answer["closed"] is True, observed.answer
     except BaseException:
         with contextlib.suppress(Exception):
             await get_fn("close_instance")(instance_id=instance_id)
@@ -200,21 +210,28 @@ def _seed_files(seed: Path) -> list[Path]:
 async def test_the_seed_refresh_after_a_default_close_carries_the_login(
     fixture_app_server, redirected_root, monkeypatch
 ):
-    """The seed is refreshed on close, and the cookie set before it is in there.
+    """The seed is refreshed on close, the CALLER is told so, and the cookie
+    set before the close is in there.
 
-    Two assertions in one node because they are one event: the refresh has to
-    RUN before there is anything to ask about its contents, and running is the
-    half whose RED is deterministic — before F-910 the browser was still alive
-    when the refresh asked, so it answered `default-in-use` and copied nothing.
+    Three assertions in one node because they are one event: the refresh has to
+    RUN before there is anything to ask about its contents, and what the tool
+    REPORTED has to agree with what the product actually did — a refusal used
+    to go into a dict `close_instance` discarded, which is how a seed that had
+    stopped moving would have stayed invisible (the lead's M3 ruling).
     """
     observed = await _close_the_default_session(fixture_app_server, monkeypatch)
 
+    # The reporting contract, read off the tool's own answer.
+    assert observed.answer.get("seed_refreshed") is True, (
+        f"close_instance did not report a refreshed seed: {observed.answer!r}"
+    )
+    assert "seed_error" not in observed.answer, (
+        f"the tool reported a seed error: {observed.answer!r}"
+    )
+    # …and it agrees with what the product's own refresh returned.
     assert observed.refresh.get("seed_refreshed") is True, (
         "closing the default session did not refresh its seed: "
-        f"{observed.refresh!r} — before F-910 close_instance returned while "
-        "Chrome was still running, so the refresh saw a live browser on the "
-        "profile and refused, and every later session was copied from a seed "
-        "that had never been updated"
+        f"{observed.refresh!r} — every later session is copied from that seed"
     )
     assert "seed_error" not in observed.refresh, (
         f"the refresh reported an error: {observed.refresh!r}"
@@ -238,9 +255,10 @@ async def test_the_seed_refresh_after_a_default_close_skips_no_file(
     The second exposure at the same site, and it is not pinned by the first:
     `copy_file` answers a file Chrome still holds by logging `copy_skip` and
     carrying on, so a seed built over a live browser is silently incomplete
-    rather than refused. The bounded wait sits inside `close_instance`, so the
-    refresh that runs after it inherits a browser that has already gone — this
-    is what says that inheritance is real rather than argued.
+    rather than refused. A CONTRACT pin, not an F-910 RED — it passes with
+    Phase 2b neutralised too (see this module's docstring for the numbers and
+    for why: the kill path already blocked on the browser's exit). What it
+    states is that the property survives the fix, which reorders that path.
     """
     observed = await _close_the_default_session(fixture_app_server, monkeypatch)
 

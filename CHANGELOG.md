@@ -153,16 +153,29 @@ knob, no platform branch; `browser_manager.py`'s LOC cap ratchets 1485 → 1452.
 `close_instance` also writes one close-diagnostics line saying whether Chrome
 left unaided and how long it took, so a post-mortem can read it.
 
-**The same defect was silently disabling the seed refresh.** Closing the
-`default` session refreshes the seed every later session is copied from, and
-that refresh refuses to copy a profile a live browser holds — so with the close
-returning while Chrome was still running, it refused **every time**, reporting
-`seed_error: default-in-use` into an answer `close_instance` discards. A
-session created after a login would therefore be copied from a seed that had
-never been updated since the shared profile was last genuinely idle. It works
-now, and both halves are pinned against a redirected session root with a
-synthetic profile: the refreshed seed carries the cookie set before the close,
-and the copy skips no locked file.
+**The seed a new session is copied from is the same fix's blast radius.**
+Closing the `default` session refreshes that seed from the profile the close
+has just finished with, so a truncated shutdown is a truncated seed, inherited
+by every session created afterwards. Both halves are pinned against a
+redirected session root with a synthetic profile: the refreshed seed carries
+the cookie set before the close, and the copy skips no locked file.
+
+**And the refresh now REPORTS.** `close_instance` answers a record rather than
+a bare boolean — `closed`, plus `seed_refreshed` (`True` refreshed, `False`
+refused with `seed_error` in the words the refresh itself produces, `None` for
+a close that owed no refresh). The refusal used to go into a dict the tool
+discarded one line after building it, which is precisely why a seed that had
+stopped moving would have been invisible from outside the process. Its schema
+is declared in `tests/goldens/tool_surface.json`, so that SOFT golden moves
+here deliberately; `stealthy close` prints the refusal, and a record being
+always truthy is why that verb no longer says "closed" for a close that failed.
+
+**The wait does not reap.** On POSIX a browser we launched is a child asyncio
+is already waiting on, and a second `waitpid` would make asyncio report
+`returncode 255` for a browser that exited cleanly — so the grace polls and
+treats a zombie as exited, leaving asyncio its reap. Linux and macOS execute
+this code for the first time on the gate; the finding says which claims they
+are the first to check.
 
 **Attribution, measured rather than assumed.** The CI node
 (`test_storage_and_cookies_survive_one_profile_and_no_other`) spawns into the

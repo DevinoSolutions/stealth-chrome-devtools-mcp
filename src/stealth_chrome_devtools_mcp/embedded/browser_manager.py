@@ -807,10 +807,12 @@ class BrowserManager:
         """
         Close and remove a browser instance.
 
-        Three-phase teardown that keeps the event loop responsive:
+        Four-step teardown that keeps the event loop responsive:
         Phase 1 (claim) — pop shared state under lock, the in-memory-storage
             entry included (F-899: it must not outlive the pop).
         Phase 2 (graceful CDP) — close tabs/connection on the loop (bounded).
+        Phase 2b (grace) — wait, bounded, for Chrome's OWN exit before anything
+            kills it: that exit commits the cookie store (F-910, `settle`).
         Phase 3 (blocking kill) — synchronous kill in a worker thread.
         """
         # -- Phase 1: claim (under lock, O(microseconds)) --------------------
@@ -888,20 +890,18 @@ class BrowserManager:
                 )
 
             # -- Phase 2b: let Chrome finish leaving (F-910) -------------------
-            # The graceful close above is the START of Chrome's shutdown, not
-            # the end of it: the cookie store is committed on the way out, and
-            # terminating mid-flush loses the login the caller just made. So
-            # the browser gets a bounded grace to go on its own BEFORE Phase 3
-            # touches it — the argument and the measurement are at
-            # `process_exit.EXIT_GRACE_SECONDS`. Phase 3 is unchanged and still
-            # gets its whole budget, because this wait is its own await.
-            waited = await process_exit.wait_for_exit_async(
-                process_exit.browser_pid(
-                    getattr(browser, "_process", None),
-                    getattr(browser, "_process_pid", None),
-                )
+            # The graceful close above is the START of Chrome's shutdown, and
+            # that shutdown is what COMMITS the cookie store — terminating
+            # mid-flush loses the login the caller just made. The grace, its
+            # measurement and what a cancelled close does about it are all
+            # `process_exit.settle`'s. Phase 3 keeps its whole budget: this is
+            # its own await.
+            await process_exit.settle(
+                instance_id,
+                getattr(browser, "_process", None),
+                getattr(browser, "_process_pid", None),
+                self._KILL_RETRIES,
             )
-            process_exit.report(instance_id, waited)
 
             # -- Phase 3: blocking kill (off the loop, real timeout) ----------
             stop_coro = None

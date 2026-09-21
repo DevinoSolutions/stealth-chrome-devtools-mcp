@@ -8,13 +8,23 @@ Scenarios:
 4. Happy path: fast kill returns True, instance removed, storage cleaned.
 5. A wedged tab's close is bounded, so teardown still completes.
 6. The kill ladder reports the rung that ended the browser (F-910).
+7. The TOOL tells its caller what the close did to the seed (F-910 M3) —
+   hermetic, through the real tool body with the singletons swapped.
+8. The wait OBSERVES the browser's exit and never reaps it, so asyncio's child
+   watcher keeps the status it is waiting for (F-910 M2, POSIX); it declines a
+   pid asyncio has already collected (S1); and a close cancelled DURING the
+   grace still ends the browser (S2).
 """
 
+import ast
 import asyncio
+import inspect
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import psutil
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import process_exit
@@ -345,3 +355,233 @@ def test_the_kill_ladder_logs_the_rung_that_ended_the_browser():
         and entry.get("method") == "terminate_process"
         and "ladder-1" in entry.get("message", "")
     ], f"the rung that ended the browser wrote nothing: {written!r}"
+
+
+# ---------------------------------------------------------------------------
+# 7. The tool reports what the close did to the SEED (F-910, the lead's M3)
+# ---------------------------------------------------------------------------
+
+
+def _closing_server(patched_server, *, role: str, refresh: dict | None):
+    """Drive the REAL ``close_instance`` tool body with everything else faked.
+
+    The subject is the tool and not the manager: the refresh's answer was
+    computed correctly all along and then dropped on the floor, so a pin on
+    ``clone_storage`` or on ``browser_manager`` cannot see this defect at all.
+    ``refresh=None`` means the refresh must never be called.
+    """
+    calls: list[str] = []
+
+    def _refresh(reason):
+        calls.append(reason)
+        assert refresh is not None, f"the refresh must not run for role {role!r}"
+        return refresh
+
+    async def _close(instance_id):
+        return True
+
+    async def _spawn_diagnostics(instance_id):
+        return {"profile_selection": {"profile_role": role}}
+
+    async def _clear(instance_id):
+        return None
+
+    server = patched_server(
+        browser_manager=SimpleNamespace(
+            close_instance=_close,
+            get_spawn_diagnostics=_spawn_diagnostics,
+        ),
+        network_interceptor=SimpleNamespace(clear_instance_data=_clear),
+        dynamic_hook_system=SimpleNamespace(remove_instance=MagicMock()),
+        clone_storage=SimpleNamespace(
+            _refresh_master_snapshot_if_safe=_refresh,
+            _release_clone_dir=MagicMock(),
+        ),
+        profile_seed=SimpleNamespace(DEFAULT_SESSION="default"),
+    )
+    return server, calls
+
+
+@pytest.mark.asyncio
+async def test_a_refused_seed_refresh_reaches_the_caller(patched_server, call_tool):
+    """A refusal must be REPORTED, in `clone_storage`'s own words.
+
+    This is the half F-910 could not see: closing the shared session refreshes
+    the seed every later session is copied from, and the refusal went into a
+    dict ``close_instance`` discarded — so a seed that had stopped moving was
+    indistinguishable, at every surface a caller has, from one that had not.
+    """
+    server, calls = _closing_server(
+        patched_server,
+        role="default",
+        refresh={"seed_refreshed": False, "seed_error": "default-in-use"},
+    )
+
+    answer = await call_tool(server, "close_instance", instance_id="i1")
+
+    assert calls == ["after-default-close"]
+    assert answer == {
+        "closed": True,
+        "seed_refreshed": False,
+        "seed_error": "default-in-use",
+    }, answer
+
+
+@pytest.mark.asyncio
+async def test_a_close_that_owed_no_refresh_says_so_rather_than_nothing(
+    patched_server, call_tool
+):
+    """``seed_refreshed: None`` is "not asked" — one answer shape, no missing key.
+
+    A key present only after a `default` close would make "nothing to report"
+    and "nothing reported" the same reading, which is the shape of the defect
+    this reporting exists to remove.
+    """
+    server, calls = _closing_server(patched_server, role="clone", refresh=None)
+
+    answer = await call_tool(server, "close_instance", instance_id="i2")
+
+    assert calls == []
+    assert answer == {"closed": True, "seed_refreshed": None}, answer
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_with_no_words_is_still_reported(patched_server, call_tool):
+    """A refusal the refresh left unexplained must not read as an absent key.
+
+    ``_refresh_master_snapshot_if_safe`` names every refusal it makes today;
+    this pins what happens if one ever stops, because ``seed_refreshed: False``
+    with no ``seed_error`` is a silence of exactly the kind under repair.
+    """
+    server, _calls = _closing_server(
+        patched_server, role="default", refresh={"seed_refreshed": False}
+    )
+
+    answer = await call_tool(server, "close_instance", instance_id="i3")
+
+    assert answer["seed_error"] == "unreported", answer
+
+
+# ---------------------------------------------------------------------------
+# 8. The wait does not reap (F-910 M2) — POSIX, unreachable from this host
+# ---------------------------------------------------------------------------
+
+
+def test_the_wait_calls_nothing_that_would_reap_the_browser():
+    """No ``wait()`` anywhere in ``process_exit``, and the reason is POSIX.
+
+    A browser we launched is a child of this process and asyncio's child
+    watcher is already blocked in ``os.waitpid`` on it. ``psutil``'s POSIX
+    ``Process.wait()`` reaps (``_psposix.wait_pid`` polls
+    ``os.waitpid(pid, WNOHANG)``), and a child's status can be collected once —
+    so the loser of that race reports ``returncode 255`` for a browser that
+    exited 0. This host is Windows, where no watcher and no zombie exist, so
+    the defect is INVISIBLE to every node here and to every local measurement:
+    a source pin is what can state it at all. Keyed on the CALL and not on a
+    text match, so the module's prose about waiting is untouched.
+    """
+    source = Path(inspect.getsourcefile(process_exit)).read_text(encoding="utf-8")
+    waits = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "wait"
+    ]
+    assert not waits, (
+        "process_exit calls .wait() at "
+        f"{[node.lineno for node in waits]} — on POSIX that reaps a child "
+        "asyncio is waiting on, and asyncio then reports returncode 255"
+    )
+
+
+def _fake_psutil(statuses):
+    """A psutil stand-in whose one process answers *statuses* in order."""
+    answers = list(statuses)
+
+    class _Proc:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def is_running(self):
+            return answers[0] != "gone" if answers else False
+
+        def status(self):
+            return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    return SimpleNamespace(
+        Process=_Proc,
+        STATUS_ZOMBIE=psutil.STATUS_ZOMBIE,
+        NoSuchProcess=psutil.NoSuchProcess,
+        Error=psutil.Error,
+    )
+
+
+def test_a_zombie_is_an_exited_browser(monkeypatch):
+    """The POSIX success shape: still running, then a zombie, then done.
+
+    Windows never produces this, so it is driven through the module's one
+    ``psutil`` name rather than a real process. A zombie has exited — its
+    cookie store is committed — and calling that a timeout would spend the
+    whole 5 s grace and then kill an already-dead pid on every POSIX close.
+    """
+    monkeypatch.setattr(
+        process_exit,
+        "psutil",
+        _fake_psutil([psutil.STATUS_RUNNING, psutil.STATUS_ZOMBIE]),
+    )
+    monkeypatch.setattr(process_exit, "_POLL_SECONDS", 0.0)
+
+    waited = process_exit.wait_for_exit(4321, timeout=1.0)
+
+    assert waited.exited is True, waited
+    assert waited.reason == "exited", waited
+
+
+def test_a_browser_that_never_leaves_is_handed_to_the_kill_path(monkeypatch):
+    """The grace is a CEILING: a wedged browser times out and is not called gone."""
+    monkeypatch.setattr(process_exit, "psutil", _fake_psutil([psutil.STATUS_RUNNING]))
+    monkeypatch.setattr(process_exit, "_POLL_SECONDS", 0.0)
+
+    waited = process_exit.wait_for_exit(4321, timeout=0.05)
+
+    assert waited.exited is False, waited
+    assert waited.reason == "still-running", waited
+
+
+def test_a_process_asyncio_has_already_collected_is_never_waited_on():
+    """F-910 S1: a set ``returncode`` means the pid may already be a stranger's.
+
+    asyncio collected this child, so on POSIX the pid is free from that
+    instant; waiting would spend up to the whole grace on whoever holds it
+    next. The answer is None — "do not wait" — which lands on exactly the
+    behaviour that shipped before F-910.
+    """
+    collected = SimpleNamespace(returncode=0, pid=4242)
+
+    assert process_exit.browser_pid(collected, None) is None
+    assert process_exit.browser_pid(collected, 777) is None
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_grace_still_kills_the_browser(monkeypatch):
+    """F-910 S2: a client that disconnects mid-grace must not strand a Chrome.
+
+    Phase 2b sits inside a ``try`` whose handler is ``except Exception``, and
+    ``CancelledError`` is not one — so without this arm the grace would newly
+    make a cancelled close likelier to leave a live browser for the orphan
+    reaper, by the width of the ceiling (up to 5 s for a wedged one).
+    """
+
+    async def _cancelled(pid, timeout=process_exit.EXIT_GRACE_SECONDS):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(process_exit, "wait_for_exit_async", _cancelled)
+    process = SimpleNamespace(
+        returncode=None, pid=5150, terminate=MagicMock(), kill=MagicMock()
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await process_exit.settle("cancel-1", process, None, 2)
+
+    process.terminate.assert_called_once_with()

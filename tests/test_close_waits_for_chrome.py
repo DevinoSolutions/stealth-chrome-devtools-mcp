@@ -87,10 +87,13 @@ class _Spawned:
         return instance_id
 
     async def close(self, instance_id: str) -> bool:
-        closed = await get_fn("close_instance")(instance_id=instance_id)
+        # F-910's own reporting change: the tool answers a record, and `closed`
+        # is the boolean it used to return. Read strictly (see the same helper
+        # in `test_stateful_i18n.py`).
+        answer = await get_fn("close_instance")(instance_id=instance_id)
         with contextlib.suppress(ValueError):
             self.instance_ids.remove(instance_id)
-        return closed
+        return answer["closed"]
 
     async def await_profile_free(self, profile: str) -> bool:
         directory = Path(self.profile_dirs[profile])
@@ -194,7 +197,12 @@ async def test_the_kill_path_never_runs_against_a_live_browser(spawned, monkeypa
     assert await spawned.close(instance_id) is True
 
     assert observed, "the kill path never ran, so this node measured nothing"
-    assert observed[0] in {"gone", "no-pid"}, (
+    # `zombie` is an EXITED browser and belongs in this set: on POSIX the wait
+    # deliberately does not reap (`process_exit`'s POSIX paragraph — asyncio's
+    # child watcher owns that `waitpid`), so between Chrome's exit and its
+    # parent collecting the status the process entry is still there, in exactly
+    # that state. Windows has no zombies and answers `gone`.
+    assert observed[0] in {"gone", "no-pid", psutil.STATUS_ZOMBIE}, (
         "close_instance reached its kill path while the browser was still "
         f"running (status {observed[0]!r}) — Chrome was mid-shutdown, and a "
         "terminate there truncates the cookie-store commit (F-910)"
