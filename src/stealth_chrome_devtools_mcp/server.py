@@ -14,11 +14,18 @@ EMBEDDED_DIR = Path(__file__).with_name("embedded")
 # it decides ONE thing from three flags — stdio proxy, or `runpy` the backend — and
 # every other argument belongs to `embedded/server.py`'s full parser, which re-reads
 # `sys.argv` after the runpy load. An `add_help=True` here would answer with this
-# shim's three-flag usage and hide the real one, so the help request is meant to fall
+# shim's three-flag usage and hide the real one, so the request is meant to fall
 # through. What it fell through INTO was the defect: with the default
-# `--transport stdio` it reached `ensure_server_running`, so asking for help
-# cold-started a backend. These are the two spellings that mean "answer, do not run".
-_HELP_FLAGS = frozenset({"-h", "--help"})
+# `--transport stdio` it reached `ensure_server_running`, so asking a QUESTION
+# cold-started a backend.
+#
+# This is the ANSWER-AND-EXIT set: every flag `build_arg_parser()` handles by
+# printing something and exiting before a port is bound. `--list-sections` is one
+# of them ("List all available tool sections and exit") and was the sibling F-905
+# left behind (review S1, measured with the same tripwire). `--minimal`, `--debug`
+# and `--xpool-safe` are deliberately NOT here: they CONFIGURE a backend that then
+# serves, so passing them with the default stdio transport still means "start".
+_ANSWER_AND_EXIT = frozenset({"-h", "--help", "--list-sections"})
 
 
 def _start_proxy_error_reporting() -> threading.Thread:
@@ -78,14 +85,13 @@ def main() -> None:
         parser.add_argument("--singleton-port", type=int, default=DEFAULT_PORT)
         known, extra = parser.parse_known_args()
 
-        # A help request takes the branch that can ANSWER it (F-905). The runpy
-        # load below reaches `build_arg_parser()`, whose `--help` prints the real
-        # usage and exits 0 before anything binds a port. Keyed on the request
-        # alone, so no other argv changes branch: an ordinary stdio start is
-        # byte-identical to 2.1.12's.
-        wants_help = _HELP_FLAGS.intersection(extra)
+        # A question takes the branch that can ANSWER it (F-905). The runpy load
+        # below reaches `build_arg_parser()`, which prints and exits before
+        # anything binds a port. Keyed on the request alone, so no other argv
+        # changes branch: an ordinary stdio start is byte-identical to 2.1.12's.
+        wants_answer = _ANSWER_AND_EXIT.intersection(extra)
 
-        if known.transport == "stdio" and not known.standalone and not wants_help:
+        if known.transport == "stdio" and not known.standalone and not wants_answer:
             from stealth_chrome_devtools_mcp.embedded.logging_setup import (
                 configure_logging,
             )

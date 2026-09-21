@@ -344,8 +344,8 @@ class TestTheRealDashMStillWorks:
         assert "--transport" in done.stdout
 
 
-class TestAskingForHelpStartsNothing:
-    """F-905: `--help` must reach a parser, never `ensure_server_running`.
+class TestAskingAQuestionStartsNothing:
+    """F-905: an answer-and-exit flag must reach a parser, never a cold start.
 
     ``server.main`` builds its own parser with ``add_help=False`` and reads it
     with ``parse_known_args``, and BOTH are deliberate: it decides one thing --
@@ -356,16 +356,24 @@ class TestAskingForHelpStartsNothing:
 
     What that left is a gap rather than a policy: ``--help`` is unknown to the
     shim, so with the default ``--transport stdio`` it fell past the parser into
-    the stdio branch and reached ``ensure_server_running`` -- **asking for help
-    cold-started a backend**. The fix routes a help request to the branch that
-    can answer it, and touches no other argv.
+    the stdio branch and reached ``ensure_server_running`` -- **asking a question
+    cold-started a backend**. The fix routes the request to the branch that can
+    answer it, and touches no other argv.
+
+    ``--list-sections`` is parametrised beside the two help spellings because it
+    is the same defect and was the sibling F-905 shipped without (review S1):
+    its own help text says "and exit", and it reached ``ensure_server_running``
+    exactly as ``--help`` did -- measured with this tripwire before the fix.
+    ``--minimal``/``--debug``/``--xpool-safe`` are deliberately absent: they
+    CONFIGURE a backend that then serves, so under the default transport they
+    still mean "start".
 
     Neither node here starts anything: the first tripwires the cold start and
     the ``runpy`` load, and the second is the real child that already proves
     ``--transport http --help`` exits 0.
     """
 
-    @pytest.mark.parametrize("flag", ["--help", "-h"])
+    @pytest.mark.parametrize("flag", ["--help", "-h", "--list-sections"])
     def test_a_help_request_never_reaches_the_cold_start(self, monkeypatch, flag):
         from stealth_chrome_devtools_mcp import server as shim
         from stealth_chrome_devtools_mcp.embedded import singleton

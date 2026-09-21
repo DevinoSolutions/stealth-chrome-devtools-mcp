@@ -295,10 +295,12 @@ def _root_spellings(path: Path) -> list[str]:
     the filesystem and would recurse into the primitives being guarded.
 
     What this does NOT close, and the finding says so: a junction MID-path in
-    the TARGET (``C:\\link\\server.json`` where ``C:\\link`` -> the state dir)
-    is still a spelling of a fenced file that no root string is a prefix of.
-    Closing that needs a resolve per call, which is the cost this whole guard
-    is built to avoid; the redirect is what covers it.
+    the TARGET (``C:\\link\\server.json`` where ``C:\\link`` -> the state dir),
+    and a TRAILING DOT on the root component (``…\\fenceroot.\\x.txt``, which
+    Windows strips when opening the file while ``normpath`` keeps it). Both are
+    spellings of a fenced file that no root string is a prefix of, and closing
+    either needs a resolve per call — the cost this whole guard is built to
+    avoid. The redirect is what covers them.
     """
     spellings = [os.path.normpath(str(path)), os.path.realpath(str(path))]  # noqa: PTH100  PERMANENT(F-903: Path.resolve() is realpath plus a Path allocation; the string is what the guard compares)
     if os.name == "nt":

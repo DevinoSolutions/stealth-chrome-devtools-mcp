@@ -35,11 +35,11 @@ the next entry: **asking for help cold-started a backend** (F-905).
 
 ### Fixed — F-905: `--help` cold-started a backend instead of printing help
 
-`python -m stealth_chrome_devtools_mcp --help` (and `-h`) did not print usage.
-It started a real backend in `~/.stealth-mcp` and then ran an stdio proxy
-against it until the operator interrupted — and on a machine with a stale
-record, `ensure_server_running` can evict as well as adopt. Typing `--help` is
-not consent for any of that.
+`python -m stealth_chrome_devtools_mcp --help` (and `-h`, and
+`--list-sections`) did not print anything. Each started a real backend in
+`~/.stealth-mcp` and then ran an stdio proxy against it until the operator
+interrupted — and on a machine with a stale record, `ensure_server_running` can
+evict as well as adopt. Typing `--help` is not consent for any of that.
 
 `server.main` is a shim that decides one thing from three flags — stdio proxy,
 or `runpy` the real backend — and its `add_help=False` + `parse_known_args` are
@@ -49,13 +49,21 @@ the shim's three-flag usage and hide the real interface. The pass-through is the
 design; the defect was what the help request passed through INTO, since the
 default `--transport stdio` carried it into the proxy branch.
 
-Fixed by routing a help request to the branch that can answer it, keyed on the
+Fixed by routing the request to the branch that can answer it, keyed on the
 request alone — an ordinary stdio start, an `--transport http` start, a
 `--standalone` start and the backend's own `-m …` argv are byte-identical to
 2.1.12's, and a pin exists for that specifically, because "route help to runpy"
 has a lazy implementation that would delete the stdio proxy. `--help` now
-prints the backend's real usage and exits 0. Found while writing F-903's
-entrypoint pin; the finding is
+prints the backend's real usage and `--list-sections` its section table, both
+exiting 0 with nothing started.
+
+The set is **answer-and-exit**, not "help": it is every flag
+`build_arg_parser()` handles by printing and exiting before a port is bound.
+`--list-sections` ("List all available tool sections and exit") was the sibling
+the first pass left behind and is measured in the same tripwire;
+`--minimal`/`--debug`/`--xpool-safe` are deliberately outside it, because they
+configure a backend that then serves. Found while writing F-903's entrypoint
+pin; the finding is
 `audit/stage2/finding_F905_help_cold_starts_a_backend.md`.
 
 ### Fixed — F-903: the test suite could cold-start a real backend into the operator's state dir

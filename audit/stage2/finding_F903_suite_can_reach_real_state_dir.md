@@ -503,7 +503,11 @@ is the shape this finding is about.
     S1/N3), which closes the 8.3, `\\?\`, root-level-link and local-admin-share
     cases for zero per-open cost. A link in the middle of the target would need
     a `realpath` per call, and the set of names that resolve to this machine is
-    not enumerable.
+    not enumerable. **A trailing dot on the root component bypasses the table
+    too** (`…\fenceroot.\x.txt`, `samefile` True — measured): Windows strips it
+    when opening the file while `os.path.normpath` keeps it, so the probe
+    matches no root string. Same class as the other two — a spelling only the
+    filesystem folds, and the redirect is what covers it.
 11. **`tests/test_backend_escapes_client_job.py`'s helper child** ran real
     backend-spawn code with the operator's real `HOME` (review S7). Nothing
     landed, because the child hand-stubs its one writer — but it was one

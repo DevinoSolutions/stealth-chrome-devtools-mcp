@@ -160,15 +160,19 @@ enforces the general rule by AST and carries the single allowance
 (`tool_runtime`'s `cdp_transport.install()`); adding a second means writing down
 why. There is no exclusion list to add a module to — fix the module instead.
 
-**`--help` used to cold-start a backend** (F-905, fixed on this branch).
-`server.main` parses with `add_help=False` + `parse_known_args` — deliberately,
-because it decides one thing from three flags and every other argument belongs
-to `embedded/server.py`'s full parser — so `--help` was *unknown* to it and the
-default `--transport stdio` carried it into `ensure_server_running`. A help
-request now takes the `runpy` branch, which is the one that can answer it. If
-you add a flag to that shim's parser, keep the help request out of the stdio
-branch; `tests/test_package_entrypoints.py::TestAskingForHelpStartsNothing`
-fails if it goes back in.
+**`--help` and `--list-sections` used to cold-start a backend** (F-905, fixed on
+this branch). `server.main` parses with `add_help=False` + `parse_known_args` —
+deliberately, because it decides one thing from three flags and every other
+argument belongs to `embedded/server.py`'s full parser — so both were *unknown*
+to it and the default `--transport stdio` carried them into
+`ensure_server_running`. They take the `runpy` branch now, which is the one that
+can answer them. `server._ANSWER_AND_EXIT` is the set and the rule is "does
+`build_arg_parser()` print and exit on it" — `--minimal`/`--debug`/
+`--xpool-safe` are outside it, because they configure a backend that then
+serves. **If you add a printing flag to the backend's parser, add it to that
+set**; nothing derives it, because the shim may not import the backend's parser.
+`tests/test_package_entrypoints.py::TestAskingAQuestionStartsNothing`
+parametrises every member.
 
 Coverage is **intentionally not** in `addopts` (it would slow every single-file TDD run
 and trip `--cov-fail-under` on partial runs). CI turns it on explicitly.

@@ -70,17 +70,31 @@ any of that.
 
 ## 4. The fix
 
-One predicate, keyed on the help request and on nothing else:
+One predicate, keyed on the request and on nothing else:
 
 ```python
-_HELP_FLAGS = frozenset({"-h", "--help"})
+_ANSWER_AND_EXIT = frozenset({"-h", "--help", "--list-sections"})
 …
-wants_help = _HELP_FLAGS.intersection(extra)
+wants_answer = _ANSWER_AND_EXIT.intersection(extra)
 
-if known.transport == "stdio" and not known.standalone and not wants_help:
+if known.transport == "stdio" and not known.standalone and not wants_answer:
 ```
 
-A help request now takes the branch that can ANSWER it. The `runpy` load reaches
+A question now takes the branch that can ANSWER it.
+
+**The set is "answer and exit", not "help"** — and it took a review to get the
+membership right. The first version of this fix shipped `{-h, --help}` and left
+the sibling behind: `--list-sections`, whose own help text is *"List all
+available tool sections and exit"*, is unknown to the shim in exactly the same
+way and reached `ensure_server_running` in exactly the same way (measured with
+the same tripwire, before the widening). The rule is what
+`build_arg_parser()` handles by PRINTING and exiting before a port is bound.
+
+`--minimal`, `--debug` and `--xpool-safe` are deliberately NOT in it. They
+CONFIGURE a backend that then serves, so a caller passing one with the default
+stdio transport still means "start a backend"; routing them here would turn a
+working invocation into a printout. The line between the two sets is "does the
+flag end the process with an answer", and it is stated at the constant. The `runpy` load reaches
 `build_arg_parser()`, whose own `--help` prints the real usage and exits 0 before
 anything binds a port, spawns a browser or touches the record.
 
@@ -101,15 +115,17 @@ delete the stdio proxy.
 
 ## 5. RED first
 
-`tests/test_package_entrypoints.py::TestAskingForHelpStartsNothing`, both
-parameters (`--help`, `-h`), against the unfixed shim:
+`tests/test_package_entrypoints.py::TestAskingAQuestionStartsNothing`, against
+the unfixed shim — first the two help spellings, then `--list-sections` against
+the half-fixed one:
 
 ```
 AssertionError: `--help` reached ensure_server_running -- asking for help
 cold-starts a backend (F-905)
+AssertionError: `--list-sections` reached ensure_server_running -- …
 ```
 
-2 RED → 9 GREEN for the file. Neither node starts anything: `ensure_server_running`
+2 RED → 9 GREEN for the file; then 1 RED → 13 GREEN for the sibling. Neither node starts anything: `ensure_server_running`
 is replaced with a tripwire and `runpy.run_path` with a recorder, so the node
 observes WHICH branch was taken without either branch running.
 
@@ -122,7 +138,17 @@ exit 0
 ```
 
 `server.py` in that usage line is `embedded/server.py` — the real parser
-answering, which is the whole point of the fix.
+answering, which is the whole point of the fix. The sibling, same shape:
+
+```
+$ uv run python -m stealth_chrome_devtools_mcp --list-sections
+Available tool sections:
+  browser-management: Core browser operations (8 tools)
+  …
+exit 0
+```
+
+with no new Python process on the machine before and after.
 
 ## 6. Residuals
 
@@ -139,3 +165,10 @@ answering, which is the whole point of the fix.
    belong to the other parser.
 3. **A help request with `--standalone` or `--transport http`** already reached
    the `runpy` branch and is unchanged. Only the default path was broken.
+4. **The set is a LIST and has to be kept in step with `build_arg_parser()`.**
+   Nothing derives it — the shim may not import the backend's parser, which is
+   the whole reason it has three flags of its own — so a future flag that prints
+   and exits has to be added here by hand. That is the cost of the shim's
+   independence and it is why the constant states the rule rather than only the
+   members. `tests/test_package_entrypoints.py` parametrises every member, so a
+   flag added to the set without the behaviour fails.
