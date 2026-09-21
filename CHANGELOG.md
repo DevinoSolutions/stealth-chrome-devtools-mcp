@@ -17,11 +17,27 @@ of 104; each alone was green. The full lane was green only because
 unpatched, so `app_lifespan`'s shutdown ran `clear_all()` on the real singleton in
 passing.
 
-Harness only — no shipped behaviour changes. `tests/conftest.py` grows an autouse
-`_in_memory_storage_hygiene` that restores the store after every test, a sibling
-of the `_stealth_logger_hygiene` fixture above it, and
-`tests/test_in_memory_storage_isolation.py` pins it with a two-node pair that no
-collection order can mask.
+`tests/conftest.py` grows an autouse `_in_memory_storage_hygiene` that restores
+the store after every test, a sibling of the `_stealth_logger_hygiene` fixture
+above it, and `tests/test_in_memory_storage_isolation.py` pins it with a two-node
+pair that no collection order can mask.
+
+### Fixed — F-899: a cancelled `close_instance` left a permanent ghost row in `list_instances`
+
+Found while reviewing the above, in the same subject. `BrowserManager.close_instance`
+popped `_instances` in Phase 1 but removed the in-memory-storage entry in Phase 4,
+inside a `try` whose handler is `except Exception` — which an
+`asyncio.CancelledError` walks straight past, because it is a `BaseException`. Six
+awaits separate the two, and the `close_instance` tool body carries no CDP timeout,
+so a client disconnecting mid-close cancelled the request task in that window and
+left the manager without the instance and the store with its entry. `list_instances`
+then reported it as a `source: "stored"` record — about a browser already being torn
+down — for the life of the backend, since only lifespan shutdown clears the store.
+
+The removal now happens in Phase 1, under the same lock and with no `await` between
+it and the pop, so the window is closed rather than narrowed. The cancellation still
+propagates. `close_instance` keeps exactly one removal site and
+`browser_manager.py` stays at its 1485-LOC cap.
 
 ## 2.1.11
 

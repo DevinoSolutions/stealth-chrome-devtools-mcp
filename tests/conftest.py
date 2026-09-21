@@ -174,10 +174,22 @@ def _in_memory_storage_hygiene():
     is hidden. ``tests/test_in_memory_storage_isolation.py`` is the
     order-independent pin that this fixture is still here and still works.
 
-    The snapshot is two levels deep, which is every mutation the class offers:
-    ``store_instance``/``remove_instance`` write inside ``_data["instances"]``,
-    ``set`` writes a top-level key, ``clear_all`` replaces the whole dict.
-    Restoration goes through the public API only.
+    The snapshot is two levels deep, which is every mutation the class's own
+    METHODS make: ``store_instance``/``remove_instance`` write inside
+    ``_data["instances"]``, ``set`` writes a top-level key, ``clear_all``
+    replaces the whole dict. It is deliberately not a ``deepcopy``, and what
+    that costs is one shape: ``get``/``get_instance`` hand back the LIVE nested
+    object, so a caller mutating below level 2 in place is not restored. Today
+    that is unreachable — measured over 222 nodes, every test starts with an
+    EMPTY store, so there is never a nested object to mutate — and
+    ``copy.deepcopy`` is the one-word answer if it stops being. Restoration goes
+    through the public API only.
+
+    The import is function-local, unlike every other import in this file,
+    because it is the one that reaches ``embedded/`` — and that package's
+    ``__init__`` runs a ``sys.path`` shim. A conftest that fired it at import
+    time would put it in front of every run, including the ones that never touch
+    the backend at all.
     """
     from stealth_chrome_devtools_mcp.embedded.in_memory_storage import (
         in_memory_storage,
