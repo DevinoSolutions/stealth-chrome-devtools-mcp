@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.11
 
 ### Fixed — F-892: the snapshot staleness witness stated a file Chrome stopped writing in v96
 
