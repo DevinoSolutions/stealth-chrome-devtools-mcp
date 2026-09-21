@@ -610,10 +610,23 @@ needed is the moment that call raised. `spawn_leak.launched_pid` then reads the
 pid off the `Browser` nodriver registered for that exact object (identity, never
 a field match: two concurrent spawns build configs equal in every field),
 through `process_exit.browser_pid`, which already owns "which member of the tree
-is the browser" and refuses a handle asyncio has already collected — a stronger
-recycled-pid guard than a stored `(pid, create_time)` pair, because an
-uncollected child's pid cannot be reissued at all. `_CLOCK_TOLERANCE_SECONDS`
-and `_started_after` are deleted.
+is the browser" and refuses a handle asyncio has already collected. A stored
+`(pid, create_time)` pair is not the alternative: the pid is unknown until reap
+time, because nodriver creates the process inside `uc.start` and hands nothing
+back when it fails, so there is no launch-time moment at which a create_time
+could be captured. `_CLOCK_TOLERANCE_SECONDS` and `_started_after` are deleted.
+
+**A claim in the first version of this entry was wrong and is corrected here.**
+It said that `returncode` refusal is a *stronger* recycled-pid guard than that
+pair. On Windows the pid is indeed pinned — but by the open PROCESS handle
+(`subprocess.py:1575`), not by `returncode`. On POSIX there is a
+sub-millisecond window: `os.waitpid` frees the pid at
+`asyncio/unix_events.py:1443` while `returncode` is set later from a loop
+callback at `:1461`, and in that window a stored pair would have done better.
+What stands in it is the second witness — a recycled pid must be a
+Chromium-family process on OUR `--user-data-dir` to be killed — and sequential
+pid allocation wrapping the whole space is why that is not reachable. F-919
+§4.1 carries the source lines.
 
 **What it costs is stated rather than implied.** A Chrome that genuinely leaked
 but whose launch cannot be named is left RUNNING until the next backend start's

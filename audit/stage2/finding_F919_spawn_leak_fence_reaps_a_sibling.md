@@ -177,13 +177,49 @@ returning and a failed launch returns nothing.
    `process_cleanup._get_browser_pids_for_profile` still lists it on the directory we
    launched it on. `_CLOCK_TOLERANCE_SECONDS`, `_started_after` and `since` are deleted.
 
-**The recycled-pid question is answered more strongly than by a stored pair.** The brief
-suggested `browser_pid_registry`'s `(pid, create_time)` stamp. That pair exists because a
-*record* is read long after it was written; here the handle is live, and while asyncio has
-not collected the child the OS cannot hand its pid to anybody else — so there is no window
-to compare across. `process_exit.browser_pid`'s `returncode` guard is exactly that
-argument and already carries it in its docstring; reusing it was cheaper and tighter than
-re-spelling the pair.
+**The recycled-pid question, and a claim this finding made and then refuted.** The brief
+suggested `browser_pid_registry`'s `(pid, create_time)` stamp. The first version of this
+section answered that the `returncode` guard is *stronger* than that pair, because "while
+asyncio has not collected the child the OS cannot hand its pid to anybody else — so there
+is no window to compare across". **That is false on POSIX**, and the case it misses is one
+where the pair would have done better. §4.1 has it.
+
+The argument that does hold is that the pair is **not obtainable on this path at all**.
+The pid is not known until reap time: nodriver creates the process inside `uc.start` and
+hands nothing back when it fails, so there is no launch-time moment at which a
+`create_time` could be captured to compare against, and reading one at reap time is
+circular. The pair was never the alternative — `process_exit.browser_pid` was reused
+because it is the only witness this path has, not because it beats a witness this path
+could have had.
+
+### 4.1 What the `returncode` refusal actually buys, per platform
+
+**Windows — unconditional, and not because of `returncode`.** `subprocess` keeps the
+PROCESS handle for the life of the `Popen` (`subprocess.py:1575`, `self._handle =
+Handle(hp)`; only the THREAD handle is closed, `:1577`), and Windows does not reuse a pid
+while a handle to the process is open. The right conclusion was reached here for the wrong
+reason: the pid is pinned by that handle, whatever `returncode` says.
+
+**POSIX — a real sub-millisecond window.** `ThreadedChildWatcher._do_waitpid`
+(CPython 3.13.11, `asyncio/unix_events.py`):
+
+```
+:1443   pid, status = os.waitpid(expected_pid, 0)               # the kernel frees the pid HERE
+:1461   loop.call_soon_threadsafe(callback, pid, returncode, …) # returncode is set LATER, on the loop
+```
+
+Between those two the pid is reusable while `returncode` is still None. The reap runs as a
+coroutine on that same loop, so it and the queued `_process_exited` callback (`:231`) sit
+in the ready queue with no ordering guarantee between them. **In that window a stored
+`(pid, create_time)` pair would have spared a recycled pid and this guard does not.**
+
+**What stands in the window is the second witness — and the window is real.** For harm the
+pid freed at `:1443` would have to be recycled, inside that window, onto a Chromium-family
+process on OUR `--user-data-dir`; `_get_browser_pids_for_profile` admits nothing else.
+Linux and macOS allocate pids sequentially and wrap the whole pid space before reissuing
+one, so an immediate reuse is not a reachable event. That is why the window is tolerable.
+It is not a reason the window does not exist. Not measured: the claim is about the
+kernel's allocation policy, not a timing run.
 
 **An answer that cannot be established resolves toward NOT killing** — uniformly with
 `profile_lock._browser_pids`, with the deleted `_started_after`, and with the direction

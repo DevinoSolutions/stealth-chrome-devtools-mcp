@@ -45,12 +45,31 @@ answer, reused rather than re-spelled:
 
 * ``process_exit.browser_pid`` decides whether the pid is the BROWSER — a pid
   carrying ``--type=`` is one of its children — and refuses a process whose
-  ``returncode`` is already set. That refusal is also the recycled-pid guard,
-  and a STRONGER one than a stored ``(pid, create_time)`` pair: while asyncio
-  has not collected the child, the OS cannot hand its pid to anyone else, so
-  there is no window to compare across. ``browser_pid_registry`` stamps the
-  pair because a RECORD is read long after it was written; this reads a live
-  handle, which is why the pair would be the weaker of the two here.
+  ``returncode`` is already set. **A stored ``(pid, create_time)`` pair is not
+  the alternative to that, because on this path it is not OBTAINABLE**: the pid
+  is unknown until reap time, since nodriver creates the process inside
+  ``uc.start`` and hands nothing back when it fails, so there is no launch-time
+  moment at which a create_time could be captured — and reading one at reap
+  time is circular. ``browser_pid_registry`` stamps the pair because a RECORD
+  is read long after it was written; this reads a live handle.
+
+  What the ``returncode`` refusal buys is a pid the OS has not yet freed, and
+  the two platforms buy it differently. On **Windows** it is unconditional and
+  has nothing to do with ``returncode``: ``subprocess`` keeps the PROCESS
+  handle for the life of the ``Popen`` (``subprocess.py``:1575; only the THREAD
+  handle is closed, :1577), and Windows will not reuse a pid while a handle to
+  it is open. On **POSIX it is not absolute, and an earlier draft of this
+  paragraph claimed it was**: the kernel frees the pid at ``os.waitpid`` in the
+  watcher thread (``asyncio/unix_events.py``:1443) while ``returncode`` is set
+  later, from a ``call_soon_threadsafe`` callback on the loop (:1461). The reap
+  runs as a coroutine on that same loop, so it and that callback sit in the
+  ready queue unordered — a sub-millisecond window in which this guard is open,
+  and in exactly that window a stored pair would have done BETTER. What stands
+  in it is the second witness below: the freed pid would have to be recycled,
+  inside the window, onto a Chromium-family process on OUR ``--user-data-dir``.
+  Linux and macOS allocate pids sequentially and wrap the whole space before
+  reissuing one, so that is not a reachable event — which is why the window is
+  tolerable, not a reason it does not exist.
 * ``process_cleanup._get_browser_pids_for_profile`` is the second witness: the
   pid must still be a Chromium-family process on the directory we launched it
   on, or it is not the thing we came for.
