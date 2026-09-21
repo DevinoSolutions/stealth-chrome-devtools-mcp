@@ -8,6 +8,7 @@ every profile helper at a tmp dir); no browser.
 """
 
 import json
+import os
 from unittest.mock import patch
 
 from stealth_chrome_devtools_mcp import cli
@@ -297,6 +298,15 @@ class TestKillOrphansForceWarning:
         `profile_lock` falls through to Chrome's own singleton, which is what
         `fakes.held_profile` writes. Without the stub the real machine's process
         table decides and the test is not hermetic.
+
+        **Why the stub lands at all**: `clone_storage.py` imports the process
+        cleanup SINGLETON (`from ...process_cleanup import process_cleanup`),
+        not the module, so `clone_storage._profile_hold`'s
+        `getattr(process_cleanup, "_get_browser_pids_for_profile")` resolves on
+        the very object patched here. Re-point that import at the module and
+        this stub silently stops reaching `_profile_hold`, the real process
+        table answers, and every node below becomes machine-dependent while
+        staying green on a quiet machine — so do not "simplify" it.
         """
         from stealth_chrome_devtools_mcp.embedded import process_cleanup
 
@@ -328,21 +338,36 @@ class TestKillOrphansForceWarning:
             ),
         )
 
+    @staticmethod
+    def _flag_help(flag: str) -> str:
+        """One way to read a `kill-orphans` flag's help, lowercased."""
+        action = next(
+            action
+            for action in cli.build_parser()
+            ._subparsers._group_actions[0]
+            .choices["kill-orphans"]
+            ._actions
+            if flag in action.option_strings
+        )
+        return (action.help or "").lower()
+
     def test_force_help_names_the_logged_in_browser_risk(self):
         """The whole defect in one assertion: "override the live-backend guard
         and reap anyway" is true, and says nothing about the harm."""
-        parser = cli.build_parser()
-        force = next(
-            action
-            for action in parser._subparsers._group_actions[0]
-            .choices["kill-orphans"]
-            ._actions
-            if "--force" in action.option_strings
-        )
-        help_text = (force.help or "").lower()
+        help_text = self._flag_help("--force")
         assert "live-backend guard" in help_text
         assert "logged-in" in help_text or "logged in" in help_text
         assert "--dry-run" in help_text
+
+    def test_dry_run_help_claims_only_what_the_flag_prints(self):
+        """`--dry-run` prints the persistent pre-flight and nothing else, so
+        "print what would be reaped" over-claimed: on the machine measured in
+        the finding `--force` reaps SIX entries while the pre-flight names TWO
+        directories. A preview that names a smaller set than the act is the
+        same under-disclosure F-921 is about, one flag along."""
+        help_text = self._flag_help("--dry-run")
+        assert "persistent profiles at risk" in help_text
+        assert "what would be reaped" not in help_text
 
     def test_dry_run_parses_and_defaults_false(self):
         assert cli.build_parser().parse_args(["kill-orphans"]).dry_run is False
@@ -378,9 +403,29 @@ class TestKillOrphansForceWarning:
         self, tmp_session_root, tmp_path, monkeypatch, capsys
     ):
         """F-869/F-877 discipline: session names, counts and pids — never a
-        path, which names the operating user."""
+        path, which names the operating user.
+
+        Two things make it able to fail, and it needed BOTH. The profile is
+        HELD: without that nothing is open, the naming branch never runs and
+        there is no name to bite on — which is what this node shipped as at
+        `f35e2ca`, green and vacuous. And the comparison is made under the
+        RECORD's own
+        normalization: `browser_pid_registry.normalize_path` normcases, i.e.
+        LOWERCASES on Windows, so the string a leak would actually print is the
+        lowercased one and a raw `str(logged_in) not in out` misses it there.
+        Mutation-proven both ways: `persistent_profile_risk`'s `path.name` ->
+        `str(path)` turns this RED. A pin that is green in a RED census is not
+        thereby an invariant; it is a pin nobody has shown can fail.
+        """
+        from tests import fakes
+
+        from stealth_chrome_devtools_mcp.embedded.browser_pid_registry import (
+            normalize_path,
+        )
+
         sessions = tmp_session_root["sessions"]
         logged_in = _named(sessions, "github-session", model_mb=1)
+        fakes.held_profile(logged_in)
         self._bind(monkeypatch, tmp_path, {"a": self._entry(logged_in)})
 
         probe, reap = self._no_backend_and_no_reap()
@@ -388,8 +433,10 @@ class TestKillOrphansForceWarning:
             assert cli.main(["kill-orphans", "--force"]) == 0
 
         out = capsys.readouterr().out
-        assert str(logged_in) not in out
-        assert str(sessions) not in out
+        assert "github-session" in out  # the branch that could leak a path ran
+        shown = os.path.normcase(out)
+        assert normalize_path(str(logged_in)) not in shown
+        assert normalize_path(str(sessions)) not in shown
 
     def test_auto_clones_are_not_counted_as_persistent(
         self, tmp_session_root, tmp_path, monkeypatch, capsys
@@ -405,7 +452,8 @@ class TestKillOrphansForceWarning:
 
         out = capsys.readouterr().out
         assert "sess-auto" not in out
-        assert "0 persistent profile(s) tracked" in out
+        assert "none tracked on a persistent profile" in out
+        assert "BY HAND" not in out
 
     def test_two_entries_on_one_profile_count_once(
         self, tmp_session_root, tmp_path, monkeypatch, capsys
@@ -439,8 +487,12 @@ class TestKillOrphansForceWarning:
             assert cli.main(["kill-orphans", "--force"]) == 0
 
         out = capsys.readouterr().out
-        assert "1 persistent profile(s) tracked, 0 open now" in out
+        assert "1 persistent profile(s) in the record, none open" in out
         assert "github-session" not in out
+        # The harm sentence is about losing a login. Nothing is running, so
+        # this invocation ends none, and saying otherwise is the same defect
+        # F-921 is about with the sign reversed.
+        assert "BY HAND" not in out
 
     def test_dry_run_prints_the_set_and_reaps_nothing(
         self, tmp_session_root, tmp_path, monkeypatch, capsys
@@ -457,13 +509,67 @@ class TestKillOrphansForceWarning:
         assert "1 persistent" in out
         assert "dry run" in out
 
+    def test_an_empty_record_warns_about_nothing(
+        self, tmp_session_root, tmp_path, monkeypatch, capsys
+    ):
+        """Review blocking 2: with nothing recorded the line still read "0
+        persistent profile(s) tracked" and then told the operator that logins
+        must be re-entered by hand. A warning printed when there is nothing to
+        warn about is how a warning stops being read."""
+        self._bind(monkeypatch, tmp_path, {})
+
+        probe, reap = self._no_backend_and_no_reap()
+        with probe, reap:
+            assert cli.main(["kill-orphans", "--force"]) == 0
+
+        out = capsys.readouterr().out
+        assert "none tracked on a persistent profile" in out
+        assert "BY HAND" not in out
+        assert "open now" not in out
+
+    def test_the_line_names_the_reaps_whole_scope_not_just_the_persistent_set(
+        self, tmp_session_root, tmp_path, monkeypatch, capsys
+    ):
+        """`--force` ends EVERY tracked browser, not only the persistent ones,
+        and the count is of what the RECORD names. Saying "2 tracked, --force
+        ENDS these browsers" beside a record holding clones too implied the
+        clones were safe and that the toll was exactly 2. Scope first, harm
+        second."""
+        from tests import fakes
+
+        sessions = tmp_session_root["sessions"]
+        logged_in = _named(sessions, "github-session", model_mb=1)
+        fakes.held_profile(logged_in)
+        clone = _auto(sessions, "sess-auto", mb=1)
+        self._bind(
+            monkeypatch,
+            tmp_path,
+            {
+                "a": self._entry(logged_in),
+                "b": self._entry(clone, auto_clone=True, pid=77),
+            },
+        )
+
+        probe, reap = self._no_backend_and_no_reap()
+        with probe, reap:
+            assert cli.main(["kill-orphans", "--force"]) == 0
+
+        out = capsys.readouterr().out
+        assert "1 persistent profile(s) in the record, 1 open now" in out
+        assert "--force ends EVERY tracked browser" in out
+        assert "sess-auto" not in out  # a clone holds no login to name
+
     def test_without_force_the_line_says_persistent_profiles_are_spared(
         self, tmp_session_root, tmp_path, monkeypatch, capsys
     ):
         """Without `--force` F-888 spares them, so the same line must NOT claim
         they are about to end — a pre-flight that overstates is one nobody
-        reads the second time."""
+        reads the second time. The profile is HELD deliberately: the wording
+        branch under test only exists in the shape that has something to end."""
+        from tests import fakes
+
         logged_in = _named(tmp_session_root["sessions"], "github-session", model_mb=1)
+        fakes.held_profile(logged_in)
         self._bind(monkeypatch, tmp_path, {"a": self._entry(logged_in)})
 
         probe, reap = self._no_backend_and_no_reap()
@@ -473,7 +579,7 @@ class TestKillOrphansForceWarning:
         out = capsys.readouterr().out
         assert "1 persistent" in out
         assert "only --force ends them" in out
-        assert "ENDS these browsers" not in out
+        assert "ends EVERY tracked browser" not in out
 
 
 class TestStatusProfiles:

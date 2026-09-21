@@ -599,16 +599,31 @@ Now the verb says what it is about to do, before it does it:
 
 ```
 $ stealthy kill-orphans --force
-profiles    : 2 persistent profile(s) tracked, 2 open now (master, nvidia-nim-signup)
-              each keeps logins that must be re-entered BY HAND; --force ENDS these browsers
+profiles    : 2 persistent profile(s) in the record, 2 open now (master, nvidia-nim-signup)
+              --force ends EVERY tracked browser; these keep logins that must be re-entered BY HAND
 orphan recovery triggered: reaped any browsers left over from a dead backend.
 ```
 
 and without `--force` the same line ends "only --force ends them", because
 F-888 spares them — a pre-flight that overstates is one nobody reads twice.
 `--help` now names both overrides and the cost in the operator's vocabulary, and
-there is a new **`--dry-run`** that prints the set and reaps nothing
-(`--force --dry-run` previews a forced reap).
+there is a new **`--dry-run`** that prints the persistent pre-flight and
+reaps nothing (`--force --dry-run` previews a forced reap). Its help says that
+and not "print what would be reaped", which would over-claim in the same
+direction: the flag prints the profiles at risk, and the reap is wider.
+
+**It says nothing when there is nothing to say.** An empty record prints
+`none tracked on a persistent profile`, and profiles recorded with none of
+them open print `... none open — this reap ends no logged-in browser`, with the
+harm sentence withheld in both. A warning that fires when nothing is at stake is
+how a warning stops being read.
+
+**And it does not over-claim.** The reap kills by DIRECTORY, so a profile the
+record calls disposable has every browser on it ended too — including one a
+human started there by hand, which no record can see. So the line names the
+record's SCOPE ("in the record", "ends EVERY tracked browser") rather than a
+death toll. **F-922** narrows directory-wide reaping to auto-clone directories,
+after which only recorded pids are killed on a named profile.
 
 **A printed line, deliberately not a prompt.** This CLI is driven by agents as
 well as humans, and a blocking `input()` on a non-tty hangs them — a `y/N`
@@ -624,10 +639,14 @@ never a presence test (F-871). One record read, no new probe pass, counted by
 DIRECTORY because the reap is directory-matched too. No message names a path:
 counts and session names only.
 
-`cli.py` 952 → 999 LOC against the 1000-LOC default; no cap padded, no golden
-moved (`dump_tool_surface.py --check` reports the tool surface identical).
-Nine hermetic pins in `tests/test_cli.py::TestKillOrphansForceWarning`, eight of
-which fail on the pre-fix source. Full reasoning, the measurements and the
+The counting is a new leaf, `embedded/persistent_profile_risk.py`, which takes
+the entries and the hold predicate as arguments and imports nothing of the
+lifecycle graph — so the counts have a home a test can reach without building a
+CLI parser. `cli.py` keeps the printed shapes and lands at 998 of the 1000-LOC
+default (from 952); no cap padded, no golden moved (`dump_tool_surface.py
+--check` reports the tool surface identical). Twelve hermetic pins in
+`tests/test_cli.py::TestKillOrphansForceWarning` and eight pure ones in
+`tests/test_persistent_profile_risk.py`. Full reasoning, the measurements and the
 residuals — including why the count is a floor and not an exact death toll — are
 in `audit/stage2/finding_F921_kill_orphans_force_warns_nobody.md`.
 

@@ -684,35 +684,34 @@ def _cmd_restart(_args) -> int:
 
 
 def _persistent_profile_preflight(force: bool) -> list[str]:
-    """The tracked profiles that KEEP their logins, counted BEFORE anything
-    dies (F-921). A printed line and deliberately not a prompt: agents drive
-    this CLI and a blocking `input()` on a non-tty hangs them, while `--force`
-    is already the explicit opt-in — the consent existed, the disclosure did
-    not. Both readers are the reap's own, so this cannot drift from what
-    `--force` does: `on_persistent_profile` is the predicate F-888's spare and
-    the delete guard ask, and whether one is OPEN is `_profile_hold` —
-    `profile_lock`, never a presence test (F-871). One record read, no probe of
-    its own, by DIRECTORY because the reap is too. Names and counts only, never
-    a path (F-869/F-877)."""
-    from stealth_chrome_devtools_mcp.embedded import process_cleanup
-    from stealth_chrome_devtools_mcp.embedded.browser_pid_registry import (
-        on_persistent_profile,
-        read_entries,
+    """The PHRASING of `persistent_profile_risk`'s answer, printed before
+    anything dies (F-921) — a line and never a prompt: agents drive this CLI
+    and a blocking `input()` on a non-tty hangs them, and `--force` is already
+    the opt-in, so only the disclosure was missing. Three shapes on purpose:
+    an empty record, and one whose profiles are all CLOSED, must not be told
+    that logins are about to be lost — "in the record" is the reap's scope."""
+    from stealth_chrome_devtools_mcp.embedded import (
+        persistent_profile_risk,
+        process_cleanup,
     )
 
     cs = _clone_storage()
-    at_risk: dict[str, Path] = {}
-    for entry in read_entries(process_cleanup.process_cleanup.pid_file).values():
-        recorded = entry.get("user_data_dir")
-        if isinstance(recorded, str) and on_persistent_profile(entry):
-            at_risk.setdefault(recorded, Path(recorded))
-    open_now = sorted(path.name for path in at_risk.values() if cs._profile_hold(path))
-    shown = f" ({', '.join(open_now)})" if open_now else ""
+    risk = persistent_profile_risk.assess(
+        process_cleanup.process_cleanup._load_tracked_pids(),
+        is_open=cs._profile_has_running_browser,
+    )
+    if not risk.tracked:
+        return ["profiles    : none tracked on a persistent profile"]
+    if not risk.open_names:
+        return [
+            f"profiles    : {risk.tracked} persistent profile(s) in the record, "
+            "none open — this reap ends no logged-in browser"
+        ]
+    ends = "--force ends EVERY tracked browser" if force else "only --force ends them"
     return [
-        f"profiles    : {len(at_risk)} persistent profile(s) tracked, "
-        f"{len(open_now)} open now{shown}",
-        "              each keeps logins that must be re-entered BY HAND; "
-        + ("--force ENDS these browsers" if force else "only --force ends them"),
+        f"profiles    : {risk.tracked} persistent profile(s) in the record, "
+        f"{len(risk.open_names)} open now ({', '.join(risk.open_names)})",
+        f"              {ends}; these keep logins that must be re-entered BY HAND",
     ]
 
 
@@ -908,7 +907,7 @@ def build_parser() -> argparse.ArgumentParser:
     kill_orphans.add_argument(
         "--dry-run",
         action="store_true",
-        help="print what would be reaped, then exit without killing anything",
+        help="print the persistent profiles at risk, then exit without reaping",
     )
 
     serve = sub.add_parser(
