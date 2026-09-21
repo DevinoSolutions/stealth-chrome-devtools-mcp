@@ -16,11 +16,15 @@ between two backends briefly coexisting (plan_M3 §2.2, rejected alternative 3).
 
 Owning log-WRITING means owning what the DEPENDENCIES may write too, so this
 is also the one place third-party logger LEVELS are set:
-:func:`apply_payload_log_floor` (F-906) holds ``nodriver`` and ``websockets``
-at WARNING, because both interpolate a raw CDP message — cookie names and
-values included — into DEBUG/INFO text that one caller-side
-``logging.basicConfig(level=DEBUG)`` is enough to route to our stderr and to a
-Sentry breadcrumb. It belongs HERE and not at the seam that patches nodriver
+:func:`apply_payload_log_floor` (F-906, F-908) holds every family in
+:data:`PAYLOAD_LOG_FAMILIES` at WARNING — ``nodriver`` and ``websockets``
+because they interpolate a raw CDP message into DEBUG/INFO text, cookie names
+and values included, and ``sse_starlette`` and ``mcp.client`` because they do
+the same to the two ENDS of one tool answer (the SSE frame the backend sends,
+and the message the stdio proxy parses back out of it). One caller-side
+``logging.basicConfig(level=DEBUG)`` is enough to route any of them to our
+stderr and to a Sentry breadcrumb. It belongs HERE and not at the seam that
+patches nodriver
 (``cdp_transport``, which owns what nodriver may DO with a reply): a level is
 log configuration, and log configuration has one home.
 
@@ -108,10 +112,85 @@ correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
 #:   this is the same payload one layer down. Capping ``nodriver`` alone would
 #:   have left that door open.
 #:
+#: * ``sse_starlette`` — F-908. ``sse/sse.py``:362 is
+#:   ``logger.debug("chunk: %s", chunk)``, and for THIS backend that chunk is
+#:   the answer to a ``tools/call``, whole: ``get_cookies``' jar,
+#:   ``get_page_content``'s HTML, ``get_instance_state``'s localStorage. The
+#:   SSE frame is what carries every answer because FastMCP leaves
+#:   ``json_response`` at its ``False`` default and nothing here asks
+#:   otherwise (an inherited ``FASTMCP_JSON_RESPONSE`` cannot either —
+#:   ``backend_env.scrub`` drops the prefix, F-890). Measured by driving the
+#:   real ``EventSourceResponse``, not read off the call.
+#:
+#: * ``mcp.client`` — F-908 review M1, and it is the OTHER END of that same
+#:   frame. The backend logs the SSE chunk it SENDS; the STDIO PROXY re-parses
+#:   the identical bytes and logs the MESSAGE:
+#:   ``client/streamable_http.py``:218 is ``logger.debug(f"SSE message:
+#:   {message}")`` — the whole ``JSONRPCResponse``, i.e. the same tool result —
+#:   and :547 is its argument-side twin on the POST leg. Both processes call
+#:   :func:`configure_logging` (the proxy at ``singleton.py``:976), so capping
+#:   only ``sse_starlette`` left the payload reaching a root handler in the
+#:   proxy, which is what the review reproduced.
+#:
+#:   The entry is ``mcp.client`` and not ``mcp.client.streamable_http`` because
+#:   a full census of the installed ``mcp/client`` package found a SECOND
+#:   renderer of the same shape — ``client/sse.py``:114/:137, the legacy SSE
+#:   client transport — and that module IS loaded (transitively, by importing
+#:   the streamable one: measured), so the logger exists even though nothing
+#:   here drives it. ``mcp.client`` is the narrowest name covering the measured
+#:   set; it is not the whole ``mcp`` family, and the reason for that line is
+#:   in the paragraph below. Its cost is zero on the same measurement as the
+#:   others: every call at WARNING and above under ``mcp/client`` still passes.
+#:
 #: Deliberately NOT ``uc``: that is only the local alias this codebase imports
 #: ``nodriver`` under, and no logger is ever named by it — capping a name that
 #: does not exist would be a claim the evidence does not support.
-PAYLOAD_LOG_FAMILIES = ("nodriver", "websockets")
+#:
+#: Deliberately NOT the whole ``mcp`` family, and not ``fastmcp``; the census
+#: behind both is pinned rather than summarised
+#: (``TestTheFamiliesDeliberatelyLeftOut``).
+#:
+#: The line between IN and OUT inside ``mcp`` is SERVER versus CLIENT, and it
+#: was measured on both sides rather than inferred from one. The SERVER tree
+#: renders nothing for a request: ``server/lowlevel/server.py``:676 logs the
+#: whole incoming message and IS admitted at DEBUG, but for a REQUEST that
+#: object is a ``RequestResponder``, which defines neither ``__repr__`` nor
+#: ``__str__``, so ``%s`` yields ``<… object at 0x…>``. (The qualifier is
+#: load-bearing: the same line's NOTIFICATION arm renders its pydantic model in
+#: full. It is still out, because every notification a client may send is
+#: enumerated from the SDK's own union and none carries a tool result or tool
+#: arguments — pinned, so an SDK that adds one goes RED.) The CLIENT transport
+#: renders the whole message and is capped, above. Capping ``mcp`` entire would
+#: therefore silence the server SDK's own INFO diagnostics and close no door
+#: that ``mcp.client`` does not already close.
+#:
+#: ``fastmcp``'s tool-ARGUMENT line (``server/server.py``:672) is real, and the
+#: library already shields it: its loggers hang under a ``FastMCP`` root
+#: carrying its own level and ``propagate = False``, so a caller's root DEBUG
+#: never reaches them — and the bare ``fastmcp`` family, which DOES inherit
+#: root, holds no payload line, so capping it would be the ``uc`` mistake
+#: spelled differently.
+#:
+#: Two SITES are RECORDED and not fixed, because no family cap can reach either
+#: however this tuple grows: ``mcp/shared/session.py``:383-384 and :430-432 use
+#: module-level ``logging.warning`` / ``logging.debug``, i.e. the ROOT logger.
+#: Both are on a validation-failure path and both are reachable AS SHIPPED,
+#: with no ``basicConfig`` anywhere: :383 carries pydantic's middle-truncated
+#: ``input_value=`` echo of a caller's arguments at WARNING (:384 renders the
+#: whole message, but only at DEBUG), and :430-432 renders the whole
+#: ``message.message.root`` AT WARNING in one line. They are named in the
+#: finding (§6) as the F-911 candidate, which needs a different mechanism — a
+#: root filter or a ``before_breadcrumb`` — exactly as F-907's does.
+#:
+#: Deliberately NOT ``starlette``, ``anyio`` (neither logs anything below
+#: WARNING at all — an AST census, so "nothing" is measured rather than
+#: grepped), ``uvicorn`` (its whole-ASGI-message logger replaces bodies with a
+#: ``<N bytes>`` placeholder BY CONSTRUCTION and logs at TRACE, which
+#: ``basicConfig(DEBUG)`` does not admit; the access log is already off, F-830)
+#: or ``httpcore``/``httpx`` (the body traces set no ``return_value``, so their
+#: message is the trace NAME alone — response HEADERS can appear, a tool result
+#: cannot).
+PAYLOAD_LOG_FAMILIES = ("nodriver", "websockets", "sse_starlette", "mcp.client")
 
 #: The floor those families are held at. WARNING is not a new policy — it is
 #: the effective level every shipped configuration of this product already had
@@ -120,7 +199,9 @@ PAYLOAD_LOG_FAMILIES = ("nodriver", "websockets")
 #: nothing an operator sees and only closes the one door that was open. It is
 #: also the level at which those libraries stop quoting payloads and start
 #: reporting faults: ``connection.py``:483's callback WARNING names the callback
-#: and the event CLASS, never the message.
+#: and the event CLASS, never the message. For ``sse_starlette`` the floor
+#: costs even less — it has no call at WARNING or above anywhere in the package
+#: (measured), so there is nothing there for a floor to stand in front of.
 PAYLOAD_LOG_FLOOR = logging.WARNING
 
 
@@ -133,13 +214,23 @@ def apply_payload_log_floor() -> None:
     ``backend-boot.log``, a durable file — and, for the one line that sits at
     INFO, away from a Sentry breadcrumb on the next event.
 
+    F-908 added two more under the identical premise, from the other end of the
+    same request: ``sse_starlette`` logs the SSE chunk the BACKEND sends, and
+    the chunk is the whole serialised answer to a ``tools/call``; ``mcp.client``
+    logs the MESSAGE the STDIO PROXY parses back out of those same bytes, which
+    is the same answer again in a second process that also calls
+    :func:`configure_logging`. Where F-906's lines quote what CHROME said,
+    these quote what WE said back — and one tool result has two ends, so
+    capping one of them is half a fix. That is why this stays one list and one
+    mechanism rather than a second floor beside the first.
+
     Until this, the only thing stopping them was that those loggers carry no
     level of their own and INHERIT root's. That is a real protection and it was
     measured to hold for every configuration this product ships — but it is
     root's to give away, and one ``logging.basicConfig(level=DEBUG)`` in a
     caller that embeds this backend, a notebook or a test gives it away for the
-    whole process. MEASURED both ways round: all four payload lines reached a
-    root handler and ``connection.py``:451 reached Sentry, whether the
+    whole process. MEASURED both ways round: every payload line reached a root
+    handler and ``connection.py``:451 reached Sentry, whether the
     ``basicConfig`` came before or after our own setup.
 
     So the level is set EXPLICITLY on the family root. ``getEffectiveLevel``
@@ -164,10 +255,12 @@ def apply_payload_log_floor() -> None:
     Called from :func:`configure_logging`, before anything that can fail: a
     process whose log directory could not be created still has stderr and
     Sentry, so it still needs the floor. It honours that caller's never-raises
-    contract BY CONSTRUCTION rather than with a handler — these two statements
-    are a dict lookup and an integer assignment on a stdlib logger, with no
-    I/O and nothing to fail — so there is no ``except`` here that could only
-    ever hide a bug of ours.
+    contract BY CONSTRUCTION rather than with a handler — these statements are
+    a dict lookup and an integer assignment on a stdlib logger, with no I/O and
+    nothing to fail — so there is no ``except`` here that could only ever hide
+    a bug of ours. Adding a family costs one more of each, which is the other
+    reason the list is the extension point and a per-library helper would not
+    be.
     """
     for family in PAYLOAD_LOG_FAMILIES:
         logging.getLogger(family).setLevel(PAYLOAD_LOG_FLOOR)
@@ -593,7 +686,8 @@ def configure_logging(role: str) -> Path:
     (plan_M3 risk #7); on failure this degrades to a no-op.
 
     It is also where the payload-carrying library loggers are held down
-    (:func:`apply_payload_log_floor`, F-906). That call is FIRST — ahead of the
+    (:func:`apply_payload_log_floor`, F-906/F-908 — all four families in
+    :data:`PAYLOAD_LOG_FAMILIES`). That call is FIRST — ahead of the
     idempotency guard and ahead of everything that can raise ``OSError`` —
     because the floor is about what may leave the process, and a process that
     failed to open its log file still has stderr and still has Sentry.

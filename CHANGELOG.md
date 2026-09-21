@@ -252,6 +252,71 @@ repr, on the branch that *is* live, and an exception is not a log record — no
 logging mechanism reaches it. It is filed as **F-912** rather than left as a
 note under a closed finding.
 
+### Fixed — F-908: the same door, from the other end — the SSE transport logged every tool RESULT
+
+F-906 closed what **Chrome said to us**. This closes what **we said back**.
+`sse_starlette/sse.py`:362 is `logger.debug("chunk: %s", chunk)`, and for this
+backend that chunk is the whole serialised answer to a `tools/call` —
+`get_cookies`' jar, `get_page_content`'s HTML, `get_instance_state`'s
+localStorage. Measured by driving the real `EventSourceResponse`, not read off
+the call:
+
+```
+sse_starlette.sse DEBUG chunk: b'event: message\r\ndata: {"jsonrpc":"2.0","id":3,
+  "result":{"structuredContent":{"cookies":[{"name":"SID","value":"…"}]}}}'
+```
+
+The SSE frame is what carries every answer, because the SDK and FastMCP both
+default `json_response` to `False`, nothing here passes it, and an inherited
+`FASTMCP_JSON_RESPONSE` cannot reach fastmcp either (F-890 drops the prefix).
+
+**A tool answer has two ends, and both are logged.** The backend logs the SSE
+chunk it sends; the **stdio proxy** re-parses the identical bytes and logs the
+message — `mcp/client/streamable_http.py`:218 is `logger.debug(f"SSE message:
+{message}")`, the whole `JSONRPCResponse`, with :547 as its argument-side twin.
+Both processes call `configure_logging`, so capping one end was half a fix:
+with `sse_starlette` already held down, the same cookie jar still reached a
+root handler in the proxy (measured). So `mcp.client` joins the list too.
+
+It is `mcp.client` and not the `mcp` family: the **server** tree renders
+nothing for a request (its whole-message line hands `%s` a `RequestResponder`,
+which defines neither `__repr__` nor `__str__`), and capping it would silence
+the server SDK's own diagnostics for no gain. It is `mcp.client` and not the
+single logger, because a full census of the client package found a **second**
+renderer of the same shape in `client/sse.py`.
+
+Identical premise, identical mechanism: these loggers carry no level of their
+own, so one caller-side `logging.basicConfig(level=DEBUG)` opened them —
+**measured, both orders**. `sse_starlette` and `mcp.client` join
+`PAYLOAD_LOG_FAMILIES`, and that is the whole change. WARNING is again the
+effective level every shipped configuration
+already had, and here the floor costs even less than it did for nodriver:
+`sse_starlette` has no call at WARNING or above anywhere in the package, so
+there is not one diagnostic for it to stand in front of.
+
+**The families deliberately left OUT are measured too, and pinned**, because
+"why is `mcp` not in that list" is the next person's question: `starlette` and
+`anyio` log nothing below WARNING at all; `uvicorn`'s whole-ASGI-message logger
+replaces bodies with a `<N bytes>` placeholder by construction and logs below
+what `basicConfig(DEBUG)` admits; `httpcore`'s body traces carry no return
+value, so their message is the trace name; `fastmcp`'s tool-ARGUMENT line is
+already shielded by the library's own `FastMCP` root level plus
+`propagate=False`; and the `mcp` **server** tree's whole-incoming-message line
+renders a `RequestResponder` for a request, while its notification arm — which
+does render in full — can carry none of the five client notifications' payload
+(enumerated from the SDK's own union, pinned, so a sixth goes RED). Capping the
+server family or `fastmcp` wholesale would have silenced those SDKs' own
+diagnostics and closed no door.
+
+Two sites a level cannot reach are **recorded rather than fixed**:
+`mcp/shared/session.py`:383-384 and :430-432 use module-level
+`logging.warning` / `logging.debug`, i.e. the **root** logger, so no family cap
+reaches them. :383 is at WARNING, therefore reachable as shipped, carrying
+pydantic's middle-truncated `input_value=` echo of a caller's arguments; and
+:430-432 renders the **whole message** at WARNING in one line. Both are on
+validation-failure paths, both need a different mechanism, and they are named in
+`audit/stage2/finding_F908_sse_starlette_logs_tool_result.md` §6 — beside
+F-907, the other line this floor sits below.
 ### Added — F-898: `--from` a session that is still OPEN
 
 F-897 refuses `--from work` while `work`'s browser is running, and it is right

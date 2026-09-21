@@ -144,7 +144,9 @@ claim the evidence does not support. Pinned.
 
 ## 4. Pins
 
-`tests/test_nodriver_payload_logging.py` — 25 nodes. RED-first, re-measured by
+`tests/test_nodriver_payload_logging.py` (renamed `tests/test_payload_log_floor.py`
+by F-908, which added a third family to the same floor and so would otherwise
+have opened a second home for one function's evidence) — 25 nodes. RED-first, re-measured by
 neutralising `apply_payload_log_floor` alone (so the RED is the FIX's absence
 and not a missing constant): **9 failed, 16 passed**. Six of the nine are
 behavioural — the three caller-root-DEBUG configurations × the all-sinks
