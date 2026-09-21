@@ -218,10 +218,8 @@ def _trash_clone(entry: Path, clone_root: Path):
 
 
 def _purge_expired_trash(clone_root: Path, max_age_seconds: float) -> int:
-    """Delete trashed clones whose time-in-trash exceeds ``max_age_seconds``.
-
-    Returns the count purged. Never raises; missing or non-dir trash is a no-op.
-    """
+    """Delete trashed clones whose time-in-trash exceeds ``max_age_seconds``,
+    and say how many went. Never raises; missing or non-dir trash is a no-op."""
     trash = _clone_trash_dir(clone_root)
     if not trash.exists():
         return 0
@@ -261,8 +259,9 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
     except OSError:
         return []
     for entry in entries:
-        if entry.name == _CLONE_TRASH_DIRNAME:
-            continue  # recoverable-eviction holding area — never a clone itself
+        if entry.name == _CLONE_TRASH_DIRNAME or profile_copy.is_scratch(entry.name):
+            continue  # never a clone: the recoverable-eviction holding area, and
+            # a copy that is half-built or already displaced (F-925)
         try:
             if not entry.is_dir() or not clone_is_auto(entry):
                 continue
@@ -350,9 +349,10 @@ def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> list[P
     except OSError:
         return []
     for entry in entries:
-        if entry.name == _CLONE_TRASH_DIRNAME:
-            continue  # trashed clones are not named profiles and must not
-            # inflate the session-cap total, or real profiles get over-trimmed
+        if entry.name == _CLONE_TRASH_DIRNAME or profile_copy.is_scratch(entry.name):
+            continue  # trashed clones and F-925's scratch siblings are not named
+            # profiles and must not inflate the session-cap total, or real
+            # profiles get over-trimmed
         try:
             if not entry.is_dir():
                 continue
@@ -477,34 +477,42 @@ def _copy_profile_tree(
     source: Path, target: Path, clone_root: Path, source_kind: str = "profile"
 ) -> str | None:
     """Copy *source* over *target*, and report whether the copy actually RAN:
-    None when it did, ``TARGET_IN_USE`` when a live browser holds the target.
+    None when it did, ``TARGET_IN_USE`` when a live browser holds the target or
+    the tree already there could not be moved out of the way.
 
     Refusing is right — rewriting a directory a Chrome is writing to would be
     the harm — but it is not success, and the bare ``return`` it used to be let
     the refresh report a refreshed snapshot with not one byte moved (F-893).
-    The other two callers hand the answer to ``_require_copied``."""
+    The other two callers hand the answer to ``_require_copied``.
+
+    The copy is BUILT BESIDE the target and published in one rename, which is
+    ``profile_copy.replace_tree``'s and argued there: this function used to
+    ``rmtree`` the target and rebuild in place, so for the whole of a ~101 MB
+    copy the SEED every later session comes from was absent or half-written —
+    permanently so if anything killed the process in that window, because the
+    repair refresh is refused while the shared browser is open and every
+    consumer tests ``exists()``, which an empty directory passes (F-925). The
+    marker rides INTO the staged copy for the same reason."""
     if not source.exists():
         target.mkdir(parents=True, exist_ok=True)
         return None
     if not _is_relative_to(target, clone_root):
         raise ValueError(f"Refusing to refresh clone outside clone root: {target}")
-    if target.exists():
-        if _profile_has_running_browser(target):
-            return TARGET_IN_USE
-        profile_copy.rmtree_robust(target)
-    target.mkdir(parents=True, exist_ok=True)
-    profile_copy.copy_delta(source, target)
-    time.sleep(0.2)
-    profile_copy.copy_delta(source, target)
-    profile_seed.write_marker(
+    if target.exists() and _profile_has_running_browser(target):
+        return TARGET_IN_USE
+    published = profile_copy.replace_tree(
+        source,
         target,
-        source=source,
-        source_kind=source_kind,
-        seeded_from=profile_seed.seed_name(
-            source, master_profile_dir(), master_snapshot_dir()
+        stamp=lambda staged: profile_seed.write_marker(
+            staged,
+            source=source,
+            source_kind=source_kind,
+            seeded_from=profile_seed.seed_name(
+                source, master_profile_dir(), master_snapshot_dir()
+            ),
         ),
     )
-    return None
+    return None if published else TARGET_IN_USE
 
 
 def _require_copied(refusal: str | None, target: Path) -> None:
@@ -642,12 +650,9 @@ def _available_clone_dir(base_clone: Path) -> Path:
 
 
 def _next_available_explicit_dir(requested: Path) -> Path:
-    """Return the next free variant of a user-supplied profile path.
-
-    When ``sessions/github-session`` is busy, tries ``sessions/github-session-2``,
-    ``sessions/github-session-3``, … up to -99, then falls back to a timestamp
-    suffix.  Uses clean numeric suffixes (no PID) because these are user-visible.
-    """
+    """The next free variant of a busy user-supplied profile path: ``-2``,
+    ``-3``, … up to -99, then a timestamp suffix. Clean numeric suffixes and no
+    PID, because these names are user-visible."""
     for index in range(2, 100):
         candidate = requested.with_name(f"{requested.name}-{index}")
         if not _dir_unavailable(candidate):
