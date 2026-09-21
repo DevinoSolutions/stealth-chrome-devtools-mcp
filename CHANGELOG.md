@@ -1,5 +1,81 @@
 # Changelog
 
+## Unreleased
+
+### Changed — F-896: sessions have a name, and it is never "master"
+
+`spawn_browser` gains **`session`**, the one documented way to ask for a
+profile: `spawn_browser(session="acme")`. `user_data_dir` stays as a deprecated
+alias and **resolves to the same request** rather than running beside it — one
+normalizer (`profile_seed.profile_request`) reads both and answers a single
+value, so nothing downstream can develop two opinions about which spelling
+wins. Passing both with **different** values raises instead of applying a
+precedence you cannot see; passing both with the same value is fine.
+
+`session` takes a NAME and refuses a path — "a session named
+`C:\Users\me\profile`" is not a sentence — and says where the path door is:
+`user_data_dir`, or `stealthy call spawn_browser --arg user_data_dir=<path>`.
+
+Whitespace around a NAME is not part of it through either spelling, while a
+PATH keeps its own characters. A non-empty value that is empty once stripped
+(`"   "`, `"\t"`) now **raises** through either spelling instead of being
+honoured as a profile request: on Windows `user_data_dir="   "` resolved to the
+session root itself — the directory that holds every session — so it was never
+a profile anyone meant. An **empty string is unchanged and still means "not
+given"** through either spelling, so a client that sends `""` for an optional
+argument gets the ordinary unnamed spawn exactly as it does today.
+
+**`default` is now a session you can open.** F-894 reserved the word as a
+refusal, explicitly as a placeholder for this release; it now MEANS the shared
+profile every session is seeded from and the one a human logs in to.
+`session="default"` and `user_data_dir="default"` both select it, by the same
+door an absolute path to it already used, so nothing about which directory an
+unnamed spawn picks has changed. It stays reserved in the sense that matters:
+it names exactly one directory, so `sessions/default` and any other RELATIVE
+spelling that would create a second one under the same word is refused —
+including one the filesystem would fold onto it, since Windows strips a
+trailing dot or space from a path component and `session="default."` otherwise
+lands in `sessions/default`. F-894's trap does not get to come back one
+separator away from the word we now teach. `master` and `master-snapshot` stay
+refused outright.
+
+A directory of your own whose name simply ends in `default` is **not** affected:
+an absolute path is opened as it always was — Chrome's own per-profile folder is
+called `Default` — and an existing `sessions/default` from before this release
+keeps its contents and stays openable by its absolute path, exactly as RUNBOOK's
+recovery paragraph says.
+
+**The words "master" and "snapshot" are retired from every user-facing string**
+— tool and parameter descriptions, CLI help and output, error messages, and the
+`spawn_diagnostics.profile_selection` payload. What moved, and what it is now:
+
+| was | is |
+|---|---|
+| `profile_role: "master"` | `profile_role: "default"` |
+| `snapshot_dir` / `snapshot_refreshed` / `snapshot_reason` / `snapshot_error` | `seed_dir` / `seed_refreshed` / `seed_reason` / `seed_error` |
+| `master_snapshot_path` | `seed_path` |
+| `snapshot_error: "master-in-use"` / `"snapshot-in-use"` | `"default-in-use"` / `"seed-in-use"` |
+| `clone_source: "master-snapshot"` / `"live-master-fallback"` | `"default-seed"` / `"live-default-fallback"` |
+| `source_kind: "explicit-master-snapshot"` / `"explicit-master"` | `"explicit-default-seed"` / `"explicit-default"` |
+| `seeded_from: "master-snapshot"` / `"master"` | `seeded_from: "default"` — one name, and one you can pass to `session=` |
+| `stealthy profiles` roles `master` / `snapshot` | `default` / `default-seed` |
+
+The old keys are **not** kept readable beside the new ones: the payload is
+rebuilt on every spawn and has no persisted or cross-version consumer, so a
+duplicate key would be two spellings of one fact bought for nothing.
+
+**What did not move:** the directories are still `master` and `master-snapshot`
+on disk, and `BROWSER_MASTER_USER_DATA_DIR` / `BROWSER_MASTER_SNAPSHOT_DIR` are
+still their env vars. Renaming either would migrate every existing
+installation's profiles or break every existing `.env`, for a word that appears
+in a path an operator reads and never types. Clone markers already on disk keep
+their old `source_kind`, and are still read correctly.
+
+**CLI.** `stealthy spawn --session NAME`. `--profile` still works for one
+release but is undocumented (`--help` does not list it) and prints a line on
+stderr naming its replacement; it will be removed. A path stays reachable
+through `stealthy call`.
+
 ## 2.1.11
 
 ### Fixed — F-892: the snapshot staleness witness stated a file Chrome stopped writing in v96

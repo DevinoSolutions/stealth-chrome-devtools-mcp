@@ -50,7 +50,7 @@ not, and each of them was found by asking a question only a wire lane can ask:
   all. The session survives — which is the half that matters most — but a client
   that sends a bad frame waits forever for a reply that is never coming.
 * **A second concurrent auto-clone spawn blocked on the client** (F-790, now
-  FIXED). While one instance holds the master profile, a second
+  FIXED). While one instance holds the shared `default` profile, a second
   ``spawn_browser`` with no ``user_data_dir`` sends a ``roots/list`` request *to
   the client* and awaits it. That await had no deadline, so a client that does
   not implement MCP ``roots`` — which the protocol permits — got no result, no
@@ -186,7 +186,7 @@ CONCURRENCY_HOLD_MS = 2_000
 #: a fast one can decide the node. It is a KIND threshold, not a budget.
 CONCURRENCY_SERIAL_FLOOR = 2.0 * CONCURRENCY_HOLD_MS / 1000.0
 
-# F-790's control bound. The working (master-profile) spawn path answers in
+# F-790's control bound. The working (shared-profile) spawn path answers in
 # under a second on the same machine and in the same session, so a control spawn
 # slower than 30x that means the machine cannot decide the node at all.
 CLONE_HANG_BOUND = 30.0
@@ -366,10 +366,10 @@ def space(tmp_path_factory):
 
 @pytest.fixture(scope="module", autouse=True)
 def primed_master(launcher, space):
-    """Create the master profile (and pay the backend's cold start) once.
+    """Create the shared ``default`` profile (and pay the cold start) once.
 
     Every node below names its profile, and a NAMED profile is cloned from the
-    master snapshot — which cannot happen before a master exists. One unnamed
+    its seed — which cannot happen before that profile exists. One unnamed
     spawn, immediately closed, is what creates it; doing it here rather than
     inside a node keeps F-790 (the unnamed path cannot produce a *second* live
     instance) out of every other node's way.
@@ -1291,7 +1291,7 @@ def test_the_http_column_is_out_of_scope_because_http_is_not_qualified():
 async def test_a_second_unnamed_spawn_is_bounded_when_roots_list_is_never_answered(
     launcher, tmp_path
 ):
-    """F-790 (RESOLVED): with one instance already holding the master profile, a
+    """F-790 (RESOLVED): with one instance already holding the shared profile, a
     second ``spawn_browser`` that names no ``user_data_dir`` must still ANSWER —
     even though it asks this client a question this client never replies to.
 
@@ -1321,7 +1321,7 @@ async def test_a_second_unnamed_spawn_is_bounded_when_roots_list_is_never_answer
       took some other route and this node would pass for the wrong reason. The
       backend's own log must carry the ``_client_session_seed`` fallback
       warning, which is what proves the deadline (not luck) released it.
-    * **A sensitivity control in the same node.** The FIRST spawn — master
+    * **A sensitivity control in the same node.** The FIRST spawn — shared
       profile, no round trip — is measured on the same machine seconds earlier,
       and must not itself have asked for roots.
 
@@ -1354,7 +1354,7 @@ async def test_a_second_unnamed_spawn_is_bounded_when_roots_list_is_never_answer
                 "machine cannot decide F-790"
             )
             assert not [f for f in wire.frames if f.get("method") == "roots/list"], (
-                "the master-profile spawn asked for roots; F-790's precondition "
+                "the shared-profile spawn asked for roots; F-790's precondition "
                 "(only the auto-clone branch does) no longer holds"
             )
 

@@ -246,7 +246,7 @@ class TestSpawnBrowserAnnouncesTheSubstitution:
         # already exists (`ci-warmup-2` pre-existed in the CI evidence). So the
         # warning may NOT promise a fresh clone -- only that it is a different
         # profile, whichever of the two ways it came to be.
-        assert "either a fresh clone of the master snapshot or one an earlier" in (
+        assert "either a fresh copy of the default session's seed or one an" in (
             warning
         )
         assert "freshly cloned" not in warning
@@ -281,4 +281,4 @@ class TestSpawnBrowserAnnouncesTheSubstitution:
         )
 
         warning = result["spawn_diagnostics"]["profile_selection"]["warning"]
-        assert warning.startswith("Named profile created")
+        assert warning.startswith("Named session created")

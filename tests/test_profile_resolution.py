@@ -313,7 +313,7 @@ class TestResolveProfileSelection:
     async def test_no_user_data_dir_uses_master(self, tmp_session_root):
         dirs = tmp_session_root
         result = await _resolve_profile_selection(None)
-        assert result["profile_role"] == "master"
+        assert result["profile_role"] == "default"
         assert result["user_data_dir"] == str(dirs["master"])
 
     @pytest.mark.asyncio
@@ -378,5 +378,5 @@ class TestResolveProfileSelection:
         # will pass (no lock), so it tries to use master directly.
         # Actually master dir doesn't exist, so it'll try to create it.
         # Let's simulate: master doesn't exist + force_clone
-        with pytest.raises(RuntimeError, match="No master profile"):
+        with pytest.raises(RuntimeError, match="No shared profile"):
             await _resolve_profile_selection(None, force_clone=True)

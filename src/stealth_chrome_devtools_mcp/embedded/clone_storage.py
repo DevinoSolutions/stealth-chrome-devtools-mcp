@@ -1,11 +1,13 @@
 """Profile and clone-storage subsystem for the embedded browser backend.
 
 Owns the disposable-session lifecycle extracted verbatim from ``server.py``
-(F-201): default/master/clone/snapshot path resolution, master-snapshot refresh,
-per-session profile cloning, the storage-cap sweep (idle auto-clone eviction plus
-named-profile regenerable trim), the trash/retention mechanism, and
+(F-201): where every session, clone and seed directory IS, refreshing the seed,
+per-session profile copying, the storage-cap sweep (idle auto-clone eviction
+plus named-profile regenerable trim), the trash/retention mechanism, and
 profile-selection resolution. Extracting it means a fault in storage GC can no
-longer disable the whole tool surface.
+longer disable the whole tool surface. What a request MAY name, and what the
+seed means, is ``profile_seed``'s; this module is the only thing that knows
+where those directories live, and hands them over as ``profile_seed.Roots``.
 
 ``server.py`` (the browser tools) and ``cli.py`` (the ops CLI) import this module
 and call its public functions; ``spawn_browser`` delegates profile selection to
@@ -671,7 +673,7 @@ def _rmtree_robust(path: Path, retries: int = 3) -> None:
 
 # F-893: why a copy did not run — the copier is the one place that knows.
 TARGET_IN_USE = "target-in-use"
-SNAPSHOT_IN_USE = "snapshot-in-use"
+SEED_IN_USE = "seed-in-use"
 
 
 def _copy_profile_tree(
@@ -718,58 +720,46 @@ def _require_copied(refusal: str | None, target: Path) -> None:
 
 
 def _refresh_master_snapshot_if_safe(reason: str) -> dict[str, Any]:
+    """Freshen the SEED, reporting in a caller's vocabulary (F-896): ``seed_*``
+    keys, and refusals that name the shared SESSION rather than its directory."""
     master = master_profile_dir()
     snapshot = master_snapshot_dir()
     result = {
-        "snapshot_dir": str(snapshot),
-        "snapshot_refreshed": False,
-        "snapshot_reason": reason,
+        "seed_dir": str(snapshot),
+        "seed_refreshed": False,
+        "seed_reason": reason,
     }
 
     if _profile_has_running_browser(master):
-        result["snapshot_error"] = "master-in-use"
+        result["seed_error"] = "default-in-use"
         return result
 
     try:
         refused = _copy_profile_tree(
-            master, snapshot, default_session_root(), f"master-snapshot-{reason}"
+            master, snapshot, default_session_root(), f"default-seed-{reason}"
         )
-        # F-893: a copy the snapshot's own live browser refused is not a refresh.
+        # F-893: a copy the seed's own live browser refused is not a refresh.
         if refused is None:
-            result["snapshot_refreshed"] = True
+            result["seed_refreshed"] = True
         else:
-            result["snapshot_error"] = SNAPSHOT_IN_USE
+            result["seed_error"] = SEED_IN_USE
     except Exception as exc:
-        result["snapshot_error"] = f"{type(exc).__name__}: {exc}"
+        result["seed_error"] = f"{type(exc).__name__}: {exc}"
     return result
 
 
 def _refresh_snapshot_if_stale() -> None:
-    """Freshen the snapshot before a copy when master has newer logins and is
-    not in use. Both copy paths asked this the same two-line way — a second way
-    to do one thing, and two places F-892 would have had to widen."""
+    """Freshen the seed before a copy when the shared profile has newer logins
+    and is free. Both copy paths asked this the same two-line way (F-892)."""
     if _snapshot_needs_refresh():
         _refresh_master_snapshot_if_safe("pre-clone-stale")
 
 
 def _snapshot_needs_refresh() -> bool:
-    """Return True when master has auth-relevant files newer than the last snapshot.
-
-    WHICH files witness a login is ``profile_seed.LOGIN_WITNESSES`` and is not
-    re-spelled here, not even in prose: this function carried the list inline, it
-    named the pre-Chrome-96 cookie jar, and a pure cookie login therefore never
-    reached this branch at all (F-892). Stat-only; safe before a clone."""
-    snapshot = master_snapshot_dir()
-    if not snapshot.exists():
-        return False  # no snapshot yet; creation is handled elsewhere
-    marker = snapshot / profile_seed.MARKER_NAME
-    if not marker.exists():
-        return True
-    try:
-        written = profile_seed.newest_login_write(master_profile_dir())
-        return written is not None and written > marker.stat().st_mtime
-    except OSError:
-        return False
+    """The seed is stale — the shared profile holds logins newer than it. The
+    rule and the witnesses are ``profile_seed``'s (F-892); this binds them to
+    OUR two directories and keeps the name every other site calls it by."""
+    return profile_seed.needs_refresh(master_profile_dir(), master_snapshot_dir())
 
 
 def _root_to_path(root: Any) -> str | None:
@@ -878,26 +868,32 @@ def _copy_clone_from_source(
         "profile_role": "clone",
         "clone_source": source_kind,
         "clone_source_path": str(source),
-        "master_snapshot_path": str(master_snapshot_dir()),
+        "seed_path": str(master_snapshot_dir()),
     }
     _require_copied(_copy_profile_tree(source, clone, clone_root, source_kind), clone)
     return selection
 
 
-def require_allowed_user_data_dir(user_data_dir: str | None) -> None:
-    """Raise if this ``user_data_dir`` names something a caller may not open.
-    PUBLIC because `spawn_browser` asks it before `adopt_held_profile`, which
-    re-attaches to whatever live browser holds the requested directory and runs
-    in front of selection (F-894 review M1). The rule is `require_allowed`; this
-    and the resolver are its TWO callers, and this one takes the tool's ``None``."""
-    if user_data_dir:
-        profile_seed.require_allowed(
-            user_data_dir,
-            default_session_root(),
-            clone_root_dir(),
-            master_snapshot_dir(),
-            _is_relative_to,
-        )
+def require_allowed_user_data_dir(
+    user_data_dir: str | None, session: str | None = None
+) -> str | None:
+    """The ONE thing `spawn_browser` does with what its caller typed: the two
+    spellings read as one request, refused if it may not be opened, and the
+    DIRECTORY it means — None when nothing was named. It ANSWERS the anchored
+    path because `adopt_held_profile`, which runs in front of selection (F-894
+    review M1), matches a DIRECTORY against live browsers: the raw string left
+    ``session="default"`` matched as a literal name nothing holds, and the
+    spawn fell through to a fresh copy."""
+    requested = profile_seed.profile_request(session, user_data_dir)
+    if not requested:
+        return None
+    roots = profile_seed.Roots(
+        default_session_root(),
+        clone_root_dir(),
+        master_profile_dir(),
+        master_snapshot_dir(),
+    )
+    return str(profile_seed.require_allowed(requested, roots, _is_relative_to))
 
 
 def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, Any]:
@@ -924,18 +920,20 @@ async def resolve_profile_selection(
     clone_root = clone_root_dir()
     snapshot = master_snapshot_dir()
 
-    # F-894: the master BY PATH is the master, not an explicit clone of itself,
-    # so it gets the ROLE that makes `close_instance` refresh the snapshot.
-    asked = Path(user_data_dir).expanduser() if user_data_dir else None
-    if asked is not None and profile_seed.same_dir(asked, master):
-        user_data_dir = None
+    # F-894: refused before anything is created, in front of the walk, through
+    # the same gate the SPAWN asks — "where does this land" has ONE answer, not
+    # two agreeing ones. F-896: the shared profile (by PATH or by the name
+    # `default`) is itself and not a clone of itself, so it gets the ROLE that
+    # makes `close_instance` refresh the seed — read off the ANCHORED path,
+    # because only anchoring turns a name into a directory.
+    landed = require_allowed_user_data_dir(user_data_dir)
+    explicit = (
+        None
+        if landed is None or profile_seed.same_dir(Path(landed), master)
+        else Path(landed)
+    )
 
-    if user_data_dir:
-        # F-894: refused before anything is created, in front of the walk — and
-        # the gate ANSWERS where it lands, so `anchor` runs once (review n6).
-        explicit = profile_seed.require_allowed(
-            user_data_dir, default_session_root(), clone_root, snapshot, _is_relative_to
-        )
+    if explicit is not None:
         # If the requested path (inside clone_root) is already held by a running
         # browser, find the next free numbered variant rather than crashing.
         # For a NAMED profile that walk is an identity change — a different set
@@ -955,7 +953,7 @@ async def resolve_profile_selection(
             _refresh_snapshot_if_stale()
             source = snapshot if snapshot.exists() else master
             source_kind = (
-                "explicit-master-snapshot" if source == snapshot else "explicit-master"
+                "explicit-default-seed" if source == snapshot else "explicit-default"
             )
             _require_copied(
                 _copy_profile_tree(source, explicit, clone_root, source_kind), explicit
@@ -970,10 +968,10 @@ async def resolve_profile_selection(
 
     master.parent.mkdir(parents=True, exist_ok=True)
     if not force_clone and not _profile_has_running_browser(master):
-        snapshot_result = _refresh_master_snapshot_if_safe("before-master-open")
+        snapshot_result = _refresh_master_snapshot_if_safe("before-default-open")
         return {
             "user_data_dir": str(master),
-            "profile_role": "master",
+            "profile_role": profile_seed.DEFAULT_SESSION,
             "clone_source": None,
             **snapshot_result,
         }
@@ -996,22 +994,23 @@ async def resolve_profile_selection(
 
     if source_override is not None:
         source = source_override
-        resolved_source_kind = source_kind or "master-snapshot"
+        resolved_source_kind = source_kind or "default-seed"
     elif snapshot.exists():
         source = snapshot
-        resolved_source_kind = source_kind or "master-snapshot"
+        resolved_source_kind = source_kind or "default-seed"
     elif master.exists():
-        # No snapshot yet (first run, snapshot deleted, or snapshot copy failed).
-        # Fall back to cloning directly from the live master directory.
+        # No seed yet (first run, seed deleted, or the seed copy failed). Fall
+        # back to copying directly from the live shared profile.
         # _copy_profile_delta skips locked files (PermissionError/OSError),
         # and _copy_profile_tree does a double-pass — cookies and login data
-        # transfer successfully even while Chrome has master open.
+        # transfer successfully even while Chrome has it open.
         source = master
-        resolved_source_kind = source_kind or "live-master-fallback"
+        resolved_source_kind = source_kind or "live-default-fallback"
     else:
         raise RuntimeError(
-            "No master profile directory found — nothing to clone from. "
-            "Spawn a browser without user_data_dir first to create and populate the master profile."
+            "No shared profile directory found — nothing to copy from. Spawn a "
+            "browser with no session first to create and populate the "
+            f"{profile_seed.DEFAULT_SESSION!r} session."
         )
 
     # Shield this clone from the storage-cap sweep BEFORE its marker is written.
@@ -1030,15 +1029,16 @@ async def _fallback_profile_selection(
     # What the NEXT attempt drives (F-834 stage 1). A ``clone`` re-clones below;
     # the two non-clone roles retry the SAME directory, which this attempt's
     # F-860 reap has just freed — a NAMED profile is the identity the caller
-    # asked for and is never walked or swapped, and a master no sibling took is
-    # still the best profile here, while one a sibling DID take falls through.
-    # The hold is asked about the directory this attempt DROVE, off the
-    # selection, never config. No wait, no master reservation: CLAUDE.md's row.
+    # asked for and is never walked or swapped, and a shared profile no sibling
+    # took is still the best profile here, while one a sibling DID take falls
+    # through. The hold is asked about the directory this attempt DROVE, off the
+    # selection, never config. No wait, no reservation: CLAUDE.md's row.
+    shared = profile_seed.DEFAULT_SESSION
     role = previous_selection.get("profile_role")
     same = previous_selection.get("user_data_dir")
-    if role == "explicit" or (role == "master" and _profile_hold(Path(same)) is None):
+    if role == "explicit" or (role == shared and _profile_hold(Path(same)) is None):
         return dict(previous_selection)
-    if role not in ("clone", "master"):
+    if role not in ("clone", shared):
         return None
 
     snapshot = master_snapshot_dir()
@@ -1049,6 +1049,6 @@ async def _fallback_profile_selection(
         None,
         force_clone=True,
         source_override=snapshot,
-        source_kind="master-snapshot-final" if final else "master-snapshot-retry",
-        clone_suffix="snapshot" if final else "retry",
+        source_kind="default-seed-final" if final else "default-seed-retry",
+        clone_suffix="seed" if final else "retry",
     )

@@ -365,8 +365,8 @@ def held_by(
     Measured on the stranded Seller Central Chrome (pid 115652, port 9223): its
     owner backend died and the SUCCESSOR rewrote ``browser_pids.json`` without it,
     so :func:`run`, which walks entries, would walk past it forever. The only
-    thing that still names it is the DIRECTORY it holds — which is exactly what a
-    caller passes to ``spawn_browser(user_data_dir=…)``.
+    thing that still names it is the DIRECTORY it holds — which since F-896 is what
+    ``spawn_browser`` hands us for a ``session`` NAME too, already anchored (§5).
 
     So the witness is Chrome's own process singleton, through
     ``profile_lock.profile_hold`` (F-871's one home). What that answers is "is

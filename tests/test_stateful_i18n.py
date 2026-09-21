@@ -167,7 +167,8 @@ class _Instances:
 
         This is a correctness barrier, not politeness. ``spawn_browser`` on a
         named profile that is still held resolves to a NUMBERED VARIANT
-        (``…-2``) cloned from master — or, if an earlier walk already made that
+        (``…-2``) copied from the `default` session's seed — or, if an earlier
+        walk already made that
         name, whatever it left there — rather than failing, which is a
         reasonable product behaviour and a silent disaster for a restart test:
         the respawn would read an empty profile and the node would report that
@@ -772,7 +773,7 @@ async def test_storage_and_cookies_survive_one_profile_and_no_other(
 
     # Same named profile, brand-new browser process. The barrier is not
     # politeness: a named profile that is still held resolves to a numbered
-    # variant cloned fresh from master, and this node would then report that
+    # variant copied fresh from the seed, and this node would then report that
     # nothing persisted when in truth it had read the wrong profile.
     assert await browsers.await_profile_free(kept) is True
     second_id = await browsers.spawn(kept)

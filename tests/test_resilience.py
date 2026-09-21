@@ -402,16 +402,21 @@ async def test_crash_recovery_after_the_owned_chrome_is_killed(
 def _is_per_instance_clone(path: str) -> bool:
     """Only a per-instance CLONE may be deleted by this suite (F-841).
 
-    An uncontended spawn opens the shared MASTER profile directly
-    (``profile_role: "master"``), and ``metadata["user_data_dir"]`` then names
-    the operator's real master — which this suite once ``rmtree``'d on a quiet
-    machine (2026-08-31; restored from ``master-snapshot``). The lane only ever
-    looked safe because a busy machine's live Chrome held the master and forced
-    every test spawn onto a clone. "The crashed instance's profile is
-    removable" is a contract about the disposable clone the spawn created, so
-    the check now runs only when the instance actually got one: clones live
-    under the session root's ``sessions/`` directory; the master (and anything
-    else) is never this test's to delete.
+    An uncontended spawn opens the shared ``default`` profile directly
+    (``profile_role: "default"`` since F-896, ``"master"`` before it), and
+    ``metadata["user_data_dir"]`` then names the operator's real shared
+    profile — which this suite once ``rmtree``'d on a quiet machine
+    (2026-08-31; restored from its seed). The lane only ever looked safe
+    because a busy machine's live Chrome held that profile and forced every
+    test spawn onto a clone. "The crashed instance's profile is removable" is a
+    contract about the disposable clone the spawn created, so the check now
+    runs only when the instance actually got one: clones live under the session
+    root's ``sessions/`` directory; the shared profile (and anything else) is
+    never this test's to delete.
+
+    The guard is a PATH test and deliberately not a role test, which is what
+    makes it survive F-896's rename untouched: a role word can be renamed, and
+    this decides whether to delete a directory.
     """
     from pathlib import Path
 

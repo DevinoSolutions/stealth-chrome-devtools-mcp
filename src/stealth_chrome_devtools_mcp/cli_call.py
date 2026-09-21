@@ -637,32 +637,31 @@ def cmd_ls(args: argparse.Namespace) -> int:
 
 
 def _spawn_arguments(args: argparse.Namespace) -> dict[str, object]:
-    """``spawn_browser``'s arguments, from the three sugar flags.
+    """``spawn_browser``'s arguments, from the sugar flags.
 
-    ``--profile`` is passed STRAIGHT THROUGH as ``user_data_dir`` — a name or an
-    absolute path, exactly as the tool takes it, with no interpretation here.
-    That is the whole of profile selection at this layer, deliberately: what a
-    name resolves to is ``clone_storage.resolve_profile_selection``'s answer and
-    the verb PRINTS it back (role + directory), so the CLI can never claim a
-    profile the backend did not actually pick.
+    ``--session`` goes STRAIGHT THROUGH as ``session`` and ``--profile`` as
+    ``user_data_dir``, uninterpreted: what a name resolves to is the resolver's
+    answer and the verb PRINTS it back, so the CLI never claims a profile the
+    backend did not pick. ``--profile`` is DEPRECATED and undocumented (F-896),
+    accepted for one release with a stderr line naming its replacement; the
+    path door is ``stealthy call spawn_browser --arg user_data_dir=<path>``,
+    which is what ``call`` is for, and a second sugar flag for one tool
+    argument is convention 4's defect. **Both flags at once are left for the
+    BACKEND to refuse** — that rule lives in ``profile_seed.profile_request``
+    and nowhere else, so the two surfaces cannot come to disagree.
 
-    **There is no `--master`.** It was built and removed before shipping: an
-    unnamed spawn reaches the master profile only while master is FREE, so the
-    flag had to name master's DIRECTORY to keep its promise — and naming a
-    directory is what ``--profile`` already does. Worse, `master` as a bare NAME
-    resolves to ``sessions/master``, a different profile entirely (F-894), so the
-    flag would have taught a spelling that is a trap one character away. The
-    session vocabulary replacing it (``--session NAME`` + ``--from <session>``,
-    with ``default`` reserved for what is today the master profile) is where that
-    question belongs; shipping ``--master`` would have meant renaming it in the
-    next release.
-
-    Neither ``--headed`` nor ``--headless`` sends no ``headless`` argument at
-    all, so the tool's own default decides; sending one either way would be a
-    second answer to a question ``spawn_browser`` already answers.
+    Neither ``--headed`` nor ``--headless`` sends no ``headless`` at all, so the
+    tool's own default decides rather than this CLI holding a second opinion.
     """
     arguments: dict[str, object] = {}
+    if args.session:
+        arguments["session"] = args.session
     if args.profile:
+        print(
+            "note: --profile is deprecated — use --session NAME, or `stealthy "
+            "call spawn_browser --arg user_data_dir=<path>` for a path.",
+            file=sys.stderr,
+        )
         arguments["user_data_dir"] = args.profile
     if args.headed:
         arguments["headless"] = False
@@ -912,12 +911,11 @@ def add_parsers(sub: SubParsers) -> None:
 
     Parsers and bodies in one file because they are one question. They were
     split — declarations in ``cli.py``, meaning here — and the split showed:
-    this module's own docstring explains what ``--profile`` does while the
-    ``add_argument`` that offers it lived in another file, so adding a flag to
-    ``spawn`` meant editing two homes and either could drift from the other
-    (convention 4, reached from the side where the second way is a second
-    FILE). ``cli.py`` still owns the parser TREE, both script names and the
-    ops verbs; what moved is only the six verbs' own surface.
+    this module's docstring explained what ``--session`` MEANS while the
+    ``add_argument`` offering it lived in another file, so adding a flag to
+    ``spawn`` meant editing two homes and either could drift (convention 4,
+    reached from the side where the second way is a second FILE). ``cli.py``
+    still owns the parser TREE, both script names and the ops verbs.
 
     ``call`` has no per-tool mirror on purpose — the tool's own schema on the
     backend is the validation, so a 95th tool is reachable the day it is
@@ -957,11 +955,14 @@ def add_parsers(sub: SubParsers) -> None:
 
     spawn = sub.add_parser("spawn", parents=[shared], help="spawn a browser")
     spawn.add_argument(
-        "--profile",
+        "--session",
         default=None,
-        help="persistent profile: a name or an absolute path, passed straight "
-        "through as user_data_dir (re-attaches when a browser already holds it)",
+        metavar="NAME",
+        help="persistent session NAME, not a path: keeps its cookies and "
+        "logins. `default` is the shared session new ones are copied from",
     )
+    # F-896: accepted for one release, undocumented, and it says so on stderr.
+    spawn.add_argument("--profile", default=None, help=argparse.SUPPRESS)
     headed = spawn.add_mutually_exclusive_group()
     headed.add_argument("--headed", action="store_true", help="show a window")
     headed.add_argument("--headless", action="store_true", help="no window")
