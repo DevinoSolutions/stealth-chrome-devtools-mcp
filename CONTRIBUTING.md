@@ -148,6 +148,22 @@ operator's directories unreachable; it does not give each node a clean record.
 Two nodes in one file that both write `server.json` still need `tmp_path`
 between them. The two answer different questions and the suite needs both.
 
+**Never move a module in `sys.modules` by hand — use `tests/module_cache.py`.**
+A module's identity lives in TWO places: the `sys.modules` mapping and the
+attribute its parent package carries (`import a.b` writes both). Move one half
+and the other is left naming the wrong object, which is **not local to your
+file**: pytest resolves a dotted `monkeypatch.setattr("a.b.c.d", …)` target by
+`__import__` plus a `getattr` walk, so the next file in the lane that patches
+through that attribute fails — green in every single-file run, red only under
+the full alphabetical order. Both directions have now been measured here: a
+popped PARENT left `tests/test_python_exec_timeout.py` with `module
+'stealth_chrome_devtools_mcp' has no attribute 'embedded'`, and a popped CHILD
+restored into the mapping alone orphaned
+`embedded.file_based_element_cloner`. `module_cache.bind` / `absent` /
+`pristine_package` are the one home for the rule (move the pair, never one
+half); `tests/test_package_entrypoints.py::TestTheImportTreeSurvivesTheseNodes`
+pins it for this file and everything sorted before it.
+
 **No module body in `src/stealth_chrome_devtools_mcp/` may CALL anything.**
 Importing a module must only define things, so that a `pkgutil.walk_packages`
 sweep, a doc generator, an import linter or an IDE can walk the package without

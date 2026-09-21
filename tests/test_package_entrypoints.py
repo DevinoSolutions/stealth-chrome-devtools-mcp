@@ -35,7 +35,6 @@ node to observe (or safely tolerate) a call.
 from __future__ import annotations
 
 import ast
-import contextlib
 import importlib
 import os
 import runpy
@@ -45,6 +44,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+import module_cache
 
 MODULE_NAME = "stealth_chrome_devtools_mcp.__main__"
 MAIN_SOURCE = (
@@ -58,54 +59,35 @@ MAIN_SOURCE = (
 PACKAGE = "stealth_chrome_devtools_mcp"
 
 
-def _unload(name: str) -> None:
-    sys.modules.pop(name, None)
-
-
-def _cached_package_modules() -> dict[str, object]:
-    return {
-        name: module
-        for name, module in sys.modules.items()
-        if name == PACKAGE or name.startswith(PACKAGE + ".")
-    }
-
-
-@contextlib.contextmanager
-def _pristine_package_modules():
-    """Put ``sys.modules`` back exactly as it was, whatever the body did.
-
-    **Popping a PACKAGE while its submodules stay cached is unsound**, and this
-    is the one file that has reason to do it. The next ``import
-    stealth_chrome_devtools_mcp`` builds a NEW module object, while ``import
-    stealth_chrome_devtools_mcp.embedded`` is a ``sys.modules`` HIT that never
-    re-binds ``embedded`` as an attribute of that new parent -- not even an
-    explicit ``importlib.import_module`` repairs it (measured). The package is
-    then permanently un-walkable by attribute, which is how
-    ``monkeypatch.setattr("stealth_chrome_devtools_mcp.embedded.<x>.<y>", …)``
-    -- pytest resolves a dotted target by ``__import__`` plus a ``getattr``
-    walk -- came to fail in ``tests/test_python_exec_timeout.py`` with
-    ``module 'stealth_chrome_devtools_mcp' has no attribute 'embedded'``.
-
-    It only ever showed up in a FULL lane: this file sorts before that one, and
-    each file alone re-imports the package cleanly. Restoring the mapping here
-    is what makes the pops below local to the node that needs them.
-    """
-    saved = _cached_package_modules()
-    try:
-        yield
-    finally:
-        for name in tuple(_cached_package_modules()):
-            if name not in saved:
-                del sys.modules[name]
-        sys.modules.update(saved)
+#: **Popping a PACKAGE while its submodules stay cached is unsound**, and this is
+#: the one file that has reason to do it. The next ``import
+#: stealth_chrome_devtools_mcp`` builds a NEW module object, while ``import
+#: stealth_chrome_devtools_mcp.embedded`` is a ``sys.modules`` HIT that never
+#: re-binds ``embedded`` as an attribute of that new parent -- not even an
+#: explicit ``importlib.import_module`` repairs it (measured). The package is
+#: then permanently un-walkable by attribute, which is how
+#: ``monkeypatch.setattr("stealth_chrome_devtools_mcp.embedded.<x>.<y>", …)`` --
+#: pytest resolves a dotted target by ``__import__`` plus a ``getattr`` walk --
+#: came to fail in ``tests/test_python_exec_timeout.py`` with ``module
+#: 'stealth_chrome_devtools_mcp' has no attribute 'embedded'``. It only ever
+#: showed up in a FULL lane: this file sorts before that one, and each file
+#: alone re-imports the package cleanly.
+#:
+#: The restore is ``tests/module_cache.py``'s, not a spelling of its own: the
+#: same rule (move the mapping and the parent's attribute together, never one
+#: half) is what ``tests/test_element_cloner_output_dir.py`` needs for the
+#: opposite direction of the same hazard, and two spellings of one rule are how
+#: the two would come to disagree about it. Both entry points below are that
+#: module's -- ``pristine_package(PACKAGE)`` for the restore,
+#: ``bind(name, None)`` for a pop that also takes the parent's attribute.
 
 
 class TestImportingDoesNotRun:
     def test_importing_by_name_never_calls_main(self):
         """A bare import must be inert: no backend, no side effect."""
         calls: list[None] = []
-        with _pristine_package_modules():
-            _unload(MODULE_NAME)
+        with module_cache.pristine_package(PACKAGE):
+            module_cache.bind(MODULE_NAME, None)
             with patch(
                 "stealth_chrome_devtools_mcp.server.main",
                 side_effect=lambda: calls.append(None),
@@ -126,14 +108,14 @@ class TestRunningAsMainStillRuns:
         the package's ``__main__`` submodule.
 
         The pops are what force a fresh execution, and
-        :func:`_pristine_package_modules` is what keeps them from outliving
-        this node -- popping the PACKAGE leaves every later attribute walk over
-        it broken, for the whole session.
+        ``module_cache.pristine_package`` is what keeps them from outliving this
+        node -- popping the PACKAGE leaves every later attribute walk over it
+        broken, for the whole session.
         """
         calls: list[None] = []
-        with _pristine_package_modules():
-            _unload(MODULE_NAME)
-            _unload(PACKAGE)
+        with module_cache.pristine_package(PACKAGE):
+            module_cache.bind(MODULE_NAME, None)
+            module_cache.bind(PACKAGE, None)
             with patch(
                 "stealth_chrome_devtools_mcp.server.main",
                 side_effect=lambda: calls.append(None),
@@ -190,9 +172,15 @@ class TestTheImportTreeSurvivesTheseNodes:
 
     A pin here covers this file and every file sorted before it, which is where
     the mechanism lives -- the cost of covering the whole session would be a
-    per-test teardown hook, and no other file in the tree pops or reloads a
-    real package module (``test_element_cloner_output_dir`` and
-    ``test_tool_module_reload`` both restore what they take).
+    per-test teardown hook. **It has already caught one file other than this
+    one**: ``tests/test_element_cloner_output_dir.py``'s isolation fixture
+    restored ``sys.modules[name]`` without re-binding the parent's attribute,
+    which orphaned ``embedded.file_based_element_cloner`` whenever a file
+    sorting before it had already cached that module (measured with
+    ``test_clone_output_dir.py test_element_cloner_output_dir.py`` in front of
+    this one; each pair alone is green). Both files now take the restore from
+    ``tests/module_cache.py``. ``test_tool_module_reload`` needs none: its two
+    probe identities are BARE names with no parent to disagree with.
     """
 
     def test_the_named_subpackages_resolve_by_attribute(self):
@@ -216,9 +204,19 @@ class TestTheImportTreeSurvivesTheseNodes:
                 )
 
     def test_every_cached_submodule_is_still_named_by_its_parent(self):
-        """The general invariant, not just the two spellings above."""
+        """The general invariant, not just the two spellings above.
+
+        It is the whole property and not a list of the names a dotted
+        ``monkeypatch.setattr`` happens to need today: that list is every file
+        in the suite's business, it changes with every new patch target, and
+        the two orphans this pin has actually caught were found precisely
+        because it was not scoped to one. ``__main__`` is in it for the same
+        reason -- it is not a subpackage anyone resolves by attribute, but a
+        file that leaves IT disagreeing is a file whose restore is wrong, and
+        the restore is what protects ``test_python_exec_timeout``.
+        """
         orphans = []
-        for name, module in sorted(_cached_package_modules().items()):
+        for name, module in sorted(module_cache.cached_under(PACKAGE).items()):
             parent_name, _, leaf = name.rpartition(".")
             if not parent_name:
                 continue
@@ -227,9 +225,9 @@ class TestTheImportTreeSurvivesTheseNodes:
                 orphans.append(name)
         assert not orphans, (
             "cached submodules their own parent no longer names: "
-            f"{orphans}. Popping a package from sys.modules while its "
-            "submodules stay cached is what does this; restore the mapping "
-            "instead (see _pristine_package_modules)."
+            f"{orphans}. Moving a module in sys.modules without moving the "
+            "attribute its parent package carries is what does this; take the "
+            "restore from tests/module_cache.py instead."
         )
 
     def test_a_dotted_monkeypatch_target_still_resolves(self, monkeypatch):

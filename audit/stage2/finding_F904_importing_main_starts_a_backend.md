@@ -135,17 +135,58 @@ monkeypatch target (`__import__`, then a `getattr` walk), so
 3413 passed, and only in a full lane, because this file sorts before that one
 and either file alone re-imports the package cleanly.
 
-The pops are kept (they are what forces the fresh execution) and wrapped in
-`_pristine_package_modules`, which restores the `sys.modules` mapping for the
-package exactly. Three pins at the end of the file assert the invariant this
-file is uniquely able to break: the two named subpackages resolve by attribute
-after an import, no cached submodule is unnamed by its own parent, and a real
-dotted `monkeypatch.setattr` resolves. They go red on all three without the
-restore, so the failure is now reported in the file that causes it rather than
-in whichever file happens to sort next.
+The pops are kept (they are what forces the fresh execution) and wrapped in a
+restore. Three pins at the end of the file assert the invariant this file is
+uniquely able to break: the two named subpackages resolve by attribute after an
+import, no cached submodule is unnamed by its own parent, and a real dotted
+`monkeypatch.setattr` resolves. They go red on all three without the restore,
+so the failure is now reported in the file that causes it rather than in
+whichever file happens to sort next.
 
-Their reach is this file and everything sorted before it, which is where the
-mechanism lives — no other test file pops or reloads a real package module
-(`test_element_cloner_output_dir` and `test_tool_module_reload` both restore
-what they take, verified). Covering the whole session would mean a per-test
-teardown hook, which is not worth its cost for one file.
+### 7.1 The restore had to move twice, and the second time it moved out
+
+The first restore wrote the `sys.modules` MAPPING back and nothing else, and
+the next lane was red on the middle pin —
+`['stealth_chrome_devtools_mcp.__main__',
+'stealth_chrome_devtools_mcp.embedded.file_based_element_cloner']`. That is the
+same hazard reached from the other end, and it is the half the first fix
+missed: **a module's identity lives in two places**, the mapping and the
+attribute its parent package carries, and re-importing a popped CHILD rebinds
+the parent's attribute to the NEW object, so putting the OLD one back in the
+mapping alone leaves the parent naming a module the cache does not.
+
+Both orphans are that, at two different files:
+
+* `__main__` — this file's own. `TestImportingDoesNotRun` pops it and
+  re-imports it; the restore put the old object back in the mapping while
+  `stealth_chrome_devtools_mcp.__main__` still named the copy. Invisible unless
+  something had already cached `__main__` before this file ran, which
+  `tests/test_operator_fence.py`'s whole-package sweep does (`o` sorts before
+  `p`) — reproduced with exactly those two files.
+* `embedded.file_based_element_cloner` — **not this file's**, and fixed at its
+  own source. `tests/test_element_cloner_output_dir.py`'s autouse
+  `_isolate_imports` fixture did the same pop-reimport-restore-the-mapping. It
+  needs a file sorting before IT to have cached the module first
+  (`tests/test_clone_output_dir.py`), which is why every pair was green;
+  reproduced with `test_clone_output_dir test_element_cloner_output_dir
+  test_package_entrypoints`.
+
+So the paragraph above that claimed "no other test file pops or reloads a real
+package module — `test_element_cloner_output_dir` and `test_tool_module_reload`
+both restore what they take" was **wrong about the first of the two**, and the
+pin is what caught it. `test_tool_module_reload` remains correct for a reason
+worth stating: its two probe identities (`server`, `_split_reload_probe`) are
+BARE names with no parent package, so there is no second half to move.
+
+The restore now lives in `tests/module_cache.py` — THE one home for taking a
+module out of `sys.modules` and putting it back, `bind` / `absent` /
+`pristine_package` — because two files need the same rule and a second spelling
+of it is how the two would come to disagree (convention 4). Verified under the
+real lane ORDER rather than a batch: the 114 files alphabetically up to and
+including `tests/test_package_entrypoints.py` are 2034 passed / 1 skipped, and
+the 97 from there to the end are 1882 passed.
+
+The pins' reach is this file and everything sorted before it, which is where the
+mechanism lives. Covering the whole session would mean a per-test teardown hook,
+which is not worth its cost; what makes the reach sufficient is that the pin has
+already caught a file other than the one it lives in.
