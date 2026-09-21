@@ -58,6 +58,12 @@ Issues = "https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/issues"
 
 [project.scripts]
 stealth-chrome-devtools-mcp = "stealth_chrome_devtools_mcp.server:main"
+# ONE CLI under two names (F-891), never two CLIs: `stealthy` is the name the
+# docs teach and `stealth-chrome-devtools` is kept because it is in every
+# operator's muscle memory and in this repo's own RUNBOOK. Both resolve to the
+# same `cli:main`, which derives its help text's prog name from argv[0], so the
+# alias never advertises the other name's usage line.
+stealthy = "stealth_chrome_devtools_mcp.cli:main"
 stealth-chrome-devtools = "stealth_chrome_devtools_mcp.cli:main"
 
 [project.optional-dependencies]
@@ -423,6 +429,11 @@ ban-relative-imports = "all"
 "src/stealth_chrome_devtools_mcp/cli.py" = [
     "ANN001", "ANN202", "T20",
 ]  # PERMANENT(print is CLI UI) + plan_M4ph1 (annotation surface)
+"src/stealth_chrome_devtools_mcp/cli_call.py" = [
+    "T20",
+]  # PERMANENT(print is CLI UI) — F-891. ONE code, not cli.py's three: the
+# tool-driving verbs are fully annotated, so neither ANN001 nor ANN202 fires
+# here. Carried deliberately narrow rather than inherited.
 "src/stealth_chrome_devtools_mcp/embedded/models.py" = [
     "ANN201", "TID251",
 ]  # plan_M4ph1 (pre-typing data models)

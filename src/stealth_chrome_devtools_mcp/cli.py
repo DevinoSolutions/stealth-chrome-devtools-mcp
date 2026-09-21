@@ -709,6 +709,26 @@ def _cmd_kill_orphans(args) -> int:
     return 0
 
 
+def _cli_call():
+    """The six tool-driving verbs (F-891) — parsers, bodies and dispatch —
+    imported lazily.
+
+    They are the only verbs that speak MCP, so the ops verbs must not pay for
+    the client library: ``profiles`` and ``status`` reach a running backend
+    through nothing heavier than a socket and a probe. Same reason every
+    ``embedded`` import in this file is inside the function that needs it.
+
+    Building the parser now imports that module, so the laziness is thinner
+    than it was — but what it protects is unchanged and measured: ``cli_call``
+    imports only stdlib (``argparse``, ``contextlib``, ``sys``, ``typing``) at
+    module scope, and every reach for ``backend_client`` (and through it
+    ``httpx`` and the ``mcp`` SDK) is still inside the function that needs it.
+    """
+    from stealth_chrome_devtools_mcp import cli_call
+
+    return cli_call
+
+
 def _cmd_serve(args) -> int:
     # Delegate to the same entrypoint as `stealth-chrome-devtools-mcp` so server
     # lifecycle (incl. orphan recovery) behaves exactly as normal.
@@ -730,6 +750,10 @@ def _cmd_serve(args) -> int:
     return 0
 
 
+#: The OPS verbs. The six tool-driving verbs are `cli_call.DISPATCH`'s, beside
+#: the bodies they name; :func:`main` consults it for anything not here, so one
+#: table covers the lifecycle and the other covers the tool surface, each next
+#: to what it dispatches to.
 _DISPATCH = {
     "status": _cmd_status,
     "profiles": _cmd_profiles,
@@ -741,14 +765,36 @@ _DISPATCH = {
     "serve": _cmd_serve,
 }
 
+#: The console-script names this ONE ``main`` is installed under
+#: (``pyproject.toml`` ``[project.scripts]``), canonical first. F-891 added
+#: ``stealthy``; ``stealth-chrome-devtools`` stays because it is in every
+#: operator's muscle memory and in this repo's own RUNBOOK. One CLI, two names —
+#: never two CLIs (convention 4).
+SCRIPT_NAMES = ("stealthy", "stealth-chrome-devtools")
+
+
+def _prog_name() -> str:
+    """The name this process was invoked as, for help text and usage lines.
+
+    A CLOSED set, and that is the point: ``argparse``'s own default is
+    ``basename(sys.argv[0])``, which under pytest prints ``pytest`` and under
+    ``python -m`` prints ``__main__``, so help text would advertise a command
+    that does not exist. Anything unrecognised falls back to the canonical name.
+    """
+    invoked = Path(sys.argv[0] or "").name.removesuffix(".exe")
+    return invoked if invoked in SCRIPT_NAMES else SCRIPT_NAMES[0]
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="stealth-chrome-devtools",
-        description="Ops CLI for the stealth Chrome DevTools MCP server "
-        "(inspect, reclaim disk, start). For browser automation, use the MCP server.",
+        prog=_prog_name(),
+        description="CLI for the stealth Chrome DevTools MCP server: inspect and "
+        "operate the backend, and drive its tools from a shell.",
     )
     sub = parser.add_subparsers(dest="command")
+    # ONE parser tree; the six tool verbs contribute their own surface, which
+    # is why their flags and their bodies can no longer drift apart (F-891).
+    _cli_call().add_parsers(sub)
 
     sub.add_parser(
         "status", help="show backend state, browser-session root, and storage caps"
@@ -831,8 +877,60 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if not args.command:
         parser.print_help()
-        return 1
-    return _DISPATCH[args.command](args)
+        # USAGE, never 1 (F-891 review M1): naming no verb is argparse's own
+        # kind of mistake, and exit 1 now means "the tool answered and said no".
+        return _delivered(_cli_call().EXIT_USAGE)
+    handler = _DISPATCH.get(args.command)
+    if handler is None:
+        handler = _cli_call().DISPATCH[args.command]
+    try:
+        return _delivered(handler(args))
+    except OSError as exc:
+        # The DISPATCH is guarded and not only the flush (round-5 M1): an ops
+        # verb has no handler of its own, so a `print` that crosses the 8 KB
+        # buffer raises mid-body — `stealthy profiles | head -1` with many
+        # sessions — and left `main` as a traceback and exit 1, which the set
+        # defines as "the tool said no". Only the reader-gone shape converts;
+        # any other OSError is the verb's own failure and keeps propagating.
+        calls = _cli_call()
+        if not calls._reader_gone(exc):
+            raise
+        calls._abandon_stdout()
+        return calls.EXIT_BROKEN_PIPE
+
+
+def _delivered(code: int) -> int:
+    """THE one flush, for every verb of BOTH dispatch tables (F-891 delta
+    review M1 + round-4 S2).
+
+    ``print`` leaves the tail of any output above the 8 KB ``TextIOWrapper``
+    buffer unwritten, and it lands at interpreter finalisation — after
+    ``head`` has gone, outside every handler — as ``Exception ignored on
+    flushing sys.stdout`` and exit **120**, outside the advertised set. So
+    ``stealthy call get_page_content | head -1`` and ``stealthy profiles |
+    head -1`` both exited 120 while the docs said 141. Flushing HERE brings the
+    failure into a handler where it becomes 141; putting the ONE flush in
+    ``main`` rather than in ``cli_call._run`` reaches the eight ops verbs for
+    the answer that FITS the buffer, and ``main``'s guard around the dispatch
+    covers the one that crosses it — one home for "the reader went away".
+
+    This is a second guarded site, deliberately NOT routed through
+    ``cli_call._verdict``: it catches ``OSError`` and not ``BrokenPipeError``
+    because the measured Windows finalisation error is ``EINVAL`` (errno 22),
+    not a pipe error at all — and ``_verdict`` would route that shape to the
+    transport row and answer 3, "could not reach the backend", about a round
+    trip that succeeded. The cost is that any other ``OSError`` from this
+    flush (a full disk, ENOSPC) also reads as 141 — finding §6.16. It is the
+    INNER half of one region: ``main`` guards the dispatch around it, for the
+    output that crosses the buffer before the verb returns.
+    """
+    try:
+        sys.stdout.flush()
+    except OSError:
+        calls = _cli_call()
+        calls._abandon_stdout()
+        return calls.EXIT_BROKEN_PIPE
+    return code
 
 
 if __name__ == "__main__":

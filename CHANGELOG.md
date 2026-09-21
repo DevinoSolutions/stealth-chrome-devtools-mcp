@@ -133,6 +133,126 @@ four fixes rather than a raised cap.
 The "browser session / named session" row said `spawn_browser(session_name=…)`.
 There is no such parameter and never has been; it is `user_data_dir`.
 
+### Added — F-891: `stealthy`, one CLI that can also drive the backend's tools
+
+Nothing in a shell could call a tool on the running backend. On 2026-09-19,
+recovering a stranded Seller Central login therefore cost a hand-written 40-line
+MCP stdio client (`reattach_seller_central.py`) whose only job was to invoke
+`spawn_browser(user_data_dir=…)` — a script that had to know the protocol, the
+result shape and how to start a proxy, to make one call the product already
+supports.
+
+The ops CLI gains six verbs and a new name. `stealthy` and
+`stealth-chrome-devtools` are **one CLI under two names** — the same `cli:main`,
+one parser, one `_DISPATCH` — and help text names whichever you typed. The
+existing verbs are unchanged.
+
+- `stealthy call <tool> [--arg k=v ...] [--json '<object>']` reaches **any** tool.
+  There is no per-tool argparse mirror: the tool's own schema on the backend is
+  the validation, so a 95th tool is callable the day it is registered and the
+  tool count stays derived. `--arg` values are JSON when they parse
+  (`headless=false`, `browser_args=["--x"]`) and strings when they do not
+  (`C:\Users\me\profile`), split on the first `=` so a query string survives.
+- `stealthy ls` / `nav` / `close` / `spawn` are sugar over `list_instances`,
+  `navigate`, `close_instance` and `spawn_browser`; instance ids resolve by
+  unique prefix, and an ambiguous one names every match instead of picking.
+- `stealthy spawn --profile <name-or-path>` is the stranded-login recipe as one
+  command, and prints `REATTACHED : yes` with the holder's pid when F-888 gave it
+  the browser that was already running. The value is passed through as
+  `user_data_dir` untouched and a `spawn` with no `--profile` is whatever
+  `spawn_browser()` itself selects; either way the `profile_selection` the
+  backend made — role and directory — is printed, so nothing has to be inferred.
+  There is deliberately **no** `--master`: `master` as a bare name resolves to
+  `sessions/master`, a different profile (F-894), and the vocabulary that will
+  name the master profile is `--session`/`--from` with `default` reserved.
+- `stealthy tools [--section X]` lists the LIVE backend's surface and states the
+  installed build's registry count beside it, because when those two disagree the
+  shell and the backend are different builds — which is the answer.
+
+They talk MCP streamable-HTTP straight to the backend, selected **exactly** the
+way `status` selects it (`singleton._probe_backend_status`, F-868) and started
+through the existing `ensure_server_running` path when none is running, so the
+cold-start lock, F-886's step-aside and F-889's adopt-forward apply unchanged;
+`--no-start` makes the absence an error. No stdio proxy is spawned per command.
+Output is a table on a terminal and JSON in a pipe or under `--json`.
+
+**Exit codes are a closed set**: 0 ok / 1 the tool answered and said no / 2 usage
+— including `stealthy` with no subcommand, which prints help and is the same kind
+of mistake argparse answers with 2 / 3 no backend, which is also where a transport
+failure lands (nothing on the backend saw the request, so there is no answer to
+report) / 70 a bug in the CLI itself / 130 `Ctrl-C` / 141 the READER went away.
+Every exception out of a tool verb is mapped, so no tool-verb invocation ever pairs
+a raw traceback with Python's default exit 1 — the code that means the tool
+refused. An ops verb's OWN failure (an `OSError` that is not the reader leaving —
+a directory `cleanup --apply` cannot delete) still propagates as it always did;
+that is deliberate, and stated in the finding's §6.17.
+
+141 is `128 + SIGPIPE` and it needs its own judgement, asked before the transport
+one: a `BrokenPipeError` is an `OSError`, so `stealthy ls | head -1` and `stealthy
+tools | less` with `q` pressed early reported *"could not reach the backend"* about
+a round trip that had already succeeded — a false statement about the backend,
+made by the one function whose job is to keep transport and tool apart, over the
+commonest idiom in the shell. The judgement is keyed on the errno and not only the
+type, because the same closed pipe is `BrokenPipeError` (EPIPE) on every POSIX and
+a bare `OSError(EINVAL)` on Windows — measured through a REAL pipe, where a row
+keyed on the type alone still answered 3 on Windows while every hermetic double
+passed. It prints nothing (the operator's `head` did what they asked), and stdout
+is re-pointed at the null device before returning, because otherwise the
+interpreter's own exit flush fails again outside every handler and CPython answers
+with exit 120 — a code outside the advertised set.
+
+**Both ways out reach that, and the SUCCESS path is the one you meet first.** A
+verb that fails mid-write is the easy half; a verb that succeeds leaves the tail
+of any output over the 8 KB buffer unwritten, and it lands at interpreter
+finalisation with the reader long gone — so `stealthy call get_page_content |
+head -1` exited **120** with `Exception ignored on flushing sys.stdout` while the
+docs said 141. Every run now ends with ONE explicit flush in `cli.main`, after
+whichever dispatch table answered, and `main` guards the DISPATCH itself with the
+same reader-gone judgement — both halves are needed for the eight ops verbs, which
+have no handler of their own: the flush catches an answer that fits the buffer,
+the guard catches one that crosses it mid-`print` (`stealthy profiles | head -1`
+with many sessions exited 120 before the flush and 1-with-a-traceback with only
+the flush). It is a second guarded site rather than a row in the exit-code table: it
+catches `OSError`, not `BrokenPipeError`, because the measured Windows
+finalisation error is `EINVAL` (errno 22), not a pipe error at all, and the table
+would have routed that shape to the transport row and answered 3 about a round
+trip that succeeded. The redirect-to-null that follows cannot raise either, even
+out of descriptors — it runs inside handlers, where an escape would be the
+traceback this whole set exists to prevent. The one-line report is
+likewise emitted under `contextlib.suppress(OSError)`, because `2>&1 | head -1`
+closes stderr too and that print lives inside the handler; and
+`asyncio.CancelledError` joined the caught set, being the last `BaseException`
+shape that could leave a set advertised as closed.
+
+`--traceback` prints the stack **as well as** the one-line message, and
+deliberately does not re-raise: an exception leaving `main` goes past
+`sentry_init()`, and `sys.excepthook` would ship a `BackendCallError` carrying the
+tool's own payload — exactly what this CLI promises it never sends anywhere.
+
+**The CLI never evicts a live backend.** The one selection is identity-blind, so
+a backend built from a different source tree answers and is adopted rather than
+replaced — a fingerprint mismatch is the proxy reuse gate's business, not a
+one-shot command's. What a cold start can still evict, when nothing answers at
+all, is a *wedged* backend of another build owning no live browser: that is the
+proxy's own startup path, unchanged and not forked, and `--no-start` is the
+opt-out. Both facts are in `--no-start`'s help.
+
+The MCP session each call opens is **terminated on the way out** — pinned on the
+happy path, on a tool error, on a mid-call transport failure and on cancellation,
+against the real `mcp` SDK driven over a fake in-process HTTP server, rather than
+by asserting that a keyword argument was passed. `spawn --url` prints the
+instance id **before** navigating, so a failed navigation still leaves the
+operator a browser they can name.
+
+Two new leaves: `embedded/backend_client.py` (the session, the call, and the one
+reading of an answer — `structuredContent` with EMPTY `content` is the common
+shape, measured) and `cli_call.py` (the six verbs' parsers, bodies and dispatch
+table). `cli.py` keeps the one parser TREE, the one `main` and both script
+names, and calls `cli_call.add_parsers(sub)` once — so there is still exactly
+one `--help` and one set of verbs, and a flag now sits beside the code that
+explains it. It is **890 LOC against the 1000 budget**, which ratchets down
+only; no cap was raised.
+
 ## 2.1.10
 
 ### Fixed — F-882d: the meta-refresh node named two of that shape's three truthful states

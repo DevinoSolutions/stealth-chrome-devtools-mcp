@@ -154,8 +154,9 @@ def marked_fences() -> list[Fence]:
 # The static screen — everything below runs BEFORE any command is executed.
 # ---------------------------------------------------------------------------
 # Only the ops CLI is executable. It is read-only in the forms allowed below and
-# exits on its own.
-ALLOWED_EXECUTABLES = frozenset({"stealth-chrome-devtools"})
+# exits on its own. Both of its names, because they are one command (F-891) and
+# the docs teach the newer one.
+ALLOWED_EXECUTABLES = frozenset({"stealthy", "stealth-chrome-devtools"})
 # Named explicitly so the refusal carries its reason. The MCP launcher defaults
 # to stdio: invoking it spawns a detached backend and then blocks reading
 # JSON-RPC from stdin, which is exactly the interactive/undeclared-side-effect
@@ -166,7 +167,29 @@ BLOCKING_EXECUTABLES = {
     ),
 }
 # Sub-commands that mutate state, kill processes, or never return.
-DENIED_SUBCOMMANDS = frozenset({"serve", "stop", "restart", "kill-orphans"})
+#
+# F-891's six tool-driving verbs are all here, including the three that only
+# read. None of them mutates a FILE, which is what the rest of this set is
+# about, but every one of them reaches a live backend and STARTS one when none
+# is running — a doc lane that cold-started a backend would leave a detached
+# process behind on every CI cell and, on a developer's machine, would reach
+# whatever real backend the record names. Passing `--no-start` in a doc example
+# would narrow that to "reaches the operator's live backend", which is still not
+# something a README fence may do unasked.
+DENIED_SUBCOMMANDS = frozenset(
+    {
+        "serve",
+        "stop",
+        "restart",
+        "kill-orphans",
+        "tools",
+        "call",
+        "ls",
+        "spawn",
+        "nav",
+        "close",
+    }
+)
 # Flags that turn a preview into a mutation, or that write files.
 DENIED_FLAGS = frozenset(
     {"--apply", "--force", "-f", "-o", "--output", "--out", "--file", "--write"}
@@ -256,12 +279,20 @@ def screen_command(command: str) -> list[str]:
 # marked fence without adding its command here fails, and so does deleting a
 # reviewed example from the docs. That equality is what makes "reviewed" a fact
 # rather than a claim.
+#
+# BOTH console-script names appear here on purpose (F-891): the README teaches
+# `stealthy` and the RUNBOOK still shows `stealth-chrome-devtools`, so the lane
+# executes each name on every qualified cell. That is the only place the alias
+# is proven to RUN rather than merely to be declared — `[project.scripts]` can
+# name an entry point that the installer never wrote.
 REVIEWED_COMMANDS = frozenset(
     {
-        "stealth-chrome-devtools status",
+        "stealthy status",
+        "stealthy profiles",
+        "stealthy cleanup",
+        "stealthy cleanup --browser-session-cap-gb 12",
         "stealth-chrome-devtools profiles",
         "stealth-chrome-devtools cleanup",
-        "stealth-chrome-devtools cleanup --browser-session-cap-gb 12",
     }
 )
 
@@ -548,10 +579,16 @@ class TestInstallClaims:
             assert name == project["name"]
             assert version == project["version"]
 
-    def test_both_console_scripts_are_declared_and_documented(self):
+    def test_the_console_scripts_are_declared_and_documented(self):
+        """THREE names, TWO mains (F-891). `stealthy` and
+        `stealth-chrome-devtools` are one CLI under two names — the alias is the
+        whole claim, so it is asserted as an identity and not merely as a
+        presence: two entries drifting onto two different `main`s is exactly the
+        second CLI convention 4 forbids."""
         scripts = _pyproject()["project"]["scripts"]
         assert scripts == {
             "stealth-chrome-devtools-mcp": "stealth_chrome_devtools_mcp.server:main",
+            "stealthy": "stealth_chrome_devtools_mcp.cli:main",
             "stealth-chrome-devtools": "stealth_chrome_devtools_mcp.cli:main",
         }
         text = _doc_text()
@@ -559,12 +596,17 @@ class TestInstallClaims:
             assert name in text, f"console script {name} is undocumented"
 
     def test_every_console_script_the_docs_invoke_is_declared(self):
-        """No fence may invoke an entry-point name that is not installed."""
+        """No fence may invoke an entry-point name that is not installed.
+
+        Keyed on the `stealth` PREFIX rather than on the old full name: F-891's
+        `stealthy` would have slipped past a `stealth-chrome-devtools` test
+        silently, and a check that stops covering the newest name is a check
+        that stops mattering."""
         declared = set(_pyproject()["project"]["scripts"])
         for fence in all_fences():
             for command in fence.commands():
                 token = command.split()[0]
-                if not token.startswith("stealth-chrome-devtools"):
+                if not token.startswith("stealth"):
                     continue
                 assert token in declared, (
                     f"{fence.evidence_id} invokes {token!r}, which is not a "
@@ -572,20 +614,28 @@ class TestInstallClaims:
                 )
 
     def test_the_readme_cli_section_documents_the_ops_script_not_the_server(self):
-        """The two scripts are one hyphen apart; a swap here is a real support bug."""
+        """The scripts are one hyphen apart; a swap here is a real support bug.
+
+        What is forbidden is the SERVER launcher in a section about operating
+        and driving the backend from a shell — `stealth-chrome-devtools-mcp` is
+        the MCP server an AI client spawns, and a reader copy-pasting it here
+        gets a process that waits on stdio forever. Both CLI names are allowed,
+        because both resolve to the same `cli:main`."""
         section = _readme().split("## CLI", 1)[1].split("\n## ", 1)[0]
         invoked = {
             command.split()[0]
             for fence in parse_fences(section, "README.md#CLI")
             for command in fence.commands()
         }
-        assert invoked == {"stealth-chrome-devtools"}, (
-            f"the README CLI section invokes {sorted(invoked)}; the ops verbs "
-            "belong to `stealth-chrome-devtools` only"
+        assert invoked <= {"stealthy", "stealth-chrome-devtools"}, (
+            f"the README CLI section invokes {sorted(invoked)}; the verbs belong "
+            "to the ops CLI, never to the MCP server launcher"
         )
+        assert "stealthy" in invoked, "the README CLI section must teach `stealthy`"
 
-    def test_the_ops_console_script_resolves_in_this_environment(self):
-        launcher = resolve_launcher(name="stealth-chrome-devtools")
+    @pytest.mark.parametrize("name", ["stealth-chrome-devtools", "stealthy"])
+    def test_the_ops_console_script_resolves_in_this_environment(self, name):
+        launcher = resolve_launcher(name=name)
         assert launcher.is_absolute() and launcher.is_file()
 
 

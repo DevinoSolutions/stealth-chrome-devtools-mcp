@@ -72,13 +72,42 @@ class TestDocumentedCliVerbs:
         "restart",
         "kill-orphans",
         "serve",
+        # F-891 — the six verbs that drive the LIVE backend's tool surface.
+        "tools",
+        "call",
+        "ls",
+        "spawn",
+        "nav",
+        "close",
     ]
+
+    @staticmethod
+    def _handler_for(verb: str):
+        """What `cli.main` would dispatch `verb` to.
+
+        TWO tables since F-891's extraction — the ops verbs' in `cli`, the six
+        tool verbs' in `cli_call` beside the bodies they name — looked up in
+        the same order `main` uses, so this pin cannot pass for a verb `main`
+        itself could not resolve.
+        """
+        return cli._DISPATCH.get(verb) or cli._cli_call().DISPATCH.get(verb)
 
     def test_verbs_exist_and_are_documented(self):
         text = _doc_text()
         for verb in self.VERBS:
-            assert verb in cli._DISPATCH, f"{verb} not in cli dispatch"
+            assert self._handler_for(verb) is not None, f"{verb} reaches no body"
             assert verb in text, f"{verb} not documented in the root docs"
+
+    def test_every_dispatchable_verb_has_a_parser(self):
+        """The other direction: a body no parser offers is unreachable, and the
+        split into two tables is exactly how one could come to be."""
+        offered = set(cli.build_parser()._subparsers._group_actions[0].choices)
+        dispatchable = set(cli._DISPATCH) | set(cli._cli_call().DISPATCH)
+        assert dispatchable == offered
+        assert set(self.VERBS) == offered
+        # The ops table wins SILENTLY on a shared key, and set equality above
+        # passes a duplicate — so the disjointness is its own assertion.
+        assert not (set(cli._DISPATCH) & set(cli._cli_call().DISPATCH))
 
     def test_renamed_flag_present_old_absent_in_cli(self):
         parser = cli.build_parser()
@@ -98,6 +127,7 @@ class TestNavMapModules:
         "browser_pid_registry",
         "browser_reattach",
         "browser_cmdline",
+        "backend_client",
         "cdp_attach",
         "tool_registry",
         "tool_errors",

@@ -343,19 +343,70 @@ adopted that app's `PORT`, `DEBUG`, and `SENTRY_DSN` as the server's own.
 
 ## CLI
 
-Installs a `stealth-chrome-devtools` ops command for managing the server and its
-disk usage. (This is for *ops* — to drive a browser, use the MCP server or its
-HTTP backend.)
+Installs a **`stealthy`** command. It both operates the backend and drives its
+tools, so a shell can do anything an AI client can. (`stealth-chrome-devtools` is
+the same command under its older name — one CLI, two names, not two tools.)
+
+### Drive the browser from a shell
+
+Every one of these talks to the **backend your shell would be served by** — the
+same one `status` reports — and starts one if none is running (`--no-start` makes
+that an error instead: a live backend is always used as-is, whatever build it is,
+but starting one can evict a *wedged* backend of another build). Output is a
+table on a terminal and JSON in a pipe:
+
+```console
+stealthy ls                                          # browser instances
+stealthy spawn --profile seller-central --headed     # recover a stranded login
+stealthy spawn --headed                              # whatever spawn_browser() picks
+stealthy nav e364 https://example.com --wait load    # ids resolve by prefix
+stealthy call get_cookies --arg instance_id=e364c31b --arg domain=example.com
+stealthy tools --section browser-management
+```
+
+`call` reaches **any** tool the backend serves — there is no per-tool mirror
+here, so a newly added tool is callable the day it ships. `--arg key=value`
+values are JSON when they parse (`headless=false`, `viewport_width=1200`,
+`browser_args=["--x"]`) and plain strings when they do not; `--json '<object>'`
+passes the whole arguments object at once.
+
+`spawn --profile <name-or-path>` is the **stranded-login recovery**: if a browser
+is already holding that profile it is re-attached to over CDP — same window, same
+open page — and the answer says `REATTACHED`. See RUNBOOK, *Recover a stranded
+login*. The name or path goes through as `user_data_dir` untouched; a `spawn`
+with no `--profile` is whatever `spawn_browser()` itself selects. Either way the
+answer prints the `profile_selection` the backend actually made — role and
+directory — so you can see what you got rather than infer it.
+
+#### Exit codes are a closed set
+
+Every failure there is becomes one of these, and errors are one line on stderr —
+a script never gets a raw traceback paired with Python's own exit 1:
+
+| Code | Means |
+|---|---|
+| `0` | it worked |
+| `1` | the tool answered and said **no** — the round trip succeeded |
+| `2` | usage: a bad flag, a bad `--arg`, an ambiguous id, no verb at all (argparse's own code, so its refusals and ours are indistinguishable to a script) |
+| `3` | no backend: nothing running and `--no-start`, or the transport failed, so nothing on the backend ever saw the request |
+| `70` | a bug in the CLI itself (`EX_SOFTWARE`) — never 1, which would blame the tool |
+| `130` | `Ctrl-C` |
+| `141` | the **reader** went away: `128 + SIGPIPE`, so `stealthy ls \| head -1` under `set -o pipefail` looks exactly like `ls \| head -1`. No message — your `head` did what you asked |
+
+`--traceback` adds the full stack **after** that one line; it never replaces it
+and never changes the code.
+
+### Operate the backend
 
 These four only read and preview — they change nothing, and the test suite runs
 them on every commit, so they are known to work:
 
 <!-- doc-example: runnable -->
 ```console
-stealth-chrome-devtools status
-stealth-chrome-devtools profiles
-stealth-chrome-devtools cleanup
-stealth-chrome-devtools cleanup --browser-session-cap-gb 12
+stealthy status
+stealthy profiles
+stealthy cleanup
+stealthy cleanup --browser-session-cap-gb 12
 ```
 
 `status` reports whether the backend is up plus the browser-session root and both
@@ -367,9 +418,9 @@ These are not auto-executed — `--apply` deletes, `serve` does not return, and
 `doctor` needs Chrome installed:
 
 ```console
-stealth-chrome-devtools cleanup --apply               # actually reclaim
-stealth-chrome-devtools doctor                        # check Chrome / environment
-stealth-chrome-devtools serve --http --port 19222     # start the server
+stealthy cleanup --apply               # actually reclaim
+stealthy doctor                        # check Chrome / environment
+stealthy serve --http --port 19222     # start the server
 ```
 
 `cleanup` deletes idle auto-clones over the clone cap and trims idle named
@@ -380,9 +431,14 @@ uses the same selectors as the automatic sweep, so the preview matches `--apply`
 ## Preparing the Master Profile
 
 1. Start the MCP server
-2. Call `spawn_browser()` without `user_data_dir`
+2. Call `spawn_browser()` without `user_data_dir` — or, from a shell,
+   `stealthy spawn --headed`
 3. Sign in to your accounts in the browser that opens
 4. Close it — future sessions use this profile or clone from it
+
+That reaches master **only while master is free**; once a browser holds it, the
+same call clones from the snapshot instead. The `profile_selection` in the answer
+(`profile_role` + the directory) says which of the two you got.
 
 ## Requirements
 

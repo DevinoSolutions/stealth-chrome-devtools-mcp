@@ -46,8 +46,13 @@ def _auto(sessions, name, *, mb):
 
 
 class TestParser:
-    def test_no_command_prints_help_and_returns_1(self, capsys):
-        assert cli.main([]) == 1
+    def test_no_command_prints_help_and_returns_the_usage_code(self, capsys):
+        """It returned 1 until F-891 review M1. Nothing declared what 1 MEANT
+        before that feature; now it means "the tool answered and said no", which
+        is not what naming no verb is. 2 is what argparse's own refusals use."""
+        from stealth_chrome_devtools_mcp import cli_call
+
+        assert cli.main([]) == cli_call.EXIT_USAGE == 2
         assert "usage" in capsys.readouterr().out.lower()
 
     def test_serve_args_parse(self):
