@@ -284,6 +284,75 @@ in the **same commit** as whatever changed those:
 
 ---
 
+## CHANGELOG placement (F-923)
+
+An entry under a heading for a release that does not contain it is a false
+statement about a shipped artefact. It has happened: between 2.1.7 and 2.1.8,
+four entries reached `main` under `## 2.1.7` and stayed there across five
+merged PRs. The `v2.1.7` tag ships two sections; at the worst point that
+heading held six, and none of the four extra ones was in the release.
+
+**It happens on a CLEAN merge, which is why it is easy to miss.** A release
+commit renames `## Unreleased` to `## <version>` and adds no replacement — so a
+branch that appended its section inside that block merges afterwards with the
+surrounding context unchanged, and git places the section by context, under the
+RELEASE heading. Nothing conflicts, so no resolver runs.
+
+`tests/test_doc_claims.py::TestChangelogIntegrity` now fails on three shapes of
+this — a queue below a shipped heading, a second queue, and release headings
+that are duplicated, out of order or malformed — plus a `pyproject.toml` bump
+that moved without its heading. **It cannot catch the shape above**, because a
+file whose entries were absorbed into the shipped section and whose queue is
+gone is byte-indistinguishable from a legitimate release commit. That one needs
+a base ref, so it is this procedure:
+
+### After every merge of `main` into a branch
+
+    git diff origin/main --numstat -- CHANGELOG.md
+
+Insertions, and **0 deletions**. A nonzero right-hand column means git moved
+something — an entry relocated into a shipped section shows up as deletions
+elsewhere in the file. Run it on *every* merge, not only conflicting ones; the
+conflicting merges are the safe case, because a human reads those.
+
+**The word _after_ is load-bearing.** `git diff origin/main` is not symmetric:
+deletions are lines `origin/main` has that your branch lacks. Run it *before*
+merging and a perfectly healthy branch reports every entry `main` has gained
+since the merge-base as a deletion. This is not hypothetical — as of 2026-09-21
+`fix/F916-…`, `fix/F919-…` and `fix/F921-…` each report `132` deletions, which
+are F-903/F-904/F-905's blocks, and all three branches are fine: they simply
+have not merged `main`. That reading was taken for a data-loss incident once
+already. The discriminator:
+
+    git log --oneline origin/main..HEAD
+
+No merge of `main` on the branch means the deletions are `main`'s lead, not
+your loss. Do not "restore" them — merge `main` and re-run the `--numstat`.
+
+### Merging `main` after a release has landed
+
+`main` will lead with `## <version>` and carry **no `## Unreleased` at all**.
+Do not put your entry under the release heading:
+
+1. create a new `## Unreleased` heading **above** the release heading;
+2. put your block under that;
+3. check: exactly one `## Unreleased`, it is the first `## ` heading, the
+   release heading is immediately below with its contents untouched, and the
+   `--numstat` above shows 0 deletions.
+
+Cheapest option of all: **do not merge `main` while a release lane is in
+flight.** Merging before it lands just means doing it twice.
+
+### Before a release bump
+
+Diff the `### ` headings under the previous release heading against the tag:
+
+    git show v<prev>:CHANGELOG.md
+
+Anything extra belongs back under `## Unreleased`.
+
+---
+
 ## Golden discipline (two-tier)
 
 Schema/shape tests compare against goldens in `tests/goldens/`. Two tiers:
