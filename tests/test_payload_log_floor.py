@@ -78,6 +78,11 @@ FRAME_MARK = "F906_FRAME_PAYLOAD"
 #: F-908. ``sse_starlette/sse.py``:362 — ``logger.debug("chunk: %s", chunk)``,
 #: where ``chunk`` is the whole serialised SSE frame, i.e. the tool's answer.
 CHUNK_MARK = "F908_TOOL_RESULT_PAYLOAD"
+#: F-908 review M1. ``mcp/client/streamable_http.py``:218 —
+#: ``logger.debug(f"SSE message: {message}")``, the PARSED ``JSONRPCMessage``.
+#: The SAME tool answer, one process over: this is the STDIO PROXY re-parsing
+#: the bytes ``sse_starlette`` just logged at the backend.
+CLIENT_MARK = "F908_PROXY_TOOL_RESULT_PAYLOAD"
 
 PAYLOAD_MARKS = {
     "connection.py:445 raw reply (DEBUG)": REPLY_MARK,
@@ -85,6 +90,7 @@ PAYLOAD_MARKS = {
     "browser.py:824 cookie name+value (DEBUG)": COOKIE_MARK,
     "websockets protocol.py:609 frame (DEBUG)": FRAME_MARK,
     "sse_starlette sse.py:362 tool result (DEBUG)": CHUNK_MARK,
+    "mcp client streamable_http.py:218 tool result (DEBUG)": CLIENT_MARK,
 }
 
 #: ``connection.py``:483 — a real diagnostic. It names the callback and the
@@ -114,6 +120,7 @@ def emit_payload_lines() -> None:
         "< %s", f'TEXT \'{{"v":"{FRAME_MARK}"}}\' [42 bytes]'
     )
     emit_real_sse_tool_result()
+    emit_real_proxy_side_tool_result()
 
 
 #: The answer shape ``mcp/server/streamable_http.py`` hands to
@@ -158,6 +165,50 @@ def emit_real_sse_tool_result() -> None:
         )
 
     asyncio.run(drain())
+
+
+def proxy_answer(marker: str) -> dict:
+    """The same answer shape, addressed to the PROXY side of the round trip."""
+    return {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {
+            "content": [],
+            "structuredContent": {"cookies": [{"name": "SID", "value": marker}]},
+        },
+    }
+
+
+def emit_real_proxy_side_tool_result() -> None:
+    """Drive the REAL ``StreamableHTTPTransport._handle_sse_event`` (F-908 M1).
+
+    The backend logs the SSE frame it SENDS (``sse_starlette``); the stdio
+    proxy re-parses the identical bytes and logs the MESSAGE it received. Both
+    processes call ``configure_logging``, so both are inside this mechanism's
+    reach — and capping only the backend's half leaves the same cookie jar
+    reachable one process over, which is F-906's own ``websockets`` argument
+    applied to the payload F-908 names.
+
+    Driven for real rather than copied, for ``emit_real_sse_tool_result``'s
+    reason: the entry point takes a ``ServerSentEvent`` and a memory stream and
+    needs no socket, so the pin can afford the library's own code path.
+    """
+    import anyio
+    from httpx_sse import ServerSentEvent
+    from mcp.client.streamable_http import StreamableHTTPTransport
+
+    async def drive() -> None:
+        event = ServerSentEvent(
+            event="message", data=json.dumps(proxy_answer(CLIENT_MARK))
+        )
+        transport = StreamableHTTPTransport("http://127.0.0.1:1/mcp/")
+        writer, reader = anyio.create_memory_object_stream(10)
+        await transport._handle_sse_event(event, writer)
+        # The message really was parsed and forwarded — so an absent marker is
+        # the FLOOR working, never the drive silently doing nothing.
+        assert reader.receive_nowait() is not None
+
+    asyncio.run(drive())
 
 
 def emit_diagnostic_warning() -> None:
@@ -567,23 +618,52 @@ class TestPremises:
         )
 
     def test_the_families_named_are_the_families_that_exist(self):
-        """Every family is named by its ROOT, and every root is one a logger
-        really sits under: all three libraries build loggers from ``__name__``,
-        so there is no ``uc`` to cap, and naming one would be a claim the
-        evidence does not support."""
+        """Every entry is a logger name a REAL payload-rendering logger sits at
+        or under, and every one of those loggers is ``__name__``-derived — so
+        there is no ``uc`` to cap, and naming one would be a claim the evidence
+        does not support.
+
+        The rule is "at or under" and not "the top-level root", because
+        ``mcp.client`` is deliberately a SUB-family (F-908 review M1): the
+        ``mcp`` SERVER tree renders nothing for a request and keeps its own
+        diagnostics, so the floor stops at the client transports.
+        """
+        import mcp.client.sse
+        import mcp.client.streamable_http
         import sse_starlette.sse
         from nodriver.core import browser, connection
 
-        for module in (connection, browser, sse_starlette.sse):
+        renderers = (
+            connection,
+            browser,
+            sse_starlette.sse,
+            mcp.client.streamable_http,
+            mcp.client.sse,
+        )
+        for module in renderers:
             assert module.logger.name == module.__name__
-            assert (
-                module.logger.name.split(".")[0] in logging_setup.PAYLOAD_LOG_FAMILIES
-            )
+            assert any(
+                module.logger.name == family
+                or module.logger.name.startswith(family + ".")
+                for family in logging_setup.PAYLOAD_LOG_FAMILIES
+            ), f"{module.logger.name} renders a payload and no entry covers it"
         assert set(logging_setup.PAYLOAD_LOG_FAMILIES) == {
             "nodriver",
             "websockets",
             "sse_starlette",
+            "mcp.client",
         }
+
+    def test_the_mcp_server_tree_is_deliberately_not_covered(self):
+        """The floor stops at ``mcp.client``; the SERVER tree keeps its own INFO
+        diagnostics, which is the whole reason this entry is a sub-family and
+        not ``mcp`` (F-908 review M1)."""
+        for name in ("mcp", "mcp.server", "mcp.server.lowlevel.server"):
+            assert name not in logging_setup.PAYLOAD_LOG_FAMILIES
+            assert not any(
+                name == family or name.startswith(family + ".")
+                for family in logging_setup.PAYLOAD_LOG_FAMILIES
+            ), f"{name} is now covered by the floor; the mcp server tree must not be"
 
 
 def _calls_below_warning(package) -> list[str]:
@@ -706,6 +786,79 @@ class TestTheSseChunkIsTheToolResult:
         )
 
 
+class TestTheProxySideOfTheSameRoundTrip:
+    """F-908 review M1. The backend logs the SSE frame it SENDS; the stdio
+    proxy re-parses the identical bytes and logs the MESSAGE — same cookie
+    jar, one process over, and that process calls ``configure_logging("proxy")``
+    (``singleton.py``:976) so it is inside this mechanism's reach.
+
+    The first round of this finding ruled the whole ``mcp`` family out on a
+    measurement of ``mcp/server/lowlevel/server.py``:676 — a different module,
+    on the other side of the wire. That is the census failure these pins exist
+    to make permanent.
+    """
+
+    def test_the_proxy_transport_is_what_the_stdio_proxy_runs(self):
+        """The leak is only F-908's business because OUR proxy drives that
+        transport and floors its own loggers. Both halves read from source."""
+        singleton = Path(logging_setup.__file__).with_name("singleton.py")
+        source = singleton.read_text(encoding="utf-8")
+        assert "streamable_http_client(" in source, (
+            "the stdio proxy no longer drives the SDK's streamable-http client; "
+            "re-measure whether mcp.client still renders our payloads"
+        )
+        assert 'configure_logging("proxy")' in source, (
+            "the proxy no longer applies the floor; M1's whole premise was that "
+            "this process is already inside the mechanism's reach"
+        )
+
+    def test_both_directions_of_the_proxy_leg_are_on_one_capped_logger(self):
+        """``:218`` is the tool RESULT and ``:547`` the tool ARGUMENTS, and
+        both are ``logger.debug`` on ``mcp.client.streamable_http`` — so one
+        entry closes both. Read from the installed source, because a bump that
+        moved either onto another logger or above the floor must be seen."""
+        import mcp.client.streamable_http as client
+
+        lines = Path(client.__file__).read_text(encoding="utf-8").splitlines()
+        result_line = [
+            n for n, ln in enumerate(lines) if "SSE message: {message}" in ln
+        ]
+        args_line = [
+            n for n, ln in enumerate(lines) if "Sending client message: {message}" in ln
+        ]
+        assert result_line and args_line, (
+            "the mcp client transport's payload lines moved; re-measure M1"
+        )
+        for index in result_line + args_line:
+            assert "logger.debug(" in lines[index], (
+                f"{lines[index].strip()} is no longer below the floor"
+            )
+        assert client.logger.name == "mcp.client.streamable_http"
+
+    def test_the_initialize_result_warning_sits_above_the_floor(self):
+        """RECORDED, not fixed. ``:198`` is
+        ``logger.warning(f"Raw result: {message.root.result}")`` — a whole
+        result rendered ABOVE any floor this mechanism can set.
+
+        It is left because of WHAT it renders and WHEN: it is reached only from
+        ``_maybe_extract_protocol_version_from_message``, i.e. only for the
+        ``initialize`` response, and only when that response fails to parse as
+        an ``InitializeResult``. That result is the server's own capabilities,
+        never a tool answer. Pinned so a bump that widens its reach is seen
+        rather than inherited.
+        """
+        import mcp.client.streamable_http as client
+
+        source = Path(client.__file__).read_text(encoding="utf-8")
+        assert 'logger.warning(f"Raw result: {message.root.result}")' in source
+        holder = source.split("def _maybe_extract_protocol_version_from_message")[1]
+        holder = holder.split("\n    async def ")[0]
+        assert 'logger.warning(f"Raw result:' in holder, (
+            "the raw-result WARNING moved out of the initialize-only helper; it "
+            "may now render tool answers and needs its own finding"
+        )
+
+
 class TestTheFamiliesDeliberatelyLeftOut:
     """A census is only a finding if its NEGATIVE half is pinned too.
 
@@ -789,9 +942,28 @@ class TestTheFamiliesDeliberatelyLeftOut:
         import fastmcp.server.server as fastmcp_server
         from fastmcp.utilities.logging import configure_logging as fastmcp_configure
 
-        source = Path(fastmcp.__file__).read_text(encoding="utf-8")
-        assert "configure_logging" in source, (
-            "fastmcp no longer configures its own family at import; the "
+        # Keyed on the module-body CALL, never on the substring: `__init__`
+        # imports the function under an ALIAS, so `"configure_logging" in
+        # source` is satisfied by the import line alone and stays green for
+        # exactly the bump this pin warns about (F-908 review S1, measured —
+        # deleting the call left a substring assertion passing).
+        tree = ast.parse(Path(fastmcp.__file__).read_text(encoding="utf-8"))
+        aliases = {
+            alias.asname or alias.name
+            for node in tree.body
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+            if alias.name == "configure_logging"
+        }
+        called = {
+            node.value.func.id
+            for node in tree.body
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+        }
+        assert aliases & called, (
+            "fastmcp no longer CALLS configure_logging in its module body; the "
             "fastmcp family may now need the floor"
         )
         fastmcp_configure()
@@ -808,20 +980,69 @@ class TestTheFamiliesDeliberatelyLeftOut:
             "the fastmcp family now needs the floor"
         )
 
-    def test_the_mcp_incoming_message_line_renders_no_payload(self):
+    def test_the_mcp_server_incoming_line_renders_no_payload_for_a_request(self):
         """``mcp/server/lowlevel/server.py``:676 logs the whole incoming
         message and IS admitted at DEBUG — so it looks like the argument-side
-        twin of F-908 and is not.
+        twin of F-908 and, **for a request**, is not.
 
-        A REQUEST arrives there as a ``RequestResponder``, which defines
-        neither ``__repr__`` nor ``__str__``, so ``%s`` renders
-        ``<... object at 0x...>`` and no argument escapes. Measured, because
-        the level alone would have put this family IN.
+        ``incoming_messages`` is typed ``RequestResponder |
+        ReceiveNotificationT | Exception``, and only the first arm is silent: a
+        ``RequestResponder`` defines neither ``__repr__`` nor ``__str__``, so
+        ``%s`` renders ``<... object at 0x...>``. The qualifier is the point —
+        the unqualified claim would stay true of a shape that does render
+        (F-908 review S2).
         """
         from mcp.shared.session import RequestResponder
 
         assert RequestResponder.__repr__ is object.__repr__
         assert RequestResponder.__str__ is object.__str__
+
+    def test_the_mcp_server_notification_arm_renders_in_full_and_is_still_out(self):
+        """The OTHER arm of that same line renders its pydantic model WHOLE.
+
+        So the OUT verdict rests on WHAT a server-bound notification can carry,
+        not on the line being silent — and that is pinned rather than asserted:
+        every notification a CLIENT may send is enumerated from the SDK's own
+        union, and none of them carries a tool result or tool arguments. The
+        two that carry free text at all — ``notifications/progress``'s
+        ``message`` and ``notifications/tasks/status``'s ``statusMessage`` —
+        carry the CALLER's own status string, never page content.
+
+        If the SDK ever adds a client notification that carries page data, this
+        goes RED and the family question re-opens.
+        """
+        import typing
+
+        from mcp import types
+
+        progress = types.ProgressNotification(
+            method="notifications/progress",
+            params=types.ProgressNotificationParams(
+                progressToken="TOK", progress=1.0, message="RENDERED"
+            ),
+        )
+        assert "RENDERED" in f"{types.ClientNotification(progress)}", (
+            "the notification arm no longer renders its model; re-measure S2"
+        )
+
+        # ``ClientNotification`` is a ``RootModel``: ``root`` is inherited, so it
+        # is in ``model_fields`` and NOT in the class's own ``__annotations__``.
+        methods = {
+            arm.model_fields["method"].default
+            for arm in typing.get_args(
+                types.ClientNotification.model_fields["root"].annotation
+            )
+        }
+        assert methods == {
+            "notifications/cancelled",
+            "notifications/progress",
+            "notifications/initialized",
+            "notifications/roots/list_changed",
+            "notifications/tasks/status",
+        }, (
+            f"the client notification set changed to {methods}; re-decide "
+            "whether mcp.server is still out of PAYLOAD_LOG_FAMILIES"
+        )
 
     def test_the_one_argument_line_a_family_cap_could_never_reach(self):
         """RECORDED, not fixed: ``mcp/shared/session.py``:383-384 use

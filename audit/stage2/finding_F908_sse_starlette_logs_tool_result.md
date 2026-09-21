@@ -114,7 +114,9 @@ RED name exactly this gap and nothing else.
 
 ## 3. The fix, and why this home
 
-One string added to `logging_setup.PAYLOAD_LOG_FAMILIES`.
+Two strings added to `logging_setup.PAYLOAD_LOG_FAMILIES` — `sse_starlette`
+and, after the review's M1, `mcp.client`. They are the two ends of one tool
+answer and the argument below is the same for both.
 
 Deliberately **not** a second floor function, a `logging.Filter`, or a
 `before_breadcrumb` rule. F-906 established the mechanism and its argument
@@ -131,10 +133,24 @@ for F-906's reason: the package builds its logger from `__name__`, and there
 is exactly one `getLogger` call in the whole package (`sse.py`:59), so the root
 covers it and anything added under it later.
 
+`mcp.client` is the one entry here that is **not** a distribution root, and the
+narrowness is deliberate in both directions. It is narrower than `mcp` because
+the `mcp` SERVER tree renders nothing for a request and capping it would
+silence the server SDK's own diagnostics for no gain (§4). It is wider than
+`mcp.client.streamable_http` — the single logger the review named — because the
+re-census the review asked for found a **second** renderer of the same shape in
+the same subtree (`client/sse.py`:114/:137), and `mcp.client` is the narrowest
+name that covers the measured set. **This is a deliberate deviation from the
+literal instruction** and is flagged as such; a one-logger entry would have
+left a measured payload line uncapped, which is the defect this round exists to
+close.
+
 **What the floor costs here is less than it cost for nodriver.** F-906 had to
 argue that WARNING preserves nodriver's real diagnostics (`connection.py`:483).
 `sse_starlette` has **no call at WARNING or above anywhere in the package**
-(AST census), so there is not one diagnostic for the floor to stand in front of.
+(AST census), so there is not one diagnostic for the floor to stand in front
+of. Under `mcp/client` there are WARNING-and-above calls and every one of them
+still passes — measured, and pinned.
 
 ## 4. The census — and why each other family is OUT
 
@@ -152,7 +168,8 @@ which is precisely how a family gets left out.
 | `uvicorn` | 55 | No. The only whole-ASGI-message logger is `MessageLoggerMiddleware`, which replaces `body`/`bytes`/`text`/`headers` with `<N bytes>` **before** logging (`message_with_placeholders`), so it cannot render a payload even when enabled; it logs at TRACE (5), which `basicConfig(DEBUG)` does not admit; and the access log is already off (`backend_uvicorn_config`, F-830) | OUT |
 | `httpx` | 2 | No — method + full URL at INFO. The only httpx conversation in this tree is proxy/CLI → our own backend on loopback | OUT |
 | `httpcore` | 2 | No. `_trace.py`:47/87 render the trace's `info`; `receive_response_headers.complete` carries response **headers**, but the two BODY traces (`receive_response_body`, `response_closed`) set no `return_value`, so their message is the trace **name** alone — measured. A tool result cannot escape here | OUT |
-| `mcp` | 109 | **Measured, and the answer is no** — see below | OUT |
+| `mcp.client` | 33 in the package, 30 on `mcp.client.*` loggers | **YES** — `client/streamable_http.py`:218 (the whole tool RESULT, in the stdio proxy) and :547 (the argument side), plus `client/sse.py`:114/:137 | **IN** |
+| `mcp` (the SERVER tree) | 76 | **Measured on both arms of the one candidate line, and the answer is no** — see below | OUT |
 | `fastmcp` | 110 | **Measured, and the library already shields it** — see below | OUT |
 | `urllib3` | — | Not on the backend's request path (it is `requests`, under `cdp_element_cloner` / `desktop_launch`); renders method + path + status, never a body | OUT |
 
@@ -160,12 +177,43 @@ Each OUT row is pinned in `TestTheFamiliesDeliberatelyLeftOut`, so a dependency
 bump that makes one of them start rendering payloads fails there. That is the
 only thing that keeps "we checked" from decaying into "we assumed".
 
-### Why `mcp` is out
+### Why `mcp.client` is IN and the `mcp` SERVER tree is out
 
+**This section replaces a claim the first round got wrong.** That round
+inspected `mcp/server/lowlevel` only, found its one whole-message line
+harmless, and ruled the **whole** `mcp` family out on that basis — a
+positively-stated exclusion shipped into product source and CLAUDE.md that the
+evidence did not support. The review (M1) reproduced the miss: with the
+`sse_starlette` cap applied, the identical serialised tool result still reached
+a root handler, through the **stdio proxy**.
+
+**Reproduced before fixing.** Driving the real
+`StreamableHTTPTransport._handle_sse_event` under the proxy's own shipped
+configuration (`configure_logging("proxy")`, `singleton.py`:976) plus a caller
+`basicConfig(DEBUG)`:
+
+```
+sse_starlette                    effective=WARNING
+mcp.client.streamable_http       effective=DEBUG
+MARKER REACHED A ROOT HANDLER: True
+  >> mcp.client.streamable_http DEBUG SSE message: root=JSONRPCResponse(jsonrpc='2.0',
+     id=3, result={'content': [], 'structuredContent': {'cookies': [{'name': 'SID',
+     'value': 'F908_PROXY_SIDE_TOOL_RESULT'}]}})
+```
+
+The backend logs the SSE chunk it **sends**; the proxy re-parses the same bytes
+and logs the **message**. One round trip, two processes, both of which call
+`configure_logging` — so capping one end is half a fix.
+
+After the fix, the same probe reports `mcp.client.streamable_http
+effective=WARNING`, `MARKER REACHED A ROOT HANDLER: False`, and `mcp` still
+`effective=DEBUG` — the server tree is untouched, which is the point of the
+narrow entry.
+
+**The SERVER tree is still out, and now for a reason that survives both arms.**
 `mcp/server/lowlevel/server.py`:676 is `logger.debug("Received message: %s",
-message)` over `session.incoming_messages` — the whole incoming message, and it
-**is** admitted at DEBUG under a caller's `basicConfig`. On level alone it
-would be IN. It is out because of what `%s` actually renders:
+message)` over `session.incoming_messages`, admitted at DEBUG. What `%s`
+renders depends on which arm of that union arrived:
 
 ```
 RequestResponder.__repr__ owner: object.__repr__
@@ -174,14 +222,27 @@ rendered: <mcp.shared.session.RequestResponder object at 0x...>
 SECRET present: False
 ```
 
-A **request** — the `tools/call` with its arguments — arrives there as a
+A **request** — the `tools/call` with its arguments — arrives as a
 `RequestResponder`, which defines neither dunder, so nothing escapes. A
-**notification** on the same line does render its whole pydantic model, but the
-server's incoming notifications are `initialized` / `cancelled` / `progress`,
-none of which carries tool data in this product.
+**notification** arrives as a pydantic model and **does** render in full, so
+the verdict cannot rest on the line being silent. It rests on what a
+client-sent notification can carry, enumerated from the SDK's own union rather
+than asserted (measured, mcp 1.27.1 — **five** arms, not the four the first
+round would have guessed):
 
-Capping the family would therefore close no door and would silence the SDK's
-own INFO diagnostics (`Processing request of type %s`, session lifecycle).
+| Client notification | Carries a tool result or tool arguments? |
+|---|---|
+| `notifications/cancelled` | No — a request id and a `reason` |
+| `notifications/progress` | No — a progress number and a free-text `message`, the CALLER's own status string |
+| `notifications/initialized` | No — no params |
+| `notifications/roots/list_changed` | No — no params |
+| `notifications/tasks/status` | No — task id, status, a free-text `statusMessage` |
+
+Capping the server family would therefore silence the SDK's own INFO
+diagnostics (`Processing request of type %s`, session lifecycle) and close no
+door `mcp.client` does not already close. The enumeration is **pinned**, so an
+SDK that adds a client notification carrying page data goes RED and re-opens
+the question.
 
 ### Why `fastmcp` is out
 
@@ -213,9 +274,9 @@ re-opens the family question.
 `apply_payload_log_floor`; a third family would otherwise have opened a second
 home for one mechanism's evidence.
 
-**35 nodes** after merging F-906's review round (`96d7876`, which brought that
+**40 nodes** after merging F-906's review round (`96d7876`, which brought that
 file from 22 to 25 and is where the `reset_logging` docstring and the
-seventh matrix cell come from).
+seventh matrix cell come from) and after the review round below.
 
 Extended, never duplicated:
 
@@ -237,19 +298,67 @@ Extended, never duplicated:
   name — and this finding's duplicate was dropped rather than merged, because
   it asserted nothing the surviving pin does not. The pin is SHARED across both
   findings: one mechanism, one place its foundation is measured;
-* `test_the_families_named_are_the_families_that_exist` now walks all three
-  families and asserts each is `__name__`-derived.
+* `test_the_families_named_are_the_families_that_exist` became an **"at or
+  under" rule** rather than a list: it walks the five measured renderer modules
+  and asserts the set of families they fall under is exactly
+  `PAYLOAD_LOG_FAMILIES`. A logger that is not a distribution root
+  (`mcp.client`) had to be expressible without weakening the pin.
 
 New: `TestTheSseChunkIsTheToolResult` (the live-path premise, the below-the-floor
 premise, and the end-to-end render) and `TestTheFamiliesDeliberatelyLeftOut`
 (the census's negative half, one pin per OUT family).
 
+### What the review round added
+
+* **M1 — the proxy side.** `emit_real_proxy_side_tool_result` drives the real
+  `StreamableHTTPTransport._handle_sse_event`, the reviewer's own probe shape,
+  and its marker joins `PAYLOAD_MARKS`, so all seven configuration cells cover
+  it with no new parametrisation. It was **RED in the three caller-DEBUG cells
+  before the fix and green after** — the leak, not a restatement of it.
+  `TestTheProxySideOfTheSameRoundTrip` adds that this transport is what the
+  stdio proxy actually runs, that :218 and :547 are one capped logger (so the
+  argument side is covered by the same entry), and that the `:198` WARNING
+  above the floor still passes.
+* **S1 — the fastmcp premise pin now asserts the EFFECT, not a substring.** The
+  reviewer mutated out the `configure_logging()` call at `fastmcp/__init__.py`
+  :9-12 and the pin still passed, because `assert "configure_logging" in
+  source` is satisfied by the **import line**. It now reads the `FastMCP`
+  logger's own level and `propagate` after importing the library, and asserts
+  the AST actually contains a module-body CALL of an imported alias — so
+  deleting the call flips it.
+* **S2 — the server line's notification arm** is pinned as its own node
+  (`test_the_mcp_server_notification_arm_renders_in_full_and_is_still_out`),
+  and the request-arm pin is renamed to carry its qualifier
+  (`..._renders_no_payload_for_a_request`). Writing that pin is what found the
+  **fifth** notification arm, `notifications/tasks/status`.
+* **N — the OUT reasoning in `logging_setup.py` and CLAUDE.md** is corrected to
+  what the census proves, the `mcp` SERVER tree is named as the thing excluded
+  rather than the family, and `mcp/shared/session.py`:430-432 joins :383-384 in
+  the root-logger residual.
+
 ## 6. Residuals
 
-1. **`mcp/shared/session.py`:383-384 — RECORDED, not fixed, and not fixable by
-   this mechanism.** Both use **module-level `logging.warning` / `logging.debug`**,
-   i.e. the **ROOT** logger — so no family cap can reach them however
-   `PAYLOAD_LOG_FAMILIES` grows.
+1. **`mcp/shared/session.py`:383-384 AND :430-432 — RECORDED, not fixed, and
+   not fixable by this mechanism (the F-911 candidate).** All of them use
+   **module-level `logging.warning` / `logging.debug`**, i.e. the **ROOT**
+   logger — so no family cap can reach them however `PAYLOAD_LOG_FAMILIES`
+   grows.
+
+   **:430-432 is the worse of the two and was missed by the first round**
+   (review N3). It is the notification-validation twin of :383-384, and it does
+   in **one** line what those two split between them:
+
+   ```python
+   logging.warning(
+       f"Failed to validate notification: {e}. Message was: {message.message.root}"
+   )
+   ```
+
+   That renders the **whole message** at **WARNING** — so unlike :384 it needs
+   no `basicConfig` at all, and unlike :383 it is not a truncated echo but the
+   entire object. It is on the notification path, so what it can carry is
+   bounded by the same five-arm enumeration in §4; the exposure is that a
+   malformed notification prints whatever it did contain.
 
    :384 (`f"Message that failed validation: {message.message.root}"`) renders
    the full request **including arguments**; it is at DEBUG, so it needs a
@@ -266,11 +375,24 @@ premise, and the end-to-end render) and `TestTheFamiliesDeliberatelyLeftOut`
      input_value={'arguments': {'script': ...IN_A_VALIDATION_ERROR'}}, input_type=dict]
    ```
 
-   So it is a **partial** echo of a caller's arguments on the validation-failure
-   path only. Both lines are pinned as premises, so if either ever moves onto
-   `mcp.shared.session` the family question re-opens. Closing :383 would need a
-   root-logger filter or a `before_breadcrumb` rule — a different mechanism
-   with a different argument, and deliberately out of scope here.
+   So :383 is a **partial** echo of a caller's arguments on the
+   validation-failure path only. All three lines are pinned as premises, so if
+   any of them ever moves onto `mcp.shared.session` the family question
+   re-opens. Closing them needs a root-logger filter or a `before_breadcrumb`
+   rule — a different mechanism with a different argument, and deliberately out
+   of scope here.
+
+1a. **`mcp/client/streamable_http.py`:198 sits ABOVE the floor** — RECORDED,
+   not fixed, found by the review's re-census.
+   `logger.warning(f"Raw result: {message.root.result}")` renders a whole
+   result, at WARNING, so the `mcp.client` cap does not touch it. It is not a
+   tool answer: it is reached only from
+   `_maybe_extract_protocol_version_from_message`, i.e. only for the
+   `initialize` response and only when that fails to parse as
+   `InitializeResult` (the branch is `# pragma: no cover`), so what it renders
+   is server capabilities. Raising the floor over it would be the trade all
+   three of these findings refuse. Pinned, so a widening of what reaches that
+   line is seen.
 
 2. **`fastmcp/server/server.py`:672 is NOT reachable** — recorded per the
    brief, confirmed, and the logger name corrected to `FastMCP.fastmcp.server.server`.
@@ -278,7 +400,7 @@ premise, and the end-to-end render) and `TestTheFamiliesDeliberatelyLeftOut`
    a fastmcp bump that stops doing so re-opens it, which is why the premise is
    a pin and not a sentence.
 
-3. **The same residual F-906 named, now over three families.** A caller who
+3. **The same residual F-906 named, now over four families.** A caller who
    writes `logging.getLogger("sse_starlette").setLevel(DEBUG)` still gets
    DEBUG. That is them asking for this library's frames **by name**, which is a
    different act from turning DEBUG on globally, and the floor deliberately
@@ -312,3 +434,15 @@ premise, and the end-to-end render) and `TestTheFamiliesDeliberatelyLeftOut`
    `record.args`), a root-logger rule for `session.py`. Raising
    `PAYLOAD_LOG_FLOOR` over either would silence real diagnostics, which is the
    trade all three findings refuse.
+
+7. **Two things `mcp.client` deliberately does not cover, both measured.**
+   `mcp/client/__main__.py` logs through `logging.getLogger("client")` — a
+   **top-level** logger named `client`, not under `mcp.client` — so the cap
+   cannot reach its three INFO lines; they render connection status, never a
+   payload, and it is a module this product never executes. And
+   `mcp/client/sse.py`, whose :114/:137 are half the reason the entry is
+   `mcp.client` rather than one logger, is never **driven** by this tree — only
+   **loaded**, transitively, by importing the streamable transport (measured:
+   `'mcp.client.sse' in sys.modules` is True). It is capped because the logger
+   exists and the line renders the same shape, not because a call path reaches
+   it today.
