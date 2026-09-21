@@ -44,6 +44,9 @@ LIVE_CHROME = 7777
 DEAD_CHROME = 7778
 # A browser in NO record entry at all: the one the owner started by hand.
 OWNERS_CHROME = 5555
+# A browser an F-916 SPARE protects: recorded, but not in `Classified.adoptable`,
+# so `browser_reattach.run`'s `candidate_pids` never names it (F-922 / B1).
+SPARED_SIBLING = 6666
 PORT = 51234
 
 
@@ -637,3 +640,110 @@ class TestPersistentProfileIsReapedByRecordOnly:
         }
 
         assert _reap(_cleanup(tmp_path), legacy, [OWNERS_CHROME]) == [OWNERS_CHROME]
+
+
+# ---------------------------------------------------------------------------
+# F-922 / B1 — the SECOND door: a failed adoption's own fallback reap
+# ---------------------------------------------------------------------------
+
+
+def _failed_adoption_metadata(pid, user_data_dir, *, auto_clone=False):
+    """EXACTLY the synthetic entry ``browser_reattach.run`` hands its reap.
+
+    Spelled out here rather than imported because that dict is built inline at
+    the call site; a pin that assembled it some other way would stop describing
+    the call it is about. Note it carries no ``create_time`` — the real one does
+    not either, which is why these pins patch the shared identity predicate
+    instead of pretending to a value the product never supplies.
+    """
+    return {
+        "pid": pid,
+        "user_data_dir": user_data_dir,
+        "uses_custom_data_dir": True,
+        "auto_clone": auto_clone,
+    }
+
+
+class TestFailedAdoptionReapDoesNotCrossTheSpare:
+    """F-917's harm reached through ``browser_reattach.run``'s OWN reap.
+
+    ``run`` protects the pids of its ADOPTABLE candidates (``candidate_pids``),
+    and an entry F-916 spared is by construction NOT one of them — it is in
+    ``Classified.spare``, which ``run`` never reads. So when an adoption fails
+    and falls back to ``reap_recorded``, a spared sibling's pid is in neither
+    set, and a directory scan over the profile the two share would end it: the
+    same defect as F-917, through a door F-917's filter does not reach.
+
+    **What closes it is F-922's scope rule, not a second subtraction.** ``run``
+    hands that reap a metadata dict hard-coding ``uses_custom_data_dir: True``
+    and ``auto_clone: False`` — it must, because the profile-delete guard reads
+    those two keys and a persistent profile must not be deleted — so the entry
+    is PERSISTENT by construction and no directory scan is ever built for it.
+
+    Measured on both sides: at ``50c63fc`` this reap answered ``[6666, 7777]``
+    and the spared browser died; here it answers ``[7777]``.
+    """
+
+    @staticmethod
+    def _reap(pc, metadata, on_directory, protected=frozenset()):
+        """Drive ``reap_recorded`` the way ``run`` does; answer the pids killed."""
+        before = MagicMock()
+        before.create_time.return_value = pc._init_time - 50.0
+        killed: list[int] = []
+        with (
+            patch.object(
+                pc, "_get_browser_pids_for_profile", return_value=set(on_directory)
+            ),
+            patch(
+                "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process",
+                return_value=before,
+            ),
+            patch.object(
+                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+            ),
+            # Not what these pins are about: the synthetic entry carries no
+            # create_time, and whether a recorded pid is still its own process
+            # is the shared predicate F-917 and F-922 both already lean on.
+            patch.object(pc, "_fallback_pid_identity_ok", return_value=True),
+            patch.object(pc, "_cleanup_profile_for_metadata"),
+        ):
+            browser_reattach.reap_recorded(pc, "i-candidate", metadata, protected)
+        return sorted(killed)
+
+    def test_a_spared_siblings_browser_survives_a_failed_adoption(self, tmp_path):
+        """Both directions in one assertion: the spared sibling is NOT ended and
+        the candidate's own recorded browser still IS, so the pin cannot pass by
+        the reap having done nothing at all."""
+        pc = _cleanup(tmp_path)
+        shared = str(tmp_path / "sessions" / "master")
+
+        killed = self._reap(
+            pc,
+            _failed_adoption_metadata(LIVE_CHROME, shared),
+            # `run` passes `candidate_pids - {candidate.pid}`; a SPARED entry is
+            # not in `classified.adoptable`, so its pid is in neither set.
+            [LIVE_CHROME, SPARED_SIBLING],
+            frozenset(),
+        )
+
+        assert killed == [LIVE_CHROME], (
+            "a browser F-916 spared was killed by a sibling's failed adoption"
+        )
+
+    def test_the_scope_rule_is_what_closes_it(self, tmp_path):
+        """The counter-direction, so this cannot go vacuous the way F-917's two
+        unit pins did: flip the ONE key the scope rule reads and the directory
+        scan runs again, reaching the very pid the pin above protects. That is
+        what shows these pins measure the rule rather than an empty answer."""
+        pc = _cleanup(tmp_path)
+        shared = str(tmp_path / "sessions" / "master")
+
+        killed = self._reap(
+            pc,
+            _failed_adoption_metadata(LIVE_CHROME, shared, auto_clone=True),
+            [LIVE_CHROME, SPARED_SIBLING],
+            frozenset(),
+        )
+
+        # `_reap` sorts, and SPARED_SIBLING (6666) is the lower pid.
+        assert killed == [SPARED_SIBLING, LIVE_CHROME]

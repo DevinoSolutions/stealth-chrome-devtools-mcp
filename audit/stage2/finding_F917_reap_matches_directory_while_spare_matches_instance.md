@@ -115,7 +115,7 @@ to re-run if this fix is ever questioned. The lane total is `finding_F918_*.md`
 ## 6. Verification, and what this costs
 
 Same harness after the fix: `kills issued: []`, `i-live` still recorded and
-still running, `i-stale` dropped. 20/20 in the pin file, and 3639 passed with 1
+still running, `i-stale` dropped. 22/22 in the pin file, and 3641 passed with 1
 skipped across the whole non-integration suite.
 
 **The cost:** a browser that a spared entry names is now never reaped by a
@@ -125,6 +125,12 @@ by the spare itself — and every member of it is, by construction, a browser we
 either intend to adopt or could not classify. `kill-orphans --force` sets
 `spare` to the empty set and therefore `protected_pids` to empty too, so the
 operator's override is unaffected.
+
+F-922 also closes this defect through a SECOND door that the filter above
+cannot reach — `browser_reattach.run`'s failed-adoption reap, whose
+`candidate_pids` names only ADOPTABLE entries and so never names one F-916
+spared. The measurement and why the scope rule rather than a second subtraction
+is what closes it are in `finding_F922_*.md` §4.2.
 
 **The residual this finding named is now RESOLVED — by F-922, in this same
 branch.** It read: a browser on that directory with no record entry at all — the

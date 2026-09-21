@@ -147,10 +147,10 @@ and the log line now states the decision rather than only the failure:
 > was NOT killed, because a pid we cannot identify may be a browser holding a
 > login`
 
-14/14 in the new file; 528 passed across every non-integration importer of
-`process_cleanup` / `browser_reattach` / `cdp_endpoint`; ruff format + check, ty,
-vulture, suppression owners, pinned imports, file budgets and
-`dump_tool_surface.py --check` all clean.
+22/22 in the pin file — which carries F-922's eight as well, that fix having
+landed in this same branch — and 3641 passed with 1 skipped across the whole
+non-integration suite; ruff format + check, ty, vulture, suppression owners,
+pinned imports, file budgets and `dump_tool_surface.py --check` all clean.
 
 ## 6. What this costs
 

@@ -694,6 +694,15 @@ whose record entry was lost is never reaped automatically. It stays visible in
 cannot tell a leaked browser of ours from the one the operator is logged into,
 ending both.
 
+It also closes F-917's defect through a **second door**, which F-917's own
+filter could not reach. When an adoption fails, `browser_reattach.run` falls
+back to a reap that protects its ADOPTABLE candidates' pids — and an entry
+F-916 SPARED is by construction not one of them, so a spared browser sharing
+that profile was ended. Measured: `[6666, 7777]` before, `[7777]` after. What
+closes it is the scope rule rather than a second subtraction, because `run`
+hands that reap a metadata dict that must declare the profile persistent — the
+profile-delete guard reads those same two keys.
+
 `process_cleanup.py` was at 1007/1007 — this lane's own ratchet — so the change
 paid for itself: four sites that logged a declined pid in four spellings became
 one `_skip_note`. 1007 → 1006.

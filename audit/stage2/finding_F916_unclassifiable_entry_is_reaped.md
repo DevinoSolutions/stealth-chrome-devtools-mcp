@@ -134,8 +134,8 @@ was wrong, is `finding_F918_*.md` §4.1.
 
 After the fix, same harness, same five inputs: the three could-not-establish
 rows are `spared` with `unclassifiable == {'i'}`, the two controls are still
-`REAPED`. 20/20 in the pin file — which carries F-922's six as well, that fix
-having landed in this same branch — and 3639 passed, 1 skipped across the whole
+`REAPED`. 22/22 in the pin file — which carries F-922's eight as well, that
+fix having landed in this same branch — and 3641 passed, 1 skipped across the whole
 non-integration suite.
 
 **The cost, named rather than hidden: a browser we can neither adopt nor reap is

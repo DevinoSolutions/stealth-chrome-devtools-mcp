@@ -112,6 +112,8 @@ entry carrying NEITHER key still reads as disposable.
 RED at `50c63fc`: three of the six; the other three are the controls that keep
 this a NARROWING rather than a stand-down.
 
+`...::TestFailedAdoptionReapDoesNotCrossTheSpare`, two more — see §4.2.
+
 ### 4.1 A defect this fix created in F-917's own pins
 
 F-917's two unit pins ran on a PERSISTENT entry and asserted that
@@ -132,12 +134,51 @@ passes after the behaviour it guards has been removed is not evidence; it is a
 pin nobody has shown can fail.** Asserting both directions is what shows it can,
 and it is cheap — one extra call with the guard emptied.
 
+### 4.2 F-917's defect had a SECOND door, and this fix closes that too
+
+Reported as B1 and confirmed by measurement. `browser_reattach.run` protects the
+pids of its ADOPTABLE candidates (`candidate_pids`) when an adoption fails and
+falls back to `reap_recorded`. An entry F-916 SPARED is by construction not one
+of them — it is in `Classified.spare`, which `run` never reads — so its pid is
+in neither set, and the directory scan over a profile the two share reached it.
+F-917's filter cannot help: the pid it would need to carry is not in the
+collection `run` derives that filter from.
+
+Measured, driving `reap_recorded` with exactly the synthetic metadata `run`
+builds, a spared sibling (6666) and the candidate (7777) on one directory:
+
+| tree | killed |
+|---|---|
+| `50c63fc` (F-916/F-917/F-918) | **`[6666, 7777]`** — the spared browser dies |
+| with this fix | `[7777]` — the candidate's own, and only that |
+
+**What closes it is the scope rule, not a second subtraction**, and the reason
+is worth stating because it is load-bearing rather than lucky: `run` hands that
+reap a metadata dict hard-coding `uses_custom_data_dir: True` and
+`auto_clone: False`. It has to — the profile-delete guard reads those two keys
+and a persistent profile must not be deleted — so the entry is PERSISTENT by
+construction and no directory scan is ever built for it.
+
+Two nodes pin it, and the second exists so the first cannot go vacuous by §4.1's
+own rule: flip that one key to `auto_clone: True` and the scan runs again and
+reaches the spared pid, which is what shows the pins measure the rule rather
+than an empty answer. RED at `50c63fc`: the first.
+
+**Residual, named rather than fixed:** `candidate_pids` still carries only
+adoptable pids. Today nothing can reach a spared sibling through it, but that is
+a property of the metadata `run` happens to build; widening it to
+`reap_guard.spared_pids` was NOT done, because a second guard for a harm the
+scope rule already answers is the second-way-to-do-something this repo treats as
+a defect. If that dict ever stops declaring the profile persistent, this door
+reopens — which is why the pin asserts on the dict `run` actually builds.
+
 ## 5. Verification
 
 Same harness after the fix: rows 1, 2 and 5 answer `[]`, `[]` and `[7777]`; the
-disposable control and the recorded-pid control are unchanged. 20/20 in the pin
-file and 3639 passed with 1 skipped across the whole non-integration suite;
-ruff format + check, vulture, suppression owners and file budgets clean.
+disposable control and the recorded-pid control are unchanged, and the
+second-door table in §4.2 goes `[6666, 7777]` → `[7777]`. 22/22 in the pin file
+and 3641 passed with 1 skipped across the whole non-integration suite; ruff
+format + check, vulture, suppression owners and file budgets clean.
 
 ## 6. What this costs — the owner's accepted trade
 
