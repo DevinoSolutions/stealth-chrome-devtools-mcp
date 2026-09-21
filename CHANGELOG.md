@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — F-899: adopted instances leaked between test files through a process-global store
+
+`in_memory_storage` is a module-level singleton: one per backend process in
+production, one per pytest SESSION in a test run. `browser_reattach`'s adoption
+pass and `BrowserManager`'s spawn both write it, and both bind it by value at
+import time, so `patched_server(in_memory_storage=FakeStorage())` never reached
+them. `tests/test_browser_reattach.py` therefore left `i-kept` and `i-held`
+behind, and `list_instances` — which merges the manager's instances with this
+store — reported them to a later file as `source: "stored"` rows. Running
+`test_browser_reattach.py` and `test_tool_failure_visibility.py` together failed 2
+of 104; each alone was green. The full lane was green only because
+`test_mcp_protocol_surface.py` sorts between them and boots the real transport
+unpatched, so `app_lifespan`'s shutdown ran `clear_all()` on the real singleton in
+passing.
+
+Harness only — no shipped behaviour changes. `tests/conftest.py` grows an autouse
+`_in_memory_storage_hygiene` that restores the store after every test, a sibling
+of the `_stealth_logger_hygiene` fixture above it, and
+`tests/test_in_memory_storage_isolation.py` pins it with a two-node pair that no
+collection order can mask.
+
 ## 2.1.11
 
 ### Fixed — F-892: the snapshot staleness witness stated a file Chrome stopped writing in v96
