@@ -153,6 +153,95 @@ class TestDefaultIsTheSharedSession:
         with pytest.raises(ToolError, match="default"):
             clone_storage.require_allowed_user_data_dir("sessions/default", None)
 
+    @pytest.mark.parametrize("given", ["./default", "default/", "Default", "DEFAULT"])
+    def test_a_spelling_that_creates_no_second_directory_is_the_shared_one(
+        self, given, tmp_session_root
+    ):
+        """The refusal above is about a spelling that would CREATE a second
+        directory under the word — not about punctuation. ``./default`` and
+        ``default/`` normalise to the bare name (``Path("./default").parts`` is
+        ``('default',)`` under both flavours), and the comparison is casefolded,
+        so all four name the one shared profile and none of them makes anything.
+        Pinned because ``profile_seed``'s docstring claimed ``./default`` was
+        refused while the code resolved it here (review S3): a stated refusal
+        the code does not make is the claim this repo's standard exists to stop.
+        """
+        landed = clone_storage.require_allowed_user_data_dir(given, None)
+        assert Path(landed) == tmp_session_root["master"]
+        assert not (tmp_session_root["sessions"] / "default").exists()
+
+    def test_an_absolute_path_that_ends_in_default_is_the_callers_own(
+        self, tmp_path, tmp_session_root
+    ):
+        """The fourth refusal is about a RELATIVE spelling that would put a
+        second ``default`` under the clone root. An absolute path is a
+        directory the caller already has — Chrome's own per-profile folder is
+        literally named ``Default`` — and refusing it would be a new refusal of
+        an input 2.1.11 honoured, told through a message that names a
+        completely different profile as the escape (review M2).
+        """
+        outside = tmp_path / "work" / "default"
+        landed = clone_storage.require_allowed_user_data_dir(str(outside), None)
+        assert Path(landed) == outside
+
+    def test_an_existing_sessions_default_stays_openable_by_absolute_path(
+        self, tmp_session_root
+    ):
+        """RUNBOOK's recovery paragraph, as written. A ``sessions/default``
+        directory that predates F-896 keeps its contents and is still reachable
+        — by the absolute path, which is the same escape the reserved-name
+        refusal one clause above already offers for ``sessions/master``."""
+        stale = tmp_session_root["sessions"] / "default"
+        stale.mkdir(parents=True, exist_ok=True)
+        landed = clone_storage.require_allowed_user_data_dir(str(stale), None)
+        assert Path(landed) == stale
+
+    @pytest.mark.parametrize("flavour", [PurePosixPath, PureWindowsPath])
+    def test_the_relative_half_of_that_rule_is_flavour_independent(
+        self, flavour, tmp_session_root
+    ):
+        """What gates the refusal is ``Path.is_absolute()`` — the flavour
+        ``anchor`` anchors with — so the two halves have to agree on every
+        platform. ``sessions/default`` is relative under BOTH flavours, which
+        is what keeps this refusal identical on six POSIX cells and one Windows
+        box; the absolute case is covered by the two nodes above."""
+        assert not flavour("sessions/default").is_absolute()
+        with pytest.raises(ToolError, match="default"):
+            clone_storage.require_allowed_user_data_dir("sessions/default", None)
+
+    @pytest.mark.parametrize(
+        "given", ["default.", "default..", "default. ", "master.", "master-snapshot."]
+    )
+    def test_a_name_the_filesystem_would_fold_onto_a_reserved_one_is_refused(
+        self, given, tmp_session_root
+    ):
+        """Windows strips a trailing dot or space from a path COMPONENT, so
+        ``session="default."`` created ``sessions\\default`` — a second
+        directory under the word, through the one door the fourth refusal
+        exists to close, one character away (measured: ``(t / "default.")``
+        ``.mkdir()`` lands on disk as ``default``, and ``Path.resolve`` does not
+        normalise the dot for a path that does not exist yet, so ``same_dir``
+        cannot catch it either).
+
+        The refusal is applied on EVERY platform rather than behind a
+        ``sys.platform`` test: a name that means one directory here and another
+        there is not a name, and a rule that fires on one host only is the
+        flavour mistake F-894 already paid for once.
+        """
+        with pytest.raises(ToolError):
+            clone_storage.require_allowed_user_data_dir(None, given)
+
+    def test_whitespace_around_a_name_is_not_part_of_it(self, tmp_session_root):
+        """``profile_request`` is the ONE normaliser and it strips BOTH
+        spellings. Before this it stripped only ``session``, so ``" default "``
+        was the shared profile while ``" acme "`` was a directory with literal
+        spaces in its name — one function pair, two answers to what a name is
+        (review N5)."""
+        shared = clone_storage.require_allowed_user_data_dir(" default ", None)
+        named = clone_storage.require_allowed_user_data_dir(" acme ", None)
+        assert Path(shared) == tmp_session_root["master"]
+        assert Path(named) == tmp_session_root["sessions"] / "acme"
+
     @pytest.mark.parametrize("name", ["master", "master-snapshot"])
     def test_the_two_mechanism_names_stay_refused(self, name, tmp_session_root):
         with pytest.raises(ToolError, match="reserved"):
@@ -221,8 +310,17 @@ class TestNoUserFacingStringSaysTheOldWords:
     async def test_every_role_reports_itself_without_the_old_words(
         self, tmp_session_root
     ):
-        """The three roles' real ``profile_selection`` payloads — keys AND
+        """ALL THREE roles' real ``profile_selection`` payloads — keys AND
         values — produced by the resolver, not transcribed.
+
+        The clone is here because it is the role whose payload this release
+        renames MOST (``clone_source`` carries ``default-seed``,
+        ``live-default-fallback``, ``default-seed-retry``,
+        ``default-seed-final``) and it is also the commonest role in service.
+        The sweep used to build three selections of which two were the same
+        role, so the one key whose values moved was never read (review S2): a
+        coverage gap rather than a live defect today, and exactly the gap the
+        next rename would regress through.
 
         **A value that is an absolute PATH is exempt, and that exemption is
         the cost of this change rather than a hole in it.** The two directories
@@ -239,8 +337,13 @@ class TestNoUserFacingStringSaysTheOldWords:
         selections = [
             await _selection(),  # the shared session
             await _selection(session="acme"),  # a named session
-            await _selection(session="default"),
+            await _selection(session="default"),  # the shared session, by name
+            clone_storage._public_profile_selection(  # a disposable clone
+                await clone_storage.resolve_profile_selection(None, force_clone=True)
+            ),
         ]
+        roles = {selection["profile_role"] for selection in selections}
+        assert roles == {"default", "explicit", "clone"}, roles
         for selection in selections:
             for key, value in selection.items():
                 offenders.extend(

@@ -80,10 +80,28 @@ byte-identical to 2.1.11: shared profile when free, disposable copy when held
 `session="default"` adds is a door onto a path that already existed.
 
 It stays reserved in the sense that matters. `master` and `master-snapshot` are
-refused outright; `default` names exactly one directory, so any spelling that
-would CREATE a second one under that word (`sessions/default`, `./default`) is
+refused outright; `default` names exactly one directory, so any RELATIVE
+spelling that would CREATE a second one under that word (`sessions/default`) is
 refused. Without that clause F-894's trap would have come back one separator
 away from the word the vocabulary teaches.
+
+Two boundaries on that clause, both from review round 1 and both pinned:
+
+* **It is gated on the request being relative**, exactly as the reserved-name
+  refusal beside it is. `./default` normalises to the bare name and reaches the
+  shared profile — it creates nothing, so there is nothing to refuse — and an
+  ABSOLUTE path whose basename is `default` is the caller's own directory
+  (Chrome's per-profile folder is literally `Default`). Refusing those was a new
+  refusal of an input 2.1.11 honoured, offering an escape that named a different
+  profile, and it made RUNBOOK's recovery paragraph false as written (M2).
+* **A name the filesystem FOLDS onto one of those words is refused** (S1).
+  Windows strips a trailing dot or space from a path component, so
+  `session="default."` reached `sessions/default` — a second directory under the
+  word, through the one door this clause exists to close, one character away
+  (measured; `Path.resolve(strict=False)` leaves the dot on a path that does not
+  exist yet, so `same_dir` cannot catch it either). The fold is applied on every
+  platform, because a name that means one directory here and another there is
+  not a name.
 
 ### 2.3 The words, retired
 
@@ -152,8 +170,9 @@ stays the only thing that knows where they are.
 
 ## 3. Pins
 
-`tests/test_session_vocabulary.py`, 32 nodes. RED first: **30 failed, 1 passed**
-before the fix, each for its own reason —
+`tests/test_session_vocabulary.py`, **49 nodes**. They arrived in three batches
+and each was RED first. The first batch at `b620ee3` was 31 of them: **30
+failed, 1 passed** before the fix, each for its own reason —
 `require_allowed_user_data_dir() takes 1 positional argument but 2 were given`
 (the parameter did not exist), `spawn_browser.description says 'master'`,
 `{} == {'session': 'acme'}` (the CLI sent nothing), `--profile`'s help was not
@@ -163,6 +182,15 @@ The one that passed is the parser-tree sweep: the CLI's help strings were
 already clean, so that node is a guard against the next flag rather than a
 change driver, and it is stated as one.
 
+The second batch is the three tool-level nodes at `780f6f0` (§3, last bullet).
+The third is review round 1's fourteen, of which **8 failed, 6 passed**, for
+three reasons: the two absolute-path nodes raised `profile request rejected:
+'default' is the shared session …` about a directory outside the tree; the five
+fold nodes did not raise at all; and the whitespace node put ` acme ` in a
+directory name. The six that passed on arrival are guards, and are stated as
+such: four spellings that normalise to the bare `default` (the behaviour a
+docstring had claimed was refused — S3) and two flavour assertions.
+
 * **One request** — a name resolves identically through either spelling; both
   given and different raises; both given and equal is honoured; neither is no
   request.
@@ -171,13 +199,23 @@ change driver, and it is stated as one.
   reachable through the alias, which is what makes this a narrowing of one
   spelling rather than a loss of reach.
 * **`default`** — selects the shared profile; is the same answer as naming no
-  session; creates no `sessions/default`; `sessions/default` is refused;
+  session; creates no `sessions/default`; `sessions/default` is refused, under
+  BOTH `PurePath` flavours, because what gates that refusal is
+  `Path.is_absolute()`; four spellings that normalise to the bare word
+  (`./default`, `default/`, `Default`, `DEFAULT`) reach the shared profile and
+  make nothing; an ABSOLUTE path ending in `default` is the caller's own, both
+  outside the tree and as the pre-F-896 `sessions/default` RUNBOOK promises is
+  still openable; five names the filesystem would fold onto a reserved word are
+  refused; whitespace around a name is not part of it, through either spelling;
   `master`/`master-snapshot` stay refused; `default` is out of `RESERVED_NAMES`.
 * **No user-facing string says the old words**, and the string set is DERIVED,
   never listed: the live tool registry (every description and every parameter
   description, off `dump_tool_surface._surface()`), the live argparse tree
   (walked recursively, `SUPPRESS`ed actions skipped), and a REAL
-  `profile_selection` payload for each of the three roles, produced by the
+  `profile_selection` payload for each of the three roles — `default`,
+  `explicit` and `clone`, asserted to be three and not two, because the sweep
+  first shipped with `default` in it twice and so never read `clone_source`,
+  the one key whose values this PR renames (review S2) — produced by the
   resolver. Plus two scoped nodes: the reserved-name refusal is checked with the
   caller's own echoed word removed, because quoting what you typed is not the
   product teaching a vocabulary; and `seeded_from` is checked WITHOUT the
@@ -197,8 +235,13 @@ which is the thing the golden exists to prove about a change like this.
 
 No SOFT golden file moved. The diagnostics-string rename lands as Q4 directs —
 in this PR — but it is pinned by assertions in test files rather than by a
-golden artifact, so what moved is nine test files' literals, each one an
-assertion about a value this PR renames.
+golden artifact, so what moved is **seven** test files' literals, each one an
+assertion about a value this PR renames (`test_browser_integration`,
+`test_concurrent_spawn_collision`, `test_correlation_id`,
+`test_extra_headers_cdp`, `test_profile_lock`, `test_profile_resolution`,
+`test_profile_seed_truth`). The pin file itself and the HARD golden are
+counted separately above, and the integration tier's own sweep is its own
+commit — nine and six were two ways of miscounting that set.
 
 ---
 
@@ -238,6 +281,11 @@ read as one rather than as scope creep. Before this change a BARE name reached
 fire for a session named by name, although `spawn_browser`'s own docstring
 promises it does ("spawning with a user_data_dir a live browser still holds
 re-attaches to THAT browser"). Only an absolute path worked. Now both do.
+
+**A tilde path gains the same thing, for the same reason** (review N4): `anchor`
+calls `.expanduser()`, so `~/profiles/acme` now reaches `adopt_held_profile` as
+the directory it means, where before `Path("~/x").resolve()` was `<cwd>/~/x` on
+Windows — a directory nothing holds. Same class of fix, same one line.
 
 ---
 

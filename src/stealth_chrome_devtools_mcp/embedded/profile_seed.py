@@ -110,6 +110,15 @@ RESERVED_NAMES = frozenset({"master", "master-snapshot"})
 # directory and a caller may not create a session of their own called it.
 DEFAULT_SESSION = "default"
 
+# The words above, as a set no SPELLING may fold onto. Windows strips a
+# trailing dot or space from a path component, so `default.` is created as
+# `default` — a second way to the one directory the word names, through the one
+# door the `default` refusal exists to close. `fold` is applied on every
+# platform: a name that means one directory here and another there is not a
+# name, and a rule that fires on one host only is the flavour mistake F-894
+# already paid for once.
+FOLDED_NAMES = RESERVED_NAMES | {DEFAULT_SESSION}
+
 _STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -350,6 +359,12 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
     two opinions about which spelling wins. That is convention 4 applied to a
     parameter rather than to a module.
 
+    It is also the ONE normaliser: surrounding whitespace is stripped off
+    BOTH spellings, because it was stripped off ``session`` alone and that made
+    ``" default "`` the shared profile while ``" acme "`` was a directory with
+    literal spaces in its name — one function pair with two answers to what a
+    name is (review N5). An alias that is only whitespace is no request at all.
+
     Two rules, and each exists because its absence is a silence:
 
     * **Both given with different values is refused.** A precedence would pick
@@ -369,7 +384,7 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
       things on two platforms is not a name.
     """
     if session is None:
-        return user_data_dir or None
+        return (user_data_dir or "").strip() or None
     name = session.strip()
     if not name:
         raise ToolError(
@@ -437,7 +452,7 @@ def require_allowed(
 def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
     """Why this profile request may not be honoured, or None (F-894, F-896).
 
-    Four refusals, and one deliberate non-refusal. A reserved NAME is refused
+    Five refusals, and one deliberate non-refusal. A reserved NAME is refused
     because anchoring it under the clone root hands back a different profile
     under the name the caller used. The SEED path is refused because a browser
     driven there writes into the seed every later session copies from.
@@ -460,11 +475,33 @@ def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
 
     The FOURTH refusal is F-896's and it is what keeps F-894 closed under the
     new word: ``default`` now MEANS the shared profile, but only in its bare
-    form, so any spelling that would instead CREATE a directory called
-    ``default`` (``sessions/default``, ``./default``) is refused rather than
-    quietly made. Without it the finding's exact trap — a documented name that
-    silently opens a different profile — would come back one separator away
-    from the word the vocabulary teaches.
+    form, so a RELATIVE spelling that would instead CREATE a directory called
+    ``default`` (``sessions/default``) is refused rather than quietly made.
+    Without it the finding's exact trap — a documented name that silently opens
+    a different profile — would come back one separator away from the word the
+    vocabulary teaches. ``./default`` is NOT one of them and is not refused:
+    it normalises to the bare name under both flavours and makes nothing.
+
+    **It is gated on the request being RELATIVE, exactly as the reserved-name
+    refusal above it is** (review M2). An absolute path whose basename happens
+    to be ``default`` — Chrome's own per-profile folder is literally called
+    ``Default`` — is a directory the caller already has, outside this tree; it
+    creates no second session under the word, 2.1.11 opened it, and the
+    refusal's own escape ("pass ``session='default'``") would send them to a
+    completely different profile. It is also what makes RUNBOOK's recovery
+    paragraph true as written: an existing ``sessions/default`` keeps its
+    contents and stays openable by its absolute path, the same escape the
+    reserved-name refusal already offers for ``sessions/master``.
+
+    The FIFTH is S1's and it is the fourth one's own door, one character away:
+    a name the FILESYSTEM folds onto any of ``FOLDED_NAMES`` is refused, because
+    Windows strips a trailing dot or space from a path component and
+    ``session="default."`` therefore reached ``sessions/default`` — a second
+    directory under the word — while being a different string from every rule
+    above (measured; and ``Path.resolve(strict=False)`` does not normalise the
+    dot for a path that does not exist yet, so ``same_dir`` cannot catch it
+    either). It is asked BEFORE the reserved-name clause so ``master.`` is told
+    what it actually is rather than being quoted back a name it did not type.
 
     The SHARED profile itself is deliberately NOT refused: driving it directly
     is how a human logs in, and the caller who names it (by path, or by
@@ -479,7 +516,15 @@ def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
             "path this host reads as absolute, or a bare session name."
         )
     name = asked.name.casefold()
-    if not asked.is_absolute() and name in RESERVED_NAMES:
+    folded = name.rstrip(". ")
+    if not asked.is_absolute() and folded != name and folded in FOLDED_NAMES:
+        return (
+            f"{name!r} is {folded!r} once the filesystem has had it: Windows "
+            "strips a trailing dot or space from a path component, so this "
+            f"would reach {folded!r} rather than a session of its own name. "
+            "Drop the trailing dot or space, or pick a different name."
+        )
+    if not asked.is_absolute() and folded in RESERVED_NAMES:
         # F-894 review M3: an operator may ALREADY have a session directory of
         # this name — one exists on the machine the finding was measured on —
         # and "pick another name" is advice for a new session, not for theirs.
@@ -496,7 +541,11 @@ def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
             "all) for the shared profile every session is seeded from; pick "
             f"another name for a session of your own.{existing}"
         )
-    if name == DEFAULT_SESSION and not same_dir(resolved, roots.shared):
+    if (
+        not asked.is_absolute()
+        and folded == DEFAULT_SESSION
+        and not same_dir(resolved, roots.shared)
+    ):
         return (
             f"{DEFAULT_SESSION!r} is the shared session and names exactly one "
             f"profile, so {requested!r} would create a second one under the "

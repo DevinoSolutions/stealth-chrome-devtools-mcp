@@ -41,7 +41,7 @@ https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
   attached at once; simultaneous cold start is scale-tested at 50 concurrent
   sessions, all usable in seconds against one backend — see
   [Built for fleets](#built-for-fleets-50-claude-code-sessions-one-backend)
-- **Auto-suffix busy profiles** — `github-session` auto-becomes `github-session-2` when occupied
+- **A busy session re-attaches, and only then suffixes** — spawning with a `session` a live browser still holds joins THAT browser; `github-session` becomes `github-session-2` only when the re-attach declines
 - **Orphan recovery** — safely cleans up leaked browser processes without killing live ones
 - **Session persistence** — a new session carries the cookies, logins and Web Data of `default`
 - **Zero idle timeout** — browsers stay alive until explicitly closed

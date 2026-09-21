@@ -22,10 +22,19 @@ profile every session is seeded from and the one a human logs in to.
 `session="default"` and `user_data_dir="default"` both select it, by the same
 door an absolute path to it already used, so nothing about which directory an
 unnamed spawn picks has changed. It stays reserved in the sense that matters:
-it names exactly one directory, so `sessions/default` and any other spelling
-that would create a second one under the same word is refused — F-894's trap
-does not get to come back one separator away from the word we now teach.
-`master` and `master-snapshot` stay refused outright.
+it names exactly one directory, so `sessions/default` and any other RELATIVE
+spelling that would create a second one under the same word is refused —
+including one the filesystem would fold onto it, since Windows strips a
+trailing dot or space from a path component and `session="default."` otherwise
+lands in `sessions/default`. F-894's trap does not get to come back one
+separator away from the word we now teach. `master` and `master-snapshot` stay
+refused outright.
+
+A directory of your own whose name simply ends in `default` is **not** affected:
+an absolute path is opened as it always was — Chrome's own per-profile folder is
+called `Default` — and an existing `sessions/default` from before this release
+keeps its contents and stays openable by its absolute path, exactly as RUNBOOK's
+recovery paragraph says.
 
 **The words "master" and "snapshot" are retired from every user-facing string**
 — tool and parameter descriptions, CLI help and output, error messages, and the
