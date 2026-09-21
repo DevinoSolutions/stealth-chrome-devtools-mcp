@@ -235,6 +235,12 @@ now.
   the *previous* generation survivable; it does not make the new one
   checkable. That is the same gap `profile_source.seed_source` refuses a live
   source over, and it is the reason the previous generation is kept at all.
+* **F-930**, filed alongside: `TestARealProcessDeath` runs the product in a
+  CHILD interpreter, which imports no `conftest.py` and so carries none of
+  F-903's fence. The instance is closed here by a self-fence in the child
+  (§5 above), and that guard is deliberately a per-test one — the general
+  shape is F-930's, where a census found zero unfenced tests in the suite and
+  six independent hand-rolled implementations of the guard.
 * **F-927**, filed alongside: `_clone_dir_is_protected` is an in-process set
   that `process_cleanup._cleanup_profile_dir` never consults, so a deferred
   delete can `rmtree` a directory a new spawn is copying into. Adjacent to this
