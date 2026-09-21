@@ -281,15 +281,26 @@ async def _await_ledger(base_url: str, key: str, count: int, timeout: float = SE
 
 
 async def _register_service_worker(instance_id: str) -> dict:
+    """Register, and answer only once this DOCUMENT is controlled (F-909).
+
+    The terminal state is ``controlled`` and not ``ready``, because
+    ``navigator.serviceWorker.ready`` resolves on an active REGISTRATION while
+    ``navigator.serviceWorker.controller`` is a fact about this document that
+    ``clients.claim()`` delivers separately — so a node that polled ``ready``
+    and then read ``controller`` was reading it in the gap between the two.
+    Every caller here wants a controlled page, including F-800's control step.
+    A worker that activates and never claims stops at ``ready``, and this
+    poll's own failure then reports that state rather than a wrong answer.
+    """
     await eval_js(instance_id, "window.w16Register()")
     report = await _settled_json(
         instance_id,
         "(() => {const r = JSON.parse(window.w16Report()); "
-        "return (r.state === 'ready' || r.state === 'error') "
+        "return (r.state === 'controlled' || r.state === 'error') "
         "? window.w16Report() : null;})()",
         timeout=45.0,
     )
-    assert report["state"] == "ready", report
+    assert report["state"] == "controlled", report
     return report
 
 
