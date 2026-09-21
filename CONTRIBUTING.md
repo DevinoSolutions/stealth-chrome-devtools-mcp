@@ -79,6 +79,55 @@ mock, and they run on every push. Use `release_gate_harness._isolated_env` +
 with no env override, so redirecting the child's `HOME`/`USERPROFILE` *before* it starts
 is the only way a test can touch a backend record without touching yours.
 
+### Test isolation: the three roots, and what fences each (F-903)
+
+A test run can reach three directories that are not its own, and each has a
+different fence. Know which one you are near before you write a fixture.
+
+| Root | What lives there | Fenced by |
+|---|---|---|
+| clone / large-response output | screenshots, clone artifacts | `STEALTH_MCP_CLONE_OUTPUT_DIR`, set in `tests/conftest.py` at import |
+| browser-session root | the `default` profile and every session copy | `STEALTH_MCP_BROWSER_SESSION_ROOT`, same place |
+| **backend state dir** (`~/.stealth-mcp`) | `server.json`, the lock, heartbeats, `browser_pids.json`, logs — **and the live backends they name** | `tests/state_dir_fence.py`, installed by `conftest.py` at import |
+
+The state dir is the one that owns a live PROCESS, so it gets three layers, and
+**you get all three for free — do not re-implement any of them**:
+
+1. **The redirect.** Ten module globals across five modules are re-pointed at a
+   per-process tmp root. There are ten because `singleton`, `process_cleanup`
+   and `response_handler` each FROM-import the path — a `setattr` on
+   `backend_registry.STATE_DIR` alone reaches *none* of them — and because
+   pydantic copied its value into `Settings.model_config["env_file"]` at class
+   creation. If you add a global derived from the state dir, add it to
+   `state_dir_fence.STATE_DIR_BINDINGS`; `tests/test_state_dir_fence.py` measures
+   the package and will fail until you do.
+2. **A write guard.** Any write under the *real* state dir raises
+   `state_dir_fence.RealStateDirWrite`, a **`BaseException`** — the product is
+   fail-open by design (`backend_registry` is a never-raise cache,
+   `proxy_selfheal` never raises), so an `Exception` would be swallowed at the
+   first handler and your node would go green over a real write. If you see this
+   error, a path escaped the redirect; fix the path, never the guard.
+3. **A kill guard.** `backend_eviction.terminate` refuses a pid the operator's
+   real `server.json` names.
+
+Reads of the real record are deliberately **not** guarded, and `HOME` is
+deliberately **not** redirected in the pytest process:
+`release_gate_harness._reserved_ports()` reads the real `server.json` through
+`Path.home()` so an isolated backend never binds a port a live backend holds.
+Child processes still redirect `HOME`/`USERPROFILE` — that is the paragraph
+above, a different mechanism for a different process.
+
+**Keep writing per-file `isolated_state` fixtures.** The fence makes the
+operator's directory unreachable; it does not give each node a clean record. Two
+nodes in one file that both write `server.json` still need `tmp_path` between
+them. The two answer different questions and the suite needs both.
+
+**Never import `stealth_chrome_devtools_mcp.__main__`.** It is three lines and
+the third is a bare `main()`, so importing it starts a stdio proxy and
+cold-starts a backend. Any `pkgutil.walk_packages` sweep must skip it —
+`state_dir_fence._NEVER_IMPORT` is the list, and it is how this finding was
+reproduced while being investigated.
+
 Coverage is **intentionally not** in `addopts` (it would slow every single-file TDD run
 and trip `--cov-fail-under` on partial runs). CI turns it on explicitly.
 

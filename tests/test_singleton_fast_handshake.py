@@ -43,6 +43,37 @@ def _isolated_subprocess_env(tmp_path) -> dict[str, str]:
     )
 
 
+@pytest.fixture(autouse=True)
+def _fence_is_in_place():
+    """F-903: these nodes REQUIRE the suite-wide state-dir fence, so assert it.
+
+    The four hermetic nodes in this file carried no isolation of their own, and
+    two of them — ``TestFastHandshake``'s pair — are structurally able to reach
+    the real startup path: ``_drive_initialize`` runs the REAL ``_proxy_streams``
+    against a dead port, and ``_proxy_streams`` hands the real
+    ``ensure_server_running`` to ``proxy_selfheal.drive`` as ``ensure_running``.
+    Whether a backend is actually spawned before ``tg.cancel_scope.cancel()``
+    lands is a question about the scheduler, not about the test — which is
+    exactly what "unfenced" means. On 2026-09-21 that path DID reach it in a
+    sibling worktree and cold-started a real backend into the operator's record.
+
+    The fence is ``tests/conftest.py``'s and this is deliberately an ASSERTION
+    rather than another per-file ``isolated_state`` copy: a local fixture would
+    fence this file and leave the next one written without one exposed, which is
+    the shape F-903 is about. What this adds is a loud failure if the suite-wide
+    fence is ever removed, at the file that needs it most.
+    """
+    import state_dir_fence
+    from stealth_chrome_devtools_mcp.embedded import singleton
+
+    real = state_dir_fence.REAL_STATE_DIR
+    assert singleton.SERVER_STATE_FILE.parent != real, (
+        "the suite-wide state-dir fence (tests/conftest.py) is not installed; "
+        "these nodes drive the real proxy startup path and would cold-start a "
+        "backend into the operator's ~/.stealth-mcp"
+    )
+
+
 def _free_port() -> int:
     """A port with nothing listening — so the proxy's backend never answers."""
     s = socket.socket()

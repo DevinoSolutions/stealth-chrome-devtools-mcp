@@ -46,11 +46,15 @@ def _is_within(child: Path, parent: Path) -> bool:
 
 class TestDefaultCloneOutputDir:
     def test_defaults_to_user_state_dir(self, monkeypatch):
+        # Against ``rh_mod.STATE_DIR``, not ``Path.home()``: F-903's suite-wide
+        # fence redirects that binding so no test run can write the operator's
+        # real ``~/.stealth-mcp``, and this node's subject is the CONVENTION
+        # (the default is ``<state dir>/element_clones``, never inside the
+        # package) rather than where the state dir itself lives. That the state
+        # dir is home-derived is one claim with one home now, pinned in
+        # ``tests/test_state_dir_fence.py``.
         monkeypatch.delenv(ENV_VAR, raising=False)
-        assert (
-            default_clone_output_dir()
-            == Path.home() / ".stealth-mcp" / "element_clones"
-        )
+        assert default_clone_output_dir() == rh_mod.STATE_DIR / "element_clones"
 
     def test_env_override_is_honored(self, monkeypatch, tmp_path):
         monkeypatch.setenv(ENV_VAR, str(tmp_path / "out"))
@@ -62,10 +66,7 @@ class TestDefaultCloneOutputDir:
 
     def test_blank_env_falls_back_to_default(self, monkeypatch):
         monkeypatch.setenv(ENV_VAR, "   ")
-        assert (
-            default_clone_output_dir()
-            == Path.home() / ".stealth-mcp" / "element_clones"
-        )
+        assert default_clone_output_dir() == rh_mod.STATE_DIR / "element_clones"
 
     def test_default_is_never_inside_the_package(self, monkeypatch):
         monkeypatch.delenv(ENV_VAR, raising=False)

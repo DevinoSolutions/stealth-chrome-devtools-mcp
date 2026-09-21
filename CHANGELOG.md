@@ -76,6 +76,45 @@ release but is undocumented (`--help` does not list it) and prints a line on
 stderr naming its replacement; it will be removed. A path stays reachable
 through `stealthy call`.
 
+### Fixed — F-903: the test suite could cold-start a real backend into the operator's state dir
+
+**Tests only — no product behaviour changes.**
+
+`tests/conftest.py` redirected the clone output dir and the browser-session root
+and nothing else. The third root — `~/.stealth-mcp`, the one that owns a live
+PROCESS — was never fenced, so every fence was per-file: ~30 test files each
+carried their own `isolated_state` copy and the files with none were safe by
+which collaborator a node happened to mock. Two measured consequences, three
+days apart: a hermetic node drove the proxy's heal path into the real
+`ensure_server_running` and cold-started a backend (pid 55240, port 21770) into
+the operator's live record; and this finding's own census probe imported
+`stealth_chrome_devtools_mcp.__main__` — three lines, the third a bare `main()`
+— which started a stdio proxy and cold-started another (pid 189088, port 64986).
+Neither was worse only because F-886 refuses to evict a backend holding live
+browsers; before 2.1.9 the same route terminated one.
+
+The fence has one home (`tests/state_dir_fence.py`) and one caller
+(`tests/conftest.py`, at import time, because an autouse function-scoped fixture
+is ordered after the E2E modules' module-scoped `_warmup`). Three parts: the ten
+state-dir bindings across five modules re-pointed at a per-process tmp root
+(four modules FROM-import the path, so one `setattr` reaches none of the others;
+pydantic's `model_config["env_file"]` needs its own, or a hermetic run absorbs
+the operator's `.env`); a WRITE guard on every filesystem primitive that raises
+a `BaseException` — the product is fail-open by design, so an `Exception` is
+swallowed at the first handler; and a kill guard refusing to terminate a pid the
+real record names. Bindings are measured by a probe, not grepped, and that probe
+is a pin, so a new derived global fails a test instead of escaping.
+
+Reads of the real record stay deliberately unguarded and `HOME` is deliberately
+not redirected: `release_gate_harness._reserved_ports()` reads the operator's
+own `server.json` through `Path.home()` so an isolated backend never binds a
+port a LIVE backend holds. Redirecting HOME would have created the collision the
+fence exists to prevent.
+
+Per-file `isolated_state` fixtures are kept, not deleted: they give each NODE a
+clean record while the fence gives the SESSION one directory — per-test
+isolation and operator safety are different questions.
+
 ## 2.1.11
 
 ### Fixed — F-892: the snapshot staleness witness stated a file Chrome stopped writing in v96
