@@ -115,7 +115,7 @@ def _fresh_session_holds(name: str) -> str:
     """
     if name == profile_seed.DEFAULT_SESSION:
         return (
-            "a fresh copy of the seed — which is that session in copyable "
+            "a fresh copy of the seed, which is that session in copyable "
             "form, so its logins come too, as of the last time that browser "
             "was closed"
         )
