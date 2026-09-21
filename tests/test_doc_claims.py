@@ -129,6 +129,8 @@ class TestNavMapModules:
         "browser_cmdline",
         "backend_client",
         "cdp_attach",
+        "cdp_endpoint",
+        "reap_guard",
         "tool_registry",
         "tool_errors",
         "logging_setup",
@@ -248,7 +250,6 @@ class TestLoadBearingSymbols:
                 "held_by",
                 "adopt_held_profile",
                 "claim",
-                "endpoint",
                 "reap_recorded",
                 "recorded_browser_alive",
                 "start",
@@ -257,7 +258,6 @@ class TestLoadBearingSymbols:
                 "Classified",
                 "Held",
                 "Refused",
-                "DEVTOOLS_PORT_FILE",
                 "ATTACH_BUDGET_SECONDS",
             ],
             "embedded.cdp_attach": [
@@ -266,6 +266,17 @@ class TestLoadBearingSymbols:
                 "attach_reclaiming",
                 "close",
                 "CDP_HOST",
+            ],
+            "embedded.cdp_endpoint": [
+                "endpoint",
+                "DEVTOOLS_PORT_FILE",
+            ],
+            "embedded.reap_guard": [
+                "UNDECIDED",
+                "Undecided",
+                "Verdict",
+                "killable",
+                "spared_pids",
             ],
             "embedded.browser_cmdline": [
                 "arguments",
