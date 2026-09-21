@@ -115,6 +115,43 @@ Per-file `isolated_state` fixtures are kept, not deleted: they give each NODE a
 clean record while the fence gives the SESSION one directory — per-test
 isolation and operator safety are different questions.
 
+### Fixed — F-899: adopted instances leaked between test files through a process-global store
+
+`in_memory_storage` is a module-level singleton: one per backend process in
+production, one per pytest SESSION in a test run. `browser_reattach`'s adoption
+pass and `BrowserManager`'s spawn both write it, and both bind it by value at
+import time, so `patched_server(in_memory_storage=FakeStorage())` never reached
+them. `tests/test_browser_reattach.py` therefore left `i-kept` and `i-held`
+behind, and `list_instances` — which merges the manager's instances with this
+store — reported them to a later file as `source: "stored"` rows. Running
+`test_browser_reattach.py` and `test_tool_failure_visibility.py` together failed 2
+of 104; each alone was green. The full lane was green only because
+`test_mcp_protocol_surface.py` sorts between them and boots the real transport
+unpatched, so `app_lifespan`'s shutdown ran `clear_all()` on the real singleton in
+passing.
+
+`tests/conftest.py` grows an autouse `_in_memory_storage_hygiene` that restores
+the store after every test, a sibling of the `_stealth_logger_hygiene` fixture
+above it, and `tests/test_in_memory_storage_isolation.py` pins it with a two-node
+pair that no collection order can mask.
+
+### Fixed — F-899: a cancelled `close_instance` left a permanent ghost row in `list_instances`
+
+Found while reviewing the above, in the same subject. `BrowserManager.close_instance`
+popped `_instances` in Phase 1 but removed the in-memory-storage entry in Phase 4,
+inside a `try` whose handler is `except Exception` — which an
+`asyncio.CancelledError` walks straight past, because it is a `BaseException`. Six
+awaits separate the two, and the `close_instance` tool body carries no CDP timeout,
+so a client disconnecting mid-close cancelled the request task in that window and
+left the manager without the instance and the store with its entry. `list_instances`
+then reported it as a `source: "stored"` record — about a browser already being torn
+down — for the life of the backend, since only lifespan shutdown clears the store.
+
+The removal now happens in Phase 1, under the same lock and with no `await` between
+it and the pop, so the window is closed rather than narrowed. The cancellation still
+propagates. `close_instance` keeps exactly one removal site and
+`browser_manager.py` stays at its 1485-LOC cap.
+
 ## 2.1.11
 
 ### Fixed — F-892: the snapshot staleness witness stated a file Chrome stopped writing in v96
