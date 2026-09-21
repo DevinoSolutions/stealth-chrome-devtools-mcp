@@ -361,6 +361,21 @@ without the sugar.
 > browser is spared (F-886). If you are diagnosing a wedged backend and want it
 > left exactly as it is, add `--no-start` — the command then exits 3 instead.
 
+**Once you have it back, you can branch off it without closing it** (F-898).
+A recovered session is a session this backend drives, so it is a legal `--from`
+source while its window stays open:
+
+```console
+stealthy spawn --session seller-central --headed        # recover it
+stealthy spawn --session seller-staging --from seller-central
+```
+
+The second call copies the profile for everything the copier can read and hands
+the COOKIES over CDP out of the running browser, which is the half a file copy
+of a live profile loses entirely. The first window is untouched. Cookies only —
+see "Start a new session from an existing one" below for what does not come
+across, and close the source first if you need `localStorage`.
+
 Two cases still need a hand.
 
 **The owner backend is still ALIVE (wedged, or just unreachable because every
@@ -450,22 +465,66 @@ CREATION only — for a session that already exists it is an error naming where
 that session actually came from, never a silent no-op and never a re-seed over
 a login somebody typed by hand.
 
-**The source must not be open.** Copying a profile Chrome is writing to
-silently drops whatever it has locked — the cookie jar above all — and nothing
-can say afterwards what was lost, so an open source is refused by name:
+**The source may be open, if this backend is driving it** (F-898) — which it is
+if `stealthy ls` lists it. A file copy of a live profile carries ZERO cookies
+(measured: the SQLite jar is held open and skipped, and nothing can say
+afterwards what was lost), so the COOKIES are handed over the two browsers' CDP
+connections instead, after the new one launches. The spawn reports it:
 
 ```
-seed_from='work' is open in a browser right now. …
-Close the 'work' session first (`stealthy close <instance>`), or seed from
-'default', which the product keeps a separate copyable form of.
+seeded     : seeded from work at 2026-09-21 14:02
+cookies    : 14 handed over from the running source
 ```
 
-`stealthy ls` names the instance to close. `--from default` is the one source
-that works while open, because the seed (`master-snapshot`) is that separate
-copyable form — which also means the copy can be as old as the last time
-`default` was closed; `profiles` prints `SEED CHANGED SINCE` when it is stale.
-Carrying a login out of a browser that is still RUNNING needs a CDP hand-off
-rather than a file copy, and that is F-898, not this.
+That hand-off carries **cookies only** — every kind, including the session
+cookies a file copy can never carry, and every site the source is logged into.
+It does NOT carry `localStorage`, `sessionStorage`, IndexedDB, Cache Storage,
+service workers or saved passwords. If a site keeps its token in `localStorage`,
+close the source first so the file copy can read it. A hand-off that fails does
+not fail the spawn — the session works minus the cookies, and the line reads
+`cookies : NOT carried (<type> from <CDP method>)`; the reason is shape only,
+because a cookie name identifies on its own.
+
+**A source open in a browser this backend does NOT drive is still refused by
+name** — another backend's, or a Chrome someone started by hand:
+
+```
+seed_from='work' is open in a browser this backend does not drive, so its
+cookies cannot be handed over: … Close the 'work' session first (`stealthy
+close <instance>`), or spawn it through this backend (`stealthy spawn --session
+work`) and seed from it while it runs, or seed from 'default', …
+```
+
+`stealthy ls` names the instance to close.
+
+**`--from default` has three outcomes and is worth knowing separately**, because
+`default` is the session a human logs in to and — since a named session's
+browser survives its backend (F-888) — its window is normally still open. It is
+also the default for an unset `--from`, so `stealthy spawn --session NAME` takes
+the same three paths.
+
+| `default`'s window | what happens |
+|---|---|
+| open, driven by this backend (`stealthy ls` lists it) | the seed is copied **and** the live jar is handed over — `cookies : N handed over from the running source`. This is the common case and it is what F-898 added |
+| open in a Chrome we do not drive | the seed is copied and nothing is refused. The seed is only as fresh as the last close, which is what `SEED CHANGED SINCE` on the `seeded` line means |
+| closed | the seed is copied, exactly as in 2.1.12 |
+
+The copy always comes from the seed (`master-snapshot`) and never from the live
+`default` directory — that is what makes it safe — and while `default` is open
+the seed is not refreshed, which is why the hand-off matters: it puts the
+current jar on top of a copy that may be days old.
+
+The one refusal here is a machine with **no seed yet AND `default` open**:
+
+```
+the 'default' session has no copyable form yet and its browser is open, so
+there is nothing safe to seed from: … Close the 'default' session once
+(`stealthy close <instance>`); the seed every later session is copied from is
+written when it closes, …
+```
+
+Nothing is created on disk when that happens. Closing the `default` window once
+writes the seed and the refusal is gone for good, open or closed.
 
 **One-time job if you have a session directory named `master` or
 `master-snapshot`.** Those two names are reserved (F-894): `spawn_browser` used

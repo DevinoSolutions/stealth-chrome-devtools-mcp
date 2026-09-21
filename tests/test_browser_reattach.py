@@ -171,7 +171,7 @@ class TestPersistenceGuarantees:
         The directory and every session-state file survive; only regenerable
         caches go, which Chrome rebuilds on the next launch.
         """
-        from stealth_chrome_devtools_mcp.embedded import clone_storage
+        from stealth_chrome_devtools_mcp.embedded import profile_copy
 
         named = tmp_path / "github-session"
         (named / "Default").mkdir(parents=True)
@@ -179,7 +179,7 @@ class TestPersistenceGuarantees:
         (named / "Default" / "Cache").mkdir()
         (named / "Default" / "Cache" / "big").write_bytes(b"x" * 64)
 
-        clone_storage._trim_profile_regenerable(named)
+        profile_copy.trim_regenerable(named)
 
         assert named.exists()
         assert (named / "Default" / "Cookies").read_bytes() == b"login"

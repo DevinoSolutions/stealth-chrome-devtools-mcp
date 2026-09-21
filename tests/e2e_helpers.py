@@ -311,6 +311,50 @@ def visible_window_pids() -> set[int]:
     return found
 
 
+def browsers_on(profile) -> bool:
+    """Is any Chromium process still running on *profile*?
+
+    Deliberately NOT ``async``: a ``psutil`` walk has no yield point, and a
+    coroutine here would promise the loop one it never gets.
+    """
+    import contextlib
+
+    import psutil
+
+    target = str(profile).lower()
+    for proc in psutil.process_iter(["name", "cmdline"]):
+        with contextlib.suppress(Exception):
+            if "chrome" not in (proc.info["name"] or "").lower():
+                continue
+            if any(target in (arg or "").lower() for arg in proc.info["cmdline"] or ()):
+                return True
+    return False
+
+
+async def released(profile, *, budget: float = 30.0) -> None:
+    """Wait for a torn-down node's Chrome to actually EXIT before the next runs.
+
+    ``close_instance`` offloads its teardown, so it returns while the process
+    tree is still dying — and the files that use this deliberately leave a
+    browser RUNNING mid-test, so without this barrier three real Chromes launch
+    over the top of three dying ones. That is how a file passed node by node and
+    failed as a FILE on a loaded machine: nodriver's connect deadline is a fixed
+    ≈2.75 s and it loses that race, which surfaces as "Failed to connect to
+    browser" and a retry onto a DIFFERENT directory — i.e. as a take-over that
+    was never attempted. Bounded, and deliberately silent on expiry: a browser
+    that outlives the budget is the next node's capacity problem to report, not
+    a failure of the node that just passed.
+
+    It lives here rather than in either file that needs it because "has this
+    profile been let go" is one question however many E2E modules ask it, and a
+    second copy is what would drift.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    while loop.time() < deadline and browsers_on(profile):
+        await asyncio.sleep(0.2)
+
+
 async def wait_for_js(
     iid: str,
     expression: str,
