@@ -99,6 +99,19 @@ this module's `Path` name, because both arguments are concrete directories on
 this host while the flavour screening that matters is on the caller's STRING,
 one line above.
 
+The separator that makes it STRICTLY inside is **stripped before it is added**
+(delta review N1): `normpath` KEEPS the trailing separator on a filesystem root
+— `D:\` stays `D:\`, `/` stays `/` — so appending one more doubled it and
+matched nothing, and a clone root configured at a drive root would have refused
+every relative request as a walk out of itself. `os.altsep` is in the strip set,
+because a configured root may arrive spelled with a forward slash on Windows,
+and the "landed ON the root" equality is tested separately rather than left to
+the prefix, because at a root the parent IS its own stem plus a separator.
+Pinned directly on the predicate (RED: 2 failed, one per separator spelling),
+because reaching it through the gate would mean moving the whole session root
+to a drive root, which is a fixture no CI box can build and would measure the
+fixture rather than the rule.
+
 **2.2b A refusal names the directory it really opens.** `_landing_words` adds
 the resolved target when, and only when, it differs from the lexical landing.
 Without it the root refusal reached through a junction read `'self' names a
@@ -135,13 +148,18 @@ for no hazard there.
 
 ## 3. Pins
 
-`tests/test_profile_anchor_containment.py`, 38 nodes across two RED rounds.
+`tests/test_profile_anchor_containment.py`, 43 nodes across three RED rounds.
 
 **Round 1 — the finding itself: 28 failed, 3 passed** — every dot shape landed
 on or above a root, both roots were honoured by absolute path, and
 `sub/../acme` did not equal `acme`. The 3 that passed are the guards (an
 ordinary name, the `sessions/` prefix, an ordinary absolute path), and they are
 labelled as such.
+
+**Round 3 — the delta review's N1: 2 failed, 3 passed** — a clone root at a
+filesystem root contained none of its own sessions, under both separator
+spellings. The three that passed are the guards the fix must not break:
+strictness at a root, and an ordinary clone root with its prefix trap.
 
 **Round 2 — the review's S1: 4 failed, 34 passed**, each for its own reason: a
 linked session directory refused through the alias, refused through `session=`,

@@ -775,14 +775,23 @@ def _inside_lexically(path: Path, parent: Path) -> bool:
     one form; ``normcase`` is what makes two spellings of one Windows directory
     compare equal and is the identity on POSIX. The separator on the end is what
     makes it STRICTLY inside — landing ON the root is the clause above's answer,
-    with its own message.
+    with its own message — and it is stripped before it is added, because
+    ``normpath`` KEEPS the trailing separator on a FILESYSTEM root (``D:\\``
+    stays ``D:\\``, ``/`` stays ``/``): appending one more doubled it and
+    matched nothing, so a clone root configured at a drive root refused every
+    relative request as a walk out of itself (review N1). ``os.altsep`` is in
+    the strip set for the same reason both separators are read elsewhere in
+    this module — a configured root may arrive spelled with a forward slash on
+    Windows. The equality is tested separately rather than left to the prefix,
+    because at a root the parent IS its own stem plus a separator.
     """
     try:
-        base = os.path.normcase(os.path.normpath(str(parent)))
+        root = os.path.normcase(os.path.normpath(str(parent)))
         landed = os.path.normcase(os.path.normpath(str(path)))
     except (OSError, ValueError):
         return False
-    return landed.startswith(base + os.sep)
+    separators = os.sep if os.altsep is None else os.sep + os.altsep
+    return landed != root and landed.startswith(root.rstrip(separators) + os.sep)
 
 
 def _landing_words(resolved: Path) -> str:
