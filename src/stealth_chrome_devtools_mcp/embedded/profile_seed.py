@@ -307,6 +307,53 @@ def provenance(profile: Path) -> dict[str, object]:
     }
 
 
+def seed_sentence(fields: dict[str, object]) -> str:
+    """:func:`provenance`'s three fields as ONE sentence (F-897).
+
+    It exists because two surfaces say this out loud — ``stealthy profiles``
+    lists every session's seed, and ``stealthy spawn --from X`` has to show
+    that the flag did something — and two phrasings of one marker would drift
+    the day a fourth field appears. It is PHRASING only: whether the question
+    arises at all is the caller's, because the two callers answer it
+    differently and both are right (``cli._seed_line`` prints an unmarked
+    SESSION directory as unknown, which is the finding worth reading in a
+    listing, while a spawn omits the line rather than claim a seed for the
+    shared profile, which is nobody's copy).
+
+    ``seed_changed_since`` has THREE values and each gets its own ending
+    (F-897 review N1):
+
+    * **True** — ``SEED CHANGED SINCE``, shouted, because it is an ALERT: the
+      source has taken a login since this copy was made and the copy is behind.
+    * **False** — nothing at all. The ordinary case, and a line saying "up to
+      date" on every spawn is noise that teaches a reader to skip the line.
+    * **None** — ``(source unreadable)``. It means no login witness could be
+      read in the recorded source, which a DELETED or renamed source
+      guarantees, and until F-897 it rendered BYTE-IDENTICALLY to False: a
+      vanished source read as a fresh one, and a reused name read as "up to
+      date" about a directory sharing nothing with the source but its spelling.
+      Lowercase and parenthetical on purpose — it is a caveat about what could
+      be READ, not a claim that anything is wrong, and giving it the alert's
+      register would teach a reader to ignore both. It deliberately does not
+      say "deleted": this function sees three fields and not a path, and
+      "exists but holds no login" produces the same None.
+
+    A marker that cannot say WHEN still short-circuits to ``(when: unknown)``
+    above, so a legacy marker never reaches the three-way branch.
+    """
+    seeded_from = fields.get("seeded_from") or UNKNOWN_SEED
+    seeded_at = fields.get("seeded_at")
+    if not seeded_at:
+        return f"seeded from {seeded_from} (when: unknown)"
+    sentence = f"seeded from {seeded_from} at {seeded_at}"
+    changed = fields.get("seed_changed_since")
+    if changed:
+        return sentence + "  SEED CHANGED SINCE"
+    if changed is None:
+        return sentence + "  (source unreadable)"
+    return sentence
+
+
 def is_default_name(requested: str) -> bool:
     """Is this request the bare word ``default`` — the shared session?
 
@@ -385,7 +432,8 @@ def is_bare_name(value: str) -> bool:
 
 
 def _names_nothing(spelling: str, given: str) -> ToolError:
-    """The ONE sentence both spellings get for a request that names no profile.
+    """The ONE sentence every field that takes a NAME gets for a value that
+    names no profile.
 
     One function, because the two spellings answering an EMPTY request
     differently is an asymmetry with nothing behind it — and they did:
@@ -406,12 +454,64 @@ def _names_nothing(spelling: str, given: str) -> ToolError:
     spelling may reach a directory profiles are kept in, and that rule lives in
     ``reserved_reason``. What this one never covers is the exactly-EMPTY
     string, which is "not given" and is answered long before here — see
-    ``profile_request``.
+    ``profile_request`` and ``profile_source.seed_request``, which is in the
+    other module and is why the second name is qualified (review N3).
+
+    **Three fields ask it, not two** (F-897): ``session`` and its alias, and
+    ``seed_from``, which reaches it through ``require_name``. The sentence is
+    IDENTICAL for all three down to its last clause, and that clause is true
+    of each — omitting ``session`` opens the shared session, omitting
+    ``seed_from`` copies it. A per-field variant would be a second way to say
+    one thing, and the field name the sentence opens with is already what
+    tells the caller which argument to go and edit.
     """
     return ToolError(
         f"{spelling} must be a name and {given!r} names no profile. Omit it "
         f"entirely to use the {DEFAULT_SESSION!r} session."
     )
+
+
+def require_name(field: str, value: str, *, path_hint: str) -> str:
+    """THE one refusal of a value that has to be a session NAME, and the one
+    strip that makes it one (F-896, generalised by F-897).
+
+    Two callers ask it about two different parameters — ``session``, which
+    says which profile to OPEN, and ``seed_from``, which says which one to
+    COPY — and a name is the same thing for both. The FIELD is data rather
+    than a second function, because the two messages must name the parameter
+    the caller actually typed: a caller told about ``session`` when they wrote
+    ``seed_from`` goes and edits the wrong argument, which is the class of
+    mistake this file's neighbours keep closing.
+
+    The names-nothing refusal is ``_names_nothing``'s and is NOT a hint this
+    function composes: it is one sentence shared with the alias arm of
+    ``profile_request``, which cannot come through here because
+    ``user_data_dir`` is also the path door. Only the PATH refusal takes a
+    hint, and it has to, because the escape differs — ``session`` has
+    ``user_data_dir`` and ``seed_from`` has none, since you cannot seed from a
+    directory that is not a session.
+
+    "Has a path in it" is ``is_bare_name``'s, so the three sites that ask can
+    never answer differently; the three shapes added here are refusals rather
+    than shape — an absolute path with no separator or drive under some
+    flavour, a ``~`` this layer does not expand, and a name that is only dots.
+    The strip in front of them is also what makes ``" C:foo"`` refusable: the
+    drive is read off the STRIPPED name, so one leading space cannot hide it
+    (F-896 delta review N, reached here by every field rather than by one).
+    """
+    name = value.strip()
+    if not name:
+        raise _names_nothing(field, value)
+    if (
+        not is_bare_name(name)
+        or Path(name).is_absolute()
+        or name.startswith("~")
+        or set(name) == {"."}
+    ):
+        raise ToolError(
+            f"{field} takes a NAME, not a path, and {value!r} is a path. {path_hint}"
+        )
+    return name
 
 
 def profile_request(session: str | None, user_data_dir: str | None) -> str | None:
@@ -478,21 +578,15 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
         if not bare:
             raise _names_nothing("user_data_dir", user_data_dir)
         return bare if is_bare_name(bare) else user_data_dir
-    name = session.strip()
-    if not name:
-        raise _names_nothing("session", session)
-    if (
-        not is_bare_name(name)
-        or Path(name).is_absolute()
-        or name.startswith("~")
-        or set(name) == {"."}
-    ):
-        raise ToolError(
-            f"session takes a NAME, not a path, and {session!r} is a path. "
+    name = require_name(
+        "session",
+        session,
+        path_hint=(
             "Pick a name (letters, digits, dashes), or open a directory by "
             "path with user_data_dir=<path> — `stealthy call spawn_browser "
             "--arg user_data_dir=<path>` from the CLI."
-        )
+        ),
+    )
     if user_data_dir and user_data_dir.strip() != name:
         raise ToolError(
             f"session={session!r} and user_data_dir={user_data_dir!r} name two "

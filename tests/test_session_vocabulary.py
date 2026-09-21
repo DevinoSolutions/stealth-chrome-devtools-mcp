@@ -496,7 +496,13 @@ class TestNoUserFacingStringSaysTheOldWords:
 
 
 def _spawn_namespace(**overrides) -> argparse.Namespace:
-    base = {"session": None, "profile": None, "headed": False, "headless": False}
+    base = {
+        "session": None,
+        "seed_from": None,
+        "profile": None,
+        "headed": False,
+        "headless": False,
+    }
     base.update(overrides)
     return argparse.Namespace(**base)
 

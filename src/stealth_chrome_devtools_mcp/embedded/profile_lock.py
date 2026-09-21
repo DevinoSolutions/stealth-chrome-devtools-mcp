@@ -1,7 +1,7 @@
 """THE one home for INTERPRETING Chrome's process-singleton artefacts — "is this
 profile held by a live process, and who holds it" (F-871).
 
-Interpreting, not owning the names: `clone_storage._REGENERABLE_PROFILE_NAMES`
+Interpreting, not owning the names: `profile_copy.REGENERABLE_NAMES`
 also lists `SingletonLock`/`SingletonSocket`/`SingletonCookie` (and `lockfile`),
 for the different question of what a clone must not copy and what a trim may
 delete. That list is about bytes on disk; this module is about what they MEAN.

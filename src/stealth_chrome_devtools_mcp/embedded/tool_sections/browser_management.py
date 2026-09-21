@@ -78,6 +78,7 @@ async def spawn_browser(
     block_resources: list[str] = None,
     extra_headers: dict[str, str] = None,
     session: str | None = None,
+    seed_from: str | None = None,
     user_data_dir: str | None = None,
     sandbox: Any | None = None,
 ) -> dict[str, Any]:
@@ -141,6 +142,30 @@ async def spawn_browser(
             ``spawn_diagnostics["reattach_declined"]`` saying so, and the old
             browser is left running and untouched — stop that backend first, see
             RUNBOOK, "Recover a stranded login".
+        seed_from (Optional[str]): The NAME of an existing session to copy when
+            ``session`` names one that does not exist yet — so a new session
+            starts with that session's cookies and logins instead of the
+            shared ``default`` session's. Leave UNSET for normal use; unset
+            means ``default``, which is exactly what every session has always
+            been seeded from.
+            It applies ONLY at creation: passing it with a ``session`` that
+            already exists is an ERROR naming where that session was actually
+            seeded from, never a silent no-op and never a re-seed — opening a
+            session keeps what it holds, and overwriting a login a human typed
+            by hand is not something a flag should be able to do by accident.
+            It needs a ``session`` of its own, so it is also an error with no
+            ``session`` or with ``session="default"``.
+            The source must EXIST and must NOT be open in a browser: copying a
+            profile Chrome is writing to silently drops whatever it has locked
+            — which is where the logins are — so an open source is refused BY
+            NAME with the remedy, rather than copied and hoped for. The one
+            exception is ``default`` itself, whose copyable form the product
+            maintains separately, so seeding from it works whether or not it
+            is open (that copy can be as old as the last time ``default`` was
+            closed, which the answer reports as ``seed_changed_since``).
+            What the new session records is the source's NAME:
+            ``spawn_diagnostics["profile_selection"]["seeded_from"]``, a word
+            you can pass straight back as ``session=``.
         user_data_dir (Optional[str]): DEPRECATED, and the ONE thing it still
             buys you is an absolute PATH, which ``session`` refuses. For a name
             it resolves to exactly the same profile ``session`` does — it is the
@@ -191,6 +216,16 @@ async def spawn_browser(
     user_data_dir = rt.clone_storage.require_allowed_user_data_dir(
         user_data_dir, session
     )
+
+    # F-897, and it has to be HERE rather than only in the resolver: a session
+    # whose browser is still running is a session that EXISTS, and the
+    # re-attach below would adopt that browser without the resolver ever
+    # seeing the request — so `--from` would be silently dropped in exactly the
+    # case a caller most wants to be told about. It takes the ANSWER above,
+    # because "is this the shared session" and "does it already exist" are
+    # questions about the directory a request MEANS. The resolver asks again;
+    # it is public and has its own callers, and the cost is one `exists()`.
+    seed_from = rt.clone_storage.require_allowed_seed_from(seed_from, user_data_dir)
 
     # Then the HOST-shaped guard, also outside the try so it is not re-wrapped
     # (F-808): a spawn nobody could ever see must not first clone a profile dir
@@ -251,7 +286,7 @@ async def spawn_browser(
                 return await _adopted_instance_record(held.instance_id, block_resources)
 
         profile_selection = await rt.clone_storage.resolve_profile_selection(
-            user_data_dir
+            user_data_dir, seed_from=seed_from
         )
         spawn_errors = []
 

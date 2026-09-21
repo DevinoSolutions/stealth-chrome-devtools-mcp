@@ -37,6 +37,11 @@ from stealth_chrome_devtools_mcp.embedded.logging_setup import (
 # discipline, and the same one property that moved in the HARD
 # ``tests/goldens/tool_surface.json``. Nothing else in this snapshot moves,
 # which is the thing it exists to say about a change of this shape.
+#
+# F-897 adds ONE more, ``seed_from``, on exactly the same terms and for the
+# same reason: a new session may be copied from an existing one. Again nothing
+# else in this snapshot moves, and again it is the same single property that
+# moved in the HARD golden.
 _GOLDEN_SCHEMA_JSON = r"""
 {
   "browser-management": {
@@ -50,6 +55,7 @@ _GOLDEN_SCHEMA_JSON = r"""
         "idle_timeout_seconds": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Idle Timeout Seconds"},
         "proxy": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Proxy"},
         "sandbox": {"anyOf": [{}, {"type": "null"}], "default": null, "title": "Sandbox"},
+        "seed_from": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Seed From"},
         "session": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Session"},
         "timezone_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Timezone Id"},
         "user_agent": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "User Agent"},

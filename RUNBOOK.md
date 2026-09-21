@@ -438,6 +438,35 @@ session created before 2.1.11 has no such record and reads `seeded from unknown`
 that is the truth, not a fault, and nothing back-fills it. The `default` row and
 the `default-seed` row carry no seed line because they ARE the seed.
 
+### Start a new session from an existing one
+
+```console
+stealthy spawn --session work2 --from work
+```
+
+`--from` (the tool's `seed_from=`) copies a NEW session from an existing one
+instead of from `default`, so it starts already logged in. It applies at
+CREATION only — for a session that already exists it is an error naming where
+that session actually came from, never a silent no-op and never a re-seed over
+a login somebody typed by hand.
+
+**The source must not be open.** Copying a profile Chrome is writing to
+silently drops whatever it has locked — the cookie jar above all — and nothing
+can say afterwards what was lost, so an open source is refused by name:
+
+```
+seed_from='work' is open in a browser right now. …
+Close the 'work' session first (`stealthy close <instance>`), or seed from
+'default', which the product keeps a separate copyable form of.
+```
+
+`stealthy ls` names the instance to close. `--from default` is the one source
+that works while open, because the seed (`master-snapshot`) is that separate
+copyable form — which also means the copy can be as old as the last time
+`default` was closed; `profiles` prints `SEED CHANGED SINCE` when it is stale.
+Carrying a login out of a browser that is still RUNNING needs a CDP hand-off
+rather than a file copy, and that is F-898, not this.
+
 **One-time job if you have a session directory named `master` or
 `master-snapshot`.** Those two names are reserved (F-894): `spawn_browser` used
 to anchor a bare name under `sessions/`, so `user_data_dir="master"` silently
