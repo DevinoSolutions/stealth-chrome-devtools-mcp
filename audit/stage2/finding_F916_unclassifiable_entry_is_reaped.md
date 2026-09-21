@@ -96,11 +96,26 @@ about ENTRIES, F-918 the layer that knows about PROCESSES.
 `browser_reattach.py` was at **999 of its 1000-LOC default** and the fix needed a
 third answer in it. Caps ratchet down only, so the cut came first: the **endpoint
 ladder** (`endpoint`, `_port_from_profile`, `DEVTOOLS_PORT_FILE` and its
-three-witness argument) moved whole into `embedded/cdp_attach.py` — beside the
-door that spends it, on the precedent of F-910 (`process_exit`) and F-897
-(`profile_copy`). That module already reasoned about the endpoint as "a port and
-a host"; a door nobody can address is not a door. **999 → 988**; `cdp_attach.py`
-182 → 248.
+three-witness argument) moved whole into a new leaf, `embedded/cdp_endpoint.py`,
+named for the question it answers — "where is the CDP endpoint of the browser
+this RECORD ENTRY describes". **999 → 991**; the new leaf is 93 LOC.
+
+**The first attempt put it in `cdp_attach` and that was wrong.** Reviewed and
+reverted, and the decisive item is a fact rather than a preference: measured,
+`cdp_attach` **never calls** `endpoint` — both call sites are
+`browser_reattach`'s two entry points — so the move relocated a function away
+from both of its callers into a module that does not use it. The justification
+written at the time inverted itself in its own second clause ("both of
+`browser_reattach`'s entry points ask for it"). Three more: it collapsed the
+WHICH/HOW split the map states deliberately (`browser_reattach` owns WHEN to
+knock, `cdp_attach` owns the door); the ladder's three witnesses are all about a
+RECORD ENTRY while `cdp_attach`'s subject is a websocket; and — independently
+blocking — the move made `cdp_attach` import `browser_cmdline` and
+`browser_pid_registry`, so it was no longer a leaf, while the same commit's
+CLAUDE.md row still ended "A leaf: `nodriver` … and `debug_logger`". A commit
+that rewrites a row and leaves its last sentence false is the documentation
+defect the map exists to prevent. `cdp_attach.py` is restored byte-for-byte and
+its row with it.
 
 ## 5. The pins
 
@@ -111,14 +126,17 @@ recovery would never reap again), and `test_recovery_does_not_kill_the_
 unreachable_browser` drives the real `recover_orphans` and asserts on the pid
 list the kill path received — the harm, not the classification.
 
-RED at `a3d22b3`: 4 of the 6 fail, and the two that pass are the controls.
+RED at `a3d22b3`: 4 of the 6 fail — all four behaviour-RED — and the two that
+pass are the controls. The lane total, and why the first number reported for it
+was wrong, is `finding_F918_*.md` §4.1.
 
 ## 6. Verification, and what this costs
 
 After the fix, same harness, same five inputs: the three could-not-establish
 rows are `spared` with `unclassifiable == {'i'}`, the two controls are still
-`REAPED`. 14/14 in the new file; 528 passed across every non-integration
-importer of `process_cleanup` / `browser_reattach` / `cdp_attach`.
+`REAPED`. 20/20 in the pin file — which carries F-922's six as well, that fix
+having landed in this same branch — and 3639 passed, 1 skipped across the whole
+non-integration suite.
 
 **The cost, named rather than hidden: a browser we can neither adopt nor reap is
 left running and left recorded.** That is the leak the old docstring warned

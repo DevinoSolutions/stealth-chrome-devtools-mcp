@@ -310,6 +310,12 @@ class ProcessCleanup:
             owner_pid, owner_create_time
         )
 
+    def _skip_note(self, action: str, subject: str, instance_id: str, why: str) -> None:
+        """One INFO line for a pid the reap declined to use, and why."""
+        debug_logger.log_info(
+            "process_cleanup", action, f"Skipping {subject} for {instance_id}: {why}"
+        )
+
     def _kill_processes_for_metadata(  # noqa: C901,PLR0912  plan_M11a
         self,
         instance_id: str,
@@ -330,9 +336,22 @@ class ProcessCleanup:
         matched by ``instance_id``, so on a SHARED profile one stale entry's
         reap reached a browser another entry had just protected (F-917).
         """
-        pids_to_kill = self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
+        # The DIRECTORY scan is for DISPOSABLE profiles only (F-922, owner
+        # ruling): a clone directory is ours by construction — a human never
+        # opens one by hand — while a NAMED profile is exactly what a human DOES
+        # open, and since F-888 a browser on one outlives its backend. There we
+        # may end only what the RECORD names. Same predicate F-888 and the
+        # delete guard ask, read the other way round.
+        pids_to_kill: set[int] = (
+            set()
+            if browser_pid_registry.on_persistent_profile(metadata)
+            else self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
+        )
         fallback_pid = metadata.get("pid")
         stored_create_time = metadata.get("create_time")
+        subject = f"fallback PID {fallback_pid}"
+        recycled = "create_time mismatch (recycled PID)"
+        late = "started after server init"
 
         if recovery:
             # Safety net: never kill processes that started after this server
@@ -344,12 +363,7 @@ class ProcessCleanup:
                     if pid_create_time < self._init_time:
                         safe_pids.add(pid)
                     else:
-                        debug_logger.log_info(
-                            "process_cleanup",
-                            "recovery",
-                            f"Skipping PID {pid} for {instance_id}: "
-                            f"started after server init",
-                        )
+                        self._skip_note("recovery", f"PID {pid}", instance_id, late)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass  # gone or inaccessible — skip conservatively
             pids_to_kill = safe_pids
@@ -362,31 +376,16 @@ class ProcessCleanup:
                         if psutil.Process(fallback_pid).create_time() < self._init_time:
                             pids_to_kill = {fallback_pid}
                         else:
-                            debug_logger.log_info(
-                                "process_cleanup",
-                                "recovery",
-                                f"Skipping fallback PID {fallback_pid} for "
-                                f"{instance_id}: started after server init",
-                            )
+                            self._skip_note("recovery", subject, instance_id, late)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
                 else:
-                    debug_logger.log_info(
-                        "process_cleanup",
-                        "recovery",
-                        f"Skipping fallback PID {fallback_pid} for {instance_id}: "
-                        "create_time mismatch (recycled PID)",
-                    )
+                    self._skip_note("recovery", subject, instance_id, recycled)
         elif not pids_to_kill and isinstance(fallback_pid, int):
             if self._fallback_pid_identity_ok(fallback_pid, stored_create_time):
                 pids_to_kill = {fallback_pid}
             else:
-                debug_logger.log_info(
-                    "process_cleanup",
-                    "kill_browser_process",
-                    f"Skipping fallback PID {fallback_pid} for {instance_id}: "
-                    "create_time mismatch (recycled PID)",
-                )
+                self._skip_note("kill_browser_process", subject, instance_id, recycled)
 
         # THE one place the set is finally spent, so the subtraction happens
         # once here rather than at each of the three ways a pid gets into it.

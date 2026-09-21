@@ -103,7 +103,33 @@ nodes: `AccessDenied` and `OSError` must answer `False` with neither
 unchanged case, pinned with its measurement); a verified `chrome.exe` must still
 be terminated; a verified `explorer.exe` must still be refused.
 
-RED at `a3d22b3`: the two unreadable cases.
+RED at `a3d22b3`: the two unreadable cases, both behaviour-RED.
+
+### 4.1 Re-measuring after correcting a pin moved the number
+
+The lane's three pin classes are **14 nodes, 9 RED at `a3d22b3`**: 7
+behaviour-RED (F-916's four, F-917's one, and the two above) and 2
+signature-RED — F-917's pair, which fail on a `TypeError` for a keyword argument
+the pre-fix signature does not have.
+
+The commit that introduced them says **10**, and that number is wrong. It was
+measured while the zombie node above asserted `killed is False` — the answer its
+author expected before reading the pre-fix source, which in fact already reached
+`except psutil.NoSuchProcess` (listed BEFORE the blanket handler) and answered
+`True` without terminating. Correcting that assertion turned the node from a RED
+into a control, and the count was never re-run.
+
+Measured, not reasoned: the tree re-exported at `a3d22b3` with this file's pins
+dropped in gives 9 failed / 5 passed; flip that one assertion back and it gives
+exactly 10 failed / 4 passed, which is where the published number came from. The
+export was confirmed to be the unfixed product by four witnesses — no
+`reap_guard` and no `cdp_endpoint` module, `browser_reattach.endpoint` still
+present at its pre-move home with `Classified.unclassifiable` instead of
+`.spare`, and `_kill_processes_for_metadata` carrying no `protected_pids`.
+
+**Re-measure a RED count after correcting any pin in the set.** A corrected pin
+is a different experiment, and the number belongs to the experiment that was
+falsified rather than to the one that shipped.
 
 ## 5. Verification
 
@@ -122,7 +148,7 @@ and the log line now states the decision rather than only the failure:
 > login`
 
 14/14 in the new file; 528 passed across every non-integration importer of
-`process_cleanup` / `browser_reattach` / `cdp_attach`; ruff format + check, ty,
+`process_cleanup` / `browser_reattach` / `cdp_endpoint`; ruff format + check, ty,
 vulture, suppression owners, pinned imports, file budgets and
 `dump_tool_surface.py --check` all clean.
 

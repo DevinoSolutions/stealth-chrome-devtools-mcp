@@ -103,13 +103,20 @@ nodes:
 * `test_an_unprotected_pid_on_the_directory_is_still_killed` — that it is a
   subtraction and not a switch.
 
-RED at `a3d22b3`: all three.
+RED at `a3d22b3`: all three — but only the FIRST is behaviour-RED. The other two
+fail with `TypeError: ProcessCleanup._kill_processes_for_metadata() got an
+unexpected keyword argument 'protected_pids'`, which is evidence that the
+parameter does not exist yet: a statement about an API, not about a kill. So the
+harm is pinned RED exactly once, by
+`test_stale_entry_does_not_kill_a_spared_siblings_browser`, and that is the node
+to re-run if this fix is ever questioned. The lane total is `finding_F918_*.md`
+§4.1.
 
 ## 6. Verification, and what this costs
 
 Same harness after the fix: `kills issued: []`, `i-live` still recorded and
-still running, `i-stale` dropped. 14/14 in the new file, 528 across every
-non-integration importer.
+still running, `i-stale` dropped. 20/20 in the pin file, and 3639 passed with 1
+skipped across the whole non-integration suite.
 
 **The cost:** a browser that a spared entry names is now never reaped by a
 sibling entry's pass, even when that browser really is an orphan of the sibling.
@@ -119,9 +126,21 @@ either intend to adopt or could not classify. `kill-orphans --force` sets
 `spare` to the empty set and therefore `protected_pids` to empty too, so the
 operator's override is unaffected.
 
-**Residual (not this finding's):** a browser on that directory with **no record
-entry at all** — the owner's own Chrome, started by hand — is still in the
-directory scan's answer and is still killed, subject only to the start-time
-fence. Nothing in the record names it, so nothing here can spare it; what
-decides that case is whether recovery should reap by directory at all, which is
-the audit's D2 residual and needs the owner's ruling rather than a patch.
+**The residual this finding named is now RESOLVED — by F-922, in this same
+branch.** It read: a browser on that directory with no record entry at all — the
+owner's own Chrome, started by hand — is still in the directory scan's answer
+and is still killed, and nothing here can spare it because nothing in the record
+names it. That needed the owner's ruling rather than a patch, and the ruling
+came: the directory scan is for DISPOSABLE profiles only; on a named/persistent
+profile a reap may end only what the RECORD names. See
+`finding_F922_named_profile_reaped_by_directory.md`.
+
+**What that did to THIS finding's surface, and to two of its pins.** The
+subtraction now guards only the disposable case — where two entries can still
+share one clone directory — because on a named profile the scope rule gets there
+first. The two unit pins were left VACUOUS by it: they ran on a persistent entry
+and, measured, answered `[]` with AND without `protected_pids`. Both moved to a
+disposable entry and each now asserts BOTH directions, so neither can rot that
+way again; F-922 §4.1 carries the detail. The end-to-end pin stays on the shared
+persistent profile — it is the harm as reported, and two guards on the owner's
+logged-in Chrome is the right number.

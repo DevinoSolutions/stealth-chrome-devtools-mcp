@@ -177,10 +177,21 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # loop. Behaviour unchanged — terminate, wait 3 s, kill, wait 2 s, same
     # exhaustion warning. Caps ratchet DOWN only; this one is the ruff-clean
     # merged file measured, as every number in this row has been.
+    # F-922 RATCHETS this row 1007 -> 1006. Narrowing the directory scan to
+    # DISPOSABLE profiles is one conditional at the one place the kill set is
+    # BUILT, and the file was at exactly its cap, so the change paid for itself:
+    # the four sites that logged "Skipping <pid> for <id>: <reason>" in four
+    # spellings became one `_skip_note`. That is a deduplication and not a
+    # compression -- a reap that DECLINES is exactly what an operator goes
+    # looking for, and one helper is where its wording lives now. An extraction
+    # of the two recorded-pid branches into a `_recorded_kill_pid` helper was
+    # tried FIRST and reverted: measured, it took the file to 1036, because two
+    # signatures and two docstrings cost more than the duplication they removed.
+    # Caps ratchet DOWN only; this one is the ruff-clean file measured.
     "embedded/process_cleanup.py": (
-        1007,
+        1006,
         "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809 + plan_F856 + F-888"
-        " - F-917/F-918",
+        " - F-917/F-918 - F-922",
     ),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
     # + honest message + debug_logger.log_info on failure) + 1 (plan_M4ph1

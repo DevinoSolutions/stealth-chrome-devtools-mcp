@@ -34,8 +34,8 @@ all four hold, asked in cheapest-first order:
    the recorded tolerance, and a Chromium-family process name. Supplied as
    ``browser_alive`` rather than re-implemented, so the recycled-pid tolerance
    has one home (``process_cleanup``).
-4. A CDP endpoint is recoverable for it (:func:`cdp_attach.endpoint`). Without
-   a port there is nothing to attach to.
+4. A CDP endpoint is recoverable for it (:func:`cdp_endpoint.endpoint`).
+   Without a port there is nothing to attach to.
 
 Conditions 1 and 2 are DECISIONS — a live sibling owns it, or its profile is
 disposable — and an entry failing either is the reaper's. Conditions 3 and 4 can
@@ -45,9 +45,11 @@ PERSISTENT that is not a decision at all: those answer
 (F-916). :mod:`reap_guard` carries the rule and names what sparing costs.
 
 **The address is not here either.** Which PORT to knock on is
-:func:`cdp_attach.endpoint`'s, beside the door that spends it — the
-three-witness ladder this file gave up when F-916 needed a third answer in it
-and the file was at its 1000-LOC cap.
+``cdp_endpoint``'s — a three-witness ladder over a RECORD ENTRY, extracted by
+F-916 when this file was at its 1000-LOC cap and needed a third answer in it.
+It is its own leaf rather than part of the door: ``cdp_attach`` never calls it,
+and its witnesses are a recorded field, a live process's argv and a file in a
+profile, none of which a websocket knows about.
 
 **The door is not here.** Entering a browser that is already running is a
 question ``desktop_launch.launch_and_attach`` had too, so it is ONE leaf with two
@@ -80,6 +82,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
     browser_pid_registry,
     cdp_attach,
+    cdp_endpoint,
     desktop_launch,
     reap_guard,
     tab_identity,
@@ -240,7 +243,7 @@ def _adoptable_entry(  # noqa: PLR0911  PERMANENT(one early return per condition
         # F-918's guard at the kill itself, which refuses a pid it cannot read.
         return None
 
-    port = cdp_attach.endpoint(entry)
+    port = cdp_endpoint.endpoint(entry)
     if port is None:
         # Alive, ours, persistent — and no door into it. F-916's measured
         # population: 2.1.8/2.1.9 recorded no `cdp_port`, and those are the
@@ -440,7 +443,7 @@ def held_by(
         if recorded_id is not None
         else {"pid": holder, "user_data_dir": user_data_dir}
     )
-    port = cdp_attach.endpoint(entry_for_port)
+    port = cdp_endpoint.endpoint(entry_for_port)
     if port is None:
         # A holder was FOUND and we still cannot get in — the one outcome that
         # must not read as "an ordinary spawn, nothing to say". The browser is

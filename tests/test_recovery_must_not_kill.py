@@ -15,6 +15,11 @@ to the kill.
   another entry had just protected.
 * **F-918** — the ACT. ``_kill_process_by_pid`` logged "Could not verify process"
   from a blanket ``except`` and then terminated the pid anyway.
+* **F-922** — the SCOPE, and the owner's ruling on F-917's residual. The kill set
+  was built by scanning the ``user_data_dir`` whatever KIND of profile it was, so
+  a Chrome the owner started by hand on one of their own named sessions — in no
+  record entry at all, and therefore reachable by no spare — was killed by a
+  stale entry's reap. The directory scan is for DISPOSABLE profiles only now.
 
 Hermetic throughout: the record is a ``tmp_path`` file, both liveness witnesses
 are injected, psutil is patched, and **nothing here may terminate a real
@@ -37,6 +42,8 @@ from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 DEAD_OWNER = 9001
 LIVE_CHROME = 7777
 DEAD_CHROME = 7778
+# A browser in NO record entry at all: the one the owner started by hand.
+OWNERS_CHROME = 5555
 PORT = 51234
 
 
@@ -246,7 +253,17 @@ class TestUnclassifiableEntryIsSpared:
 
 
 class TestReapDoesNotCrossTheSpare:
-    """One stale entry's reap must not kill a browser another entry protected."""
+    """One stale entry's reap must not kill a browser another entry protected.
+
+    **F-922 narrowed where this can happen at all.** The subtraction guards the
+    DIRECTORY-derived kill set, and since the owner's ruling that set is only
+    built for DISPOSABLE profiles — so the two unit pins below run on an
+    auto-clone entry, where two entries sharing one directory is still
+    reachable (a re-track, a record carried across versions). Run on a
+    persistent entry they would pass VACUOUSLY: measured, the answer is the
+    same with and without ``protected_pids``, because no directory scan ran.
+    Each therefore pins BOTH directions.
+    """
 
     def test_stale_entry_does_not_kill_a_spared_siblings_browser(self, tmp_path):
         """Two entries, ONE directory — the shared profile, i.e. the master.
@@ -260,6 +277,12 @@ class TestReapDoesNotCrossTheSpare:
         ``create_time`` predates ``_init_time``): that fence is what hides this
         on a machine where the pid happens to be absent, and a pin it satisfies
         would read green without the fix.
+
+        Since F-922 this shared profile is PERSISTENT, so the scope rule stops
+        it one layer earlier and this pin no longer isolates the subtraction —
+        the two unit pins below do that on a disposable entry. It is kept
+        because it is the harm as REPORTED, and because two guards on the
+        owner's logged-in Chrome is the right number.
         """
         profile = tmp_path / "master"
         profile.mkdir()
@@ -307,32 +330,46 @@ class TestReapDoesNotCrossTheSpare:
         Both ways a pid can get into that set — the directory scan and the
         recorded fallback pid — pass through it, so neither can grow a second
         answer to "is this one protected".
+
+        The counter-assertion is what keeps this honest: the SAME input with an
+        empty ``protected_pids`` must kill, or the pin is measuring the absence
+        of a directory scan rather than the subtraction.
         """
         pc = _cleanup(tmp_path)
-        metadata = _entry(pid=LIVE_CHROME, user_data_dir=str(tmp_path / "master"))
+        metadata = _entry(
+            pid=LIVE_CHROME,
+            auto_clone=True,
+            user_data_dir=str(tmp_path / "uc_shared"),
+        )
 
-        killed: list[int] = []
-        with (
-            patch.object(
-                pc, "_get_browser_pids_for_profile", return_value={LIVE_CHROME}
-            ),
-            patch.object(
-                pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
-            ),
-        ):
-            pc._kill_processes_for_metadata(
-                "i-stale",
-                metadata,
-                recovery=False,
-                protected_pids=frozenset({LIVE_CHROME}),
-            )
+        def reap(protected):
+            killed: list[int] = []
+            with (
+                patch.object(
+                    pc, "_get_browser_pids_for_profile", return_value={LIVE_CHROME}
+                ),
+                patch.object(
+                    pc,
+                    "_kill_process_by_pid",
+                    lambda pid, iid: killed.append(pid) or True,
+                ),
+            ):
+                pc._kill_processes_for_metadata(
+                    "i-stale", metadata, recovery=False, protected_pids=protected
+                )
+            return killed
 
-        assert killed == []
+        assert reap(frozenset({LIVE_CHROME})) == []
+        assert reap(frozenset()) == [LIVE_CHROME], "otherwise the pin is vacuous"
 
     def test_an_unprotected_pid_on_the_directory_is_still_killed(self, tmp_path):
         """The filter is a subtraction, not a switch — everything else still goes."""
         pc = _cleanup(tmp_path)
-        metadata = _entry(pid=DEAD_CHROME, user_data_dir=str(tmp_path / "master"))
+        metadata = _entry(
+            pid=DEAD_CHROME,
+            auto_clone=True,
+            user_data_dir=str(tmp_path / "uc_shared"),
+        )
 
         killed: list[int] = []
         with (
@@ -474,3 +511,129 @@ class TestUnverifiableProcessIsNotKilled:
 
         assert killed is False
         proc.terminate.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# F-922 — a named profile is reaped by the RECORD, never by its DIRECTORY
+# ---------------------------------------------------------------------------
+
+
+def _reap(pc, metadata, on_directory, *, recovery=True):
+    """Drive one reap; answer the pids the kill path actually received.
+
+    The recovery start-time fence is deliberately let THROUGH — every patched
+    ``create_time`` predates ``_init_time`` — so what these pins measure is the
+    kill SET itself and not a fence that happens to narrow it on some machines.
+    """
+    before = MagicMock()
+    before.create_time.return_value = pc._init_time - 50.0
+    killed: list[int] = []
+    with (
+        patch.object(
+            pc, "_get_browser_pids_for_profile", return_value=set(on_directory)
+        ),
+        patch(
+            "stealth_chrome_devtools_mcp.embedded.process_cleanup.psutil.Process",
+            return_value=before,
+        ),
+        patch.object(
+            pc, "_kill_process_by_pid", lambda pid, iid: killed.append(pid) or True
+        ),
+    ):
+        pc._kill_processes_for_metadata("i-x", metadata, recovery=recovery)
+    return sorted(killed)
+
+
+class TestPersistentProfileIsReapedByRecordOnly:
+    """The owner's ruling: the DIRECTORY scan is for disposable profiles only.
+
+    An auto-clone directory is ours BY CONSTRUCTION — a human would never open
+    one by hand — so anything running on it is ours to reap. A NAMED profile is
+    exactly what a human does open by hand; that is what ``session=`` is for,
+    and since F-888 a persistent-profile browser is meant to outlive its
+    backend. The safe direction therefore differs by profile KIND, which is why
+    one uniform rule was the wrong shape.
+
+    The predicate is ``browser_pid_registry.on_persistent_profile`` read the
+    other way round — the same one F-888 and the profile-deletion guard already
+    ask. There is deliberately no second notion of "ours".
+    """
+
+    def test_a_hand_started_chrome_on_a_named_profile_is_not_killed(self, tmp_path):
+        """The reported harm. The owner's Chrome is in NO record entry, so no
+        spare can reach it (F-917 protects recorded pids); only narrowing the
+        SCOPE can."""
+        stale = _entry(
+            pid=DEAD_CHROME,
+            user_data_dir=str(tmp_path / "sessions" / "work"),
+            auto_clone=False,
+        )
+
+        assert _reap(_cleanup(tmp_path), stale, [OWNERS_CHROME]) == []
+
+    def test_the_close_path_is_narrowed_the_same_way(self, tmp_path):
+        """``kill_browser_process`` reaches the same function with
+        ``recovery=False``, and a named profile is a named profile whichever
+        caller arrived — keying the rule on the CALLER would be a second answer
+        to "may we kill by directory"."""
+        stale = _entry(
+            pid=DEAD_CHROME,
+            user_data_dir=str(tmp_path / "sessions" / "work"),
+            auto_clone=False,
+        )
+
+        assert _reap(_cleanup(tmp_path), stale, [OWNERS_CHROME], recovery=False) == []
+
+    def test_a_named_profile_reap_no_longer_takes_a_bystander_with_it(self, tmp_path):
+        """Even a JUSTIFIED reap over-reached: the entry's own browser is killed
+        and the owner's is killed beside it, because both are on the
+        directory."""
+        pc = _cleanup(tmp_path)
+        live = _entry(
+            pid=LIVE_CHROME,
+            create_time=pc._init_time - 50.0,
+            user_data_dir=str(tmp_path / "sessions" / "work"),
+            auto_clone=False,
+        )
+
+        assert _reap(pc, live, [LIVE_CHROME, OWNERS_CHROME]) == [LIVE_CHROME]
+
+    def test_a_named_profiles_own_recorded_browser_is_still_reaped(self, tmp_path):
+        """The control that keeps this a NARROWING and not a stand-down: what
+        the record names is still ended, identity-checked as it always was."""
+        pc = _cleanup(tmp_path)
+        live = _entry(
+            pid=LIVE_CHROME,
+            create_time=pc._init_time - 50.0,
+            user_data_dir=str(tmp_path / "sessions" / "work"),
+            auto_clone=False,
+        )
+
+        assert _reap(pc, live, [LIVE_CHROME]) == [LIVE_CHROME]
+
+    def test_a_disposable_auto_clone_still_reaps_its_whole_directory(self, tmp_path):
+        """The other half of the ruling, and the reason it is not "record-only
+        everywhere": an orphaned clone browser the record lost would otherwise
+        accumulate forever on a directory nothing else will ever claim."""
+        clone = _entry(
+            pid=DEAD_CHROME,
+            user_data_dir=str(tmp_path / "sessions" / "uc_throwaway"),
+            auto_clone=True,
+        )
+
+        assert _reap(_cleanup(tmp_path), clone, [OWNERS_CHROME]) == [OWNERS_CHROME]
+
+    def test_an_entry_missing_both_keys_reads_as_disposable(self, tmp_path):
+        """Stated rather than left to be discovered. ``on_persistent_profile``
+        answers False for an entry carrying NEITHER key, so a hand-edited or
+        cross-version record still gets the directory scan. That is the audit's
+        A1 shape and it is unchanged here — this finding narrowed the scope, it
+        did not fix what decides the kind."""
+        legacy = {
+            "pid": DEAD_CHROME,
+            "create_time": 1700000000.0,
+            "user_data_dir": str(tmp_path / "sessions" / "work"),
+            "timestamp": 0,
+        }
+
+        assert _reap(_cleanup(tmp_path), legacy, [OWNERS_CHROME]) == [OWNERS_CHROME]

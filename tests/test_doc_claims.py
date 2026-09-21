@@ -129,6 +129,7 @@ class TestNavMapModules:
         "browser_cmdline",
         "backend_client",
         "cdp_attach",
+        "cdp_endpoint",
         "reap_guard",
         "tool_registry",
         "tool_errors",
@@ -265,6 +266,8 @@ class TestLoadBearingSymbols:
                 "attach_reclaiming",
                 "close",
                 "CDP_HOST",
+            ],
+            "embedded.cdp_endpoint": [
                 "endpoint",
                 "DEVTOOLS_PORT_FILE",
             ],
