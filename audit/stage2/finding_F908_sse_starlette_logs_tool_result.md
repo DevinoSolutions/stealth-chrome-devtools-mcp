@@ -416,19 +416,30 @@ premise, and the end-to-end render) and `TestTheFamiliesDeliberatelyLeftOut`
    (`mcp-session-id`), not a page's. Worth its own finding only if an httpx
    client of ours ever talks to a third party.
 
-5. **`reset_logging()` in the pin file is still a global mutation with no
-   restore** (F-906 review N2, whose `96d7876` gave it a docstring saying so).
-   Unchanged by this work, and the slice was run with the mutating file both
-   **first** and **last** to confirm order-independence. `pytest-randomly` is
-   not installed in this venv, so this remains latent rather than live.
+5. **`reset_logging()` in the pin file was a global mutation with no restore**
+   (F-906 review N2, whose `96d7876` gave it a docstring saying so) — **CLOSED
+   by F-907's `11662ae`, which this branch merges.** It did not stay latent:
+   no ordering plugin was needed, because F-907's pin file carries the same
+   fixture and run ahead of `tests/test_observability.py` it turned that file's
+   RELEASE-BLOCKER canary pin red (2 failed / 400 passed in natural order, 402
+   passed reversed). The mechanism was **two** process globals, not one — the
+   stripped root handlers, and `debug_logger.enable()` left on by
+   `drive(debug_ring=True)`, whose `_emit_stderr` echoes every later tool
+   failure in the process to real stderr. `tests/logging_state.py` is now THE
+   one home for snapshot/diff-restore, and this file's `reset_logging` is a
+   re-export of `logging_state.reset` rather than a second copy; the fixture
+   runs inside `logging_state.owned()` and puts the ring back to what it WAS.
+   Measured after the merge: the whole logging/observability slice is **483
+   passed in BOTH orderings**.
 
    F-908 does add one interaction worth naming: `reset_logging` wipes the
    `FastMCP` root that `fastmcp/__init__.py` configures at import, so
    `test_the_fastmcp_argument_line_is_unreachable_from_root` re-runs the
    library's **own** configurator before asserting. That is the honest shape —
    the premise under test is "fastmcp still shields its own family", not "this
-   process happened to be configured" — but it is a second reason to replace
-   the reset with a snapshot-and-restore if random ordering ever arrives.
+   process happened to be configured" — and it survives the restore unchanged,
+   because `logging_state.reset` still puts the floor down inside the block;
+   what changed is only that the block hands the process back afterwards.
 
 6. **F-907 is the third line this floor sits below**, and the three are
    deliberately separate findings rather than one widened cap: F-907's

@@ -52,6 +52,7 @@ import pytest
 import sentry_sdk
 from sentry_sdk.integrations.logging import LoggingIntegration
 
+import logging_state
 from stealth_chrome_devtools_mcp.embedded import backend_env, logging_setup
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -271,41 +272,37 @@ class Sinks:
         return self.durable | self.ring | self.sentry | self.downstream
 
 
-def reset_logging() -> None:
-    """Every library logger back to NOTSET, every handler gone. The pins set
-    global process state, so each one starts from the same floor.
-
-    It RESETS and does not RESTORE, and that is worth knowing rather than
-    hiding (F-906 review N2): anything an earlier test module configured on a
-    logger is destroyed here, not put back. It is safe in this suite because
-    the only cross-module logging state is `stealth.<role>`'s handler, which
-    `configure_logging` reinstalls on demand — and it was verified by running
-    the whole logging/observability slice with this file placed FIRST. If
-    random test ordering is ever introduced, snapshot-and-restore instead.
-    """
-    for name in list(logging.Logger.manager.loggerDict):
-        logger = logging.getLogger(name)
-        for handler in list(logger.handlers):
-            logger.removeHandler(handler)
-            with contextlib.suppress(Exception):
-                handler.close()
-        logger.setLevel(logging.NOTSET)
-        logger.propagate = True
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        root.removeHandler(handler)
-        with contextlib.suppress(Exception):
-            handler.close()
-    root.setLevel(logging.WARNING)
+#: Every library logger back to NOTSET, every handler of ours gone — the floor
+#: each pin starts from. Re-exported so ``drive`` below can re-floor mid-test;
+#: OWNING the process's logging is the fixture's job.
+#:
+#: F-906's review named the residual this closes (N2): the version here RESET
+#: and never RESTORED, so anything an earlier module had configured was
+#: destroyed rather than put back. F-907 measured what that cost — this slice
+#: was order-dependent — and built ``tests/logging_state.py`` as the one home
+#: for snapshot/diff-restore. There is deliberately no second copy of it here.
+reset_logging = logging_state.reset
 
 
 @pytest.fixture(autouse=True)
 def _isolated_logging():
-    reset_logging()
-    get_settings.cache_clear()
-    yield
-    reset_logging()
-    get_settings.cache_clear()
+    """Own every process-global these pins mutate, and hand them all back.
+
+    TWO globals, not one, and the second is the one that actually disclosed
+    another module's canaries: ``drive(debug_ring=True)`` calls
+    ``debug_logger.enable()``, and ``debug_logger._emit_stderr`` prints every
+    later tool failure in the process to **real stderr** exactly while the ring
+    is enabled. So it is restored to what it WAS rather than to ``disable()``
+    — the general rule, not a patch for either half.
+    """
+    ring_was_enabled = debug_logger._enabled
+    with logging_state.owned():
+        get_settings.cache_clear()
+        try:
+            yield
+        finally:
+            debug_logger.enable() if ring_was_enabled else debug_logger.disable()
+            get_settings.cache_clear()
 
 
 def drive(
