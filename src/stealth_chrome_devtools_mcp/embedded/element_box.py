@@ -27,16 +27,28 @@ the difference from F-907, whose three box-model WARNINGs are unreachable in
 users**, and it is a bare ``Exception``, so it propagates straight past
 ``Element.mouse_click``'s ``except AttributeError`` and out of the call.
 
-Where it went, measured through our own handlers on a real page:
+Where it went, measured through our own handlers on a real page — each site is
+named by the RELAY that interpolates it, not by the call that produced it:
 
-* ``dom_handler.get_element_state`` → ``ToolError("Failed to get element
+* ``dom_handler.get_element_state``:606 → ``ToolError("Failed to get element
   state: could not find position for <input … value="SECRET-VALUE-MARKER" …>")``
-  — the **client**, and the debug **ring** through ``log_tool_failure``;
-* ``dom_handler.click_element`` → ``debug_logger.log_debug(..., str(e))`` — the
-  backend log at DEBUG and, under ``--debug``, stderr; the click itself still
-  lands, through ``click_target.SYNTHETIC``;
-* ``dom_handler.query_elements`` → ``type(e).__name__`` only, which is the one
-  of the three that was already safe.
+  — the durable log, **Sentry** (not dropped: the ``ToolError`` is raised from
+  inside an ``except``, so the chain is ``[ToolError, Exception]`` and
+  ``expected_events``' error-convention rule tolerates only a timeout or a
+  cancellation behind ours), and the failed call's own error text;
+* ``dom_handler.click_element``:276 → ``debug_logger.log_debug(..., str(e))`` —
+  the backend log at DEBUG and, under ``--debug``, stderr; the click itself
+  still lands, through ``click_target.SYNTHETIC``;
+* ``dom_handler.query_elements``:159 → ``type(e).__name__`` only, which is the
+  one of the three that was already safe.
+
+**The novel exposure is the two sinks nobody asked for, and the CLIENT leg is a
+change of SHAPE rather than of disclosure**: ``get_element_state`` already
+returns ``attributes`` (including ``value``), ``text`` and ``text_all`` on the
+SUCCESS path by design (``dom_handler.py``:578-586), so a caller asking for an
+element's state is entitled to the field's value. What was wrong is that the
+same content left the process, and that a FAILED call answered with a rendering
+of an element instead of a reason.
 
 **Why the fix is here and not at those three sites.** F-907 proved a logging
 mechanism cannot reach an exception: there is no ``LogRecord``, and the factory
@@ -81,18 +93,42 @@ import the browser stack, and ``_shape`` is duck-typed precisely so it does not.
 
 **The new exception is raised OUTSIDE the ``except`` block, and that is a PII
 rule rather than a style.** Raised inside one, Python sets ``__context__`` to
-nodriver's exception, and a ``__context__`` is not a private detail: every sink
-that formats a traceback prints "During handling of the above exception…"
-followed by the repr, and sentry-sdk's own chain walk follows ``__context__``
-whether or not ``raise … from None`` suppressed its display. Leaving the handler
-first makes the chain empty, so there is nothing downstream able to re-derive
-the payload — ``cdp_transport._guard_result``'s reasoning at a different seam.
+nodriver's exception, and a ``__context__`` is not a private detail: stdlib
+``traceback`` prints "During handling of the above exception…" followed by the
+repr, sentry-sdk serialises the chain, and this repo's own
+``observability._exception_chain`` walks it.
+
+``raise … from None`` would close all three of those, and the measurement says
+so rather than the opposite: ``sentry_sdk/utils.py``:798-801 and :880-916 both
+branch on ``__suppress_context__`` (with ``__cause__`` then ``None``, so no
+child exception is emitted at all), ``observability._exception_chain`` reads
+``if following is None and not current.__suppress_context__``, and ``traceback``
+honours the flag too. What leaving the handler first buys is **strictly more**:
+the context is ABSENT rather than SUPPRESSED, so anything that reads
+``exc.__context__`` directly — a custom formatter, a debugger, a future SDK that
+stops consulting the flag — finds nothing, and an absence is not a setting
+anyone can flip. It costs one line's placement, which is why the stronger form
+is the one taken; ``cdp_transport._guard_result`` builds its error outside the
+handler for the same reason at a different seam. The pin asserts the ABSENCE
+(``__cause__ is None`` and ``__context__ is None``), never a third party's
+walking behaviour.
 
 Redacting is not silencing: the message still says WHICH control had no box and
 that the element renders nothing, which is the whole diagnostic value of the
 line it replaces — and ``ElementBoxError`` names the condition where a bare
 ``Exception`` named nothing, so ``query_elements``' ``type(e).__name__`` line
 became more informative rather than less.
+
+**Cost, measured** (min of 7 x 20 000 happy-path calls against a hermetic tab,
+CPython 3.13.11): nodriver's own ``get_position`` 2.087 us/call, wrapped
+2.200 us — **+0.113 us, +5.4 %** of the in-process cost, which is one coroutine
+frame and one ``try``. Against the call itself that is nothing: the same method
+over real CDP on Chrome 153 measures **238.3 us min / 430.9 us median** (n=200,
+headless, one visible ``<div>``), because it always makes at least one round
+trip (``getContentQuads``, plus ``resolve_node`` when the node has no remote
+object) — so the wrapper is ~0.026 % of a real call. F-907's precedent: state
+the number so the next reader does not have to re-measure to decide it is
+negligible.
 
 ``ElementBoxError`` is deliberately NOT a ``ToolError``: convention 2's class is
 what ``expected_events`` DROPS from Sentry, and this is a library-level
@@ -150,7 +186,9 @@ def _guard(original: Callable) -> Callable:
             shape = _shape(self)
         # OUTSIDE the handler: an exception constructed while another is being
         # handled carries it as ``__context__``, and nodriver's message is the
-        # payload this exists to withhold. Out here the chain is empty.
+        # payload this exists to withhold. ``from None`` would SUPPRESS it (and
+        # every reader measured does honour that flag); leaving the handler
+        # first makes it ABSENT, which is the stronger claim and costs a line.
         raise ElementBoxError(
             f"The element has no layout box, so its position cannot be read: "
             f"{shape}. display:none, an <option> and a detached node all render "

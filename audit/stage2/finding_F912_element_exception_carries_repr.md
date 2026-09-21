@@ -27,8 +27,18 @@ and `Element.__repr__` (`element.py`:1131-1158) renders three things: the tag,
 **every attribute as `name="value"`**, and the element's **whole recursive
 descendant TEXT** (`str(child)` over every child; a text node's own `__repr__`
 answers its raw `node_value`). So an `<input type=password>`'s `value=`, a
-`data-*` session token and a balance in a `<div>` all ride in the message —
-which reaches the **client**, the **debug ring** and **Sentry**.
+`data-*` session token and a balance in a `<div>` all ride in the message.
+
+**The novel exposure is the DURABLE LOG and SENTRY, and the client leg is a
+change of SHAPE rather than of disclosure.** `get_element_state` already returns
+`attributes` (including `value`), `text` and `text_all` to the caller on the
+SUCCESS path by design (`dom_handler.py`:578-586) — a caller that asked for an
+element's state is entitled to the field's value, and nothing here makes the
+tool more secretive about it. What was new is that the same content left the
+process: into `backend-boot.log`/the backend log through `click_element`'s
+relay, and into a Sentry event on a third party's machine (§2.4), neither of
+which anyone asked for. It also arrived as the error text of a call that
+FAILED, where a caller gets a rendering of an element rather than an answer.
 
 F-907 shaped exactly that rendering, for LOG RECORDS, and could not reach this
 one: there is no `LogRecord`, and its record factory sits inside
@@ -97,11 +107,15 @@ index is taken.
 Three call sites reach `get_position` in the whole product, and the stub's §2
 attributed the leak to the wrong one of them. Measured:
 
-| Our site | What it does with the exception | Sinks | Shipped default? |
-|---|---|---|---|
-| `dom_handler.get_element_state`:595 | `raise ToolError(f"Failed to get element state: {e!s}")` | **client**, debug **ring** (`log_tool_failure`), **Sentry** | **yes** |
-| `dom_handler.click_element`:273 | inner `except` → `debug_logger.log_debug(..., str(e))`, then a SYNTHETIC click | backend log at DEBUG; stderr under `--debug` | only with DEBUG on |
-| `dom_handler.query_elements`:142 | `f"...: {type(e).__name__}"` | — | the one that was already safe |
+Each row names two lines: where `get_position` is CALLED, and the RELAY that
+interpolates what it raised — the relay is the defect, the call is only how the
+exception gets there.
+
+| Our site | call → relay | What the relay does | Sinks | Shipped default? |
+|---|---|---|---|---|
+| `dom_handler.get_element_state` | :595 → **:606** | `raise ToolError(f"Failed to get element state: {e!s}")` | **durable log**, **Sentry**, and the failed call's own error text | **yes** |
+| `dom_handler.click_element` | :273 → **:276** | `debug_logger.log_debug(..., str(e))`, then a SYNTHETIC click | backend log at DEBUG; stderr under `--debug` | only with DEBUG on |
+| `dom_handler.query_elements` | :142 → **:159** | `f"...: {type(e).__name__}"` | — | the one that was already safe |
 
 ```
 get_element_state('#pwhidden') RAISED ToolError
@@ -194,11 +208,28 @@ seam, and it runs one way only: `logging_setup` executes in the stdio proxy and
 must never import the browser stack, which is why `_shape` is duck-typed.
 
 **Raised OUTSIDE the `except` block.** Inside one, Python sets `__context__` to
-nodriver's exception, and a `__context__` is not a private detail: every
-traceback formatter prints "During handling of the above exception…" followed by
-the repr, and sentry-sdk's chain walk follows `__context__` whether or not
-`raise … from None` suppressed its display. Leaving the handler first makes the
-chain EMPTY — `cdp_transport._guard_result`'s reasoning at a different seam.
+nodriver's exception, and a `__context__` is not a private detail: stdlib
+`traceback` prints "During handling of the above exception…" followed by the
+repr, sentry-sdk serialises the chain, and `observability._exception_chain`
+walks it.
+
+`raise … from None` would close all three, and the measurement says so:
+`sentry_sdk/utils.py`:798-801 and :880-916 both branch on
+`__suppress_context__` — with it set, the walk follows `__cause__`, which
+`from None` makes `None`, so no child exception is emitted at all — and
+`observability.py`:323 reads `if following is None and not
+current.__suppress_context__`. Leaving the handler first is **strictly
+stronger**: the context is ABSENT rather than SUPPRESSED, so anything reading
+`exc.__context__` directly (a custom formatter, a debugger, a future SDK that
+stops consulting the flag) finds nothing, and an absence is not a setting
+anyone can flip. It costs one line's placement, which is the whole argument for
+taking the stronger form — `cdp_transport._guard_result` builds its error
+outside the handler for the same reason at a different seam. **The pin asserts
+the ABSENCE** (`__cause__ is None` and `__context__ is None`) and never a third
+party's walking behaviour; the first draft of this paragraph claimed sentry-sdk
+ignores `__suppress_context__`, which is measurably false, and F-908 §"the
+first round ruled the whole `mcp` family out … it was wrong" is what a shipped
+positive claim about a dependency costs.
 
 `ElementBoxError` is deliberately not a `ToolError`: that class is what
 `expected_events` DROPS, and this is a library-level condition each call site
@@ -213,6 +244,23 @@ is executed three times under runpy — and is idempotent anyway.
 **No change to `dom_handler`.** All three relays are correct once what they
 relay is shape-only, and the two-line diff to `tool_runtime` plus one new file
 is the whole product change.
+
+**Cost — measured, on F-907's precedent of stating it rather than implying it.**
+Min of 7 × 20 000 happy-path calls against a hermetic tab, CPython 3.13.11:
+
+```
+  nodriver's own get_position     2.087 us/call
+  wrapped                         2.200 us/call
+  delta                           0.113 us   (+5.39 %)
+```
+
+That +5 % is the whole in-process cost of one coroutine frame and one `try`, and
+it is measured against a call that never touches a socket. The same method over
+real CDP — Chrome 153, headless, one visible `<div>`, n=200 after 20 warm-ups —
+is **238.3 µs min / 430.9 µs median**, because `get_position` always makes at
+least one round trip (`getContentQuads`, plus `resolve_node` when the node has
+no remote object). So the wrapper is **~0.026 % of a real call**, and the number
+is here so the next reader does not have to re-measure to decide that.
 
 ## 5. Tests
 

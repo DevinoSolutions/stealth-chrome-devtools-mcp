@@ -291,10 +291,15 @@ class TestNoPageContentInTheException:
     def test_the_chain_carries_nothing_either(self, guarded):
         """``__context__``/``__cause__`` are a sink of their own.
 
-        Every traceback formatter prints "During handling of the above
-        exception…" and sentry-sdk's chain walk follows ``__context__``
-        regardless of ``__suppress_context__`` — so the guard raises OUTSIDE the
-        handler and the chain must be EMPTY, not merely suppressed.
+        ``traceback`` prints "During handling of the above exception…",
+        sentry-sdk serialises the chain and ``observability._exception_chain``
+        walks it. All three honour ``__suppress_context__`` (measured), so
+        ``raise … from None`` would close all three — the guard leaves the
+        handler first because that makes the context ABSENT rather than
+        SUPPRESSED, which nothing downstream can opt out of.
+
+        So this asserts the ABSENCE, which is a fact about our own object, and
+        never a third party's walking behaviour.
         """
         element = make_element(QuadlessTab(quads=[]))
         with pytest.raises(ElementBoxError) as caught:

@@ -318,7 +318,7 @@ validation-failure paths, both need a different mechanism, and they are named in
 `audit/stage2/finding_F908_sse_starlette_logs_tool_result.md` §6 — beside
 F-907, the other line this floor sits below.
 
-### Fixed — F-912: a hidden password field's value no longer reaches the client in an error message
+### Fixed — F-912: a hidden password field's value no longer leaves the machine in an error message
 
 `get_element_state` on an element that lays out no box answered with the
 element rendered in full — tag, **every attribute as `name="value"`**, and all
@@ -331,13 +331,18 @@ Failed to get element state: could not find position for <input id="pwhidden"
 
 That text is nodriver's, not ours: `element.py`:499 raises
 `Exception("could not find position for %s " % self)`, and every `except` block
-that relays `str(exc)` carries the whole element with it. Measured, it reached
-the **client**, the debug **ring** and **Sentry** in the shipped configuration —
-and the Sentry leg is not dropped as a tool failure, because `get_element_state`
-raises its `ToolError` from inside an `except` and `expected_events`'
+that relays `str(exc)` carries the whole element with it.
+
+**What was new is that the content LEFT THE PROCESS.** `get_element_state`
+already returns `attributes` (including `value`), `text` and `text_all` to the
+caller on the success path by design — a caller asking for an element's state is
+entitled to the field's value, and this changes the SHAPE of a failed call's
+error text rather than making the tool more secretive. The exposure is the two
+sinks nobody asked for: `click_element` wrote the same rendering to the backend
+log at DEBUG (then clicked the element synthetically and succeeded), and the
+`ToolError` reached **Sentry** — not dropped as a tool failure, because
+`get_element_state` raises it from inside an `except` and `expected_events`'
 error-convention rule tolerates only a timeout or a cancellation behind ours.
-`click_element` wrote the same rendering to the backend log at DEBUG, then
-clicked the element synthetically and succeeded.
 
 **It is reachable by three ordinary shapes**, which is what separates this from
 F-907's insurance: measured on Chrome 153, `DOM.getContentQuads` answers an
@@ -363,11 +368,15 @@ value of the line, and the new `ElementBoxError` names a condition a bare
 `Exception` named not at all. Everything that is **not** that exact type passes
 through untouched — a `ProtocolException` keeps Chrome's own words, an
 `AttributeError` still reaches `mouse_click`'s handler, a cancellation still
-cancels. The replacement is raised OUTSIDE the `except` block, so nodriver's
-message is not reachable through `__context__` either, by a traceback formatter
-or by Sentry's chain walk. One shaper — F-907's `logging_setup._shape` — and no
-second one; no change to any of the three call sites, because all three are
-correct once what they relay is shape-only.
+cancels. The replacement is raised OUTSIDE the `except` block rather than with
+`raise … from None`: both keep nodriver's message out of a traceback and out of
+Sentry's chain (every reader measured honours `__suppress_context__`), but
+leaving the handler first makes the `__context__` ABSENT rather than suppressed,
+which nothing downstream can opt out of. One shaper — F-907's
+`logging_setup._shape` — and no second one; no change to any of the three call
+sites, because all three are correct once what they relay is shape-only.
+Measured cost: +0.113 µs per `get_position`, against 430.9 µs median for the
+same call over real CDP.
 
 ## 2.1.12
 
