@@ -32,13 +32,21 @@ was made is not a claim about which seed it was made from.
 ``reserved_reason``. A bare relative ``user_data_dir`` is anchored under the
 clone root, so ``user_data_dir="master"`` resolved to ``<root>/sessions/master``
 and NOT ``<root>/master`` — MEASURED: that directory exists, 0.46 GB, marker
-``explicit-master-snapshot``, created 2026-09-11. Someone asked for the master
-profile by its documented name and silently got a nine-day-old clone of a
-snapshot. ``default`` is reserved with it because the session vocabulary is
-about to give the master that name, and a friendlier word for the same trap is
-still the trap. The snapshot PATH is refused for a second reason as well: a
-browser driven on the snapshot directory writes into the seed every later
-session copies from, which is how F-893's precondition arose.
+``explicit-master-snapshot``, created 2026-09-11. Someone asked for the shared
+profile by its documented name and silently got a nine-day-old clone of its
+seed. The seed PATH is refused for a second reason as well: a browser driven
+on it writes into the seed every later session copies from, which is how
+F-893's precondition arose.
+
+**And which word does a caller say?** ``DEFAULT_SESSION`` / ``profile_request``
+(F-896). F-894 reserved ``default`` as a refusal, explicitly ahead of the
+vocabulary that would use it; this is that vocabulary, so the word now MEANS
+the shared profile rather than refusing. It stays reserved in the sense that
+matters — it names one directory, and any spelling that would create a second
+one under it is refused — which is what keeps F-894's trap closed rather than
+re-opening it under a friendlier word. ``profile_request`` is the one reading
+of the two spellings a caller may use, so the alias ``user_data_dir`` resolves
+TO ``session`` rather than running beside it.
 
 A leaf: stdlib plus ``tool_errors``, whose whole contract is to import nothing
 from ``embedded``. The master and snapshot directories, the profile and the
@@ -50,10 +58,28 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
+from typing import NamedTuple
 
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 MARKER_NAME = ".stealth_chrome_devtools_mcp_clone.json"
+
+
+class Roots(NamedTuple):
+    """The four directories a profile request is decided against.
+
+    One tuple rather than four parameters because they always travel together
+    and mean nothing apart: which root a relative name anchors under, which
+    root keeps it inside, which directory IS the shared session, and which is
+    that session's seed. ``clone_storage`` owns WHERE they are — it is the one
+    thing this module is never told — and passes them in.
+    """
+
+    session: Path
+    clones: Path
+    shared: Path
+    seed: Path
+
 
 # F-892: the profile-relative files whose mtime moves when a login lands. THE
 # one spelling of each — ``tests/test_profile_seed_truth.py`` fails if any of
@@ -71,9 +97,18 @@ LOGIN_WITNESSES: tuple[str, ...] = (
 # What a marker that predates F-895 says about its seed: nothing at all.
 UNKNOWN_SEED = "unknown"
 
-# The seeds' own names. A caller may not hand one of these to ``user_data_dir``
-# (F-894); ``default`` is here ahead of the vocabulary that will use it.
-RESERVED_NAMES = frozenset({"master", "master-snapshot", "default"})
+# The MECHANISM's own directory names. A caller may not hand one of these to
+# ``session`` or ``user_data_dir`` (F-894): anchoring them under the clone root
+# hands back a different profile under the name the caller used.
+RESERVED_NAMES = frozenset({"master", "master-snapshot"})
+
+# The shared session — the one a spawn that names none lands on, and the one
+# every new session is copied from. F-894 reserved this word as a refusal,
+# deliberately ahead of the vocabulary that would use it; F-896 is that
+# vocabulary, so the word now MEANS the shared profile instead of refusing.
+# It is still reserved in the sense that matters: it names exactly one
+# directory and a caller may not create a session of their own called it.
+DEFAULT_SESSION = "default"
 
 _STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -127,6 +162,29 @@ def changed_since(profile: Path, stamp: object) -> bool | None:
     return int(written) > at
 
 
+def needs_refresh(profile: Path, seed: Path) -> bool:
+    """Has *profile* taken a login write since *seed* was last copied from it?
+
+    The witnesses are ``LOGIN_WITNESSES`` and the "when" is the seed MARKER's
+    mtime — the marker is written at the end of a copy, so it dates the copy
+    itself. Stat-only, so it is safe to ask before one. A seed that does not
+    exist needs no refresh (creating it is another path's job); one with no
+    marker always does, because nothing dates it. It lives here rather than in
+    ``clone_storage`` because every term in it is this module's: the list, the
+    marker and what counts as a login. The caller binds it to its own two
+    directories (F-892, moved F-896)."""
+    if not seed.exists():
+        return False
+    marker = seed / MARKER_NAME
+    if not marker.exists():
+        return True
+    try:
+        written = newest_login_write(profile)
+        return written is not None and written > marker.stat().st_mtime
+    except OSError:
+        return False
+
+
 def read_marker(profile: Path) -> dict[str, object]:
     """The clone marker in *profile* as a dict — ``{}`` for a directory with no
     marker, an unreadable one, or one that is not a JSON object. Every reader
@@ -142,16 +200,21 @@ def read_marker(profile: Path) -> dict[str, object]:
 def seed_name(source: Path, master: Path, snapshot: Path) -> str:
     """The seed's NAME rather than its path — what a profile was copied from.
 
-    The two the product owns are named; anything else is its directory name,
-    which is what a per-session seed will be. The value written today is
-    ``master-snapshot``, i.e. the word the session-vocabulary phase (F-896)
-    renames to ``default`` — it is a name, not yet the name a user would
-    choose, and the field exists partly so that rename has one place to land.
+    The shared profile and its copyable form answer with ONE name,
+    ``default``, and that is the F-896 rename F-895 said this field existed to
+    receive. They are one session to a user: which of the two directories a
+    given copy was physically taken from is a mechanism detail — the snapshot
+    exists only because a live profile cannot always be copied — and a user
+    told ``seeded from master-snapshot`` learns a word they can neither type
+    nor act on. What they CAN act on is ``seeded from default``, because
+    ``default`` is a session they can open. Staleness does not go with it:
+    ``provenance`` reads ``seed_changed_since`` off the marker's recorded
+    ``source`` PATH, so the two directories stay distinguishable exactly where
+    the distinction is load-bearing. Anything else is its directory name,
+    which is what a per-session seed will be (F-897).
     """
-    if same_dir(source, snapshot):
-        return "master-snapshot"
-    if same_dir(source, master):
-        return "master"
+    if same_dir(source, snapshot) or same_dir(source, master):
+        return DEFAULT_SESSION
     return source.name
 
 
@@ -234,15 +297,30 @@ def provenance(profile: Path) -> dict[str, object]:
     }
 
 
-def anchor(
-    requested: str,
-    session_root: Path,
-    clone_root: Path,
-    inside: Callable[[Path, Path], bool],
-) -> Path:
-    """WHERE a ``user_data_dir`` request lands on disk.
+def is_default_name(requested: str) -> bool:
+    """Is this request the bare word ``default`` — the shared session?
 
-    An absolute path is itself. A relative one is anchored against the session
+    The BARE form only, and that is what keeps F-894 closed under the new
+    vocabulary: ``sessions/default`` is a relative path naming a directory of
+    the caller's own making, and answering the shared profile for it would be
+    the same silent substitution the finding is about, one separator away.
+    That spelling is refused instead, in ``reserved_reason``.
+    """
+    asked = Path(requested.strip())
+    return (
+        not asked.is_absolute()
+        and len(asked.parts) == 1
+        and asked.name.casefold() == DEFAULT_SESSION
+    )
+
+
+def anchor(requested: str, roots: Roots, inside: Callable[[Path, Path], bool]) -> Path:
+    """WHERE a ``session`` / ``user_data_dir`` request lands on disk.
+
+    The bare name ``default`` is the shared profile itself (F-896) — checked
+    first, because anchoring it would make it ``sessions/default``, a
+    different directory under the word the vocabulary now teaches. An absolute
+    path is itself. Any other relative one is anchored against the session
     root, and kept there only if that already puts it inside the clone root
     (``"sessions/acme"``); otherwise the clone root is prepended, so a bare
     ``"acme"`` becomes ``sessions/acme`` without ``sessions/sessions/acme``.
@@ -253,19 +331,77 @@ def anchor(
     reservation is about which directory is being opened. ``inside`` arrives as
     an argument because ``clone_storage._is_relative_to`` is its one home.
     """
+    if is_default_name(requested):
+        return roots.shared
     asked = Path(requested).expanduser()
     if asked.is_absolute():
         return asked
-    anchored = session_root / asked
-    return anchored if inside(anchored, clone_root) else clone_root / asked
+    anchored = roots.session / asked
+    return anchored if inside(anchored, roots.clones) else roots.clones / asked
+
+
+def profile_request(session: str | None, user_data_dir: str | None) -> str | None:
+    """THE one reading of the two spellings a caller may use (F-896).
+
+    ``session`` is the documented one and ``user_data_dir`` the deprecated
+    alias, and the alias RESOLVES TO it rather than running beside it: this
+    function answers ONE string, so everything downstream — the reserved-name
+    gate, the re-attach, the resolver — has a single input and cannot develop
+    two opinions about which spelling wins. That is convention 4 applied to a
+    parameter rather than to a module.
+
+    Two rules, and each exists because its absence is a silence:
+
+    * **Both given with different values is refused.** A precedence would pick
+      one and say nothing; the caller who typed two different profiles meant
+      one of them and cannot tell which they got. Both given with the SAME
+      value is honoured — refusing someone who said one thing twice buys
+      nothing.
+    * **``session`` takes a NAME and refuses a path.** "A session named
+      ``C:\\Users\\me\\profile``" is not a sentence, and the path door stays
+      open through the alias and through ``stealthy call``, which the refusal
+      says. The test is the same one ``reserved_reason`` uses for a
+      drive — ``PureWindowsPath``, because a drive is a Windows concept and
+      ``PurePosixPath("C:foo").drive`` is ``""`` (measured), so reading the
+      host's flavour would make this refusal fire on one platform only — plus
+      both separators literally, because a backslash is a separator on Windows
+      and a legal filename character on POSIX, and a name that means two
+      things on two platforms is not a name.
+    """
+    if session is None:
+        return user_data_dir or None
+    name = session.strip()
+    if not name:
+        raise ToolError(
+            "session must be a name; it was empty. Omit it to use the "
+            f"{DEFAULT_SESSION!r} session."
+        )
+    if (
+        "/" in name
+        or "\\" in name
+        or PureWindowsPath(name).drive
+        or Path(name).is_absolute()
+        or name.startswith("~")
+        or set(name) == {"."}
+    ):
+        raise ToolError(
+            f"session takes a NAME, not a path, and {session!r} is a path. "
+            "Pick a name (letters, digits, dashes), or open a directory by "
+            "path with user_data_dir=<path> — `stealthy call spawn_browser "
+            "--arg user_data_dir=<path>` from the CLI."
+        )
+    if user_data_dir and user_data_dir.strip() != name:
+        raise ToolError(
+            f"session={session!r} and user_data_dir={user_data_dir!r} name two "
+            "different profiles and only one browser is being spawned. Pass "
+            "session alone — user_data_dir is the deprecated spelling of the "
+            "same argument."
+        )
+    return name
 
 
 def require_allowed(
-    requested: str,
-    session_root: Path,
-    clone_root: Path,
-    snapshot: Path,
-    inside: Callable[[Path, Path], bool],
+    requested: str, roots: Roots, inside: Callable[[Path, Path], bool]
 ) -> Path:
     """Raise ``ToolError`` when this ``user_data_dir`` may not be honoured, and
     answer WHERE it lands when it may.
@@ -285,24 +421,26 @@ def require_allowed(
     two calls are two stats, and one home for the rule is worth more than one
     call. It ANSWERS the anchored path so the resolver does not anchor a second
     time for the same request (review n6); ``anchor`` keeps its one home and is
-    now reached once per selection. The MASTER path passes here — the resolver,
-    not this gate, is where it becomes the master ROLE, and it must still reach
-    the re-attach in front of it, where being adopted is the right outcome.
+    now reached once per selection. The SHARED profile passes here — by
+    absolute path, and since F-896 by the name ``default`` as well — because
+    the resolver, not this gate, is where it becomes the shared ROLE, and it
+    must still reach the re-attach in front of it, where being adopted is the
+    right outcome.
     """
-    resolved = anchor(requested, session_root, clone_root, inside)
-    refusal = reserved_reason(requested, resolved, snapshot)
+    resolved = anchor(requested, roots, inside)
+    refusal = reserved_reason(requested, resolved, roots)
     if refusal is not None:
-        raise ToolError(f"user_data_dir rejected: {refusal}")
+        raise ToolError(f"profile request rejected: {refusal}")
     return resolved
 
 
-def reserved_reason(requested: str, resolved: Path, snapshot: Path) -> str | None:
-    """Why this ``user_data_dir`` may not be honoured, or None (F-894).
+def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
+    """Why this profile request may not be honoured, or None (F-894, F-896).
 
-    Three refusals, and one deliberate non-refusal. A reserved NAME is refused
+    Four refusals, and one deliberate non-refusal. A reserved NAME is refused
     because anchoring it under the clone root hands back a different profile
-    under the name the caller used. The SNAPSHOT path is refused because a
-    browser driven there writes into the seed every later session copies from.
+    under the name the caller used. The SEED path is refused because a browser
+    driven there writes into the seed every later session copies from.
     A drive-qualified path that is not absolute (``C:foo``, what a Windows
     absolute path becomes once a lenient string layer has eaten its backslashes
     — ``\\s`` is nobody's escape) is refused because ``Path.is_absolute()`` is
@@ -320,10 +458,18 @@ def reserved_reason(requested: str, resolved: Path, snapshot: Path) -> str | Non
     For ``C:foo`` both flavours answer "not absolute", which is what makes the
     refusal identical on every platform.
 
-    The MASTER path is deliberately NOT refused, and is not even a parameter
-    here — driving the master directly is how a human logs in, and the caller
-    who names it gets the master ROLE; the resolver settles that before asking
-    this question at all.
+    The FOURTH refusal is F-896's and it is what keeps F-894 closed under the
+    new word: ``default`` now MEANS the shared profile, but only in its bare
+    form, so any spelling that would instead CREATE a directory called
+    ``default`` (``sessions/default``, ``./default``) is refused rather than
+    quietly made. Without it the finding's exact trap — a documented name that
+    silently opens a different profile — would come back one separator away
+    from the word the vocabulary teaches.
+
+    The SHARED profile itself is deliberately NOT refused: driving it directly
+    is how a human logs in, and the caller who names it (by path, or by
+    ``default``) gets the shared ROLE, which the resolver settles.
+    ``roots.shared`` is read here only to tell those two apart.
     """
     asked = Path(requested)
     if PureWindowsPath(requested).drive and not asked.is_absolute():
@@ -346,14 +492,22 @@ def reserved_reason(requested: str, resolved: Path, snapshot: Path) -> str | Non
         )
         return (
             f"{name!r} is a reserved profile name and never means a session of "
-            "that name. Spawn with no user_data_dir to use the shared profile "
-            f"the sessions are seeded from; pick another name for a session.{existing}"
+            f"that name. Pass session={DEFAULT_SESSION!r} (or no session at "
+            "all) for the shared profile every session is seeded from; pick "
+            f"another name for a session of your own.{existing}"
         )
-    if same_dir(resolved, snapshot):
+    if name == DEFAULT_SESSION and not same_dir(resolved, roots.shared):
+        return (
+            f"{DEFAULT_SESSION!r} is the shared session and names exactly one "
+            f"profile, so {requested!r} would create a second one under the "
+            f"same word. Pass session={DEFAULT_SESSION!r} on its own to open "
+            "it; a session of your own needs a different name."
+        )
+    if same_dir(resolved, roots.seed):
         return (
             "that path is the shared seed every new session is copied from, and "
-            "a browser running on it writes into the seed. Spawn with no "
-            "user_data_dir to use the shared profile itself."
+            "a browser running on it writes into the seed. Pass "
+            f"session={DEFAULT_SESSION!r} to open the shared profile itself."
         )
     return None
 

@@ -77,6 +77,7 @@ async def spawn_browser(
     idle_timeout_seconds: int | None = None,
     block_resources: list[str] = None,
     extra_headers: dict[str, str] = None,
+    session: str | None = None,
     user_data_dir: str | None = None,
     sandbox: Any | None = None,
 ) -> dict[str, Any]:
@@ -99,27 +100,33 @@ async def spawn_browser(
         idle_timeout_seconds (Optional[int]): Idle timeout override in seconds for automatic instance cleanup.
         block_resources (List[str]): List of resource types to block (e.g., ['image', 'font', 'stylesheet']).
         extra_headers (Dict[str, str]): Additional HTTP headers.
-        user_data_dir (Optional[str]): Leave UNSET for normal use. When unset, the server
-            automatically clones a disposable session from the master profile and deletes it
-            as soon as the browser closes — you never need to manage or clean up sessions.
-            Only set this when the user has EXPLICITLY asked for a persistent/named profile:
-            a named profile is NOT auto-cleaned and persists on disk indefinitely, so treat
-            creating one as a deliberate, space-consuming action. Do not invent names.
-            THIS PARAMETER IS THE PERSISTENT-PROFILE OPTION — there is no separate
-            ``profile=``. A named profile (a bare name or an absolute path) is never
-            deleted by close_instance, by the clone GC, by `cleanup --apply` or by
-            `kill-orphans`, and since F-888 its BROWSER survives the backend too: a
+        session (Optional[str]): The NAME of a persistent browser session — THE
+            one documented way to ask for a profile, and the only one to use.
+            Leave UNSET for normal use: an unnamed spawn gets a disposable copy
+            of the shared ``default`` session and deletes it as soon as the
+            browser closes, so you never manage or clean up sessions. Set it
+            only when the user has EXPLICITLY asked to keep a login: a named
+            session is NOT auto-cleaned and persists on disk indefinitely, so
+            treat creating one as a deliberate, space-consuming action, and do
+            not invent names. ``session="default"`` opens the SHARED session
+            itself — the profile every new session is seeded from and the one a
+            human logs in to; it is reserved and is never a session of your own.
+            A session is a NAME, not a path: pass ``user_data_dir`` to open a
+            directory by path.
+            A named session is never deleted by close_instance, by the clone GC,
+            by `cleanup --apply` or by `kill-orphans`, and since F-888 its
+            BROWSER survives the backend too: a
             backend that stops, restarts, heals or crashes leaves such a browser
             RUNNING, and it is RE-ATTACHED to over CDP rather than replaced, so a
             human's logged-in session is not lost. Two paths reach it and you need
             neither by name: a new backend adopts the browsers it finds recorded
             at its own startup (same instance_id as before), and spawning with a
-            user_data_dir a live browser still holds re-attaches to THAT browser
+            session a live browser still holds re-attaches to THAT browser
             instead of walking to a sibling directory. Either way the answer
             carries ``spawn_diagnostics["reattached"]: true`` plus the holder's
             pid, and the page is the one that was already open — not a fresh tab
             on the same cookies. So to recover a logged-in browser whose backend
-            died, just spawn with the same user_data_dir. On that path the
+            died, just spawn with the same session. On that path the
             arguments that describe a LAUNCH cannot apply to a browser already
             running: headless, user_agent, viewport, proxy, browser_args,
             timezone_id and extra_headers are IGNORED rather than refused, and the
@@ -134,6 +141,12 @@ async def spawn_browser(
             ``spawn_diagnostics["reattach_declined"]`` saying so, and the old
             browser is left running and untouched — stop that backend first, see
             RUNBOOK, "Recover a stranded login".
+        user_data_dir (Optional[str]): DEPRECATED, and the ONE thing it still
+            buys you is an absolute PATH, which ``session`` refuses. For a name
+            it resolves to exactly the same profile ``session`` does — it is the
+            same argument under the older word, not a second one — so passing
+            both with DIFFERENT values is an error rather than a precedence you
+            cannot see. Everything said about ``session`` above applies to it.
         sandbox (Optional[Any]): Enable browser sandbox. Accepts bool, string ('true'/'false'), int (1/0), or None for auto-detect.
 
     Network interception captures request/response metadata by default, but
@@ -167,7 +180,17 @@ async def spawn_browser(
     # a reserved snapshot path, so the reservation was unreachable there. Neither
     # guard has a side effect, so the order decides only which message is sent.
     # The rule has one home; this is the second site that asks it.
-    rt.clone_storage.require_allowed_user_data_dir(user_data_dir)
+    #
+    # It is also where the TWO spellings become ONE (F-896): this call reads
+    # `session` and `user_data_dir` as a single request and ANSWERS the
+    # directory it means, so every line below — the re-attach, the resolver,
+    # the diagnostics — sees one value and `session` cannot develop a second
+    # path of its own. `session="default"` is the shared profile by the time it
+    # reaches the re-attach, which is what lets that re-attach find a browser
+    # already open on it.
+    user_data_dir = rt.clone_storage.require_allowed_user_data_dir(
+        user_data_dir, session
+    )
 
     # Then the HOST-shaped guard, also outside the try so it is not re-wrapped
     # (F-808): a spawn nobody could ever see must not first clone a profile dir
@@ -308,16 +331,16 @@ async def spawn_browser(
                     f"{profile_selection.get('requested_user_data_dir')} is in use "
                     f"({walked}), so this spawn got "
                     f"{profile_selection.get('walked_to')} — a DIFFERENT profile, "
-                    f"either a fresh clone of the master snapshot or one an "
-                    f"earlier walk left behind, with none of the cookies or "
+                    f"either a fresh copy of the default session's seed or one "
+                    f"an earlier walk left behind, with none of the cookies or "
                     f"logins the requested one holds. "
                     if walked
                     else ""
                 )
                 spawn_diagnostics["profile_selection"]["warning"] = substitution + (
-                    "Named profile created — it is NOT auto-cleaned and persists on disk. "
-                    "Only pass user_data_dir when the user explicitly asks for a persistent "
-                    "profile; otherwise omit it so the session is auto-cloned and auto-deleted."
+                    "Named session created — it is NOT auto-cleaned and persists on disk. "
+                    "Only pass session when the user explicitly asks to keep a login; "
+                    "otherwise omit it so the profile is copied and auto-deleted."
                 )
         return {
             "instance_id": instance.instance_id,
@@ -539,7 +562,9 @@ async def close_instance(instance_id: str) -> bool:
     profile_selection = {}
     if isinstance(spawn_diagnostics, dict):
         profile_selection = spawn_diagnostics.get("profile_selection") or {}
-    should_refresh_snapshot = profile_selection.get("profile_role") == "master"
+    should_refresh_snapshot = (
+        profile_selection.get("profile_role") == rt.profile_seed.DEFAULT_SESSION
+    )
 
     success = await rt.browser_manager.close_instance(instance_id)
     if success:
@@ -553,7 +578,8 @@ async def close_instance(instance_id: str) -> bool:
             rt.clone_storage._release_clone_dir(profile_selection["user_data_dir"])
         if should_refresh_snapshot:
             await asyncio.to_thread(
-                rt.clone_storage._refresh_master_snapshot_if_safe, "after-master-close"
+                rt.clone_storage._refresh_master_snapshot_if_safe,
+                "after-default-close",
             )
     return success
 

@@ -222,7 +222,19 @@ class TestNoUserFacingStringSaysTheOldWords:
         self, tmp_session_root
     ):
         """The three roles' real ``profile_selection`` payloads — keys AND
-        values — produced by the resolver, not transcribed."""
+        values — produced by the resolver, not transcribed.
+
+        **A value that is an absolute PATH is exempt, and that exemption is
+        the cost of this change rather than a hole in it.** The two directories
+        are still called ``master`` and ``master-snapshot`` on disk: renaming
+        them would move every existing installation's profiles and invalidate
+        every configured ``BROWSER_MASTER_USER_DATA_DIR``, for a word that
+        appears in a path an operator reads and never types. So an operator can
+        still SEE "master" in ``spawn_diagnostics``; what they can no longer be
+        TOLD is a role, a reason, an error or a seed named after it. Everything
+        this release authors is checked; only what the filesystem already held
+        is skipped, and F-896 §6 records it as the residual it is.
+        """
         offenders: list[str] = []
         selections = [
             await _selection(),  # the shared session
@@ -234,10 +246,24 @@ class TestNoUserFacingStringSaysTheOldWords:
                 offenders.extend(
                     f"key {key!r} says {word!r}" for word in _says_retired(key)
                 )
+                if isinstance(value, str) and Path(value).is_absolute():
+                    continue  # an on-disk path, not a word this release authors
                 offenders.extend(
                     f"{key}={value!r} says {word!r}" for word in _says_retired(value)
                 )
         assert not offenders, offenders
+
+    async def test_the_seed_a_session_reports_is_a_session_you_can_open(
+        self, tmp_session_root
+    ):
+        """The exemption above must not be a door: ``seeded_from`` is a NAME,
+        never a path, so it is checked without it — and the name it answers has
+        to be one a caller can actually pass to ``session=``."""
+        named = await _selection(session="acme")
+        assert named["seeded_from"] == profile_seed.DEFAULT_SESSION
+        assert clone_storage.require_allowed_user_data_dir(
+            None, named["seeded_from"]
+        ), "the seed a session names must itself be openable by that name"
 
     def test_the_reserved_refusal_says_the_word_only_because_you_did(
         self, tmp_session_root

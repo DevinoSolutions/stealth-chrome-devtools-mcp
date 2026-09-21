@@ -209,25 +209,29 @@ class TestRefusedRefreshIsNotSuccess:
         ``C:\\stealth-mcp-browser-sessions\\master-snapshot`` and its
         ``Default/Network/Cookies`` was 7 s NEWER than the master's, with a
         ``Local State`` 133,607 B against the master's 90,406 — a divergence a
-        copy from master cannot produce. Every refresh in that window returned
-        ``snapshot_refreshed: True`` having moved nothing."""
+        copy from master cannot produce. Every refresh in that window reported a
+        refreshed seed having moved nothing.
+
+        The KEYS and the refusal WORDS are F-896's (``seed_*``, and refusals
+        that name the shared SESSION rather than the directory): the finding is
+        unchanged, only what it is called is."""
         held_profile(real_layout_root["snapshot"])
         result = clone_storage._refresh_master_snapshot_if_safe("test")
-        assert result["snapshot_refreshed"] is False
-        assert result["snapshot_error"] == "snapshot-in-use"
+        assert result["seed_refreshed"] is False
+        assert result["seed_error"] == "seed-in-use"
 
     def test_held_master_still_reports_master_in_use(self, real_layout_root):
         """The existing arm is unchanged: the SOURCE being live is a different
         refusal, decided before the copy is attempted at all."""
         held_profile(real_layout_root["master"])
         result = clone_storage._refresh_master_snapshot_if_safe("test")
-        assert result["snapshot_refreshed"] is False
-        assert result["snapshot_error"] == "master-in-use"
+        assert result["seed_refreshed"] is False
+        assert result["seed_error"] == "default-in-use"
 
     def test_a_copy_that_ran_still_reports_success(self, real_layout_root):
         result = clone_storage._refresh_master_snapshot_if_safe("test")
-        assert result["snapshot_refreshed"] is True
-        assert "snapshot_error" not in result
+        assert result["seed_refreshed"] is True
+        assert "seed_error" not in result
 
     def test_the_guard_raises_rather_than_handing_back_an_empty_profile(self, tmp_path):
         """`_require_copied` is unreachable from its two callers TODAY — both
@@ -324,13 +328,15 @@ class TestReservedProfileNames:
 
     @pytest.mark.asyncio
     async def test_master_path_selects_the_master_role(self, real_layout_root):
-        """The master by absolute path is the MASTER, not an explicit clone of
-        itself: driving it directly is how a human logs in, and the role is what
-        makes ``close_instance`` refresh the seed afterwards."""
+        """The shared profile by absolute path is the SHARED session, not an
+        explicit clone of itself: driving it directly is how a human logs in,
+        and the role is what makes ``close_instance`` refresh the seed
+        afterwards. Since F-896 that role is called ``default``, the word a
+        caller can actually pass back in."""
         result = await clone_storage.resolve_profile_selection(
             str(real_layout_root["master"])
         )
-        assert result["profile_role"] == "master"
+        assert result["profile_role"] == profile_seed.DEFAULT_SESSION
         assert Path(result["user_data_dir"]) == real_layout_root["master"]
 
     @pytest.mark.asyncio
@@ -365,14 +371,19 @@ class TestReservedProfileNames:
         directory, not the flavour, that ``resolved`` carries.
         """
         monkeypatch.setattr(profile_seed, "Path", PurePosixPath)
-        snapshot = tmp_path / "master-snapshot"
+        roots = profile_seed.Roots(
+            tmp_path,
+            tmp_path / "sessions",
+            tmp_path / "master",
+            tmp_path / "master-snapshot",
+        )
         mangled = "C:stealth-mcp-browser-sessionssessionsproject-f876e3d7f2ec"
-        reason = profile_seed.reserved_reason(mangled, tmp_path / mangled, snapshot)
+        reason = profile_seed.reserved_reason(mangled, tmp_path / mangled, roots)
         assert reason is not None and "absolute" in reason
         # And it must not over-refuse on that same host: an ordinary session
         # name and a POSIX absolute path name no drive under either flavour.
-        assert profile_seed.reserved_reason("acme", tmp_path / "acme", snapshot) is None
-        assert profile_seed.reserved_reason("/srv/p", tmp_path / "p", snapshot) is None
+        assert profile_seed.reserved_reason("acme", tmp_path / "acme", roots) is None
+        assert profile_seed.reserved_reason("/srv/p", tmp_path / "p", roots) is None
 
     @pytest.mark.asyncio
     async def test_a_held_snapshot_is_refused_before_any_re_attach(
@@ -453,7 +464,7 @@ class TestReservedProfileNames:
             await call_tool(srv, "spawn_browser", user_data_dir="master", sandbox=False)
 
         message = str(excinfo.value)
-        assert "user_data_dir rejected" in message
+        assert "profile request rejected" in message
         assert "F-808" not in message
 
     @pytest.mark.asyncio
@@ -509,8 +520,14 @@ class TestReservedProfileNames:
     async def test_a_reserved_name_with_no_directory_says_nothing_about_one(
         self, real_layout_root
     ):
+        """``master-snapshot`` rather than ``default``: F-894 reserved both,
+        but it reserved ``default`` explicitly as a placeholder for the
+        vocabulary that would use it, and F-896 is that vocabulary — the word
+        now MEANS the shared session, so it is no longer a refusal and cannot
+        stand in for one. The two MECHANISM names still are, and the "no
+        directory, so name no escape" rule is about them."""
         with pytest.raises(ToolError) as excinfo:
-            await clone_storage.resolve_profile_selection("default")
+            await clone_storage.resolve_profile_selection("master-snapshot")
         assert "still openable" not in str(excinfo.value)
 
     @pytest.mark.asyncio
@@ -536,17 +553,19 @@ class TestSeedProvenance:
         marker = json.loads(
             (real_layout_root["sessions"] / "acme" / MARKER).read_text(encoding="utf-8")
         )
-        assert marker["seeded_from"] == "master-snapshot"
+        # F-896: ONE name for the shared session and its seed — the word a
+        # caller can pass back to `session=`, not the directory it came from.
+        assert marker["seeded_from"] == profile_seed.DEFAULT_SESSION
         assert marker["seeded_at"] == marker["created_at"]
         # The legacy keys a 2.1.10 reader looks for are still written.
         assert marker["source"] == str(real_layout_root["snapshot"])
-        assert marker["source_kind"] == "explicit-master-snapshot"
+        assert marker["source_kind"] == "explicit-default-seed"
 
     @pytest.mark.asyncio
     async def test_diagnostics_carry_seed_and_staleness(self, real_layout_root):
         selection = await clone_storage.resolve_profile_selection("acme")
         public = clone_storage._public_profile_selection(selection)
-        assert public["seeded_from"] == "master-snapshot"
+        assert public["seeded_from"] == profile_seed.DEFAULT_SESSION
         assert public["seeded_at"]
         assert public["seed_changed_since"] is False
 

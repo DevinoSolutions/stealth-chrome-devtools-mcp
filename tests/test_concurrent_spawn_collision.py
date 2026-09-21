@@ -43,6 +43,7 @@ from fakes import FakeBrowserManager
 from stealth_chrome_devtools_mcp.embedded import (
     clone_storage,
     profile_lock,
+    profile_seed,
     spawn_contention,
     spawn_exhaustion,
 )
@@ -365,7 +366,7 @@ async def test_concurrent_unnamed_selections_all_still_pick_master(tmp_session_r
     selections = await asyncio.gather(
         *(clone_storage.resolve_profile_selection(None) for _ in range(3))
     )
-    assert [s["profile_role"] for s in selections] == ["master"] * 3
+    assert [s["profile_role"] for s in selections] == ["default"] * 3
     assert {s["user_data_dir"] for s in selections} == {
         str(clone_storage.master_profile_dir())
     }
@@ -404,9 +405,11 @@ def master_taken(master_race):
 
 
 def _master_selection():
+    """A selection on the SHARED profile, in the role word the resolver issues
+    — ``default`` since F-896, read rather than re-spelled."""
     return {
         "user_data_dir": str(clone_storage.master_profile_dir()),
-        "profile_role": "master",
+        "profile_role": profile_seed.DEFAULT_SESSION,
     }
 
 
@@ -467,7 +470,7 @@ async def test_the_master_hold_is_asked_about_the_directory_the_attempt_drove(
     drove = clone_storage.clone_root_dir() / "somewhere-else"
 
     await clone_storage._fallback_profile_selection(
-        {"user_data_dir": str(drove), "profile_role": "master"}, 0
+        {"user_data_dir": str(drove), "profile_role": "default"}, 0
     )
 
     assert asked == [drove]

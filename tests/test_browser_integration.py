@@ -548,7 +548,7 @@ class TestAutoCloneDeletion:
         master_iid = master_inst["instance_id"]
         try:
             master_sel = master_inst["spawn_diagnostics"]["profile_selection"]
-            assert master_sel["profile_role"] == "master", master_sel
+            assert master_sel["profile_role"] == "default", master_sel
 
             # Master is busy now → a second spawn must clone from the snapshot.
             clone_inst = await spawn(headless=True, **_sandbox_kwargs())
