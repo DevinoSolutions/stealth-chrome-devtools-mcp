@@ -917,23 +917,26 @@ class TestNoRefusalSaysTheOldWords:
 
 
 # ---------------------------------------------------------------------------
-# 9. What the advisory ask COSTS (review N2)
+# 9. What the source ask COSTS (review N2; memo review S)
 # ---------------------------------------------------------------------------
 
 
-class TestTheAdvisoryAskCostsOneScan:
+class TestTheSourceAskIsPaidForTwice:
     """`_profile_hold` is a full psutil cmdline walk, and on a machine that has
     been running a Chrome fleet that is hundreds of processes. Review S1 bought
     an unwrapped refusal by asking the SOURCE question in the pre-flight and
-    throwing the answer away — and the pre-flight is itself asked twice (the
-    tool's, then the resolver's own), so one seeded spawn walked the table
-    three times for one source where an unseeded named spawn walks it once.
+    throwing the answer away — and that gate is itself asked twice (the tool's,
+    then the resolver's own), so one seeded spawn walked the table three times
+    for one source where an unseeded named spawn walks it once.
 
-    The two ADVISORY asks share ONE scan; the AUTHORITATIVE read before the
-    copy is never served from that memo, because "is this source open" is a
-    fact with a lifetime and the statement before the copy is the one that has
-    to be true. That split is the whole point of `_seed_source` vs
-    `_seed_source_for_copy`, so it is pinned rather than described.
+    The RESOLVER's own gate call is the one that pays nothing: it runs inside
+    `spawn_browser`'s try, where a source refusal is re-labelled anyway, and
+    `_seed_source_for_copy` raises the same sentences one statement later with
+    no `await` between. So it passes `check_source=False`, and the walk is paid
+    for exactly where its answer is used — the pre-flight's, and the read
+    before the copy. A 1 s memo bought the same saving and was REPLACED by the
+    flag: no process-global state, no clock, no reset hook, and no remembered
+    answer that can go stale.
 
     Counted at the COMPOSITION rather than through `call_tool`: the cost is a
     property of the gate and the resolver, and the tool path adds F-888's own
@@ -942,7 +945,6 @@ class TestTheAdvisoryAskCostsOneScan:
     """
 
     def _counted(self, monkeypatch) -> list[str]:
-        profile_source.forget_advisory_holds()
         seen: list[str] = []
         real = clone_storage._profile_hold
 
@@ -962,15 +964,15 @@ class TestTheAdvisoryAskCostsOneScan:
         await _selection(session="beta", seed_from="work")
 
         assert seen.count("work") == 2, (
-            "one advisory scan shared by both pre-flight asks, plus the "
-            f"authoritative read before the copy — got {seen}"
+            "the pre-flight's ask and the authoritative read before the copy, "
+            f"and not the resolver's own gate call — got {seen}"
         )
         assert seen.count("beta") == 1, f"the target is asked about once: {seen}"
 
     async def test_an_unseeded_named_spawn_is_unchanged(
         self, monkeypatch, tmp_session_root
     ):
-        """A GUARD: the memo must not cost — or save — anything on the spawn
+        """A GUARD: the flag must not cost — or save — anything on the spawn
         that never writes `seed_from`."""
         seen = self._counted(monkeypatch)
 
@@ -978,36 +980,35 @@ class TestTheAdvisoryAskCostsOneScan:
 
         assert seen == ["beta"]
 
-    async def test_the_read_before_the_copy_is_never_served_from_the_memo(
+    async def test_the_resolvers_gate_call_skips_the_walk_the_preflight_makes(
         self, monkeypatch, tmp_session_root
     ):
-        """The one that would undo review S1's honesty. Two advisory asks cost
-        one walk; the pre-copy read walks again, every time."""
+        """The replacement for the memo, and the whole of it: ONE parameter,
+        False at ONE call site. Asked the way `spawn_browser` asks it, the
+        source question is put; asked the way the resolver asks it, it is not.
+        """
+        await _session_with_a_login("work", tmp_session_root)
+        landed = clone_storage.require_allowed_user_data_dir(None, "beta")
+        seen = self._counted(monkeypatch)
+
+        clone_storage.require_allowed_seed_from("work", landed)
+        assert seen.count("work") == 1, f"the pre-flight asks: {seen}"
+
+        clone_storage.require_allowed_seed_from("work", landed, check_source=False)
+        assert seen.count("work") == 1, f"the resolver's own call does not: {seen}"
+
+    async def test_nothing_remembers_an_answer_between_asks(
+        self, monkeypatch, tmp_session_root
+    ):
+        """No memo survives: every ask that is MADE walks. That is what makes
+        the pre-copy read the statement it claims to be, and it is why a source
+        closed a moment ago can never be refused from a remembered positive."""
         await _session_with_a_login("work", tmp_session_root)
         seen = self._counted(monkeypatch)
 
         clone_storage._seed_source("work")
         clone_storage._seed_source("work")
-        assert seen.count("work") == 1, f"advisory asks share one walk: {seen}"
+        assert seen.count("work") == 2, f"each ask is its own walk: {seen}"
 
         clone_storage._seed_source_for_copy("work")
-        assert seen.count("work") == 2, f"the pre-copy read is fresh: {seen}"
-
-        clone_storage._seed_source_for_copy("work")
-        assert seen.count("work") == 3, f"and fresh every time: {seen}"
-
-    async def test_a_source_that_opens_after_the_memo_is_still_refused(
-        self, monkeypatch, tmp_session_root
-    ):
-        """The memo's cost, named and bounded: a stale ADVISORY "not open" lets
-        the request through the gate, and the pre-copy read — the authoritative
-        one — refuses it. That is exactly the check-to-copy window review S1
-        already documented, not a new hole."""
-        source = await _session_with_a_login("work", tmp_session_root)
-        self._counted(monkeypatch)
-
-        clone_storage._seed_source("work")  # not held: memoised
-        held_profile(source)
-
-        with pytest.raises(ToolError, match="open in a browser right now"):
-            clone_storage._seed_source_for_copy("work")
+        assert seen.count("work") == 3, f"the pre-copy read is fresh: {seen}"

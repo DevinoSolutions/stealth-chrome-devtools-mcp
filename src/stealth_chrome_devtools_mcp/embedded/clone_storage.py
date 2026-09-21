@@ -761,7 +761,9 @@ def require_allowed_user_data_dir(
     return str(profile_seed.require_allowed(requested, _roots(), _is_relative_to))
 
 
-def require_allowed_seed_from(seed_from: str | None, landed: str | None) -> str | None:
+def require_allowed_seed_from(
+    seed_from: str | None, landed: str | None, *, check_source: bool = True
+) -> str | None:
     """THE gate for a ``seed_from`` request (F-897): the name it may be, and
     that there is a NEW session for it to apply to. None when none was given.
 
@@ -778,16 +780,21 @@ def require_allowed_seed_from(seed_from: str | None, landed: str | None) -> str 
     The resolver asks again because it is public and has its own callers.
 
     The SOURCE question is asked here too and its answer DISCARDED (review S1;
-    argument in finding §2.3). Its three refusals are raised inside
+    finding §2.3): its three refusals are raised inside
     ``profile_source.seed_source``, which the resolver calls from INSIDE
     ``spawn_browser``'s ``try``, so they reached the caller re-labelled
-    ``Failed to spawn browser: …``; an inner ``except ToolError: raise`` does
-    not fix that. **Discarding is the point**: "is this source open" is a fact
-    with a LIFETIME, so the authoritative read stays ``_seed_source_for_copy``'s
-    — the statement before the copy, no ``await`` between — and this one is
-    ADVISORY, which is why it may be memoised and why the freshen is not here.
+    ``Failed to spawn browser: ...``, and an inner ``except ToolError: raise``
+    does not fix that. Discarding is the point: "is this source open" is a fact
+    with a LIFETIME, so the read that DECIDES stays the statement before the
+    copy, with no ``await`` between.
 
-    **What it costs** (N2): one ``exists()``, ONE psutil walk for BOTH asks."""
+    *check_source* is False for exactly one caller, the RESOLVER (memo review
+    S): its ask already runs inside that ``try``, and ``_seed_source_for_copy``
+    raises the same sentences one statement later with no ``await`` between, so
+    a third walk of the process table decides nothing. A 1 s memo bought the
+    same saving and is REPLACED by this flag — no process-global state, no
+    clock, no reset hook, no answer that can go stale. What is left is one
+    ``exists()`` and a psutil walk only where the answer is used."""
     requested = profile_source.seed_request(seed_from)
     if requested is None:
         return None
@@ -799,36 +806,30 @@ def require_allowed_seed_from(seed_from: str | None, landed: str | None) -> str 
         and profile_seed.same_dir(target, master_profile_dir()),
         inside_root=target is not None and _is_relative_to(target, clone_root_dir()),
     )
-    _seed_source(requested)
+    if check_source:
+        _seed_source(requested)
     return requested
 
 
 def _seed_source(seed_from: str | None) -> profile_source.SeedSource:
-    """The ADVISORY read: which directory this new session is copied from,
-    bound to OUR four directories and to OUR witness through ``advisory``,
-    which remembers that answer for the window review N2 argues at
-    ``profile_source.ADVISORY_HOLD_SECONDS``. Deliberately SIDE-EFFECT-FREE,
-    because it is asked TWICE (review S1) and only one ask is about to copy:
-    taken twice the freshen would copy a whole profile for a spawn about to be
-    refused, and taken here a gate whose job is asking questions would write
-    to disk."""
-    held = profile_source.advisory(_profile_has_running_browser)
-    return profile_source.seed_source(seed_from, _roots(), _is_relative_to, held=held)
-
-
-def _seed_source_for_copy(seed_from: str | None) -> profile_source.SeedSource:
-    """The AUTHORITATIVE read: the same question on a FRESH witness — never the
-    memo, because this is the statement before the copy and a remembered answer
-    would widen the microsecond window review S1 measured to the whole one
-    review N2 bought — plus the freshen a copy from the SHARED session owes its
-    seed first, asked only for that session, the only source that HAS one. The
-    two may answer differently on a first run (no seed yet -> the live shared
-    dir; after -> the seed), harmless because the advisory answer is dropped."""
-    if seed_from is None or profile_seed.is_default_name(seed_from):
-        _refresh_snapshot_if_stale()
+    """THE one binding of ``profile_source.seed_source`` to OUR four directories
+    and OUR witness. SIDE-EFFECT-FREE: it is asked TWICE (review S1) and only
+    one ask is about to copy, so the freshen is ``_seed_source_for_copy``'s
+    alone — taken twice it would copy a whole profile for a refused spawn."""
     return profile_source.seed_source(
         seed_from, _roots(), _is_relative_to, held=_profile_has_running_browser
     )
+
+
+def _seed_source_for_copy(seed_from: str | None) -> profile_source.SeedSource:
+    """The AUTHORITATIVE read: the SAME question through the SAME binding
+    (review N4 — one ``seed_source`` call site, not two that can drift), plus
+    the freshen a copy from the SHARED session owes its seed first — the only
+    source that HAS one. Authoritative by WHERE it sits: the statement before
+    the copy, with no ``await`` between."""
+    if seed_from is None or profile_seed.is_default_name(seed_from):
+        _refresh_snapshot_if_stale()
+    return _seed_source(seed_from)
 
 
 def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, Any]:
@@ -875,7 +876,7 @@ async def resolve_profile_selection(
     # caller NAMED. A target that is held is walked to `<name>-2`, which does
     # not exist — so asking afterwards would seed a substitute directory under
     # a flag the caller passed about theirs.
-    seed_from = require_allowed_seed_from(seed_from, landed)
+    seed_from = require_allowed_seed_from(seed_from, landed, check_source=False)
     explicit = (
         None
         if landed is None or profile_seed.same_dir(Path(landed), master)
@@ -899,9 +900,8 @@ async def resolve_profile_selection(
                     "walk_reason": hold.reason,
                 }
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
-            # `_for_copy`, never `_seed_source`: this read owns the freshen AND
-            # is the AUTHORITATIVE hold check — the statement before the copy,
-            # no `await` between. The pre-flight's ask is advisory (review S1).
+            # `_for_copy`, never `_seed_source`: this read owns the freshen and
+            # is the AUTHORITATIVE hold check — the pre-flight skipped it (S).
             seed = _seed_source_for_copy(seed_from)
             _require_copied(
                 _copy_profile_tree(seed.path, explicit, clone_root, seed.kind), explicit

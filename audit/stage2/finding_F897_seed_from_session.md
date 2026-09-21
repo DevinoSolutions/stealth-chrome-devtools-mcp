@@ -202,28 +202,37 @@ to microseconds rather than to zero. A source opened inside that window still
 refuses, one layer down and one label differently, which is strictly better
 than what it replaces.
 
-**What it cost, measured, and what that cost is now** (delta review N2). The
-gate is itself asked twice — the tool's pre-flight, then the resolver's own —
-so a seeded spawn walked the process table THREE times for one source where an
-unseeded named spawn walks it once: counted at `clone_storage._profile_hold`,
-`['work', 'work', 'beta', 'work']`. `_profile_hold` is a full psutil cmdline
-scan, and on a machine that has been running a Chrome fleet that is hundreds of
-processes. The two ADVISORY asks now share ONE walk through
-`profile_source.advisory` / `ADVISORY_HOLD_SECONDS` (1.0 s), and the read
-before the copy is never served from it — `_seed_source_for_copy` takes the
-witness itself. So the count is `['work', 'beta', 'work']`, pinned as a count
-rather than described.
+**What it cost, measured, and what that cost is now** (delta review N2; memo
+review S). The gate is itself asked twice — the tool's pre-flight, then the
+resolver's own — so a seeded spawn walked the process table THREE times for one
+source where an unseeded named spawn walks it once: counted at
+`clone_storage._profile_hold`, `['work', 'work', 'beta', 'work']`.
+`_profile_hold` is a full psutil cmdline scan, and on a machine that has been
+running a Chrome fleet that is hundreds of processes.
 
-Reusing an advisory answer is a WEAKER claim than the one the advisory ask
-already makes: that answer is discarded. Inside one spawn a remembered answer
-can only ever be NEGATIVE — a positive raises at the first ask, so nothing
-reaches the second. Across spawns a stale negative lands in exactly the
-check-to-copy window above and the authoritative read refuses it; a stale
-positive refuses a source closed less than a second ago, with the right
-sentence and the right remedy. Both are bounded by the window and by nothing
-else, which is why it is a second and not a minute. Cost now: one
-`Path.resolve`, one `exists()` and one `profile_hold` for a spawn that passes
-`seed_from`, and nothing at all for one that does not — which is what
+The walk that goes is the RESOLVER's own gate call, and it goes by a parameter:
+`require_allowed_seed_from(..., check_source=False)`, passed at that one site.
+That ask is the one walk whose answer can decide nothing — it runs inside
+`spawn_browser`'s `try`, where a source refusal is re-labelled exactly as this
+section says, and `_seed_source_for_copy` raises the same sentences from the
+same function one statement later with no `await` between. What is left is a
+walk at each of the two places the answer is USED: the pre-flight's, which
+turns the common case into an unwrapped refusal, and the read before the copy,
+which is the one that decides. The count is `['work', 'beta', 'work']`, pinned
+as a count rather than described.
+
+**A 1 s memo was built for this first, and was replaced.** It lived in
+`profile_source` as `advisory` / `advisory_hold` / `ADVISORY_HOLD_SECONDS` /
+`forget_advisory_holds`, and it saved exactly the same walk by remembering the
+answer instead of by not asking. The flag is strictly less machinery for the
+identical arithmetic: no process-global dict, no clock, no test-isolation reset
+hook, and — the substantive difference — no remembered answer that can be
+STALE, so a source closed a moment ago can never be refused from a positive
+nobody re-checked. The memo's own named cost (a stale negative landing in the
+check-to-copy window) is gone with it; that window is still exactly the one
+review S1 documented above and no wider. Cost now: one `Path.resolve`, one
+`exists()` and one `profile_hold` for a spawn that passes `seed_from`, and
+nothing at all for one that does not — which is what
 `require_allowed_seed_from`'s docstring says, where it used to say "one
 `exists()`".
 
@@ -235,6 +244,12 @@ to ask questions would write to disk. The two can answer DIFFERENTLY on a first
 run — the pre-flight sees no seed yet and reads the live shared directory, the
 copy creates the seed and reads that — which is harmless precisely because the
 pre-flight's answer is thrown away.
+
+Since the memo went, `_seed_source_for_copy` also CALLS `_seed_source` rather
+than re-spelling the same `seed_source(...)` binding beside it (review N4): one
+call site, so the four directories, the containment predicate and the witness
+cannot drift between the two reads, and what distinguishes the authoritative
+read is only WHERE it sits and the freshen it owns.
 
 It is also asked BEFORE the F-871 walk to `<name>-2`, for the same shape of
 reason: a held target is walked to a directory that does not exist, so a
@@ -449,7 +464,7 @@ It also kept the signature inside `PLR0913`.
 |---|---|---|---|
 | `embedded/clone_storage.py` | 1054 | 1000 | 1000 (GRANDFATHER row DELETED) |
 | `embedded/profile_copy.py` | — | 231 | 1000 |
-| `embedded/profile_seed.py` | 599 | 917 | 1000 |
+| `embedded/profile_seed.py` | 599 | 918 | 1000 |
 | `embedded/profile_source.py` | — | 241 | 1000 |
 | `cli_call.py` | 1000 | 928 | 1000 |
 | `cli_render.py` | — | 146 | 1000 |
@@ -460,8 +475,9 @@ It also kept the signature inside `PLR0913`.
 
 ## 4. Pins
 
-`tests/test_seed_from_session.py`, **66 nodes**, measured in four rounds
-because the file was written in four.
+`tests/test_seed_from_session.py`, **66 nodes**, measured in five rounds
+because the file was written in five — the fifth REPLACED the fourth's four
+nodes rather than adding to them, so the total is unchanged.
 
 1. The original 43 against the tree with the two extractions committed and the
    feature reverted — **40 failed, 3 passed**.
@@ -472,17 +488,27 @@ because the file was written in four.
 3. The fourteen added for this review, against `c5accae` — **9 failed,
    4 passed** (the remaining node, `test_every_refusal_here_names_both
    _spellings`, was written after the M1 refusal existed and is stated below).
-4. The four added for the DELTA review's N2 (`TestTheAdvisoryAskCostsOneScan`),
-   against the merge commit `3da8572` — **2 failed, 2 passed**. The two REDs
-   are the count itself: `AssertionError: one advisory scan shared by both
-   pre-flight asks, plus the authoritative read before the copy — got
-   ['work', 'work', 'beta', 'work']`, and `advisory asks share one walk:
-   ['work', 'work']`. The two GREENs are guards and say so — an unseeded named
-   spawn must not change (`['beta']`), and a source opened after the memo must
-   still be refused by the pre-copy read, which is the memo's one named cost
-   rather than a new hole. They were run with the memo's own reset removed, so
-   the REDs are the behaviour and not an `AttributeError` on a helper that did
-   not exist yet.
+4. The four added for the DELTA review's N2, against the merge commit
+   `3da8572` — **2 failed, 2 passed**. The two REDs were the count itself:
+   `AssertionError: one advisory scan shared by both pre-flight asks, plus the
+   authoritative read before the copy — got ['work', 'work', 'beta', 'work']`,
+   and `advisory asks share one walk: ['work', 'work']`. They were run with the
+   memo's own reset removed, so the REDs were the behaviour and not an
+   `AttributeError` on a helper that did not exist yet.
+5. The same four, REWRITTEN when the memo review replaced that memo with
+   `check_source` (`TestTheSourceAskIsPaidForTwice`). Measured against this tree
+   with the resolver's `check_source=False` alone reverted — **1 failed,
+   3 passed**. The RED is the count at the call site that matters:
+   `AssertionError: the pre-flight's ask and the authoritative read before the
+   copy, and not the resolver's own gate call — got ['work', 'work', 'beta',
+   'work']`, i.e. exactly round 4's measurement, reached by the other route.
+   The three GREENs are each about something that reversion does not move and
+   they say so: the unseeded named spawn (`['beta']`, a guard), the PARAMETER
+   as opposed to the call site (`check_source=False` suppresses the walk
+   wherever it is passed — the site is node 1's claim), and the guard that
+   nothing memoises an answer between asks, which is RED against round 4's tree
+   by round 4's own recorded reading, `advisory asks share one walk:
+   ['work', 'work']`.
 
 Round 3's REDs, by claim:
 

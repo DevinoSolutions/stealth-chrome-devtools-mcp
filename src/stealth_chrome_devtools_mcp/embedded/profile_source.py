@@ -38,72 +38,12 @@ callables, so this module never learns where a session root is and
 ``clone_storage`` stays the only thing that knows.
 """
 
-import os.path
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
 from stealth_chrome_devtools_mcp.embedded import profile_seed
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
-
-#: How long an ADVISORY "is this source open" answer may be reused (review N2).
-#: The pre-flight gate that asks it is itself asked twice per seeded spawn —
-#: the tool's, then the resolver's own — and the witness behind it is a full
-#: psutil cmdline walk, which on a machine that has been running a Chrome
-#: fleet is hundreds of processes. One seeded spawn walked the table three
-#: times for one source where an unseeded named spawn walks it once.
-ADVISORY_HOLD_SECONDS = 1.0
-
-_HOLDS: dict[str, tuple[float, bool]] = {}
-
-
-def forget_advisory_holds() -> None:
-    """Drop every memoised advisory answer. For test isolation."""
-    _HOLDS.clear()
-
-
-def advisory(ask: Callable[[Path], bool]) -> Callable[[Path], bool]:
-    """*ask*, as a witness that remembers its answers for the advisory window.
-    **ADVISORY callers only** — see `advisory_hold`. A binder rather than a
-    stored callable because the witness has to be resolved at CALL time: it is
-    a module attribute the suite patches, and one captured at import would
-    make a patched liveness answer unreachable.
-    """
-    return lambda profile_dir: advisory_hold(profile_dir, ask)
-
-
-def advisory_hold(profile_dir: Path, ask: Callable[[Path], bool]) -> bool:
-    """*ask* about *profile_dir*, answered from the memo while it is fresher
-    than `ADVISORY_HOLD_SECONDS`. **ADVISORY callers only.**
-
-    Reusing an answer is a WEAKER claim than the advisory ask already makes —
-    that answer is discarded, and the read that decides is the statement
-    before the copy, which takes the witness itself and never comes here.
-    Within one spawn a remembered answer can only ever be a NEGATIVE one: a
-    positive raises at the first ask, so nothing reaches the second. Across
-    spawns a stale negative lands in exactly the check-to-copy window review
-    S1 documented and the pre-copy read refuses it; a stale positive refuses a
-    source closed less than a second ago, with the right sentence and the
-    right remedy. Both are bounded by the window and by nothing else, which is
-    why it is a second rather than a minute.
-
-    Unlocked deliberately: `dict` get and set are atomic under the GIL, every
-    caller runs on the event loop, and a lost update costs one extra walk —
-    the one thing this exists to save, not anything it is trusted for. The key
-    is case-folded and nothing more, because the only thing that reaches here
-    is `seed_source`'s source, which is `profile_seed.require_allowed`'s
-    answer: already absolute, already normalised. A key that resolved would
-    also stat, which is the cost this exists to avoid.
-    """
-    key = os.path.normcase(str(profile_dir))
-    now = time.monotonic()
-    seen = _HOLDS.get(key)
-    if seen is not None and now - seen[0] < ADVISORY_HOLD_SECONDS:
-        return seen[1]
-    answer = ask(profile_dir)
-    _HOLDS[key] = (now, answer)
-    return answer
 
 
 class SeedSource(NamedTuple):
