@@ -276,13 +276,15 @@ def test_a_tool_failure_exits_1_with_the_tools_own_message(isolated_backend):
     message on stderr and exit 1, with nothing on stdout for a script to parse
     as an answer.
 
-    ``navigate`` and deliberately not ``close_instance``: that one answers
-    ``false`` for an unknown instance (measured — the call exits 0 and prints
-    ``false``), which is its contract and not a failure, so building the error
-    pin on it would have pinned the opposite of what it claims. Measured the
-    same way, ``get_instance_state`` and ``list_tabs`` also answer rather than
-    raise for an unknown id; ``navigate`` and ``execute_script`` are the two
-    that reach ``InstanceNotFoundError``, in 0.1 s.
+    ``navigate`` and deliberately not ``close_instance``: that one ANSWERS for
+    an unknown instance rather than raising — the call exits 0 and prints a
+    record whose ``closed`` is ``false`` (since F-910; it printed the bare
+    ``false`` when the tool returned a bool) — which is its contract and not a
+    failure, so building the error pin on it would have pinned the opposite of
+    what it claims. Measured the same way, ``get_instance_state`` and
+    ``list_tabs`` also answer rather than raise for an unknown id; ``navigate``
+    and ``execute_script`` are the two that reach ``InstanceNotFoundError``,
+    in 0.1 s.
     """
     proc = _stealthy(
         isolated_backend,

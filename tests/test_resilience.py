@@ -267,7 +267,12 @@ async def _assert_close_leaves_nothing(iid: str) -> None:
     tree = _tree_pids(_tracked(iid).get("pid"))
     outcome, value, _ = await _terminal(close(instance_id=iid), f"close({iid})")
     assert outcome == "returned", value
-    assert value is True, value
+    # F-910 made the answer a record, so the boolean is a key. Read the key and
+    # never the record: a record is always truthy, so `value is True` on it is
+    # unconditionally False here and `assert value` would be unconditionally
+    # True — the same reason the crashed-browser pin below spells this out.
+    assert isinstance(value, dict), f"close_instance answered {value!r}"
+    assert value["closed"] is True, value
     assert iid not in process_cleanup.get_tracked_processes()
     assert await _await_pids_gone(tree, REAP_TIMEOUT) == [], (
         f"close left orphaned chrome process(es) from {tree}"
@@ -383,7 +388,11 @@ async def test_crash_recovery_after_the_owned_chrome_is_killed(
         close(instance_id=instance), f"close({instance}) after the crash"
     )
     assert closed_outcome == "returned", closed
-    assert closed is False, (
+    # F-910 made the answer a record; `closed` is the boolean it used to be,
+    # and reading the key is what keeps this pin able to see a False at all —
+    # a record is truthy, so `closed is False` would have gone quiet here.
+    assert isinstance(closed, dict), f"close_instance answered {closed!r}"
+    assert closed["closed"] is False, (
         "close_instance now reports success for a crashed browser — F-789 is "
         "fixed and MQ-126 can be promoted from planned to satisfied"
     )

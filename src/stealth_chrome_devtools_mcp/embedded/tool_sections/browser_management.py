@@ -732,7 +732,7 @@ async def list_instances() -> list[dict[str, Any]]:
     return result
 
 
-async def close_instance(instance_id: str) -> bool:
+async def close_instance(instance_id: str) -> dict[str, bool | str | None]:
     """
     Close a browser instance.
 
@@ -740,7 +740,14 @@ async def close_instance(instance_id: str) -> bool:
         instance_id (str): Browser instance ID.
 
     Returns:
-        bool: True if closed successfully.
+        Dict[str, Union[bool, str, None]]: ``closed`` is the old boolean — True
+        when the instance was closed. ``seed_refreshed`` reports what closing
+        the `default` session did to the SEED every later session is copied
+        from: True refreshed it, False refused (and ``seed_error`` then carries
+        the refusal in ``clone_storage``'s own words), and None means no
+        refresh was due because this was not the `default` session. The refusal
+        used to go into a dict this tool discarded, which is how F-910 hid a
+        seed that had silently stopped moving.
     """
     spawn_diagnostics = await rt.browser_manager.get_spawn_diagnostics(instance_id)
     profile_selection = {}
@@ -751,6 +758,13 @@ async def close_instance(instance_id: str) -> bool:
     )
 
     success = await rt.browser_manager.close_instance(instance_id)
+    # F-910: `seed_refreshed` is tri-state and every value is a statement — the
+    # None is "not asked", on `profile_seed.seed_changed_since`'s precedent, so
+    # "nothing to report" cannot read as "nothing reported". `seed_error` IS
+    # conditional, and deliberately: it is present exactly when there is a
+    # refusal to quote, which is a fact about that refusal and not a third
+    # value of `seed_refreshed`.
+    answer: dict[str, bool | str | None] = {"closed": success, "seed_refreshed": None}
     if success:
         await rt.network_interceptor.clear_instance_data(instance_id)
         rt.dynamic_hook_system.remove_instance(instance_id)
@@ -761,11 +775,18 @@ async def close_instance(instance_id: str) -> bool:
         ):
             rt.clone_storage._release_clone_dir(profile_selection["user_data_dir"])
         if should_refresh_snapshot:
-            await asyncio.to_thread(
+            refresh = await asyncio.to_thread(
                 rt.clone_storage._refresh_master_snapshot_if_safe,
                 "after-default-close",
             )
-    return success
+            refreshed = refresh.get("seed_refreshed") is True
+            answer["seed_refreshed"] = refreshed
+            if not refreshed:
+                # The words are `_refresh_master_snapshot_if_safe`'s, never a
+                # second phrasing here; a refusal it left unexplained is itself
+                # reportable rather than silently absent.
+                answer["seed_error"] = str(refresh.get("seed_error") or "unreported")
+    return answer
 
 
 async def get_instance_state(instance_id: str) -> dict[str, Any] | None:

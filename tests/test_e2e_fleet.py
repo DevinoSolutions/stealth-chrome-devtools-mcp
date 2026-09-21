@@ -632,7 +632,14 @@ async def test_a_fleet_of_six_browsers_answers_truthfully_about_every_page(
             *(close(instance_id=iid) for iid in ids), return_exceptions=True
         )
 
-    assert all(result is True for result in closed), closed
+    # F-910 made the answer a record, so the boolean is a key. `isinstance`
+    # stays in front of it because `return_exceptions=True` means an element may
+    # be an Exception — which the old `is True` also rejected — and `.get` rather
+    # than `[...]` so a record missing the key fails with the whole list in the
+    # message instead of a KeyError naming nothing.
+    assert all(
+        isinstance(result, dict) and result.get("closed") is True for result in closed
+    ), closed
 
     # Nothing of ours is live any more.
     still_live = {

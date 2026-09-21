@@ -14,6 +14,7 @@ Four findings, one subject: the master snapshot every session is copied from.
 
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -177,6 +178,32 @@ class TestLoginWitnesses:
         assert spellings == [Path(profile_seed.__file__).resolve()], (
             f"{literal!r} is spelled in {[p.name for p in spellings]}"
         )
+
+    @pytest.mark.parametrize("store", ["Cookies", "Login Data", "Web Data"])
+    def test_the_shared_fixture_writes_stores_a_browser_can_open(
+        self, tmp_session_root, store
+    ):
+        """`tmp_session_root`'s profile stores must be REAL SQLite (F-910).
+
+        Six modules sharing that fixture spawn a real browser onto its
+        profile, and Chrome >= 96 MIGRATES the legacy cookie store into the
+        Network subdirectory at startup — so a store it cannot open is not
+        inert: measured with the 18-byte placeholders this replaces, Chrome
+        kept its cookie jar in memory, `document.cookie` read back perfectly,
+        the on-disk database was left at one empty page and nothing survived
+        the respawn. A fixture that manufactures data loss fails the finding
+        that uses it, which is why this is pinned at the source rather than
+        worked around in the one module that noticed.
+        """
+        for profile in (tmp_session_root["master"], tmp_session_root["snapshot"]):
+            path = profile / "Default" / store
+            assert path.exists(), path
+            connection = sqlite3.connect(path)
+            try:
+                verdict = connection.execute("PRAGMA integrity_check").fetchone()[0]
+            finally:
+                connection.close()
+            assert verdict == "ok", f"{path} is not a database Chrome could open"
 
     def test_the_dead_refresh_window_is_gone(self):
         """`_clone_needs_refresh` and `_profile_refresh_days` had no callers and

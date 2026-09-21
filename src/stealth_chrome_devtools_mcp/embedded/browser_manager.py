@@ -3,7 +3,6 @@
 import asyncio
 import contextlib
 import json
-import os
 import time
 import uuid
 from collections.abc import Coroutine
@@ -19,6 +18,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     desktop_launch,
     navigation_milestone,
     page_storage,
+    process_exit,
     spawn_contention,
     spawn_exhaustion,
     spawn_leak,
@@ -221,7 +221,7 @@ class BrowserManager:
             return
         await proxy_forwarder.close()
 
-    def _blocking_teardown(self, instance_id: str, browser: Browser) -> object | None:  # noqa: C901,PLR0912  DEBT(F-702)
+    def _blocking_teardown(self, instance_id: str, browser: Browser) -> object | None:
         """Synchronous kill work, run in a worker thread via asyncio.to_thread.
 
         Returns an awaitable if browser.stop() produced a coroutine (nodriver
@@ -248,61 +248,12 @@ class BrowserManager:
                 f"browser.stop() failed for {instance_id}: {stop_err}",
             )
 
-        if (
-            hasattr(browser, "_process")
-            and browser._process
-            and browser._process.returncode is None
-        ):
-            for attempt in range(self._KILL_RETRIES):
-                try:
-                    browser._process.terminate()
-                    debug_logger.log_info(
-                        "browser_manager",
-                        "terminate_process",
-                        f"terminated browser with pid "
-                        f"{browser._process.pid} successfully on attempt "
-                        f"{attempt + 1}",
-                    )
-                    break
-                except Exception:
-                    try:
-                        browser._process.kill()
-                        debug_logger.log_info(
-                            "browser_manager",
-                            "kill_process",
-                            f"killed browser with pid "
-                            f"{browser._process.pid} successfully on "
-                            f"attempt {attempt + 1}",
-                        )
-                        break
-                    except Exception:
-                        try:
-                            if (
-                                hasattr(browser, "_process_pid")
-                                and browser._process_pid
-                            ):
-                                os.kill(browser._process_pid, 15)
-                                debug_logger.log_info(
-                                    "browser_manager",
-                                    "kill_process",
-                                    f"killed browser with pid "
-                                    f"{browser._process_pid} using signal 15 "
-                                    f"successfully on attempt {attempt + 1}",
-                                )
-                                break
-                        except (PermissionError, ProcessLookupError) as e:
-                            debug_logger.log_info(
-                                "browser_manager",
-                                "kill_process",
-                                f"browser already stopped or no "
-                                f"permission to kill: {e}",
-                            )
-                            break
-                        except Exception as e:
-                            if attempt == self._KILL_RETRIES - 1:
-                                debug_logger.log_error(
-                                    "browser_manager", "kill_process", e
-                                )
+        process_exit.terminate(
+            instance_id,
+            getattr(browser, "_process", None),
+            getattr(browser, "_process_pid", None),
+            self._KILL_RETRIES,
+        )
 
         try:
             if hasattr(browser, "_process"):
@@ -856,10 +807,12 @@ class BrowserManager:
         """
         Close and remove a browser instance.
 
-        Three-phase teardown that keeps the event loop responsive:
+        Four-step teardown that keeps the event loop responsive:
         Phase 1 (claim) — pop shared state under lock, the in-memory-storage
             entry included (F-899: it must not outlive the pop).
         Phase 2 (graceful CDP) — close tabs/connection on the loop (bounded).
+        Phase 2b (grace) — wait, bounded, for Chrome's OWN exit before anything
+            kills it: that exit commits the cookie store (F-910, `settle`).
         Phase 3 (blocking kill) — synchronous kill in a worker thread.
         """
         # -- Phase 1: claim (under lock, O(microseconds)) --------------------
@@ -935,6 +888,20 @@ class BrowserManager:
                     "close_instance",
                     f"Proxy forwarder close failed for {instance_id}: {proxy_err}",
                 )
+
+            # -- Phase 2b: let Chrome finish leaving (F-910) -------------------
+            # The graceful close above is the START of Chrome's shutdown, and
+            # that shutdown is what COMMITS the cookie store — terminating
+            # mid-flush loses the login the caller just made. The grace, its
+            # measurement and what a cancelled close does about it are all
+            # `process_exit.settle`'s. Phase 3 keeps its whole budget: this is
+            # its own await.
+            await process_exit.settle(
+                instance_id,
+                getattr(browser, "_process", None),
+                getattr(browser, "_process_pid", None),
+                self._KILL_RETRIES,
+            )
 
             # -- Phase 3: blocking kill (off the loop, real timeout) ----------
             stop_coro = None

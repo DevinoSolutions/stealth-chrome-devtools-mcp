@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -215,6 +216,22 @@ def _reset_settings_cache():
     get_settings.cache_clear()
 
 
+def _empty_sqlite(path: Path) -> None:
+    """Write a valid, EMPTY SQLite database at *path* (F-910).
+
+    A profile store a browser cannot open is worse than one that is absent:
+    Chrome carries on with an in-memory jar and every persistence assertion
+    made afterwards is about nothing. One table, committed, so the file has a
+    real header rather than being zero-length.
+    """
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("CREATE TABLE IF NOT EXISTS placeholder (id INTEGER)")
+        connection.commit()
+    finally:
+        connection.close()
+
+
 @pytest.fixture()
 def tmp_session_root(tmp_path):
     """
@@ -223,11 +240,19 @@ def tmp_session_root(tmp_path):
     """
     master = tmp_path / "master" / "Default"
     master.mkdir(parents=True)
-    # Minimal profile files Chrome needs
+    # Minimal profile files Chrome needs. The three stores are REAL (empty)
+    # SQLite databases and never byte placeholders (F-910): six of the modules
+    # sharing this fixture spawn a real browser onto it, and Chrome >= 96
+    # MIGRATES `Default/Cookies` into the Network subdirectory on startup —
+    # so an unreadable store there is not inert. Measured while building F-910
+    # with 18-byte stubs in place: Chrome keeps its cookie jar in MEMORY for
+    # the life of the browser, `document.cookie` reads back perfectly, the
+    # on-disk database is left at one empty page and nothing survives the
+    # respawn. That is F-910's own symptom manufactured by the harness, and it
+    # cost an hour of chasing the product before the fixture was suspected.
     (master / "Preferences").write_text("{}", encoding="utf-8")
-    (master / "Cookies").write_bytes(b"sqlite-cookie-stub")
-    (master / "Login Data").write_bytes(b"sqlite-login-stub")
-    (master / "Web Data").write_bytes(b"sqlite-webdata-stub")
+    for store in ("Cookies", "Login Data", "Web Data"):
+        _empty_sqlite(master / store)
 
     snapshot = tmp_path / "master-snapshot" / "Default"
     shutil.copytree(str(master.parent), str(snapshot.parent))
