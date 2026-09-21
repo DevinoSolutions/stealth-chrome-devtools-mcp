@@ -54,6 +54,7 @@ from pathlib import Path
 import anyio
 import pytest
 
+import operator_fence
 from stealth_chrome_devtools_mcp.embedded import backend_client, singleton
 
 PORT = 41900
@@ -144,20 +145,14 @@ def _init_msg(req_id):
     return SessionMessage(message=JSONRPCMessage(req))
 
 
-class _RealStartupReached(BaseException):
-    """A test reached ``singleton.ensure_server_running``, the real startup path.
-
-    **Deliberately a `BaseException` and not an `AssertionError`** (review M2).
-    ``proxy_selfheal.heal_backend`` drives ``ensure_running`` inside
-    ``except Exception:  # PERMANENT(a backstop must not raise)``
-    (``proxy_selfheal.py:325``), and an ``AssertionError`` is an ``Exception``:
-    the first version of this tripwire was swallowed there, logged once per
-    attempt as ``heal attempt <n>/HEAL_ATTEMPTS failed``, retried for the rest
-    of that budget, and the node passed — with a real backend already
-    cold-started. A tripwire a backstop can eat is decoration.
-    :meth:`TestTheFence.test_the_tripwire_ends_the_run_when_the_heal_path_is_reached`
-    proves this one is not.
-    """
+# The tripwire is `operator_fence`'s, not this file's (F-903). It was declared
+# here by F-900, with the `BaseException` argument that module's own guards are
+# built on — two classes, one sentence, one finding apart. The reasoning moved
+# with the symbol; what stays here is the ARMING, because a spawn cannot be
+# refused suite-wide without deciding for the integration tier and the herd test.
+# :meth:`TestTheFence.test_the_tripwire_ends_the_run_when_the_heal_path_is_reached`
+# still proves this one is not swallowed.
+_RealStartupReached = operator_fence.RealStartupReached
 
 
 @pytest.fixture()

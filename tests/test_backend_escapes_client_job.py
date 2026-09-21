@@ -322,8 +322,26 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
 
 
 def _child_env(tmp_path: Path) -> dict[str, str]:
-    """The helper's environment: the real one, with every state path diverted."""
+    """The helper's environment: the real one, with every state path diverted.
+
+    ``HOME``/``USERPROFILE`` are the important two and they were missing
+    (F-903 review S7). This helper runs REAL backend-spawn code, and the
+    suite-wide fence in ``tests/operator_fence.py`` is in-process only -- it
+    cannot reach a child. The helper fences itself by hand, but only three
+    names (``backend_registry.STATE_DIR``, ``singleton.PORT_FILE``, and stubs
+    for ``_ensure_state_dir``/``_write_server_state``); ``singleton
+    .SERVER_STATE_FILE``, ``singleton.STATE_DIR`` and ``singleton.LOCK_FILE``
+    were computed from the operator's real home at the child's own import and
+    left pointing there. Nothing landed, because the only writer is stubbed --
+    which is one un-stubbed writer away from the operator's real record.
+    Redirecting the home makes those three derive somewhere harmless, which is
+    what every other spawning test in this suite already does.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["STEALTH_MCP_LOG_DIR"] = str(tmp_path / "logs")
     env["STEALTH_MCP_NO_ERROR_REPORTING"] = "1"
     env["PYTHONUTF8"] = "1"
