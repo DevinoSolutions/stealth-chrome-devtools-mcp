@@ -25,6 +25,7 @@ from pathlib import Path
 import psutil
 
 from stealth_chrome_devtools_mcp.embedded import (
+    backend_client,
     backend_env,
     backend_eviction,
     backend_liveness,
@@ -785,7 +786,7 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
     herd live in ``proxy_selfheal``.
     """
     import anyio
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
     from mcp.shared.message import SessionMessage
     from mcp.types import (
         DEFAULT_NEGOTIATED_VERSION,
@@ -850,12 +851,23 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
         armed.set()  # arm the liveness monitor now that it is genuinely up
         init_swallowed = {"done": False}  # per generation: each backend answers
         backend_initialized = anyio.Event()  # our initialize exactly once
-        async with streamablehttp_client(url) as (backend_read, backend_write, _):
+        # F-900: the SDK's CURRENT client, over the ONE transport seam, under
+        # the bridge's own read policy — the argument for all three is at
+        # `backend_client.BRIDGE_READ_TIMEOUT`. A client we PASS is one the SDK
+        # does not close, so it is entered here.
+        async with (
+            backend_client.http_client(backend_client.BRIDGE_READ_TIMEOUT) as http,
+            streamable_http_client(url, http_client=http, terminate_on_close=True) as (
+                backend_read,
+                backend_write,
+                _,
+            ),
+        ):
 
             async def to_backend():
                 # Forward the initialize first, then hold every later message
                 # until the backend's initialize response establishes the
-                # streamable-HTTP session id: streamablehttp_client stamps each
+                # streamable-HTTP session id: the SDK stamps each
                 # concurrent request with the CURRENT id, so a tools/list sent
                 # before it exists yields 400. A real client gets that
                 # sequencing by awaiting the initialize response; we answered

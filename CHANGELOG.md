@@ -113,6 +113,31 @@ it and the pop, so the window is closed rather than narrowed. The cancellation s
 propagates. `close_instance` keeps exactly one removal site and
 `browser_manager.py` stays at its 1485-LOC cap.
 
+### Fixed — F-900: the proxy bridge's inherited read timeout silently dropped its event stream
+
+The stdio proxy's bridge opened `streamablehttp_client(url)` — the mcp SDK's
+deprecated client, with no arguments — so it inherited
+`Timeout(connect=30, read=300, ...)`. A `read` deadline is a deadline on being
+IDLE: the standing GET event stream carries nothing while a session is quiet and
+the backend sends no SSE keepalive, so the stream timed out, was retried the
+SDK's two times, and was then abandoned for good at DEBUG after ~601 s of quiet.
+That is exactly the discriminator F-862's session sweep uses to decide a client
+has gone, whose docstring promises a live proxy idle for hours is never touched —
+so after ~15 min of continuous idleness a healthy session was reaped. The next
+tool call is answered `Session terminated`, and it does not recover: the SDK
+answers a 404 by pushing that JSON-RPC error into the read stream and returning
+without raising, without closing the stream and without clearing the dead
+session id, so the bridge never ends, nothing heals or re-bridges, and every
+later call in that Claude Code session answers the same error until the client
+is restarted.
+
+The bridge now uses `streamable_http_client` (no more `DeprecationWarning` from
+our own call sites, pinned by AST) through `backend_client.http_client`, the one
+transport seam, with `BRIDGE_READ_TIMEOUT = None`. What bounds a bridge is left
+where it already lives: the F-820 watchdog, `proxy_selfheal`, and each tool
+call's own CDP budget. Measured against a real loopback socket: a bounded read
+opens the stream twice and then loses it; the new policy holds one.
+
 ## 2.1.11
 
 ### Fixed — F-892: the snapshot staleness witness stated a file Chrome stopped writing in v96
