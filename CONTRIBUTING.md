@@ -344,11 +344,25 @@ your loss. Do not "restore" them — merge `main` and re-run the `--numstat`.
 `main` will lead with `## <version>` and carry **no `## Unreleased` at all**.
 Do not put your entry under the release heading:
 
+0. **BEFORE the merge, copy your own `### ` block to a scratch file.** Not
+   optional. After the merge, diff it byte-for-byte against what is in the
+   file. This is the ONLY control for the likeliest failure of a multi-lane
+   union — losing your own block — and no automated check sees it: your block
+   is not in `origin/main`, so its absence is an insertion count that never
+   happened rather than a deletion, and F-923's rules read headings, not
+   blocks. The full matrix of which resolutions each control catches is
+   `audit/stage2/finding_F923_changelog_placement_is_unguarded.md` §6.1.1;
+   two of the five bad shapes are caught by nothing automated.
 1. create a new `## Unreleased` heading **above** the release heading;
 2. put your block under that;
 3. check: exactly one `## Unreleased`, it is the first `## ` heading, the
-   release heading is immediately below with its contents untouched, and the
-   `--numstat` above shows 0 deletions.
+   release heading is immediately below with its contents untouched, and your
+   block matches the copy from step 0;
+4. check the `--numstat` above shows 0 deletions — a CLOBBER check, and a
+   separate question from step 3. When several lanes queue behind one release
+   it also catches a dropped SIBLING's block, but only once that sibling has
+   merged: the cover accumulates down the merge order, and the lane merging
+   FIRST behind a release has none of it.
 
 Cheapest option of all: **do not merge `main` while a release lane is in
 flight.** Merging before it lands just means doing it twice.

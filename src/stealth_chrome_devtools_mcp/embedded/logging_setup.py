@@ -561,7 +561,13 @@ def install_payload_arg_redaction() -> None:
     every exception that quotes nobody; this rule is about the one measured
     shape whose rendering IS the payload, and it replaces the rendering rather
     than suppressing the diagnostic — the pydantic error type, the model, the
-    error count and every field path survive.
+    error count and up to :data:`payload_log_sites.MAX_RESTATED_ERRORS` distinct
+    ``type``/``loc`` pairs survive, with a count of how many more there were.
+    "Up to", because the union shape F-913 is about OVERFLOWS it: the measured
+    frame reports 9 errors and 9 DISTINCT pairs against a cap of 8, so the
+    restatement ends ``…+1``. This said "every field path" until the F-913
+    review; the cap is deliberately unchanged and it was the sentence that was
+    wrong (finding §"What survives, and what does not").
 
     The residual is F-906's, named rather than hidden: a caller who installs
     their own record factory AFTER this one replaces it.
@@ -612,8 +618,11 @@ def install_payload_arg_redaction() -> None:
         # REPLACING what the record carries rather than by mutating anything:
         # the SDK sends the very exception it just logged downstream
         # (`streamable_http.py`:241), so the live object has to survive intact.
-        # The original TRACEBACK is handed through, so every frame — and
-        # therefore Sentry's grouping — is unchanged.
+        # The original TRACEBACK is handed through, so every FRAME survives
+        # (measured byte-identical). Not "and therefore the grouping": the
+        # type and value change by construction, so the default
+        # stacktrace-first strategy does not move but one keyed on either
+        # does. The inference is what the F-913 review struck out.
         restated = payload_log_sites.restated_exc_info(record)
         if restated is not None:
             record.exc_info = restated
