@@ -1,5 +1,86 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — F-919: a failed spawn no longer reaps a sibling spawn's browser
+
+A spawn that fails after Chrome launched reaps what it left running (F-860), and
+it used to decide what that was from a **start time**: everything on the
+attempt's `--user-data-dir` that started within one second of it. Concurrent
+unnamed spawns all select the shared profile by design (F-834), so when one
+loses Chrome's process singleton and fails **because** the other holds it — the
+exact case that reap promised to spare — the winner's Chrome was inside the
+loser's window and was terminated. On the shared profile that browser is the one
+the operator is logged into, and the kill arrives from another call's failure
+handler, so nothing in the surviving caller's answer says it happened.
+
+Measured on this machine: two concurrent `spawn_browser` calls stamp their
+launches **9.9-86.4 ms apart** (10 rounds through the real orchestrator), and
+the shipped fence terminates the sibling at **every** one of those separations —
+driven directly against the code as it shipped, which logs the winner as a leak
+while killing it. It spares the sibling only past 1001 ms.
+
+**Shrinking the window was rejected and the arithmetic is why.** The tolerance
+exists to absorb the kernel's rounding of a process start time, which its own
+comment puts at 10 ms on Linux and ~16 ms on Windows; sparing the sibling needs
+it below 9.9 ms. No value does both — the two quantities are the same size — so
+a smaller window is the same guess with a smaller blast radius.
+
+The fence is an **identity** now. `spawn_leak.Attempt` is a handle the
+orchestrator creates before the fallible launch and passes **into**
+`_launch_browser`, which stamps the `uc.Config` object it built onto it before
+awaiting `uc.start` — passed in rather than returned, because the moment it is
+needed is the moment that call raised. `spawn_leak.launched_pid` then reads the
+pid off the `Browser` nodriver registered for that exact object (identity, never
+a field match: two concurrent spawns build configs equal in every field),
+through `process_exit.browser_pid`, which already owns "which member of the tree
+is the browser" and refuses a handle asyncio has already collected.
+`_CLOCK_TOLERANCE_SECONDS` and `_started_after` are deleted.
+
+**Two claims in the first version of this entry were wrong and are corrected
+here.** It said the `returncode` refusal is a *stronger* recycled-pid guard than
+a stored `(pid, create_time)` pair, and then that such a pair is not obtainable
+at all. Neither holds. On Windows the pid is pinned, but by the open PROCESS
+handle (`subprocess.py:1575`) rather than by `returncode`. On POSIX the guard is
+open for two loop iterations and open deterministically: `os.waitpid` frees the
+pid on the watcher thread (`asyncio/unix_events.py:1443`) while `returncode`
+lands two `call_soon_threadsafe` hops later, and `base_events._run_once` drains
+a fixed `ntodo` (`:2033-2034`) so a callback queued mid-step cannot run before
+the next iteration — in that band a stored pair would have done better. The pair
+is ruled out on WORTH, not on impossibility: it would differ only inside that
+band and only for a recycled pid already carrying our own `--user-data-dir`,
+which the second witness excludes. F-919 §4 and §4.1 carry the source lines, and
+§4 records that three absolute claims here have been refuted in sequence — which
+is why the finding is now written in magnitudes.
+
+**What it costs is stated rather than implied.** A Chrome that genuinely leaked
+but whose launch cannot be named is left RUNNING until the next backend start's
+orphan reap. That is the direction `profile_lock` and F-886/F-888 all chose, and
+the alternative is killing a process on a guess, which is this defect.
+
+**A first version of this entry added that no path is known to leave a real
+process behind today. That was wrong and is withdrawn.** The **delegated**
+(F-810) headed launch is a real regression against the old fence. Its own
+cleanup is conditional — it kills only when it managed to stamp a `(pid,
+create_time)` pair — and the finding's §6 names three paths that reach it with a
+live Chrome and no kill: the 20 s pid-file deadline expiring, the create-time
+probe answering `None` (its `except psutil.Error` swallows `AccessDenied`
+alongside the exited process it was written for), and the kill itself refusing on
+an identity mismatch or a psutil error. In all three the Chrome is untracked,
+invisible to `list_instances`, and ends only at the next backend start's orphan
+sweep.
+
+The old fence did cover them, by guessing, at a **wider** aperture than the one
+this entry closes: a delegated launch takes seconds, so every sibling Chrome that
+started in that span sat inside its window. Restoring the coverage would restore
+this defect on that path, so it is given up rather than reinstated. The residual
+is Windows-only, needs a launcher that started Chrome plus one of those three
+conditions, and ends at the next backend start. **F-922** carries the cheap fix:
+`desktop_launch` already computes the pair this fence wants.
+
+`audit/stage2/finding_F919_spawn_leak_fence_reaps_a_sibling.md` has the
+measurements, the run against the shipped code, and the open items.
+
 ## 2.1.13
 
 ### Added — F-897: a new session can start from an existing one
@@ -709,85 +790,6 @@ prevent, and would not have fenced the session root on Windows at all.
 Per-file `isolated_state` fixtures are kept, not deleted: they give each NODE a
 clean record while the fence gives the SESSION one directory — per-test
 isolation and operator safety are different questions.
-
-### Fixed — F-919: a failed spawn no longer reaps a sibling spawn's browser
-
-A spawn that fails after Chrome launched reaps what it left running (F-860), and
-it used to decide what that was from a **start time**: everything on the
-attempt's `--user-data-dir` that started within one second of it. Concurrent
-unnamed spawns all select the shared profile by design (F-834), so when one
-loses Chrome's process singleton and fails **because** the other holds it — the
-exact case that reap promised to spare — the winner's Chrome was inside the
-loser's window and was terminated. On the shared profile that browser is the one
-the operator is logged into, and the kill arrives from another call's failure
-handler, so nothing in the surviving caller's answer says it happened.
-
-Measured on this machine: two concurrent `spawn_browser` calls stamp their
-launches **9.9-86.4 ms apart** (10 rounds through the real orchestrator), and
-the shipped fence terminates the sibling at **every** one of those separations —
-driven directly against the code as it shipped, which logs the winner as a leak
-while killing it. It spares the sibling only past 1001 ms.
-
-**Shrinking the window was rejected and the arithmetic is why.** The tolerance
-exists to absorb the kernel's rounding of a process start time, which its own
-comment puts at 10 ms on Linux and ~16 ms on Windows; sparing the sibling needs
-it below 9.9 ms. No value does both — the two quantities are the same size — so
-a smaller window is the same guess with a smaller blast radius.
-
-The fence is an **identity** now. `spawn_leak.Attempt` is a handle the
-orchestrator creates before the fallible launch and passes **into**
-`_launch_browser`, which stamps the `uc.Config` object it built onto it before
-awaiting `uc.start` — passed in rather than returned, because the moment it is
-needed is the moment that call raised. `spawn_leak.launched_pid` then reads the
-pid off the `Browser` nodriver registered for that exact object (identity, never
-a field match: two concurrent spawns build configs equal in every field),
-through `process_exit.browser_pid`, which already owns "which member of the tree
-is the browser" and refuses a handle asyncio has already collected.
-`_CLOCK_TOLERANCE_SECONDS` and `_started_after` are deleted.
-
-**Two claims in the first version of this entry were wrong and are corrected
-here.** It said the `returncode` refusal is a *stronger* recycled-pid guard than
-a stored `(pid, create_time)` pair, and then that such a pair is not obtainable
-at all. Neither holds. On Windows the pid is pinned, but by the open PROCESS
-handle (`subprocess.py:1575`) rather than by `returncode`. On POSIX the guard is
-open for two loop iterations and open deterministically: `os.waitpid` frees the
-pid on the watcher thread (`asyncio/unix_events.py:1443`) while `returncode`
-lands two `call_soon_threadsafe` hops later, and `base_events._run_once` drains
-a fixed `ntodo` (`:2033-2034`) so a callback queued mid-step cannot run before
-the next iteration — in that band a stored pair would have done better. The pair
-is ruled out on WORTH, not on impossibility: it would differ only inside that
-band and only for a recycled pid already carrying our own `--user-data-dir`,
-which the second witness excludes. F-919 §4 and §4.1 carry the source lines, and
-§4 records that three absolute claims here have been refuted in sequence — which
-is why the finding is now written in magnitudes.
-
-**What it costs is stated rather than implied.** A Chrome that genuinely leaked
-but whose launch cannot be named is left RUNNING until the next backend start's
-orphan reap. That is the direction `profile_lock` and F-886/F-888 all chose, and
-the alternative is killing a process on a guess, which is this defect.
-
-**A first version of this entry added that no path is known to leave a real
-process behind today. That was wrong and is withdrawn.** The **delegated**
-(F-810) headed launch is a real regression against the old fence. Its own
-cleanup is conditional — it kills only when it managed to stamp a `(pid,
-create_time)` pair — and the finding's §6 names three paths that reach it with a
-live Chrome and no kill: the 20 s pid-file deadline expiring, the create-time
-probe answering `None` (its `except psutil.Error` swallows `AccessDenied`
-alongside the exited process it was written for), and the kill itself refusing on
-an identity mismatch or a psutil error. In all three the Chrome is untracked,
-invisible to `list_instances`, and ends only at the next backend start's orphan
-sweep.
-
-The old fence did cover them, by guessing, at a **wider** aperture than the one
-this entry closes: a delegated launch takes seconds, so every sibling Chrome that
-started in that span sat inside its window. Restoring the coverage would restore
-this defect on that path, so it is given up rather than reinstated. The residual
-is Windows-only, needs a launcher that started Chrome plus one of those three
-conditions, and ends at the next backend start. **F-922** carries the cheap fix:
-`desktop_launch` already computes the pair this fence wants.
-
-`audit/stage2/finding_F919_spawn_leak_fence_reaps_a_sibling.md` has the
-measurements, the run against the shipped code, and the open items.
 
 ## 2.1.12
 

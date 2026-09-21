@@ -328,6 +328,66 @@ owners, file budgets, pinned imports, `dump_tool_surface.py --check` all clean.
 
 ## 6. What this costs, and what is left open
 
+### 6.0 The owner's reaping ruling — this fence satisfies it on every profile kind
+
+An owner ruling landed while this finding was in review, filed against F-917's residual:
+**directory-wide reaping stays only for disposable auto-clone directories; on a named or
+otherwise persistent profile, only pids the record actually names may be killed.** The
+stated rationale is that the safe direction differs by profile KIND — an auto-clone
+directory is ours by construction, while a named profile is exactly what a human opens by
+hand.
+
+**It reaches this site, and the code it was written about is the code this finding
+deletes.** `reap_launched_browsers` as it shipped took every browser
+`_get_browser_pids_for_profile` returned for the attempt's `--user-data-dir` and narrowed
+that set only by start time. On an `explicit` (NAMED) role that is reaping by directory on
+a persistent profile — the shape the ruling forbids — and §1.5 is the argument that the
+time fence cannot rescue it: a start time separates "predates this attempt" from "started
+during it", never "mine" from "a concurrent sibling's". `clone_storage`'s fallback retries
+a NAMED directory deliberately, so the herd the ruling worries about is one the resolver
+permits.
+
+**Of the two options put to this lane, it takes the second: a witness exists that makes
+the pid provably ours, so the reap is not directory-wide at all.** That witness is §4's
+fence, and the membership test is the whole of it:
+
+```python
+launched = launched_pid(attempt)   # nodriver's registry, by config IDENTITY
+...
+if launched in on_profile:         # a TEST on one pid, not an enumeration
+    return _kill(cleanup, launched, user_data_dir, instance_id)
+```
+
+`_get_browser_pids_for_profile` is still called and what it returns is no longer a kill
+list: **at most one pid can be killed, and it is the one nodriver registered for this
+attempt's own `uc.Config` object.** The directory answer is demoted to a witness — *is
+that pid still on the directory we launched it on* — so the ruling is satisfied with no
+profile-kind branch, and Option 1's cost is not incurred. F-860's coverage survives on a
+named profile, because the Chrome it reaps there is named rather than guessed at.
+
+**The premise that makes Option 1 look forced does not apply here, and the distinction is
+WHICH record.** It is true, and `spawn_leak.py`'s module docstring says so, that a Chrome
+leaked by a FAILED spawn is absent from `browser_pids.json` — the instance is tracked in
+`_apply_post_launch`, after a successful launch. But the witness is not that record. It is
+**nodriver's own in-process registry**, and the ordering is §3's measurement, re-read at
+the pinned 0.47 for this section: `self._process_pid` is set at `core/browser.py`:409, the
+`Browser` is added to the registry at `:412`, and the connect failure raises at `:429`. The
+pid is therefore live and reachable at the instant `start()` raises. The information was
+never missing — it had no way to reach the teardown, which is what `Attempt` supplies.
+
+**`browser_pid_registry.on_persistent_profile` is deliberately NOT read here**, and that is
+not a second spelling of the protection — it is the absence of a question this fence no
+longer has to ask. That predicate exists to choose a safe DIRECTION when a target is
+identified only by its directory; once the target is identified by the launch that created
+it, profile kind no longer bears on whether the kill is safe, and branching on it would
+make one answer depend on two rules. It stays the one home for its own question, untouched
+by this branch.
+
+**What is given up is unchanged by the ruling**, and is the rest of this section: a Chrome
+whose launch cannot be NAMED is left running until the next backend start's orphan reap.
+That residual is a property of naming, not of profile kind, so it falls identically on a
+clone directory and on a named session.
+
 **A leaked Chrome we cannot name is left RUNNING.** This is the deliberate direction and
 it is not free. The reap declines when: the `Browser` is not in nodriver's registry (the
 launch raised before `:412` — a missing executable, a `create_subprocess_exec` failure:
