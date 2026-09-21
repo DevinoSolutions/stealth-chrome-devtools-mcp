@@ -377,13 +377,26 @@ class TestReservedProfileNames:
             tmp_path / "master",
             tmp_path / "master-snapshot",
         )
+        # `inside` is the product's own predicate (`clone_storage`'s one home
+        # for it), handed in because F-901 gave `reserved_reason` a containment
+        # question to ask; the two landings below are inside `roots.clones` by
+        # construction, so it answers exactly as it does in production.
+        inside = clone_storage._is_relative_to
         mangled = "C:stealth-mcp-browser-sessionssessionsproject-f876e3d7f2ec"
-        reason = profile_seed.reserved_reason(mangled, tmp_path / mangled, roots)
+        reason = profile_seed.reserved_reason(
+            mangled, roots.clones / mangled, roots, inside
+        )
         assert reason is not None and "absolute" in reason
         # And it must not over-refuse on that same host: an ordinary session
         # name and a POSIX absolute path name no drive under either flavour.
-        assert profile_seed.reserved_reason("acme", tmp_path / "acme", roots) is None
-        assert profile_seed.reserved_reason("/srv/p", tmp_path / "p", roots) is None
+        assert (
+            profile_seed.reserved_reason("acme", roots.clones / "acme", roots, inside)
+            is None
+        )
+        assert (
+            profile_seed.reserved_reason("/srv/p", Path("/srv/p"), roots, inside)
+            is None
+        )
 
     @pytest.mark.asyncio
     async def test_a_held_snapshot_is_refused_before_any_re_attach(
