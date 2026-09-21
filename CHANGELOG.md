@@ -1,5 +1,139 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — F-916 / F-917 / F-918: startup recovery no longer kills what it could not establish
+
+Three defects on one path, and one sentence holds them: **an answer we could not
+establish must resolve toward NOT killing.** Startup orphan recovery runs on
+every backend cold start, and what it decides about may be a human's logged-in
+Chrome — the one piece of state reconnecting cannot rebuild, because a killed
+browser does not flush its session.
+
+**F-916 — an entry we could not CLASSIFY was reaped.**
+`browser_reattach._adoptable_entry` answered a bare `None` both for "this is not
+one to adopt" and for "we could not establish whether it is", so an entry that
+is alive, ours and on a PERSISTENT profile fell outside `Classified.spare` and
+was killed. Measured on the pre-fix source, five different entries produced one
+verdict: a 2.1.8/2.1.9 record carrying no `cdp_port`, one with no `create_time`
+and one with an unreadable `pid` were all `REAPED`, indistinguishable from a
+disposable auto-clone and from a Chrome that is provably gone. The first of
+those is not hypothetical — 2.1.8/2.1.9 recorded no port at all, and those are
+the records holding today's stranded logins. Those three now answer
+`reap_guard.UNDECIDED` and land in `.spare`: not adopted, and not ended.
+"The Chrome this entry names is gone" stays a DECISION, so a dead entry can
+still leave the record and `browser_pids.json` cannot grow without bound.
+
+**F-917 — the reap was DIRECTORY-matched while the spare was INSTANCE-ID-matched.**
+Recovery skips by `instance_id` and the reap it then performs kills every
+browser on the entry's `user_data_dir`, so on a SHARED profile — which is what
+the master is — one stale entry's reap reached a browser another entry had just
+been spared for. Measured: with `i-live` (pid 7777, adoptable, spared) and
+`i-stale` (pid 7778, Chrome gone) on one directory, the reap of `i-stale` called
+the kill path **with pid 7777**, and the record still listed `i-live`
+afterwards — so the record claimed a live adoptable browser whose process had
+just been ended. The spared entries' pids now travel with the spare and are
+subtracted at the one place the kill set is spent. The same filter is applied to
+`browser_reattach.run`'s failed-adoption reap, which had the shape from the
+other door.
+
+**F-918 — an UNVERIFIABLE process was terminated.** `_kill_process_by_pid`
+logged "Could not verify process {pid}" from a blanket `except` and then fell
+through to `terminate()`. Measured: a `psutil.AccessDenied` on `.name()` — what
+Windows answers for a process this account may not open — and a plain `OSError`
+both terminated the pid and returned `True`, so the caller counted an
+unidentified process as successfully reaped and dropped its record entry. Both
+now refuse and answer `False`, with a line that states the decision. A zombie
+was already correct (`ZombieProcess` subclasses `NoSuchProcess`) and is
+unchanged; it is pinned because it looks like it should have changed.
+
+This makes orphan recovery uniform with the places in the tree that already
+resolved an unreadable witness toward safety: `profile_lock._browser_pids`
+(`None` for "could not be asked", distinct from `()` for "asked, nothing
+running"), `backend_eviction`'s refusal to evict what it cannot prove is idle,
+and F-919's `spawn_leak.launched_pid`, which leaves a failed spawn's leftovers
+running rather than guess at them. It also interlocks with F-919 rather than
+overlapping it: that fence decides WHICH process a failed spawn may end, this
+guard decides whether a pid may be ended at all, and F-919's reap reaches its
+kill through this very function.
+
+**What it costs, stated rather than hidden:** a browser we can neither adopt nor
+reap is left running and left recorded, and an orphan whose pid we cannot
+identify is left alone. Both are bounded — the entry is re-classified on every
+later cold start and is reaped the moment its Chrome actually exits — and
+`kill-orphans --force` still skips the whole classification by design. A leaked
+Chrome is recoverable; a login is not.
+
+New leaf `embedded/reap_guard.py` carries the rule and its three pieces
+(`UNDECIDED`, `spared_pids`, `killable`). Two files were at their LOC caps and
+caps ratchet down only, so each fix paid for itself: the CDP **endpoint ladder**
+moved out of `browser_reattach` into a new leaf named for the question it
+answers, `embedded/cdp_endpoint.py` — "where is the CDP endpoint of the browser
+this RECORD ENTRY describes" — taking that file 999 → 991, and
+`_kill_process_by_pid`'s two near-identical escalation rungs became one table,
+taking `process_cleanup` 1009 → 1007 with its grandfather row ratcheted to
+match. No behaviour changed in either move. `cdp_attach` is untouched and
+remains a leaf: it owns the DOOR, and it never calls the ladder — both callers
+are `browser_reattach`'s.
+
+Full measurements, the before/after tables and the residuals are in
+`audit/stage2/finding_F916_unclassifiable_entry_is_reaped.md`,
+`…finding_F917_reap_matches_directory_while_spare_matches_instance.md` and
+`…finding_F918_unverifiable_process_is_terminated.md`.
+
+### Fixed — F-922: a named profile is reaped by the RECORD, never by its directory
+
+The fourth reading of the same sentence, and an owner ruling rather than a
+judgement call. Orphan recovery built its kill set by scanning the entry's
+`user_data_dir` whatever KIND of profile it was — so a Chrome the owner had
+started **by hand** on one of their own named sessions was killed by a stale
+entry's reap. No record entry names such a browser, so no spare can reach it:
+F-916's classification and F-917's `protected_pids` both protect RECORDED pids,
+and this one is not recorded at all.
+
+Measured before the fix: a stale entry on a named profile killed the owner's
+unrecorded Chrome, through recovery **and** through the close path; and even a
+fully justified reap — the entry's own browser, correctly identified — took the
+bystander with it, because both were on the directory.
+
+**The ruling:** directory-wide reaping stays only for DISPOSABLE auto-clone
+directories; on a named or shared profile a reap may end only pids the record
+actually names. The asymmetry is the point. An auto-clone directory is ours by
+construction — a human never opens one by hand — while a named profile is
+exactly what a human does open, and since F-888 a browser on one is meant to
+outlive its backend. Explicitly not chosen: "record-only everywhere", which
+would let orphaned clone browsers accumulate forever.
+
+It is one conditional on the one line that BUILDS the kill set, reading
+`browser_pid_registry.on_persistent_profile` the other way round — the same
+predicate F-888's adoption rule and the profile-deletion guard already ask, with
+no second notion of "ours". The recorded pid then supplies the kill, identity-
+checked and start-time fenced exactly as it always was. It applies to the close
+path as well as to recovery, because a named profile is a named profile
+whichever caller arrived.
+
+**What it costs, and the owner chose it:** a leaked Chrome on a named profile
+whose record entry was lost is never reaped automatically. It stays visible in
+`stealthy profiles` and is cleared deliberately. The alternative is a scan that
+cannot tell a leaked browser of ours from the one the operator is logged into,
+ending both.
+
+It also closes F-917's defect through a **second door**, which F-917's own
+filter could not reach. When an adoption fails, `browser_reattach.run` falls
+back to a reap that protects its ADOPTABLE candidates' pids — and an entry
+F-916 SPARED is by construction not one of them, so a spared browser sharing
+that profile was ended. Measured: `[6666, 7777]` before, `[7777]` after. What
+closes it is the scope rule rather than a second subtraction, because `run`
+hands that reap a metadata dict that must declare the profile persistent — the
+profile-delete guard reads those same two keys.
+
+`process_cleanup.py` was at 1007/1007 — this lane's own ratchet — so the change
+paid for itself: four sites that logged a declined pid in four spellings became
+one `_skip_note`. 1007 → 1006.
+
+Details, the before/after table and the defect this fix created in F-917's own
+pins are in `audit/stage2/finding_F922_named_profile_reaped_by_directory.md`.
+
 ## 2.1.13
 
 ### Added — F-897: a new session can start from an existing one
@@ -709,138 +843,6 @@ prevent, and would not have fenced the session root on Windows at all.
 Per-file `isolated_state` fixtures are kept, not deleted: they give each NODE a
 clean record while the fence gives the SESSION one directory — per-test
 isolation and operator safety are different questions.
-
-### Fixed — F-916 / F-917 / F-918: startup recovery no longer kills what it could not establish
-
-Three defects on one path, and one sentence holds them: **an answer we could not
-establish must resolve toward NOT killing.** Startup orphan recovery runs on
-every backend cold start, and what it decides about may be a human's logged-in
-Chrome — the one piece of state reconnecting cannot rebuild, because a killed
-browser does not flush its session.
-
-**F-916 — an entry we could not CLASSIFY was reaped.**
-`browser_reattach._adoptable_entry` answered a bare `None` both for "this is not
-one to adopt" and for "we could not establish whether it is", so an entry that
-is alive, ours and on a PERSISTENT profile fell outside `Classified.spare` and
-was killed. Measured on the pre-fix source, five different entries produced one
-verdict: a 2.1.8/2.1.9 record carrying no `cdp_port`, one with no `create_time`
-and one with an unreadable `pid` were all `REAPED`, indistinguishable from a
-disposable auto-clone and from a Chrome that is provably gone. The first of
-those is not hypothetical — 2.1.8/2.1.9 recorded no port at all, and those are
-the records holding today's stranded logins. Those three now answer
-`reap_guard.UNDECIDED` and land in `.spare`: not adopted, and not ended.
-"The Chrome this entry names is gone" stays a DECISION, so a dead entry can
-still leave the record and `browser_pids.json` cannot grow without bound.
-
-**F-917 — the reap was DIRECTORY-matched while the spare was INSTANCE-ID-matched.**
-Recovery skips by `instance_id` and the reap it then performs kills every
-browser on the entry's `user_data_dir`, so on a SHARED profile — which is what
-the master is — one stale entry's reap reached a browser another entry had just
-been spared for. Measured: with `i-live` (pid 7777, adoptable, spared) and
-`i-stale` (pid 7778, Chrome gone) on one directory, the reap of `i-stale` called
-the kill path **with pid 7777**, and the record still listed `i-live`
-afterwards — so the record claimed a live adoptable browser whose process had
-just been ended. The spared entries' pids now travel with the spare and are
-subtracted at the one place the kill set is spent. The same filter is applied to
-`browser_reattach.run`'s failed-adoption reap, which had the shape from the
-other door.
-
-**F-918 — an UNVERIFIABLE process was terminated.** `_kill_process_by_pid`
-logged "Could not verify process {pid}" from a blanket `except` and then fell
-through to `terminate()`. Measured: a `psutil.AccessDenied` on `.name()` — what
-Windows answers for a process this account may not open — and a plain `OSError`
-both terminated the pid and returned `True`, so the caller counted an
-unidentified process as successfully reaped and dropped its record entry. Both
-now refuse and answer `False`, with a line that states the decision. A zombie
-was already correct (`ZombieProcess` subclasses `NoSuchProcess`) and is
-unchanged; it is pinned because it looks like it should have changed.
-
-This makes orphan recovery uniform with the places in the tree that already
-resolved an unreadable witness toward safety: `profile_lock._browser_pids`
-(`None` for "could not be asked", distinct from `()` for "asked, nothing
-running"), `backend_eviction`'s refusal to evict what it cannot prove is idle,
-and F-919's `spawn_leak.launched_pid`, which leaves a failed spawn's leftovers
-running rather than guess at them. It also interlocks with F-919 rather than
-overlapping it: that fence decides WHICH process a failed spawn may end, this
-guard decides whether a pid may be ended at all, and F-919's reap reaches its
-kill through this very function.
-
-**What it costs, stated rather than hidden:** a browser we can neither adopt nor
-reap is left running and left recorded, and an orphan whose pid we cannot
-identify is left alone. Both are bounded — the entry is re-classified on every
-later cold start and is reaped the moment its Chrome actually exits — and
-`kill-orphans --force` still skips the whole classification by design. A leaked
-Chrome is recoverable; a login is not.
-
-New leaf `embedded/reap_guard.py` carries the rule and its three pieces
-(`UNDECIDED`, `spared_pids`, `killable`). Two files were at their LOC caps and
-caps ratchet down only, so each fix paid for itself: the CDP **endpoint ladder**
-moved out of `browser_reattach` into a new leaf named for the question it
-answers, `embedded/cdp_endpoint.py` — "where is the CDP endpoint of the browser
-this RECORD ENTRY describes" — taking that file 999 → 991, and
-`_kill_process_by_pid`'s two near-identical escalation rungs became one table,
-taking `process_cleanup` 1009 → 1007 with its grandfather row ratcheted to
-match. No behaviour changed in either move. `cdp_attach` is untouched and
-remains a leaf: it owns the DOOR, and it never calls the ladder — both callers
-are `browser_reattach`'s.
-
-Full measurements, the before/after tables and the residuals are in
-`audit/stage2/finding_F916_unclassifiable_entry_is_reaped.md`,
-`…finding_F917_reap_matches_directory_while_spare_matches_instance.md` and
-`…finding_F918_unverifiable_process_is_terminated.md`.
-
-### Fixed — F-922: a named profile is reaped by the RECORD, never by its directory
-
-The fourth reading of the same sentence, and an owner ruling rather than a
-judgement call. Orphan recovery built its kill set by scanning the entry's
-`user_data_dir` whatever KIND of profile it was — so a Chrome the owner had
-started **by hand** on one of their own named sessions was killed by a stale
-entry's reap. No record entry names such a browser, so no spare can reach it:
-F-916's classification and F-917's `protected_pids` both protect RECORDED pids,
-and this one is not recorded at all.
-
-Measured before the fix: a stale entry on a named profile killed the owner's
-unrecorded Chrome, through recovery **and** through the close path; and even a
-fully justified reap — the entry's own browser, correctly identified — took the
-bystander with it, because both were on the directory.
-
-**The ruling:** directory-wide reaping stays only for DISPOSABLE auto-clone
-directories; on a named or shared profile a reap may end only pids the record
-actually names. The asymmetry is the point. An auto-clone directory is ours by
-construction — a human never opens one by hand — while a named profile is
-exactly what a human does open, and since F-888 a browser on one is meant to
-outlive its backend. Explicitly not chosen: "record-only everywhere", which
-would let orphaned clone browsers accumulate forever.
-
-It is one conditional on the one line that BUILDS the kill set, reading
-`browser_pid_registry.on_persistent_profile` the other way round — the same
-predicate F-888's adoption rule and the profile-deletion guard already ask, with
-no second notion of "ours". The recorded pid then supplies the kill, identity-
-checked and start-time fenced exactly as it always was. It applies to the close
-path as well as to recovery, because a named profile is a named profile
-whichever caller arrived.
-
-**What it costs, and the owner chose it:** a leaked Chrome on a named profile
-whose record entry was lost is never reaped automatically. It stays visible in
-`stealthy profiles` and is cleared deliberately. The alternative is a scan that
-cannot tell a leaked browser of ours from the one the operator is logged into,
-ending both.
-
-It also closes F-917's defect through a **second door**, which F-917's own
-filter could not reach. When an adoption fails, `browser_reattach.run` falls
-back to a reap that protects its ADOPTABLE candidates' pids — and an entry
-F-916 SPARED is by construction not one of them, so a spared browser sharing
-that profile was ended. Measured: `[6666, 7777]` before, `[7777]` after. What
-closes it is the scope rule rather than a second subtraction, because `run`
-hands that reap a metadata dict that must declare the profile persistent — the
-profile-delete guard reads those same two keys.
-
-`process_cleanup.py` was at 1007/1007 — this lane's own ratchet — so the change
-paid for itself: four sites that logged a declined pid in four spellings became
-one `_skip_note`. 1007 → 1006.
-
-Details, the before/after table and the defect this fix created in F-917's own
-pins are in `audit/stage2/finding_F922_named_profile_reaped_by_directory.md`.
 
 ## 2.1.12
 
