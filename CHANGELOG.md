@@ -443,6 +443,78 @@ sites, because all three are correct once what they relay is shape-only.
 Measured cost: +0.113 µs per `get_position`, against 430.9 µs median for the
 same call over real CDP.
 
+### Fixed — F-911: the MCP SDK logged a caller's arguments on the ROOT logger, where no floor could reach them
+
+The two sites F-908 recorded and could not fix. `mcp/shared/session.py` logs
+with the module-level `logging.warning` / `logging.debug` **functions**, so its
+records are the **root logger's** — and both mechanisms this file owns miss
+them structurally, not narrowly:
+
+* a record on `root` has no family to name, so `PAYLOAD_LOG_FAMILIES` is inert
+  however that tuple grows, and "cap root" is not the missing entry — root's
+  level is the caller's, and lowering it silences the process;
+* every one of the lines is an **f-string**, so the payload is already inside
+  `record.msg` with `record.args` empty, which is what F-907's argument rule
+  reads.
+
+```
+root WARNING session.py:383  Failed to validate request: 31 validation errors …
+  input_value={'tok': '…'}, input_type=dict          ← the caller's own arguments
+root WARNING session.py:430  Failed to validate notification: … Message was:
+  method='notifications/…' params={'tok': '…'}       ← the whole message, untruncated
+```
+
+**Two of the three are at WARNING, so this needed no `basicConfig` from
+anybody** — it was live in the plain shipped backend and the plain shipped
+proxy. And the SDK arranges its own sink: `logging.warning` at module level
+calls `logging.basicConfig()` when root has no handlers, so the first such line
+installs a stderr `StreamHandler` on our root — and the backend's stderr is
+`backend-boot.log`, a durable file. At WARNING they are Sentry breadcrumbs on
+the next event too.
+
+The fix is a **second rule in the one record factory** F-907 already installs,
+with its table and matching in a new leaf, `embedded/payload_log_sites.py`
+(extracted rather than inlined because the addition crossed `logging_setup`'s
+1000-LOC budget, which ratchets down only): a record MADE BY a
+payload-rendering third-party module has its rendered text withheld and keeps
+everything else —
+`<mcp/shared/session.py:430 message withheld: 1847 chars>`. The record still
+arrives, on the same logger, at the same level, naming the line that fired,
+which is the whole of what makes it actionable.
+
+**The unit is the MODULE and the key is `record.pathname`.** Not the message
+text, which the library may reword (F-906's rule). Not the line number, the
+least stable thing in a dependency — a rule keyed on 383/384/430 goes silently
+inert on the next release. A file path is what F-906's family root is, one
+level finer, and when the module stops existing the entry is inert and
+**visible**, because the pins read the installed SDK's source.
+
+A root `logging.Filter` *would* have worked here — unlike F-907's case, the
+call is on root, so `Logger.handle` consults root's own filters. It is declined
+on convention 4: a second mechanism answering one question, one import from the
+first, covering strictly less. No `before_breadcrumb` either, and that is
+measured rather than argued — `makeRecord` runs upstream of
+`Logger.callHandlers`, the one method `LoggingIntegration` patches, so the
+breadcrumb is built from an already-withheld record. Both halves of that
+premise are pinned.
+
+Scope is `mcp/shared/session.py` alone, from an AST census of all 206 logging
+calls in the package (11 on root): `client/session_group.py`'s three root
+WARNINGs are real but this tree never constructs a `ClientSessionGroup`, and
+`server/sse.py`:193 carries a session id.
+
+One site is **recorded rather than fixed, and it is filed as F-913**, because it
+is sharper than either of F-908's: `mcp/client/streamable_http.py`:240
+`logger.exception("Error parsing SSE message")` has a static message and no
+args, so neither rule sees anything — but its `exc_info` carries a pydantic
+`ValidationError` whose `input_value=` echoes the **SSE data**, i.e. a tool
+result on the proxy leg (`:394` and `:574` are the same shape on the other
+legs). It is at ERROR, so F-908's floor does not reach it and Sentry ships it as
+a full **event**. It needs a third mechanism — what a validation error may say
+about its input — so it gets a number rather than a residual nobody picks up:
+`audit/stage2/finding_F913_validation_error_echoes_tool_result.md`, cross-linked
+from `audit/stage2/finding_F911_root_logger_tool_payload.md` §6.
+
 ## 2.1.12
 
 ### Fixed — F-901: a profile request can no longer name the directory profiles live in

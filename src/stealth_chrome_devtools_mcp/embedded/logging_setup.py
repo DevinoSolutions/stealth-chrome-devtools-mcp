@@ -54,6 +54,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from stealth_chrome_devtools_mcp.embedded import payload_log_sites
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 if TYPE_CHECKING:
@@ -443,7 +444,14 @@ def _redacted(args: tuple[object, ...]) -> tuple[object, ...]:
 
 
 def install_payload_arg_redaction() -> None:
-    """Stop a page's own content reaching a sink through a library's ``%s``.
+    """Stop a third party's log line carrying content we never shaped.
+
+    **THE one record-factory install, now carrying TWO rules** — F-907's, which
+    shapes a payload-carrying ARGUMENT, and F-911's, which withholds the
+    rendered text of a record made by a payload-rendering MODULE. The name is
+    F-907's and is kept deliberately: what must never be duplicated is the
+    INSTALL, because a factory chain is ordered by install time and two of them
+    make the outcome depend on call order. A rule is added by adding a rule.
 
     F-907. F-906 held ``nodriver`` and ``websockets`` at WARNING because
     everything below it quoted raw CDP. This is the half ABOVE that floor:
@@ -505,6 +513,32 @@ def install_payload_arg_redaction() -> None:
     Sentry. Idempotent, on ``session_hygiene.install()``'s precedent, and it
     CHAINS rather than replaces, so a caller's own factory keeps running.
 
+    **F-911, the second rule.** Its table and its two helpers are
+    ``payload_log_sites``' — see that module for the measurement and for why
+    the unit is a MODULE — and what lives here is the one thing a leaf cannot
+    own: the rewrite, inside the one factory. Keyed on the same species of fact
+    as F-907's — the identity of the CODE, never the wording of the line — but
+    read off the record's own ``pathname`` instead of an argument's type,
+    because ``mcp/shared/session.py`` interpolates with an f-string and so
+    hands ``logging`` a finished string with no arguments at all.
+
+    It is a rule here and not a ``logging.Filter`` for a reason F-907
+    half-stated and F-911 completes: a filter on ROOT *would* fire for these
+    (``Logger.handle`` consults the filters of the logger the call was made ON,
+    and that logger is root), so the objection is no longer that it cannot work
+    — it is that it would be a SECOND mechanism answering "what may a third
+    party's log line carry", one import away from this one, covering strictly
+    less (only records made on root) and needing its own idempotency, its own
+    install site and its own restore in ``tests/logging_state.py``. Convention
+    4 read literally.
+
+    A ``before_breadcrumb`` in ``observability`` is declined for F-906's reason
+    unchanged, and it is MEASURED rather than argued: ``makeRecord`` runs
+    upstream of ``Logger.callHandlers``, the one method ``LoggingIntegration``
+    patches, so the breadcrumb is built from an already-withheld record. Both
+    halves of that premise are pinned, so an SDK that moved its hook upstream
+    makes this RED instead of quietly re-opening the door.
+
     The residual is F-906's, named rather than hidden: a caller who installs
     their own record factory AFTER this one replaces it.
     """
@@ -514,6 +548,27 @@ def install_payload_arg_redaction() -> None:
 
     def factory(*args: object, **kwargs: object) -> logging.LogRecord:
         record = previous(*args, **kwargs)
+        # TWO rules, ONE factory, and the order is the argument. F-911's asks
+        # about the SITE and answers for the whole record; F-907's asks about
+        # an ARGUMENT. A record whose site is withholding has no arguments left
+        # to shape -- they are cleared one line down -- so the second rule has
+        # nothing to do and the `elif` is the cheaper spelling of that, not a
+        # precedence anyone has to reason about.
+        #
+        # A SECOND factory install would be the defect here, not a second rule
+        # inside this one: the chain is ordered by install time, so two
+        # factories make "which rewrite saw the record first" depend on the
+        # order `configure_logging` happens to call them in.
+        site = payload_log_sites.site_of(record)
+        if site is not None:
+            # F-911. `record.args` must go WITH the message and not after it:
+            # `getMessage()` runs `msg % args`, so leaving a `%s`-carrying
+            # tuple beside a message that no longer has a `%s` raises
+            # `TypeError` in every handler that formats -- turning a redaction
+            # into an outage. `exc_info` is deliberately untouched (see
+            # `payload_log_sites`, and F-907's exception clause).
+            record.msg = payload_log_sites.withheld(site, record)
+            record.args = ()
         # `record.args` is a TUPLE unless the caller passed a single mapping,
         # logging's own `%(name)s` special case -- which no measured nodriver
         # line uses, and which we leave alone rather than guess a rewrite for.
@@ -521,7 +576,7 @@ def install_payload_arg_redaction() -> None:
         # Deliberately NOT gated on `record.name`: `_carries_payload` asks about
         # the ARGUMENT, so one of our own records carrying a nodriver object is
         # redacted exactly as nodriver's own is. See that function.
-        if isinstance(record.args, tuple) and record.args:
+        elif isinstance(record.args, tuple) and record.args:
             record.args = _redacted(record.args)
         return record
 
