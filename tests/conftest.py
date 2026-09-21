@@ -143,6 +143,69 @@ def _stealth_logger_hygiene():
 
 
 @pytest.fixture(autouse=True)
+def _in_memory_storage_hygiene():
+    """No test may leave an entry in the process-global ``in_memory_storage``
+    for the next one (F-899).
+
+    ``embedded/in_memory_storage.py`` ends in a module-level
+    ``in_memory_storage = InMemoryStorage()``: production gets one per backend
+    PROCESS, a test run gets one for the whole session. Two production writers
+    fill it — ``browser_reattach``'s adoption pass and ``BrowserManager``'s spawn
+    — and both are reached by hermetic tests that drive the real code against a
+    fake manager. Neither is coverable by ``patched_server``: those modules bind
+    the singleton by value at import time, so a ``setattr`` on ``tool_runtime``
+    never reaches them. The entry then shows up in the NEXT file that calls
+    ``list_instances``, which merges the manager's instances with this store and
+    reports the strays as ``source: "stored"`` rows.
+
+    Measured on main ``f18ecc5``: ``test_browser_reattach.py`` left ``i-kept``
+    and ``i-held`` behind, and two ``list_instances() == []`` assertions in
+    ``test_tool_failure_visibility.py`` failed on them. The full lane was green
+    only because ``test_mcp_protocol_surface.py`` sorts between the two and boots
+    the real transport unpatched, so ``app_lifespan``'s shutdown ran
+    ``clear_all()`` on the real singleton in passing — an accident, not a
+    guarantee.
+
+    RESTORE, not assert-and-fail, on ``_stealth_logger_hygiene``'s precedent
+    above: the tests that write here are exercising production code that is
+    RIGHT to write, and a store that is cleared on ``close_instance`` and again
+    at lifespan shutdown has no product defect to report. A test that asserts
+    its own write was removed still asserts it inside its own body, so nothing
+    is hidden. ``tests/test_in_memory_storage_isolation.py`` is the
+    order-independent pin that this fixture is still here and still works.
+
+    The snapshot is two levels deep, which is every mutation the class's own
+    METHODS make: ``store_instance``/``remove_instance`` write inside
+    ``_data["instances"]``, ``set`` writes a top-level key, ``clear_all``
+    replaces the whole dict. It is deliberately not a ``deepcopy``, and what
+    that costs is one shape: ``get``/``get_instance`` hand back the LIVE nested
+    object, so a caller mutating below level 2 in place is not restored. Today
+    that is unreachable — measured over 222 nodes, every test starts with an
+    EMPTY store, so there is never a nested object to mutate — and
+    ``copy.deepcopy`` is the one-word answer if it stops being. Restoration goes
+    through the public API only.
+
+    The import is function-local, unlike every other import in this file,
+    because it is the one that reaches ``embedded/`` — and that package's
+    ``__init__`` runs a ``sys.path`` shim. A conftest that fired it at import
+    time would put it in front of every run, including the ones that never touch
+    the backend at all.
+    """
+    from stealth_chrome_devtools_mcp.embedded.in_memory_storage import (
+        in_memory_storage,
+    )
+
+    before = {
+        key: dict(value) if isinstance(value, dict) else value
+        for key, value in in_memory_storage.list_instances().items()
+    }
+    yield
+    in_memory_storage.clear_all()
+    for key, value in before.items():
+        in_memory_storage.set(key, value)
+
+
+@pytest.fixture(autouse=True)
 def _reset_settings_cache():
     """Every test gets a fresh Settings read. ``get_settings()`` is process-cached
     (``@lru_cache``), so without this an env mutation via ``monkeypatch`` /

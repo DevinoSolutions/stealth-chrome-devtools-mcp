@@ -22,7 +22,7 @@ everywhere a WAL-mode SQLite cookie jar may be mid-transaction. The answer here
 is to RETRY briefly and then SKIP with a warning, never to fail the copy — and
 the cost of that answer is exactly why the SOURCE has to be chosen carefully
 one layer up. A skipped file is a login silently missing from the copy, and
-this module cannot say which file mattered. So ``profile_seed.seed_source``
+this module cannot say which file mattered. So ``profile_source.seed_source``
 refuses to seed a new session from a source a live browser holds, by name,
 rather than handing the caller a copy whose gaps nobody can enumerate; the one
 source that stays copyable while its own browser runs is the shared session,

@@ -18,7 +18,7 @@ silence rather than an answer:
    the product keeps a separate closed copyable form of it.
 3. **`seed_from` applies at CREATION and nowhere else.** An existing session
    plus `--from` is an ERROR, not a no-op and not a re-seed. Both alternatives
-   were rejected deliberately (see `profile_seed.require_new_session`), so the
+   were rejected deliberately (see `profile_source.require_new_session`), so the
    refusal is pinned together with the fact that it NAMES where the existing
    session actually came from.
 4. **It is a NAME, through the same gate `session` passes.** Never a path,
@@ -41,7 +41,11 @@ import pytest
 
 from fakes import held_profile
 from stealth_chrome_devtools_mcp import cli, cli_call, cli_render
-from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_seed
+from stealth_chrome_devtools_mcp.embedded import (
+    clone_storage,
+    profile_seed,
+    profile_source,
+)
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 #: A byte string no fixture writes, so finding it in a new session is proof
@@ -267,7 +271,7 @@ class TestSeedFromIsAName:
     )
     def test_a_path_shape_is_refused(self, requested, tmp_session_root):
         with pytest.raises(ToolError) as excinfo:
-            profile_seed.seed_request(requested)
+            profile_source.seed_request(requested)
         assert "seed_from" in str(excinfo.value), (
             "a caller told about `session` when they typed `seed_from` goes "
             "and edits the wrong argument"
@@ -286,7 +290,7 @@ class TestSeedFromIsAName:
         thing, and this node is what stops one being written.
         """
         with pytest.raises(ToolError) as excinfo:
-            profile_seed.seed_request(requested)
+            profile_source.seed_request(requested)
         assert str(excinfo.value) == str(
             profile_seed._names_nothing("seed_from", requested)
         )
@@ -303,7 +307,7 @@ class TestSeedFromIsAName:
         spawn that asked for nothing. Here saying nothing has a right answer
         already — the shared session — which is what an unset `--from` means,
         so `seed_request` answers None and the copy comes from the seed."""
-        assert profile_seed.seed_request("") is None
+        assert profile_source.seed_request("") is None
 
     async def test_an_empty_from_still_makes_the_session_from_the_default(
         self, tmp_session_root
@@ -331,7 +335,7 @@ class TestSeedFromIsAName:
         eventually cost."""
         for requested in (" C:profile", "C:profile "):
             with pytest.raises(ToolError) as excinfo:
-                profile_seed.seed_request(requested)
+                profile_source.seed_request(requested)
             assert "seed_from" in str(excinfo.value)
 
     def test_the_drive_refusal_reads_one_flavour_on_both_platforms(self):
@@ -372,10 +376,10 @@ class TestSeedFromIsAName:
         assert selection["seeded_from"] == profile_seed.DEFAULT_SESSION
 
     def test_whitespace_around_a_name_is_not_part_of_it(self, tmp_session_root):
-        assert profile_seed.seed_request("  work  ") == "work"
+        assert profile_source.seed_request("  work  ") == "work"
 
     def test_none_stays_none(self):
-        assert profile_seed.seed_request(None) is None
+        assert profile_source.seed_request(None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -635,7 +639,7 @@ class TestEverySeedRefusalIsACallerRefusal:
     Two of the five refusals were already in the pre-flight and arrived clean.
     The other three — a source that is open, a source that does not exist, and
     a source naming a reserved word — were raised from inside
-    `profile_seed.seed_source`, which runs under the resolver INSIDE the try,
+    `profile_source.seed_source`, which runs under the resolver INSIDE the try,
     so a caller who typed `--from work` while `work` was open was told a spawn
     had FAILED about a spawn that never started.
 
@@ -761,7 +765,7 @@ class TestSeedFromNeedsASessionToApplyTo:
         user looking for an argument they did not type; a second message home
         keyed on who asked would be the defect this file keeps closing."""
         with pytest.raises(ToolError) as excinfo:
-            profile_seed.require_new_session(
+            profile_source.require_new_session(
                 "work", None, shared=False, inside_root=False
             )
         message = str(excinfo.value)
@@ -782,12 +786,12 @@ class TestSeedFromNeedsASessionToApplyTo:
         ]
         for requested_target, flags in cases:
             with pytest.raises(ToolError) as excinfo:
-                profile_seed.require_new_session("work", requested_target, **flags)
+                profile_source.require_new_session("work", requested_target, **flags)
             assert "--session" in str(excinfo.value), str(excinfo.value)
 
         target.mkdir(parents=True)
         with pytest.raises(ToolError) as excinfo:
-            profile_seed.require_new_session(
+            profile_source.require_new_session(
                 "work", target, shared=False, inside_root=True
             )
         assert "--session" in str(excinfo.value), str(excinfo.value)

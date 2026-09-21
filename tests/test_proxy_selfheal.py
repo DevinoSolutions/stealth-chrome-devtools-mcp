@@ -607,8 +607,13 @@ def wired_proxy(monkeypatch):
     from mcp.client import streamable_http
 
     links = []
+    # F-900 re-pointed this: the bridge calls the SDK's CURRENT client. The
+    # factory ignores the keywords it is now passed (`http_client`,
+    # `terminate_on_close`) because what these nodes drive is the re-bridge,
+    # not the transport — `tests/test_proxy_bridge_transport.py` is where the
+    # transport itself is pinned, against the real SDK.
     monkeypatch.setattr(
-        streamable_http, "streamablehttp_client", _fake_streamable_client(links)
+        streamable_http, "streamable_http_client", _fake_streamable_client(links)
     )
 
     async def always_ready(_url, *_a, **_kw):

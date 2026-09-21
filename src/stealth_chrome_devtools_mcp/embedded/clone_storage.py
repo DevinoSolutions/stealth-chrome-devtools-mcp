@@ -5,13 +5,12 @@ Owns the disposable-session lifecycle extracted verbatim from ``server.py``
 per-session profile copying, the storage-cap sweep (idle auto-clone eviction
 plus named-profile regenerable trim), the trash/retention mechanism, and
 profile-selection resolution. Extracting it means a fault in storage GC can no
-longer disable the whole tool surface. What a request MAY name, and what the
-seed means, is ``profile_seed``'s; this module is the only thing that knows
-where those directories live, and hands them over as ``profile_seed.Roots``.
-HOW a profile directory is copied — what such a copy leaves behind and what it
-does about a file Chrome holds open — is ``profile_copy``'s (F-897); what
-stays here is the POLICY around a copy: which source, into which directory,
-refused when, and reported how.
+longer disable the whole tool surface. What a request MAY name and what the
+seed means is `profile_seed`'s; WHICH SESSION a new one is copied from is
+`profile_source`'s; HOW the copy is made is `profile_copy`'s (F-897). This
+module is the only thing that knows where those directories live, and hands
+them over as `profile_seed.Roots`; what stays here is the POLICY around a
+copy: into which directory, refused when, and reported how.
 
 ``server.py`` (the browser tools) and ``cli.py`` (the ops CLI) import this module
 and call its public functions; ``spawn_browser`` delegates profile selection to
@@ -35,6 +34,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     profile_copy,
     profile_lock,
     profile_seed,
+    profile_source,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
@@ -782,7 +782,7 @@ def require_allowed_seed_from(seed_from: str | None, landed: str | None) -> str 
 
     The SOURCE question is asked here too and its answer DISCARDED (review S1;
     argument in finding §2.3). Its three refusals are raised inside
-    ``profile_seed.seed_source``, which the resolver calls from INSIDE
+    ``profile_source.seed_source``, which the resolver calls from INSIDE
     ``spawn_browser``'s ``try``, so they reached the caller re-labelled
     ``Failed to spawn browser: …`` — and an inner ``except ToolError: raise``
     does not fix that, it still unwinds into the enclosing handler.
@@ -790,11 +790,11 @@ def require_allowed_seed_from(seed_from: str | None, landed: str | None) -> str 
     LIFETIME, so the authoritative read stays the resolver's — the statement
     before the copy, no ``await`` between — and this ask is ADVISORY. The
     freshen is NOT taken here (``_seed_source_for_copy``)."""
-    requested = profile_seed.seed_request(seed_from)
+    requested = profile_source.seed_request(seed_from)
     if requested is None:
         return None
     target = None if landed is None else Path(landed)
-    profile_seed.require_new_session(
+    profile_source.require_new_session(
         requested,
         target,
         shared=target is not None
@@ -805,21 +805,21 @@ def require_allowed_seed_from(seed_from: str | None, landed: str | None) -> str 
     return requested
 
 
-def _seed_source(seed_from: str | None) -> profile_seed.SeedSource:
+def _seed_source(seed_from: str | None) -> profile_source.SeedSource:
     """Which directory this new session is copied from, bound to OUR four
-    directories and OUR liveness witness. The rule is ``profile_seed``'s.
+    directories and OUR liveness witness. The rule is ``profile_source``'s.
 
     Deliberately SIDE-EFFECT-FREE, because it is asked TWICE (review S1) and
     only one ask is about to copy: taken twice the freshen would copy a whole
     profile for a spawn about to be refused, and taken here a gate whose job
     is asking questions would write to disk.
     """
-    return profile_seed.seed_source(
+    return profile_source.seed_source(
         seed_from, _roots(), _is_relative_to, held=_profile_has_running_browser
     )
 
 
-def _seed_source_for_copy(seed_from: str | None) -> profile_seed.SeedSource:
+def _seed_source_for_copy(seed_from: str | None) -> profile_source.SeedSource:
     """``_seed_source``, plus the freshen a copy from the SHARED session owes
     its seed first — asked only for that session, the only source that HAS a
     seed. The two may therefore answer differently on a first run (no seed yet
@@ -848,7 +848,7 @@ async def resolve_profile_selection(
     *,
     seed_from: str | None = None,
     force_clone: bool = False,
-    override: profile_seed.SeedSource | None = None,
+    override: profile_source.SeedSource | None = None,
     clone_suffix: str | None = None,
 ) -> dict[str, Any]:
     """Which directory this spawn drives, and how it got there.
@@ -943,14 +943,14 @@ async def resolve_profile_selection(
     if override is not None:
         seed = override
     elif snapshot.exists():
-        seed = profile_seed.SeedSource(snapshot, "default-seed")
+        seed = profile_source.SeedSource(snapshot, "default-seed")
     elif master.exists():
         # No seed yet (first run, seed deleted, or the seed copy failed). Fall
         # back to copying directly from the live shared profile.
         # profile_copy.copy_delta skips locked files (PermissionError/OSError),
         # and _copy_profile_tree does a double-pass — cookies and login data
         # transfer successfully even while Chrome has it open.
-        seed = profile_seed.SeedSource(master, "live-default-fallback")
+        seed = profile_source.SeedSource(master, "live-default-fallback")
     else:
         raise RuntimeError(
             "No shared profile directory found — nothing to copy from. Spawn a "
@@ -993,7 +993,7 @@ async def _fallback_profile_selection(
     return await resolve_profile_selection(
         None,
         force_clone=True,
-        override=profile_seed.SeedSource(
+        override=profile_source.SeedSource(
             snapshot, "default-seed-final" if final else "default-seed-retry"
         ),
         clone_suffix="seed" if final else "retry",

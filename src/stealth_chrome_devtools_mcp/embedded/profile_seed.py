@@ -55,6 +55,7 @@ a session root is and ``clone_storage`` stays the one home for that.
 """
 
 import json
+import os.path
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
@@ -386,6 +387,23 @@ def anchor(requested: str, roots: Roots, inside: Callable[[Path, Path], bool]) -
     written as — the two answers differ for every relative path, and the
     reservation is about which directory is being opened. ``inside`` arrives as
     an argument because ``clone_storage._is_relative_to`` is its one home.
+
+    **The ``inside`` call is a DISAMBIGUATION, not a guard** (F-901), and that
+    distinction is the whole finding: it asks "did the caller already write the
+    ``sessions/`` prefix?", and whatever the other branch composes used to be
+    returned unchecked — so ``".."`` walked out of the clone root and ``"."``
+    landed on it. Whether a landing is ALLOWED is `reserved_reason`'s, asked of
+    the NORMALISED path this now returns.
+
+    The normalisation is LEXICAL (``os.path.normpath``) and deliberately not
+    ``resolve()``: it must fold ``..`` for a directory that does not exist yet,
+    it must not follow a symlink (a symlinked session root is one an operator
+    chose, and resolving it here would record a path they never configured),
+    and it must cost no filesystem call on the spawn path. What it cannot see
+    — a component the OS itself folds away, ``...`` on Windows — is caught one
+    call later by a comparison that DOES resolve, on both sides. It is applied
+    to the relative branch only: an absolute path is the caller's own string
+    and F-896 promises it back byte-for-byte.
     """
     if is_default_name(requested):
         return roots.shared
@@ -393,7 +411,9 @@ def anchor(requested: str, roots: Roots, inside: Callable[[Path, Path], bool]) -
     if asked.is_absolute():
         return asked
     anchored = roots.session / asked
-    return anchored if inside(anchored, roots.clones) else roots.clones / asked
+    if not inside(anchored, roots.clones):
+        anchored = roots.clones / asked
+    return Path(os.path.normpath(anchored))
 
 
 def is_bare_name(value: str) -> bool:
@@ -415,8 +435,8 @@ def _names_nothing(spelling: str, given: str) -> ToolError:
     """The ONE sentence every field that takes a NAME gets for a value that
     names no profile.
 
-    One function, because two spellings answering an empty request differently
-    is the asymmetry this module exists to remove — and they did:
+    One function, because the two spellings answering an EMPTY request
+    differently is an asymmetry with nothing behind it — and they did:
     ``session="   "`` raised while ``user_data_dir="   "`` was ANCHORED, which
     on Windows resolves to the clone root itself (the trailing spaces are
     stripped from the component), so Chrome would have been handed the
@@ -424,9 +444,17 @@ def _names_nothing(spelling: str, given: str) -> ToolError:
 
     It raises rather than falling back to an unnamed spawn: silently turning a
     malformed request into the shared session is a substitution, which is the
-    thing this vocabulary exists to stop. What it never covers is the
-    exactly-EMPTY string, which is "not given" and is answered long before
-    here — see ``profile_request`` and ``seed_request``.
+    thing this vocabulary exists to stop.
+
+    **It says nothing about the two spellings in general, and must not be read
+    as a rule** (F-901): ``user_data_dir`` is also the PATH door, so it accepts
+    shapes ``session`` refuses on purpose (``sub/acme``, an absolute path), and
+    it once accepted ``"."`` and ``".."`` — which `session` refused and which
+    were not empty at all. Where they may never differ is the ANSWER: neither
+    spelling may reach a directory profiles are kept in, and that rule lives in
+    ``reserved_reason``. What this one never covers is the exactly-EMPTY
+    string, which is "not given" and is answered long before here — see
+    ``profile_request`` and ``seed_request``.
 
     **Three fields ask it, not two** (F-897): ``session`` and its alias, and
     ``seed_from``, which reaches it through ``require_name``. The sentence is
@@ -603,9 +631,10 @@ def require_allowed(
 
 
 def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
-    """Why this profile request may not be honoured, or None (F-894, F-896).
+    """Why this profile request may not be honoured, or None (F-894, F-896,
+    F-901).
 
-    Five refusals, and one deliberate non-refusal. A reserved NAME is refused
+    Seven refusals, and one deliberate non-refusal. A reserved NAME is refused
     because anchoring it under the clone root hands back a different profile
     under the name the caller used. The SEED path is refused because a browser
     driven there writes into the seed every later session copies from.
@@ -656,11 +685,68 @@ def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
     either). It is asked BEFORE the reserved-name clause so ``master.`` is told
     what it actually is rather than being quoted back a name it did not type.
 
+    The SIXTH and SEVENTH are F-901's, and together they are one sentence: a
+    request may name a profile, never a directory profiles are KEPT in. The
+    sixth refuses the clone root and the browser-session root THEMSELVES —
+    through either door, because an absolute path reaches them exactly as
+    ``"."`` and ``".."`` did, and a browser opened on one writes its own
+    profile files in among every session's (and, for the session root, beside
+    the shared profile and its seed). It is two equalities and nothing wider:
+    a directory that merely lives near them is untouched, which is what keeps
+    F-896's "an absolute path is the caller's own business" true. The seventh
+    refuses a RELATIVE request that lands outside the clone root at all — the
+    ``".."`` walk — because a name is anchored under that root and a name that
+    leaves it is not naming a session. The shared profile is exempt by
+    landing, not by spelling, since `anchor` answers it for the bare word.
+
+    Both are asked of the NORMALISED landing ``anchor`` now returns, and they
+    ask it in two different ways ON PURPOSE (review S1). The sixth compares
+    through ``same_dir``, which RESOLVES both sides — so a symlinked root
+    compares equal to itself, a LINK pointing at a root is caught, and so is a
+    component the OS folds away (``...`` on Windows, measured to resolve onto
+    the clone root) which ``normpath`` cannot see. The seventh is LEXICAL
+    (``_inside_lexically``), because a session directory that is a symlink or
+    a junction to storage elsewhere RESOLVES outside the clone root: asking
+    that one by resolving read a configuration 2.1.11 honoured as a walk out of
+    the tree and refused it through both spellings. Every escape this finding
+    closes is folded by ``normpath`` before either is asked, so the lexical
+    question costs the rule nothing — see ``_inside_lexically`` for what it
+    gives up, and ``_landing_words`` for why a refusal that reaches a directory
+    through a link has to name the one it really opens.
+
     The SHARED profile itself is deliberately NOT refused: driving it directly
     is how a human logs in, and the caller who names it (by path, or by
     ``default``) gets the shared ROLE, which the resolver settles.
     ``roots.shared`` is read here only to tell those two apart.
+
+    It is composed of two halves and they are two QUESTIONS, not a split for
+    length: ``_name_refusal`` is about the string the caller typed — is this
+    word one they may use — and ``_landing_refusal`` is about the directory it
+    MEANS, which is why F-901's pair live there. Either half answering is a
+    refusal; this function stays THE one home a caller asks.
     """
+    return _name_refusal(requested, resolved, roots) or _landing_refusal(
+        requested, resolved, roots
+    )
+
+
+def _about(requested: str, name: str) -> str:
+    """How a refusal that is about a NAME opens (review N2).
+
+    These two rules key on ``Path(requested).name``, so ``../master`` is
+    refused for its basename and the message quoted back ``'master'`` — a
+    string the caller never wrote. The request is named alongside it when the
+    two differ, and the message is byte-identical when they do not, which is
+    the overwhelmingly common case (a bare name) and the one the F-896 pins
+    read.
+    """
+    return (
+        f"{name!r} " if requested == name else f"{requested!r} names {name!r}, which "
+    )
+
+
+def _name_refusal(requested: str, resolved: Path, roots: Roots) -> str | None:
+    """The refusals about the NAME a caller typed (F-894, F-896)."""
     asked = Path(requested)
     # `.strip()` here is a TEST and never a normalisation — `asked`, and so
     # every answer about where the request LANDS, still reads the string as it
@@ -677,10 +763,11 @@ def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
     folded = name.rstrip(". ")
     if not asked.is_absolute() and folded != name and folded in FOLDED_NAMES:
         return (
-            f"{name!r} is {folded!r} once the filesystem has had it: Windows "
-            "strips a trailing dot or space from a path component, so this "
-            f"would reach {folded!r} rather than a session of its own name. "
-            "Drop the trailing dot or space, or pick a different name."
+            f"{_about(requested, name)}is {folded!r} once the filesystem has "
+            "had it: Windows strips a trailing dot or space from a path "
+            f"component, so this would reach {folded!r} rather than a session "
+            "of its own name. Drop the trailing dot or space, or pick a "
+            "different name."
         )
     # Past that clause `folded == name` always, since it returns for every
     # spelling where they differ and lands in `FOLDED_NAMES`. The two rules
@@ -698,10 +785,10 @@ def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
             else ""
         )
         return (
-            f"{name!r} is a reserved profile name and never means a session of "
-            f"that name. Pass session={DEFAULT_SESSION!r} (or no session at "
-            "all) for the shared profile every session is seeded from; pick "
-            f"another name for a session of your own.{existing}"
+            f"{_about(requested, name)}is a reserved profile name and never "
+            f"means a session of that name. Pass session={DEFAULT_SESSION!r} "
+            "(or no session at all) for the shared profile every session is "
+            f"seeded from; pick another name for a session of your own.{existing}"
         )
     if (
         not asked.is_absolute()
@@ -714,13 +801,111 @@ def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
             f"same word. Pass session={DEFAULT_SESSION!r} on its own to open "
             "it; a session of your own needs a different name."
         )
+    return None
+
+
+def _landing_refusal(requested: str, resolved: Path, roots: Roots) -> str | None:
+    """The refusals about the DIRECTORY a request means (F-893, F-901)."""
+    asked = Path(requested)
     if same_dir(resolved, roots.seed):
         return (
             "that path is the shared seed every new session is copied from, and "
             "a browser running on it writes into the seed. Pass "
             f"session={DEFAULT_SESSION!r} to open the shared profile itself."
         )
+    if same_dir(resolved, roots.clones) or same_dir(resolved, roots.session):
+        return (
+            f"{requested!r} names a directory profiles are KEPT in rather than "
+            f"a profile: {_landing_words(resolved)}. A browser opened there "
+            "writes its own profile files in among every session's. Pass a "
+            "session name, or an absolute path to a directory of your own."
+        )
+    if (
+        not asked.is_absolute()
+        and not same_dir(resolved, roots.shared)
+        and not _inside_lexically(resolved, roots.clones)
+    ):
+        return (
+            f"{requested!r} walks out of the session storage and lands at "
+            f"{_landing_words(resolved)}. A session name is anchored under the "
+            "clone root and has to stay inside it. Pass a session name, or an "
+            "absolute path if you mean a directory of your own."
+        )
     return None
+
+
+def _inside_lexically(path: Path, parent: Path) -> bool:
+    """Is *path*, AS WRITTEN, under *parent* — asked of the strings alone.
+
+    The RESOLVING twin is ``clone_storage._is_relative_to``, which ``anchor``
+    takes as ``inside``, and the two are not a second way to do one thing: they
+    answer two different questions and F-901 needs one of each. "Which root did
+    the caller already name" is about the directories these paths BECOME, so it
+    resolves. "Did this request walk out of the clone root" is about the path
+    the caller composed, so it must NOT — a session directory that is a
+    symlink or a junction to storage elsewhere resolves outside the clone root,
+    and a resolving test reads that legal configuration as an escape and refuses
+    a request 2.1.11 honoured (review S1), with a message naming a path visibly
+    inside the root.
+
+    It costs the rule nothing, because every escape F-901 closes is folded by
+    ``normpath`` BEFORE this is asked: `..`, `../..` and `sub/..` are already
+    the directory they mean by the time they arrive. What a LEXICAL test cannot
+    see — a component the OS itself folds away, `...` on Windows, or a link
+    pointing AT a root — is caught one clause above by ``same_dir``, which does
+    resolve, on both sides.
+
+    What it gives up is named rather than hidden: a link INSIDE the clone root
+    pointing outside it is the caller's own business again, which is exactly
+    what 2.1.11 said and what an operator who made that link meant.
+
+    It is spelled on ``os.path`` and deliberately NOT on this module's ``Path``
+    name: both arguments are CONCRETE directories on this host — one of them is
+    a root ``clone_storage`` handed us — so the host's own rules for separators
+    and case are the right ones, and the flavour screening that matters is on
+    the caller's STRING, one line above, where ``Path(requested).is_absolute()``
+    still reads whatever flavour is in play. Normalising both sides puts them in
+    one form; ``normcase`` is what makes two spellings of one Windows directory
+    compare equal and is the identity on POSIX. The separator on the end is what
+    makes it STRICTLY inside — landing ON the root is the clause above's answer,
+    with its own message — and it is stripped before it is added, because
+    ``normpath`` KEEPS the trailing separator on a FILESYSTEM root (``D:\\``
+    stays ``D:\\``, ``/`` stays ``/``): appending one more doubled it and
+    matched nothing, so a clone root configured at a drive root refused every
+    relative request as a walk out of itself (review N1). ``os.altsep`` is in
+    the strip set for the same reason both separators are read elsewhere in
+    this module — a configured root may arrive spelled with a forward slash on
+    Windows. The equality is tested separately rather than left to the prefix,
+    because at a root the parent IS its own stem plus a separator.
+    """
+    try:
+        root = os.path.normcase(os.path.normpath(str(parent)))
+        landed = os.path.normcase(os.path.normpath(str(path)))
+    except (OSError, ValueError):
+        return False
+    separators = os.sep if os.altsep is None else os.sep + os.altsep
+    return landed != root and landed.startswith(root.rstrip(separators) + os.sep)
+
+
+def _landing_words(resolved: Path) -> str:
+    """How a refusal NAMES the directory a request landed on (review S1).
+
+    The landing is the lexical path — that is what the caller composed and what
+    the answer would have been — but a refusal that reaches a directory through
+    a link has to say which one, or it contradicts itself: the shipped message
+    told an operator that ``<clones>\\self`` "is a directory profiles are KEPT
+    in", naming a path visibly inside the clone root as though it were the root.
+    So the real target is added when, and only when, the two differ; case-only
+    differences are not a difference, because Windows spells one directory both
+    ways.
+    """
+    try:
+        real = resolved.resolve(strict=False)
+    except OSError:
+        return str(resolved)
+    if os.path.normcase(str(real)) == os.path.normcase(str(resolved)):
+        return str(resolved)
+    return f"{resolved}, which really is {real}"
 
 
 def same_dir(left: Path, right: Path) -> bool:
@@ -730,198 +915,3 @@ def same_dir(left: Path, right: Path) -> bool:
         return left.resolve(strict=False) == right.resolve(strict=False)
     except OSError:
         return False
-
-
-# ── seed_from: which session a NEW session is copied from (F-897) ────────────
-
-
-class SeedSource(NamedTuple):
-    """The directory a new session is copied FROM, and what that copy is
-    called in the marker and in ``clone_source``. One tuple because the two
-    are decided together and a caller that could pick them apart would be able
-    to record a copy as having come from somewhere it did not."""
-
-    path: Path
-    kind: str
-
-
-def seed_request(seed_from: str | None) -> str | None:
-    """THE one reading of a ``seed_from`` / ``--from`` request (F-897).
-
-    A session NAME, through ``require_name`` — the same rule ``session``
-    passes, because they name the same kind of thing and a ``seed_from`` that
-    accepted a path would be a second way to reach a directory, one the
-    resolver could not anchor, reserve or record a name for. There is
-    deliberately no path door here at all: what ``--from`` copies has to be a
-    session, because the provenance it writes (``seeded_from``) is a word the
-    caller can pass back to ``session=``, and an arbitrary directory has no
-    such word.
-
-    **The exactly-empty string is NOT GIVEN**, which is why the test is falsy
-    rather than ``is None`` — the same decision ``profile_request`` makes for
-    ``session``, for the same measured reason (F-896 delta): an MCP client is
-    a language model and ``""`` for an optional string is one of the commonest
-    shapes it sends, so refusing it would fail a spawn that asked for nothing.
-    Here that is not merely harmless but exactly right — ``seed_from=""`` says
-    nothing about where to copy from, and the answer for saying nothing is the
-    shared session, which is what an unset ``--from`` already means. Anything
-    NON-empty that strips to nothing still raises, through the one sentence
-    ``session`` and its alias raise (``_names_nothing``, reached via
-    ``require_name``): that value cannot have held a separator, so it names a
-    session that cannot exist rather than a default that does.
-    """
-    if not seed_from:
-        return None
-    return require_name(
-        "seed_from",
-        seed_from,
-        path_hint=(
-            "Pick the name of a session to copy — `stealthy profiles` lists "
-            "them. There is no path form: a seed has to be a session, because "
-            "its name is what the new session records as `seeded_from`."
-        ),
-    )
-
-
-def require_new_session(
-    requested: str,
-    target: Path | None,
-    *,
-    shared: bool,
-    inside_root: bool,
-) -> None:
-    """Raise unless this ``seed_from`` has a NEW session of its own to apply to.
-
-    ``seed_from`` says where a session's contents come from at the moment it
-    is CREATED, so all FOUR refusals here are one sentence read four ways:
-    there has to be a session, it has to be the caller's own, it has to be a
-    session at all, and it must not already exist.
-
-    The third exists because the answer to it used to be SILENCE (F-897 review
-    M1, measured). A ``user_data_dir`` landing outside the clone root is
-    opened exactly as it is — the resolver only ever seeds a directory it is
-    about to create UNDER the session root — so ``seed_from`` passed every
-    gate and was then never used: no copy, no marker, ``seeded_from:
-    unknown``, and not one word to the caller. That is this feature's own
-    commitment ("``--from`` is never silently dropped") inverted and reached
-    through the path door one argument to the left. It is decided HERE rather
-    than in the resolver because the rule is this function's — whether there
-    is a NEW SESSION for a seed to apply to — and the caller supplies the one
-    fact it cannot know, exactly as it does for ``shared``.
-
-    The fourth is the one with a choice in it, and the choice is deliberate.
-    The alternatives were a silent no-op — which tells a caller their login
-    came from ``work`` when it came from wherever the directory was seeded
-    weeks ago — and a RE-SEED, which overwrites a profile whose whole purpose
-    is to hold a login the user typed by hand. Refusing is the only answer
-    that is neither a lie nor a loss, and it can afford to be loud because the
-    remedy is one word: open the session (which is what a spawn without
-    ``seed_from`` does), or pick a name that is free. The refusal NAMES where
-    the existing session was actually seeded from, so a caller who expected a
-    fresh copy learns what they have instead.
-
-    **Every sentence here names BOTH spellings of the remedy** (review N4).
-    The CLI prints the backend's message verbatim — one home for the rule —
-    so a caller who typed ``stealthy spawn --from work`` and is told to "pass
-    ``session=<name>``" goes looking for an argument they never typed. Keying
-    the wording on who asked would need a second message home, which is the
-    defect this module exists to prevent; naming both costs four words.
-    """
-    if target is None:
-        raise ToolError(
-            f"seed_from={requested!r} says what a NEW session is copied from, "
-            "so it needs a session of its own: pass session=<name> beside it "
-            "(--session NAME from the CLI). A spawn that names no session gets "
-            f"the {DEFAULT_SESSION!r} session or a disposable copy of it, and "
-            "neither is seeded from another session."
-        )
-    if shared:
-        raise ToolError(
-            f"seed_from={requested!r} cannot apply to the "
-            f"{DEFAULT_SESSION!r} session: {DEFAULT_SESSION!r} is the session "
-            "every other one is seeded FROM, and is nobody's copy. Pick a name "
-            "for a new session of your own — session=<name>, or --session NAME "
-            "from the CLI."
-        )
-    if not inside_root:
-        raise ToolError(
-            f"seed_from={requested!r} copies one SESSION into another, and "
-            f"{str(target)!r} is a directory named by path rather than a "
-            "session: it is opened exactly as it is, so there is nothing for "
-            "seed_from to apply to and it would have been silently ignored. "
-            "Pass session=<name> instead (--session NAME from the CLI) — a "
-            "session is what carries a name, which is what the copy records."
-        )
-    if target.exists():
-        raise ToolError(
-            f"session {target.name!r} already exists, and seed_from only "
-            f"applies when a session is CREATED — it was "
-            f"{seed_sentence(provenance(target))}. Pass session="
-            f"{target.name!r} on its own to open it with the cookies and "
-            f"logins it already holds, or pick a free name for a fresh copy "
-            f"of {requested!r}. (--session NAME from the CLI.)"
-        )
-
-
-def seed_source(
-    requested: str | None,
-    roots: Roots,
-    inside: Callable[[Path, Path], bool],
-    *,
-    held: Callable[[Path], bool],
-) -> SeedSource:
-    """WHICH directory a new session is copied from, and what that copy is
-    called (F-897). ``None`` means the same thing as ``"default"``, so the two
-    cannot develop separate behaviour.
-
-    **The shared session is the one source that stays copyable while its own
-    browser runs, and that is a fact about the MECHANISM rather than a
-    privilege of the word.** The product keeps a separate, closed, copyable
-    form of it — the seed — refreshed whenever the shared profile is free
-    (F-892/F-893), so a copy taken from it is a copy of a directory nothing is
-    writing to. The fallback to the LIVE shared directory when no seed exists
-    yet (first run) is 2.1.11's behaviour and is kept deliberately rather than
-    widened into the refusal below: it is the path that CREATES the first
-    seed, and refusing it would make a fresh installation unable to make its
-    first named session. What it costs is named in ``profile_copy``'s
-    docstring — a locked file is skipped and nothing can say which.
-
-    **Every other session is refused while it is open, BY NAME.** It has no
-    seed, so the copy would be of the live directory itself, and
-    ``profile_copy.copy_file`` answers a locked file by skipping it with a
-    warning: on Windows that is every file Chrome holds, and everywhere it is
-    a WAL-mode cookie jar mid-transaction. The caller would be handed a
-    session that looks complete and is missing exactly the logins they wanted,
-    with no way for us to enumerate the gap. A refusal naming the session and
-    the remedy is worth more than a copy nobody can trust. F-898 is where a
-    RUNNING source becomes copyable — a CDP cookie hand-off out of the live
-    browser rather than a file copy — and is deliberately not built here.
-
-    Per-session seeds were the other candidate and are deliberately NOT built:
-    each costs ~0.47 GB, and each needs its own refresh trigger, its own
-    staleness witness and its own in-use rule — a second copy of the lifecycle
-    F-892 and F-893 spent two findings getting right for ONE seed, bought to
-    avoid a refusal whose remedy is closing a window.
-    """
-    if requested is None or is_default_name(requested):
-        if roots.seed.exists():
-            return SeedSource(roots.seed, "explicit-default-seed")
-        return SeedSource(roots.shared, "explicit-default")
-    source = require_allowed(requested, roots, inside)
-    if not source.exists():
-        raise ToolError(
-            f"seed_from={requested!r} is not a session: there is nothing at "
-            f"{source}. `stealthy profiles` lists the sessions you have; omit "
-            f"seed_from to copy the {DEFAULT_SESSION!r} session."
-        )
-    if held(source):
-        raise ToolError(
-            f"seed_from={requested!r} is open in a browser right now. Copying "
-            "a profile Chrome is writing to silently drops whatever it has "
-            "locked — which is where the logins are — and nothing can say "
-            f"afterwards what was lost. Close the {requested!r} session first "
-            f"(`stealthy close <instance>`), or seed from "
-            f"{DEFAULT_SESSION!r}, which the product keeps a separate "
-            "copyable form of."
-        )
-    return SeedSource(source, "explicit-session")

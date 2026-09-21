@@ -377,13 +377,19 @@ class TestReservedProfileNames:
             tmp_path / "master",
             tmp_path / "master-snapshot",
         )
+        # F-901's containment question is asked of the landing alone — the
+        # resolving predicate it needs is `anchor`'s, not this function's — so
+        # the signature is unchanged from 2.1.11. The two landings below are
+        # inside `roots.clones` by construction.
         mangled = "C:stealth-mcp-browser-sessionssessionsproject-f876e3d7f2ec"
-        reason = profile_seed.reserved_reason(mangled, tmp_path / mangled, roots)
+        reason = profile_seed.reserved_reason(mangled, roots.clones / mangled, roots)
         assert reason is not None and "absolute" in reason
         # And it must not over-refuse on that same host: an ordinary session
         # name and a POSIX absolute path name no drive under either flavour.
-        assert profile_seed.reserved_reason("acme", tmp_path / "acme", roots) is None
-        assert profile_seed.reserved_reason("/srv/p", tmp_path / "p", roots) is None
+        assert (
+            profile_seed.reserved_reason("acme", roots.clones / "acme", roots) is None
+        )
+        assert profile_seed.reserved_reason("/srv/p", Path("/srv/p"), roots) is None
 
     @pytest.mark.asyncio
     async def test_a_held_snapshot_is_refused_before_any_re_attach(

@@ -49,7 +49,7 @@ built.
 `stealthy spawn --session NAME --from SOURCE`. When `session` names a session
 that does **not exist yet**, it is created as a copy of `seed_from`.
 
-**Unset means `default`, and the two are ONE path.** `profile_seed.seed_source`
+**Unset means `default`, and the two are ONE path.** `profile_source.seed_source`
 treats `None` and the bare word `default` identically in its first branch, so
 "seeding from the shared session" cannot develop behaviour that differs from
 "seeding from nothing named". Pinned
@@ -58,7 +58,7 @@ agree today are the defect convention 4 names.
 
 ### 2.2 It is a NAME, through the gate `session` already passes
 
-`profile_seed.seed_request` → `require_name` → (at the copy)
+`profile_source.seed_request` → `require_name` → (at the copy)
 `require_allowed`. No second resolver, no path door.
 
 `require_name` is F-896's name rule with the FIELD as data. The two messages
@@ -111,7 +111,7 @@ would eventually cost.
 
 ### 2.3 CREATION only — an existing target RAISES
 
-`profile_seed.require_new_session` refuses FOUR shapes, which are one sentence
+`profile_source.require_new_session` refuses FOUR shapes, which are one sentence
 read four ways: there has to be a session (`seed_from` with no `session`), it
 has to be the caller's own (`session="default"`), it has to be a session at all
 (a `user_data_dir` outside the clone root), and it must not already exist.
@@ -179,7 +179,7 @@ resolver asks again because it is public with its own callers; the cost is one
 reason** (review S1). Two of the five refusals were already there and reached
 the caller clean; the other three — the source is open, the source does not
 exist, the source names a reserved word — are raised inside
-`profile_seed.seed_source`, which runs under the resolver INSIDE
+`profile_source.seed_source`, which runs under the resolver INSIDE
 `spawn_browser`'s `try`, so they arrived re-labelled:
 
 ```
@@ -363,9 +363,9 @@ with a sharper reason.
 
 ---
 
-## 3. Two payments, and what they bought
+## 3. Three payments, and what they bought
 
-Both files that needed a line were at their caps, and **caps ratchet down only.**
+Every file that needed a line was at its cap, and **caps ratchet down only.**
 
 * **`clone_storage.py`** (grandfathered 1054). `embedded/profile_copy.py` is the
   new home for the filesystem mechanics of a Chrome profile directory —
@@ -386,6 +386,28 @@ Both files that needed a line were at their caps, and **caps ratchet down only.*
   decision (`wants_json`) are things a script depends on and stay in
   `cli_call`; the shape of a table is explicitly not a contract, which is why
   `wants_json` sends JSON the moment stdout is not a terminal. 1000 → **928**.
+* **`profile_seed.py`** (917/1000), and this one was owed to the MERGE rather
+  than to the feature. F-901 grew the landing rule by 185 lines while F-897 had
+  grown the same file by 288, and the merged module stood at **1112**.
+  `embedded/profile_source.py` is the new home for `seed_from` itself —
+  `seed_request`, `require_new_session`, `SeedSource`, `seed_source` — and the
+  cut is this question's surface rather than a raised cap. The line between the
+  two is WHEN the question is asked: `profile_seed` is consulted on every spawn
+  and answers what a seed IS and what a caller may SAY; nothing in the new file
+  runs unless a caller wrote `seed_from`. The seam was already visible before
+  the merge made it load-bearing — `profile_seed`'s own module docstring still
+  enumerated four questions and never named this one. They meet at exactly
+  three points, each of which stays single-homed: `require_name` (one name rule
+  for `session` and `seed_from`), `require_allowed` (a source is anchored and
+  reserved by the same gate a target is) and `seed_sentence`/`provenance` (the
+  already-exists refusal names a seed in the words `stealthy profiles` uses).
+  It is deliberately NOT folded into `profile_copy`, which owns the MECHANICS
+  of a copy and knows nothing about sessions. The invariant `profile_seed`
+  carries is inherited whole rather than weakened: the four directories arrive
+  as a `Roots`, the containment predicate and the liveness witness as
+  callables, so `clone_storage` is still the only thing that knows where a
+  session root is. 1112 → **917**; `clone_storage` paid the one line the new
+  import cost out of its own module docstring, 1001 → **1000**.
 
 Two behaviour-preserving cleanups came with the first move, because a new leaf
 lands under the default lint set rather than inheriting `clone_storage`'s
@@ -395,16 +417,17 @@ nothing reads claims the answer depends on where you ask), and `copy_file`'s
 retry count is `COPY_ATTEMPTS` rather than a bare 3 and 2.
 
 One more fold, and it is not tidying: `resolve_profile_selection`'s
-`source_override` + `source_kind` became ONE `profile_seed.SeedSource`
+`source_override` + `source_kind` became ONE `profile_source.SeedSource`
 (`override`). A path and the word recorded for it are decided together, and two
 parameters let a caller record a copy as having come from somewhere it did not.
 It also kept the signature inside `PLR0913`.
 
 | File | before | after | cap |
 |---|---|---|---|
-| `embedded/clone_storage.py` | 1054 | 980 | 1000 (GRANDFATHER row DELETED) |
-| `embedded/profile_copy.py` | — | 227 | 1000 |
-| `embedded/profile_seed.py` | 599 | 803 | 1000 |
+| `embedded/clone_storage.py` | 1054 | 1000 | 1000 (GRANDFATHER row DELETED) |
+| `embedded/profile_copy.py` | — | 231 | 1000 |
+| `embedded/profile_seed.py` | 599 | 917 | 1000 |
+| `embedded/profile_source.py` | — | 241 | 1000 |
 | `cli_call.py` | 1000 | 928 | 1000 |
 | `cli_render.py` | — | 146 | 1000 |
 | `cli.py` | 953 | 950 | 1000 |
@@ -480,7 +503,7 @@ The 40 REDs are of four distinct shapes, not one:
 
 * `AttributeError: module … has no attribute 'require_allowed_seed_from'` — the
   gate did not exist (every node that composes a selection).
-* `TypeError`/`AttributeError` on `profile_seed.seed_request` — the reader did
+* `TypeError`/`AttributeError` on `profile_source.seed_request` — the reader did
   not exist (the eight path shapes, the empty case, the `None` case).
 * `assert {} == {'seed_from': 'a/b'}` — the CLI sent nothing.
 * `StopIteration` — the parser had no `--from` action.
