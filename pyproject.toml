@@ -356,8 +356,22 @@ ban-relative-imports = "all"
 "src/stealth_chrome_devtools_mcp/embedded/clone_storage.py" = [
     "ANN001", "ANN202", "ANN401", "ARG001", "ARG005", "ASYNC240",
     "BLE001", "DTZ005", "DTZ006", "E501", "PIE810", "PLR2004", "PTH100",
-    "PTH101", "PTH105", "PTH109", "SIM105", "TID251", "TRY300",
+    "PTH101", "PTH109", "TID251", "TRY300",
 ]  # plan_M4ph1 (F-201 clone-storage extraction — suppressions carried verbatim from server.py)
+# Suppression-shrink (F-914): PTH105 and SIM105 removed — the `os.replace` that
+# IS the recoverable rename and the best-effort `os.utime` stamp both left with
+# the trash mechanism, so neither code fires here any more. Carried, not copied:
+# see the clone_trash.py entry below.
+"src/stealth_chrome_devtools_mcp/embedded/clone_trash.py" = [
+    "PTH105", "SIM105",
+]  # plan_M4ph1 (F-914 moved the recoverable-eviction mechanism VERBATIM out of
+# clone_storage.py when the held-profile rule put that file over its 1000-LOC
+# budget, so the OWNER is unchanged — these are F-201's lines under a new
+# filename. Both codes are the exact subset of that file's list the moved lines
+# fire: PTH105 is the `os.replace` that makes eviction a same-volume rename
+# rather than a delete, SIM105 the `os.utime` stamp that may fail and must not
+# take the eviction with it. Carried verbatim, nothing widened — which is why
+# the clone_storage.py entry above SHRANK by exactly these two codes.)
 "src/stealth_chrome_devtools_mcp/embedded/tool_registry.py" = [
     "ANN001", "ANN201", "ANN202", "BLE001",
 ]  # plan_M4ph1 (F-101/F-505/F-612 registry extraction — suppressions carried verbatim from server.py)

@@ -64,12 +64,28 @@ class TestModuleSurface:
             "_enforce_named_profile_trim_in",
             "_idle_autoclones_over_cap",
             "_named_profiles_over_session_cap",
-            "_trash_clone",
-            "_clone_trash_dir",
             "_profile_has_running_browser",
             "_copy_profile_tree",
         ):
             assert callable(getattr(clone_storage, name)), name
+
+    def test_the_extracted_leaves_are_not_re_exported_here(self):
+        """F-914 moved two questions out and this module may not answer them a
+        second time: what to do about a HELD target (``profile_target``) and
+        what an EVICTION means (``clone_trash``). ``_trash_clone`` and
+        ``_clone_trash_dir`` were in the sample above until then, so an alias
+        coming back to keep an old caller working would pass silently."""
+        for name in (
+            "_trash_clone",
+            "_clone_trash_dir",
+            "_purge_expired_trash",
+            "_hand_over_or_refuse",
+            "_still_driven_source",
+        ):
+            assert not hasattr(clone_storage, name), (
+                f"clone_storage answers {name} again — the extraction has a "
+                "second way back in"
+            )
 
     def test_server_keeps_no_reexport_or_alias(self):
         # F-201 + second-way lens: the moved names live ONLY in clone_storage.

@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from fakes import held_profile
+from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_seed
 
 # These are module-level functions in server.py (bare imports via sys.path)
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
@@ -34,6 +35,17 @@ from stealth_chrome_devtools_mcp.embedded.profile_copy import (
 from stealth_chrome_devtools_mcp.embedded.profile_copy import (
     ignore_names as _profile_ignore_names,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
+
+def _driving(directory: Path):
+    """The F-898 witness, answering True for exactly one directory.
+
+    ``profile_seed.same_dir`` and not ``==`` because the product compares that
+    way too — a caller names a session and the resolver holds an absolute path.
+    """
+    return lambda profile: profile_seed.same_dir(profile, directory)
+
 
 # ---------------------------------------------------------------------------
 # _is_relative_to
@@ -358,23 +370,60 @@ class TestResolveProfileSelection:
 
     @pytest.mark.asyncio
     async def test_busy_profile_auto_suffixes(self, tmp_session_root):
-        """When relative profile is busy, auto-suffix to -2."""
+        """When a relative profile is busy AND we drive its browser, the spawn
+        gets ``-2`` — seeded from the holder, with its jar handed over.
+
+        SOFT GOLDEN UPDATED for F-915. This node used to take no ``driven``
+        witness at all and assert the walk unconditionally, which is the defect:
+        the walked directory was copied from the SHARED seed, so it held none of
+        ``occupied``'s logins. The walk survives only where it is safe, and
+        ``driven`` is what makes it so.
+        """
         dirs = tmp_session_root
         busy = dirs["sessions"] / "occupied"
         busy.mkdir()
         held_profile(busy)  # SOFT GOLDEN UPDATED for F-871 -- see above
-        result = await _resolve_profile_selection("occupied")
+        result = await _resolve_profile_selection("occupied", driven=_driving(busy))
         resolved = Path(result["user_data_dir"])
         assert resolved.name == "occupied-2"
+        assert result[clone_storage.LIVE_SEED_KEY] == str(busy)
+
+    @pytest.mark.asyncio
+    async def test_a_busy_profile_we_do_not_drive_is_refused(self, tmp_session_root):
+        """The other half of F-915, and the reason the node above needed a
+        witness: with no browser of ours on it there is no jar to hand over, so
+        ``-2`` would be a stranger under the caller's own session name."""
+        dirs = tmp_session_root
+        busy = dirs["sessions"] / "occupied"
+        busy.mkdir()
+        held_profile(busy)
+        with pytest.raises(ToolError, match="occupied"):
+            await _resolve_profile_selection("occupied")
 
     @pytest.mark.asyncio
     async def test_master_busy_clones(self, tmp_session_root):
-        """When master is busy and user_data_dir=None, should clone."""
+        """When the shared session is busy under a browser WE drive, an unnamed
+        spawn gets a clone — of the seed, with the live jar handed over.
+
+        SOFT GOLDEN UPDATED for F-914: the clone is unchanged, the witness is
+        new. Without one this is the finding itself — a logged-out copy of a
+        seed frozen at the last clean close, announced in ``profile_role``
+        alone.
+        """
         dirs = tmp_session_root
         held_profile(dirs["master"])  # SOFT GOLDEN UPDATED for F-871
-        result = await _resolve_profile_selection(None)
+        result = await _resolve_profile_selection(None, driven=_driving(dirs["master"]))
         assert result["profile_role"] == "clone"
         assert result["clone_source"] is not None
+        assert result[clone_storage.LIVE_SEED_KEY] == str(dirs["master"])
+
+    @pytest.mark.asyncio
+    async def test_a_busy_master_we_do_not_drive_is_refused(self, tmp_session_root):
+        """F-914 proper: the owner's own logged-in Chrome holds the shared
+        session, and 2.1.12 answered with a clone of a stale seed."""
+        held_profile(tmp_session_root["master"])
+        with pytest.raises(ToolError, match="default"):
+            await _resolve_profile_selection(None)
 
     @pytest.mark.asyncio
     async def test_no_master_no_snapshot_raises(self, tmp_empty_root):

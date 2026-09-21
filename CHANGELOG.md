@@ -577,6 +577,239 @@ out of nothing.
 
 Known gaps and the one defect these pins caught in the fix itself are in
 `audit/stage2/finding_F910_cookie_lost_on_close.md` §5.1 and §7.
+### Fixed — F-904: importing `__main__` by name started a backend
+
+`src/stealth_chrome_devtools_mcp/__main__.py` was three lines and the third was a
+bare `main()` — no `if __name__ == "__main__":` guard. `python -m
+stealth_chrome_devtools_mcp` works either way (it runs the module as `__main__`
+regardless), but anything that imports the module BY NAME —
+`importlib.import_module`, `pkgutil.walk_packages` walking the package, a stray
+`import stealth_chrome_devtools_mcp.__main__` — ran `main()` as an ordinary import
+side effect. `main()` cold-starts a real backend into the operator's
+`~/.stealth-mcp`; measured on 2026-09-21 from nothing more than an import (proxy
+pid 188108 → backend pid 189088, port 64986), by F-903's own census probe. Fixed
+with the guard the module always should have had.
+
+`tests/test_package_entrypoints.py` pins both directions — importing by name is
+inert, and `runpy.run_module(..., run_name="__main__")`, the same mechanism
+`python -m` uses, still reaches `main()` — plus an end-to-end child process, and
+the rule that generalises the defect: **no module body in this package may CALL
+anything**, checked by AST over the whole package with one named allowance
+(`tool_runtime`'s `cdp_transport.install()`). That rule replaced a deny-list in
+F-903's test fence: a deny-list protects against the module someone remembered.
+
+Nothing depended on the import-time execution, and each route was checked rather
+than assumed: the three console scripts point at `server:main` / `cli:main` and
+never touch this file, `server.py`'s `runpy` load takes `embedded/server.py`
+rather than the package `__main__`, and the backend's own `-m …` argv *is* the
+`-m` route.
+
+A second defect on the same entry point was found while fixing this one, and is
+the next entry: **asking for help cold-started a backend** (F-905).
+
+
+### Fixed — F-905: `--help` cold-started a backend instead of printing help
+
+`python -m stealth_chrome_devtools_mcp --help` (and `-h`, and
+`--list-sections`) did not print anything. Each started a real backend in
+`~/.stealth-mcp` and then ran an stdio proxy against it until the operator
+interrupted — and on a machine with a stale record, `ensure_server_running` can
+evict as well as adopt. Typing `--help` is not consent for any of that.
+
+`server.main` is a shim that decides one thing from three flags — stdio proxy,
+or `runpy` the real backend — and its `add_help=False` + `parse_known_args` are
+deliberate: every other argument belongs to `embedded/server.py`'s full parser,
+reached through the `runpy` load, and an `add_help=True` here would answer with
+the shim's three-flag usage and hide the real interface. The pass-through is the
+design; the defect was what the help request passed through INTO, since the
+default `--transport stdio` carried it into the proxy branch.
+
+Fixed by routing the request to the branch that can answer it, keyed on the
+request alone — an ordinary stdio start, an `--transport http` start, a
+`--standalone` start and the backend's own `-m …` argv are byte-identical to
+2.1.12's, and a pin exists for that specifically, because "route help to runpy"
+has a lazy implementation that would delete the stdio proxy. `--help` now
+prints the backend's real usage and `--list-sections` its section table, both
+exiting 0 with nothing started.
+
+The set is **answer-and-exit**, not "help": it is every flag
+`build_arg_parser()` handles by printing and exiting before a port is bound.
+`--list-sections` ("List all available tool sections and exit") was the sibling
+the first pass left behind and is measured in the same tripwire;
+`--minimal`/`--debug`/`--xpool-safe` are deliberately outside it, because they
+configure a backend that then serves. Found while writing F-903's entrypoint
+pin; the finding is
+`audit/stage2/finding_F905_help_cold_starts_a_backend.md`.
+
+### Fixed — F-903: the test suite could cold-start a real backend into the operator's state dir
+
+**The fence in this entry is tests-only** (the product half is the entry above).
+
+`tests/conftest.py` redirected the clone output dir and the browser-session root
+and nothing else. The third root — `~/.stealth-mcp`, the one that owns a live
+PROCESS — was never fenced, so every fence was per-file: ~30 test files each
+carried their own `isolated_state` copy and the files with none were safe by
+which collaborator a node happened to mock. Two measured consequences, three
+days apart: a hermetic node drove the proxy's heal path into the real
+`ensure_server_running` and cold-started a backend (pid 55240, port 21770) into
+the operator's live record; and this finding's own census probe imported
+`stealth_chrome_devtools_mcp.__main__` — three lines, the third a bare `main()`
+— which started a stdio proxy and cold-started another (pid 189088, port 64986).
+Neither was worse only because F-886 refuses to evict a backend holding live
+browsers; before 2.1.9 the same route terminated one.
+
+**The browser-session root was reachable too** — the operator's `master` profile
+and every named session copied from it. `conftest.py` redirected it with
+`os.environ.setdefault`, which cannot tell the release gate redirecting the
+suite from the operator's own root arriving in an INHERITED environment, and on
+Windows the product default is the hardcoded `C:\stealth-mcp-browser-sessions`
+regardless. The residue is still on the machine that found this:
+`e2e-warmup`, `ci-warmup`, `ci-cycle-0/1/2`, `tree-kill-test`,
+`integration-test-profile` and `ci-basic-test` sitting in the real `sessions/`
+beside 87 real ones.
+
+The fence has one home (`tests/operator_fence.py`) and one caller
+(`tests/conftest.py`, at import time, because an autouse function-scoped fixture
+is ordered after the E2E modules' module-scoped `_warmup`, which both starts a
+backend and resolves the session root during module setup). Both roots live in
+one module because they share ONE filesystem tripwire. Four parts: the session
+root FORCED rather than `setdefault`-ed, with the three derived env names
+(`BROWSER_MASTER_USER_DATA_DIR`, `BROWSER_PROFILE_CLONE_ROOT`,
+`BROWSER_MASTER_SNAPSHOT_DIR`) cleared so they derive from it; the ten
+state-dir bindings across five modules re-pointed at a per-process tmp root
+(four modules FROM-import the path, so one `setattr` reaches none of the others;
+pydantic's `model_config["env_file"]` needs its own, or a hermetic run absorbs
+the operator's `.env`); a tripwire on every filesystem door the PRODUCT goes
+through, raising a `BaseException` — the product is fail-open by design, so an
+`Exception` is swallowed at the first handler; and a kill guard on
+`psutil.Process.terminate`/`kill`/`send_signal` and `os.kill`, refusing a pid
+the real record names. Bindings are measured by a probe, not grepped, and that
+probe is a pin, so a new derived path — including one a module-level singleton
+captured on itself — fails a test instead of escaping.
+
+The tripwire is deliberately **not** claimed to be every filesystem primitive,
+because it is not and cannot be: `shutil.copy2`'s Win32 fast path, `Path.glob`'s
+import-bound `scandir`, `os.chmod`/`link`/`symlink`, `sqlite3`, subprocesses and
+any fd opened before the fence installs all reach a designated root without
+raising. The REDIRECT covers those; the tripwire is the backstop for what the
+redirect misses. The roots are designated by every spelling Windows answers to
+for them (realpath, 8.3 short name, `\\?\`), resolved once at install so the hot
+path stays on `normpath`; a junction used mid-path in a TARGET is still a
+spelling no root string is a prefix of, and is named as a residual.
+
+Two deliberate asymmetries. The state dir forbids WRITES only — 
+`release_gate_harness._reserved_ports()` must read the operator's own
+`server.json` through `Path.home()` so an isolated backend never binds a port a
+LIVE backend holds — while the session root forbids READS as well, because
+nothing in the harness reads a profile and copying one is how a test would take
+the operator's logged-in cookies into a clone. And `HOME` is deliberately not
+redirected: it would have created the port collision the fence exists to
+prevent, and would not have fenced the session root on Windows at all.
+
+Per-file `isolated_state` fixtures are kept, not deleted: they give each NODE a
+clean record while the fence gives the SESSION one directory — per-test
+isolation and operator safety are different questions.
+
+### Fixed — F-914/F-915: a session that is already open hands its cookies over, or refuses
+
+**This is the whole of "the master profile was erased / I have to set up the
+credentials again", and on disk it was never a deletion — it was
+SUBSTITUTION.** Ask for the shared session while anything held it and 2.1.12
+handed back a fresh clone of the seed; ask for a NAMED session while anything
+held it and it handed back `<name>-2`, seeded from that same seed. Both reported
+success, both were logged out, and `profile_role` / `walk_reason` were the only
+tells — fields a caller has to go looking for before trusting a login.
+
+**The rule now has exactly two outcomes.** When the profile you asked for is
+open in a browser **this backend drives**, the new session is seeded from that
+browser's LIVE cookie jar over CDP (F-898's `cookie_handoff`) and the answer
+says which holder it came from. When it is open in a browser we cannot reach —
+another backend's Chrome, or your own — the spawn is **REFUSED BY NAME** and
+nothing is created. There is no third answer: substituting a different profile
+and reporting it was considered and rejected.
+
+The refusal names the session and the holder's pid, never a path (a profile path
+names the operating user, and that message reaches the client, the durable log
+and Sentry at once), and it carries both remedies — close that browser and spawn
+again to get that session, or pass `session=<a free name>` for a new one.
+
+**Measured, which is why this was ranked first.** On the reporting machine the
+shared profile's cookie jar was written at 1:17 PM and the seed every substitute
+was copied from at 7:42 AM — the seed is refreshed only while the shared session
+is CLOSED, so a machine whose browser stays open freezes it at the last clean
+close. And seventeen directories carried a numeric walk suffix, one of them
+`-22`: one session name substituted at least twenty-two times.
+
+**Those seventeen directories are left exactly where they are** — not deleted,
+not merged, not renamed. Some may hold a login typed by hand into a walked
+directory, deleting profile directories is the act this whole family of findings
+exists to stop, and `stealthy profiles` still lists them. What changed is that
+no eighteenth one is created.
+
+**What a walk MEANS changed with it.** A walk to `<name>-N` now happens only
+when we drive the holder, and the new directory is copied FROM that holder with
+its jar handed over — so `spawn_browser`'s `warning` no longer says the walked
+profile holds "none of the cookies or logins the requested one holds", which was
+true of the old unconditional walk and false of this one. It says what is still
+true: a separate directory from here on, and that whatever the original keeps
+outside its cookie jar (localStorage, IndexedDB, service workers) did not come
+with the cookies.
+
+**`spawn_diagnostics.profile_selection` gains `handed_over_from`** — the NAME of
+the session whose jar came over, a word you can pass straight back as
+`session=`, beside `seeded_via` and its counts. That key is not a schema change:
+it lives inside the free-form diagnostics dict.
+
+**The SOFT tool-surface golden IS updated here, by one line, deliberately.**
+`spawn_browser`'s own description promised that a session held by another live
+backend's browser costs you "a normal spawn plus `reattach_declined`" — which
+this finding makes false, since that spawn is now refused. A tool description
+that survives a change to what the tool DOES is this same defect one layer up, so
+`tests/goldens/tool_surface.json` was regenerated (`tools/dump_tool_surface.py
+--write`) in this commit and the diff is that sentence and nothing else. The two
+other operator-facing sentences that said it were corrected with it:
+`browser_reattach`'s no-endpoint refusal used to end "and a new browser was
+started instead", which would now be glued to a refusal reading "Nothing was
+created", and RUNBOOK's "Recover a stranded login" said you land on a different
+directory.
+
+**The retry door answers the same way.** F-834 widened
+`_fallback_profile_selection` to all three roles, so it is the second way into
+the same substitution — left alone it would have answered a held shared session
+with exactly the clone the resolver now refuses, one spawn failure later. It
+asks the same rule, and it carries a hand-off the previous attempt was making
+onto the retry, dropping it when that source is no longer ours.
+
+**What this costs is named rather than hidden.** A concurrent unnamed spawn that
+loses Chrome's profile singleton to a browser we do NOT drive now fails with
+that refusal, where 2.1.12 gave it a disposable clone of a stale seed. When the
+winner of that race is a sibling spawn of this backend — the common case — the
+loser still gets its clone, now with the shared jar handed over.
+
+**F-920 is folded in**, because it is the same branch: the no-seed
+`live-default-fallback` path carried a comment asserting cookies "transfer
+successfully even while Chrome has it open", which `profile_copy.copy_file`'s
+own docstring contradicts — a held file is skipped and the gap cannot be
+enumerated afterwards. That branch is now reachable with the shared session open
+only once the hand-off has been allowed, so the jar arrives over CDP; with it
+closed it is a copy of a directory at rest.
+
+**Two files were cut to pay for it, because caps ratchet down only.**
+`embedded/profile_target.py` is the new home for the rule itself — the
+target-side twin of `profile_source`, which answers the same question about the
+session a spawn copies FROM; it is a policy where `profile_lock` is a fact, and
+the two sat welded together until the rule was needed in two branches at once.
+`embedded/clone_trash.py` is the new home for what an EVICTION means — an
+over-cap auto-clone is moved aside and purged only after a retention window —
+which left because the rule alone did not pay for itself against
+`clone_storage.py`'s 1000-LOC budget. Both are internal moves with no behaviour
+change; `clone_storage.py` keeps the policy around a copy and its
+`PTH105`/`SIM105` suppressions SHRANK by exactly the two codes that went with
+the trash mechanism.
+
+Full detail, including the measurements and every residual, is in
+`audit/stage2/finding_F914_unnamed_spawn_substitutes_seed_clone.md` and
+`audit/stage2/finding_F915_held_named_session_walks_and_reseeds.md`.
 
 ## 2.1.12
 

@@ -34,10 +34,22 @@ import psutil
 import pytest
 
 from fakes import FakeBrowserManager, held_profile, write_singleton
-from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_lock
+from stealth_chrome_devtools_mcp.embedded import (
+    clone_storage,
+    profile_lock,
+    profile_seed,
+)
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     resolve_profile_selection,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
+
+def _driving(directory: Path):
+    """The F-898 witness, answering True for exactly one directory — through
+    ``profile_seed.same_dir``, the tree's one path comparison, because the
+    resolver asks about an anchored absolute path."""
+    return lambda profile: profile_seed.same_dir(profile, directory)
 
 
 def dead_pid() -> int:
@@ -185,17 +197,45 @@ class TestNamedProfileSelection:
 
     @pytest.mark.asyncio
     async def test_a_live_lock_walks_and_the_answer_says_why(self, tmp_session_root):
-        """A walk is an identity change; the answer has to name it."""
+        """A walk is an identity change; the answer has to name it.
+
+        SOFT GOLDEN UPDATED for F-915 — the three fields are unchanged and the
+        ``driven`` witness is new. F-871 made this walk REPORTED and left it
+        unconditional, and what it reported was a directory copied from the
+        SHARED seed: a different identity with none of ``occupied``'s logins,
+        seventeen of them on the owner's machine. Since F-915 a walk happens
+        only where the holder is a browser THIS backend drives, so the copy
+        comes from the holder and its jar is handed over — which is also why
+        ``occupied-2`` is still the right answer here rather than a refusal.
+        """
         occupied = tmp_session_root["sessions"] / "occupied"
         occupied.mkdir()
         held_profile(occupied)
 
-        result = await resolve_profile_selection("occupied")
+        result = await resolve_profile_selection("occupied", driven=_driving(occupied))
 
         assert Path(result["user_data_dir"]).name == "occupied-2"
         assert result["requested_user_data_dir"] == str(occupied)
         assert result["walked_to"] == result["user_data_dir"]
         assert str(os.getpid()) in result["walk_reason"]
+        assert result[clone_storage.LIVE_SEED_KEY] == str(occupied)
+
+    @pytest.mark.asyncio
+    async def test_a_live_lock_we_do_not_drive_walks_nowhere(self, tmp_session_root):
+        """F-915's other half: the same live lock, no browser of ours on it.
+
+        There is no jar to hand over, so the walk would produce exactly what
+        F-871 measured and reported — and the owner's ruling is that reporting
+        a substitution is not the same as being given the session you asked for.
+        """
+        occupied = tmp_session_root["sessions"] / "occupied"
+        occupied.mkdir()
+        held_profile(occupied)
+
+        with pytest.raises(ToolError, match="occupied"):
+            await resolve_profile_selection("occupied")
+
+        assert not (tmp_session_root["sessions"] / "occupied-2").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -238,17 +278,20 @@ class TestSpawnBrowserAnnouncesTheSubstitution:
         )
 
         warning = result["spawn_diagnostics"]["profile_selection"]["warning"]
-        assert warning.startswith("NOT the profile you asked for")
+        assert warning.startswith("NOT the directory you asked for")
         assert "Chrome's SingletonLock is held by live pid 4242" in warning
         assert "/sessions/github-2" in warning
-        # `_next_available_explicit_dir` returns the first non-busy <name>-N,
-        # and `resolve_profile_selection` skips the copy when that directory
-        # already exists (`ci-warmup-2` pre-existed in the CI evidence). So the
-        # warning may NOT promise a fresh clone -- only that it is a different
-        # profile, whichever of the two ways it came to be.
-        assert "either a fresh copy of the default session's seed or one an" in (
-            warning
-        )
+        # SOFT GOLDEN UPDATED for F-915. The shipped sentence said the walked
+        # directory held "none of the cookies or logins the requested one
+        # holds", which was true of F-871's unconditional walk and is false of
+        # the only walk that survives: one taken because we drive the holder,
+        # copied FROM that holder, with its jar handed over. Pinning the claim
+        # that is still true -- a separate directory from here on, and what a
+        # cookie jar does not carry -- rather than a sentence about a copy of
+        # the seed that no longer happens.
+        assert "with its cookies handed over" in warning
+        assert "outside its cookie jar did not come with them" in warning
+        assert "none of the cookies" not in warning
         assert "freshly cloned" not in warning
         # The standing named-profile advice is kept, not replaced.
         assert "NOT auto-cleaned" in warning

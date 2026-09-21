@@ -293,7 +293,11 @@ def failing_spawn_server(patched_server, monkeypatch):
         ):
             return {"user_data_dir": None, "profile_role": "none"}
 
-        async def _fallback_profile_selection(self, selection, attempt):
+        async def _fallback_profile_selection(self, selection, attempt, *, driven=None):
+            # ``driven`` is F-914's witness, named for the reason the guard
+            # above names its own: this function is the SECOND door onto the
+            # held-shared-session rule, so a double that swallowed it would
+            # turn the day that rule stops being asked here into a pass.
             return None  # no retry: the first failure is the terminal one
 
     return patched_server(

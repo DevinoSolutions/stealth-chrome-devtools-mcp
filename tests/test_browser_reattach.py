@@ -862,11 +862,14 @@ class TestHeldProfileAdoption:
         assert self._held(hold_pid=None) is None
 
     def test_a_holder_we_cannot_name_a_port_for_refuses_with_a_reason(self):
-        """A browser IS there and we cannot get in. The spawn still goes ahead —
-        this path never reaps — but "no endpoint" must not arrive at the caller
-        as the same silence "nothing holds this directory" produces: the whole
-        point of the decline is to tell an operator that the login they were
-        reaching for is still running."""
+        """A browser IS there and we cannot get in. This path never reaps, so it
+        is left running — but "no endpoint" must not arrive at the caller as the
+        same silence "nothing holds this directory" produces: the whole point of
+        the decline is to tell an operator that the login they were reaching for
+        is still running. What happens to the spawn afterwards is no longer this
+        module's sentence to write (F-915): a held session directory is refused
+        by ``profile_target``, and only a path outside the clone root still goes
+        ahead."""
         with pytest.raises(browser_reattach.Refused, match="no CDP endpoint"):
             self._held(cmdline_port=None)
 

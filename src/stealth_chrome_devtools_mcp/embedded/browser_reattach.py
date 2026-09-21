@@ -460,14 +460,14 @@ def held_by(
     if port is None:
         # A holder was FOUND and we still cannot get in — the one outcome that
         # must not read as "an ordinary spawn, nothing to say". The browser is
-        # left running (this path never reaps), the spawn goes ahead onto a
-        # sibling directory as it always did, and the caller is told which of
-        # those two things happened.
+        # left running (this path never reaps). What the spawn does NEXT is not
+        # said here since F-915 refuses a held session: this text is appended to
+        # THAT refusal, and "a new browser was started instead" contradicted it.
         raise Refused(
             f"a live browser holds that directory (pid {holder}) but no CDP "
             f"endpoint could be recovered for it — no port in the record, none "
             f"on its command line, and no DevToolsActivePort file — so it was "
-            f"left alone and a new browser was started instead"
+            f"left alone"
         )
     return Adoptable(
         instance_id=recorded_id or new_instance_id,
