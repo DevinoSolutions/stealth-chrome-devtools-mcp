@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Fixed — F-901: a profile request can no longer name the directory profiles live in
+
+`user_data_dir="."` opened the **clone root** — the directory that holds every
+session — and `user_data_dir=".."` opened the **browser-session root**, which
+holds that plus the shared profile and its seed. `"./"`, `".\"` and `"..."`
+reached the clone root too (Windows folds those components away), and an
+absolute path to either root was honoured as though it were a profile. Chrome
+was then handed the storage as its own user-data-dir and wrote its profile
+files in among every session's.
+
+`anchor` had an `inside(...)` check, but it decides WHICH root to anchor under
+— it was never a guard on the answer, and `Path("..").name` is `""`, so no
+refusal could see one of these either. A relative request now lands on the
+normalised path and must be strictly INSIDE the clone root; the clone root and
+the browser-session root are refused through either spelling; and both refusals
+name what to pass instead.
+
+Unchanged: every ordinary request (`acme`, `sessions/acme`, `default`, any
+other absolute path) lands exactly where it did, and an absolute path is still
+returned byte-for-byte. `sub/../acme` is accepted and canonicalised to
+`sessions/acme` — the directory it already meant — rather than refused.
+`session=` refused all of these before and still does: a session is a name.
+
+**A session directory that is a symlink or a junction to storage elsewhere
+still opens**, through either spelling. The walk test reads the path the caller
+composed and never where it resolves to, precisely so that configuration keeps
+working; the two roots are still compared by resolving, which is what catches a
+link pointing AT one. And a refusal that reached a directory through a link now
+names the directory it really opens, instead of naming a path inside the clone
+root while explaining that it is the clone root.
+
 ### Changed — F-896: sessions have a name, and it is never "master"
 
 `spawn_browser` gains **`session`**, the one documented way to ask for a
@@ -20,7 +51,7 @@ Whitespace around a NAME is not part of it through either spelling, while a
 PATH keeps its own characters. A non-empty value that is empty once stripped
 (`"   "`, `"\t"`) now **raises** through either spelling instead of being
 honoured as a profile request: on Windows `user_data_dir="   "` resolved to the
-session root itself — the directory that holds every session — so it was never
+clone root itself — the directory that holds every session — so it was never
 a profile anyone meant. An **empty string is unchanged and still means "not
 given"** through either spelling, so a client that sends `""` for an optional
 argument gets the ordinary unnamed spawn exactly as it does today.
