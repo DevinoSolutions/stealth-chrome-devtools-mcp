@@ -207,6 +207,63 @@ def _seed_files(seed: Path) -> list[Path]:
     return [path for path in network.glob("*") if path.is_file()]
 
 
+#: A file this big is not a cookie jar, and reading it to find out costs the
+#: failure path more than the answer is worth.
+_EVIDENCE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _tree_evidence(label: str, profile: Path) -> str:
+    """What a profile actually holds, so a POSIX-only failure can be read off
+    the job log alone.
+
+    Gate run 35633920183 failed this module's first node on BOTH POSIX cells
+    with an empty `Default/Network`, while Windows passed — and an empty
+    directory cannot say whether the browser never wrote the jar, the copy
+    dropped it, or that host keeps it somewhere else. Naming all three is what
+    turns one more gate round into an answer instead of another guess.
+    """
+    if not profile.exists():
+        return f"{label}: MISSING at {profile}"
+    default = profile / "Default"
+    network = default / "Network"
+
+    def _names(path: Path, limit: int) -> list[str]:
+        if not path.is_dir():
+            return [f"<not a directory: {path.name}>"]
+        return sorted(entry.name for entry in path.iterdir())[:limit]
+
+    sized = (
+        sorted(f"{entry.name}:{entry.stat().st_size}" for entry in network.iterdir())
+        if network.is_dir()
+        else ["<no Default/Network>"]
+    )
+    return (
+        f"{label} at {profile}: root={_names(profile, 20)} "
+        f"Default={_names(default, 30)} Default/Network={sized}"
+    )
+
+
+def _needle_locations(root: Path, needle: bytes) -> list[str]:
+    """Every file under *root* carrying the probe cookie's name.
+
+    It tells a copy that DROPPED the jar apart from a browser that never wrote
+    one: bytes present under the source and absent from the seed is the copy's
+    defect, absent from both is the shutdown's.
+    """
+    found: list[str] = []
+    for path in root.rglob("*"):
+        if len(found) >= 10:
+            break
+        try:
+            if not path.is_file() or path.stat().st_size > _EVIDENCE_MAX_BYTES:
+                continue
+            if needle in path.read_bytes():
+                found.append(str(path.relative_to(root)))
+        except OSError:
+            continue
+    return found
+
+
 async def test_the_seed_refresh_after_a_default_close_carries_the_login(
     fixture_app_server, redirected_root, monkeypatch
 ):
@@ -238,12 +295,18 @@ async def test_the_seed_refresh_after_a_default_close_carries_the_login(
     )
 
     seed = redirected_root["seed"]
+    master = redirected_root["default"]
     needle = COOKIE_NAME.encode()
     carrying = [path.name for path in _seed_files(seed) if needle in path.read_bytes()]
     assert carrying, (
         "the refreshed seed does not carry the cookie set before the close — "
         f"searched {[p.name for p in _seed_files(seed)]} under {seed}. Every "
-        "session created from here inherits a profile missing that login"
+        "session created from here inherits a profile missing that login\n"
+        f"  {_tree_evidence('SOURCE (shared profile)', master)}\n"
+        f"  {_tree_evidence('SEED (snapshot)', seed)}\n"
+        f"  cookie bytes under source: {_needle_locations(master, needle)}\n"
+        f"  cookie bytes under seed:   {_needle_locations(seed, needle)}\n"
+        f"  refresh={observed.refresh!r} copy_skips={observed.skips}"
     )
 
 
