@@ -1736,8 +1736,16 @@ class TestOneDoor:
                 )
 
             # The door never answers on its own, so the budget can only expire
-            # HERE, inside the attach. That is the whole point of the node.
-            held = await adopting
+            # HERE, inside the attach. That is the whole point of the node — and
+            # also why this edge is bounded by the NODE: if the product's budget
+            # ever stopped firing, an unbounded await would hang the job instead
+            # of failing it (there is no global pytest timeout in this repo).
+            try:
+                held = await asyncio.wait_for(adopting, timeout=10.0)
+            except TimeoutError:
+                let_the_door_answer.set()
+                adopting.cancel()
+                pytest.fail("the adoption budget never fired inside the attach (F-909)")
             assert held.instance_id is None
             assert claimed_pids == [CHROME_PID], "the claim was not taken first"
             assert handed_back == ["i-held"], (
