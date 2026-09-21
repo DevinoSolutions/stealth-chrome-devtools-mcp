@@ -138,6 +138,23 @@ def site_of(record: logging.LogRecord) -> str | None:
     ``session.py``, and withholding a stranger's records because their file
     happens to share a name would be silencing rather than redacting.
 
+    **The path match is on a SEPARATOR BOUNDARY, and the boundary is the whole
+    point of the second read** (F-911 review S1). A bare ``endswith(site)``
+    answers True for ``/opt/fakemcp/shared/session.py`` — measured — so every
+    distribution whose name merely ENDS IN ``mcp`` and ships
+    ``shared/session.py`` would have its records silently withheld, which is
+    this function's own stated failure mode arriving by the other door. The
+    repo has already ruled on exactly this shape: ``expected_events.Kind.modules``
+    matches "exactly or on a DOTTED boundary … the boundary is what keeps
+    ``pydanticfoo`` out". Same rule, one separator instead of a dot. The
+    ``path == site`` arm is for a ``pathname`` that IS the relative module path
+    with nothing in front of it, which has no separator to anchor on.
+
+    ``record.pathname`` is normalised first because it arrives in the host's
+    own flavour — measured on this machine, ``logging`` records the native
+    Windows path with backslashes — while :data:`PAYLOAD_LOG_SITES` is written
+    one way. Both shapes are pinned.
+
     There is deliberately **no** ``except`` here, and that is a claim rather
     than an oversight. ``logging_setup._shape`` needs a total one because it
     calls into library code (``tag`` is a property, ``attrs`` answers a
@@ -155,7 +172,7 @@ def site_of(record: logging.LogRecord) -> str | None:
         return None
     path = pathname.replace("\\", "/")
     for site in PAYLOAD_LOG_SITES:
-        if path.endswith(site):
+        if path == site or path.endswith("/" + site):
             return site
     return None
 

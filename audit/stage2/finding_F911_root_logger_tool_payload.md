@@ -324,9 +324,11 @@ Full related suite (every file importing `logging_setup`, 18 files):
 ## 6. Residuals — what this does NOT cover
 
 1. **`mcp/client/streamable_http.py`:240 — a tool RESULT in a Sentry EVENT, and
-   it is the sharpest thing this finding leaves open.** `logger.exception("Error
-   parsing SSE message")` has a **static** message, so this rule sees nothing to
-   withhold, and empty `args`, so F-907's rule sees nothing either — but its
+   it is the sharpest thing this finding leaves open. Filed as
+   `audit/stage2/finding_F913_validation_error_echoes_tool_result.md`.**
+   `logger.exception("Error parsing SSE message")` has a **static** message, so
+   this rule sees nothing to withhold, and empty `args`, so F-907's rule sees
+   nothing either — but its
    `exc_info` carries a pydantic `ValidationError` whose `input_value=` echoes
    the **SSE data**, which on the proxy leg is the answer to a `tools/call`.
    Measured: the marker reaches the formatted traceback. It sits at **ERROR**,
@@ -339,7 +341,9 @@ Full related suite (every file importing `logging_setup`, 18 files):
    an exception is a diagnostic and is never shaped — so closing it means
    deciding, at the `observability` scrubber or at `cdp_transport.CdpReplyError`'s
    precedent, what a pydantic validation error may say about its input. That is
-   a finding, not a line.
+   a finding, not a line — **F-913**, which carries this measurement, the reason
+   each of the three mechanisms is structurally blind to it, and the candidate
+   homes.
 2. **`session.py`:444's `exc_info` is untouched.** Its f-string half is
    withheld, but `logging.exception` passes the traceback, and every sink that
    formats one renders the same exception text — so for that line the rule

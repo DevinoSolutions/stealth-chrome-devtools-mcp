@@ -586,6 +586,25 @@ class TestTheKeyIsTheSiteAndNotTheText:
         assert REQUEST_MARK not in capture.text
         assert f"{SDK_MODULE}:999" in capture.text
 
+    @staticmethod
+    def _emitted_from(pathname: str) -> str:
+        """One record made from ``pathname``, as it reaches a root handler."""
+        capture = _RootCapture()
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG)
+        root.addHandler(capture)
+        record = root.makeRecord(
+            "somelib",
+            logging.WARNING,
+            pathname,
+            10,
+            f"not the mcp SDK: {REQUEST_MARK}",
+            (),
+            None,
+        )
+        root.handle(record)
+        return capture.text
+
     def test_a_same_named_module_elsewhere_is_not_withheld(self, tmp_path, monkeypatch):
         """The stem is the cheap first gate; the PATH is the answer.
 
@@ -596,21 +615,69 @@ class TestTheKeyIsTheSiteAndNotTheText:
         get_settings.cache_clear()
         with contextlib.redirect_stderr(io.StringIO()):
             logging_setup.configure_logging("backend")
-        capture = _RootCapture()
-        root = logging.getLogger()
-        root.setLevel(logging.DEBUG)
-        root.addHandler(capture)
-        record = root.makeRecord(
-            "somelib",
-            logging.WARNING,
-            "/opt/somelib/shared/session.py",
-            10,
-            f"not the mcp SDK: {REQUEST_MARK}",
-            (),
-            None,
-        )
-        root.handle(record)
-        assert REQUEST_MARK in capture.text
+        assert REQUEST_MARK in self._emitted_from("/opt/somelib/shared/session.py")
+
+    @pytest.mark.parametrize(
+        "pathname",
+        [
+            pytest.param("/opt/fakemcp/shared/session.py", id="suffix-of-the-name"),
+            pytest.param("/a/xmcp/shared/session.py", id="one-char-prefix"),
+            pytest.param("/opt/notmcp/shared/session.py", id="word-boundary"),
+        ],
+    )
+    def test_a_package_whose_name_merely_ends_in_mcp_is_not_withheld(
+        self, pathname, tmp_path, monkeypatch
+    ):
+        """F-911 review S1 — the match needs a separator BOUNDARY.
+
+        A bare ``endswith("mcp/shared/session.py")`` answers True for every one
+        of these (measured against the shipped function before the fix), so any
+        distribution whose name merely ENDS IN ``mcp`` and happens to ship
+        ``shared/session.py`` had its records silently withheld. Latent rather
+        than live — a sweep of the locked ``site-packages`` for ``*/session.py``
+        finds only ``mcp``'s — and its direction is silencing a stranger's
+        diagnostics rather than leaking, which is why it is S and not M. It is
+        pinned because ``site_of``'s own docstring claims the path read is what
+        stops exactly this, and because the repo already ruled on the shape in
+        ``expected_events.Kind.modules`` ("the boundary is what keeps
+        ``pydanticfoo`` out").
+        """
+        monkeypatch.setenv("STEALTH_MCP_LOG_DIR", str(tmp_path))
+        get_settings.cache_clear()
+        with contextlib.redirect_stderr(io.StringIO()):
+            logging_setup.configure_logging("backend")
+        assert REQUEST_MARK in self._emitted_from(pathname)
+
+    def test_both_host_pathname_flavours_match(self, tmp_path, monkeypatch):
+        """The site table is written one way; ``record.pathname`` arrives in
+        the host's own flavour.
+
+        MEASURED on this machine: ``logging`` records the native Windows path,
+        backslashes and all. Both shapes are driven here so the normalisation
+        cannot regress on either platform — a POSIX-only pin would go green on
+        a Windows-only bug and vice versa.
+        """
+        monkeypatch.setenv("STEALTH_MCP_LOG_DIR", str(tmp_path))
+        get_settings.cache_clear()
+        with contextlib.redirect_stderr(io.StringIO()):
+            logging_setup.configure_logging("backend")
+        posix = "/usr/lib/python3.13/site-packages/mcp/shared/session.py"
+        windows = r"C:\venv\Lib\site-packages\mcp\shared\session.py"
+        for pathname in (posix, windows):
+            text = self._emitted_from(pathname)
+            assert REQUEST_MARK not in text, pathname
+            assert f"{SDK_MODULE}:10" in text, pathname
+
+    def test_a_bare_relative_module_path_matches(self, tmp_path, monkeypatch):
+        """The ``path == site`` arm: a ``pathname`` that IS the relative module
+        path has no separator in front of it to anchor the boundary on."""
+        monkeypatch.setenv("STEALTH_MCP_LOG_DIR", str(tmp_path))
+        get_settings.cache_clear()
+        with contextlib.redirect_stderr(io.StringIO()):
+            logging_setup.configure_logging("backend")
+        text = self._emitted_from(SDK_MODULE)
+        assert REQUEST_MARK not in text
+        assert f"{SDK_MODULE}:10" in text
 
 
 class TestTheShippedStderrPath:

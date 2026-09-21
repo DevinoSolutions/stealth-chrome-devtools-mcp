@@ -378,14 +378,17 @@ calls in the package (11 on root): `client/session_group.py`'s three root
 WARNINGs are real but this tree never constructs a `ClientSessionGroup`, and
 `server/sse.py`:193 carries a session id.
 
-One site is **recorded rather than fixed**, and it is sharper than either of
-F-908's: `mcp/client/streamable_http.py`:240 `logger.exception("Error parsing
-SSE message")` has a static message and no args, so neither rule sees anything
-— but its `exc_info` carries a pydantic `ValidationError` whose `input_value=`
-echoes the **SSE data**, i.e. a tool result on the proxy leg. It is at ERROR,
-so F-908's floor does not reach it and Sentry ships it as a full **event**. It
-needs a third mechanism — what a validation error may say about its input —
-and is named in `audit/stage2/finding_F911_root_logger_tool_payload.md` §6.
+One site is **recorded rather than fixed, and it is filed as F-913**, because it
+is sharper than either of F-908's: `mcp/client/streamable_http.py`:240
+`logger.exception("Error parsing SSE message")` has a static message and no
+args, so neither rule sees anything — but its `exc_info` carries a pydantic
+`ValidationError` whose `input_value=` echoes the **SSE data**, i.e. a tool
+result on the proxy leg (`:394` and `:574` are the same shape on the other
+legs). It is at ERROR, so F-908's floor does not reach it and Sentry ships it as
+a full **event**. It needs a third mechanism — what a validation error may say
+about its input — so it gets a number rather than a residual nobody picks up:
+`audit/stage2/finding_F913_validation_error_echoes_tool_result.md`, cross-linked
+from `audit/stage2/finding_F911_root_logger_tool_payload.md` §6.
 
 ## 2.1.12
 
