@@ -1663,29 +1663,99 @@ class TestOneDoor:
     async def test_the_adoption_path_goes_through_the_reclaiming_attach(self, tmp_path):
         """And the caller actually USES it. The budget that bounds an adoption is
         the one that can fire mid-attach, so a plain `attach` there would put the
-        leak back with every pin above still green."""
-        browser = FakeBrowser(alive=None, pid=CHROME_PID, main_tab=FakeTab())
+        leak back with every pin above still green.
 
-        async def _slow(*_args, **_kwargs):
-            await asyncio.sleep(0.6)
+        **Every edge here is an EVENT, and that is F-909.** The shipped version
+        raced a 0.25 s budget against a real locked record write on a worker
+        thread and a 0.6 s sleep in the door. On a loaded Windows runner the
+        first of those won: the budget was spent BEFORE the door
+        (``browser_claim.py``'s ``await asyncio.shield(claiming)`` took the
+        cancellation), no browser was ever produced, and the node reported the
+        connection it had never opened as "left open" — a true assertion about a
+        thing that never happened, which is the worst shape a pin can fail in.
+        Measured: ~3 ms to reach the door locally against a 250 ms budget, and
+        8 s spent failing on CI.
+
+        So the claim is stubbed to the one thing this node is about — it was
+        taken, and it was handed back — with NO disk in the measured window, and
+        the door PARKS on an event instead of sleeping, which makes the budget
+        provably spent inside the attach rather than probably. Reaching the door
+        is asserted on its own, so the pre-door stall can never again present as
+        the post-door leak. The real claim keeps its own pins in
+        ``TestTheCrossProcessClaim``; widening the budget would have hidden the
+        race rather than removed it.
+        """
+        browser = FakeBrowser(alive=None, pid=CHROME_PID, main_tab=FakeTab())
+        at_the_door = asyncio.Event()
+        let_the_door_answer = asyncio.Event()
+        claimed_pids: list[int] = []
+        handed_back: list[str] = []
+
+        async def _park_at_the_door(*_args, **_kwargs):
+            at_the_door.set()
+            await let_the_door_answer.wait()
             return browser
 
-        # The budget has to outlast the CLAIM — a real locked file write on a
-        # worker thread — and expire inside the ATTACH, or this pin times out
-        # before the door is ever opened and proves nothing about it.
+        def _claim_without_touching_disk(_cleanup, candidate):
+            claimed_pids.append(candidate.pid)
+            return registry.Claimed(instance_id=candidate.instance_id, previous=None)
+
+        # The first `asyncio.to_thread` in a process pays for a thread-pool
+        # worker; `browser_claim.held` runs the claim on one, and that hop is
+        # the last thing between the call and the door. Paying it here keeps it
+        # out of the budget.
+        await asyncio.to_thread(int)
+
         with (
             patch.object(browser_reattach, "ATTACH_BUDGET_SECONDS", 0.25),
             patch.object(browser_reattach, "held_by", return_value=_held_candidate()),
+            patch.object(browser_reattach, "claim", _claim_without_touching_disk),
+            patch.object(
+                registry,
+                "release_claim",
+                lambda _path, landed: handed_back.append(landed.instance_id),
+            ),
             patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
-            patch.object(cdp_attach, "attach", side_effect=_slow),
+            patch.object(cdp_attach, "attach", side_effect=_park_at_the_door),
         ):
-            held = await browser_reattach.adopt_held_profile(
-                BrowserManager(), _spawn_cleanup(tmp_path), "C:/p"
+            adopting = asyncio.ensure_future(
+                browser_reattach.adopt_held_profile(
+                    BrowserManager(), _spawn_cleanup(tmp_path), "C:/p"
+                )
             )
+            # The budget is running from the line above, so the door has to be
+            # reached before it expires or this node is about nothing. It is its
+            # OWN assertion, because that is exactly what went wrong on CI.
+            try:
+                await asyncio.wait_for(at_the_door.wait(), timeout=10.0)
+            except TimeoutError:
+                adopting.cancel()
+                pytest.fail(
+                    "the attach door was never reached — the claim, not the "
+                    "attach, spent the adoption budget (F-909)"
+                )
+
+            # The door never answers on its own, so the budget can only expire
+            # HERE, inside the attach. That is the whole point of the node — and
+            # also why this edge is bounded by the NODE: if the product's budget
+            # ever stopped firing, an unbounded await would hang the job instead
+            # of failing it (there is no global pytest timeout in this repo).
+            try:
+                held = await asyncio.wait_for(adopting, timeout=10.0)
+            except TimeoutError:
+                let_the_door_answer.set()
+                adopting.cancel()
+                pytest.fail("the adoption budget never fired inside the attach (F-909)")
             assert held.instance_id is None
+            assert claimed_pids == [CHROME_PID], "the claim was not taken first"
+            assert handed_back == ["i-held"], (
+                "an adoption the budget cancelled must hand its claim back"
+            )
+
             # The abandoned attach finishes after the caller gave up, and the
             # closer runs after IT. Wait for the fact, not for a guessed nap —
             # the thing under test is that it happens at all.
+            let_the_door_answer.set()
             loop = asyncio.get_running_loop()
             deadline = loop.time() + 5.0
             while not browser.connection.disconnected and loop.time() < deadline:
