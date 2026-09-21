@@ -10,12 +10,17 @@ which is independent of both CWD and the install location. An explicit relative
 path is still anchored to the package for backward compatibility.
 """
 
+import importlib
 import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+import module_cache
+
+MODULE_NAME = "stealth_chrome_devtools_mcp.embedded.file_based_element_cloner"
 
 EMBEDDED_DIR = (
     Path(__file__).resolve().parent.parent
@@ -27,14 +32,25 @@ EMBEDDED_DIR = (
 
 @pytest.fixture(autouse=True)
 def _isolate_imports():
-    """Remove cached module so each test gets a fresh import."""
-    mod_name = "stealth_chrome_devtools_mcp.embedded.file_based_element_cloner"
-    had = mod_name in sys.modules
-    old = sys.modules.pop(mod_name, None)
-    yield
-    sys.modules.pop(mod_name, None)
-    if had and old is not None:
-        sys.modules[mod_name] = old
+    """Remove cached module so each test gets a fresh import.
+
+    The restore is ``tests/module_cache.py``'s because a module's identity
+    lives in TWO places and this fixture used to move one of them: it popped
+    ``sys.modules[name]``, the test re-imported the module — which re-binds the
+    parent package's ``file_based_element_cloner`` attribute to the NEW object —
+    and then it put the OLD object back in the mapping alone. The parent named a
+    module the cache did not, for the rest of the session.
+
+    That is not local to this file. It needs a file sorting BEFORE this one to
+    have cached the module already (``tests/test_clone_output_dir.py`` does), so
+    it is invisible in every single-file run and in every pair, and it surfaced
+    only in the full alphabetical lane, at
+    ``tests/test_package_entrypoints.py``'s import-tree pin — which is where a
+    dotted ``monkeypatch.setattr`` would otherwise have found it, in whichever
+    file happened to walk that attribute next.
+    """
+    with module_cache.absent(MODULE_NAME):
+        yield
 
 
 def _import_cloner_class():
@@ -114,3 +130,36 @@ class TestOutputDirResolution:
             assert cloner.output_dir.is_dir()
         finally:
             os.chdir(original_cwd)
+
+
+class TestTheIsolationLeavesTheImportTreeIntact:
+    """The fixture above must hand the package back exactly as it found it.
+
+    This is the RED half of the defect it pins: with the pop-only restore this
+    file shipped with, the last two assertions fail — ``sys.modules`` holds the
+    original module while ``embedded.file_based_element_cloner`` names the copy
+    the body imported. It is pinned HERE, beside the fixture that does it,
+    rather than only at the whole-tree invariant in
+    ``tests/test_package_entrypoints.py``: that one sorts after this file and
+    catches the same bug, but it names the symptom, and the file that has to
+    change is this one.
+    """
+
+    def test_isolating_the_module_restores_its_parent_binding(self):
+        parent = importlib.import_module("stealth_chrome_devtools_mcp.embedded")
+        before = importlib.import_module(MODULE_NAME)
+
+        with module_cache.absent(MODULE_NAME):
+            during = importlib.import_module(MODULE_NAME)
+            assert during is not before, (
+                "the block must get a FRESH module — that is what the fixture "
+                "exists for"
+            )
+            assert parent.file_based_element_cloner is during
+
+        assert sys.modules[MODULE_NAME] is before
+        assert parent.file_based_element_cloner is before, (
+            "the parent package still names the copy imported inside the "
+            "block: restoring sys.modules alone moves one half of a module's "
+            "identity (see tests/module_cache.py)"
+        )
