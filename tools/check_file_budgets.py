@@ -25,28 +25,20 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # deleting it is honest rather than lucky. Do NOT re-add a row for a file
     # that fits the default (plan_SERVERSPLIT §6.2).
     #
-    # plan_M4ph1 C1 (F-201): the verbatim 50-def clone-storage move is an
-    # irreducibly ~1024-line contiguous block, landing this module over the
-    # 1000-LOC budget. GRANDFATHERED at its actual post-ruff-format LOC per the
-    # human gate ruling 2026-07-12 (cap == actual, no padding; the two-module
-    # split and the partial move were both explicitly declined). No-grow applies.
-    # F-871 RATCHETS DOWN 1057 -> 1055. "Is this Chrome profile held by a live
-    # process, and who holds it" left for the new profile_lock.py leaf, which
-    # reads Chrome's SingletonLock the way Chromium reads it; what stays here is
-    # the two-line adapter plus the walk diagnostics a named profile's caller
-    # needs (requested_user_data_dir / walked_to / walk_reason). The import of
-    # psutil went with the moved body, which is the rest of the payment.
-    # F-892/F-894/F-895 RATCHET DOWN 1055 -> 1054, and the ratchet is what paid
-    # for the four fixes rather than a raise. What left is the SEED's own
-    # subject, to the new profile_seed.py leaf: the clone marker (its name, its
-    # schema, the read, the write and the two auto/named verdicts), the files
-    # whose mtime witnesses a login, and where a user_data_dir request lands
-    # plus which directories a caller may not name. What stays is one wrapper
-    # per name the suite and the CLI call (clone_is_auto / clone_is_named /
-    # _snapshot_needs_refresh), the refusal report _copy_profile_tree now
-    # returns, and the two lines of the resolver that ASK the leaf.
-    # Cap == actual.
-    "embedded/clone_storage.py": (1054, "plan_M4ph1 + F-871 + F-892"),
+    # F-897 DELETES the ``embedded/clone_storage.py`` row that stood here
+    # through plan_M4ph1 C1 (F-201's irreducible ~1024-line verbatim move,
+    # grandfathered at 1057 by the human gate ruling 2026-07-12), F-871's
+    # ratchet to 1055 (profile_lock.py) and F-892/F-894/F-895's to 1054
+    # (profile_seed.py). The copy MECHANICS — what a Chrome profile copy leaves
+    # behind and what it does about a file Chrome holds open — are the new
+    # profile_copy.py leaf, and that took the file to 958, i.e. under the
+    # 1000-LOC default with room for F-897's own additions. The row is REMOVED
+    # rather than ratcheted, on ``embedded/server.py``'s precedent above: a
+    # grandfathered cap is a standing permission to be over budget, and leaving
+    # one on a file that fits would say this file is allowed 958 lines when what
+    # is true is that it is allowed 1000 like every other. Do NOT re-add a row
+    # for a file that fits the default.
+    #
     # 1447 (DEBT(F-702)) + 2 (plan_M10a step 7a: switch_to_tab/close_tab's two
     # truly-silent `except Exception: return False` handlers now each add one
     # debug_logger.log_warning(...) line closing F-181 rows 1-2; same minimal-

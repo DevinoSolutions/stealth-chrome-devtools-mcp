@@ -182,6 +182,25 @@ it explicitly. It is reserved: you cannot create a session of your own by that
 name (nor by `master` or `master-snapshot`, which are the mechanism's own
 directories).
 
+**`seed_from` / `--from`** copies a NEW session from an existing one instead of
+from `default`:
+
+```console
+stealthy spawn --session work --headed          # log in by hand in this window
+stealthy close <instance>                       # …then close it
+stealthy spawn --session work2 --from work      # a second session, already logged in
+```
+
+It applies only when the session is CREATED. Passing it for a session that
+already exists is an error that names where that session actually came from —
+never a silent no-op, and never a re-seed over a login you typed by hand. The
+source must exist and, unless it is `default`, must not be open in a browser:
+copying a profile Chrome is writing to silently drops whatever it has locked,
+which is exactly where the logins are, so an open source is refused by name
+with the remedy rather than copied and hoped for. `default` is the exception
+because the product keeps a separate, closed, copyable form of it (the seed
+below).
+
 ```
 C:\stealth-mcp-browser-sessions\
   master/              # the `default` session — your logins, cookies, extensions
@@ -199,6 +218,13 @@ words you type and the words the tool answers with are `default` and the seed.
 3. When `default` is busy, a disposable copy is made from the seed
 4. Copies carry all cookies, logins, and session data
 5. A stale seed is auto-refreshed when auth files change
+6. `--from <session>` copies a NEW session from that session instead
+
+Whatever a session was copied from is recorded in it: `stealthy profiles` and a
+spawn's own answer both print `seeded from <name> at <when>`, and flag
+`SEED CHANGED SINCE` when the source has taken a login write since the copy was
+made. A login done in one session still does not reach another on its own —
+that is deliberate, and `--from` is how you ask.
 
 Clones exclude regenerable Chrome caches, so each is a few MB rather than
 multiple GB. Disposable auto-clones are deleted on close, and a storage cap
@@ -372,6 +398,7 @@ table on a terminal and JSON in a pipe:
 ```console
 stealthy ls                                          # browser instances
 stealthy spawn --session seller-central --headed     # recover a stranded login
+stealthy spawn --session staging --from seller-central  # a new session, already logged in
 stealthy spawn --headed                              # whatever spawn_browser() picks
 stealthy nav e364 https://example.com --wait load    # ids resolve by prefix
 stealthy call get_cookies --arg instance_id=e364c31b --arg domain=example.com

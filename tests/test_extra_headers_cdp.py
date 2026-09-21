@@ -266,7 +266,23 @@ def failing_spawn_server(patched_server, monkeypatch):
             named."""
             return session or user_data_dir
 
-        async def resolve_profile_selection(self, user_data_dir):
+        def require_allowed_seed_from(self, seed_from, landed):
+            """F-897: the SECOND pre-flight guard, asked between the reservation
+            above and the F-888 re-attach — so a double of this module has to
+            offer it too, with the real arity (the request AND the directory the
+            first gate answered) and the real return (the name, or None when
+            none was given). For this fixture that is always None: it spawns
+            naming no profile and no source at all.
+
+            It is here rather than tolerated at the call site because the pre-push
+            lane measured what tolerating costs: with the name missing, the tool
+            raised `AttributeError` INSIDE its own `try` and the node above read
+            that as the spawn failure whose prefix it is pinning — a double that
+            offers less than the real surface turns a renamed call into a pass,
+            or into a red about something else entirely."""
+            return seed_from or None
+
+        async def resolve_profile_selection(self, user_data_dir, *, seed_from=None):
             return {"user_data_dir": None, "profile_role": "none"}
 
         async def _fallback_profile_selection(self, selection, attempt):

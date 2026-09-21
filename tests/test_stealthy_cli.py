@@ -36,7 +36,7 @@ from pathlib import Path
 
 import pytest
 
-from stealth_chrome_devtools_mcp import cli, cli_call
+from stealth_chrome_devtools_mcp import cli, cli_call, cli_render
 from stealth_chrome_devtools_mcp.embedded import backend_client
 
 REPO = Path(__file__).resolve().parent.parent
@@ -1178,11 +1178,11 @@ class TestLsVerb:
             if row[:1].isalnum()
         }
         assert "https://live.test/" in lines["aaa"]
-        assert cli_call.LAST_KNOWN_MARK not in lines["aaa"], (
+        assert cli_render.LAST_KNOWN_MARK not in lines["aaa"], (
             "a regression that marked EVERY row still contains the live url"
         )
-        assert cli_call.LAST_KNOWN_MARK in lines["bbb"]
-        assert cli_call.LAST_KNOWN_MARK in lines["ccc"]
+        assert cli_render.LAST_KNOWN_MARK in lines["bbb"]
+        assert cli_render.LAST_KNOWN_MARK in lines["ccc"]
 
     def test_no_instances_says_so_rather_than_printing_an_empty_table(
         self, responsive, recorder, monkeypatch, capsys

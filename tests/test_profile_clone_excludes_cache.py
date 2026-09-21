@@ -9,9 +9,11 @@ These tests pin the behavior: cache dirs are skipped, session state is kept.
 No browser required.
 """
 
-from stealth_chrome_devtools_mcp.embedded.clone_storage import (
-    _copy_profile_delta,
-    _profile_ignore_names,
+from stealth_chrome_devtools_mcp.embedded.profile_copy import (
+    copy_delta as _copy_profile_delta,
+)
+from stealth_chrome_devtools_mcp.embedded.profile_copy import (
+    ignore_names as _profile_ignore_names,
 )
 
 CACHE_DIRS_THAT_MUST_BE_SKIPPED = [
@@ -37,12 +39,12 @@ SESSION_STATE_THAT_MUST_BE_KEPT = [
 
 class TestIgnoreNamesExcludesCache:
     def test_heavy_cache_dirs_are_ignored(self):
-        ignored = _profile_ignore_names("/fake", CACHE_DIRS_THAT_MUST_BE_SKIPPED)
+        ignored = _profile_ignore_names(CACHE_DIRS_THAT_MUST_BE_SKIPPED)
         for name in CACHE_DIRS_THAT_MUST_BE_SKIPPED:
             assert name in ignored, f"cache dir {name!r} should be excluded from clone"
 
     def test_session_state_names_are_kept(self):
-        ignored = _profile_ignore_names("/fake", SESSION_STATE_THAT_MUST_BE_KEPT)
+        ignored = _profile_ignore_names(SESSION_STATE_THAT_MUST_BE_KEPT)
         assert ignored == set(), f"session state must never be excluded, got {ignored}"
 
 

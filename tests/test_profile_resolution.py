@@ -1,8 +1,9 @@
 """Unit tests for profile path resolution and clone logic.
 
 Validates that _resolve_profile_selection, _is_relative_to,
-_next_available_explicit_dir, _profile_ignore_names, _snapshot_needs_refresh,
-and _copy_profile_delta all behave correctly across edge cases.
+_next_available_explicit_dir, _snapshot_needs_refresh and the two copy
+primitives (``profile_copy.ignore_names`` / ``profile_copy.copy_delta``, whose
+one home moved there in F-897) all behave correctly across edge cases.
 
 No browser required — uses tmp_path fixtures with env-var patches.
 """
@@ -19,15 +20,19 @@ from fakes import held_profile
 
 # These are module-level functions in server.py (bare imports via sys.path)
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
-    _copy_profile_delta,
     _copy_profile_tree,
     _is_relative_to,
     _next_available_explicit_dir,
-    _profile_ignore_names,
     _snapshot_needs_refresh,
 )
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     resolve_profile_selection as _resolve_profile_selection,
+)
+from stealth_chrome_devtools_mcp.embedded.profile_copy import (
+    copy_delta as _copy_profile_delta,
+)
+from stealth_chrome_devtools_mcp.embedded.profile_copy import (
+    ignore_names as _profile_ignore_names,
 )
 
 # ---------------------------------------------------------------------------
@@ -70,7 +75,7 @@ class TestIsRelativeTo:
 class TestProfileIgnoreNames:
     def test_volatile_dirs_ignored(self):
         names = ["Default", "Crashpad", "GPUCache", "ShaderCache", "BrowserMetrics"]
-        ignored = _profile_ignore_names("/fake", names)
+        ignored = _profile_ignore_names(names)
         assert "Crashpad" in ignored
         assert "GPUCache" in ignored
         assert "ShaderCache" in ignored
@@ -79,12 +84,12 @@ class TestProfileIgnoreNames:
 
     def test_singleton_prefix(self):
         names = ["SingletonLock", "SingletonSocket", "SingletonCookie", "SingletonFoo"]
-        ignored = _profile_ignore_names("/fake", names)
+        ignored = _profile_ignore_names(names)
         assert len(ignored) == 4  # all Singleton* caught
 
     def test_tmp_and_lock_extensions(self):
         names = ["data.tmp", "session.TMP", "write.lock", "LOCK", "lockfile"]
-        ignored = _profile_ignore_names("/fake", names)
+        ignored = _profile_ignore_names(names)
         assert "data.tmp" in ignored
         assert "session.TMP" in ignored
         assert "write.lock" in ignored
@@ -93,7 +98,7 @@ class TestProfileIgnoreNames:
 
     def test_safe_names_pass(self):
         names = ["Default", "Cookies", "Login Data", "Preferences"]
-        ignored = _profile_ignore_names("/fake", names)
+        ignored = _profile_ignore_names(names)
         assert len(ignored) == 0
 
 

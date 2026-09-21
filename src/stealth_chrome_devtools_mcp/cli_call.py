@@ -36,6 +36,12 @@ No message here adds anything to what the tool itself
 returned — a tool's payload is the caller's own data (cookies, page text, a
 profile path naming the operating user), and this file neither logs it nor ships
 it anywhere; what the backend already records, it records.
+
+What a TEXT answer looks like is :mod:`cli_render`'s (F-897) — the three tables
+and their clipping rule, moved out when this file stood at exactly its
+1000-LOC budget and ``spawn`` needed a flag. The line is consequence: an exit
+code and the JSON-or-text decision (:func:`wants_json`) are things a script
+depends on and stay here; the shape of a table is explicitly not a contract.
 """
 
 from __future__ import annotations
@@ -44,6 +50,8 @@ import argparse
 import contextlib
 import sys
 from typing import TYPE_CHECKING
+
+from stealth_chrome_devtools_mcp import cli_render
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterable, Sequence
@@ -88,24 +96,6 @@ EXIT_NO_BACKEND = 3
 EXIT_INTERNAL = 70
 EXIT_INTERRUPTED = 130
 EXIT_BROKEN_PIPE = 141
-
-#: The mark a table puts in front of a url or title that is the LAST KNOWN one
-#: rather than the current one. F-874 is the whole reason it exists: a `partial`
-#: or `stored` record deliberately carries NO `current_url`, and a table that
-#: filled that column from `last_navigated_url` would report a login page for an
-#: instance sitting on a feed — the exact defect that finding closed.
-LAST_KNOWN_MARK = "~"
-
-#: Where `tools` files a live tool the installed registry has never heard of.
-#: Named rather than inline because it is the row that MEANS something: the
-#: shell and the backend are different builds.
-UNKNOWN_SECTION = "(unknown section)"
-
-#: Table column widths. A url is unbounded and a title is page-authored, so both
-#: are clipped; the full values are one `--json` away.
-_URL_WIDTH = 52
-_TITLE_WIDTH = 28
-_ID_WIDTH = 38
 
 
 class UsageError(Exception):
@@ -274,35 +264,6 @@ def _emit_json(payload: object) -> None:
     import json
 
     print(json.dumps(payload, indent=2, default=str))
-
-
-def _clip(value: object, width: int) -> str:
-    text = "" if value is None else str(value)
-    return text if len(text) <= width else text[: width - 1] + "…"
-
-
-def instance_rows(records: Sequence[dict[str, object]]) -> list[str]:
-    """The `ls` table: one row per instance, and never a stale url in a column
-    headed as the current one — see :data:`LAST_KNOWN_MARK`."""
-    rows = [f"{'ID':<{_ID_WIDTH}} {'STATE':<18} {'SRC':<7} {'URL':<{_URL_WIDTH}} TITLE"]
-    for record in records:
-        live = record.get("source") == "active" and not record.get("partial")
-        mark = "" if live else LAST_KNOWN_MARK
-        url = record.get("current_url") if live else record.get("last_navigated_url")
-        title = record.get("title") if live else record.get("last_navigated_title")
-        shown_url = _clip(mark + _clip(url, _URL_WIDTH), _URL_WIDTH)
-        shown_title = _clip(mark + _clip(title, _TITLE_WIDTH), _TITLE_WIDTH)
-        rows.append(
-            f"{_clip(record.get('instance_id'), _ID_WIDTH):<{_ID_WIDTH}} "
-            f"{_clip(record.get('state'), 18):<18} "
-            f"{_clip(record.get('source'), 7):<7} "
-            f"{shown_url:<{_URL_WIDTH}} {shown_title}"
-        )
-    rows.append(
-        f"({LAST_KNOWN_MARK} = last known, not current: this instance's live tab "
-        "could not be read)"
-    )
-    return rows
 
 
 # ── the six verbs ────────────────────────────────────────────────────────────
@@ -630,7 +591,7 @@ def cmd_ls(args: argparse.Namespace) -> int:
         if not rows:
             print("no browser instances.")
             return
-        for row in instance_rows(rows):
+        for row in cli_render.instance_rows(rows):
             print(row)
 
     return _run(args, body)
@@ -639,10 +600,16 @@ def cmd_ls(args: argparse.Namespace) -> int:
 def _spawn_arguments(args: argparse.Namespace) -> dict[str, object]:
     """``spawn_browser``'s arguments, from the sugar flags.
 
-    ``--session`` goes STRAIGHT THROUGH as ``session`` and ``--profile`` as
-    ``user_data_dir``, uninterpreted: what a name resolves to is the resolver's
-    answer and the verb PRINTS it back, so the CLI never claims a profile the
-    backend did not pick. ``--profile`` is DEPRECATED and undocumented (F-896),
+    ``--session`` goes STRAIGHT THROUGH as ``session``, ``--from`` as
+    ``seed_from`` and ``--profile`` as ``user_data_dir``, uninterpreted: what a
+    name resolves to is the resolver's answer and the verb PRINTS it back, so
+    the CLI never claims a profile the backend did not pick. **``--from``
+    carries no opinion of its own** (F-897) — whether that session exists, is
+    open, is the shared one, or names a session that already exists is decided
+    by ``profile_seed`` on the backend, which is the only place that can see
+    any of it, and a CLI-side pre-check would be a second answer that goes
+    stale between the check and the spawn. ``--profile`` is DEPRECATED and
+    undocumented (F-896),
     accepted for one release with a stderr line naming its replacement; the
     path door is ``stealthy call spawn_browser --arg user_data_dir=<path>``,
     which is what ``call`` is for, and a second sugar flag for one tool
@@ -656,6 +623,8 @@ def _spawn_arguments(args: argparse.Namespace) -> dict[str, object]:
     arguments: dict[str, object] = {}
     if args.session:
         arguments["session"] = args.session
+    if args.seed_from:
+        arguments["seed_from"] = args.seed_from
     if args.profile:
         print(
             "note: --profile is deprecated — use --session NAME, or `stealthy "
@@ -668,34 +637,6 @@ def _spawn_arguments(args: argparse.Namespace) -> dict[str, object]:
     elif args.headless:
         arguments["headless"] = True
     return arguments
-
-
-def _spawn_lines(result: dict[str, object]) -> list[str]:
-    """What a human needs to see about the browser they just got.
-
-    ``reattached`` first and unmissable: it is the difference between a fresh
-    Chrome and the one that still holds the login the caller came for, and F-888
-    put that fact in ``spawn_diagnostics``, where nobody reads it.
-    """
-    diagnostics = result.get("spawn_diagnostics")
-    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
-    selection = diagnostics.get("profile_selection")
-    selection = selection if isinstance(selection, dict) else {}
-    lines = [f"instance   : {result.get('instance_id')}"]
-    if diagnostics.get("reattached"):
-        lines.append(
-            f"REATTACHED : yes — this is the browser that was already running "
-            f"(pid {diagnostics.get('reattached_pid')})"
-        )
-    if diagnostics.get("reattach_declined"):
-        lines.append(f"reattach   : declined — {diagnostics['reattach_declined']}")
-    lines.append(f"role       : {selection.get('profile_role', '-')}")
-    lines.append(f"profile    : {selection.get('user_data_dir', '-')}")
-    if selection.get("walked_to"):
-        lines.append(
-            f"walked to  : {selection['walked_to']} ({selection.get('walk_reason')})"
-        )
-    return lines
 
 
 def cmd_spawn(args: argparse.Namespace) -> int:
@@ -723,7 +664,7 @@ def cmd_spawn(args: argparse.Namespace) -> int:
         if wants_json(sys.stdout, explicit=args.json):
             _emit_json(result)
         else:
-            for line in _spawn_lines(record):
+            for line in cli_render.spawn_lines(record):
                 print(line)
         if args.url and record.get("instance_id"):
             await _call(
@@ -801,28 +742,6 @@ def _sections() -> dict[str, str]:
     }
 
 
-def _tool_lines(
-    tools: Sequence[dict[str, object]], sections: dict[str, str]
-) -> list[str]:
-    """The live surface, grouped by the section the installed registry knows it
-    by. A live tool the registry does not know goes under ``(unknown section)``
-    rather than being dropped — the LIVE list is the truth about the running
-    backend, and a name this build has never heard of is the most interesting
-    row on the page."""
-    grouped: dict[str, list[dict[str, object]]] = {}
-    for tool in tools:
-        section = sections.get(str(tool.get("name")), UNKNOWN_SECTION)
-        grouped.setdefault(section, []).append(tool)
-    lines: list[str] = []
-    for section in sorted(grouped):
-        lines.append(f"\n{section} ({len(grouped[section])})")
-        for tool in grouped[section]:
-            summary = str(tool.get("description") or "").strip().splitlines()
-            first = summary[0] if summary else ""
-            lines.append(f"  {tool.get('name')!s:<34} {_clip(first, 60)}")
-    return lines
-
-
 def cmd_tools(args: argparse.Namespace) -> int:
     """`tools [--section X] [--json]` — the LIVE tool surface of the backend.
 
@@ -851,7 +770,7 @@ def cmd_tools(args: argparse.Namespace) -> int:
             f"{len(tools)} tools on the live backend; the installed build's "
             f"registry lists {len(sections)}"
         )
-        for line in _tool_lines(tools, sections):
+        for line in cli_render.tool_lines(tools, sections):
             print(line)
 
     return _run(args, body)
@@ -960,6 +879,15 @@ def add_parsers(sub: SubParsers) -> None:
         metavar="NAME",
         help="persistent session NAME, not a path: keeps its cookies and "
         "logins. `default` is the shared session new ones are copied from",
+    )
+    spawn.add_argument(
+        "--from",
+        dest="seed_from",
+        default=None,
+        metavar="SESSION",
+        help="when --session NAMES a session that does not exist yet, copy it "
+        "from this one instead of `default`; the source must exist and, "
+        "unless it is `default`, must not be open",
     )
     # F-896: accepted for one release, undocumented, and it says so on stderr.
     spawn.add_argument("--profile", default=None, help=argparse.SUPPRESS)
