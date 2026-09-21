@@ -272,11 +272,66 @@ class TestSeedFromIsAName:
             "and edits the wrong argument"
         )
 
-    def test_empty_is_refused_and_names_the_default(self, tmp_session_root):
+    @pytest.mark.parametrize("requested", ["   ", "\t", " \n "])
+    def test_a_value_that_names_nothing_is_refused_with_the_one_sentence(
+        self, requested, tmp_session_root
+    ):
+        """F-896's delta rule reaching the third field that takes a NAME.
+
+        The sentence is `_names_nothing`'s and is asserted to be the SAME one
+        `session` and `user_data_dir` get, down to its last clause — only the
+        field name differs, because that is what tells the caller which
+        argument to edit. A per-field variant would be a second way to say one
+        thing, and this node is what stops one being written.
+        """
         with pytest.raises(ToolError) as excinfo:
-            profile_seed.seed_request("   ")
-        message = str(excinfo.value)
-        assert "seed_from" in message and profile_seed.DEFAULT_SESSION in message
+            profile_seed.seed_request(requested)
+        assert str(excinfo.value) == str(
+            profile_seed._names_nothing("seed_from", requested)
+        )
+        with pytest.raises(ToolError) as session_refusal:
+            profile_seed.profile_request(requested, None)
+        assert str(session_refusal.value) == str(excinfo.value).replace(
+            "seed_from", "session", 1
+        )
+
+    def test_empty_is_not_given_and_seeds_from_the_default(self, tmp_session_root):
+        """`""` is NOT the names-nothing case and must not raise (F-896 delta,
+        `2953e8d`): an MCP client is a language model and `""` for an optional
+        string is one of its commonest shapes, so refusing it would fail a
+        spawn that asked for nothing. Here saying nothing has a right answer
+        already — the shared session — which is what an unset `--from` means,
+        so `seed_request` answers None and the copy comes from the seed."""
+        assert profile_seed.seed_request("") is None
+
+    async def test_an_empty_from_still_makes_the_session_from_the_default(
+        self, tmp_session_root
+    ):
+        """The half the reader above cannot see: `""` must not merely parse to
+        None, it must reach the resolver as no request at all and leave the
+        spawn on today's path."""
+        selection = await _selection(session="beta", seed_from="")
+        assert selection["seeded_from"] == profile_seed.DEFAULT_SESSION
+        assert (tmp_session_root["sessions"] / "beta").exists()
+
+    def test_a_drive_hidden_behind_a_space_is_still_refused(self, tmp_session_root):
+        """F-896 delta review N, reached by the third field rather than by one.
+
+        `"C:foo"` is refused and one leading space used to hide the drive from
+        the rule that reads it. Here the strip is `require_name`'s and happens
+        before `is_bare_name` sees the value, so the space cannot hide
+        anything.
+
+        A GUARD, stated as one: it passed before this merge too, because
+        `require_name` has always stripped first. It is pinned because the
+        rule and the strip live in two functions and nothing else says they
+        must stay in that order — `reserved_reason` needed its own `.strip()`
+        added for exactly this shape, which is what a missing guard here would
+        eventually cost."""
+        for requested in (" C:profile", "C:profile "):
+            with pytest.raises(ToolError) as excinfo:
+                profile_seed.seed_request(requested)
+            assert "seed_from" in str(excinfo.value)
 
     def test_the_drive_refusal_reads_one_flavour_on_both_platforms(self):
         """F-894's lesson, reached a third time: a drive is a Windows concept

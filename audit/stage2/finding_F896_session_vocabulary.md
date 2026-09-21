@@ -50,7 +50,26 @@ the only place either spelling is read. `clone_storage.require_allowed_user_data
 calls it, so the tool body has one line and everything below — the F-888
 re-attach, the resolver, the diagnostics — sees a single value.
 
-Two rules, each because its absence is a silence:
+Three rules, each because its absence is a silence:
+
+* **A NON-EMPTY request that names nothing raises, through either spelling.**
+  `"   "` is not a profile, and the two spellings answered it differently:
+  `session="   "` raised while `user_data_dir="   "` was anchored — and on
+  Windows `<root>/sessions/"   "` RESOLVES TO the clone root itself, so Chrome
+  would have been handed the directory that holds every session as its profile,
+  past every refusal (`rstrip(". ")` of `"   "` is `""`, which is in no rule's
+  set). Measured. `_names_nothing` is the one sentence both get; falling back
+  to an unnamed spawn was rejected, because turning a malformed request into
+  the shared session is the substitution this vocabulary exists to stop.
+
+  **The exactly-empty string is NOT GIVEN, through either spelling** — the one
+  place this rule deliberately stops. An MCP client is a language model and
+  `""` for an optional string is one of the commonest shapes it sends; 2.1.11
+  honours it as "nothing asked for", so refusing it would break spawns that
+  work today for a caller who asked for nothing. It cannot reach the hazard
+  above either, which needs a non-empty string the filesystem folds away, so
+  the two rules do not overlap. An empty `session` leaves the decision to the
+  alias beside it, exactly as an absent one does.
 
 * **Both given with different values RAISES.** A precedence would pick one and
   say nothing, and the caller who typed two profiles cannot tell which they got.
@@ -59,11 +78,16 @@ Two rules, each because its absence is a silence:
 * **`session` takes a NAME and refuses a path.** "A session named
   `C:\Users\me\profile`" is not a sentence. The refusal names the path door:
   `user_data_dir`, or `stealthy call spawn_browser --arg user_data_dir=<path>`.
-  The drive test is `PureWindowsPath`'s, for `reserved_reason`'s measured reason
+  "Has a path in it" is `profile_seed.is_bare_name`, asked by this refusal and
+  by the alias's strip so the two cannot drift. The drive test is
+  `PureWindowsPath`'s, for `reserved_reason`'s measured reason
   (`PurePosixPath("C:foo").drive` is `""`, so reading the host's flavour makes a
   refusal fire on one platform only); both separators are tested literally,
   because a backslash is a separator on Windows and a legal filename character
   on POSIX, and a name that means two things on two platforms is not a name.
+  F-894's own drive refusal reads the STRIPPED string for the same purpose —
+  a test, never a normalisation — because `" C:foo"` otherwise hid the drive
+  from it and was anchored as a session name (delta review N).
 
 ### 2.2 `default` is a session you can open
 
@@ -193,7 +217,11 @@ docstring had claimed was refused — S3) and two flavour assertions.
 
 * **One request** — a name resolves identically through either spelling; both
   given and different raises; both given and equal is honoured; neither is no
-  request.
+  request; `""` is NOT GIVEN through either spelling (and an empty `session`
+  lets the alias beside it decide); a non-empty value that names nothing
+  (`"   "`, `"\t"`) raises through BOTH spellings in one node, so the
+  asymmetry cannot come back through either;
+  a PATH keeps its own whitespace and a relative request stays inside the tree.
 * **A session is a NAME** — eight path shapes refused, parametrized; the
   drive refusal asserted under BOTH `PurePath` flavours; and a path is still
   reachable through the alias, which is what makes this a narrowing of one

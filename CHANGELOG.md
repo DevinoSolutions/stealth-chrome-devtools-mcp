@@ -16,6 +16,15 @@ precedence you cannot see; passing both with the same value is fine.
 `C:\Users\me\profile`" is not a sentence — and says where the path door is:
 `user_data_dir`, or `stealthy call spawn_browser --arg user_data_dir=<path>`.
 
+Whitespace around a NAME is not part of it through either spelling, while a
+PATH keeps its own characters. A non-empty value that is empty once stripped
+(`"   "`, `"\t"`) now **raises** through either spelling instead of being
+honoured as a profile request: on Windows `user_data_dir="   "` resolved to the
+session root itself — the directory that holds every session — so it was never
+a profile anyone meant. An **empty string is unchanged and still means "not
+given"** through either spelling, so a client that sends `""` for an optional
+argument gets the ordinary unnamed spawn exactly as it does today.
+
 **`default` is now a session you can open.** F-894 reserved the word as a
 refusal, explicitly as a placeholder for this release; it now MEANS the shared
 profile every session is seeded from and the one a human logs in to.
@@ -88,6 +97,13 @@ reserved word (`master`, `master-snapshot`) and a spelling the filesystem folds
 onto one of them (`default.`) are all refused there and not by a second
 resolver. The refusal says `seed_from`, because a caller told about `session`
 goes and edits the wrong argument.
+
+It follows F-896's rules for a name-shaped argument exactly, because it now
+shares the code that makes them: **`seed_from=""` means "not given"** and seeds
+from `default` like an unset `--from`, while a NON-empty value that is empty
+once stripped (`"   "`, `"\t"`) **raises** — with the same sentence `session`
+and `user_data_dir` raise, differing only in the field name it opens with. A
+drive hidden behind a space (`" C:profile"`) is refused too.
 
 **It applies at CREATION and nowhere else.** For a `session` that already
 exists it RAISES, naming where that session was actually seeded from. The two

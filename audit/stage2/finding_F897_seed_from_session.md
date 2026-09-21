@@ -67,12 +67,47 @@ must name the parameter the caller actually typed — a caller told about
 the ESCAPE differs and cannot come from the field: `session` has a path door
 (`user_data_dir`) and `seed_from` has none, because the provenance a seed writes
 is a NAME the caller can pass back to `session=`, and an arbitrary directory has
-no such word. So each caller hands in its own two hints and the rule stays one
+no such word. So each caller hands in its own PATH hint and the rule stays one
 function.
 
 That also means `master`, `master-snapshot` and F-896's fold shapes (`default.`,
 `master.`) are refused through the seed door exactly as through the session
 door, because it is the same `reserved_reason`.
+
+**The empty-request rules came from F-896's own delta and are shared, not
+copied** (merge of `500afb6` + `2953e8d`). There are two of them and they do not
+overlap:
+
+* **`seed_from=""` is NOT GIVEN** and seeds from `default`, exactly as an unset
+  `--from` does. `seed_request` tests falsy rather than `is None`, the same
+  decision `profile_request` makes for `session` and for the measured reason:
+  an MCP client is a language model and `""` for an optional string is one of
+  its commonest shapes. Here it is not merely harmless but right — `""` says
+  nothing about where to copy from, and the answer for saying nothing already
+  exists.
+* **A NON-empty value that is empty once stripped RAISES** — and with the
+  *same sentence*, because `require_name`'s empty branch is now
+  `_names_nothing(field, value)` rather than a hint this function composes.
+  That is the whole shape of the merge: F-896's delta introduced one sentence
+  for two spellings of one request, and a third field that takes a name would
+  have been a third wording of it. The last clause ("Omit it entirely to use
+  the `'default'` session") is true of all three — omitting `session` opens
+  the shared session, omitting `seed_from` copies it — so nothing is
+  parameterised except the field name, which is the part that tells a caller
+  which argument to edit. Only the PATH refusal still takes a hint.
+
+The hazard the second rule exists for cannot be reached through `seed_from` the
+way it is reached through `user_data_dir` — a `seed_from` naming nothing is a
+source that cannot exist, not a directory that resolves to the session root —
+but the refusal is shared anyway, because the alternative is one field quietly
+disagreeing with the other two about what a name is, which is the finding
+F-896 closed.
+
+`" C:profile"` is refused as a path, because `require_name` strips BEFORE
+`is_bare_name` reads the drive. That was already true and is pinned as a guard
+rather than claimed as a fix — `reserved_reason` needed its own `.strip()`
+added for exactly this shape in `500afb6`, which is what a missing guard here
+would eventually cost.
 
 ### 2.3 CREATION only — an existing target RAISES
 
@@ -277,17 +312,33 @@ It also kept the signature inside `PLR0913`.
 
 ## 4. Pins
 
-`tests/test_seed_from_session.py`, **43 nodes**. RED evidence: run against the
+`tests/test_seed_from_session.py`, **48 nodes**. RED evidence: run against the
 tree with the two extractions committed and the feature reverted,
-**40 failed, 3 passed**.
+**40 failed, 3 passed**; the five nodes added at the F-896 merge were measured
+separately against that merge with only their two product lines un-extended
+(`seed_request`'s falsy test, and `require_name`'s empty branch raising its own
+sentence instead of `_names_nothing`'s) — **5 failed, 1 passed**.
 
-The three that passed on arrival are guards and are stated as such in their own
+The four that passed on arrival are guards and are stated as such in their own
 docstrings: `test_no_from_sends_no_seed_from` and
 `test_no_seed_from_reaches_the_resolver_as_none` (no `--from` sends no
 argument, at the CLI and at the tool — true before and after, and there so a
-later default cannot start sending one) and
+later default cannot start sending one),
 `test_the_drive_refusal_reads_one_flavour_on_both_platforms` (a pure `PurePath`
-assertion about `C:profile`, F-894's lesson reached a third time).
+assertion about `C:profile`, F-894's lesson reached a third time) and
+`test_a_drive_hidden_behind_a_space_is_still_refused` (the strip already ran
+before the drive read; pinned because the two halves live in two functions).
+
+The five merge REDs, verbatim:
+
+```
+test_a_value_that_names_nothing_is_refused_with_the_one_sentence["   ", "\t", " \n "]
+  E  ToolError: seed_from must be a name; it was empty.     (≠ the one sentence)
+test_empty_is_not_given_and_seeds_from_the_default
+test_an_empty_from_still_makes_the_session_from_the_default
+  -> seed_request("") raised instead of answering None
+5 failed, 1 passed
+```
 
 The 40 REDs are of four distinct shapes, not one:
 

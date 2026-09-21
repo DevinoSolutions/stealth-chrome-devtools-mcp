@@ -393,7 +393,38 @@ def is_bare_name(value: str) -> bool:
     return "/" not in value and "\\" not in value and not PureWindowsPath(value).drive
 
 
-def require_name(field: str, value: str, *, empty_hint: str, path_hint: str) -> str:
+def _names_nothing(spelling: str, given: str) -> ToolError:
+    """The ONE sentence every field that takes a NAME gets for a value that
+    names no profile.
+
+    One function, because two spellings answering an empty request differently
+    is the asymmetry this module exists to remove — and they did:
+    ``session="   "`` raised while ``user_data_dir="   "`` was ANCHORED, which
+    on Windows resolves to the clone root itself (the trailing spaces are
+    stripped from the component), so Chrome would have been handed the
+    directory that holds every session as its profile.
+
+    It raises rather than falling back to an unnamed spawn: silently turning a
+    malformed request into the shared session is a substitution, which is the
+    thing this vocabulary exists to stop. What it never covers is the
+    exactly-EMPTY string, which is "not given" and is answered long before
+    here — see ``profile_request`` and ``seed_request``.
+
+    **Three fields ask it, not two** (F-897): ``session`` and its alias, and
+    ``seed_from``, which reaches it through ``require_name``. The sentence is
+    IDENTICAL for all three down to its last clause, and that clause is true
+    of each — omitting ``session`` opens the shared session, omitting
+    ``seed_from`` copies it. A per-field variant would be a second way to say
+    one thing, and the field name the sentence opens with is already what
+    tells the caller which argument to go and edit.
+    """
+    return ToolError(
+        f"{spelling} must be a name and {given!r} names no profile. Omit it "
+        f"entirely to use the {DEFAULT_SESSION!r} session."
+    )
+
+
+def require_name(field: str, value: str, *, path_hint: str) -> str:
     """THE one refusal of a value that has to be a session NAME, and the one
     strip that makes it one (F-896, generalised by F-897).
 
@@ -403,19 +434,27 @@ def require_name(field: str, value: str, *, empty_hint: str, path_hint: str) -> 
     than a second function, because the two messages must name the parameter
     the caller actually typed: a caller told about ``session`` when they wrote
     ``seed_from`` goes and edits the wrong argument, which is the class of
-    mistake this file's neighbours keep closing. What the field cannot supply
-    is the ESCAPE — ``session`` has a path door (``user_data_dir``) and
-    ``seed_from`` has none, because you cannot seed from a directory that is
-    not a session — so each caller hands in its own two hints.
+    mistake this file's neighbours keep closing.
+
+    The names-nothing refusal is ``_names_nothing``'s and is NOT a hint this
+    function composes: it is one sentence shared with the alias arm of
+    ``profile_request``, which cannot come through here because
+    ``user_data_dir`` is also the path door. Only the PATH refusal takes a
+    hint, and it has to, because the escape differs — ``session`` has
+    ``user_data_dir`` and ``seed_from`` has none, since you cannot seed from a
+    directory that is not a session.
 
     "Has a path in it" is ``is_bare_name``'s, so the three sites that ask can
     never answer differently; the three shapes added here are refusals rather
     than shape — an absolute path with no separator or drive under some
     flavour, a ``~`` this layer does not expand, and a name that is only dots.
+    The strip in front of them is also what makes ``" C:foo"`` refusable: the
+    drive is read off the STRIPPED name, so one leading space cannot hide it
+    (F-896 delta review N, reached here by every field rather than by one).
     """
     name = value.strip()
     if not name:
-        raise ToolError(f"{field} must be a name; it was empty. {empty_hint}")
+        raise _names_nothing(field, value)
     if (
         not is_bare_name(name)
         or Path(name).is_absolute()
@@ -452,8 +491,22 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
     directories on POSIX — and turned ``" /tmp/x"``, whose parts are
     ``(' ', 'tmp', 'x')`` and which 2.1.11 anchored inside the clone root, into
     a ROOTED string that ``roots.session / asked`` resets to the drive root, so
-    the request left the session tree. Both measured. A value that is only
-    whitespace is left exactly as it arrived, which is 2.1.11's answer for it.
+    the request left the session tree. Both measured.
+
+    A NON-EMPTY value that is empty once stripped is neither — it names no
+    profile — and both spellings raise for it through ``_names_nothing``; a
+    string that short cannot have held a separator, so that rule can never
+    divert a path.
+
+    **The exactly-empty string is NOT GIVEN, through either spelling**, which
+    is why both tests here are falsy rather than ``is None``. An MCP client is
+    a language model and ``""`` for an optional string is one of the commonest
+    shapes it sends; 2.1.11 honours it as "nothing asked for", and refusing it
+    would break spawns that work today for a caller who asked for nothing. It
+    cannot reach the hazard ``_names_nothing`` exists for either — that needs a
+    non-empty string the filesystem folds away — so the two rules do not
+    overlap. An empty ``session`` therefore leaves the decision to the alias
+    beside it, exactly as an absent one does.
 
     Two rules, and each exists because its absence is a silence:
 
@@ -471,15 +524,16 @@ def profile_request(session: str | None, user_data_dir: str | None) -> str | Non
       absolute path with no separator or drive under some flavour, a ``~`` this
       layer does not expand, and a name that is only dots.
     """
-    if session is None:
+    if not session:
         if not user_data_dir:
             return None
         bare = user_data_dir.strip()
-        return bare if bare and is_bare_name(bare) else user_data_dir
+        if not bare:
+            raise _names_nothing("user_data_dir", user_data_dir)
+        return bare if is_bare_name(bare) else user_data_dir
     name = require_name(
         "session",
         session,
-        empty_hint=f"Omit it to use the {DEFAULT_SESSION!r} session.",
         path_hint=(
             "Pick a name (letters, digits, dashes), or open a directory by "
             "path with user_data_dir=<path> — `stealthy call spawn_browser "
@@ -590,7 +644,12 @@ def reserved_reason(requested: str, resolved: Path, roots: Roots) -> str | None:
     ``roots.shared`` is read here only to tell those two apart.
     """
     asked = Path(requested)
-    if PureWindowsPath(requested).drive and not asked.is_absolute():
+    # `.strip()` here is a TEST and never a normalisation — `asked`, and so
+    # every answer about where the request LANDS, still reads the string as it
+    # arrived. Without it one leading space hid the drive from this rule:
+    # `"C:foo"` was refused while `" C:foo"` was anchored as a session name,
+    # which is F-894's own shape wearing a space (delta review N).
+    if PureWindowsPath(requested.strip()).drive and not asked.is_absolute():
         return (
             f"{requested!r} names a drive but is not an absolute path, so it "
             "would be created as a session name rather than opened. Pass a "
@@ -679,13 +738,25 @@ def seed_request(seed_from: str | None) -> str | None:
     session, because the provenance it writes (``seeded_from``) is a word the
     caller can pass back to ``session=``, and an arbitrary directory has no
     such word.
+
+    **The exactly-empty string is NOT GIVEN**, which is why the test is falsy
+    rather than ``is None`` — the same decision ``profile_request`` makes for
+    ``session``, for the same measured reason (F-896 delta): an MCP client is
+    a language model and ``""`` for an optional string is one of the commonest
+    shapes it sends, so refusing it would fail a spawn that asked for nothing.
+    Here that is not merely harmless but exactly right — ``seed_from=""`` says
+    nothing about where to copy from, and the answer for saying nothing is the
+    shared session, which is what an unset ``--from`` already means. Anything
+    NON-empty that strips to nothing still raises, through the one sentence
+    ``session`` and its alias raise (``_names_nothing``, reached via
+    ``require_name``): that value cannot have held a separator, so it names a
+    session that cannot exist rather than a default that does.
     """
-    if seed_from is None:
+    if not seed_from:
         return None
     return require_name(
         "seed_from",
         seed_from,
-        empty_hint=f"Omit it to copy the {DEFAULT_SESSION!r} session.",
         path_hint=(
             "Pick the name of a session to copy — `stealthy profiles` lists "
             "them. There is no path form: a seed has to be a session, because "
