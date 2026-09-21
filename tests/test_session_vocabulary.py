@@ -319,6 +319,79 @@ class TestStealthySpawnFlags:
         assert arguments["user_data_dir"] == "b"
 
 
+# ---------------------------------------------------------------------------
+# 6. The tool body itself — the layer the pins above sit one below
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnBrowserTakesASession:
+    """The composition above is what ``spawn_browser`` is supposed to do; these
+    two drive the real tool and watch what the RESOLVER is handed, because a
+    gate that answers correctly and a body that ignores its answer would leave
+    every pin above green."""
+
+    async def _resolved_with(self, call_tool, patched_server, monkeypatch, **kwargs):
+        from types import SimpleNamespace
+
+        from fakes import FakeBrowserManager
+
+        seen: list[str | None] = []
+
+        async def fake_resolve(user_data_dir, **_):
+            seen.append(user_data_dir)
+            return {
+                "user_data_dir": user_data_dir or "/shared",
+                "profile_role": "explicit" if user_data_dir else "default",
+                "clone_source": None,
+            }
+
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        srv = patched_server(
+            browser_manager=FakeBrowserManager(
+                spawn_instance=SimpleNamespace(
+                    instance_id="i1",
+                    state="active",
+                    headless=True,
+                    viewport={"width": 800, "height": 600},
+                ),
+                spawn_diagnostics={},
+            )
+        )
+        await call_tool(srv, "spawn_browser", headless=True, sandbox=False, **kwargs)
+        return seen[0]
+
+    async def test_a_session_reaches_the_resolver_as_its_directory(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        landed = await self._resolved_with(
+            call_tool, patched_server, monkeypatch, session="acme"
+        )
+        assert Path(landed) == tmp_session_root["sessions"] / "acme"
+
+    async def test_default_reaches_the_resolver_as_the_shared_directory(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        """The one that makes the re-attach work: ``adopt_held_profile`` matches
+        a DIRECTORY, so `default` arriving as the literal name would find
+        nothing holding it and the spawn would fall through to a fresh copy."""
+        landed = await self._resolved_with(
+            call_tool, patched_server, monkeypatch, session="default"
+        )
+        assert Path(landed) == tmp_session_root["master"]
+
+    async def test_the_two_spellings_disagreeing_is_refused_at_the_tool(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        with pytest.raises(ToolError, match="user_data_dir"):
+            await self._resolved_with(
+                call_tool,
+                patched_server,
+                monkeypatch,
+                session="acme",
+                user_data_dir="other",
+            )
+
+
 def _spawn_parser() -> argparse.ArgumentParser:
     parser = cli.build_parser()
     action = next(
