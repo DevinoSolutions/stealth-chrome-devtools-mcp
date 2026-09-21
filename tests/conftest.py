@@ -22,7 +22,7 @@ if str(TESTS_DIR) not in sys.path:
 
 # Imported by bare name for the same reason ``fakes`` is, and only once the path
 # above is in place. It must come before any product import in this file.
-import state_dir_fence  # noqa: E402  PERMANENT(F-903: the fence must install before any product import, and the path above is what makes this importable at all)
+import operator_fence  # noqa: E402  PERMANENT(F-903: the fence must install before any product import, and the path above is what makes this importable at all)
 
 # Redirect clone / large-response artifacts to a temp dir for the whole test
 # session. The module-global ResponseHandler()/FileBasedElementCloner() create
@@ -54,10 +54,23 @@ os.environ.setdefault(
 #   ``clone_root_dir`` / ``master_snapshot_dir`` all derive from it when their
 #   own vars are unset, which is the same single knob the release gate sets.
 #
-# ``setdefault``, so the gate's ``runner.temp`` value still wins, and a FIXED
-# path rather than a fresh temp dir per session so the master profile is cloned
-# once on this machine instead of once per run. Nothing here is the operator's
-# root, which is the whole point.
+# It is FORCED, not ``setdefault``-ed, since F-903. ``setdefault`` was
+# deliberate — it let the release gate's own ``runner.temp`` value win — but it
+# cannot tell the gate redirecting the suite from the OPERATOR'S OWN root
+# arriving in an inherited environment, and those are the same string-shaped
+# thing: an agent shell that inherited ``STEALTH_MCP_BROWSER_SESSION_ROOT`` from
+# the MCP client's config ran the whole E2E tier against the real root, and the
+# residue is still on this machine (``e2e-warmup``, ``ci-warmup``,
+# ``ci-cycle-0/1/2``, ``tree-kill-test``, ``integration-test-profile``,
+# ``ci-basic-test`` sitting in ``C:\stealth-mcp-browser-sessions\sessions``
+# beside the ``master`` profile a human is logged into and 87 real sessions).
+# Forcing costs the gate nothing — its value is a throwaway temp dir and so is
+# ours. The whole decision, and the three DERIVED env names that have to be
+# cleared with it, is ``operator_fence._fence_session_root``.
+#
+# A FIXED path rather than a fresh temp dir per session, so the master profile
+# is cloned once on this machine instead of once per run. Nothing here is the
+# operator's root, which is the whole point.
 #
 # What a FIXED path costs, stated so no test assumes otherwise: this root is
 # SHARED — across git worktrees, across concurrent pytest processes, and with
@@ -82,10 +95,7 @@ os.environ.setdefault(
 # ``stealth-mcp-browser-sessions`` never appears in CLI output, and this name
 # avoids it only because of that infix. Renaming this without renaming that
 # pin turns the doc lane red.
-os.environ.setdefault(
-    "STEALTH_MCP_BROWSER_SESSION_ROOT",
-    str(Path(tempfile.gettempdir()) / "stealth-mcp-test-browser-sessions"),
-)
+_SESSION_FENCE_ROOT = Path(tempfile.gettempdir()) / "stealth-mcp-test-browser-sessions"
 os.environ.setdefault("STEALTH_MCP_NO_AUTO_RECOVERY", "1")
 # Test runs must not ship their deliberately-injected failures to the real
 # Sentry project: sentry_init() is on by default, LoggingIntegration forwards
@@ -97,29 +107,36 @@ os.environ.setdefault("STEALTH_MCP_NO_AUTO_RECOVERY", "1")
 # var explicitly via monkeypatch.
 os.environ.setdefault("STEALTH_MCP_NO_ERROR_REPORTING", "1")
 
-# The THIRD root a test can reach, and the one that owns a LIVE process: the
-# backend state dir. F-903 -- a hermetic node drove the proxy's heal path into
+# THE one install of the operator fence, covering BOTH real directories: the
+# browser-session root set up above, and the state dir -- the one that owns a
+# LIVE PROCESS. F-903: a hermetic node drove the proxy's heal path into
 # ``ensure_server_running`` and cold-started a real backend (pid 55240, port
-# 21770) into the operator's live ``~/.stealth-mcp``. Until this line the fence
-# was per-file: ~30 files each carried their own ``isolated_state`` copy and the
-# files with none were safe only by which collaborator a node happened to mock.
+# 21770) into the operator's live ``~/.stealth-mcp``; and this finding's own
+# census probe imported ``stealth_chrome_devtools_mcp.__main__`` and did it
+# again. Until this line the state-dir fence was per-file: ~30 files each
+# carried their own ``isolated_state`` copy and the files with none were safe
+# only by which collaborator a node happened to mock.
 #
-# The mechanism has ONE home, ``tests/state_dir_fence.py`` -- the ten measured
-# bindings, the write guard and the kill guard, with the arguments for each. It
-# is installed HERE, at conftest import time, for the same reason the session
-# root above is set here rather than in a fixture: an autouse FUNCTION-scoped
-# fixture is ordered after a module-scoped one, and the E2E modules' ``_warmup``
-# starts a backend during module setup. Import time is ahead of collection and
-# ahead of every fixture of every scope.
+# The mechanism has ONE home, ``tests/operator_fence.py`` -- the ten measured
+# state-dir bindings, the session-root forcing, the shared filesystem tripwire
+# and the kill guard, with the argument for each beside the code. It is
+# installed HERE, at conftest import time, and that is load-bearing for both
+# halves: an autouse FUNCTION-scoped fixture is ordered after a module-scoped
+# one, and the E2E modules' ``_warmup`` both starts a backend and resolves the
+# session root during module setup (``get_settings()`` is ``@lru_cache``d, so
+# whatever the env says then is what the product reads). Import time is ahead of
+# collection and of every fixture of every scope.
 #
-# Per-PROCESS, not the fixed path the session root uses: there is nothing here
-# worth sharing (the session root shares a 108 MB master profile; this is two
-# small JSON files), and concurrent pytest processes sharing one ``server.json``
-# would fight over it exactly as two backends would.
+# The STATE root is per-PROCESS where the session root is a fixed shared path:
+# there is nothing here worth sharing (the session root shares a 108 MB master
+# profile; this is two small JSON files), and concurrent pytest processes
+# sharing one ``server.json`` would fight over it exactly as two backends would.
 _STATE_FENCE_ROOT = (
     Path(tempfile.gettempdir()) / "stealth-mcp-test-state" / f"pid-{os.getpid()}"
 )
-_FENCED_LIVE_BACKEND_PIDS = state_dir_fence.install(_STATE_FENCE_ROOT)
+_FENCED_LIVE_BACKEND_PIDS = operator_fence.install(
+    _STATE_FENCE_ROOT, session_root=_SESSION_FENCE_ROOT, env=os.environ
+)
 atexit.register(shutil.rmtree, _STATE_FENCE_ROOT, True)
 
 

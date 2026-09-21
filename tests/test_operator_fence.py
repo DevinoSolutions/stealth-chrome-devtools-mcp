@@ -16,7 +16,7 @@ rot.
 * **Reads still work**, because ``release_gate_harness._reserved_ports()``
   depends on reading the operator's real record.
 
-Every node here works against a DECOY state dir: ``state_dir_fence`` reads
+Every node here works against a DECOY state dir: ``operator_fence`` reads
 ``REAL_STATE_DIR`` at call time, so pointing it at ``tmp_path`` makes the
 already-installed guard guard the decoy instead. Nothing in this file can touch
 the operator's directory even when it fails.
@@ -30,16 +30,16 @@ from pathlib import Path
 
 import pytest
 
-import state_dir_fence
+import operator_fence
 
 
 class TestTheRedirectReachesEveryBinding:
     """The ten measured bindings, live in the running session."""
 
     def test_no_binding_still_names_the_real_state_dir(self):
-        real = state_dir_fence.REAL_STATE_DIR
+        real = operator_fence.REAL_STATE_DIR
         escaped = []
-        for dotted, attr, _ in state_dir_fence.STATE_DIR_BINDINGS:
+        for dotted, attr, _ in operator_fence.STATE_DIR_BINDINGS:
             value = getattr(importlib.import_module(dotted), attr)
             if value == real or real in Path(value).parents:
                 escaped.append(f"{dotted}.{attr} = {value}")
@@ -60,12 +60,12 @@ class TestTheRedirectReachesEveryBinding:
         honest, since ``REAL_STATE_DIR`` is what the write guard designates and a
         drift there would silently designate the wrong directory.
         """
-        assert Path.home() / ".stealth-mcp" == state_dir_fence.REAL_STATE_DIR
+        assert Path.home() / ".stealth-mcp" == operator_fence.REAL_STATE_DIR
 
     def test_every_binding_lands_under_one_fence_root(self):
         """One root, so a test reading two of them sees one consistent dir."""
         roots = set()
-        for dotted, attr, basename in state_dir_fence.STATE_DIR_BINDINGS:
+        for dotted, attr, basename in operator_fence.STATE_DIR_BINDINGS:
             value = Path(getattr(importlib.import_module(dotted), attr))
             roots.add(value if basename is None else value.parent)
         assert len(roots) == 1, f"bindings are split across roots: {sorted(roots)}"
@@ -81,23 +81,23 @@ class TestTheRedirectReachesEveryBinding:
         from stealth_chrome_devtools_mcp.settings import Settings
 
         configured = Path(Settings.model_config["env_file"])
-        assert configured.parent != state_dir_fence.REAL_STATE_DIR
+        assert configured.parent != operator_fence.REAL_STATE_DIR
 
 
 class TestTheEnumerationCannotGoStale:
     """A new global derived from the state dir must fail a test, not escape."""
 
     def test_no_package_global_is_left_under_the_real_state_dir(self):
-        real = state_dir_fence.REAL_STATE_DIR
+        real = operator_fence.REAL_STATE_DIR
         leaked = {
             name: value
-            for name, value in state_dir_fence.derived_globals().items()
+            for name, value in operator_fence.derived_globals().items()
             if Path(value) == real or real in Path(value).parents
         }
         assert not leaked, (
             "package globals derived from the real state dir that the fence "
             f"does not redirect: {leaked}. Add each to "
-            "state_dir_fence.STATE_DIR_BINDINGS."
+            "operator_fence.STATE_DIR_BINDINGS."
         )
 
     def test_the_pin_catches_a_global_the_table_does_not_name(self, monkeypatch):
@@ -115,13 +115,13 @@ class TestTheEnumerationCannotGoStale:
         monkeypatch.setattr(
             backend_registry,
             "_F903_NEW_DERIVED_GLOBAL",
-            state_dir_fence.REAL_STATE_DIR / "newly-derived.json",
+            operator_fence.REAL_STATE_DIR / "newly-derived.json",
             raising=False,
         )
-        real = state_dir_fence.REAL_STATE_DIR
+        real = operator_fence.REAL_STATE_DIR
         leaked = {
             name: value
-            for name, value in state_dir_fence.derived_globals().items()
+            for name, value in operator_fence.derived_globals().items()
             if Path(value) == real or real in Path(value).parents
         }
         assert (
@@ -131,7 +131,7 @@ class TestTheEnumerationCannotGoStale:
 
     def test_the_table_names_globals_that_still_exist(self):
         """A binding whose global was renamed is a fence with a hole in it."""
-        for dotted, attr, _ in state_dir_fence.STATE_DIR_BINDINGS:
+        for dotted, attr, _ in operator_fence.STATE_DIR_BINDINGS:
             module = importlib.import_module(dotted)
             assert hasattr(module, attr), (
                 f"{dotted}.{attr} is in the fence table but no longer exists"
@@ -146,14 +146,14 @@ class TestTheEnumerationCannotGoStale:
         "__main__":`` this deny-list entry can go -- and this node is what will
         tell them, by failing on the second assertion.
         """
-        assert "stealth_chrome_devtools_mcp.__main__" in state_dir_fence._NEVER_IMPORT
+        assert "stealth_chrome_devtools_mcp.__main__" in operator_fence._NEVER_IMPORT
 
         import stealth_chrome_devtools_mcp as pkg
 
         source = (Path(pkg.__file__).parent / "__main__.py").read_text(encoding="utf-8")
         assert 'if __name__ == "__main__"' not in source, (
             "__main__.py now guards its main() call, so importing it is safe "
-            "and state_dir_fence._NEVER_IMPORT no longer needs it"
+            "and operator_fence._NEVER_IMPORT no longer needs it"
         )
 
 
@@ -177,8 +177,8 @@ class TestTheWriteGuardStopsAWriteTheRedirectMissed:
         assert (decoy / "server.json").read_text(encoding="utf-8") == "{}"
 
     def test_write_text_under_the_designated_dir_raises(self, decoy, monkeypatch):
-        monkeypatch.setattr(state_dir_fence, "REAL_STATE_DIR", decoy)
-        with pytest.raises(state_dir_fence.RealStateDirWrite):
+        monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", decoy)
+        with pytest.raises(operator_fence.RealStateDirWrite):
             (decoy / "server.json").write_text("{}", encoding="utf-8")
 
     # The RAW primitives on purpose. ``os.replace``/``os.remove``/``open`` are
@@ -210,8 +210,8 @@ class TestTheWriteGuardStopsAWriteTheRedirectMissed:
     )
     def test_every_write_door_is_guarded(self, decoy, monkeypatch, act):
         """One node per primitive the product writes the state dir through."""
-        monkeypatch.setattr(state_dir_fence, "REAL_STATE_DIR", decoy)
-        with pytest.raises(state_dir_fence.RealStateDirWrite):
+        monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", decoy)
+        with pytest.raises(operator_fence.RealStateDirWrite):
             act(decoy)
 
     def test_the_guard_survives_the_products_fail_open_handlers(
@@ -226,8 +226,8 @@ class TestTheWriteGuardStopsAWriteTheRedirectMissed:
         ``_RealStartupReached(Exception)`` was swallowed at
         ``proxy_selfheal.py:~325`` for exactly this reason.
         """
-        monkeypatch.setattr(state_dir_fence, "REAL_STATE_DIR", decoy)
-        with pytest.raises(state_dir_fence.RealStateDirWrite):
+        monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", decoy)
+        with pytest.raises(operator_fence.RealStateDirWrite):
             try:
                 (decoy / "server.json").write_text("{}", encoding="utf-8")
             # The product's own fail-open shape, reproduced deliberately.
@@ -245,8 +245,8 @@ class TestTheWriteGuardStopsAWriteTheRedirectMissed:
         """
         from stealth_chrome_devtools_mcp.embedded import backend_registry
 
-        monkeypatch.setattr(state_dir_fence, "REAL_STATE_DIR", decoy)
-        with pytest.raises(state_dir_fence.RealStateDirWrite):
+        monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", decoy)
+        with pytest.raises(operator_fence.RealStateDirWrite):
             backend_registry.record_backend(
                 decoy / "server.json",
                 port=64986,
@@ -270,9 +270,9 @@ class TestTheWriteGuardStopsAWriteTheRedirectMissed:
         it that way; widening it for speed would open a hole the size of a
         ``chdir``.
         """
-        monkeypatch.setattr(state_dir_fence, "REAL_STATE_DIR", decoy)
+        monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", decoy)
         monkeypatch.chdir(decoy)
-        with pytest.raises(state_dir_fence.RealStateDirWrite):
+        with pytest.raises(operator_fence.RealStateDirWrite):
             Path("server.json").write_text("{}", encoding="utf-8")
 
     def test_a_sibling_directory_is_not_caught_by_prefix(self, tmp_path, monkeypatch):
@@ -286,9 +286,125 @@ class TestTheWriteGuardStopsAWriteTheRedirectMissed:
         designated.mkdir()
         sibling = tmp_path / ".stealth-mcp-browser-sessions"
         sibling.mkdir()
-        monkeypatch.setattr(state_dir_fence, "REAL_STATE_DIR", designated)
+        monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", designated)
         (sibling / "profile.json").write_text("{}", encoding="utf-8")
         assert (sibling / "profile.json").is_file()
+
+
+class TestTheBrowserSessionRootIsFencedToo:
+    """The operator's profiles: the ``master`` a human is logged into, and every
+    named session copied from it.
+
+    The residue that proves this was reachable is still on the machine that
+    found it -- ``e2e-warmup``, ``ci-warmup``, ``ci-cycle-0/1/2``,
+    ``tree-kill-test``, ``integration-test-profile`` and ``ci-basic-test`` in the
+    operator's real ``sessions/``, beside 87 real ones.
+    """
+
+    def test_the_product_resolves_every_root_inside_the_fence(self):
+        """All FOUR roots, not just the one env name.
+
+        ``clone_storage`` derives master / clone root / snapshot from the
+        session root only when their own env names are unset, so an inherited
+        ``BROWSER_MASTER_USER_DATA_DIR`` would name the operator's real master
+        profile underneath a redirected root. The fence clears all three.
+        """
+        from stealth_chrome_devtools_mcp.embedded import clone_storage
+
+        resolved = [
+            clone_storage.default_session_root(),
+            clone_storage.master_profile_dir(),
+            clone_storage.clone_root_dir(),
+            clone_storage.master_snapshot_dir(),
+        ]
+        for forbidden in operator_fence.REAL_SESSION_ROOTS:
+            for path in resolved:
+                assert forbidden not in [path, *path.parents], (
+                    f"{path} resolves inside the operator's real {forbidden}"
+                )
+
+    def test_the_real_root_is_designated(self):
+        """The fence must actually be guarding something.
+
+        A regression that left ``REAL_SESSION_ROOTS`` empty would make every
+        node in this class vacuously green.
+        """
+        assert operator_fence.REAL_SESSION_ROOTS
+
+    def test_the_spelled_default_matches_the_products_own(self, monkeypatch):
+        """``_product_session_root`` re-spells a default it may not import.
+
+        It runs before the product is importable, so it cannot ask
+        ``clone_storage``. This node asks, with the env cleared, and fails if the
+        two ever drift -- which is what would silently designate the wrong
+        directory and fence nothing.
+        """
+        from stealth_chrome_devtools_mcp.embedded import clone_storage
+        from stealth_chrome_devtools_mcp.settings import get_settings
+
+        monkeypatch.delenv(operator_fence.SESSION_ROOT_ENV, raising=False)
+        get_settings.cache_clear()
+        assert clone_storage.default_session_root() == (
+            operator_fence._product_session_root()
+        )
+
+    def test_a_write_under_the_real_session_root_raises(self, tmp_path, monkeypatch):
+        decoy = tmp_path / "operator-sessions"
+        decoy.mkdir()
+        monkeypatch.setattr(operator_fence, "REAL_SESSION_ROOTS", (decoy,))
+        with pytest.raises(operator_fence.RealSessionRootAccess):
+            (decoy / "master" / "Cookies").parent.mkdir(parents=True)
+
+    def test_reading_under_the_real_session_root_also_raises(
+        self, tmp_path, monkeypatch
+    ):
+        """The asymmetry with the state dir, pinned.
+
+        Reading is the harm here: copying the operator's ``master`` profile is
+        how a test would take their logged-in cookies into a clone. The state
+        dir's rows deliberately allow reads, and the node below proves the two
+        policies do not bleed into each other.
+        """
+        decoy = tmp_path / "operator-sessions"
+        (decoy / "master").mkdir(parents=True)
+        cookies = decoy / "master" / "Cookies"
+        cookies.write_bytes(b"sqlite")
+        monkeypatch.setattr(operator_fence, "REAL_SESSION_ROOTS", (decoy,))
+        with pytest.raises(operator_fence.RealSessionRootAccess):
+            cookies.read_bytes()
+
+    def test_listing_the_real_session_root_raises(self, tmp_path, monkeypatch):
+        """``_copy_profile_tree`` walks before it opens a single file."""
+        decoy = tmp_path / "operator-sessions"
+        decoy.mkdir()
+        monkeypatch.setattr(operator_fence, "REAL_SESSION_ROOTS", (decoy,))
+        with pytest.raises(operator_fence.RealSessionRootAccess):
+            list(decoy.iterdir())
+
+    def test_the_state_dir_still_allows_reads_while_this_is_installed(
+        self, tmp_path, monkeypatch
+    ):
+        """One table, two policies -- and they must not bleed.
+
+        The session root's read ban is per-ROW, so designating it must not make
+        the state dir's reads raise; ``_reserved_ports()`` depends on that.
+        """
+        state = tmp_path / ".stealth-mcp"
+        state.mkdir()
+        (state / "server.json").write_text('{"schema": 3}', encoding="utf-8")
+        sessions = tmp_path / "operator-sessions"
+        sessions.mkdir()
+        monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", state)
+        monkeypatch.setattr(operator_fence, "REAL_SESSION_ROOTS", (sessions,))
+        assert (state / "server.json").read_text(encoding="utf-8") == '{"schema": 3}'
+
+    def test_a_filesystem_root_is_never_designated(self, monkeypatch):
+        """A misconfigured root would otherwise fence the suite off the disk."""
+        monkeypatch.setattr(
+            operator_fence, "REAL_SESSION_ROOTS", (Path(Path.cwd().anchor),)
+        )
+        rows = operator_fence._designated_roots()
+        assert all(mark for _root, mark, _reads, _error in rows)
 
 
 class TestReadsAreDeliberatelyNotGuarded:
@@ -306,7 +422,7 @@ class TestReadsAreDeliberatelyNotGuarded:
         designated.mkdir()
         record = designated / "server.json"
         record.write_text('{"schema": 3}', encoding="utf-8")
-        monkeypatch.setattr(state_dir_fence, "REAL_STATE_DIR", designated)
+        monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", designated)
         assert record.read_text(encoding="utf-8") == '{"schema": 3}'
         # builtins.open explicitly: it is the wrapped door, and a read through it
         # must pass. ``read_text`` above reaches ``io.open``, the other wrapper.
@@ -331,14 +447,14 @@ class TestTheKillGuardProtectsALiveBackend:
     def test_a_recorded_pid_cannot_be_terminated(self, monkeypatch):
         from stealth_chrome_devtools_mcp.embedded import backend_eviction
 
-        state_dir_fence._install_kill_guard(frozenset({4242}))
+        operator_fence._install_kill_guard(frozenset({4242}))
         monkeypatch.setattr(
             backend_eviction,
             "terminate",
             backend_eviction.terminate,
             raising=False,
         )
-        with pytest.raises(state_dir_fence.RealBackendTerminated):
+        with pytest.raises(operator_fence.RealBackendTerminated):
             backend_eviction.terminate(4242)
 
     def test_an_unrecorded_pid_is_not_refused_by_the_guard(self):
@@ -358,7 +474,7 @@ class TestTheKillGuardProtectsALiveBackend:
         original = backend_eviction.terminate
         try:
             backend_eviction.terminate = fake
-            state_dir_fence._install_kill_guard(frozenset({4242}))
+            operator_fence._install_kill_guard(frozenset({4242}))
             backend_eviction.terminate(9999)
         finally:
             backend_eviction.terminate = original

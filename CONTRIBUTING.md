@@ -81,51 +81,63 @@ is the only way a test can touch a backend record without touching yours.
 
 ### Test isolation: the three roots, and what fences each (F-903)
 
-A test run can reach three directories that are not its own, and each has a
-different fence. Know which one you are near before you write a fixture.
+A test run can reach three directories that are not its own. Know which one you
+are near before you write a fixture.
 
 | Root | What lives there | Fenced by |
 |---|---|---|
 | clone / large-response output | screenshots, clone artifacts | `STEALTH_MCP_CLONE_OUTPUT_DIR`, set in `tests/conftest.py` at import |
-| browser-session root | the `default` profile and every session copy | `STEALTH_MCP_BROWSER_SESSION_ROOT`, same place |
-| **backend state dir** (`~/.stealth-mcp`) | `server.json`, the lock, heartbeats, `browser_pids.json`, logs — **and the live backends they name** | `tests/state_dir_fence.py`, installed by `conftest.py` at import |
+| **browser-session root** | the `default`/`master` profile **a human is logged into**, and every named session copied from it | `tests/operator_fence.py` — env **forced**, plus a read+write tripwire |
+| **backend state dir** (`~/.stealth-mcp`) | `server.json`, the lock, heartbeats, `browser_pids.json`, logs — **and the live backends they name** | `tests/operator_fence.py` — ten rebound globals, plus a write tripwire and a kill guard |
 
-The state dir is the one that owns a live PROCESS, so it gets three layers, and
-**you get all three for free — do not re-implement any of them**:
+The last two are one module because they share one tripwire. **You get all of it
+for free — do not re-implement any of it**:
 
-1. **The redirect.** Ten module globals across five modules are re-pointed at a
-   per-process tmp root. There are ten because `singleton`, `process_cleanup`
-   and `response_handler` each FROM-import the path — a `setattr` on
-   `backend_registry.STATE_DIR` alone reaches *none* of them — and because
-   pydantic copied its value into `Settings.model_config["env_file"]` at class
-   creation. If you add a global derived from the state dir, add it to
-   `state_dir_fence.STATE_DIR_BINDINGS`; `tests/test_state_dir_fence.py` measures
+1. **The state-dir redirect.** Ten module globals across five modules are
+   re-pointed at a per-process tmp root. Ten because `singleton`,
+   `process_cleanup` and `response_handler` each FROM-import the path — a
+   `setattr` on `backend_registry.STATE_DIR` alone reaches *none* of them — and
+   because pydantic copied its value into `Settings.model_config["env_file"]` at
+   class creation. If you add a global derived from the state dir, add it to
+   `operator_fence.STATE_DIR_BINDINGS`; `tests/test_operator_fence.py` measures
    the package and will fail until you do.
-2. **A write guard.** Any write under the *real* state dir raises
-   `state_dir_fence.RealStateDirWrite`, a **`BaseException`** — the product is
-   fail-open by design (`backend_registry` is a never-raise cache,
+2. **The session root is FORCED, not `setdefault`-ed** — along with the three
+   derived names (`BROWSER_MASTER_USER_DATA_DIR`, `BROWSER_PROFILE_CLONE_ROOT`,
+   `BROWSER_MASTER_SNAPSHOT_DIR`), which are cleared so they derive from it.
+   `setdefault` could not tell the release gate redirecting the suite from the
+   operator's own root arriving in an inherited environment; on Windows the
+   product default is the hardcoded `C:\stealth-mcp-browser-sessions`, and test
+   directories (`e2e-warmup`, `ci-warmup`, `ci-cycle-*`) are still sitting in
+   the real one beside 87 real sessions.
+3. **The tripwire.** A write under the real state dir, or a **read or write**
+   under the real session root, raises a **`BaseException`**
+   (`operator_fence.RealStateDirWrite` / `RealSessionRootAccess`) — the product
+   is fail-open by design (`backend_registry` is a never-raise cache,
    `proxy_selfheal` never raises), so an `Exception` would be swallowed at the
-   first handler and your node would go green over a real write. If you see this
-   error, a path escaped the redirect; fix the path, never the guard.
-3. **A kill guard.** `backend_eviction.terminate` refuses a pid the operator's
+   first handler and your node would go green over a real write. If you see one,
+   a path escaped a redirect; **fix the path, never the guard.**
+4. **A kill guard.** `backend_eviction.terminate` refuses a pid the operator's
    real `server.json` names.
 
-Reads of the real record are deliberately **not** guarded, and `HOME` is
-deliberately **not** redirected in the pytest process:
-`release_gate_harness._reserved_ports()` reads the real `server.json` through
-`Path.home()` so an isolated backend never binds a port a live backend holds.
-Child processes still redirect `HOME`/`USERPROFILE` — that is the paragraph
+Two asymmetries, both deliberate. **Reads of the real state dir are allowed**
+(`release_gate_harness._reserved_ports()` must read the real `server.json` so an
+isolated backend never binds a live backend's port) while **reads of the real
+session root are not** (nothing in the harness reads a profile, and copying one
+is how a test would take the operator's logged-in cookies into a clone). And
+`HOME` is deliberately **not** redirected in the pytest process — it would break
+`_reserved_ports()` and would not fence the session root on Windows anyway.
+Child processes still redirect `HOME`/`USERPROFILE`; that is the paragraph
 above, a different mechanism for a different process.
 
 **Keep writing per-file `isolated_state` fixtures.** The fence makes the
-operator's directory unreachable; it does not give each node a clean record. Two
-nodes in one file that both write `server.json` still need `tmp_path` between
-them. The two answer different questions and the suite needs both.
+operator's directories unreachable; it does not give each node a clean record.
+Two nodes in one file that both write `server.json` still need `tmp_path`
+between them. The two answer different questions and the suite needs both.
 
 **Never import `stealth_chrome_devtools_mcp.__main__`.** It is three lines and
 the third is a bare `main()`, so importing it starts a stdio proxy and
 cold-starts a backend. Any `pkgutil.walk_packages` sweep must skip it —
-`state_dir_fence._NEVER_IMPORT` is the list, and it is how this finding was
+`operator_fence._NEVER_IMPORT` is the list, and it is how this finding was
 reproduced while being investigated.
 
 Coverage is **intentionally not** in `addopts` (it would slow every single-file TDD run

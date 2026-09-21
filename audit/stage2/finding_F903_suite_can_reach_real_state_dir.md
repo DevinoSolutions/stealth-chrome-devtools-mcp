@@ -1,4 +1,9 @@
-# F-903 — the hermetic test suite can reach the operator's real state dir
+# F-903 — the test suite can reach the operator's real directories
+
+> Scope grew after the first pass. The finding opened on the backend **state
+> dir** and the filename still says so; the **browser-session root** — the
+> profile a human is logged into — was added on the same evidence and is §3e /
+> §4.5 below. Both are fenced by one module because they share one tripwire.
 
 **Status:** fixed on `fix/F903-suite-can-reach-real-state-dir`
 **Severity:** high — a test run could cold-start a real backend into the
@@ -60,7 +65,7 @@ to this worktree's own `build_identity.source_fingerprint(singleton.SOURCE_ROOT)
 and the argv names this worktree's `server.py`. **The finding reproduced itself
 while being investigated**, which is the strongest available evidence that the
 route is reachable by ordinary means and not only by the one exotic node that
-opened it. It is also why `state_dir_fence._NEVER_IMPORT` is a deny-list rather
+opened it. It is also why `operator_fence._NEVER_IMPORT` is a deny-list rather
 than a comment asking the next author to be careful.
 
 Cost: one stray backend and three added bytes-worth of record entry. It was not
@@ -76,7 +81,7 @@ restored to its baseline bytes.
 
 Bindings are **measured, not grepped**: a probe imports every module in the
 package and reports every global that is a `Path` at or under the real state
-dir. That probe is now `state_dir_fence.derived_globals`, so the table and the
+dir. That probe is now `operator_fence.derived_globals`, so the table and the
 thing that checks it cannot drift.
 
 ### 3a. Module globals bound at import (the redirect's subject)
@@ -135,9 +140,51 @@ stale key of theirs into a suite-wide crash.
 | `test_process_cleanup.py` | `TestRecoveryFiltering._make_cleanup` | sets `pid_file` to `~/.stealth_browser_pids_test.json` — a real home path, avoiding collision by FILENAME only |
 | any file | `pkgutil.walk_packages` + import | §2(b). No test does this today (`test_doc_claims.LIVE_TOPLEVEL` lists `"__main__"` for an `is_file()` check, never an import) |
 
+### 3e. The browser-session root — the second real directory
+
+Raised by the F-902 reviewer, who had to fence their own run by hand. What lives
+there is the `master` profile **a human is logged into** and every named session
+copied from it — on this machine `C:\stealth-mcp-browser-sessions`, 87 session
+directories.
+
+`conftest.py` had redirected it since F-841 (e24b083, 2026-09-16) with
+`os.environ.setdefault`, and **measured today that redirect works**: under
+pytest all four roots resolve into `%TEMP%\stealth-mcp-test-browser-sessions`.
+So this is not a live leak on an unmodified checkout. It is a structural hole
+with physical residue, and both halves matter:
+
+* **`setdefault` cannot tell two things apart.** It was deliberate — the comment
+  says "so the gate's `runner.temp` value still wins" — but "the release gate
+  redirecting the suite" and "the operator's own root arriving in an inherited
+  environment" are the same string-shaped thing. A shell that inherited
+  `STEALTH_MCP_BROWSER_SESSION_ROOT` from the MCP client's config runs the whole
+  E2E tier against the real root, and nothing says so.
+* **The Windows default IS the real root.** `clone_storage.default_session_root()`
+  returns the hardcoded absolute `C:\stealth-mcp-browser-sessions` when nothing
+  is set — it owes nothing to `Path.home()`, which is a second reason redirecting
+  `HOME` would not have fenced this.
+* **Three derived names escape a root-only redirect.**
+  `BROWSER_MASTER_USER_DATA_DIR`, `BROWSER_PROFILE_CLONE_ROOT` and
+  `BROWSER_MASTER_SNAPSHOT_DIR` are read directly when non-empty, so an
+  inherited one names the operator's real master profile *underneath* a
+  redirected root.
+
+The residue, measured 2026-09-21 in the operator's real `sessions/`:
+
+| Directory | mtime (UTC) |
+|---|---|
+| `e2e-warmup` | 2026-09-17 01:32 |
+| `ci-warmup` | 2026-09-16 16:45 |
+| `ci-chrome-identity`, `ci-cycle-0/1/2` | 2026-09-15 21:41 |
+| `tree-kill-test`, `integration-test-profile`, `ci-basic-test` | 2026-09-15 21:40 |
+
+`e2e-warmup` is `tests/e2e_helpers.py`'s autouse `_warmup`, which spawns
+`user_data_dir="e2e-warmup"` — a NAME, anchored under whatever the clone root
+resolves to. Those directories are the suite's own, in the operator's root.
+
 ## 4. The fix
 
-One home: `tests/state_dir_fence.py`. One caller: `tests/conftest.py`, at IMPORT
+One home: `tests/operator_fence.py`. One caller: `tests/conftest.py`, at IMPORT
 time. Three parts.
 
 ### 4.1 The redirect
@@ -206,6 +253,32 @@ have created the collision it exists to prevent. Child-process HOME redirection
 (`release_gate_harness._isolated_env`) is a different mechanism for a different
 process and is untouched.
 
+### 4.5 The session root: forced, and read-guarded
+
+`STEALTH_MCP_BROWSER_SESSION_ROOT` is **set, not `setdefault`-ed**, and the three
+derived names are **cleared** so they go back to deriving from it. Forcing costs
+the release gate nothing — its value is a throwaway temp dir and so is ours —
+and it is the only rule that does not depend on telling two identical strings
+apart. `tmp_session_root` / `tmp_empty_root` set all four per test through
+`patch.dict`, which still wins over this baseline.
+
+What is DESIGNATED forbidden is the union of what the operator's own run would
+have used: the inherited value (if any) **and** the product's own default, since
+on Windows that default is the real root with no env var at all.
+
+**Reads are forbidden here and allowed for the state dir**, and the asymmetry is
+the point of each. Nothing in the harness reads a profile directory, while
+copying one is exactly how a test would take the operator's logged-in cookies
+into a clone — so for this root a read IS the harm. For the state dir the
+opposite holds: `_reserved_ports()` must read the real `server.json`. The flag
+lives per-row in one table, so there is still exactly one `open` wrapper and
+neither policy can be applied to the wrong root (pinned both ways).
+`os.scandir`/`os.listdir` join the guarded set for this root's sake:
+`_copy_profile_tree` walks a directory before it opens a byte in it.
+
+A root with no final path component (`C:\`, `/`) is dropped rather than obeyed —
+designating one would fence the suite off the whole disk.
+
 ## 5. What was NOT deleted, and why
 
 **Every per-file `isolated_state` fixture stays.** They answer a different
@@ -242,12 +315,53 @@ is the shape this finding is about.
 5. **`_NEVER_IMPORT` is a deny-list**, so a SECOND module that executes on import
    would not be caught until it caused harm. There is exactly one today and the
    sweep's own pin names it.
+6. **CI itself was not exercised.** Pushing is out of scope for this task and this
+   repo runs zero checks on a branch push without a PR, so "verify on CI" is not a
+   thing this worktree can do. The warmup was verified locally against a tmp root
+   instead (§7). The residual CI-specific risk is a runner whose `TEMP` differs in
+   shape, which the fence handles by construction: it assumes no path, only that
+   `tempfile.gettempdir()` is writable.
+7. **The session-root leak is structural, with historical residue — not a live
+   leak.** Measured today: under pytest all four roots already resolved into a tmp
+   dir before this change, because the inherited env happened to be unset.
+   `setdefault` remains the wrong instrument, since it cannot tell a deliberate
+   redirect from an inherited real root, and the residue in the operator's real
+   `sessions/` (`e2e-warmup`, `ci-warmup`, `ci-cycle-0/1/2`, `tree-kill-test`,
+   `integration-test-profile`, `ci-basic-test`, beside 87 real ones) shows it has
+   failed before. Recorded as what it is rather than dramatised.
 
 ## 7. Verification
 
-Batched, never a full lane, `-m "not integration"`, 14 files per pytest process:
-**196 files in 14 batches, 3 307 passed, 0 failed.** The fence was installed
-before the first batch ran, so no batch in this exercise was ever unfenced.
+Batched, never a full lane, `-m "not integration"`, ≤15 files per pytest process.
+Two sweeps, one per half of the fix:
+
+| Sweep | Scope | Result |
+|---|---|---|
+| 1 (state dir) | 196 files, 14 batches | 3 307 passed, 0 failed |
+| 2 (session root added, after the `origin/main` merge) | 197 files, 15 batches | **3 318 passed, 0 failed** |
+
+The fence was installed before the first batch of either sweep ran, so no batch in
+this exercise was ever unfenced.
+
+### The warmup, on the shape CI runs it
+
+The brief asked for CI's shape, and this repo runs **zero** checks on a branch push
+without a PR, so CI could not be the witness. The call itself could: the real
+`e2e_helpers.warmup_once()` — the same coroutine CI's autouse `_warmup` drives, a
+real headless Chrome spawn and close — was run under the fence, with its profile
+deleted from the tmp root first so that finding it afterwards could only mean this
+run made it.
+
+| | |
+|---|---|
+| root the product resolved | `%TEMP%\stealth-mcp-test-browser-sessions` |
+| root the fence designates as real | `C:\stealth-mcp-browser-sessions` |
+| `sessions/e2e-warmup` before | absent (cleared) |
+| `sessions/e2e-warmup` after | **present, non-empty**, created in 1.98 s |
+| the operator's real `sessions/` | 87 entries, mtime unchanged; its own `e2e-warmup` still dated 2026-09-16 |
+
+So the warmup does not merely avoid the real root — it still WORKS against a tmp
+one, which is the half a redirect can silently break.
 
 The write guard wraps a primitive called on every import, so its cost was
 measured rather than assumed — 20 000 `open`+`read` cycles, this machine:
@@ -279,6 +393,6 @@ against `Path.home()` when its actual subject was a convention:
 | `test_settings::test_the_env_file_is_our_state_dir_never_the_cwd` | `== Path.home()/".stealth-mcp"/".env"` | `== backend_registry.STATE_DIR / ".env"` — absolute and ours, i.e. never the host project's cwd (#55/#56), which is what the node is about |
 
 The "the state dir is `~/.stealth-mcp`" claim those three carried implicitly now
-has ONE home, `test_state_dir_fence::test_the_real_state_dir_is_the_home_convention`
+has ONE home, `test_operator_fence::test_the_real_state_dir_is_the_home_convention`
 — which also keeps the fence honest, since `REAL_STATE_DIR` is what the write
 guard designates.

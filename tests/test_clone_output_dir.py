@@ -52,7 +52,7 @@ class TestDefaultCloneOutputDir:
         # (the default is ``<state dir>/element_clones``, never inside the
         # package) rather than where the state dir itself lives. That the state
         # dir is home-derived is one claim with one home now, pinned in
-        # ``tests/test_state_dir_fence.py``.
+        # ``tests/test_operator_fence.py``.
         monkeypatch.delenv(ENV_VAR, raising=False)
         assert default_clone_output_dir() == rh_mod.STATE_DIR / "element_clones"
 

@@ -63,10 +63,10 @@ def _fence_is_in_place():
     the shape F-903 is about. What this adds is a loud failure if the suite-wide
     fence is ever removed, at the file that needs it most.
     """
-    import state_dir_fence
+    import operator_fence
     from stealth_chrome_devtools_mcp.embedded import singleton
 
-    real = state_dir_fence.REAL_STATE_DIR
+    real = operator_fence.REAL_STATE_DIR
     assert singleton.SERVER_STATE_FILE.parent != real, (
         "the suite-wide state-dir fence (tests/conftest.py) is not installed; "
         "these nodes drive the real proxy startup path and would cold-start a "
