@@ -441,7 +441,93 @@ class TestStealthySpawnFrom:
 
 
 # ---------------------------------------------------------------------------
-# 7. The vocabulary survives the new door
+# 7. The tool body itself — the layer every pin above sits one below
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnBrowserTakesASeed:
+    """The composition above is what ``spawn_browser`` is supposed to do; these
+    drive the REAL tool, because a gate that answers correctly and a body that
+    never calls it would leave every pin above green."""
+
+    async def _seed_handed_to_the_resolver(
+        self, call_tool, patched_server, monkeypatch, **kwargs
+    ):
+        from types import SimpleNamespace
+
+        from fakes import FakeBrowserManager
+
+        seen: list[str | None] = []
+
+        async def fake_resolve(user_data_dir, *, seed_from=None, **_):
+            seen.append(seed_from)
+            return {
+                "user_data_dir": user_data_dir or "/shared",
+                "profile_role": "explicit" if user_data_dir else "default",
+                "clone_source": None,
+            }
+
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        srv = patched_server(
+            browser_manager=FakeBrowserManager(
+                spawn_instance=SimpleNamespace(
+                    instance_id="i1",
+                    state="active",
+                    headless=True,
+                    viewport={"width": 800, "height": 600},
+                ),
+                spawn_diagnostics={},
+            )
+        )
+        await call_tool(srv, "spawn_browser", headless=True, sandbox=False, **kwargs)
+        return seen[0]
+
+    async def test_seed_from_reaches_the_resolver(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        seed = await self._seed_handed_to_the_resolver(
+            call_tool, patched_server, monkeypatch, session="beta", seed_from="  work  "
+        )
+        assert seed == "work", "the tool hands the resolver the NORMALISED name"
+
+    async def test_no_seed_from_reaches_the_resolver_as_none(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        """A GUARD, not a change driver — it passed before the feature too,
+        because the resolver had no such keyword and the double's own default
+        answered. It is here so a later default cannot start sending one."""
+        assert (
+            await self._seed_handed_to_the_resolver(
+                call_tool, patched_server, monkeypatch, session="beta"
+            )
+            is None
+        )
+
+    async def test_an_existing_session_is_refused_at_the_tool(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        """And it has to be refused HERE, in front of the F-888 re-attach: a
+        session whose browser is still running is a session that EXISTS, so
+        without this guard `--from` would be silently dropped by an adoption in
+        exactly the case a caller most wants to be told about."""
+        await _selection(session="beta")
+
+        with pytest.raises(ToolError, match="already exists"):
+            await self._seed_handed_to_the_resolver(
+                call_tool, patched_server, monkeypatch, session="beta", seed_from="work"
+            )
+
+    async def test_a_path_shaped_seed_from_is_refused_at_the_tool(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        with pytest.raises(ToolError, match="seed_from"):
+            await self._seed_handed_to_the_resolver(
+                call_tool, patched_server, monkeypatch, session="beta", seed_from="a/b"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 8. The vocabulary survives the new door
 # ---------------------------------------------------------------------------
 
 

@@ -277,18 +277,19 @@ It also kept the signature inside `PLR0913`.
 
 ## 4. Pins
 
-`tests/test_seed_from_session.py`, **39 nodes**. RED evidence: run against the
+`tests/test_seed_from_session.py`, **43 nodes**. RED evidence: run against the
 tree with the two extractions committed and the feature reverted,
-**37 failed, 2 passed**.
+**40 failed, 3 passed**.
 
-The two that passed on arrival are guards and are stated as such:
-`test_no_from_sends_no_seed_from` (a namespace with no `--from` sends no
-argument — true before and after, and it is there so a future default cannot
-start sending one) and
+The three that passed on arrival are guards and are stated as such in their own
+docstrings: `test_no_from_sends_no_seed_from` and
+`test_no_seed_from_reaches_the_resolver_as_none` (no `--from` sends no
+argument, at the CLI and at the tool — true before and after, and there so a
+later default cannot start sending one) and
 `test_the_drive_refusal_reads_one_flavour_on_both_platforms` (a pure `PurePath`
 assertion about `C:profile`, F-894's lesson reached a third time).
 
-The 37 REDs are of four distinct shapes, not one:
+The 40 REDs are of four distinct shapes, not one:
 
 * `AttributeError: module … has no attribute 'require_allowed_seed_from'` — the
   gate did not exist (every node that composes a selection).
@@ -322,6 +323,13 @@ By claim:
   nobody's copy; and the sentence is byte-identical to `cli._seed_line`'s.
 * **The CLI** — `--from` sends `seed_from`; a value the backend will refuse is
   passed through verbatim; the flag is documented (unlike `--profile`).
+* **The tool BODY**, which is the layer every node above sits one below — a
+  gate that answers correctly and a body that never calls it would leave all of
+  them green. Four nodes drive the REAL `spawn_browser` and watch what the
+  resolver is handed: the normalised name reaches it, an existing session is
+  refused AT THE TOOL (which is what proves the guard sits in front of the
+  F-888 re-attach rather than only in the resolver behind it), and a
+  path-shaped `seed_from` is refused there too.
 * **The vocabulary** — all six F-897 refusals swept for `master`/`snapshot`,
   with F-896's own exemption for a caller's echoed word. F-896's derived sweep
   (tool registry + parser tree + a real `profile_selection`) is unchanged and
