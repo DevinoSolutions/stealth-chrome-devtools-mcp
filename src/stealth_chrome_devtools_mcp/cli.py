@@ -902,7 +902,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="override the live-backend guard AND F-888's persistent-profile "
         "spare: this can terminate a browser holding a logged-in profile, whose "
-        "logins must then be re-entered by hand. Preview it with --dry-run",
+        "logins must then be re-entered by hand. Preview it with --force "
+        "--dry-run; a plain --dry-run still refuses while a backend is live",
     )
     kill_orphans.add_argument(
         "--dry-run",

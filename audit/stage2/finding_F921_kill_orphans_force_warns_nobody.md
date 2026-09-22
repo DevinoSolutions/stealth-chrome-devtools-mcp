@@ -432,17 +432,21 @@ stops being read — the same failure mode as the silence this finding fixes, wi
 the sign reversed. There are now three shapes, and the harm sentence appears
 only when something is actually open.
 
-**6.3 — The count is the RECORD's scope, and it is a FLOOR.** The reap kills by
-directory, so a directory the record calls DISPOSABLE has every browser on it
-ended — including one a human started there by hand, which is absent from this
-count because the record classifies by how WE made a profile, not by what is
-inside it. The printed line no longer implies otherwise: it says "in the record"
-and, under `--force`, "ends EVERY tracked browser", so the operator learns the
-reap is wider than the named set rather than inferring a death toll from it.
-**F-922 is the decided follow-up** (owner ruling, assigned to the F-916 lane):
-directory-wide reaping is being restricted to auto-clone directories, and on a
-named or persistent profile only recorded pids will be killed. That is what
-closes the gap; this finding does not treat directory-wide reaping as permanent.
+**6.3 — The count is the RECORD's scope, and it is a FLOOR.** A directory the
+record calls DISPOSABLE has every browser on it ended — including one a human
+started there by hand, which is absent from this count because the record
+classifies by how WE made a profile, not by what is inside it. The printed line
+no longer implies otherwise: it says "in the record" and, under `--force`, "ends
+EVERY tracked browser", so the operator learns the reap is wider than the named
+set rather than inferring a death toll from it.
+
+**F-922 has since LANDED** (owner ruling, assigned to the F-916 lane; it is an
+ancestor of this branch and `process_cleanup._kill_processes_for_metadata` now
+gates its directory scan on `on_persistent_profile`), which narrows the gap
+rather than closing it: a PERSISTENT profile's reap ends only the pids the
+record names, while a disposable clone directory is still swept directory-wide.
+So the floor survives on the disposable side, and the wording above is what is
+true after F-922 as well as before it.
 
 **6.4 — "Tracked but none open" gets its own wording, deliberately.** With
 profiles in the record and nothing holding any of them, this invocation ends no
@@ -504,7 +508,9 @@ the record that is not what we expect, so it is named rather than assumed away.
 The direction is the safe one — the line under-counts, and already says the
 reap is wider than the set it names (§6.3). Fixing it properly means the
 pre-flight iterating the REAP's own per-entry decision rather than the record's
-directories, which is F-922's shape and not this finding's.
+directories. That is F-922's shape and not this finding's — but F-922 has landed
+and did NOT do it: it narrowed which pids a reap may take, leaving this
+pre-flight still reading the record's directories, so the residual stands.
 
 **6.8 — The count is a snapshot, not a lease.** The pre-flight reads the record
 at T0; `recover_orphans` re-reads it at T1, after the line is printed. A browser

@@ -34,18 +34,22 @@ node in the lifecycle graph instead of a leaf. It must never be a presence
 test — F-871 exists because `Path.exists()` over Chrome's `Singleton*` read a
 reaped browser's residue as busy and could not see a dangling symlink at all.
 
-**Counted by DIRECTORY, and the count is a FLOOR.** The reap kills every
-browser on a recorded entry's ``user_data_dir``
-(`process_cleanup._kill_processes_for_metadata`), so two entries on one profile
-end one profile — and so a directory the RECORD calls disposable has every
-browser on it ended, including one a human started there by hand. Such a
-browser is absent from this answer, because the record is the only thing that
-knows which directories a reap will touch and it classifies them by how WE made
-them, not by what is inside. **F-922 is the decided follow-up**: directory-wide
-reaping is being restricted to auto-clone directories, and on a named or
-persistent profile only recorded pids will be killed, which is what closes the
-gap. Until it lands a caller must phrase this as the record's scope and never
-as a death toll.
+**Counted by DIRECTORY, and the count is a FLOOR.** Two entries on one
+profile end one profile, so this is a count of PROFILES whose logins are at
+stake and never of browsers or of record entries. On a persistent profile that
+de-duplication is the whole of it: since F-922
+`process_cleanup._kill_processes_for_metadata` gates its ``user_data_dir`` scan
+on the same `on_persistent_profile` predicate this module counts by, so there
+the reap ends only the pids the RECORD names — both of one profile's entries,
+and they are still that one profile's logins.
+
+The FLOOR is the other side of that same gate. A DISPOSABLE clone directory is
+still swept directory-wide, so a browser a human started there by hand is ended
+and is absent from this answer — the record classifies a directory by how WE
+made it, not by what is inside, and a disposable one is not persistent, so it
+falls outside this count by construction. F-922 narrowed that gap to the
+disposable case rather than closing it, so a caller must still phrase this as
+the record's scope and never as a death toll.
 
 A leaf: `browser_pid_registry` (itself a leaf) and stdlib. It reads no file,
 takes no lock and probes nothing.
