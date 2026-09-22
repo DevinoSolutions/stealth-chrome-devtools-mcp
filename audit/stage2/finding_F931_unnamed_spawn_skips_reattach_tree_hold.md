@@ -278,3 +278,34 @@ did surface a defect in my own earlier fixture: `fake_process_table` patched
 read this test's live `SingletonLock` as orphaned. It patches
 `browser_cmdline._still_running` — a seam of ours, in the module that owns the
 question — and the node is green.
+
+### Second review (1aa10ab: APPROVE, four items — all fixed in 422edcb)
+
+**M4 — `sole`'s two Nones.** `browser_cmdline.browser_process` answers None
+when NO member is a browser and when TWO are, and `held_by`'s refusal
+described only the first — right after quoting a `hold.reason` which, for two
+browsers, says "a live browser process (pid N) has this profile open". The
+message contradicted the witness it had just quoted. `held_by` now asks
+`browser_members` ONCE and says which: the browser pids and that Chrome's
+process singleton did not hold, or that none could be identified. RED first
+(`test_two_browsers_are_refused_without_contradicting_the_witness`, 1 failed
+at 1aa10ab). The +4 lines were paid back by tightening four comments in the
+same function, each keeping its reason; `browser_reattach.py` stays at
+1000/1000 and no cap moved.
+
+**N5 — `_still_running` had no witness of its own.** Two nodes pin it:
+`psutil` refusing counts as running (toward HELD), a gone pid does not, and
+through `browser_members` a refused argv is `unreadable` while a gone pid
+contributes nothing. They pin behaviour that was already correct, so they are
+green on both sides and reported as guards, not REDs.
+
+**N6 — `Hold.members` could carry a non-int.** `_tree_hold` handed on
+`tuple(pids)` while `browser_members` skipped non-ints, so a scan that let one
+through produced a "pid" the next reader had to re-validate. Filtered with the
+same test now. RED first
+(`test_the_members_handed_on_are_pids_and_nothing_else`), measured out of tree
+against a `git archive` export of 1aa10ab with `PYTHONPATH` pointing at it and
+the module's `__file__` printed to prove which copy was loaded.
+
+**N7 — CLAUDE.md's `profile_lock` row** named `Hold(pid, reason)`; it names
+`Hold(pid, reason, members)`.

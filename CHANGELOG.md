@@ -570,7 +570,11 @@ lowest pid in the whole tree — routinely one we had identified perfectly well 
 a child, sending the reader after the wrong process. And the re-attach refusal
 quotes that sentence instead of opening "a live browser holds that directory
 (pid N)", which for an unreadable member asserted both that the pid was a
-browser and that we had established anything about it.
+browser and that we had established anything about it. It then says WHICH of
+two things stopped it: no member identifiable as the browser, or TWO browsers
+on one profile (Chrome's own singleton did not hold). The second used to read
+"none of its processes could be identified" straight after quoting a sentence
+that named a live browser.
 
 Full detail and every residual is in
 `audit/stage2/finding_F931_unnamed_spawn_skips_reattach_tree_hold.md`.
