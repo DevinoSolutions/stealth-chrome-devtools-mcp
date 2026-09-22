@@ -1,7 +1,8 @@
 """THE one home for copying a Chrome profile directory: what such a copy must
-NOT carry, and what it does about a file Chrome is holding open (F-897).
+NOT carry, what it does about a file Chrome is holding open (F-897), and how it
+REPLACES a directory that already has one in it (F-925).
 
-One subject, two halves that only mean anything together.
+One subject, three halves that only mean anything together.
 
 **What a copy leaves behind** — ``REGENERABLE_NAMES``, ``ignore_names``, and
 since F-898 the DELETING half as well (``regenerable_dirs``,
@@ -36,6 +37,18 @@ rather than handing the caller a copy whose gaps nobody can enumerate; the one
 source that stays copyable while its own browser runs is the shared session,
 and only because the product keeps a separate, closed, copyable form of it.
 
+**How a copy REPLACES what is already there** — ``replace_tree`` and the two
+scratch siblings it owns (``STAGING_SUFFIX``, ``PREVIOUS_SUFFIX``,
+``is_scratch``). It builds beside the target and publishes in one rename,
+because the target may be the SEED every later session is copied from and the
+destroy-then-rebuild it replaces left that seed absent or half-written for the
+whole of a ~101 MB copy — permanently, if anything killed the process inside
+that window (F-925). It belongs with the two halves above for the reason they
+belong with each other: the same locked file that makes ``copy_file`` skip is
+why a copy cannot be trusted to be complete, and the previous generation
+``_displace`` keeps is the only thing that insures against it. WHICH directory
+is copied where, and what a refusal is called, stay ``clone_storage``'s.
+
 Extracted from ``clone_storage`` by F-897, which is the finding that made the
 SOURCE of a copy a caller's choice rather than always the one seed. Putting the
 tolerance and the exclusion list in a home of their own is what lets that
@@ -47,6 +60,7 @@ A leaf: stdlib plus ``debug_logger``. It knows nothing about session roots,
 seeds or roles — every path arrives as an argument.
 """
 
+import itertools
 import os
 import shutil
 import time
@@ -163,8 +177,12 @@ def rmtree_robust(path: Path, retries: int = 3) -> None:
     The same tolerance :func:`copy_file` has, in the opposite direction, which
     is why it lives here: both answer "a file Chrome is holding" by making
     progress anyway, and both therefore cannot say afterwards what they could
-    not touch. Its callers are ``clone_storage``'s — the copy that overwrites
-    a stale seed, the trash purge and the regenerable trim.
+    not touch. Its callers are ``clone_storage``'s trash purge and, in this
+    module, the regenerable trim plus the three sites :func:`replace_tree`
+    needs — discarding a half-built staging copy, clearing a superseded
+    previous generation, and reclaiming one a dead process left behind. The
+    "copy that overwrites a stale seed" this list used to name is GONE: F-925
+    replaced that overwrite with a rename, which is the whole point of it.
     """
 
     def _on_rm_error(
@@ -237,6 +255,169 @@ def copy_delta(source: Path, target: Path) -> None:
                     copy_file(str(source_file), str(target_file))
             except (PermissionError, OSError):
                 continue
+
+
+#: The two sibling directories :func:`replace_tree` owns, each named off the
+#: target it belongs to. Distinctive rather than pretty: they sit in the same
+#: directory as real profiles and :func:`is_scratch` decides by NAME, so a
+#: session a caller could plausibly ask for must never collide with one.
+STAGING_SUFFIX = ".stealth-staging-"
+PREVIOUS_SUFFIX = ".stealth-previous"
+
+#: The pause between :func:`replace_tree`'s two copy passes — the second exists
+#: to pick up what the first found locked, and this is what gives Chrome time
+#: to let go of it.
+RETRY_SETTLE_SECONDS = 0.2
+
+#: How long a staging copy must be untouched before the next
+#: :func:`replace_tree` for the same target reclaims it. Only a process DEATH
+#: can leave one behind — every in-process exit removes its own in a
+#: ``finally`` — so this window is for that case alone, and it is ~1000x the
+#: seconds a ~101 MB profile copy takes. That margin is what makes reclaiming
+#: by age safe against a CONCURRENT build, and two refreshes really do overlap:
+#: a close runs one on a worker thread while a spawn runs one on the loop.
+STALE_STAGING_SECONDS = 3600.0
+
+_STAGING_SEQ = itertools.count(1)
+
+
+def is_scratch(name: str) -> bool:
+    """True for a directory :func:`replace_tree` owns rather than a profile.
+
+    Both scratch kinds are complete-LOOKING profile directories carrying a
+    marker, and both sit beside real profiles — so every clone-root scan has to
+    skip them by name exactly as it skips ``.trash``. Without that a storage
+    sweep can select a half-built staging copy as an eviction victim while it
+    is being written, and a displaced generation inflates the session-cap total
+    until real profiles are over-trimmed.
+    """
+    return STAGING_SUFFIX in name or name.endswith(PREVIOUS_SUFFIX)
+
+
+def _discard_stale_staging(target: Path) -> None:
+    """Remove staging copies for *target* that a dead process left behind.
+
+    Keyed on AGE and never on ownership: the pid in the name belongs to a
+    process that is gone, so there is nobody to ask. :data:`STALE_STAGING_SECONDS`
+    carries why that window cannot reach a live sibling's build. Reclaimed here,
+    by the next copy of the same target, rather than at a new sweep call site —
+    the one place that is guaranteed to run before the name is needed again.
+    """
+    prefix = f"{target.name}{STAGING_SUFFIX}"
+    cutoff = time.time() - STALE_STAGING_SECONDS
+    try:
+        entries = list(target.parent.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.name.startswith(prefix):
+            continue
+        with suppress(OSError):
+            if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                rmtree_robust(entry)
+
+
+def _displace(target: Path) -> bool:
+    """Move a complete *target* aside to its previous-generation sibling, so the
+    commit that follows renames onto a free name and the old tree survives it.
+    False when it could not be moved, in which case nothing has changed.
+
+    ONE generation, deliberately NOT a retention window like ``.trash``'s. An
+    evicted clone is the only copy of that session, which is the whole reason
+    the trash exists; a displaced seed is a STALER copy of a shared profile
+    that is still on disk and NEWER. So the narrow thing it insures against is
+    a copy that skipped a file Chrome held open and is lossy without saying so,
+    and the newest previous generation covers exactly that. It also keeps the
+    cost flat at one extra profile rather than one per refresh — which matters
+    because the seed is not in the clone root, so a trash hop would land it in
+    a ``.trash`` the storage sweep is never pointed at, and redirecting it into
+    the clone root's own trash is only purged when a CLONE spawn happens, which
+    a caller who only ever opens ``default`` never does.
+    """
+    previous = target.with_name(f"{target.name}{PREVIOUS_SUFFIX}")
+    if previous.exists():
+        rmtree_robust(previous)
+    try:
+        target.replace(previous)
+    except OSError:
+        return False
+    return True
+
+
+def _undisplace(target: Path) -> bool:
+    """Put a displaced generation back, after a publish that did not happen.
+
+    False when it could not be put back, which is the ONE outcome
+    :func:`replace_tree` must never report as "nothing has changed": there the
+    target really is absent and the caller has to hear about it.
+    """
+    previous = target.with_name(f"{target.name}{PREVIOUS_SUFFIX}")
+    try:
+        previous.replace(target)
+    except OSError:
+        return False
+    return True
+
+
+def replace_tree(
+    source: Path, target: Path, *, stamp: Callable[[Path], object]
+) -> bool:
+    """Build a copy of *source* beside *target* and publish it in ONE rename.
+    True when the new tree is in place; False when the tree already there could
+    not be moved out of the way, or when the publishing rename failed and the
+    displaced tree was put back — in which case nothing has changed.
+
+    Built beside rather than in place because the target may be the SEED every
+    later session is copied from, and rebuilding in place means deleting it
+    first: for the whole of a ~101 MB copy that seed is absent or half-written,
+    and a process death anywhere in that window leaves it that way permanently
+    — the repair refresh is refused while the shared browser is open, and every
+    consumer tests ``exists()``, which an empty directory passes (F-925). Here
+    the target is only ever the old tree or the new one, and the uncommitted
+    half lives under a name no scan reads as a profile.
+
+    *stamp* writes the clone marker INTO the staged copy, so the tree that one
+    publishing rename makes visible is already complete. Writing it afterwards
+    would leave a complete profile with no marker if the process died between
+    the two — which reads as an unmarked directory forever, and is this
+    finding's own shape one step smaller.
+
+    A publishing rename that RAISES is rolled back, because between the two
+    renames the target is absent and the ``finally`` below removes the new
+    tree: without it a failed publish leaves NOTHING at the target, and unlike
+    the microsecond gap between the renames (F-926) that state never closes —
+    every later spawn copies the live shared profile and carries no cookies.
+    Keyed on whether THIS call displaced something and never on
+    ``previous.exists()``: a previous generation may be a LEFTOVER from an
+    earlier refresh taken when the target did not exist, so restoring that one
+    would publish a staler tree as the seed, which is this finding's own harm
+    committed by the fix for it.
+    """
+    staging = target.with_name(
+        f"{target.name}{STAGING_SUFFIX}{os.getpid()}-{next(_STAGING_SEQ)}"
+    )
+    _discard_stale_staging(target)
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+        copy_delta(source, staging)
+        time.sleep(RETRY_SETTLE_SECONDS)
+        copy_delta(source, staging)
+        stamp(staging)
+        displaced = False
+        if target.exists():
+            if not _displace(target):
+                return False
+            displaced = True
+        try:
+            staging.replace(target)
+        except OSError:
+            if displaced and not _undisplace(target):
+                raise
+            return False
+        return True
+    finally:
+        if staging.exists():
+            rmtree_robust(staging)
 
 
 def dir_size_bytes(path: Path) -> int:
