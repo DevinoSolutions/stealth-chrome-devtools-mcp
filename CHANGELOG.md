@@ -455,8 +455,10 @@ does: persistent-vs-clone is `browser_pid_registry.on_persistent_profile`, the
 very predicate `--force` skips, and whether a profile is OPEN is
 `profile_lock.profile_hold` through `clone_storage`'s established adapter —
 never a presence test (F-871). One record read, no new probe pass, counted by
-DIRECTORY because the reap is directory-matched too. No message names a path:
-counts and session names only.
+DIRECTORY so that two entries on one profile count once — since F-922 a
+persistent profile's reap ends only the pids the record names, and those two
+entries are that one profile's logins. No message names a path: counts and
+session names only.
 
 The counting is a new leaf, `embedded/persistent_profile_risk.py`, which takes
 the entries and the hold predicate as arguments and imports nothing of the

@@ -93,10 +93,17 @@ open, and `master` is the owner's logged-in shared session.** The word "master"
 appeared nowhere in the verb's output or help.
 
 Note the two `master` ENTRIES resolve to one DIRECTORY (one holder, pid 33840).
-That is why the count below is by directory: the reap is directory-matched
-(`process_cleanup._kill_processes_for_metadata:325` kills every browser on the
-entry's `user_data_dir`), so two entries on one profile end one profile, and a
-count of entries would have said "3" about two.
+That is why the count below is by directory: at the time of this measurement
+the reap was directory-matched (`process_cleanup._kill_processes_for_metadata`
+killed every browser on the entry's `user_data_dir`), so two entries on one
+profile end one profile, and a count of entries would have said "3" about two.
+
+F-922 has since landed and narrowed that scan to DISPOSABLE directories
+(`process_cleanup.py:339-348`), so on a persistent profile the reap now ends
+only the pids the record names. The de-duplication above is unaffected and its
+justification is now the plainer one: both of `master`'s recorded entries are
+that ONE profile's logins, so counting them twice would still say "3" about
+two. See 6.3.
 
 ### Before
 
@@ -441,8 +448,9 @@ EVERY tracked browser", so the operator learns the reap is wider than the named
 set rather than inferring a death toll from it.
 
 **F-922 has since LANDED** (owner ruling, assigned to the F-916 lane; it is an
-ancestor of this branch and `process_cleanup._kill_processes_for_metadata` now
-gates its directory scan on `on_persistent_profile`), which narrows the gap
+ancestor of this branch and `process_cleanup._kill_processes_for_metadata`
+now gates its directory scan on `on_persistent_profile` —
+`process_cleanup.py:339-348`), which narrows the gap
 rather than closing it: a PERSISTENT profile's reap ends only the pids the
 record names, while a disposable clone directory is still swept directory-wide.
 So the floor survives on the disposable side, and the wording above is what is
