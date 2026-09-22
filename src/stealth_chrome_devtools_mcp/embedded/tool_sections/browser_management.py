@@ -124,7 +124,9 @@ async def spawn_browser(
             neither by name: a new backend adopts the browsers it finds recorded
             at its own startup (same instance_id as before), and spawning with a
             session a live browser still holds re-attaches to THAT browser
-            instead of walking to a sibling directory. Either way the answer
+            instead of walking to a sibling directory — and since F-931 that is
+            true of a spawn naming NOTHING too, which lands on ``default``, so
+            both spellings of the shared session behave alike. Either way the answer
             carries ``spawn_diagnostics["reattached"]: true`` plus the holder's
             pid, and the page is the one that was already open — not a fresh tab
             on the same cookies. So to recover a logged-in browser whose backend
