@@ -332,6 +332,13 @@ def tmp_session_root(tmp_path):
         "BROWSER_PROFILE_CLONE_ROOT": str(sessions),
     }
     with patch.dict(os.environ, env_patches):
+        # The autouse clear ran BEFORE this fixture, and any fixture set up
+        # between the two may have filled the cache from the unpatched env:
+        # `patched_server` imports `server`, whose module body reads Settings,
+        # so the first node in a process to list it ahead of this one resolved
+        # the shared session to the FENCE root (measured, F-931). The fixture
+        # that makes the cache stale is the one that has to clear it.
+        get_settings.cache_clear()
         yield {
             "root": tmp_path,
             "master": master.parent,
@@ -356,6 +363,7 @@ def tmp_empty_root(tmp_path):
         "BROWSER_PROFILE_CLONE_ROOT": str(sessions),
     }
     with patch.dict(os.environ, env_patches):
+        get_settings.cache_clear()  # tmp_session_root's reason
         yield {
             "root": tmp_path,
             "master": master,

@@ -32,6 +32,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import psutil
 import pytest
 
 from fakes import FakeBrowser, FakeTab
@@ -42,6 +43,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     cdp_attach,
     cdp_endpoint,
     desktop_launch,
+    profile_lock,
 )
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
@@ -746,20 +748,31 @@ class TestHeldProfileAdoption:
         return [*self._browser_argv(), f"--type={kind}"]
 
     def _held(
-        self, *, entries=None, hold_pid=CHROME_PID, cmdline_port=9223, table=None
+        self,
+        *,
+        entries=None,
+        hold_pid=CHROME_PID,
+        cmdline_port=9223,
+        table=None,
+        hold=None,
+        live_pids=None,
     ):
         """`held_by` with every witness injected and the process table faked.
 
         *table* is the live process tree on that profile, pid -> argv. The
         default is one browser process, which is what the simple pins want; a
         pin about WHICH member gets adopted supplies its own.
+
+        The hold is a REAL ``profile_lock.Hold`` and not a ``SimpleNamespace``
+        (F-931 M2): since that type grew ``members``, a namespace double would
+        offer less than the product does and the day this function starts
+        reading it would be an ``AttributeError`` inside whichever ``except``
+        the node was pinning, not a red about the thing that moved. A pin that
+        cares about the reason or the members passes its own *hold*.
         """
         table = table if table is not None else {CHROME_PID: self._browser_argv()}
-        hold = (
-            SimpleNamespace(pid=hold_pid, reason="process")
-            if hold_pid is not None
-            else None
-        )
+        if hold is None and hold_pid is not None:
+            hold = profile_lock.Hold(hold_pid, "process", members=tuple(table))
         with (
             patch(
                 "stealth_chrome_devtools_mcp.embedded.profile_lock.profile_hold",
@@ -775,7 +788,7 @@ class TestHeldProfileAdoption:
                 self.HELD,
                 read_entries=lambda: entries if entries is not None else {},
                 owner_alive=_owner_alive,
-                live_pids=lambda _dir: set(table),
+                live_pids=live_pids or (lambda _dir: set(table)),
                 new_instance_id="i-new",
             )
 
@@ -792,11 +805,20 @@ class TestHeldProfileAdoption:
 
     def test_the_port_comes_from_the_holders_command_line(self):
         """No record and no ``DevToolsActivePort`` file — measured true of the
-        stranded Chrome — leaves the process table as the only witness."""
+        stranded Chrome — leaves the process table as the only witness.
+
+        A real ``Hold`` for ``_held``'s stated reason (F-931 M2): this node's
+        ``SimpleNamespace`` stopped offering the product's surface the day
+        ``Hold`` grew ``members``, and what it produced was an
+        ``AttributeError`` about a missing attribute rather than a red about
+        the port this pin is for.
+        """
         with (
             patch(
                 "stealth_chrome_devtools_mcp.embedded.profile_lock.profile_hold",
-                return_value=SimpleNamespace(pid=CHROME_PID, reason="process"),
+                return_value=profile_lock.Hold(
+                    CHROME_PID, "process", members=(CHROME_PID,)
+                ),
             ),
             patch.object(
                 browser_cmdline.psutil,
@@ -816,8 +838,15 @@ class TestHeldProfileAdoption:
     def test_the_browser_is_adopted_when_the_witness_names_a_child(self):
         """MEASURED, on a real spawn: eleven processes on one profile — the
         browser, six renderers, two utilities, a gpu-process and a
-        crashpad-handler — and ``profile_hold``'s witness is a SET, so the pid it
-        reports is whichever member iterated first.
+        crashpad-handler — and ``profile_hold``'s witness was a SET, so the pid
+        it reported was whichever member iterated first.
+
+        Since F-931 that module names the browser itself, so this node no longer
+        reproduces a state the product can reach — it is kept because it pins
+        the CONSUMER's own independence: ``held_by`` must target the browser
+        whatever pid the hold carries, which is why the fixture still hands it a
+        ``utility``. Were it to start trusting that pid, a future witness
+        regression would be silent here.
 
         Adopting that member would be wrong in two ways at once: a ``utility``
         child carries no ``--remote-debugging-port`` at all (so the adoption
@@ -848,6 +877,94 @@ class TestHeldProfileAdoption:
         browser that was left alone, not an empty directory."""
         with pytest.raises(browser_reattach.Refused, match="the browser itself"):
             self._held(hold_pid=41002, table={41002: self._child_argv("gpu-process")})
+
+    def test_the_refusal_does_not_claim_a_browser_the_witness_never_saw(self):
+        """F-931 M2. The refusal used to open "a live browser holds that
+        directory (pid N)" in EVERY case, composed here from ``hold.pid``.
+
+        Since F-931 ``profile_hold`` has a third answer — a member whose argv
+        could not be READ — and for that one the sentence is two false claims at
+        once: that the pid is a browser, and that we established anything about
+        it. It is the very claim F-931 removed from ``profile_hold``, re-made
+        one module along. The hold's OWN reason is the one home for what the
+        witness saw, so the refusal quotes it rather than re-deriving it.
+        """
+        unreadable = 41003
+        with pytest.raises(browser_reattach.Refused) as refusal:
+            self._held(
+                hold=profile_lock.Hold(
+                    unreadable,
+                    f"a live process (pid {unreadable}) on this profile could "
+                    "not be read, so this profile cannot be shown free",
+                    members=(unreadable,),
+                ),
+                table={},
+            )
+
+        message = str(refusal.value)
+        assert "could not be read" in message
+        assert "a live browser holds that directory" not in message
+
+    def test_two_browsers_are_refused_without_contradicting_the_witness(self):
+        """F-931 M4. ``browser_process`` answers None for TWO shapes — no member
+        is the browser, and MORE than one is — and the refusal spoke only the
+        first, while quoting a ``hold.reason`` that says a browser IS there.
+
+        Measured, that sentence read "a live browser process (pid 5005) has this
+        profile open, but none of its processes could be identified as the
+        browser itself": a self-contradiction, in the one message an operator
+        gets about a directory they asked for. The state is reachable — it is
+        exactly what a stale ``SingletonLock`` (F-871) leaves — so the ambiguity
+        is NAMED instead, and the witness's own sentence stays true beside it.
+        """
+        argv = self._browser_argv()
+        with pytest.raises(browser_reattach.Refused) as refusal:
+            self._held(
+                hold=profile_lock.Hold(
+                    5005,
+                    "a live browser process (pid 5005) has this profile open",
+                    members=(5005, 5006),
+                ),
+                table={5005: argv, 5006: argv},
+            )
+
+        message = str(refusal.value)
+        assert "none of its processes could be identified" not in message, (
+            f"the refusal contradicts the hold it quotes: {message}"
+        )
+        assert "a live browser process (pid 5005) has this profile open" in message
+        # BOTH pids, because which one is named decides nothing here and an
+        # operator looking for "the" browser would find two.
+        assert "5005" in message and "5006" in message, message
+
+    def test_the_holder_is_read_off_the_hold_without_a_second_scan(self):
+        """F-931 M2. ``profile_hold`` already walked the process table to answer
+        "is this held"; re-asking ``live_pids`` here walks every process on the
+        machine a SECOND time for a set that module just read.
+
+        The QUESTION stays different — "which member is the browser, and is
+        there exactly one" is not "is anything there" — so the
+        ``browser_process`` call stays; what changes is its INPUT, which is now
+        the set the hold carries.
+        """
+        scans: list[str] = []
+
+        def counting_live_pids(directory):
+            scans.append(directory)
+            return {CHROME_PID}
+
+        found = self._held(
+            hold=profile_lock.Hold(
+                CHROME_PID,
+                "a live browser process has this profile open",
+                members=(CHROME_PID,),
+            ),
+            table={CHROME_PID: self._browser_argv()},
+            live_pids=counting_live_pids,
+        )
+
+        assert found is not None and found.pid == CHROME_PID
+        assert scans == [], f"held_by re-scanned the process table: {scans}"
 
     def test_a_dead_owners_entry_donates_its_instance_id(self):
         """When the record DOES still name it, the client's id is preserved
@@ -1049,6 +1166,33 @@ class TestWhatTheCommandLineSays:
         ):
             assert browser_cmdline.browser_process({41001}, r"C:\ours") == 41001
             assert browser_cmdline.browser_process(set(table), r"C:\ours") is None
+
+    def test_a_pid_psutil_will_not_describe_still_counts_as_running(self):
+        """F-931 N5. ``_still_running`` is what separates ``browser_members``'
+        two negatives — a pid that has GONE contributes nothing, one we were
+        REFUSED is ``unreadable`` and holds the profile — and it had no witness
+        of its own. An unreadable answer resolves toward HELD, the direction
+        ``profile_lock._pid_alive`` and ``reap_guard`` already take."""
+        with patch.object(
+            browser_cmdline.psutil, "pid_exists", side_effect=psutil.AccessDenied(9)
+        ):
+            assert browser_cmdline._still_running(9) is True
+        with patch.object(browser_cmdline.psutil, "pid_exists", return_value=False):
+            assert browser_cmdline._still_running(9) is False
+
+    def test_an_argv_we_cannot_read_is_unreadable_and_a_gone_pid_is_not(self):
+        """The pair that fact exists for: the scan that produced these pids and
+        this read are two moments, so a process that exited between them is an
+        established negative, while one psutil refused to describe is not."""
+        with (
+            patch.object(browser_cmdline, "arguments", return_value=[]),
+            patch.object(
+                browser_cmdline, "_still_running", side_effect=lambda pid: pid == 41001
+            ),
+        ):
+            members = browser_cmdline.browser_members({41001, 41002}, r"C:\ours")
+        assert members.browsers == ()
+        assert members.unreadable == (41001,)
 
 
 class TestIgnoredArgsNamesOnlyWhatTheCallerPassed:

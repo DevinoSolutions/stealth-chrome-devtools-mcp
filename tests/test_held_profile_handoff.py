@@ -25,16 +25,22 @@ real session root or the real ``~/.stealth-mcp``.
 
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from fakes import held_profile
+from fakes import FakeBrowser, FakeBrowserManager, held_profile
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
+    browser_reattach,
     clone_storage,
     profile_seed,
     profile_source,
 )
+from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_sections import browser_management
 
 #: A byte string no fixture writes, so finding it in the walked session is
 #: proof the copy came from the HELD directory and not from the shared seed.
@@ -294,6 +300,44 @@ class TestTheHeldSharedSession:
         assert selection["user_data_dir"] == str(tmp_session_root["master"])
         assert clone_storage.LIVE_SEED_KEY not in selection
 
+    async def test_orphaned_children_of_a_closed_browser_do_not_refuse(
+        self, tmp_session_root, monkeypatch
+    ):
+        """F-931(b) at the surface F-914 refuses from.
+
+        ``close_instance`` waits for and kills the BROWSER only — a ``--type=``
+        child is deliberately never waited on (``process_exit.browser_pid``) —
+        so for a window after a close the shared profile's tree still has
+        members in it, and under the shipped witness that is enough to refuse
+        the very next unnamed spawn about a profile whose browser has gone.
+
+        The release gate showed that refusal one test after a close
+        (``integration (Windows/X64)`` run 35689647688) but never said whether
+        the pid it named was the browser or a child — so this node is the proof
+        and the pids below are deliberately not the gate's.
+        """
+        master = tmp_session_root["master"]
+        children = {4201: 4201, 4202: 4202}
+        monkeypatch.setattr(
+            clone_storage.process_cleanup,
+            "_get_browser_pids_for_profile",
+            lambda _dir: set(children),
+        )
+        monkeypatch.setattr(
+            browser_cmdline,
+            "arguments",
+            lambda pid: (
+                ["chrome.exe", f"--user-data-dir={master}", "--type=renderer"]
+                if pid in children
+                else []
+            ),
+        )
+
+        selection = await _selection()
+
+        assert selection["profile_role"] == profile_seed.DEFAULT_SESSION
+        assert selection["user_data_dir"] == str(master)
+
 
 # ---------------------------------------------------------------------------
 # F-920 — the `live-default-fallback` branch, whose comment claimed a live
@@ -324,6 +368,323 @@ class TestTheNoSeedFallback:
 
         assert selection["clone_source"] == "live-default-fallback"
         assert selection[clone_storage.LIVE_SEED_KEY] == str(master)
+
+
+# ---------------------------------------------------------------------------
+# F-931 — the two spellings of the shared session must ask the SAME question
+# ---------------------------------------------------------------------------
+
+
+class TestAnUnnamedSpawnAsksTheSameQuestion:
+    """``spawn_browser()`` and ``spawn_browser(session="default")`` name one
+    profile, and until F-931 only the second one could re-attach to it.
+
+    ``require_allowed_user_data_dir`` answers ``None`` when nothing was named,
+    and the F-888 re-attach was gated on that answer — so the call the owner
+    makes, and every integration test makes, went straight to the resolver,
+    where F-914 refuses a holder we do not drive. The named spelling of the
+    same directory was adopted. Two spellings of one profile with two outcomes
+    is convention 4's "second way", and the one that loses is the default.
+
+    The re-attach therefore has to be asked about the directory the SELECTION
+    will land on, which for an unnamed spawn is the shared session (F-834 /
+    F-896). These nodes drive the real tool and watch which directory the
+    re-attach is handed, because a gate that answers correctly and a body that
+    asks about something else would leave every pin above green.
+    """
+
+    def _manager(self) -> FakeBrowserManager:
+        return FakeBrowserManager(
+            spawn_instance=SimpleNamespace(
+                instance_id="i1",
+                state="active",
+                headless=True,
+                viewport={"width": 800, "height": 600},
+            ),
+            spawn_diagnostics={},
+        )
+
+    async def _spawn(
+        self, call_tool, patched_server, monkeypatch, *, held, **kwargs
+    ) -> tuple[list[str], list[str | None]]:
+        """Drive ``spawn_browser`` with the re-attach and the resolver faked,
+        and answer (directories the re-attach was asked about, directories the
+        resolver was asked about)."""
+        asked: list[str] = []
+        resolved: list[str | None] = []
+
+        async def fake_adopt(_manager, _cleanup, user_data_dir, **_):
+            asked.append(user_data_dir)
+            return held
+
+        async def fake_resolve(user_data_dir, **_):
+            resolved.append(user_data_dir)
+            return {
+                "user_data_dir": str(user_data_dir or "/shared"),
+                "profile_role": "explicit" if user_data_dir else "clone",
+                "clone_source": None,
+            }
+
+        async def fake_adopted(instance_id, _block_resources):
+            return {"instance_id": instance_id, "reattached": True}
+
+        monkeypatch.setattr(browser_reattach, "adopt_held_profile", fake_adopt)
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        monkeypatch.setattr(
+            browser_management, "_adopted_instance_record", fake_adopted
+        )
+        srv = patched_server(browser_manager=self._manager())
+        await call_tool(srv, "spawn_browser", headless=True, sandbox=False, **kwargs)
+        return asked, resolved
+
+    @pytest.mark.parametrize(
+        "kwargs", [{}, {"session": "default"}], ids=["unnamed", "default"]
+    )
+    async def test_both_spellings_ask_the_reattach_about_the_shared_directory(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root, kwargs
+    ):
+        asked, _ = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            held=browser_reattach.Held(),
+            **kwargs,
+        )
+
+        assert asked == [str(tmp_session_root["master"])]
+
+    @pytest.mark.parametrize(
+        "kwargs", [{}, {"session": "default"}], ids=["unnamed", "default"]
+    )
+    async def test_both_spellings_adopt_the_holder_instead_of_selecting(
+        self, call_tool, patched_server, monkeypatch, kwargs
+    ):
+        """An adoption short-circuits selection, which is the whole point: the
+        resolver is where F-914's refusal and F-871's walk live, and a browser
+        we just re-attached to needs neither."""
+        _, resolved = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            held=browser_reattach.Held(instance_id="i-adopted"),
+            **kwargs,
+        )
+
+        assert resolved == []
+
+
+class TestAnUnnamedSpawnIsNeverHandedOurOwnBrowser:
+    """F-931's own regression, found by the release gate (PR #166,
+    ``integration (macOS/ARM64)``, four tests of one shape): once an unnamed
+    spawn asked the re-attach about the shared session, a SECOND unnamed spawn
+    was handed the first one's running instance. ``test_close_one_keeps_others``
+    spawned ``a`` and ``b``, got one browser twice, closed ``a`` and lost ``b``.
+
+    The two spellings do NOT mean the same thing about a browser this backend
+    already drives. ``session="default"`` names a directory, and the browser
+    already open on it is the answer (F-888). A spawn that names nothing asks
+    for a browser of its OWN — the fleet contract F-834 and F-914 build on — so
+    for a holder we drive it is the resolver's job: a fresh copy with the
+    holder's jar handed over. What F-931 adds for an unnamed spawn is only the
+    holder we do NOT drive, the stranded one.
+
+    Two shapes reach "ours", and both are driven here through the REAL
+    ``adopt_held_profile`` and the real ``BrowserManager`` — only ``held_by``
+    (the psutil walk), the resolver and the launch are faked: in-process, the
+    record's owner is not a backend process, so ``held_by`` answers a candidate
+    naming our own instance; in a real backend the owner IS one, so ``held_by``
+    raises ``Refused`` about ourselves. And a sibling spawn IN FLIGHT has a
+    Chrome on that directory before it has an instance, so no instance table
+    can see it — adopting it would register one Chrome twice.
+    """
+
+    def _manager(self, master: Path, *, drives_master: bool, in_flight: int = 0):
+        manager = BrowserManager()
+        if drives_master:
+            manager._instances["i-ours"] = {
+                "browser": FakeBrowser(alive=True),
+                "instance": BrowserInstance(instance_id="i-ours"),
+                "options": SimpleNamespace(user_data_dir=str(master)),
+            }
+        manager._spawns_in_flight = in_flight
+        return manager
+
+    async def _spawn(  # noqa: PLR0913  PERMANENT(each keyword is one of the fakes this node composes — one per seam the spawn crosses)
+        self,
+        call_tool,
+        patched_server,
+        monkeypatch,
+        manager,
+        *,
+        holder,
+        **kwargs,
+    ) -> tuple[dict, list, list]:
+        """Drive ``spawn_browser``; answer (its reply, directories the resolver
+        was asked about, adoptions the re-attach attempted)."""
+        resolved: list = []
+        adoptions: list = []
+
+        def fake_held_by(*_args, **_kwargs):
+            if isinstance(holder, Exception):
+                raise holder
+            return holder
+
+        async def fake_adopt_one(_manager, _cleanup, candidate, **_):
+            adoptions.append(candidate.instance_id)
+            return candidate.instance_id
+
+        async def fake_resolve(user_data_dir, **_):
+            resolved.append(user_data_dir)
+            return {
+                "user_data_dir": "/a-fresh-copy",
+                "profile_role": "clone",
+                "clone_source": None,
+            }
+
+        async def fake_launch(_options):
+            return SimpleNamespace(
+                instance_id="i-new", state="active", headless=True, viewport={}
+            )
+
+        async def no_tab(_instance_id):
+            return None
+
+        async def diagnostics(_instance_id):
+            return {}
+
+        async def fake_adopted(instance_id, _block_resources):
+            return {"instance_id": instance_id, "reattached": True}
+
+        monkeypatch.setattr(browser_reattach, "held_by", fake_held_by)
+        monkeypatch.setattr(browser_reattach, "_adopt_one", fake_adopt_one)
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        monkeypatch.setattr(
+            browser_management, "_adopted_instance_record", fake_adopted
+        )
+        monkeypatch.setattr(manager, "spawn_browser", fake_launch)
+        monkeypatch.setattr(manager, "get_tab", no_tab)
+        monkeypatch.setattr(manager, "get_spawn_diagnostics", diagnostics)
+        srv = patched_server(browser_manager=manager)
+        answer = await call_tool(
+            srv, "spawn_browser", headless=True, sandbox=False, **kwargs
+        )
+        return answer, resolved, adoptions
+
+    @staticmethod
+    def _candidate(instance_id: str, master: Path) -> browser_reattach.Adoptable:
+        return browser_reattach.Adoptable(
+            instance_id=instance_id, pid=4321, user_data_dir=str(master), port=9223
+        )
+
+    async def test_our_own_browser_on_the_shared_session_is_not_the_answer(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        """The CI shape: in-process, ``held_by`` names our own instance."""
+        master = tmp_session_root["master"]
+        answer, resolved, _ = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            self._manager(master, drives_master=True),
+            holder=self._candidate("i-ours", master),
+        )
+
+        assert answer["instance_id"] == "i-new", (
+            "an unnamed spawn must get a browser of its own, never the one "
+            "this backend already drives on the shared session"
+        )
+        assert resolved == [None]
+
+    async def test_a_refusal_about_ourselves_is_not_reported_as_a_decline(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        """The production shape: the record's owner is this live backend, so
+        ``held_by`` refuses — and its remedy is "stop that backend", which read
+        about ourselves on every unnamed spawn is advice to kill the caller's
+        own session. Nothing was declined: the resolver hands the jar over."""
+        master = tmp_session_root["master"]
+        answer, resolved, _ = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            self._manager(master, drives_master=True),
+            holder=browser_reattach.Refused("a live backend of ours already owns it"),
+        )
+
+        assert answer["instance_id"] == "i-new"
+        assert resolved == [None]
+        assert "reattach_declined" not in answer["spawn_diagnostics"]
+
+    async def test_a_sibling_spawn_in_flight_is_never_adopted(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        """Its Chrome is up before its instance is registered, so the instance
+        table cannot see it; the in-flight count can."""
+        master = tmp_session_root["master"]
+        answer, resolved, adoptions = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            self._manager(master, drives_master=False, in_flight=1),
+            holder=self._candidate("i-sibling", master),
+        )
+
+        assert adoptions == [], "one Chrome registered as two instances"
+        # Not `instance_id == "i-new"`: that answer is the FAKED resolver's. In
+        # production this shape is refused by F-914 (finding §8, residual 4).
+        assert resolved == [None]
+
+    async def test_a_stranded_holder_is_still_re_attached(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        """What F-931 is FOR, kept: a browser no spawn of ours is launching
+        and no instance of ours drives is adopted, not refused."""
+        master = tmp_session_root["master"]
+        answer, resolved, adoptions = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            self._manager(master, drives_master=False),
+            holder=self._candidate("i-stranded", master),
+        )
+
+        assert adoptions == ["i-stranded"]
+        assert answer["instance_id"] == "i-stranded"
+        assert resolved == []
+
+    async def test_a_refusal_about_a_stranger_is_still_reported(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        master = tmp_session_root["master"]
+        answer, _, _ = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            self._manager(master, drives_master=False),
+            holder=browser_reattach.Refused("a sibling backend owns it"),
+        )
+
+        assert answer["spawn_diagnostics"]["reattach_declined"] == (
+            "a sibling backend owns it"
+        )
+
+    async def test_the_named_spelling_keeps_f888s_answer(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        """``session="default"`` names the directory, so the browser already
+        open on it IS what was asked for — unchanged by this fix."""
+        master = tmp_session_root["master"]
+        answer, resolved, _ = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            self._manager(master, drives_master=True),
+            holder=self._candidate("i-ours", master),
+            session="default",
+        )
+
+        assert answer["instance_id"] == "i-ours"
+        assert resolved == []
 
 
 # ---------------------------------------------------------------------------
