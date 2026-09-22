@@ -232,7 +232,7 @@ PREFIX = "Failed to spawn browser:"
 
 
 @pytest.fixture
-def failing_spawn_server(patched_server, monkeypatch):
+def failing_spawn_server(patched_server, monkeypatch, tmp_path):
     """The real ``spawn_browser`` tool over the REAL ``BrowserManager``, failed at
     its launch phase.
 
@@ -287,6 +287,15 @@ def failing_spawn_server(patched_server, monkeypatch):
             double that tolerates whatever it is handed cannot fail when the
             real surface changes."""
             return seed_from or None
+
+        def master_profile_dir(self):
+            """F-931: the re-attach is asked about the directory the selection
+            WILL land on, and for a spawn that named nothing that is the shared
+            session — so a double of this module has to say where that is. A
+            path nothing holds, because this fixture is about the failure
+            PREFIX and an adoption would short-circuit the spawn it is failing.
+            """
+            return tmp_path / "shared-not-held"
 
         async def resolve_profile_selection(
             self, user_data_dir, *, seed_from=None, driven=None

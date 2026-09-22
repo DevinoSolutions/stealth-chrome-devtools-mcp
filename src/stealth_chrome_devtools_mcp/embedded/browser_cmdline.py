@@ -14,13 +14,14 @@ through ``merge_browser_args`` while nodriver appends its own with ``=``.
 
 A leaf: ``psutil``, stdlib ``socket``, and ``browser_pid_registry`` for the two
 things it must not re-spell — what a usable port is, and how two paths are
-compared. It decides NOTHING about adoption; every judgement is
-``browser_reattach``'s, which is this module's one consumer.
+compared. It decides NOTHING: every judgement is ``browser_reattach``'s and
+``profile_lock``'s, its two consumers since F-931.
 """
 
 from __future__ import annotations
 
 import socket
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import psutil
@@ -127,12 +128,51 @@ def browser_process(pids: Collection[int] | None, expect_dir: str) -> int | None
     the same set-ordering coin flip back — SILENTLY, which is the property this
     function exists to remove — so an ambiguous answer is no answer.
     """
+    found = browser_members(pids, expect_dir).browsers
+    return found[0] if len(found) == 1 else None
+
+
+@dataclass(frozen=True)
+class Members:
+    """Which of a profile's live processes are BROWSERS, and whether every one
+    of the others could be read (F-931).
+
+    Two facts because a caller needs both, and collapsing them is the defect
+    this exists to prevent: an empty ``browsers`` with ``unreadable`` False is
+    the ESTABLISHED statement "the browser has gone and only its children are
+    left", while an empty one with ``unreadable`` True says only that we could
+    not tell — ``reap_guard``'s distinction, at a different witness.
+    """
+
+    browsers: tuple[int, ...]
+    unreadable: bool
+
+
+def browser_members(pids: Collection[int] | None, expect_dir: str) -> Members:
+    """Which of *pids* are browser processes on *expect_dir*.
+
+    The structural rule is :func:`browser_process`'s and is argued there; what
+    this adds is the THIRD outcome that function has no way to report, because
+    it answers one pid or None. ``profile_lock.profile_hold`` needs it: an
+    argv it could not read is not evidence that a browser is absent, and a
+    directory shown free on that evidence is two browsers on one profile.
+
+    A pid missing from the process table contributes NOTHING and is not
+    "unreadable" — the scan that produced *pids* and this read are two moments,
+    and a process that exited between them is an established negative.
+    """
     found: list[int] = []
+    unreadable = False
     for pid in pids or ():
         if not isinstance(pid, int):
             continue
         cmdline = arguments(pid)
-        if not cmdline or flag_value(cmdline, TYPE_FLAG) is not None:
+        if not cmdline:
+            # `arguments` collapses "gone" and "refused" into an empty list, so
+            # the pid itself is what tells them apart.
+            unreadable = unreadable or _still_running(pid)
+            continue
+        if flag_value(cmdline, TYPE_FLAG) is not None:
             continue
         on_disk = flag_value(cmdline, "--user-data-dir")
         if browser_pid_registry.normalize_path(
@@ -140,7 +180,17 @@ def browser_process(pids: Collection[int] | None, expect_dir: str) -> int | None
         ) != browser_pid_registry.normalize_path(expect_dir):
             continue
         found.append(pid)
-    return found[0] if len(found) == 1 else None
+    return Members(tuple(found), unreadable)
+
+
+def _still_running(pid: int) -> bool:
+    """Whether *pid* is still there. A pid we cannot ask about counts as
+    running, which resolves toward HELD — ``profile_lock._pid_alive``'s
+    direction, for the same reason."""
+    try:
+        return psutil.pid_exists(pid)
+    except (psutil.Error, OSError):
+        return True
 
 
 def is_headless(pid: int) -> bool:

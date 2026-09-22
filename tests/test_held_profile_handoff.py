@@ -25,16 +25,20 @@ real session root or the real ``~/.stealth-mcp``.
 
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from fakes import held_profile
+from fakes import FakeBrowserManager, held_profile
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
+    browser_reattach,
     clone_storage,
     profile_seed,
     profile_source,
 )
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_sections import browser_management
 
 #: A byte string no fixture writes, so finding it in the walked session is
 #: proof the copy came from the HELD directory and not from the shared seed.
@@ -294,6 +298,41 @@ class TestTheHeldSharedSession:
         assert selection["user_data_dir"] == str(tmp_session_root["master"])
         assert clone_storage.LIVE_SEED_KEY not in selection
 
+    async def test_orphaned_children_of_a_closed_browser_do_not_refuse(
+        self, tmp_session_root, monkeypatch
+    ):
+        """F-931(b) at the surface F-914 refuses from.
+
+        ``close_instance`` waits for and kills the BROWSER only — a ``--type=``
+        child is deliberately never waited on (``process_exit.browser_pid``) —
+        so for a window after a close the shared profile's tree still has
+        members in it. Under the shipped witness that window refused the very
+        next unnamed spawn, about a profile whose browser was already gone:
+        measured on the release gate, ``integration (Windows/X64)`` run
+        35689647688, two tests of the same file in succession.
+        """
+        master = tmp_session_root["master"]
+        children = {8084: 8084, 8085: 8085}
+        monkeypatch.setattr(
+            clone_storage.process_cleanup,
+            "_get_browser_pids_for_profile",
+            lambda _dir: set(children),
+        )
+        monkeypatch.setattr(
+            browser_cmdline,
+            "arguments",
+            lambda pid: (
+                ["chrome.exe", f"--user-data-dir={master}", "--type=renderer"]
+                if pid in children
+                else []
+            ),
+        )
+
+        selection = await _selection()
+
+        assert selection["profile_role"] == profile_seed.DEFAULT_SESSION
+        assert selection["user_data_dir"] == str(master)
+
 
 # ---------------------------------------------------------------------------
 # F-920 — the `live-default-fallback` branch, whose comment claimed a live
@@ -324,6 +363,109 @@ class TestTheNoSeedFallback:
 
         assert selection["clone_source"] == "live-default-fallback"
         assert selection[clone_storage.LIVE_SEED_KEY] == str(master)
+
+
+# ---------------------------------------------------------------------------
+# F-931 — the two spellings of the shared session must ask the SAME question
+# ---------------------------------------------------------------------------
+
+
+class TestAnUnnamedSpawnAsksTheSameQuestion:
+    """``spawn_browser()`` and ``spawn_browser(session="default")`` name one
+    profile, and until F-931 only the second one could re-attach to it.
+
+    ``require_allowed_user_data_dir`` answers ``None`` when nothing was named,
+    and the F-888 re-attach was gated on that answer — so the call the owner
+    makes, and every integration test makes, went straight to the resolver,
+    where F-914 refuses a holder we do not drive. The named spelling of the
+    same directory was adopted. Two spellings of one profile with two outcomes
+    is convention 4's "second way", and the one that loses is the default.
+
+    The re-attach therefore has to be asked about the directory the SELECTION
+    will land on, which for an unnamed spawn is the shared session (F-834 /
+    F-896). These nodes drive the real tool and watch which directory the
+    re-attach is handed, because a gate that answers correctly and a body that
+    asks about something else would leave every pin above green.
+    """
+
+    def _manager(self) -> FakeBrowserManager:
+        return FakeBrowserManager(
+            spawn_instance=SimpleNamespace(
+                instance_id="i1",
+                state="active",
+                headless=True,
+                viewport={"width": 800, "height": 600},
+            ),
+            spawn_diagnostics={},
+        )
+
+    async def _spawn(
+        self, call_tool, patched_server, monkeypatch, *, held, **kwargs
+    ) -> tuple[list[str], list[str | None]]:
+        """Drive ``spawn_browser`` with the re-attach and the resolver faked,
+        and answer (directories the re-attach was asked about, directories the
+        resolver was asked about)."""
+        asked: list[str] = []
+        resolved: list[str | None] = []
+
+        async def fake_adopt(_manager, _cleanup, user_data_dir, **_):
+            asked.append(user_data_dir)
+            return held
+
+        async def fake_resolve(user_data_dir, **_):
+            resolved.append(user_data_dir)
+            return {
+                "user_data_dir": str(user_data_dir or "/shared"),
+                "profile_role": "explicit" if user_data_dir else "clone",
+                "clone_source": None,
+            }
+
+        async def fake_adopted(instance_id, _block_resources):
+            return {"instance_id": instance_id, "reattached": True}
+
+        monkeypatch.setattr(browser_reattach, "adopt_held_profile", fake_adopt)
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        monkeypatch.setattr(
+            browser_management, "_adopted_instance_record", fake_adopted
+        )
+        srv = patched_server(browser_manager=self._manager())
+        await call_tool(srv, "spawn_browser", headless=True, sandbox=False, **kwargs)
+        return asked, resolved
+
+    @pytest.mark.parametrize(
+        "kwargs", [{}, {"session": "default"}], ids=["unnamed", "default"]
+    )
+    async def test_both_spellings_ask_the_reattach_about_the_shared_directory(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root, kwargs
+    ):
+        asked, _ = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            held=browser_reattach.Held(),
+            **kwargs,
+        )
+
+        assert asked == [str(tmp_session_root["master"])]
+
+    @pytest.mark.parametrize(
+        "kwargs", [{}, {"session": "default"}], ids=["unnamed", "default"]
+    )
+    async def test_both_spellings_adopt_the_holder_instead_of_selecting(
+        self, call_tool, patched_server, monkeypatch, kwargs
+    ):
+        """An adoption short-circuits selection, which is the whole point: the
+        resolver is where F-914's refusal and F-871's walk live, and a browser
+        we just re-attached to needs neither."""
+        _, resolved = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            held=browser_reattach.Held(instance_id="i-adopted"),
+            **kwargs,
+        )
+
+        assert resolved == []
 
 
 # ---------------------------------------------------------------------------

@@ -318,25 +318,37 @@ async def spawn_browser(
         # empty `Held` for every other case, including a live sibling backend's
         # browser, and never raises: an adoption that cannot happen costs this
         # spawn nothing but the reason it reports.
-        if user_data_dir:
-            held = await rt.browser_reattach.adopt_held_profile(
-                rt.browser_manager,
-                rt.process_cleanup,
-                user_data_dir,
-                ignored_args=_launch_only_args(
-                    headless=headless,
-                    user_agent=user_agent,
-                    viewport_width=viewport_width,
-                    viewport_height=viewport_height,
-                    proxy=proxy,
-                    browser_args=browser_args,
-                    timezone_id=timezone_id,
-                    extra_headers=extra_headers,
-                    sandbox=requested_sandbox,
-                ),
-            )
-            if held.instance_id:
-                return await _adopted_instance_record(held.instance_id, block_resources)
+        # It is asked about the directory this spawn WILL LAND ON, which for a
+        # caller who named nothing is the shared session (F-834/F-896) — and
+        # that is F-931: `require_allowed_user_data_dir` answers None there, so
+        # gating the re-attach on its answer meant `spawn_browser()` could
+        # never adopt the browser `spawn_browser(session="default")` adopts on
+        # the very same directory, and went to the resolver instead, where
+        # F-914 refuses a holder we do not drive. Two spellings of one profile
+        # with two outcomes is convention 4's second way, and the one that lost
+        # is the one the owner and every integration test makes.
+        # `master_profile_dir()` is READ, never re-decided: `clone_storage` is
+        # the one home for where the shared session lives. What it costs is one
+        # process-table walk on the unnamed path, which is exactly what the
+        # named path has always paid.
+        held = await rt.browser_reattach.adopt_held_profile(
+            rt.browser_manager,
+            rt.process_cleanup,
+            user_data_dir or str(rt.clone_storage.master_profile_dir()),
+            ignored_args=_launch_only_args(
+                headless=headless,
+                user_agent=user_agent,
+                viewport_width=viewport_width,
+                viewport_height=viewport_height,
+                proxy=proxy,
+                browser_args=browser_args,
+                timezone_id=timezone_id,
+                extra_headers=extra_headers,
+                sandbox=requested_sandbox,
+            ),
+        )
+        if held.instance_id:
+            return await _adopted_instance_record(held.instance_id, block_resources)
 
         profile_selection = await rt.clone_storage.resolve_profile_selection(
             user_data_dir, seed_from=seed_from, driven=driven.holds

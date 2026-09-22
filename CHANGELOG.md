@@ -410,6 +410,46 @@ Full detail, including the measurements and every residual, is in
 `audit/stage2/finding_F914_unnamed_spawn_substitutes_seed_clone.md` and
 `audit/stage2/finding_F915_held_named_session_walks_and_reseeds.md`.
 
+### Fixed — F-931: an unnamed spawn can re-attach, and a dead browser's children no longer hold its profile
+
+`spawn_browser()` — no `session`, no `user_data_dir`, the call you make by
+default — could not re-attach to a browser already open on the shared session,
+while `spawn_browser(session="default")`, the other spelling of the *same*
+directory, could. The re-attach was gated on the string the caller typed, and an
+unnamed spawn types nothing, so it went to the resolver instead, where F-914
+refuses a holder this backend does not drive. Two spellings of one profile, two
+outcomes, and the one that lost is the default. The re-attach is now asked about
+the directory the selection **will land on** — for an unnamed spawn, the shared
+session, which is what F-834/F-896 already say it selects.
+
+Under it was a second defect that made the refusal fire against a profile
+nothing was using. A profile is held by a whole process TREE and
+`profile_hold` reported `min(pids)` of it, with no `--type` filter — so a
+renderer, a GPU process or a crashpad handler counted as the holder and was
+NAMED as one in the refusal. `close_instance` waits for and kills the BROWSER
+only (a `--type=` child is deliberately never waited on, F-910), so for a window
+after every close the survivors were exactly that: children of a browser that
+had gone. Measured on release gate run 35689647688, `integration (Windows/X64)`:
+an unnamed spawn refused with "the 'default' session is open in a browser this
+backend does not drive (pid 8084)" immediately after the previous test closed
+its own browser on that profile.
+
+`browser_cmdline.browser_members` is the one rule now —
+`browser_reattach.held_by` has asked its structural half since F-888 and
+`profile_lock` never did, which is how the two witnesses came to disagree — and
+it answers the third thing neither had: whether a member's argv could not be
+**read**. So a tree whose members are all readable children does not hold the
+profile; a tree with a browser in it is held by that browser, named; and a
+member we could not read still holds it, with a reason that says so instead of
+claiming a browser we never saw. What cannot be established resolves toward not
+acting, as it does in `reap_guard`, `_pid_alive` and `backend_eviction`.
+
+Waiting for the whole tree on close was rejected: it costs close latency, it
+contradicts F-910 at the same file, and it closes one door of several — a
+browser killed by a crash, by `kill-orphans` or from Task Manager leaves the
+same orphans. Full detail and every residual is in
+`audit/stage2/finding_F931_unnamed_spawn_skips_reattach_tree_hold.md`.
+
 ## 2.1.13
 
 ### Added — F-897: a new session can start from an existing one
