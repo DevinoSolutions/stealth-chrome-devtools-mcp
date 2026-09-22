@@ -537,9 +537,9 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
 
     *reuse_ours* is False for a spawn that NAMED nothing (F-931): it asked for a
     browser of its own, so a holder we drive or are still launching is never
-    adopted; only a STRANDED one is. The resolver then copies a REGISTERED
-    holder, jar handed over, and refuses one still launching (F-914, as before
-    F-931). Asked on both exits of the walk: ``Refused`` or a candidate.
+    adopted; only a STRANDED one is. The resolver then copies a holder that was
+    registered when this spawn began, jar handed over, and refuses any later one
+    (F-914, as before F-931). Asked on both exits: ``Refused`` or a candidate.
 
     Never raises.
     """

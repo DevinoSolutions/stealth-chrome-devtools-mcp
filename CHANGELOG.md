@@ -581,8 +581,8 @@ spawn will not adopt a stranded holder of the shared session either; a retry
 once the other spawn finishes re-attaches. Two more windows, read off the code
 and named in the finding: an adoption in progress and a `close_instance` still
 waiting for Chrome to exit are visible to neither the count nor the table, so
-a concurrent unnamed spawn in either window keeps the second shape's refusal
-about our own backend.
+a concurrent unnamed spawn in either window keeps the "a live backend of ours
+already owns … Stop that backend first" refusal — about our own backend.
 
 **The WIRE description of `spawn_browser` moved**, so `tests/goldens/tool_surface.json`
 is regenerated in this change: the `session` documentation now states that a
