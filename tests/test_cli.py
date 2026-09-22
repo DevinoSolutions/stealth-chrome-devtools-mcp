@@ -378,10 +378,10 @@ class TestKillOrphansForceWarning:
     ):
         """The count must reach the terminal BEFORE anything can die, so the
         assertion is made from inside the reaper itself."""
-        from tests import fakes
+        from fakes import held_profile
 
         logged_in = _named(tmp_session_root["sessions"], "github-session", model_mb=1)
-        fakes.held_profile(logged_in)
+        held_profile(logged_in)
         self._bind(monkeypatch, tmp_path, {"a": self._entry(logged_in)})
 
         printed = {}
@@ -417,15 +417,14 @@ class TestKillOrphansForceWarning:
         `str(path)` turns this RED. A pin that is green in a RED census is not
         thereby an invariant; it is a pin nobody has shown can fail.
         """
-        from tests import fakes
-
+        from fakes import held_profile
         from stealth_chrome_devtools_mcp.embedded.browser_pid_registry import (
             normalize_path,
         )
 
         sessions = tmp_session_root["sessions"]
         logged_in = _named(sessions, "github-session", model_mb=1)
-        fakes.held_profile(logged_in)
+        held_profile(logged_in)
         self._bind(monkeypatch, tmp_path, {"a": self._entry(logged_in)})
 
         probe, reap = self._no_backend_and_no_reap()
@@ -538,11 +537,11 @@ class TestKillOrphansForceWarning:
         ENDS these browsers" beside a record holding clones too implied the
         clones were safe and that the toll was exactly 2. Scope first, harm
         second."""
-        from tests import fakes
+        from fakes import held_profile
 
         sessions = tmp_session_root["sessions"]
         logged_in = _named(sessions, "github-session", model_mb=1)
-        fakes.held_profile(logged_in)
+        held_profile(logged_in)
         clone = _auto(sessions, "sess-auto", mb=1)
         self._bind(
             monkeypatch,
@@ -569,10 +568,10 @@ class TestKillOrphansForceWarning:
         they are about to end — a pre-flight that overstates is one nobody
         reads the second time. The profile is HELD deliberately: the wording
         branch under test only exists in the shape that has something to end."""
-        from tests import fakes
+        from fakes import held_profile
 
         logged_in = _named(tmp_session_root["sessions"], "github-session", model_mb=1)
-        fakes.held_profile(logged_in)
+        held_profile(logged_in)
         self._bind(monkeypatch, tmp_path, {"a": self._entry(logged_in)})
 
         probe, reap = self._no_backend_and_no_reap()
