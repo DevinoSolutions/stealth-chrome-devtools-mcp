@@ -428,11 +428,13 @@ nothing was using. A profile is held by a whole process TREE and
 renderer, a GPU process or a crashpad handler counted as the holder and was
 NAMED as one in the refusal. `close_instance` waits for and kills the BROWSER
 only (a `--type=` child is deliberately never waited on, F-910), so for a window
-after every close the survivors were exactly that: children of a browser that
-had gone. Measured on release gate run 35689647688, `integration (Windows/X64)`:
-an unnamed spawn refused with "the 'default' session is open in a browser this
-backend does not drive (pid 8084)" immediately after the previous test closed
-its own browser on that profile.
+after every close a surviving child is enough to make the profile read held.
+Release gate run 35689647688, `integration (Windows/X64)`: an unnamed spawn
+refused with "the 'default' session is open in a browser this backend does not
+drive (pid 8084)" immediately after the previous test closed its own browser on
+that profile. That log is the symptom and not the proof — it does not say
+whether 8084 was the browser or a child — so both defects are established by
+reading the code and the shape is pinned hermetically.
 
 `browser_cmdline.browser_members` is the one rule now —
 `browser_reattach.held_by` has asked its structural half since F-888 and

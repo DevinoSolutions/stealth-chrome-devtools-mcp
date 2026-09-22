@@ -51,12 +51,26 @@ Chromium-family process carrying `--user-data-dir=<dir>` and applies no
 as driven) and Phase 2b waits on `process_exit.browser_pid`, which **answers
 `None` for any `--type=` child by design** (F-910: waiting on a renderer would
 report "exited" while the browser was still flushing its cookie store);
-`process_exit.terminate` then ends the browser alone. On Windows every member of
-the tree is `chrome.exe`. So for a window after every close, a surviving child
-made the profile read HELD by a pid nothing drives.
+`process_exit.terminate` then ends the browser alone. The logic is
+platform-neutral; Windows only makes every tree member `chrome.exe`. So for a
+window after every close, a surviving child is enough to make the profile read
+HELD by a pid nothing drives.
 
 The two compound: (b) manufactures a false holder, (a) removes the one path
 that would have looked at it and found nothing to adopt.
+
+### What the gate log does and does not establish
+
+It establishes the REFUSAL, and that it landed on the shared profile one test
+after a close of that profile. It does **not** say whether pid 8084 was the
+browser or one of its children — no `reattach`, `adopt` or `reattach_declined`
+line appears in the run at all. So the log is the *symptom*; both defects are
+established by reading the code above, and the SHAPE is pinned hermetically
+(`tests/test_profile_lock.py::TestWhichMemberOfTheTreeHolds`,
+`test_orphaned_children_of_a_closed_browser_do_not_refuse`) rather than inferred
+from it. The hermetic fixtures deliberately do **not** reuse 8084 as a child's
+pid, because dressing a fixture in the incident's pid asserts exactly the thing
+the log leaves open.
 
 ## 3. Root cause
 
@@ -99,6 +113,32 @@ The last row is the direction this codebase takes everywhere (`_pid_alive`,
 could not establish resolves toward not acting. A pid *missing* from the process
 table is a different thing and contributes nothing — the scan and this read are
 two moments, and a process that exited between them is an established negative.
+
+### Why `profile_lock` and not `profile_target`
+
+Triage's first option was to narrow `profile_target.hand_over_or_refuse` —
+refuse only on a holder `browser_cmdline.browser_process` identifies as the
+browser, the way `browser_reattach.held_by` already does. It is one level too
+high, for three reasons, and the third is measured:
+
+1. **One home per question.** "Is this directory held, and by whom" is a FACT and
+   it is `profile_lock`'s; `profile_target`'s own row says it answers "what do we
+   do about it", which is a POLICY. Correcting the fact inside the policy is the
+   second-way defect that row warns about, and it leaves `profile_lock` still
+   answering wrongly for everyone else.
+2. **The pid in the message is composed in `profile_lock`.** `Hold.reason` is
+   what F-914's refusal and `walk_reason` quote verbatim, so a fix in
+   `profile_target` would still name a renderer as the holder.
+3. **`profile_target` is not the only consumer, and the others matter.**
+   `clone_storage._profile_has_running_browser` is the same answer as a bool and
+   is asked at eight further sites. Two are load-bearing here:
+   `_refresh_master_snapshot_if_safe` (`clone_storage.py`:448) answers
+   `seed_error: "default-in-use"` and **refreshes nothing** while it reads held —
+   so a lingering child would keep the SEED stale after the shared browser
+   closed, which is F-914/F-915's own "five and a half hours behind" complaint
+   arriving by a second route; and `cli.py`:126 prints `in_use` per profile in
+   `stealthy profiles`, telling an operator a closed session is open. Fixing the
+   witness fixes all ten sites at once; fixing `profile_target` fixes two.
 
 ### Why `profile_lock` and not `close_instance`
 

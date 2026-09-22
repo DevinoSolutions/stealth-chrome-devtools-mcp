@@ -226,30 +226,38 @@ class TestWhichMemberOfTheTreeHolds:
     The consequence is not cosmetic. ``close_instance`` waits for the BROWSER's
     own exit (``process_exit.browser_pid`` answers ``None`` for any ``--type=``
     child, deliberately) and kills only the browser, so for a window after a
-    close a surviving child made the profile read HELD — and since F-914 a held
-    profile we do not drive is REFUSED. Measured on the release gate
-    (``integration (Windows/X64)``, run 35689647688): an unnamed spawn refused
+    close a surviving child is enough to make the profile read HELD — and since
+    F-914 a held profile we do not drive is REFUSED. On the release gate
+    (``integration (Windows/X64)``, run 35689647688) an unnamed spawn refused
     with "the 'default' session is open in a browser this backend does not
     drive (pid 8084)" immediately after the previous test closed its own
     browser on that profile.
+
+    **That log is the symptom, not the proof, and these nodes are the proof.**
+    It never says whether 8084 was the browser or one of its children, so the
+    fixtures below deliberately do NOT reuse that pid: dressing a renderer in
+    the incident's number would assert exactly the thing the log leaves open.
+    The defect is read off ``profile_hold``'s ``min(pids)`` over a scan with no
+    ``--type`` filter, and pinned here without a Chrome.
     """
 
     def test_a_tree_with_no_browser_member_left_does_not_hold(
         self, tmp_path, monkeypatch
     ):
         """Every survivor carries a ``--type=``, so the browser has gone and
-        what is left holds no profile. This is the gate's own shape."""
+        what is left holds no profile. This is the shape the window after a
+        close leaves — neutral pids, for the reason in the class docstring."""
         fake_process_table(
             monkeypatch,
             {
-                8084: child_argv("renderer", str(tmp_path)),
-                8085: child_argv("gpu-process", str(tmp_path)),
-                8086: child_argv("crashpad-handler", str(tmp_path)),
+                4101: child_argv("renderer", str(tmp_path)),
+                4102: child_argv("gpu-process", str(tmp_path)),
+                4103: child_argv("crashpad-handler", str(tmp_path)),
             },
         )
 
         assert (
-            profile_lock.profile_hold(tmp_path, lambda _d: {8084, 8085, 8086}) is None
+            profile_lock.profile_hold(tmp_path, lambda _d: {4101, 4102, 4103}) is None
         )
 
     def test_the_hold_names_the_browser_and_not_the_lowest_pid(

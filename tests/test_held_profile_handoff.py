@@ -306,13 +306,16 @@ class TestTheHeldSharedSession:
         ``close_instance`` waits for and kills the BROWSER only — a ``--type=``
         child is deliberately never waited on (``process_exit.browser_pid``) —
         so for a window after a close the shared profile's tree still has
-        members in it. Under the shipped witness that window refused the very
-        next unnamed spawn, about a profile whose browser was already gone:
-        measured on the release gate, ``integration (Windows/X64)`` run
-        35689647688, two tests of the same file in succession.
+        members in it, and under the shipped witness that is enough to refuse
+        the very next unnamed spawn about a profile whose browser has gone.
+
+        The release gate showed that refusal one test after a close
+        (``integration (Windows/X64)`` run 35689647688) but never said whether
+        the pid it named was the browser or a child — so this node is the proof
+        and the pids below are deliberately not the gate's.
         """
         master = tmp_session_root["master"]
-        children = {8084: 8084, 8085: 8085}
+        children = {4201: 4201, 4202: 4202}
         monkeypatch.setattr(
             clone_storage.process_cleanup,
             "_get_browser_pids_for_profile",
