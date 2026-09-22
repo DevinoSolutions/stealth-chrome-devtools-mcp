@@ -25,7 +25,6 @@ import itertools
 import os
 import re
 import threading
-import time
 import urllib.parse
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -179,8 +178,9 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
     except OSError:
         return []
     for entry in entries:
-        if entry.name == clone_trash.TRASH_DIRNAME:
-            continue  # recoverable-eviction holding area — never a clone itself
+        name = entry.name
+        if name == clone_trash.TRASH_DIRNAME or profile_copy.is_scratch(name):
+            continue  # not a clone: the eviction holding area, or F-925 scratch
         try:
             if not entry.is_dir() or not clone_is_auto(entry):
                 continue
@@ -268,9 +268,10 @@ def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> list[P
     except OSError:
         return []
     for entry in entries:
-        if entry.name == clone_trash.TRASH_DIRNAME:
-            continue  # trashed clones are not named profiles and must not
-            # inflate the session-cap total, or real profiles get over-trimmed
+        name = entry.name
+        if name == clone_trash.TRASH_DIRNAME or profile_copy.is_scratch(name):
+            continue  # trashed clones and F-925 scratch are not named profiles
+            # and must not inflate the session-cap total, or real ones over-trim
         try:
             if not entry.is_dir():
                 continue
@@ -395,34 +396,42 @@ def _copy_profile_tree(
     source: Path, target: Path, clone_root: Path, source_kind: str = "profile"
 ) -> str | None:
     """Copy *source* over *target*, and report whether the copy actually RAN:
-    None when it did, ``TARGET_IN_USE`` when a live browser holds the target.
+    None when it did, ``TARGET_IN_USE`` when a live browser holds the target,
+    when the tree there could not be moved aside, or when the publish rename
+    raised and the displaced tree was put back.
 
     Refusing is right — rewriting a directory a Chrome is writing to would be
     the harm — but it is not success, and the bare ``return`` it used to be let
     the refresh report a refreshed snapshot with not one byte moved (F-893).
-    The other two callers hand the answer to ``_require_copied``."""
+    The other two callers hand the answer to ``_require_copied``.
+
+    The copy is BUILT BESIDE the target and published in one rename, which is
+    ``profile_copy.replace_tree``'s and argued there: this function used to
+    ``rmtree`` the target and rebuild in place, so for the whole of a ~101 MB
+    copy the SEED every later session comes from was absent or half-written —
+    permanently so if anything killed the process in that window, because the
+    repair refresh is refused while the shared browser is open and every
+    consumer tests ``exists()``, which an empty directory passes (F-925)."""
     if not source.exists():
         target.mkdir(parents=True, exist_ok=True)
         return None
     if not _is_relative_to(target, clone_root):
         raise ValueError(f"Refusing to refresh clone outside clone root: {target}")
-    if target.exists():
-        if _profile_has_running_browser(target):
-            return TARGET_IN_USE
-        profile_copy.rmtree_robust(target)
-    target.mkdir(parents=True, exist_ok=True)
-    profile_copy.copy_delta(source, target)
-    time.sleep(0.2)
-    profile_copy.copy_delta(source, target)
-    profile_seed.write_marker(
+    if target.exists() and _profile_has_running_browser(target):
+        return TARGET_IN_USE
+    published = profile_copy.replace_tree(
+        source,
         target,
-        source=source,
-        source_kind=source_kind,
-        seeded_from=profile_seed.seed_name(
-            source, master_profile_dir(), master_snapshot_dir()
+        stamp=lambda staged: profile_seed.write_marker(
+            staged,
+            source=source,
+            source_kind=source_kind,
+            seeded_from=profile_seed.seed_name(
+                source, master_profile_dir(), master_snapshot_dir()
+            ),
         ),
     )
-    return None
+    return None if published else TARGET_IN_USE
 
 
 def _require_copied(refusal: str | None, target: Path) -> None:
@@ -560,11 +569,9 @@ def _available_clone_dir(base_clone: Path) -> Path:
 
 
 def _next_available_explicit_dir(requested: Path, *, fresh: bool = False) -> Path:
-    """Return the next free variant of a user-supplied profile path.
-
-    When ``sessions/github-session`` is busy, tries ``sessions/github-session-2``,
-    ``sessions/github-session-3``, … up to -99, then falls back to a timestamp
-    suffix.  Uses clean numeric suffixes (no PID) because these are user-visible.
+    """The next free variant of a busy user-supplied profile path: ``-2``,
+    ``-3``, … up to -99, then a timestamp suffix. Clean numeric suffixes and no
+    PID, because these names are user-visible.
 
     ``fresh`` also skips a candidate that merely EXISTS, and is the HAND-OVER
     walk's alone — ``profile_target`` argues why, and why it is not the default.
@@ -639,38 +646,32 @@ def require_allowed_seed_from(
     """THE gate for a ``seed_from`` request (F-897): the name it may be, and
     that there is a NEW session for it to apply to. None when none was given.
 
-    It takes *landed* — ``require_allowed_user_data_dir``'s answer, the
-    DIRECTORY the caller's session request means — so "is this the shared
-    session" and "does it already exist" are asked about the directory a
-    request MEANS. Both are wrong for a relative spelling otherwise.
+    It takes *landed* — ``require_allowed_user_data_dir``'s answer, the DIRECTORY
+    the caller's session request MEANS — so "is this the shared session" and
+    "does it already exist" are asked about it, not about a relative spelling.
 
-    Asked TWICE on ``require_allowed``'s precedent, and for a sharper reason:
-    ``spawn_browser`` asks it in front of ``browser_reattach.adopt_held_profile``,
-    because a session whose browser is still running is a session that EXISTS —
-    so without it ``spawn --session work --from other`` would be silently
-    ADOPTED onto the running ``work`` browser with nothing said about the flag.
-    The resolver asks again because it is public and has its own callers.
+    Asked TWICE on ``require_allowed``'s precedent, for a sharper reason:
+    ``spawn_browser`` asks it ahead of ``browser_reattach.adopt_held_profile``,
+    because a session whose browser is running EXISTS — so without it
+    ``spawn --session work --from other`` is silently ADOPTED onto that running
+    browser, nothing said about the flag. The resolver asks again: it is public.
 
     The SOURCE question is asked here too and its answer DISCARDED (review S1;
-    finding §2.3): its three refusals are raised inside
-    ``profile_source.seed_source``, which the resolver calls from INSIDE
-    ``spawn_browser``'s ``try``, so they reached the caller re-labelled
-    ``Failed to spawn browser: ...``, and an inner ``except ToolError: raise``
-    does not fix that. Discarding is the point: "is this source open" is a fact
-    with a LIFETIME, so the read that DECIDES stays the statement before the
-    copy, with no ``await`` between.
+    finding §2.3): its refusals are raised inside ``profile_source.seed_source``,
+    which the resolver calls from INSIDE ``spawn_browser``'s ``try``, so they
+    reached the caller re-labelled ``Failed to spawn browser: ...``, and an inner
+    ``except ToolError: raise`` does not fix that. Discarding is the point: "is
+    this source open" is a fact with a LIFETIME, so the read that DECIDES stays
+    the statement before the copy, with no ``await`` between.
 
-    *check_source* is False for exactly one caller, the RESOLVER (memo review
-    S): its ask already runs inside that ``try``, and ``_seed_source_for_copy``
-    raises the same sentences one statement later with no ``await`` between, so
-    a third walk of the process table decides nothing. A 1 s memo bought the
-    same saving and is REPLACED by this flag — no process-global state, no
-    clock, no reset hook, no answer that can go stale. What is left is one
-    ``exists()`` and a psutil walk only where the answer is used.
+    *check_source* is False for exactly one caller, the RESOLVER (memo review S):
+    its ask already runs inside that ``try`` and ``_seed_source_for_copy`` raises
+    the same sentences one statement later with no ``await`` between, so a third
+    walk of the process table decides nothing. The 1 s memo it replaced is
+    argued at ``profile_source``.
 
     *driven* is F-898's witness — "does THIS backend hold a browser there" —
-    passed to ``_seed_source``; its rule and its NO default are
-    ``profile_source``'s."""
+    passed to ``_seed_source``; its rule and NO default are ``profile_source``'s."""
     requested = profile_source.seed_request(seed_from)
     if requested is None:
         return None
