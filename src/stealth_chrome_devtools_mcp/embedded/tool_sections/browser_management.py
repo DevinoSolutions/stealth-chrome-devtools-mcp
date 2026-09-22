@@ -138,11 +138,16 @@ async def spawn_browser(
             ``block_resources`` IS applied. What the dead backend held and nobody
             can read back off a running browser is named in
             ``spawn_diagnostics["not_restored"]``. The one case that refuses is a
-            browser some OTHER LIVE backend still owns (two backends driving one
-            Chrome is a defect); you get a normal spawn plus
-            ``spawn_diagnostics["reattach_declined"]`` saying so, and the old
-            browser is left running and untouched — stop that backend first, see
-            RUNBOOK, "Recover a stranded login".
+            browser this backend does not DRIVE — another backend's Chrome, or
+            the human's own — because its cookies can only come over a CDP
+            connection of ours and there is none: a copy of a profile Chrome is
+            writing to carries none of them. Since F-915 that REFUSES the whole
+            spawn rather than starting a new browser beside it. Nothing is
+            created, that browser is left running and untouched, and the error
+            names the holder and both ways on — close it (``stealthy close``, or
+            stop the backend that owns it: RUNBOOK, "Recover a stranded login")
+            and spawn again, or pass a free ``session`` name for a new session
+            of your own.
         seed_from (Optional[str]): The NAME of an existing session to copy when
             ``session`` names one that does not exist yet — so a new session
             starts with that session's cookies and logins instead of the
@@ -374,8 +379,12 @@ async def spawn_browser(
                     # process — this handler has already run for it and
                     # `close_instance`, the only other release, never will.
                     continue
+                # The SAME witness the first selection was made with (F-914):
+                # this is the second door onto the held-shared-session rule, and
+                # a retry that asked nobody would answer a held `default` with
+                # the clone the resolver refuses one call earlier.
                 fallback_selection = await rt.clone_storage._fallback_profile_selection(
-                    profile_selection, spawn_attempt
+                    profile_selection, spawn_attempt, driven=driven.holds
                 )
                 if fallback_selection is None:
                     raise
@@ -416,15 +425,26 @@ async def spawn_browser(
                 # <name>-N is an identity change. It LEADS the field a caller
                 # actually reads, rather than sitting quietly beside it in
                 # walk_reason — same field set, no second diagnostics home.
+                #
+                # F-915 changed what that change COSTS, so the sentence had to
+                # change with it: a walk now happens only when this backend
+                # drives the holder, and the new directory is copied from that
+                # holder with its jar handed over — so "with none of the cookies
+                # or logins the requested one holds" became false the moment the
+                # only walk left was one carrying them. What is still true, and
+                # is what the warning now says, is that it is a DIFFERENT
+                # directory: the two diverge from here on, and whatever the
+                # holder keeps outside its cookie jar did not come across.
                 walked = profile_selection.get("walk_reason")
                 substitution = (
-                    f"NOT the profile you asked for: "
-                    f"{profile_selection.get('requested_user_data_dir')} is in use "
-                    f"({walked}), so this spawn got "
-                    f"{profile_selection.get('walked_to')} — a DIFFERENT profile, "
-                    f"either a fresh copy of the default session's seed or one "
-                    f"an earlier walk left behind, with none of the cookies or "
-                    f"logins the requested one holds. "
+                    f"NOT the directory you asked for: "
+                    f"{profile_selection.get('requested_user_data_dir')} is open "
+                    f"in a browser this backend drives ({walked}), so this spawn "
+                    f"got {profile_selection.get('walked_to')} — a COPY of it, "
+                    f"with its cookies handed over (see seeded_via) so the "
+                    f"logins come too. The two are separate profiles from now "
+                    f"on, and anything the original keeps outside its cookie "
+                    f"jar did not come with them. "
                     if walked
                     else ""
                 )

@@ -86,7 +86,12 @@ def failing_spawn(monkeypatch, patched_server):
     async def fake_resolve(user_data_dir, **kwargs):
         return {"user_data_dir": "/fake/dir", "profile_role": "default"}
 
-    async def no_retry(previous_selection, attempt):
+    async def no_retry(previous_selection, attempt, *, driven=None):
+        # ``driven`` is F-914's witness, NAMED rather than swallowed by a
+        # ``**kwargs``: this function is the second door onto the
+        # held-shared-session rule, and a double that tolerates whatever it is
+        # handed cannot fail when the real surface changes
+        # (``test_extra_headers_cdp``'s rule, stated on its own double).
         return None
 
     async def doomed_spawn(options):

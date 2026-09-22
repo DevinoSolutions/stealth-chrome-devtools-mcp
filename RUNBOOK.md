@@ -381,11 +381,12 @@ Two cases still need a hand.
 **The owner backend is still ALIVE (wedged, or just unreachable because every
 proxy that could talk to it has died).** Adoption refuses a browser whose owner is
 a live backend of ours, and it must — two backends driving one Chrome is what
-F-886 exists to prevent. You will see the refusal rather than guess at it: the
-spawn succeeds onto a different directory and its answer carries
-`spawn_diagnostics.reattach_declined` naming the live owner, and the browser you
-were reaching for is left running and untouched. Stop that backend first, then
-start a session:
+F-886 exists to prevent. Since F-915 the spawn then REFUSES rather than landing
+you on a different directory: that browser holds the session's cookies, a copy of
+a profile Chrome is writing to carries none of them, and a substitute reported
+only as a `profile_role` reads from the chair as "my logins are gone". Nothing is
+created, the browser you were reaching for is left running and untouched, and the
+refusal names the holder. Stop that backend first, then start a session:
 
 ```console
 stealth-chrome-devtools status          # read the port off the summary
@@ -400,13 +401,17 @@ backend still kills them on the way out — install this release **before** the
 stop.)
 
 **The browser cannot be re-attached at all** (Chrome is wedged, or nothing in the
-ladder names a port). On the spawn path this never kills it — the spawn just
-proceeds normally and you get a *different* directory, reported in
-`spawn_diagnostics.profile_selection.walked_to`, and
-`spawn_diagnostics.reattach_declined` says which of the three refusals it was, so
-"a browser is there and we could not get in" is never confused with "that
-directory was free". If that happens, the old Chrome is still running and can be
-closed by hand. On the *startup recovery* path a
+ladder names a port). On the spawn path this never kills it, and since F-915 it
+never walks around it either: asking for that session is REFUSED by name, nothing
+is created, and the old Chrome is left running and closeable by hand. The refusal
+says which browser holds it and gives you both ways on — close it and spawn again
+to get that session, or `--session <a free name>` for a NEW session of your own,
+a fresh copy of the seed holding none of that session's logins. So "a browser is
+there and we could not get in" is never confused with "that directory was free".
+`spawn_diagnostics.profile_selection.walked_to` still exists and now means one
+thing only: the holder was a browser THIS backend *drives*, so the spawn got a
+COPY of it with the cookies handed over live (`seeded_via`) — the one
+substitution that keeps the login. On the *startup recovery* path a
 recorded browser that cannot be reached is reaped exactly as 2.1.9 reaped it, but
 the **profile directory is spared** either way, so the on-disk cookies survive for
 a fresh spawn — you may just have to log in again if the session cookies are gone.
