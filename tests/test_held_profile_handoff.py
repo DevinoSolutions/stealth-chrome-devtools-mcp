@@ -40,6 +40,11 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 #: proof the copy came from the HELD directory and not from the shared seed.
 HELD_COOKIE = b"held-session-cookie-jar"
 
+#: What a CLOSED leftover from an EARLIER walk holds. Distinct from both
+#: ``HELD_COOKIE`` and the seed, so a session carrying it is provably a third
+#: identity — neither the holder's jar nor a fresh copy of anything.
+STALE_COOKIE = b"stale-walked-to-leftover"
+
 #: The profile-relative jar. Spelled here rather than read out of
 #: ``LOGIN_WITNESSES``: a pin that derived its fixture from the list it checks
 #: would be comparing the code to itself.
@@ -111,6 +116,40 @@ class TestAHeldNamedSession:
         assert selection[clone_storage.LIVE_SEED_KEY] == str(work)
         assert selection["handed_over_from"] == "work"
         assert selection["walked_to"] == selection["user_data_dir"]
+
+    async def test_a_hand_over_never_lands_on_a_leftover_walk_target(
+        self, tmp_session_root
+    ):
+        """A CLOSED ``work-2`` an earlier walk left behind is not somewhere a
+        hand-over may land.
+
+        The walk target came from ``_next_available_explicit_dir``, which skips
+        a candidate that is BUSY and never one that merely EXISTS — while
+        ``resolve_profile_selection`` gates the copy AND the ``LIVE_SEED_KEY``
+        stamp on the target not existing. So the leftover was handed back
+        verbatim: nothing copied, nothing handed over, and the caller got
+        whatever that directory last held. A STALE THIRD identity — neither the
+        holder's jar nor a fresh copy of anything — under a warning that says
+        its cookies came across. That is F-915's substitution with one extra
+        step, and it is not hypothetical: the finding's own 17 leftover
+        directories, one at ``-22``, are exactly the population the first walk
+        after this lane ships would land on.
+        """
+        work = await _session_with_a_login("work", tmp_session_root)
+        stale = tmp_session_root["sessions"] / "work-2"
+        stale_jar = stale / COOKIE_JAR
+        stale_jar.parent.mkdir(parents=True, exist_ok=True)
+        stale_jar.write_bytes(STALE_COOKIE)
+        held_profile(work)
+
+        selection = await _selection(session="work", driven=_driving(work))
+        landed = Path(selection["user_data_dir"])
+
+        assert landed != stale, f"the hand-over reused the leftover {stale.name}"
+        assert selection[clone_storage.LIVE_SEED_KEY] == str(work)
+        assert selection["handed_over_from"] == "work"
+        assert (landed / COOKIE_JAR).read_bytes() == HELD_COOKIE
+        assert stale_jar.read_bytes() == STALE_COOKIE, "the leftover was written to"
 
     async def test_the_copy_comes_from_the_held_session_not_the_seed(
         self, tmp_session_root

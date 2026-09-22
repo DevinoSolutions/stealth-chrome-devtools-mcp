@@ -64,14 +64,20 @@ refuse by name. What differs is only which directory is asked about.
 The walk is now CONDITIONAL, and `profile_target.hand_over_or_refuse` is the
 same one home F-914's shared branch asks:
 
-* **driven** -> the walk happens exactly as F-871 shaped it, three fields and
-  all, but the copy source is the **HOLDER'S OWN DIRECTORY** rather than the
+* **driven** -> the walk still REPORTS itself as F-871 shaped it, three fields
+  and all, but the copy source is the **HOLDER'S OWN DIRECTORY** rather than the
   shared seed, and the holder's jar is handed over afterwards over CDP. A named
   session has no closed copyable form of its own (per-session seeds were
   declined in F-898 §10.1), so the holder IS the only source there is; the file
   half loses whatever Chrome holds open and the cookies arrive through
   `cookie_handoff`, which is the mechanism F-898 built for exactly this.
-  `seeded_via` and `handed_over_from` say so.
+  `seeded_via` and `handed_over_from` say so. **What is NOT as F-871 shaped it
+  is which directory the ladder picks**: it skipped a candidate that was BUSY
+  and never one that merely EXISTED, while the copy and the stamp are both gated
+  on the target being new — so a closed leftover came back with no copy and no
+  hand-off at all, which is this finding's own substitution one step along. On
+  this path the ladder now skips what exists, and its timestamp rung carries the
+  per-spawn attempt token so it cannot land on an existing directory past `-99`.
 * **not driven** -> `ToolError`, session and holder pid, no path, nothing
   created.
 
@@ -94,7 +100,13 @@ owner has not authorised removing any housekeeping residue. They remain visible
 in `stealthy profiles`, which lists every directory under the clone root
 unfiltered, and each carries a marker saying it was seeded from `default`. An
 operator who wants the space back can remove them by hand. What the fix
-guarantees is that **no eighteenth one is created**.
+guarantees is that **none of them is ever landed on again, and no eighteenth is
+created by a SUBSTITUTION** — a holder we cannot reach refuses instead of
+producing one. A walk we DO take still creates a new directory, deliberately
+and reported: it is a copy of the holder carrying that holder's cookies, which
+is the opposite of what the seventeen are. Reusing one instead was the review
+BLOCK on this lane, because the copy and the hand-off are gated on the target
+being new, so a reused leftover carried neither.
 
 **A spawn onto a held session we do not drive now fails** where it used to
 succeed with a stranger. That is the ruling applied literally. The two remedies

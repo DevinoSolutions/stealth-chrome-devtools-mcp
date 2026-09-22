@@ -559,20 +559,26 @@ def _available_clone_dir(base_clone: Path) -> Path:
     return base_clone.with_name(f"{base_clone.name}-{_attempt_token()}")
 
 
-def _next_available_explicit_dir(requested: Path) -> Path:
+def _next_available_explicit_dir(requested: Path, *, fresh: bool = False) -> Path:
     """Return the next free variant of a user-supplied profile path.
 
     When ``sessions/github-session`` is busy, tries ``sessions/github-session-2``,
     ``sessions/github-session-3``, … up to -99, then falls back to a timestamp
     suffix.  Uses clean numeric suffixes (no PID) because these are user-visible.
+
+    ``fresh`` also skips a candidate that merely EXISTS, and is the HAND-OVER
+    walk's alone — ``profile_target`` argues why, and why it is not the default.
     """
-    for index in range(2, 100):
-        candidate = requested.with_name(f"{requested.name}-{index}")
-        if not _dir_unavailable(candidate):
+    stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    if fresh:
+        # Unique per spawn here, so the ladder cannot run out ONTO an existing
+        # directory at the -99 boundary. `profile_target` says why that matters.
+        stamp = f"{stamp}-{_attempt_token()}"
+    for suffix in (*range(2, 100), stamp):
+        candidate = requested.with_name(f"{requested.name}-{suffix}")
+        if not _dir_unavailable(candidate) and not (fresh and candidate.exists()):
             return candidate
-    return requested.with_name(
-        f"{requested.name}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
-    )
+    return requested.with_name(f"{requested.name}-{stamp}")
 
 
 def _copy_clone_from_source(
@@ -832,7 +838,8 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
                 holder = profile_target.hand_over_or_refuse(
                     explicit, hold, _roots(), driven=driven
                 )
-                requested, explicit = explicit, _next_available_explicit_dir(explicit)
+                requested = explicit
+                explicit = _next_available_explicit_dir(explicit, fresh=True)
                 walk = {
                     "requested_user_data_dir": str(requested),
                     "walked_to": str(explicit),
