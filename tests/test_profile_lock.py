@@ -90,11 +90,18 @@ def fake_process_table(monkeypatch, table: dict[int, list[str] | None]) -> None:
     ``AccessDenied`` on an elevated Chrome); a pid absent from the table has
     EXITED. The two are different answers and this fixture keeps them apart,
     because the whole of F-931's direction rule turns on it.
+
+    It patches ``browser_cmdline._still_running`` and never
+    ``psutil.pid_exists``: the two modules share ONE psutil module object, so
+    setting the attribute there also rebinds ``profile_lock._pid_alive``'s
+    witness — which read this test's own live ``SingletonLock`` as orphaned and
+    made a correct fall-through look like a defect. A seam of ours, in the
+    module that owns the question.
     """
     monkeypatch.setattr(
         browser_cmdline, "arguments", lambda pid: list(table.get(pid) or [])
     )
-    monkeypatch.setattr(browser_cmdline.psutil, "pid_exists", lambda pid: pid in table)
+    monkeypatch.setattr(browser_cmdline, "_still_running", lambda pid: pid in table)
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +286,52 @@ class TestWhichMemberOfTheTreeHolds:
         assert hold is not None
         assert hold.pid == 2002
         assert "2002" in hold.reason
+
+    def test_the_unreadable_reason_names_a_pid_we_could_not_read(
+        self, tmp_path, monkeypatch
+    ):
+        """The sentence is quoted VERBATIM by F-914's refusal, so the pid in it
+        has to be one the claim is about.
+
+        ``min(pids)`` over the whole scan names whichever sorted first, which is
+        routinely a member we read perfectly well — here a renderer we
+        positively identified as a child. Telling an operator that pid 1001
+        "could not be read" sends them after the wrong process, and it is the
+        same class of defect as the ``min(pids)`` holder F-931 removes one
+        branch above.
+        """
+        fake_process_table(
+            monkeypatch,
+            {
+                1001: child_argv("renderer", str(tmp_path)),
+                7007: None,
+            },
+        )
+
+        hold = profile_lock.profile_hold(tmp_path, lambda _d: {1001, 7007})
+
+        assert hold is not None
+        assert hold.pid == 7007
+        assert "7007" in hold.reason
+        assert "1001" not in hold.reason
+
+    def test_a_child_only_tree_still_consults_the_lock(self, tmp_path, monkeypatch):
+        """The fall-through is the whole of why a child-only tree is safe.
+
+        ``profile_hold``'s ``if pids: … elif pids is None:`` restructure is
+        exactly where it could be lost: an early ``return None`` for a tree with
+        no browser member would make this module stop asking Chrome's own
+        singleton, and a POSIX profile whose lock names a LIVE browser would be
+        shown free. Children present AND a live lock must answer the lock.
+        """
+        held_profile(tmp_path)
+        fake_process_table(monkeypatch, {4101: child_argv("renderer", str(tmp_path))})
+
+        hold = profile_lock.profile_hold(tmp_path, lambda _d: {4101})
+
+        assert hold is not None
+        assert hold.pid == os.getpid()
+        assert profile_lock.LOCK_NAME in hold.reason
 
     def test_a_member_we_could_not_read_still_reads_as_held(
         self, tmp_path, monkeypatch

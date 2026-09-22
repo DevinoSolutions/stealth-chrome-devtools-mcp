@@ -77,10 +77,11 @@ the log leaves open.
 Both are one shape — **a question asked in two places and answered differently.**
 
 `browser_reattach.held_by` has asked `browser_cmdline.browser_process` since
-F-888 for exactly this reason ("the pid it names is whichever member of the
-holding process TREE its witness iterated first … a renderer or a utility five
-times out of six"). `profile_lock.profile_hold` is the *other* consumer of that
-same scan and never asked. And the re-attach itself was keyed on the string the
+F-888 for exactly this reason — its docstring said the pid `profile_hold` names
+is whichever member of the holding tree the witness iterated first, a renderer
+or a utility five times out of six. `profile_lock.profile_hold` is the *other*
+consumer of that same scan and never asked. (That sentence is now false of the
+product and has been corrected at every copy; see §7.) And the re-attach itself was keyed on the string the
 caller typed rather than on the directory the selection would land on, so the
 one profile a caller can reach without typing anything was the one profile the
 re-attach could not see.
@@ -185,10 +186,18 @@ It was also latently flaky — 4242 may be a live process on a busy machine.
 `master_profile_dir`, on that file's own stated rule: a double that offers less
 than the real surface turns a renamed call into a red about something else.
 
-`tests/goldens/tool_surface.json` is **not** regenerated: `spawn_browser`'s
-return schema is unchanged. What changed is which of two equal spellings can
-re-attach, and an adoption already returned the same five keys as a spawn
-(`_adopted_instance_record`, F-888).
+**SOFT GOLDEN UPDATED — `tests/goldens/tool_surface.json`** (review H1). The
+first version of this section said the golden was *not* regenerated because the
+return schema is unchanged; that was wrong, and it left the branch CI-red. The
+golden pins the served tool **description**, which is `spawn_browser`'s
+docstring, and this finding edits that docstring to state the re-attach
+guarantee for a spawn naming nothing. Regenerated with
+`python tools/dump_tool_surface.py --write`. The diff is exactly one tool, one
+field, three lines of prose under `session` — no name, no schema, no other tool
+— and F-914 set the precedent for a docstring change carrying the golden with
+it. The justification `tools/dump_tool_surface.py`:5-6 demands: this is not a
+refactor claiming to change nothing, it is a deliberate change to what the tool
+TELLS a caller, made in the same commit as the behaviour it describes.
 
 ## 6. Residuals and cost
 
@@ -222,3 +231,50 @@ re-attach, and an adoption already returned the same five keys as a spawn
    answers with a whole tree, and its other callers (the reap paths) read it
    under `reap_guard`'s rules rather than this one. Unifying them is a separate
    question about killing, not about holding.
+7. **`held_by` still re-reads each member's argv** after `_tree_hold` read it.
+   The expensive half — a second `process_iter` over every process on the
+   machine — is gone (`Hold.members`); what remains is `psutil.cmdline()` over
+   the matched set alone, eleven pids for one real Chrome. Removing it too would
+   mean either carrying a `browser_cmdline.Members` on `Hold` (coupling the two
+   types, and every test double would have to build one) or re-spelling
+   `browser_process`'s one-vs-two-vs-none rule at the call site. Neither is
+   worth it for eleven `cmdline()` reads on a path that is about to open a
+   websocket.
+
+## 7. Review outcomes
+
+**H1 — the golden.** My "3816 passed" was measured at 650f7cd, before the
+docstring commit; the lane at 156eafe was `1 failed, 3815 passed`. A full-lane
+number has to be measured at the tip it is claimed for. See §5.
+
+**M1 — the unreadable branch named a pid it had read.** `_tree_hold` reported
+`min(pids)` over the whole scan, so a tree of `{1001: renderer, 7007: unreadable}`
+answered "a live process (pid 1001) … could not be read" about a member we had
+positively identified as a child. That sentence is F-914's refusal verbatim.
+`Members.unreadable` carries the PIDS now, not a bool, and the branch names one
+of them — the same `min(pids)` defect this finding removes from the browser
+branch, re-made in the branch beside it.
+
+**M2 — the consumer's justification, its message and its second scan.**
+`browser_reattach.held_by`'s docstring and comment still said `profile_hold`
+names an arbitrary tree member; every live copy of that claim is corrected
+(`browser_cmdline.browser_process`, `held_by`, this file, CLAUDE.md's
+`browser_cmdline` row, two test docstrings, one E2E comment). Historic
+statements — the shipped F-888 CHANGELOG entry and
+`finding_F888_persistent_profile_reattach.md` — are left, because they describe
+the release they shipped in. `held_by`'s `Refused` now quotes `hold.reason`
+rather than composing "a live browser holds that directory (pid N)", which for
+the unreadable case asserted both that the pid was a browser and that we had
+established something about it. And `Hold.members` carries the set the witness
+read, so the second `process_iter` is gone (residual 7 names what is left).
+
+**M3 — the fall-through pin.** Added
+(`test_a_child_only_tree_still_consults_the_lock`) and it is **green on both
+sides**: the restructure is correct, as the reviewer's own probe found. It is a
+regression guard for the `if pids: … elif pids is None:` shape, not evidence of
+a defect, and is reported as such rather than dressed up as a RED. Writing it
+did surface a defect in my own earlier fixture: `fake_process_table` patched
+`psutil.pid_exists` on the shared module object, so `profile_lock._pid_alive`
+read this test's live `SingletonLock` as orphaned. It patches
+`browser_cmdline._still_running` — a seam of ours, in the module that owns the
+question — and the node is green.

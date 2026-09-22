@@ -105,10 +105,20 @@ class Hold:
 
     ``pid`` is ``None`` when the holder is named but not addressable from here
     (a lock written on another host).
+
+    ``members`` is the process set this answer was read FROM — empty when the
+    answer came from the lock rather than the process table (F-931 M2). It
+    exists so a consumer asking a DIFFERENT question of the same tree — which
+    member is the browser, and is there exactly one
+    (``browser_reattach.held_by``) — does not walk every process on the machine
+    a second time for a set this module has just read. It is the input to that
+    question and never its answer: who the browser is stays
+    ``browser_cmdline``'s to decide.
     """
 
     pid: int | None
     reason: str
+    members: tuple[int, ...] = ()
 
 
 def profile_hold(profile_dir: Path, live_pids: PidScan) -> Hold | None:
@@ -146,17 +156,29 @@ def _tree_hold(profile_dir: Path, pids: Collection[int]) -> Hold | None:
     :func:`_pid_alive`: one extra walk is survivable, two browsers on one
     profile is not. Only "asked every member, none is a browser" is a negative,
     and it is the one the caller may act on.
+
+    **Each sentence names a pid it is true of** (F-931 M1): the unreadable
+    branch reports one of the pids that could not be READ, never ``min(pids)``
+    over the whole scan, which routinely named a member we had identified
+    perfectly well as a child. That sentence is quoted verbatim by F-914's
+    refusal, so a pid it is not about sends an operator after the wrong process.
     """
     members = browser_cmdline.browser_members(pids, str(profile_dir))
+    scanned = tuple(pids)
     if members.browsers:
         pid = min(members.browsers)
-        return Hold(pid, f"a live browser process (pid {pid}) has this profile open")
+        return Hold(
+            pid,
+            f"a live browser process (pid {pid}) has this profile open",
+            members=scanned,
+        )
     if members.unreadable:
-        pid = min(pids)
+        pid = min(members.unreadable)
         return Hold(
             pid,
             f"a live process (pid {pid}) on this profile could not be read, so "
             "this profile cannot be shown free",
+            members=scanned,
         )
     return None
 

@@ -96,18 +96,24 @@ def browser_process(pids: Collection[int] | None, expect_dir: str) -> int | None
     """Which of *pids* is the BROWSER process on *expect_dir* — not one of its
     children (F-888 review, measured after the fact).
 
-    A profile is held by a whole process TREE, and the witness that names a
-    holder does not say which member it named. ``profile_lock.profile_hold``
-    answers from ``process_cleanup``'s cmdline scan, which is a SET, so the pid
-    it reports is whichever member iterated first. Measured on Chrome 153, one
-    real spawn, eleven processes on one profile: the browser (no ``--type``),
-    six renderers, two utilities, a gpu-process and a crashpad-handler. Only the
-    browser and the renderers carry ``--remote-debugging-port`` at all, so in the
-    run where the witness named a ``utility`` child the endpoint ladder found
-    nothing and the adoption declined — silently, because "no port" and "nothing
-    holds this directory" were the same answer. In the run where it happened to
-    name the browser, everything worked. That is one bug with a coin flip in
-    front of it.
+    A profile is held by a whole process TREE, and until F-931 the witness that
+    named a holder did not say which member it had named:
+    ``profile_lock.profile_hold`` answered from ``process_cleanup``'s cmdline
+    scan, which is a SET, so the pid it reported was whichever member iterated
+    first. Measured on Chrome 153, one real spawn, eleven processes on one
+    profile: the browser (no ``--type``), six renderers, two utilities, a
+    gpu-process and a crashpad-handler. Only the browser and the renderers carry
+    ``--remote-debugging-port`` at all, so in the run where the witness named a
+    ``utility`` child the endpoint ladder found nothing and the adoption
+    declined — silently, because "no port" and "nothing holds this directory"
+    were the same answer. In the run where it happened to name the browser,
+    everything worked. That was one bug with a coin flip in front of it.
+
+    **Since F-931 ``profile_hold`` asks this module too**, so its pid is already
+    the browser and the two witnesses cannot disagree. This function is not
+    thereby redundant: it answers a DIFFERENT question — which member is the
+    browser and whether there is EXACTLY ONE — and an ambiguous tree is no
+    answer to adopt from while it is still plainly held.
 
     Adopting a child would be worse than declining even when its argv did carry
     the port: the pid is stamped onto ``Browser._process_pid``, so
@@ -128,8 +134,7 @@ def browser_process(pids: Collection[int] | None, expect_dir: str) -> int | None
     the same set-ordering coin flip back — SILENTLY, which is the property this
     function exists to remove — so an ambiguous answer is no answer.
     """
-    found = browser_members(pids, expect_dir).browsers
-    return found[0] if len(found) == 1 else None
+    return browser_members(pids, expect_dir).sole
 
 
 @dataclass(frozen=True)
@@ -138,14 +143,28 @@ class Members:
     of the others could be read (F-931).
 
     Two facts because a caller needs both, and collapsing them is the defect
-    this exists to prevent: an empty ``browsers`` with ``unreadable`` False is
-    the ESTABLISHED statement "the browser has gone and only its children are
-    left", while an empty one with ``unreadable`` True says only that we could
-    not tell — ``reap_guard``'s distinction, at a different witness.
+    this exists to prevent: an empty ``browsers`` with an empty ``unreadable``
+    is the ESTABLISHED statement "the browser has gone and only its children
+    are left", while an empty one with pids in ``unreadable`` says only that we
+    could not tell — ``reap_guard``'s distinction, at a different witness.
+
+    ``unreadable`` carries the PIDS and not a bool (F-931 M1) because the
+    caller has to be able to NAME one: ``profile_lock`` composes the sentence
+    F-914's refusal quotes verbatim, and reporting ``min(pids)`` over the whole
+    scan named whichever member sorted first — routinely one we had read
+    perfectly well, which is the ``min(pids)`` defect F-931 removes from the
+    browser branch, re-made in the branch beside it.
     """
 
     browsers: tuple[int, ...]
-    unreadable: bool
+    unreadable: tuple[int, ...]
+
+    @property
+    def sole(self) -> int | None:
+        """The ONE browser here, or None when none qualifies **and when more
+        than one does** — :func:`browser_process`'s rule, which is argued there
+        and spelled once."""
+        return self.browsers[0] if len(self.browsers) == 1 else None
 
 
 def browser_members(pids: Collection[int] | None, expect_dir: str) -> Members:
@@ -162,7 +181,7 @@ def browser_members(pids: Collection[int] | None, expect_dir: str) -> Members:
     and a process that exited between them is an established negative.
     """
     found: list[int] = []
-    unreadable = False
+    unreadable: list[int] = []
     for pid in pids or ():
         if not isinstance(pid, int):
             continue
@@ -170,7 +189,8 @@ def browser_members(pids: Collection[int] | None, expect_dir: str) -> Members:
         if not cmdline:
             # `arguments` collapses "gone" and "refused" into an empty list, so
             # the pid itself is what tells them apart.
-            unreadable = unreadable or _still_running(pid)
+            if _still_running(pid):
+                unreadable.append(pid)
             continue
         if flag_value(cmdline, TYPE_FLAG) is not None:
             continue
@@ -180,7 +200,7 @@ def browser_members(pids: Collection[int] | None, expect_dir: str) -> Members:
         ) != browser_pid_registry.normalize_path(expect_dir):
             continue
         found.append(pid)
-    return Members(tuple(found), unreadable)
+    return Members(tuple(found), tuple(unreadable))
 
 
 def _still_running(pid: int) -> bool:

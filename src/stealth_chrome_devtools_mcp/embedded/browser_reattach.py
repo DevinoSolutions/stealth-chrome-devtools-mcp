@@ -360,12 +360,10 @@ def held_by(
     ``spawn_browser`` hands us for a ``session`` NAME too, already anchored (§5).
 
     So the witness is Chrome's own process singleton, through
-    ``profile_lock.profile_hold`` (F-871's one home). What that answers is "is
-    this directory held, and by whom" — and the pid it names is whichever member
-    of the holding process TREE its witness iterated first, which for a real
-    Chrome is a renderer or a utility five times out of six. Which member is the
-    BROWSER is ``browser_cmdline.browser_process``'s question, asked here before
-    anything else uses the pid. The record is consulted only to REFUSE — an entry
+    ``profile_lock.profile_hold`` (F-871's one home), which answers "is this
+    directory held, and by whom" — the BROWSER since F-931, because that module
+    asks ``browser_cmdline`` itself; see the call site for why this one still
+    asks too. The record is consulted only to REFUSE — an entry
     naming this pid whose owner is a live backend of ours is a sibling's browser,
     and taking it is F-886's harm from the other side — and, when a DEAD owner's
     entry names it, to donate that entry's instance id.
@@ -394,22 +392,24 @@ def held_by(
         # caller spawns, exactly as before.
         return None
 
-    # `profile_hold` answers "is this directory held, and by whom" — a QUESTION
-    # about the profile, and the pid it names is whichever member of the holding
-    # process TREE its witness iterated first. Which member is the BROWSER is a
-    # different question and it is `browser_cmdline`'s; asking it here is what
-    # makes the rest of this function about a browser rather than about a
-    # renderer that happens to share the profile. Measured: without it the
-    # adoption of a real Chrome succeeded or declined depending on set ordering.
-    holder = browser_cmdline.browser_process(
-        live_pids(user_data_dir) if callable(live_pids) else (hold.pid,),
-        user_data_dir,
+    # Not redundant with `profile_hold`'s own F-931 ask: that one is "is
+    # anything there", this is "which member is the browser, and is there
+    # EXACTLY ONE" — an ambiguous tree is no answer to adopt from while it is
+    # still plainly held (F-888 measured it deciding on set ordering). Asked
+    # about the set the hold already READ, so the table is walked once per
+    # question; a lock-derived hold carries none and keeps the older path.
+    members = hold.members or (
+        live_pids(user_data_dir) if callable(live_pids) else (hold.pid,)
     )
+    holder = browser_cmdline.browser_process(members, user_data_dir)
     if holder is None:
+        # The hold's OWN sentence, never a second claim composed here: one of
+        # its answers means "could not be READ", and "a live browser holds that
+        # directory" would assert a browser we never saw (F-931 M2).
         raise Refused(
-            f"a live browser holds that directory (pid {hold.pid}) but none of "
-            f"its processes could be identified as the browser itself, so there "
-            f"was nothing safe to attach to; it was left alone"
+            f"{hold.reason}, but none of its processes could be identified as "
+            f"the browser itself, so there was nothing safe to attach to; it "
+            f"was left alone"
         )
 
     # The record is read ONLY once something is known to hold the directory, and

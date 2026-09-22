@@ -290,10 +290,11 @@ async def test_spawn_re_attaches_to_a_holder_with_no_record_entry(
         # The BROWSER process on that profile, so an operator can see which
         # browser answered — the one with no `--type`, picked by
         # `browser_cmdline.browser_process` out of the whole holding tree.
-        # `profile_lock` names an arbitrary member of that tree and this must not
-        # be it: a `utility` child has no debugging port (the adoption declines),
-        # and a `renderer` has one (the adoption succeeds onto a process the
-        # manager will discard the moment it recycles).
+        # `profile_lock` named an arbitrary member of that tree until F-931 and
+        # this must never be one: a `utility` child has no debugging port (the
+        # adoption declines), and a `renderer` has one (the adoption succeeds
+        # onto a process the manager will discard the moment it recycles). Both
+        # witnesses agree on the browser now, so this asserts they stay agreed.
         holder = diagnostics["reattached_pid"]
         assert isinstance(holder, int)
         assert "chrome" in psutil.Process(holder).name().lower()

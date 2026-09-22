@@ -449,7 +449,24 @@ acting, as it does in `reap_guard`, `_pid_alive` and `backend_eviction`.
 Waiting for the whole tree on close was rejected: it costs close latency, it
 contradicts F-910 at the same file, and it closes one door of several — a
 browser killed by a crash, by `kill-orphans` or from Task Manager leaves the
-same orphans. Full detail and every residual is in
+same orphans.
+
+**The WIRE description of `spawn_browser` moved**, so `tests/goldens/tool_surface.json`
+is regenerated in this change: the `session` documentation now states that a
+spawn naming nothing re-attaches exactly as `session="default"` does, because a
+caller reading the old text would not know the default call had gained the
+guarantee. The golden diff is one tool, one field, three lines of prose — no
+name and no schema — and the tool count is unchanged at 94.
+
+Two messages an operator reads also changed. `profile_lock`'s "could not be
+read" sentence now names a pid we actually failed to read, where it reported the
+lowest pid in the whole tree — routinely one we had identified perfectly well as
+a child, sending the reader after the wrong process. And the re-attach refusal
+quotes that sentence instead of opening "a live browser holds that directory
+(pid N)", which for an unreadable member asserted both that the pid was a
+browser and that we had established anything about it.
+
+Full detail and every residual is in
 `audit/stage2/finding_F931_unnamed_spawn_skips_reattach_tree_hold.md`.
 
 ## 2.1.13
