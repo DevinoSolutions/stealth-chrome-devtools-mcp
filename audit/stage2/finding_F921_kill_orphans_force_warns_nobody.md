@@ -377,20 +377,31 @@ both bit on the first attempt:
 
 **Green**: `tests/test_cli.py` + `tests/test_persistent_profile_risk.py`
 **44/44**, and the WHOLE non-integration suite at this revision —
-**3711 passed, 1 skipped, 290 deselected**
-(`-m "not integration"`, 492.73 s, exit 0). The whole suite rather than a named
+**3824 passed, 1 skipped, 290 deselected**
+(`-m "not integration"`, 482.88 s, exit 0). The whole suite rather than a named
 subset because this revision edits a doc fence as well as code, and
 `test_doc_examples.py` screens those: a subset chosen by the author of the
 change is a subset that can miss the file the change broke.
 
-Measured AFTER merging 2.1.13 (`fe5cef6`), not before: this branch's own lane
-was green on both trees, but a suite count taken before a merge describes a
-revision nobody will ever run. The merge also re-checked the claims these
-artefacts MAKE — every product symbol named by the module docstring, §3.1 and
-the two CLAUDE.md rows still resolves, `process_cleanup.py:349-355` is still
-the recorded-pid fallback §6.7 cites, and `clone_storage` still imports the
-process-cleanup SINGLETON, which is the one import §5 says the hermeticity of
-every `test_cli.py` node here depends on.
+Measured at `7da54a5`, which is this branch AFTER the 2.1.13 release merge
+(`fe5cef6`) and after the five queued lanes ahead of it — F-919, F-916/F-917/
+F-918 with F-922, F-913, and F-914/F-915 — not before either. A suite count
+taken before a merge describes a revision nobody will ever run.
+
+The count was PREDICTED before the lane ran, from this tree's own
+`--collect-only`: **3825 selected** (3824 passed + 1 skipped;
+selected is passed plus skipped, and conflating them reads a correct forecast as
+a miss). It is the lane ahead's 3805 plus exactly this finding's 20
+nodes — 8 in `tests/test_persistent_profile_risk.py` and 12 in the F-921 class
+of `tests/test_cli.py` — so a green lane also confirms the merge delivered the
+tests it claimed to rather than merely passing the ones that survived.
+
+The merges also re-checked the claims these artefacts MAKE — every product
+symbol named by the module docstring, §3.1 and the two CLAUDE.md rows still
+resolves, `process_cleanup.py:349-355` is still the recorded-pid fallback §6.7
+cites, and `clone_storage` still imports the process-cleanup SINGLETON, which is
+the one import §5 says the hermeticity of every `test_cli.py` node here depends
+on.
 
 **Gates**: `ruff format --check`, `ruff check`, `ty check
 --exit-zero-on-warning src/`, `vulture`, `check_suppression_owners.py`,
