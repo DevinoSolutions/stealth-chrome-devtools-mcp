@@ -396,8 +396,9 @@ def _copy_profile_tree(
     source: Path, target: Path, clone_root: Path, source_kind: str = "profile"
 ) -> str | None:
     """Copy *source* over *target*, and report whether the copy actually RAN:
-    None when it did, ``TARGET_IN_USE`` when a live browser holds the target or
-    the tree already there could not be moved out of the way.
+    None when it did, ``TARGET_IN_USE`` when a live browser holds the target,
+    when the tree there could not be moved aside, or when the publish rename
+    raised and the displaced tree was put back.
 
     Refusing is right — rewriting a directory a Chrome is writing to would be
     the harm — but it is not success, and the bare ``return`` it used to be let
@@ -410,8 +411,7 @@ def _copy_profile_tree(
     copy the SEED every later session comes from was absent or half-written —
     permanently so if anything killed the process in that window, because the
     repair refresh is refused while the shared browser is open and every
-    consumer tests ``exists()``, which an empty directory passes (F-925). The
-    marker rides INTO the staged copy for the same reason."""
+    consumer tests ``exists()``, which an empty directory passes (F-925)."""
     if not source.exists():
         target.mkdir(parents=True, exist_ok=True)
         return None
