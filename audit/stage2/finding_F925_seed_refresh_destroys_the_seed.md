@@ -184,6 +184,20 @@ now.
   alongside this one. A single atomic directory swap does not exist on either
   platform, so closing this fully means an exchange primitive or a lock, not a
   reordering.
+  **The gap failing to CLOSE is a different case, and that one is closed
+  here.** If `_displace` succeeds and `staging.replace(target)` then
+  RAISES — a Windows handle on the staging tree, which an AV scanner or an
+  indexer can take at any moment — the exception used to propagate and
+  `replace_tree`'s `finally` removed the complete, stamped new tree,
+  leaving the target ABSENT with the old tree only at `*.stealth-previous`.
+  Same F-926 branch, but for every later spawn instead of for one instant.
+  The publish is now rolled back and the call answers False, which
+  `_copy_profile_tree` reports as `TARGET_IN_USE`; only a rollback that
+  ITSELF fails re-raises, because there the state genuinely is not
+  unchanged. Keyed on whether that call displaced anything and never on
+  `previous.exists()` — a leftover generation is a STALER tree, so
+  restoring one would publish it as the seed, which is this finding's own
+  harm committed by the fix for it.
 * **There is still no lock around a seed refresh.** Two can overlap — a close
   runs one on a worker thread while a spawn runs one on the event loop — and
   that was true before this change. Each is now individually atomic and each
@@ -194,6 +208,14 @@ now.
   longer than `STALE_STAGING_SECONDS` (1 h, ~1000× a measured ~101 MB copy)
   could be reclaimed by a concurrent refresh. Chosen over ownership because the
   pid in the name belongs to a process that is gone.
+  **The clock is the TOP-LEVEL staging directory's mtime**, which is `mkdir`
+  plus the last top-level entry created — a write nested under it does not
+  touch it, since creating `Default/Network/Cookies` bumps `Default/Network`
+  instead. So it is not an idleness test, which is what a reader will assume
+  it is: a copy that took longer than the hour is reclaimable in full rather
+  than after an hour of quiet. Nothing plausible reaches it at ~1000x the
+  measured copy time, and if it ever did the live copy would keep writing
+  into a half-deleted tree and then publish it.
 * **A staging-name collision is safe for the bytes and NOT safe for the
   leftovers.** The name is `<target>.stealth-staging-<pid>-<seq>`, and neither
   half is unique across processes: a pid is reused, and `_STAGING_SEQ` is
@@ -230,6 +252,15 @@ now.
 * **`stealthy profiles` lists the clone root unfiltered**, so a transient
   staging directory can appear in it. Pre-existing shape — `.trash` already
   does — and cosmetic; not touched here.
+  **The SEED's scratch is not in the clone root at all, and is invisible
+  rather than merely unfiltered.** `master-snapshot.stealth-previous` sits in
+  `default_session_root()`, and `cli._collect_profiles` reads that directory
+  only for `master` and `master-snapshot` BY NAME (`cli.py:130-135`) before
+  listing the clone root's children — so it appears in no `stealthy profiles`
+  row. Both cap sweeps take the clone root too, so nothing trims it either.
+  That is ~101 MB, permanent, outside every cap and in no listing.
+  Deliberate — `_displace` argues why one generation is kept — but an
+  operator cannot see what it costs them.
 * **A copy is still not verified.** `copy_file` skips a locked file with a
   warning and `replace_tree` publishes whatever it built. This finding makes
   the *previous* generation survivable; it does not make the new one

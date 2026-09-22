@@ -38,6 +38,7 @@ Pure filesystem tests: no browser, no Chrome, no sockets.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -61,6 +62,7 @@ COOKIES = Path("Default") / "Network" / "Cookies"
 
 SEED_LOGIN = b"seed-login-jar-the-old-generation"
 MASTER_LOGIN = b"master-login-jar-the-new-generation"
+STALE_LOGIN = b"stale-login-jar-a-leftover-generation"
 
 
 def _profile(root: Path, jar: bytes) -> Path:
@@ -113,6 +115,28 @@ def _login(profile: Path) -> bytes | None:
 
 def _dies_mid_copy(*_args, **_kwargs):
     raise RuntimeError("the process died mid-copy")
+
+
+def _fail_the_publish_once(monkeypatch) -> list[str]:
+    """Make ONLY the staging -> target rename raise, and only once.
+
+    ``_displace``'s rename has the TARGET as its source and the rollback's
+    has the PREVIOUS generation, and neither of those names carries
+    :data:`profile_copy.STAGING_SUFFIX` (it is not a substring of
+    ``PREVIOUS_SUFFIX``), so both keep working for real. The pin therefore
+    drives the production path and stubs no verdict.
+    """
+    raised: list[str] = []
+    real_replace = Path.replace
+
+    def _publish_fails(self, dest):
+        if profile_copy.STAGING_SUFFIX in self.name and not raised:
+            raised.append(self.name)
+            raise OSError(5, "Access is denied")
+        return real_replace(self, dest)
+
+    monkeypatch.setattr(Path, "replace", _publish_fails)
+    return raised
 
 
 def _scratch_in(root: Path) -> list[str]:
@@ -343,6 +367,100 @@ class TestAFailedDisplaceChangesNothing:
         assert result["seed_refreshed"] is False
         assert result["seed_error"] == clone_storage.SEED_IN_USE
         assert _login(seed_layout["snapshot"]) == SEED_LOGIN, "the seed moved anyway"
+
+
+class TestAFailedPublishPutsTheOldTreeBack:
+    """The gap between the two renames NOT closing (N1).
+
+    ``_displace`` has succeeded, so the target is absent and the only complete
+    old tree is the displaced one. If the publishing rename then RAISES — a
+    Windows handle on the staging tree, which an AV scanner or an indexer can
+    take at any moment — the exception propagates and ``replace_tree``'s
+    ``finally`` removes the complete, stamped new tree. What is left is: target
+    ABSENT, old tree only at ``*.stealth-previous``, new tree gone.
+
+    That is not the microsecond gap F-926 is about; it is that gap never
+    closing. Every later spawn falls through ``resolve_profile_selection``'s
+    ``elif master.exists()`` branch and copies the LIVE shared profile, which
+    carries zero cookies — permanently, not for an instant. So it is closed by
+    putting the displaced tree back, not by making the window shorter.
+    """
+
+    def test_a_publish_that_raises_restores_the_displaced_tree(
+        self, seed_layout, monkeypatch
+    ):
+        raised = _fail_the_publish_once(monkeypatch)
+
+        result = clone_storage._refresh_master_snapshot_if_safe("test")
+
+        assert raised, "the publishing rename was never reached"
+        assert _login(seed_layout["snapshot"]) == SEED_LOGIN, (
+            "the seed is absent, or holds a tree that was never published"
+        )
+        marker = json.loads((seed_layout["snapshot"] / MARKER).read_text())
+        assert marker["source_kind"] == "test-fixture", (
+            "the tree at the target is not the one that was displaced"
+        )
+        assert result["seed_refreshed"] is False
+        assert result["seed_error"] == clone_storage.SEED_IN_USE
+        assert _scratch_in(seed_layout["root"]) == [], (
+            "the rollback left the displaced generation or the staging copy behind"
+        )
+
+    def test_the_rollback_restores_the_displaced_tree_not_a_leftover(
+        self, seed_layout, monkeypatch
+    ):
+        """``_displace`` removes a stale generation and puts the LIVE tree on
+        that name, so what a rollback restores is the tree THIS refresh
+        displaced — never the one that was sitting there first."""
+        _profile(
+            seed_layout["snapshot"].with_name(
+                seed_layout["snapshot"].name + profile_copy.PREVIOUS_SUFFIX
+            ),
+            STALE_LOGIN,
+        )
+        raised = _fail_the_publish_once(monkeypatch)
+
+        result = clone_storage._refresh_master_snapshot_if_safe("test")
+
+        assert raised, "the publishing rename was never reached"
+        assert _login(seed_layout["snapshot"]) == SEED_LOGIN, (
+            "the seed is not the tree this refresh displaced"
+        )
+        assert result["seed_refreshed"] is False
+
+    def test_a_leftover_previous_generation_is_never_published(
+        self, seed_layout, monkeypatch
+    ):
+        """The rollback is keyed on whether THIS refresh displaced something,
+        never on ``previous.exists()``.
+
+        A previous generation can be a LEFTOVER from an earlier refresh taken
+        when the target did not exist, and restoring that one publishes a
+        STALER tree as the seed — this finding's own harm by a new route,
+        committed by the fix for it. So: no target, a stale previous beside it,
+        a publish that raises. Nothing was displaced, so nothing may be put
+        back.
+
+        Deliberately does NOT assert the scratch is gone: a refresh that
+        displaced nothing leaves that leftover exactly where it found it.
+        """
+        _profile(
+            seed_layout["snapshot"].with_name(
+                seed_layout["snapshot"].name + profile_copy.PREVIOUS_SUFFIX
+            ),
+            STALE_LOGIN,
+        )
+        shutil.rmtree(seed_layout["snapshot"])
+        raised = _fail_the_publish_once(monkeypatch)
+
+        result = clone_storage._refresh_master_snapshot_if_safe("test")
+
+        assert raised, "the publishing rename was never reached"
+        assert _login(seed_layout["snapshot"]) != STALE_LOGIN, (
+            "a leftover previous generation was published as the seed"
+        )
+        assert result["seed_refreshed"] is False
 
 
 class TestScratchIsInvisibleToEveryCloneRootScan:

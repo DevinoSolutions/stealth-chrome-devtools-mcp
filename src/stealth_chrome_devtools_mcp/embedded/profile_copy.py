@@ -344,12 +344,28 @@ def _displace(target: Path) -> bool:
     return True
 
 
+def _undisplace(target: Path) -> bool:
+    """Put a displaced generation back, after a publish that did not happen.
+
+    False when it could not be put back, which is the ONE outcome
+    :func:`replace_tree` must never report as "nothing has changed": there the
+    target really is absent and the caller has to hear about it.
+    """
+    previous = target.with_name(f"{target.name}{PREVIOUS_SUFFIX}")
+    try:
+        previous.replace(target)
+    except OSError:
+        return False
+    return True
+
+
 def replace_tree(
     source: Path, target: Path, *, stamp: Callable[[Path], object]
 ) -> bool:
     """Build a copy of *source* beside *target* and publish it in ONE rename.
     True when the new tree is in place; False when the tree already there could
-    not be moved out of the way, in which case nothing has changed.
+    not be moved out of the way, or when the publishing rename failed and the
+    displaced tree was put back — in which case nothing has changed.
 
     Built beside rather than in place because the target may be the SEED every
     later session is copied from, and rebuilding in place means deleting it
@@ -365,6 +381,17 @@ def replace_tree(
     would leave a complete profile with no marker if the process died between
     the two — which reads as an unmarked directory forever, and is this
     finding's own shape one step smaller.
+
+    A publishing rename that RAISES is rolled back, because between the two
+    renames the target is absent and the ``finally`` below removes the new
+    tree: without it a failed publish leaves NOTHING at the target, and unlike
+    the microsecond gap between the renames (F-926) that state never closes —
+    every later spawn copies the live shared profile and carries no cookies.
+    Keyed on whether THIS call displaced something and never on
+    ``previous.exists()``: a previous generation may be a LEFTOVER from an
+    earlier refresh taken when the target did not exist, so restoring that one
+    would publish a staler tree as the seed, which is this finding's own harm
+    committed by the fix for it.
     """
     staging = target.with_name(
         f"{target.name}{STAGING_SUFFIX}{os.getpid()}-{next(_STAGING_SEQ)}"
@@ -376,9 +403,17 @@ def replace_tree(
         time.sleep(RETRY_SETTLE_SECONDS)
         copy_delta(source, staging)
         stamp(staging)
-        if target.exists() and not _displace(target):
+        displaced = False
+        if target.exists():
+            if not _displace(target):
+                return False
+            displaced = True
+        try:
+            staging.replace(target)
+        except OSError:
+            if displaced and not _undisplace(target):
+                raise
             return False
-        staging.replace(target)
         return True
     finally:
         if staging.exists():
